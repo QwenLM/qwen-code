@@ -258,6 +258,36 @@ Claude 的 `log-update.ts` 注释写得很直白：
 
 这是 Claude 在“长会话 + 动态高度消息”问题上最有参考价值的部分。qwen-code 未来做虚拟滚动时，应该优先借鉴这里的：
 
+### 6.3 Claude 对“大输出可读性”和“滚动稳定性”的核心取舍
+
+如果只看 issue 表象，很容易把 Claude 的优势理解成“它用了 synchronized output，所以不闪”。源码表明并不是这么简单：
+
+1. `ScrollBox` 让高频滚动不经过 React state
+2. `useVirtualScroll()` 通过 quantized snapshot、overscan、height cache 和 range freeze 控制 mounted range
+3. `Messages.tsx` / `VirtualMessageList.tsx` 把长会话视为一个正式的一等场景，而不是附着在主 transcript 上的补丁
+
+对 qwen-code 的含义是：
+
+- 如果想解决 `#1479` / `#2748` 这类“长输出不可读、生成时不能自由回看”的问题，不能只靠 ANSI 优化
+- 需要把“长内容滚动容器”本身提到架构层
+
+### 6.4 Claude 的 Markdown/streaming 设计说明：防闪烁不只是终端问题
+
+`src/components/Markdown.tsx` 有两条和 qwen 当前问题高度相关的经验：
+
+1. 模块级 token cache（500 条）降低了重挂载和回滚时的重复 parse 成本
+2. `StreamingMarkdown` 使用 stable prefix / unstable suffix，只让最后一个增长中的块反复 re-parse
+
+这给 qwen-code 一个很重要的修正：
+
+- 工具输出、长 markdown、子 agent 详情之所以闪，不只是终端输出序列不够原子
+- 也是因为 parser / render tree 在不断吞下越来越大的内容块
+
+因此，Claude 的经验更适合被拆成两条路线吸收：
+
+- **终端层**：同步输出、单 write、保守 gating
+- **渲染层**：token cache、stable prefix、bounded detail container
+
 1. scroll quantization
 2. resize height scaling
 3. frozen range

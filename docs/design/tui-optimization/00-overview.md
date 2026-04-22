@@ -10,7 +10,14 @@ qwen-code 的 TUI 层基于 **Ink 6.2.3 + React 19** 构建，当前面临三个
 2. **屏幕闪烁**：Ink 的全量重绘机制导致流式输出时严重闪烁，在 tmux/SSH 环境下尤为突出（社区报告高达 4,000-6,700 次/秒的滚动事件）
 3. **渲染能力与可扩展性**：自定义正则 Markdown 解析器功能受限，缺少 LaTeX 数学公式、终端超链接等支持；主题系统默认 hex 主题可能影响透明背景终端
 
-这些问题在 GitHub Issues 中被大量报告（qwen-code#1778, #2748, #2877; claude-code#9935, #37283, #14641 等），是当前最主要的用户体验痛点。
+这些问题在 GitHub Issues 中被大量报告，而且已经不再只是“泛泛的体验抱怨”，而是形成了几个清晰的故障簇：
+
+- 动态区流式闪烁 / 滚动条抖动：qwen-code#1184, #1491, #2748, #3007, #3144
+- `refreshStatic()` 型整屏闪烁：qwen-code#938, #1861, #2924
+- 窄屏重复输出 / 无限滚动：qwen-code#2912, #2972, #1591
+- 大输出不可读 / 工具输出预算不足：qwen-code#1479, #2818, #1008, #355
+
+这些反馈已在新文档 [07-issue-backed-failure-taxonomy.md](./07-issue-backed-failure-taxonomy.md) 中重新按症状、源码证据和修复方案分类。
 
 **重要校准**：当前启动分析器只覆盖 UI render 之前的 checkpoint，尚未覆盖交互式 `config.initialize()`、MCP 首个工具注册、全部 MCP 发现完成、Gemini tools 声明刷新等阶段。因此本文档的实施顺序必须先补观测，再用真实数据确认优先级。
 
@@ -79,6 +86,14 @@ Entry (gemini.tsx)
 | 窄屏问题   | claude-code#13504, #18493, #5408                | 中       |
 | LaTeX 支持 | claude-code#21433                               | 低       |
 
+### 2.5 Issue-backed 故障分类
+
+本轮新增了一份专门把 qwen-code issue、当前源码和竞品源码对齐的分类文档：
+
+| 文档 | 说明 |
+| --- | --- |
+| [07-issue-backed-failure-taxonomy.md](./07-issue-backed-failure-taxonomy.md) | 按“闪烁 / 窄屏重复 / 大输出 / 工具与子 agent 展开”分类，给出症状、源码证据、修复路线与验收方式 |
+
 ## 3. 核心工作流概览
 
 | 工作流         | 核心问题                               | 关键指标                       | 依赖关系                   |
@@ -88,7 +103,7 @@ Entry (gemini.tsx)
 | **屏幕闪烁**   | Ink 全量重绘；无同步输出               | 闪烁事件/秒，stdout writes/sec、clearTerminal 次数 | 依赖输出层观测   |
 | **渲染与扩展** | 正则解析器脆弱；缺少格式支持；主题限制 | 格式覆盖率，parse/highlight 耗时，可配置性 | 依赖稳定输出层 |
 
-**执行顺序**：观测基线 -> 屏幕闪烁低风险治理 -> 启动/MCP 渐进可用 -> 渲染缓存与扩展。MCP 与渲染可并行推进，但必须共享同一套指标口径。
+**执行顺序**：观测基线 -> issue-backed P0 问题治理（动态闪烁、`refreshStatic()`、大输出预裁剪、窄屏回归 harness） -> 启动/MCP 渐进可用 -> 渲染缓存与扩展。MCP 与渲染可并行推进，但必须共享同一套指标口径。
 
 **实施约束**：从这一版开始，所有落地工作默认都应同时参考 [06-implementation-rollout-checklist.md](./06-implementation-rollout-checklist.md)。如果某项优化没有满足对应的验收清单、灰度顺序和回滚条件，就不应直接进入默认开启阶段。
 
@@ -176,3 +191,5 @@ Entry (gemini.tsx)
 | [04-gemini-cli-research.md](./04-gemini-cli-research.md)         | Gemini CLI 源码调研         |
 | [05-claude-code-research.md](./05-claude-code-research.md)       | Claude Code 源码调研        |
 | [06-implementation-rollout-checklist.md](./06-implementation-rollout-checklist.md) | 实施门禁、验收、灰度与回滚清单 |
+| [07-issue-backed-failure-taxonomy.md](./07-issue-backed-failure-taxonomy.md) | 基于 issue 与当前源码的故障分类和修复路线 |
+| [08-execution-plan-and-test-matrix.md](./08-execution-plan-and-test-matrix.md) | 按文件落点、阶段拆解和测试矩阵整理的执行稿 |

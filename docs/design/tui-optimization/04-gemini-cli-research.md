@@ -230,6 +230,38 @@ Gemini 将滚动行为和虚拟化行为分层：
 
 这是 qwen-code 当前文档值得吸收的结构性建议：**不要把虚拟滚动逻辑塞进 `MainContent` 本体**，否则后续 tool 输出、prompt 历史、selection list 都会复制同一套复杂逻辑。
 
+### 5.4 Gemini 对“大工具输出”和“详情滚动”已经分层治理
+
+这一轮针对 issue 重新核源码后，有两个和 qwen-code 当前痛点高度相关的点值得单独写出来：
+
+1. `packages/cli/src/ui/components/messages/ToolResultDisplay.tsx`
+   - 普通模式下对 string / object 结果使用 `SlicingMaxSizedBox`
+   - alternate buffer 下则使用 `Scrollable` 或 `ScrollableList`
+2. `packages/cli/src/ui/components/shared/SlicingMaxSizedBox.tsx`
+   - 先做字符保护
+   - 再做 logical line slice
+   - 最后才把数据交给 `MaxSizedBox`
+
+这意味着 Gemini 已经把下面两件事拆开了：
+
+- **主屏摘要与削峰**
+- **全量详情与可滚动查看**
+
+这对 qwen-code 的价值非常直接：大工具输出问题不应继续只靠 `MaxSizedBox` 或 compact mode 顶住，应该尽快形成“预裁剪 + 独立详情容器”的双层策略。
+
+### 5.5 Gemini 也暴露了窄屏 / 动态高度的剩余风险
+
+Gemini 并不是“长列表问题已经全部解决”。在 `ScrollableList.test.tsx` 里仍有一条显式注释：
+
+- 当前 `VirtualizedList` 在某些场景下“won't remeasure”
+
+这说明即便已经有 `ScrollableList` / `VirtualizedList` / `ResizeObserver`，**动态高度 remeasure、窄屏重换行和 resize 后稳定性** 仍然是长期边界问题。
+
+对 qwen-code 的意义是：
+
+- 可以借鉴 Gemini 的模式化渲染和预裁剪
+- 但不能把“只要上了虚拟滚动”误写成窄屏重复输出问题已自动解决
+
 ## 6. Markdown、代码高亮、表格与主题
 
 ### 6.1 Markdown 仍是正则解析器

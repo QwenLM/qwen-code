@@ -113,6 +113,18 @@ export const QwenDark: Theme = {
 
 因此，本设计文档后续的重点不应只是“换 parser”，而是把 parser、streaming、高亮、虚拟滚动作为一组相互制约的问题来处理。
 
+### 1.7 基于 issue 的渲染问题校准
+
+本轮补查 qwen-code issue 后，渲染层至少还要面对三类已被用户反复报告的问题：
+
+| 类别 | 代表 issue | 当前源码结论 |
+| --- | --- | --- |
+| 大工具输出导致闪烁 / 卡顿 | #2748 #2818 #1008 | 当前 plain text 路径仍主要依赖 `MaxSizedBox` 做最终视觉裁剪，容易出现“先 layout 全量，再裁剪” |
+| 长回答 / 长会话不可读不可滚动 | #1479 #2748 | 当前主路径仍是 `<Static>` + pending，缺少专门的长会话滚动容器 |
+| 工具 / 子 agent 详情既想看全，又会导致界面抖动 | #2424 #2624 #1861 #2924 | 当前折叠模式存在，但缺少统一预算、稳定高度与 bounded detail panel |
+
+更完整的问题分类见 [07-issue-backed-failure-taxonomy.md](./07-issue-backed-failure-taxonomy.md)。本文件只展开这些问题在**渲染层**的修复方式。
+
 ## 2. 解决方案
 
 ### 2.1 [P0] Markdown token/block 缓存
@@ -255,6 +267,87 @@ function cachedHighlight(input: HighlightInput): HighlightResult {
 - 同步基线 + 异步预热：减少启动时模块加载量，降低内存占用，同时不破坏同步 render
 - 缓存：对已完成代码块的重复渲染耗时降至 O(1)
 
+### 2.2A [P0] 大工具输出预裁剪（pre-render slicing）
+
+**当前问题**：`packages/cli/src/ui/components/messages/ToolMessage.tsx` 的 plain text 工具输出路径，仍然倾向于把整段字符串交给 React/Ink，再依赖 `MaxSizedBox` 做最终视觉裁剪。这样会出现一个经典坏路径：
+
+```
+500 行工具输出
+  -> React/Ink 先 layout 500 行
+  -> 终端最终只显示 10-15 行
+  -> 每次增量更新都重新走一遍
+```
+
+这类问题与同步输出、ANSI 优化是**两条独立治理线**。即便终端输出完全原子，若 React 每次仍要 layout 巨量节点，闪烁和卡顿也不会真正消失。
+
+**Gemini 参考实现**：Gemini CLI 在 `ToolResultDisplay.tsx` 中已经使用 `SlicingMaxSizedBox`，先做：
+
+1. 字符级保护
+2. logical line slice
+3. 再交给 `MaxSizedBox` 做最终安全裁剪
+
+**qwen-code 设计建议**：
+
+- 为 plain text / ANSI tool output 引入预裁剪层
+- 预裁剪在进入 React render tree 前完成
+- `MaxSizedBox` 只保留为 width limiter 和安全网，而不是主要削峰手段
+
+```typescript
+// 概念实现
+interface SlicingMaxSizedBoxProps<T> extends Omit<MaxSizedBoxProps, 'children'> {
+  data: T;
+  maxLines?: number;
+  children: (truncatedData: T) => React.ReactNode;
+}
+```
+
+**必须保留的约束**：
+
+- markdown-heavy 输出不能因为防闪烁而直接退化成纯文本
+- hidden lines 计数必须区分 logical line 与 soft wrap line，避免双重计算
+- alternate/fullscreen 模式下应允许查看完整输出，main-screen 才做保守裁剪
+
+**维护者方向信号**：截至 **2026-04-22**，PR `#3013` 仍是 `OPEN + CHANGES_REQUESTED`。它确认了“预裁剪 + 稳定高度 + 硬上限”的方向，但 reviewer 也明确指出：
+
+1. markdown path 不能被粗暴删掉
+2. hidden line 统计不能混淆 pre-slice 与 visual overflow
+
+因此本设计文档应采用该方向，但不能把 PR 当前实现直接当作已验证终稿。
+
+### 2.2B [P0] 通用 tool output budgeting
+
+`#2818` 和 `#1008` 说明当前另一个真实问题是：预算规则并不统一。shell / MCP 路径已有截断，但 `grep`、`glob`、`read_file`、`edit` 等仍可能直接把巨大字符串送入上下文和 UI。
+
+**设计建议**：把 budget 分成两层，而不是混在一起：
+
+1. **模型可见预算**
+   - 在 scheduler / function response 生成前统一截断
+   - 控制上下文膨胀
+2. **用户可见预算**
+   - 在 UI 层按 main-screen / alternate/fullscreen 模式决定显示多少
+   - 控制 Ink layout 成本与可读性
+
+这两个预算不能互相替代：
+
+- 只做 UI 折叠，模型上下文仍会爆
+- 只做模型截断，UI 仍可能因未折叠的原始结果而卡顿
+
+### 2.2C [P1] 有边界的 detail panel
+
+`#1479` 和 `#2748` 反映的不是“某个组件性能不够”，而是当前主界面缺少一个正式的长内容容器。继续把所有细节直接摊进主 transcript，会同时造成：
+
+- 工具输出太长
+- 子 agent 展开闪烁
+- 生成时无法自由回看
+
+**建议路线**：
+
+- main transcript 默认展示 summary / truncated preview
+- detail 内容进入 bounded scroll container
+- fullscreen / alternate buffer 优先承接完整详情
+
+这个动作和后面的虚拟滚动并不冲突，反而是更稳妥的前置步骤。
+
 ### 2.3 [P1] 切换到 marked 解析器
 
 **动机**：当前自定义正则解析器的功能和鲁棒性已接近上限。`marked` 是 Claude Code 的选择，提供成熟的 block/inline lexer API，可作为 v2 渲染器候选。但迁移必须先定义安全策略和流式不完整语法策略，不能只替换 parser。
@@ -284,6 +377,12 @@ const cachedBlocks = blocks.slice(0, -1).map((b) => getCachedTokens(b));
 const lastBlockTokens = marked.lexer(blocks[blocks.length - 1]);
 return [...cachedBlocks.flat(), ...lastBlockTokens];
 ```
+
+**和大工具输出方案的关系**：
+
+- `marked` 迁移不能替代 pre-render slicing
+- markdown tool output 需要自己的 bounded strategy：字符保护、stable prefix / unstable suffix、必要时 summary + detail panel
+- 不能因为 parser 升级就默认放开大块 markdown 全量渲染
 
 **新增 GFM 能力**：
 | 能力 | marked 支持 | 当前解析器 |

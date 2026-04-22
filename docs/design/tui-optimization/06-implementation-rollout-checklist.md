@@ -2,6 +2,8 @@
 
 > 本文档给 `00-05` 各设计/调研文档补齐实施门槛、验收标准、灰度顺序和回滚条件。目标不是重复方案细节，而是把“什么时候能开始做、做到什么算完成、什么情况下必须停下来”写清楚。
 
+如果需要把设计进一步落成开发排期，请与 [08-execution-plan-and-test-matrix.md](./08-execution-plan-and-test-matrix.md) 配套阅读：本清单负责“能不能上线”，`08` 负责“先改哪里、先测什么、先拆哪几条 PR”。
+
 ## 1. 使用方式
 
 这份清单按四个层次组织：
@@ -83,6 +85,7 @@
 - `02-screen-flickering.md`
 - `04-gemini-cli-research.md`
 - `05-claude-code-research.md`
+- `07-issue-backed-failure-taxonomy.md`
 
 ### 4.1 前置判断
 
@@ -109,11 +112,26 @@
 ### 4.4 `refreshStatic()` 与渲染模式分层
 
 - [ ] `refreshStatic()` 的触发来源已梳理清楚
+- [ ] `refreshStatic()` 已拆分为“仅 remount static”与“clear terminal + remount”两类语义
 - [ ] main-screen 路径与 alternate/fullscreen 路径的目标分离
 - [ ] resize 导致的重排不会默认演变为整屏 `clearTerminal`
 - [ ] active view / compact toggle / manual clear 三类路径分别有回归样例
 
-### 4.5 闪烁治理退出标准
+### 4.5 窄屏 / 无限滚动回归
+
+- [ ] 已有 <= 40 列窄终端回归样例
+- [ ] 已有 tmux 多 pane 等效宽度回归样例
+- [ ] shell interactive prompt（如 `git commit`）有回归样例
+- [ ] 文档和测试中没有再把 `#1778` 的历史 one-line fix 写成当前源码事实
+
+### 4.6 工具 / 子 agent 详情稳定性
+
+- [ ] `ctrl+e` / `ctrl+f` 展开路径有独立回归样例
+- [ ] tool progress / subagent progress / assistant content 的更新频率已分开验证
+- [ ] bounded detail panel 或等价容器的键盘交互已回归
+- [ ] pending confirmation / force expand / focus lock 规则未退化
+
+### 4.7 闪烁治理退出标准
 
 - [ ] 正常流式输出场景 `stdout.write` 频率显著下降
 - [ ] 已支持的终端中肉眼可见的帧撕裂明显减轻
@@ -127,6 +145,7 @@
 - `03-rendering-extensibility.md`
 - `04-gemini-cli-research.md`
 - `05-claude-code-research.md`
+- `07-issue-backed-failure-taxonomy.md`
 
 ### 5.1 Markdown / parser
 
@@ -143,7 +162,15 @@
 - [ ] `highlightAuto()` 有长度和 grammar 集合限制
 - [ ] pending streaming 代码块不会触发最重路径
 
-### 5.3 虚拟滚动
+### 5.3 大工具输出与 budgeting
+
+- [ ] pre-render slicing 已区分 plain text / ANSI / markdown 三类输出
+- [ ] hidden lines 统计不会把 pre-slice 与 soft wrap overflow 双重计算
+- [ ] 模型可见预算与用户可见预算已拆分
+- [ ] markdown-heavy 工具输出不会因防闪烁而直接退化为纯文本
+- [ ] 工具输出默认折叠 / summary + detail 的产品语义已与 force expand 规则对齐
+
+### 5.4 虚拟滚动
 
 - [ ] 仅在 fullscreen / alternate 路径先行
 - [ ] wheel/scroll 高频输入不直接驱动 React 高频 state 更新
@@ -151,12 +178,13 @@
 - [ ] sticky bottom / copy mode / search mode 的语义预留已写明
 - [ ] 不出现 blank spacer / mounted range 抖动
 
-### 5.4 渲染扩展退出标准
+### 5.5 渲染扩展退出标准
 
 - [ ] Markdown fixture 测试覆盖旧 parser 与新 parser 共同边界
 - [ ] 表格、代码块、列表、未闭合块在 streaming 场景不退化
 - [ ] 高亮资源未就绪时内容仍优先可见
 - [ ] 长会话场景 CPU / commit 次数有可测下降
+- [ ] issue 驱动场景（长工具输出、WebStorm/JetBrains 终端、长回答回看）至少各有一条验收样例
 
 ## 6. 灰度顺序
 

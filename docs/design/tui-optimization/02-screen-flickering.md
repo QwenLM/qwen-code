@@ -68,11 +68,16 @@ Ink 6.2.3 的渲染模型决定了闪烁问题的一部分根源，但 qwen-code
 
 ### 1.4 社区反馈
 
-- **qwen-code#1778**：流式输出时屏幕闪烁
-- **qwen-code#2748**：MCP 加载时闪烁 + 慢启动
-- **claude-code#9935**：tmux 中 4,000-6,700 次/秒滚动事件
-- **claude-code#37283**：长输出全屏闪烁
-- **claude-code#10794**：SSH 远程场景闪烁加剧
+当前 issue 已经可以分成几类，不宜继续只用“闪烁”一个词笼统概括：
+
+| 类别 | 代表 issue | 当前文档结论 |
+| --- | --- | --- |
+| 动态区流式闪烁 / 滚动条抖动 | qwen-code#1184 #1491 #2748 #3007 #3144 | 已确认与 Ink `eraseLines` 路径和高频更新共同相关 |
+| `refreshStatic()` 型整屏闪烁 | qwen-code#938 #1861 #2924 | 已确认是应用层 `clearTerminal` 路径 |
+| 窄屏重复输出 / 无限滚动 | qwen-code#2912 #2972 #1591 #1778 | 症状确认，但 `#1778` 的 one-line fix 不能直接当作当前源码根因 |
+| 大输出导致的闪烁与不可读 | qwen-code#1479 #2748 #2818 #1008 | 已确认需要把“预裁剪”和“最终视觉裁剪”分开治理 |
+
+更完整的分类、issue 引用与修复矩阵见 [07-issue-backed-failure-taxonomy.md](./07-issue-backed-failure-taxonomy.md)。
 
 ### 1.5 Gemini CLI / Claude Code 调研结论
 
@@ -89,6 +94,16 @@ Ink 6.2.3 的渲染模型决定了闪烁问题的一部分根源，但 qwen-code
 1. **Phase 1** 先做 Gemini 风格的“中层治理”：观测、节流、Static 提升、渲染模式分层
 2. **Phase 3** 再评估 Claude 风格的“底层接管”：双缓冲、diff、DECSTBM
 3. 不要在尚无同步输出和 frame ownership 时提前推进 DECSTBM
+
+### 1.6 本文档聚焦边界
+
+为避免职责混乱，本文件只覆盖三类“屏幕闪烁本体”问题：
+
+1. 动态区重绘闪烁
+2. `refreshStatic()` 引发的整屏闪烁
+3. 与闪烁强相关的窄屏重复输出 / 无限滚动
+
+而“大工具输出预算”“长会话滚动”“Markdown/tool detail 呈现”这些问题，虽然会放大闪烁，但其主方案在 [03-rendering-extensibility.md](./03-rendering-extensibility.md) 中展开。
 
 ## 2. 解决方案
 
@@ -229,6 +244,39 @@ const onStreamEnd = useCallback(() => {
 
 **预期收益**：`stdout.write` 调用从 50+/秒降至 < 20/秒，直接减少 60%+ 的渲染开销。
 
+### 2.2B [P0] `refreshStatic()` 语义拆分
+
+**为什么单独拆出来**：当前可见整屏闪烁里，有一部分并不是 Ink 自己的 `eraseLines` 路径，而是应用层主动 `clearTerminal`。如果继续把这两类问题混在一起治理，就会出现“动态区闪烁减轻了，但一切 view switch / compact merge 还是整屏闪”的错觉。
+
+**当前源码事实**：
+
+- `packages/cli/src/ui/AppContainer.tsx` 的 `refreshStatic()` 直接 `stdout.write(ansiEscapes.clearTerminal)`
+- `packages/cli/src/ui/components/MainContent.tsx` 在 compact mode 合并 tool group 时，为了绕过 `<Static>` append-only 限制，会主动调用 `uiActions.refreshStatic()`
+
+**方案**：把当前 `refreshStatic()` 拆成两个层级，而不是继续保留一个“什么都做”的总开关。
+
+```typescript
+// 概念 API
+function remountStaticHistory(): void {
+  setHistoryRemountKey((prev) => prev + 1);
+}
+
+function clearTerminalAndRemount(): void {
+  stdout.write(ansiEscapes.clearTerminal);
+  remountStaticHistory();
+}
+```
+
+**使用约束**：
+
+- `remountStaticHistory()`：用于 compact merge、局部布局变化、需要重算 `<Static>` 但不需要清空终端的场景
+- `clearTerminalAndRemount()`：仅保留给 `/clear`、显式全屏重置、或某些无法避免的严重错位恢复
+
+**验收要求**：
+
+- `clear_terminal_count` 与 `history_remount_count` 分开统计
+- resize、compact toggle、subagent expand 三类场景默认不再触发 `clearTerminal`
+
 ### 2.2A [P0] 渲染模式分层（alternate / terminal buffer）
 
 **动机**：Gemini CLI 已经把闪烁治理和渲染模式绑定在一起，而不是企图让 main-screen、fullscreen、copy mode、长会话都共享同一条输出路径。qwen-code 当前文档也应明确：防闪烁不是单纯改 ANSI 序列，而是要先区分不同 UI 模式。
@@ -258,6 +306,44 @@ const onStreamEnd = useCallback(() => {
 **现状校准**：当流式内容超过终端高度时，Ink 可能触发全屏重绘。源码中已经存在渐进提升的雏形：`useGeminiStream` 在 content 和 thought 流中调用 `findLastSafeSplitPoint()`，把安全分割点之前的内容加入 history/static，只保留尾部 pending 内容在动态区域。当前缺口不是“从零实现提升”，而是提升阈值、覆盖范围和刷新频率不够可控。
 
 **方案**：增强现有"渐进提升"（Progressive Promotion）模式 — 随着流式内容增长，将已完成的块从动态区域提升到 `<Static>` 区域，并把触发条件从纯文本边界升级为“渲染高度 + 时间间隔 + 安全 Markdown 边界”。
+
+### 2.3A [P0] 窄屏重复输出 / 无限滚动专项治理
+
+**为什么放在闪烁文档**：从用户感知看，这类问题通常表现为“屏幕一直抖、一直刷、不断重复输出”，与普通闪烁属于同一体感簇。但在实现层面，它不是单纯的 ANSI 序列问题，而是**viewport 序列化、窄屏重换行、滚动事件和主屏渲染模型叠加后的复合问题**。
+
+**当前源码能确认的事实**：
+
+1. `packages/core/src/services/shellExecutionService.ts` 的彩色 shell 路径会在每次 render 时重新调用 `serializeTerminalToObject(headlessTerminal)`，序列化当前可见 viewport
+2. `headlessTerminal.onScroll()` 也会触发 render
+3. `packages/core/src/utils/terminalSerializer.ts` 当前默认 `scrollOffset = 0`，因此 issue `#1778` 中“遗漏 scrollOffset 参数”不能直接视为现状根因
+4. 当前 `JSON.stringify(output) !== JSON.stringify(finalOutput)` 的整块对比方式，会在窄屏换行、viewport 变化或滚动后把整块 viewport 当成“新输出”
+
+**更准确的设计结论**：
+
+- `#2912` / `#2972` 的窄屏问题是**真实存在的**
+- 当前源码里已经能看到几个高风险点
+- 但不能把单一的 one-line fix 写成最终结论
+
+**分阶段修复方案**：
+
+1. **P0 回归 harness**
+   - 窄宽度（<= 40 列）
+   - tmux 多 pane 等效宽度
+   - 宽度缩小后继续 streaming / shell 运行
+   - `git commit` / interactive shell prompt
+2. **P0 分离 live viewport 与 transcript archival**
+   - live viewport 继续用于嵌入 shell / 详情面板
+   - transcript 只追加稳定块或低频快照
+3. **P1 main-screen 保守策略**
+   - main-screen 默认只展示尾部 N 行
+   - 旧内容折叠或进摘要
+   - 避免持续把完整 viewport 回灌到主消息流
+
+**验收要求**：
+
+- 40 列和 tmux 多 pane 下不再复现重复打印
+- interactive shell 不再触发顶部/底部来回跳
+- 文档中保留“历史 issue 假设”和“当前源码已确认”两种标签，避免未来再次混淆
 
 **核心逻辑**：
 
@@ -301,7 +387,9 @@ const onStreamEnd = useCallback(() => {
 
 ### 2.4 [P1] 智能 refreshStatic()
 
-**现状**：`refreshStatic()` 在 `AppContainer.tsx` 中通过 `clearTerminal`（完整的 `ESC[2J ESC[3J ESC[H`）实现全屏清除后重新挂载：
+**承接关系**：本节建立在 **2.2B 的“语义拆分”已经完成** 之上。也就是说，先把“仅 remount static”与“clear terminal + remount”拆开，再谈后续按 resize / compact / view switch 做更细粒度的选择。
+
+**现状**：当前 `refreshStatic()` 在 `AppContainer.tsx` 中通过 `clearTerminal`（完整的 `ESC[2J ESC[3J ESC[H`）实现全屏清除后重新挂载：
 
 ```typescript
 // AppContainer.tsx 当前实现
@@ -322,7 +410,7 @@ const refreshStatic = useCallback(() => {
 
 **方案**：
 
-1. **Resize 优化**：仅重绘动态区域而非全屏清除
+1. **Resize 优化**：优先走 `remountStaticHistory()`，仅在宽度变化且确实需要时才升级到 `clearTerminalAndRemount()`
 
    ```typescript
    const handleResize = useCallback(
