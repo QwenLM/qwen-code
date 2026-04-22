@@ -586,6 +586,158 @@ describe('InputPrompt', () => {
     });
   });
 
+  describe('base64 / data URL paste', () => {
+    const pngBytes = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    ]);
+    const dataUrl = `data:image/png;base64,${Buffer.concat([pngBytes, Buffer.alloc(60, 0)]).toString('base64')}`;
+
+    beforeEach(() => {
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
+      vi.mocked(clipboardUtils.cleanupOldClipboardImages).mockResolvedValue(
+        undefined,
+      );
+    });
+
+    it('inserts [Image #1] and records an attachment when a data URL is pasted', async () => {
+      vi.mocked(clipboardUtils.tryDecodeBase64Image).mockReturnValue({
+        buffer: Buffer.concat([pngBytes, Buffer.alloc(60, 0)]),
+        mimeType: 'image/png',
+        ext: 'png',
+      });
+      vi.mocked(clipboardUtils.saveDecodedImage).mockResolvedValue(
+        '/tmp/clipboard/clipboard-1.png',
+      );
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(`\x1b[200~${dataUrl}\x1b[201~`);
+      await wait();
+      await wait();
+
+      expect(clipboardUtils.tryDecodeBase64Image).toHaveBeenCalled();
+      expect(clipboardUtils.saveDecodedImage).toHaveBeenCalled();
+      await waitFor(() => {
+        expect(mockBuffer.insert).toHaveBeenCalledWith('[Image #1]', {
+          paste: false,
+        });
+      });
+
+      unmount();
+    });
+
+    it('allocates sequential placeholders for multiple pasted images', async () => {
+      vi.mocked(clipboardUtils.tryDecodeBase64Image).mockReturnValue({
+        buffer: Buffer.concat([pngBytes, Buffer.alloc(60, 0)]),
+        mimeType: 'image/png',
+        ext: 'png',
+      });
+      vi.mocked(clipboardUtils.saveDecodedImage)
+        .mockResolvedValueOnce('/tmp/clipboard/clipboard-a.png')
+        .mockResolvedValueOnce('/tmp/clipboard/clipboard-b.png');
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(`\x1b[200~${dataUrl}\x1b[201~`);
+      await wait();
+      await wait();
+      stdin.write(`\x1b[200~${dataUrl}\x1b[201~`);
+      await wait();
+      await wait();
+
+      await waitFor(() => {
+        expect(mockBuffer.insert).toHaveBeenCalledWith('[Image #1]', {
+          paste: false,
+        });
+        expect(mockBuffer.insert).toHaveBeenCalledWith('[Image #2]', {
+          paste: false,
+        });
+      });
+
+      unmount();
+    });
+
+    it('falls through to large-paste placeholder when pasted text is not a base64 image', async () => {
+      vi.mocked(clipboardUtils.tryDecodeBase64Image).mockReturnValue(null);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      const largeText = 'x'.repeat(1001);
+      stdin.write(`\x1b[200~${largeText}\x1b[201~`);
+      await wait();
+
+      expect(clipboardUtils.tryDecodeBase64Image).toHaveBeenCalled();
+      expect(clipboardUtils.saveDecodedImage).not.toHaveBeenCalled();
+      expect(mockBuffer.insert).toHaveBeenCalledWith(
+        '[Pasted Content 1001 chars]',
+        { paste: false },
+      );
+
+      unmount();
+    });
+  });
+
+  describe('drag-and-drop image paste', () => {
+    beforeEach(() => {
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
+      vi.mocked(clipboardUtils.tryDecodeBase64Image).mockReturnValue(null);
+    });
+
+    it('converts a dragged image path into [Image #1] attachment', async () => {
+      const imagePath = '/Users/test/Pictures/diagram.png';
+      vi.mocked(clipboardUtils.detectDraggedImagePath).mockReturnValue(
+        imagePath,
+      );
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(`\x1b[200~${imagePath}\x1b[201~`);
+      await wait();
+
+      expect(clipboardUtils.detectDraggedImagePath).toHaveBeenCalled();
+      await waitFor(() => {
+        expect(mockBuffer.insert).toHaveBeenCalledWith('[Image #1]', {
+          paste: false,
+        });
+      });
+
+      unmount();
+    });
+
+    it('lets non-image paths fall through to the regular paste path', async () => {
+      vi.mocked(clipboardUtils.detectDraggedImagePath).mockReturnValue(null);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(`\x1b[200~/Users/test/docs/readme.md\x1b[201~`);
+      await wait();
+
+      expect(clipboardUtils.detectDraggedImagePath).toHaveBeenCalled();
+      // Non-image: let buffer.handleInput run (which turns it into @path).
+      expect(mockBuffer.insert).not.toHaveBeenCalledWith(
+        expect.stringMatching(/^\[Image #\d+\]$/),
+        { paste: false },
+      );
+
+      unmount();
+    });
+  });
+
   it('should complete a partial parent command', async () => {
     // SCENARIO: /mem -> Tab
     mockedUseCommandCompletion.mockReturnValue({

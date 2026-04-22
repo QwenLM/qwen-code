@@ -35,6 +35,9 @@ import { t } from '../../i18n/index.js';
 import {
   clipboardHasImage,
   saveClipboardImage,
+  saveDecodedImage,
+  tryDecodeBase64Image,
+  detectDraggedImagePath,
   cleanupOldClipboardImages,
 } from '../utils/clipboardUtils.js';
 import * as path from 'node:path';
@@ -58,7 +61,10 @@ export interface Attachment {
   id: string; // Unique identifier (timestamp)
   path: string; // Full file path
   filename: string; // Filename only (for display)
+  placeholder?: string; // e.g. "[Image #1]" — set when an inline token was inserted
 }
+
+const IMAGE_PLACEHOLDER_RE = /\[Image #(\d+)\]/g;
 
 const debugLogger = createDebugLogger('INPUT_PROMPT');
 export interface InputPromptProps {
@@ -132,10 +138,29 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const [recentPasteTime, setRecentPasteTime] = useState<number | null>(null);
   const pasteTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Attachment state for clipboard images
+  // Attachment state for clipboard / base64 images
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isAttachmentMode, setIsAttachmentMode] = useState(false);
   const [selectedAttachmentIndex, setSelectedAttachmentIndex] = useState(-1);
+  // Monotonic counter for `[Image #N]` placeholders within the current input;
+  // reset when the buffer is cleared on submit.
+  const imagePlaceholderCounter = useRef(0);
+  const allocateImagePlaceholder = useCallback((): string => {
+    imagePlaceholderCounter.current += 1;
+    return `[Image #${imagePlaceholderCounter.current}]`;
+  }, []);
+  // Drag-drop detection for terminals that don't wrap dropped files in
+  // bracketed paste (macOS Terminal.app, iTerm with bracketed paste off, etc.).
+  // These terminals synthesize the path as a rapid burst of individual
+  // keystrokes. We detect the burst by the interval between consecutive chars
+  // (< DRAG_BURST_MAX_INTERVAL_MS ≈ unattainable by human typing) and, after
+  // the burst settles, check whether buffer.text ends in a real image file.
+  const DRAG_BURST_MAX_INTERVAL_MS = 10;
+  const DRAG_CHECK_DEBOUNCE_MS = 150;
+  const DRAG_MIN_BURST_CHARS = 4;
+  const lastCharKeyAtRef = useRef(0);
+  const burstCharCountRef = useRef(0);
+  const dragCheckTimerRef = useRef<NodeJS.Timeout | null>(null);
   // Large paste placeholder handling
   const [pendingPastes, setPendingPastes] = useState<Map<string, string>>(
     new Map(),
@@ -269,6 +294,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       if (pasteTimeoutRef.current) {
         clearTimeout(pasteTimeoutRef.current);
       }
+      if (dragCheckTimerRef.current) {
+        clearTimeout(dragCheckTimerRef.current);
+      }
     },
     [],
   );
@@ -297,12 +325,30 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         shellHistory.addCommandToHistory(finalValue);
       }
 
-      // Convert attachments to @references and prepend to the message
+      // Convert attachments to @references.
+      //  - Attachments with an inline `[Image #N]` placeholder: substitute the
+      //    placeholder in place so the model sees the image where the user
+      //    typed it.
+      //  - Attachments without a placeholder (legacy path): prepend `@refs`.
       if (attachments.length > 0) {
-        const attachmentRefs = attachments
-          .map((att) => `@${path.relative(config.getTargetDir(), att.path)}`)
-          .join(' ');
-        finalValue = `${attachmentRefs}\n\n${finalValue.trim()}`;
+        const refByPlaceholder = new Map<string, string>();
+        const prependRefs: string[] = [];
+        for (const att of attachments) {
+          const ref = `@${path.relative(config.getTargetDir(), att.path)}`;
+          if (att.placeholder) {
+            refByPlaceholder.set(att.placeholder, ref);
+          } else {
+            prependRefs.push(ref);
+          }
+        }
+        if (refByPlaceholder.size > 0) {
+          finalValue = finalValue.replace(IMAGE_PLACEHOLDER_RE, (match) =>
+            refByPlaceholder.has(match) ? refByPlaceholder.get(match)! : match,
+          );
+        }
+        if (prependRefs.length > 0) {
+          finalValue = `${prependRefs.join(' ')}\n\n${finalValue.trim()}`;
+        }
       }
 
       // Clear the buffer *before* calling onSubmit to prevent potential re-submission
@@ -317,6 +363,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       setAttachments([]);
       setIsAttachmentMode(false);
       setSelectedAttachmentIndex(-1);
+      imagePlaceholderCounter.current = 0;
 
       resetCompletionState();
       resetReverseSearchCompletionState();
@@ -382,32 +429,99 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     resetCommandSearchCompletionState,
   ]);
 
-  // Handle clipboard image pasting with Ctrl+V
-  const handleClipboardImage = useCallback(async (validated = false) => {
-    try {
-      const hasImage = validated || (await clipboardHasImage());
-      if (hasImage) {
-        const imagePath = await saveClipboardImage(Storage.getGlobalTempDir());
-        if (imagePath) {
-          // Clean up old images
-          cleanupOldClipboardImages(Storage.getGlobalTempDir()).catch(() => {
-            // Ignore cleanup errors
-          });
+  // Check whether `buffer.text` ends with a token that names an existing image
+  // file. If so, strip the token from the buffer and attach the image.
+  //
+  // Used to catch drag-drop on terminals that don't use bracketed paste:
+  // the path arrives as a burst of individual keystrokes, and by the time this
+  // runs the path is already sitting at the end of buffer.text.
+  const scanBufferTailForDraggedImage = useCallback(() => {
+    const text = buffer.text;
+    if (!text) return;
+    // Match an optional single- or double-quoted path, followed by an optional
+    // trailing space that some terminals add after a file drop.
+    const match = text.match(/('([^']+)'|"([^"]+)"|(\S+))\s?$/);
+    if (!match) return;
+    const token = match[1];
+    const inner = match[2] ?? match[3] ?? match[4] ?? token;
+    const imagePath = detectDraggedImagePath(inner);
+    if (!imagePath) return;
+    // Drop the trailing token (and optional space) from the buffer, then
+    // attach the image. The placeholder insert happens inside addImageAttachment.
+    const tokenStart = text.length - match[0].length;
+    buffer.setText(text.slice(0, tokenStart));
+    addImageAttachmentRef.current?.(imagePath);
+  }, [buffer]);
 
-          // Add as attachment instead of inserting @reference into text
-          const filename = path.basename(imagePath);
-          const newAttachment: Attachment = {
-            id: String(Date.now()),
-            path: imagePath,
-            filename,
-          };
-          setAttachments((prev) => [...prev, newAttachment]);
-        }
+  const scanBufferTailRef = useRef(scanBufferTailForDraggedImage);
+  useEffect(() => {
+    scanBufferTailRef.current = scanBufferTailForDraggedImage;
+  }, [scanBufferTailForDraggedImage]);
+
+  // Forward reference so scanBufferTailForDraggedImage can call addImageAttachment
+  // (declared below).
+  const addImageAttachmentRef = useRef<((imagePath: string) => void) | null>(
+    null,
+  );
+
+  // Adds an attached image: inserts `[Image #N]` inline at the cursor and
+  // records the path so submit can substitute `@<path>` for it.
+  const addImageAttachment = useCallback(
+    (imagePath: string) => {
+      const placeholder = allocateImagePlaceholder();
+      const filename = path.basename(imagePath);
+      const newAttachment: Attachment = {
+        id: `${Date.now()}-${imagePlaceholderCounter.current}`,
+        path: imagePath,
+        filename,
+        placeholder,
+      };
+      setAttachments((prev) => [...prev, newAttachment]);
+      buffer.insert(placeholder, { paste: false });
+    },
+    [allocateImagePlaceholder, buffer],
+  );
+
+  // Keep ref in sync for scanBufferTailForDraggedImage (defined earlier so it
+  // could be referenced from the drag-burst timer).
+  useEffect(() => {
+    addImageAttachmentRef.current = addImageAttachment;
+  }, [addImageAttachment]);
+
+  // Handle clipboard image pasting with Ctrl+V (system binary clipboard).
+  const handleClipboardImage = useCallback(
+    async (validated = false) => {
+      try {
+        const hasImage = validated || (await clipboardHasImage());
+        if (!hasImage) return;
+        const imagePath = await saveClipboardImage(Storage.getGlobalTempDir());
+        if (!imagePath) return;
+        cleanupOldClipboardImages(Storage.getGlobalTempDir()).catch(() => {});
+        addImageAttachment(imagePath);
+      } catch (error) {
+        debugLogger.error('Error handling clipboard image:', error);
       }
-    } catch (error) {
-      debugLogger.error('Error handling clipboard image:', error);
-    }
-  }, []);
+    },
+    [addImageAttachment],
+  );
+
+  // Handle a pasted text payload that decodes to a base64 / data-URL image.
+  const handleBase64ImagePaste = useCallback(
+    async (decoded: { buffer: Buffer; mimeType: string; ext: string }) => {
+      try {
+        const imagePath = await saveDecodedImage(
+          decoded.buffer,
+          decoded.ext,
+          Storage.getGlobalTempDir(),
+        );
+        cleanupOldClipboardImages(Storage.getGlobalTempDir()).catch(() => {});
+        addImageAttachment(imagePath);
+      } catch (error) {
+        debugLogger.error('Error handling base64 image paste:', error);
+      }
+    },
+    [addImageAttachment],
+  );
 
   // Handle deletion of an attachment from the list
   const handleAttachmentDelete = useCallback((index: number) => {
@@ -450,6 +564,45 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       }
 
+      // Drag-drop detection on terminals that don't wrap dropped files in
+      // bracketed paste. Such terminals synthesize the path as a rapid burst
+      // of single-character keystrokes. If we see a burst, schedule a debounced
+      // scan of buffer.text's trailing token and promote it to an image
+      // attachment when it points at a real image file.
+      if (
+        !shellModeActive &&
+        !key.paste &&
+        !key.ctrl &&
+        !key.meta &&
+        key.sequence &&
+        key.sequence.length === 1
+      ) {
+        const now = Date.now();
+        const delta = now - lastCharKeyAtRef.current;
+        lastCharKeyAtRef.current = now;
+        if (delta >= 0 && delta < DRAG_BURST_MAX_INTERVAL_MS) {
+          burstCharCountRef.current += 1;
+        } else {
+          burstCharCountRef.current = 1;
+        }
+        if (burstCharCountRef.current >= DRAG_MIN_BURST_CHARS) {
+          if (dragCheckTimerRef.current) {
+            clearTimeout(dragCheckTimerRef.current);
+          }
+          dragCheckTimerRef.current = setTimeout(() => {
+            dragCheckTimerRef.current = null;
+            burstCharCountRef.current = 0;
+            scanBufferTailRef.current?.();
+          }, DRAG_CHECK_DEBOUNCE_MS);
+        }
+      } else {
+        burstCharCountRef.current = 0;
+        if (dragCheckTimerRef.current) {
+          clearTimeout(dragCheckTimerRef.current);
+          dragCheckTimerRef.current = null;
+        }
+      }
+
       if (key.paste) {
         // Dismiss follow-up suggestion when user starts typing/pasting
         if (buffer.text.length === 0 && followup.state.isVisible) {
@@ -477,8 +630,19 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         const lineCount = pasted.split('\n').length;
 
         // Ensure we never accidentally interpret paste as regular input.
+        const decodedImage = key.pasteImage
+          ? null
+          : tryDecodeBase64Image(pasted);
+        const draggedImagePath =
+          key.pasteImage || decodedImage
+            ? null
+            : detectDraggedImagePath(pasted);
         if (key.pasteImage) {
           handleClipboardImage(true);
+        } else if (decodedImage) {
+          handleBase64ImagePaste(decodedImage);
+        } else if (draggedImagePath) {
+          addImageAttachment(draggedImagePath);
         } else if (
           charCount > LARGE_PASTE_CHAR_THRESHOLD ||
           lineCount > LARGE_PASTE_LINE_THRESHOLD
@@ -1039,6 +1203,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       shellHistory,
       reverseSearchCompletion,
       handleClipboardImage,
+      handleBase64ImagePaste,
+      addImageAttachment,
       resetCompletionState,
       escPressCount,
       showEscapePrompt,
@@ -1231,7 +1397,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
                   : theme.text.secondary
               }
             >
-              [{att.filename}]{idx < attachments.length - 1 ? ' ' : ''}
+              {att.placeholder ?? `[${att.filename}]`}
+              {idx < attachments.length - 1 ? ' ' : ''}
             </Text>
           ))}
         </Box>

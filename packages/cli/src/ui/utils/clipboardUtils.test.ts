@@ -4,10 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as os from 'node:os';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import {
   clipboardHasImage,
   saveClipboardImage,
+  saveDecodedImage,
+  tryDecodeBase64Image,
+  detectDraggedImagePath,
   cleanupOldClipboardImages,
 } from './clipboardUtils.js';
 
@@ -27,6 +33,12 @@ vi.mock('@teddyzhu/clipboard', () => ({
     getImageData: mockGetImageData,
   })),
 }));
+
+const PNG_MAGIC = Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49,
+  0x48, 0x44, 0x52,
+]);
+const JPEG_MAGIC = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
 
 describe('clipboardUtils', () => {
   beforeEach(() => {
@@ -132,5 +144,138 @@ describe('clipboardUtils', () => {
       // The implementation uses 'clipboard' subdirectory for both functions
       expect(true).toBe(true);
     });
+  });
+});
+
+describe('tryDecodeBase64Image', () => {
+  it('decodes a data:image/png;base64 URL', () => {
+    const bytes = Buffer.concat([PNG_MAGIC, Buffer.alloc(60, 0)]);
+    const text = `data:image/png;base64,${bytes.toString('base64')}`;
+    const decoded = tryDecodeBase64Image(text);
+    expect(decoded).not.toBeNull();
+    expect(decoded!.mimeType).toBe('image/png');
+    expect(decoded!.ext).toBe('png');
+    expect(decoded!.buffer.subarray(0, 8)).toEqual(PNG_MAGIC.subarray(0, 8));
+  });
+
+  it('decodes a data URL whose declared MIME disagrees with magic — magic wins', () => {
+    const bytes = Buffer.concat([PNG_MAGIC, Buffer.alloc(60, 0)]);
+    const text = `data:image/jpeg;base64,${bytes.toString('base64')}`;
+    const decoded = tryDecodeBase64Image(text);
+    expect(decoded).not.toBeNull();
+    expect(decoded!.mimeType).toBe('image/png');
+  });
+
+  it('decodes raw base64 with PNG magic', () => {
+    const bytes = Buffer.concat([PNG_MAGIC, Buffer.alloc(60, 0)]);
+    const decoded = tryDecodeBase64Image(bytes.toString('base64'));
+    expect(decoded).not.toBeNull();
+    expect(decoded!.mimeType).toBe('image/png');
+    expect(decoded!.ext).toBe('png');
+  });
+
+  it('decodes raw base64 with JPEG magic', () => {
+    const bytes = Buffer.concat([JPEG_MAGIC, Buffer.alloc(80, 0)]);
+    const decoded = tryDecodeBase64Image(bytes.toString('base64'));
+    expect(decoded).not.toBeNull();
+    expect(decoded!.mimeType).toBe('image/jpeg');
+    expect(decoded!.ext).toBe('jpg');
+  });
+
+  it('rejects ordinary text', () => {
+    expect(tryDecodeBase64Image('hello world')).toBeNull();
+    expect(
+      tryDecodeBase64Image('this is a long sentence that is not base64'),
+    ).toBeNull();
+  });
+
+  it('rejects base64-shaped text whose decoded bytes are not an image (e.g. JWT-ish)', () => {
+    const notImage = Buffer.from(
+      'not an image, just opaque bytes for testing'.repeat(4),
+    );
+    expect(tryDecodeBase64Image(notImage.toString('base64'))).toBeNull();
+  });
+
+  it('rejects empty / short input', () => {
+    expect(tryDecodeBase64Image('')).toBeNull();
+    expect(tryDecodeBase64Image('abc')).toBeNull();
+  });
+
+  it('rejects non-base64 in a data URL', () => {
+    expect(
+      tryDecodeBase64Image('data:image/png;base64,!!!not-base64!!!'),
+    ).toBeNull();
+  });
+});
+
+describe('saveDecodedImage', () => {
+  let tmp: string;
+  beforeEach(async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-clip-'));
+  });
+  afterEach(async () => {
+    await fs.rm(tmp, { recursive: true, force: true });
+  });
+
+  it('writes a buffer to <targetDir>/clipboard/clipboard-<ts>.<ext>', async () => {
+    const filePath = await saveDecodedImage(PNG_MAGIC, 'png', tmp);
+    expect(filePath.startsWith(path.join(tmp, 'clipboard'))).toBe(true);
+    expect(filePath.endsWith('.png')).toBe(true);
+    const written = await fs.readFile(filePath);
+    expect(written.equals(PNG_MAGIC)).toBe(true);
+  });
+});
+
+describe('detectDraggedImagePath', () => {
+  let tmp: string;
+  beforeEach(async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-drag-'));
+  });
+  afterEach(async () => {
+    await fs.rm(tmp, { recursive: true, force: true });
+  });
+
+  it('returns the path for an existing image file', async () => {
+    const imagePath = path.join(tmp, 'hello.png');
+    await fs.writeFile(imagePath, PNG_MAGIC);
+    expect(detectDraggedImagePath(imagePath)).toBe(imagePath);
+  });
+
+  it('strips single quotes that terminals add around paths with spaces', async () => {
+    const imagePath = path.join(tmp, 'a b.png');
+    await fs.writeFile(imagePath, PNG_MAGIC);
+    expect(detectDraggedImagePath(`'${imagePath}'`)).toBe(imagePath);
+  });
+
+  it('accepts escaped spaces (terminal drag-drop style)', async () => {
+    const imagePath = path.join(tmp, 'a b.png');
+    await fs.writeFile(imagePath, PNG_MAGIC);
+    const escaped = imagePath.replace(/ /g, '\\ ');
+    expect(detectDraggedImagePath(escaped)).toBe(imagePath);
+  });
+
+  it('returns null for a non-image extension', async () => {
+    const p = path.join(tmp, 'notes.txt');
+    await fs.writeFile(p, 'hello');
+    expect(detectDraggedImagePath(p)).toBeNull();
+  });
+
+  it('returns null for a path that does not exist', () => {
+    expect(detectDraggedImagePath(path.join(tmp, 'missing.png'))).toBeNull();
+  });
+
+  it('returns null for a directory', async () => {
+    const d = path.join(tmp, 'dir.png');
+    await fs.mkdir(d);
+    expect(detectDraggedImagePath(d)).toBeNull();
+  });
+
+  it('returns null for empty / too-short input', () => {
+    expect(detectDraggedImagePath('')).toBeNull();
+    expect(detectDraggedImagePath('ab')).toBeNull();
+  });
+
+  it('returns null for multi-line pasted text', () => {
+    expect(detectDraggedImagePath('first\nsecond')).toBeNull();
   });
 });
