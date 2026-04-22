@@ -119,120 +119,6 @@ describe('useMessageQueue', () => {
     );
   });
 
-  it('should auto-submit queued messages when transitioning to Idle', () => {
-    const { result, rerender } = renderHook(
-      ({ streamingState }) =>
-        useMessageQueue({
-          isConfigInitialized: true,
-          streamingState,
-          submitQuery: mockSubmitQuery,
-        }),
-      {
-        initialProps: { streamingState: StreamingState.Responding },
-      },
-    );
-
-    // Add some messages
-    act(() => {
-      result.current.addMessage('Message 1');
-      result.current.addMessage('Message 2');
-    });
-
-    expect(result.current.messageQueue).toEqual(['Message 1', 'Message 2']);
-
-    // Transition to Idle
-    rerender({ streamingState: StreamingState.Idle });
-
-    expect(mockSubmitQuery).toHaveBeenCalledWith('Message 1\n\nMessage 2');
-    expect(result.current.messageQueue).toEqual([]);
-  });
-
-  it('should not auto-submit when queue is empty', () => {
-    const { rerender } = renderHook(
-      ({ streamingState }) =>
-        useMessageQueue({
-          isConfigInitialized: true,
-          streamingState,
-          submitQuery: mockSubmitQuery,
-        }),
-      {
-        initialProps: { streamingState: StreamingState.Responding },
-      },
-    );
-
-    // Transition to Idle with empty queue
-    rerender({ streamingState: StreamingState.Idle });
-
-    expect(mockSubmitQuery).not.toHaveBeenCalled();
-  });
-
-  it('should not auto-submit when not transitioning to Idle', () => {
-    const { result, rerender } = renderHook(
-      ({ streamingState }) =>
-        useMessageQueue({
-          isConfigInitialized: true,
-          streamingState,
-          submitQuery: mockSubmitQuery,
-        }),
-      {
-        initialProps: { streamingState: StreamingState.Responding },
-      },
-    );
-
-    // Add messages
-    act(() => {
-      result.current.addMessage('Message 1');
-    });
-
-    // Transition to WaitingForConfirmation (not Idle)
-    rerender({ streamingState: StreamingState.WaitingForConfirmation });
-
-    expect(mockSubmitQuery).not.toHaveBeenCalled();
-    expect(result.current.messageQueue).toEqual(['Message 1']);
-  });
-
-  it('should handle multiple state transitions correctly', () => {
-    const { result, rerender } = renderHook(
-      ({ streamingState }) =>
-        useMessageQueue({
-          isConfigInitialized: true,
-          streamingState,
-          submitQuery: mockSubmitQuery,
-        }),
-      {
-        initialProps: { streamingState: StreamingState.Idle },
-      },
-    );
-
-    // Start responding
-    rerender({ streamingState: StreamingState.Responding });
-
-    // Add messages while responding
-    act(() => {
-      result.current.addMessage('First batch');
-    });
-
-    // Go back to idle - should submit
-    rerender({ streamingState: StreamingState.Idle });
-
-    expect(mockSubmitQuery).toHaveBeenCalledWith('First batch');
-    expect(result.current.messageQueue).toEqual([]);
-
-    // Start responding again
-    rerender({ streamingState: StreamingState.Responding });
-
-    // Add more messages
-    act(() => {
-      result.current.addMessage('Second batch');
-    });
-
-    // Go back to idle - should submit again
-    rerender({ streamingState: StreamingState.Idle });
-
-    expect(mockSubmitQuery).toHaveBeenCalledWith('Second batch');
-    expect(mockSubmitQuery).toHaveBeenCalledTimes(2);
-  });
-
   it('should pop all messages from queue', () => {
     const { result } = renderHook(() =>
       useMessageQueue({
@@ -295,5 +181,241 @@ describe('useMessageQueue', () => {
 
     expect(popped).toBeNull();
     expect(result.current.messageQueue).toEqual([]);
+  });
+
+  describe('drainQueue (mid-turn drain for tool-result injection)', () => {
+    it('returns an empty array when the queue is empty', () => {
+      const { result } = renderHook(() =>
+        useMessageQueue({
+          isConfigInitialized: true,
+          streamingState: StreamingState.Responding,
+          submitQuery: mockSubmitQuery,
+        }),
+      );
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue();
+      });
+      expect(drained).toEqual([]);
+    });
+
+    it('drains only leading plain-text messages and leaves slash commands queued', () => {
+      const { result } = renderHook(() =>
+        useMessageQueue({
+          isConfigInitialized: true,
+          streamingState: StreamingState.Responding,
+          submitQuery: mockSubmitQuery,
+        }),
+      );
+
+      act(() => {
+        result.current.addMessage('one');
+        result.current.addMessage('two');
+        result.current.addMessage('/model');
+        result.current.addMessage('three');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue();
+      });
+
+      expect(drained).toEqual(['one', 'two']);
+      expect(result.current.messageQueue).toEqual(['/model', 'three']);
+    });
+
+    it('drains nothing when a slash command leads the queue', () => {
+      const { result } = renderHook(() =>
+        useMessageQueue({
+          isConfigInitialized: true,
+          streamingState: StreamingState.Responding,
+          submitQuery: mockSubmitQuery,
+        }),
+      );
+
+      act(() => {
+        result.current.addMessage('/model');
+        result.current.addMessage('hello');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue();
+      });
+
+      expect(drained).toEqual([]);
+      expect(result.current.messageQueue).toEqual(['/model', 'hello']);
+    });
+
+    it('drains the whole queue when it contains no slash commands', () => {
+      const { result } = renderHook(() =>
+        useMessageQueue({
+          isConfigInitialized: true,
+          streamingState: StreamingState.Responding,
+          submitQuery: mockSubmitQuery,
+        }),
+      );
+
+      act(() => {
+        result.current.addMessage('a');
+        result.current.addMessage('b');
+        result.current.addMessage('c');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue();
+      });
+
+      expect(drained).toEqual(['a', 'b', 'c']);
+      expect(result.current.messageQueue).toEqual([]);
+    });
+  });
+
+  describe('popNextSegment', () => {
+    it('returns null when the queue is empty', () => {
+      const { result } = renderHook(() =>
+        useMessageQueue({
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          submitQuery: mockSubmitQuery,
+        }),
+      );
+
+      let segment: string | null = null;
+      act(() => {
+        segment = result.current.popNextSegment();
+      });
+      expect(segment).toBeNull();
+    });
+
+    it('batches leading plain-text messages into one segment', () => {
+      const { result } = renderHook(() =>
+        useMessageQueue({
+          isConfigInitialized: true,
+          streamingState: StreamingState.Responding,
+          submitQuery: mockSubmitQuery,
+        }),
+      );
+
+      act(() => {
+        result.current.addMessage('hello');
+        result.current.addMessage('world');
+      });
+
+      let segment: string | null = null;
+      act(() => {
+        segment = result.current.popNextSegment();
+      });
+      expect(segment).toBe('hello\n\nworld');
+      expect(result.current.messageQueue).toEqual([]);
+    });
+
+    it('stops batching at the first slash command and leaves it queued', () => {
+      const { result } = renderHook(() =>
+        useMessageQueue({
+          isConfigInitialized: true,
+          streamingState: StreamingState.Responding,
+          submitQuery: mockSubmitQuery,
+        }),
+      );
+
+      act(() => {
+        result.current.addMessage('hello');
+        result.current.addMessage('world');
+        result.current.addMessage('/model');
+        result.current.addMessage('after');
+      });
+
+      let segment: string | null = null;
+      act(() => {
+        segment = result.current.popNextSegment();
+      });
+      expect(segment).toBe('hello\n\nworld');
+      expect(result.current.messageQueue).toEqual(['/model', 'after']);
+    });
+
+    it('returns a slash command alone when it leads the queue', () => {
+      const { result } = renderHook(() =>
+        useMessageQueue({
+          isConfigInitialized: true,
+          streamingState: StreamingState.Responding,
+          submitQuery: mockSubmitQuery,
+        }),
+      );
+
+      act(() => {
+        result.current.addMessage('/model');
+        result.current.addMessage('hello');
+      });
+
+      let segment: string | null = null;
+      act(() => {
+        segment = result.current.popNextSegment();
+      });
+      expect(segment).toBe('/model');
+      expect(result.current.messageQueue).toEqual(['hello']);
+    });
+
+    it('drains segments one at a time across repeated calls', () => {
+      const { result } = renderHook(() =>
+        useMessageQueue({
+          isConfigInitialized: true,
+          streamingState: StreamingState.Responding,
+          submitQuery: mockSubmitQuery,
+        }),
+      );
+
+      act(() => {
+        result.current.addMessage('hello');
+        result.current.addMessage('/model');
+        result.current.addMessage('world');
+      });
+
+      const segments: Array<string | null> = [];
+      act(() => {
+        segments.push(result.current.popNextSegment());
+      });
+      act(() => {
+        segments.push(result.current.popNextSegment());
+      });
+      act(() => {
+        segments.push(result.current.popNextSegment());
+      });
+      act(() => {
+        segments.push(result.current.popNextSegment());
+      });
+
+      expect(segments).toEqual(['hello', '/model', 'world', null]);
+      expect(result.current.messageQueue).toEqual([]);
+    });
+
+    it('preserves remaining messages so popAllMessages can restore them after a cancel', () => {
+      const { result } = renderHook(() =>
+        useMessageQueue({
+          isConfigInitialized: true,
+          streamingState: StreamingState.Responding,
+          submitQuery: mockSubmitQuery,
+        }),
+      );
+
+      act(() => {
+        result.current.addMessage('hello');
+        result.current.addMessage('/model');
+        result.current.addMessage('after');
+      });
+
+      act(() => {
+        result.current.popNextSegment();
+      });
+      expect(result.current.messageQueue).toEqual(['/model', 'after']);
+
+      let popped: string | null = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+      expect(popped).toBe('/model\n\nafter');
+    });
   });
 });

@@ -245,6 +245,7 @@ describe('AppContainer State Management', () => {
       getQueuedMessagesText: vi.fn().mockReturnValue(''),
       popAllMessages: vi.fn().mockReturnValue(null),
       drainQueue: vi.fn().mockReturnValue([]),
+      popNextSegment: vi.fn().mockReturnValue(null),
     });
     mockedUseAutoAcceptIndicator.mockReturnValue(false);
     mockedUseGitBranchName.mockReturnValue('main');
@@ -459,6 +460,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
       });
 
       render(
@@ -497,6 +499,7 @@ describe('AppContainer State Management', () => {
           getQueuedMessagesText: vi.fn().mockReturnValue(''),
           popAllMessages: vi.fn().mockReturnValue(null),
           drainQueue: vi.fn().mockReturnValue([]),
+          popNextSegment: vi.fn().mockReturnValue(null),
         });
 
         render(
@@ -577,6 +580,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
       });
 
       render(
@@ -630,6 +634,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue('queued follow-up'),
         popAllMessages: mockPopAllMessages,
         drainQueue: vi.fn().mockReturnValue(['queued follow-up']),
+        popNextSegment: vi.fn().mockReturnValue('queued follow-up'),
       });
 
       render(
@@ -680,6 +685,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue('queued follow-up'),
         popAllMessages: vi.fn().mockReturnValue('queued follow-up'),
         drainQueue: vi.fn().mockReturnValue(['queued follow-up']),
+        popNextSegment: vi.fn().mockReturnValue('queued follow-up'),
       });
 
       render(

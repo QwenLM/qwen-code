@@ -873,12 +873,17 @@ export const AppContainer = (props: AppContainerProps) => {
     disabled: agentViewState.activeView !== 'main',
   });
 
-  const { messageQueue, addMessage, popAllMessages, drainQueue } =
-    useMessageQueue({
-      isConfigInitialized,
-      streamingState,
-      submitQuery,
-    });
+  const {
+    messageQueue,
+    addMessage,
+    popAllMessages,
+    drainQueue,
+    popNextSegment,
+  } = useMessageQueue({
+    isConfigInitialized,
+    streamingState,
+    submitQuery,
+  });
 
   // Bridge message queue to mid-turn drain via ref.
   // drainQueue reads the synchronous queueRef inside the hook, so it
@@ -2028,6 +2033,48 @@ export const AppContainer = (props: AppContainerProps) => {
     isDeleteDialogOpen ||
     isExtensionsManagerDialogOpen;
   dialogsVisibleRef.current = dialogsVisible;
+
+  // Drain the queued-messages queue when we're idle and not blocked by a
+  // dialog. One segment per effect run: consecutive plain-text messages are
+  // batched into a single submission, while each slash command is submitted
+  // alone so it's recognized as a command. When a slash command opens a
+  // dialog, `dialogsVisible` flips to true and subsequent segments stay
+  // queued until the dialog closes — avoids sending a queued prompt to the
+  // model while a picker is still open.
+  //
+  // `queueDrainingRef` blocks re-entry while an in-flight submission is
+  // still settling. Without it, calling `submitQuery` for a slash command
+  // returns control to React before the dialog-opening state flip commits;
+  // the effect would otherwise re-run on the fresh `messageQueue` value
+  // (post-pop) and drain the next segment before `dialogsVisible` has had a
+  // chance to flip true. `queueDrainNonce` is bumped once the submission
+  // settles so the effect re-fires for any remaining segments even when
+  // `streamingState` / `messageQueue` did not change (e.g. slash commands
+  // that don't start a model turn).
+  const queueDrainingRef = useRef(false);
+  const [queueDrainNonce, setQueueDrainNonce] = useState(0);
+  useEffect(() => {
+    if (queueDrainingRef.current) return;
+    if (!isConfigInitialized) return;
+    if (streamingState !== StreamingState.Idle) return;
+    if (dialogsVisible) return;
+    if (messageQueue.length === 0) return;
+    const segment = popNextSegment();
+    if (segment === null) return;
+    queueDrainingRef.current = true;
+    Promise.resolve(submitQuery(segment)).finally(() => {
+      queueDrainingRef.current = false;
+      setQueueDrainNonce((n) => n + 1);
+    });
+  }, [
+    isConfigInitialized,
+    streamingState,
+    dialogsVisible,
+    messageQueue,
+    popNextSegment,
+    submitQuery,
+    queueDrainNonce,
+  ]);
 
   const {
     isFeedbackDialogOpen,
