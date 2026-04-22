@@ -336,6 +336,64 @@ describe('StreamingToolCallParser', () => {
         name: 'function2',
       });
     });
+
+    it('should reassign new id at same index even when existing call is mid-stream (parallel tool call bug)', () => {
+      // Regression for the log captured at ~/.qwen/debug/3d0fa142-...:
+      //
+      // DashScope/Qwen can emit parallel tool calls that all report
+      // `index: 0` with distinct ids. Before the fix, once call A was
+      // mid-stream (depth > 0) at index 0, call B's first chunk with a
+      // different id would fall through to "reuse this index" and
+      // concatenate B's JSON onto A's unclosed buffer, producing corrupt
+      // payloads like `{"file_path": "/A{"file_path": "/B...` that even
+      // jsonrepair cannot fix. Both tool calls then get dropped entirely,
+      // surfacing as `InvalidStreamError: NO_RESPONSE_TEXT` at the
+      // subagent boundary (issue #3516 symptom, real cause is here).
+      parser.addChunk(0, '{"file_path": "/a/b', 'call_A', 'read_file');
+      parser.addChunk(0, '{"file_path": "/c/d', 'call_B', 'read_file');
+
+      // A stays intact at index 0.
+      expect(parser.getBuffer(0)).toBe('{"file_path": "/a/b');
+      expect(parser.getToolCallMeta(0)).toEqual({
+        id: 'call_A',
+        name: 'read_file',
+      });
+
+      // B lands in a fresh bucket, not merged into A.
+      expect(parser.getBuffer(1)).toBe('{"file_path": "/c/d');
+      expect(parser.getToolCallMeta(1)).toEqual({
+        id: 'call_B',
+        name: 'read_file',
+      });
+
+      // Continuations carrying the id route via idToIndexMap and close
+      // each call in its own bucket.
+      parser.addChunk(0, '"}', 'call_A');
+      parser.addChunk(0, '"}', 'call_B');
+
+      const done = parser.getCompletedToolCalls();
+      expect(done).toHaveLength(2);
+      const byId = Object.fromEntries(done.map((c) => [c.id, c.args]));
+      expect(byId['call_A']).toEqual({ file_path: '/a/b' });
+      expect(byId['call_B']).toEqual({ file_path: '/c/d' });
+    });
+
+    it('should separate three interleaved parallel tool calls sharing index 0', () => {
+      // Extended regression: the log showed 3+ calls interleaved, not just 2.
+      parser.addChunk(0, '{"file_path":"/a', 'call_A', 'read_file');
+      parser.addChunk(0, '{"file_path":"/b', 'call_B', 'read_file');
+      parser.addChunk(0, '{"file_path":"/c', 'call_C', 'read_file');
+      parser.addChunk(0, '"}', 'call_A');
+      parser.addChunk(0, '"}', 'call_B');
+      parser.addChunk(0, '"}', 'call_C');
+
+      const done = parser.getCompletedToolCalls();
+      expect(done).toHaveLength(3);
+      const byId = Object.fromEntries(done.map((c) => [c.id, c.args]));
+      expect(byId['call_A']).toEqual({ file_path: '/a' });
+      expect(byId['call_B']).toEqual({ file_path: '/b' });
+      expect(byId['call_C']).toEqual({ file_path: '/c' });
+    });
   });
 
   describe('Completed tool calls', () => {
@@ -674,16 +732,30 @@ describe('StreamingToolCallParser', () => {
       expect(call3?.index).toBe(3);
     });
 
-    it('should reuse incomplete index when available', () => {
-      // Create an incomplete tool call at index 0
+    it('should never merge a new tool call id into an incomplete bucket', () => {
+      // Previously the parser reused an incomplete index for a new distinct
+      // id, which let parallel tool calls with reused `index: 0` (a DashScope
+      // quirk) interleave their JSON arguments into one buffer. That behavior
+      // is the real root cause behind the `NO_RESPONSE_TEXT` subagent
+      // failures in issue #3516 — so even here we must open a fresh bucket.
       parser.addChunk(0, '{"incomplete":', 'call_1', 'function1');
 
-      // New tool call with different ID should reuse the incomplete index
       const result = parser.addChunk(0, ' "completed"}', 'call_2', 'function2');
-      expect(result.complete).toBe(true);
 
-      // Should have updated the metadata for the same index
+      // The first call is untouched at index 0.
+      expect(parser.getBuffer(0)).toBe('{"incomplete":');
       expect(parser.getToolCallMeta(0)).toEqual({
+        id: 'call_1',
+        name: 'function1',
+      });
+
+      // The new call lands in its own bucket. The chunk it carried is a
+      // JSON fragment (not a complete object), so it stays incomplete —
+      // which is the correct outcome: two distinct calls, two distinct
+      // buffers, neither corrupted by the other.
+      expect(result.complete).toBe(false);
+      expect(parser.getBuffer(1)).toBe(' "completed"}');
+      expect(parser.getToolCallMeta(1)).toEqual({
         id: 'call_2',
         name: 'function2',
       });

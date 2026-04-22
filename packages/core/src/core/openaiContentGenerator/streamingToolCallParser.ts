@@ -77,29 +77,14 @@ export class StreamingToolCallParser {
         // We've seen this ID before, use the existing mapped index
         actualIndex = this.idToIndexMap.get(id)!;
       } else {
-        // New tool call ID
-        // Check if the requested index is already occupied by a different complete tool call
-        if (this.buffers.has(index)) {
-          const existingBuffer = this.buffers.get(index)!;
-          const existingDepth = this.depths.get(index)!;
-          const existingMeta = this.toolCallMeta.get(index);
-
-          // Check if we have a complete tool call at this index
-          if (
-            existingBuffer.trim() &&
-            existingDepth === 0 &&
-            existingMeta?.id &&
-            existingMeta.id !== id
-          ) {
-            try {
-              JSON.parse(existingBuffer);
-              // We have a complete tool call with a different ID at this index
-              // Find a new index for this tool call
-              actualIndex = this.findNextAvailableIndex();
-            } catch {
-              // Existing buffer is not complete JSON, we can reuse this index
-            }
-          }
+        // New tool call ID. If this index is already occupied by a *different*
+        // tool-call id, allocate a fresh bucket — whether the existing call is
+        // complete or mid-stream. Provider quirks (e.g. DashScope/Qwen parallel
+        // tool calls reusing `index: 0`) can otherwise interleave arguments
+        // from distinct calls into a single buffer, corrupting both JSONs.
+        const existingMeta = this.toolCallMeta.get(index);
+        if (existingMeta?.id && existingMeta.id !== id) {
+          actualIndex = this.allocateFreshIndex();
         }
 
         // Map this ID to the actual index we're using
@@ -279,6 +264,24 @@ export class StreamingToolCallParser {
     }
 
     return completed;
+  }
+
+  /**
+   * Allocates a brand-new index, guaranteed unused. Skips every index that
+   * currently has any buffer state (complete or mid-stream) so the caller
+   * never merges a new tool call into an existing bucket.
+   *
+   * Use this when a *distinct* tool-call id arrives at an index already
+   * occupied by another id — the two calls must live in separate buckets
+   * or their streaming JSON will be concatenated and corrupt both.
+   *
+   * @returns An index with no existing state
+   */
+  private allocateFreshIndex(): number {
+    while (this.buffers.has(this.nextAvailableIndex)) {
+      this.nextAvailableIndex++;
+    }
+    return this.nextAvailableIndex++;
   }
 
   /**
