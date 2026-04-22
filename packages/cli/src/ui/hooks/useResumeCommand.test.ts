@@ -51,6 +51,9 @@ vi.mock('@qwen-code/qwen-code-core', () => {
         })
       );
     }
+    getSessionTitle(_sessionId: string) {
+      return undefined;
+    }
   }
 
   return {

@@ -1248,6 +1248,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
         prefix={prefixNode}
         borderColor={borderColor}
+        topRightLabel={uiState.sessionName || undefined}
         isActive={!isEmbeddedShellFocused}
         renderLine={renderLineWithHighlighting}
       />

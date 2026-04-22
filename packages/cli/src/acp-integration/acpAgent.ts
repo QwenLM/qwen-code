@@ -14,6 +14,7 @@ import {
   qwenOAuth2Events,
   MCPServerConfig,
   SessionService,
+  SESSION_TITLE_MAX_LENGTH,
   tokenLimit,
   type Config,
   type ConversationRecord,
@@ -296,17 +297,29 @@ class QwenAgent implements Agent {
   ): Promise<ListSessionsResponse> {
     const cwd = params.cwd || process.cwd();
     const numericCursor = params.cursor ? Number(params.cursor) : undefined;
+
+    // The ACP spec's ListSessionsRequest doesn't include a page-size field,
+    // so the SDK's zod validator strips any top-level `size` the client sends
+    // before it reaches this handler. Carry page size through `_meta.size`
+    // (same pattern filesystem.ts uses for `_meta.bom` / `_meta.encoding`).
+    const metaSize = params._meta?.['size'];
+    const size =
+      typeof metaSize === 'number' && metaSize > 0
+        ? Math.floor(metaSize)
+        : undefined;
+
     const result = await runWithAcpRuntimeOutputDir(this.settings, cwd, () => {
       const sessionService = new SessionService(cwd);
       return sessionService.listSessions({
         cursor: Number.isNaN(numericCursor) ? undefined : numericCursor,
+        size,
       });
     });
 
     const sessions: SessionInfo[] = result.items.map((item) => ({
       cwd: item.cwd,
       sessionId: item.sessionId,
-      title: item.prompt || '(session)',
+      title: item.customTitle || item.prompt || '(session)',
       updatedAt: new Date(item.mtime).toISOString(),
     }));
 
@@ -403,19 +416,74 @@ class QwenAgent implements Agent {
     method: string,
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    if (method === 'getAccountInfo') {
-      const sessionId = params['sessionId'] as string | undefined;
-      const session = sessionId ? this.sessions.get(sessionId) : undefined;
-      const config = session ? session.getConfig() : this.config;
-      const cfg = config.getContentGeneratorConfig();
-      return {
-        authType: cfg?.authType ?? config.getAuthType() ?? null,
-        model: cfg?.model ?? config.getModel() ?? null,
-        baseUrl: cfg?.baseUrl ?? null,
-        apiKeyEnvKey: cfg?.apiKeyEnvKey ?? null,
-      };
+    const cwd = (params['cwd'] as string) || process.cwd();
+    const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
+
+    switch (method) {
+      case 'deleteSession': {
+        const sessionId = params['sessionId'] as string;
+        if (!sessionId || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const success = await runWithAcpRuntimeOutputDir(
+          this.settings,
+          cwd,
+          async () => {
+            const sessionService = new SessionService(cwd);
+            return sessionService.removeSession(sessionId);
+          },
+        );
+        return { success };
+      }
+      case 'renameSession': {
+        const sessionId = params['sessionId'] as string;
+        const title = params['title'] as string;
+        if (!sessionId || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (!title || typeof title !== 'string') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing title',
+          );
+        }
+        if (title.length > SESSION_TITLE_MAX_LENGTH) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Title too long (max ${SESSION_TITLE_MAX_LENGTH} chars)`,
+          );
+        }
+        const success = await runWithAcpRuntimeOutputDir(
+          this.settings,
+          cwd,
+          async () => {
+            const sessionService = new SessionService(cwd);
+            return sessionService.renameSession(sessionId, title);
+          },
+        );
+        return { success };
+      }
+      case 'getAccountInfo': {
+        const sessionId = params['sessionId'] as string | undefined;
+        const session = sessionId ? this.sessions.get(sessionId) : undefined;
+        const config = session ? session.getConfig() : this.config;
+        const cfg = config.getContentGeneratorConfig();
+        return {
+          authType: cfg?.authType ?? config.getAuthType() ?? null,
+          model: cfg?.model ?? config.getModel() ?? null,
+          baseUrl: cfg?.baseUrl ?? null,
+          apiKeyEnvKey: cfg?.apiKeyEnvKey ?? null,
+        };
+      }
+      default:
+        throw RequestError.methodNotFound(method);
     }
-    throw RequestError.methodNotFound(method);
   }
 
   // --- private helpers ---

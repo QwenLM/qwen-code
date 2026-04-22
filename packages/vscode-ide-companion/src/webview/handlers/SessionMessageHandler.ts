@@ -32,6 +32,8 @@ export class SessionMessageHandler extends BaseMessageHandler {
       'switchQwenSession',
       'getQwenSessions',
       'resumeSession',
+      'deleteQwenSession',
+      'renameQwenSession',
       'cancelStreaming',
       // UI action: open a new chat tab (new WebviewPanel)
       'openNewChatTab',
@@ -93,6 +95,17 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
       case 'resumeSession':
         await this.handleResumeSession((data?.sessionId as string) || '');
+        break;
+
+      case 'deleteQwenSession':
+        await this.handleDeleteQwenSession((data?.sessionId as string) || '');
+        break;
+
+      case 'renameQwenSession':
+        await this.handleRenameQwenSession(
+          (data?.sessionId as string) || '',
+          (data?.title as string) || '',
+        );
         break;
 
       case 'openNewChatTab':
@@ -497,6 +510,21 @@ export class SessionMessageHandler extends BaseMessageHandler {
       }
 
       this.sendStreamEnd(undefined, myRequestId);
+
+      // After first message, sync ACP session ID to webview for session list highlighting
+      const acpSessionId = this.agentManager.currentSessionId;
+      if (acpSessionId && acpSessionId !== this.currentConversationId) {
+        this.currentConversationId = acpSessionId;
+        this.sendToWebView({
+          type: 'sessionTitleUpdated',
+          data: {
+            sessionId: acpSessionId,
+            title:
+              displayText.substring(0, 50) +
+              (displayText.length > 50 ? '...' : ''),
+          },
+        });
+      }
     } catch (error) {
       console.error('[SessionMessageHandler] Error sending message:', error);
 
@@ -654,12 +682,20 @@ export class SessionMessageHandler extends BaseMessageHandler {
             type: 'qwenSessionSwitched',
             data: { sessionId, messages },
           });
+          this.sendToWebView({
+            type: 'sessionLoadComplete',
+            data: { sessionId },
+          });
           vscode.window.showInformationMessage(
             'Showing cached session content. Configure your provider to interact with the AI.',
           );
           return;
         } else if (choice !== 'auth') {
-          // User dismissed; do nothing
+          // User dismissed; clear loading state
+          this.sendToWebView({
+            type: 'sessionLoadComplete',
+            data: { sessionId },
+          });
           return;
         }
       }
@@ -704,6 +740,12 @@ export class SessionMessageHandler extends BaseMessageHandler {
         // Reset title flag when switching sessions
         this.isTitleSet = false;
 
+        // Notify webview that session history has finished loading
+        this.sendToWebView({
+          type: 'sessionLoadComplete',
+          data: { sessionId },
+        });
+
         // Successfully loaded session, return early to avoid fallback logic
         return;
       } catch (loadError) {
@@ -733,18 +775,27 @@ export class SessionMessageHandler extends BaseMessageHandler {
         // If we are connected, try to create a fresh ACP session so user can interact
         if (this.agentManager.isConnected) {
           try {
-            const newAcpSessionId = await this.agentManager.createNewSession(
-              workingDir,
-              {
-                forceNew: true,
-              },
-            );
+            await this.agentManager.createNewSession(workingDir, {
+              forceNew: true,
+            });
 
-            this.currentConversationId = newAcpSessionId;
+            // Keep the viewed session identity aligned with what the webview sees
+            // (the archived sessionId). The live ACP session lives on
+            // agentManager.currentSessionId; the sync-on-first-message path
+            // (see streamEnd handler) will flip both sides to the ACP id once
+            // the user actually sends a message. Setting currentConversationId
+            // to the new ACP id here would desync the backend from the webview
+            // and cause rename/delete/title-update flows to target the wrong
+            // session during the fallback window.
+            this.currentConversationId = sessionId;
 
             this.sendToWebView({
               type: 'qwenSessionSwitched',
               data: { sessionId, messages, session: sessionDetails },
+            });
+            this.sendToWebView({
+              type: 'sessionLoadComplete',
+              data: { sessionId },
             });
 
             // Only show the cache warning if we actually fell back to local cache
@@ -791,6 +842,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
           this.sendToWebView({
             type: 'qwenSessionSwitched',
             data: { sessionId, messages, session: sessionDetails },
+          });
+          this.sendToWebView({
+            type: 'sessionLoadComplete',
+            data: { sessionId },
           });
           vscode.window.showWarningMessage(
             'Showing cached session content. Configure your provider to interact with the AI.',
@@ -980,6 +1035,98 @@ export class SessionMessageHandler extends BaseMessageHandler {
           data: { message: `Failed to resume session: ${errorMsg}` },
         });
       }
+    }
+  }
+
+  /**
+   * Handle delete session request
+   */
+  private async handleDeleteQwenSession(sessionId: string): Promise<void> {
+    try {
+      if (
+        sessionId === this.currentConversationId ||
+        sessionId === this.agentManager.currentSessionId
+      ) {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: 'Cannot delete the current active session.' },
+        });
+        return;
+      }
+
+      const success = await this.agentManager.deleteSession(sessionId);
+      if (success) {
+        this.sendToWebView({
+          type: 'sessionDeleted',
+          data: { sessionId },
+        });
+      } else {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: 'Failed to delete session.' },
+        });
+      }
+    } catch (error) {
+      const errorMsg = this.getErrorMessage(error);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: `Failed to delete session: ${errorMsg}` },
+      });
+    }
+  }
+
+  /**
+   * Handle rename session request
+   */
+  private async handleRenameQwenSession(
+    sessionId: string,
+    title: string,
+  ): Promise<void> {
+    try {
+      const trimmedTitle = title.trim().replace(/[\r\n]+/g, ' ');
+      if (!trimmedTitle) {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: 'Please provide a name.' },
+        });
+        return;
+      }
+      // Matches SESSION_TITLE_MAX_LENGTH from @qwen-code/qwen-code-core/sessionService
+      if (trimmedTitle.length > 200) {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: 'Name is too long. Maximum 200 characters.' },
+        });
+        return;
+      }
+
+      const success = await this.agentManager.renameSession(
+        sessionId,
+        trimmedTitle,
+      );
+      if (success) {
+        this.sendToWebView({
+          type: 'sessionRenamed',
+          data: { sessionId, title: trimmedTitle },
+        });
+        if (sessionId === this.currentConversationId) {
+          this.sendToWebView({
+            type: 'sessionTitleUpdated',
+            data: { sessionId, title: trimmedTitle },
+          });
+        }
+      } else {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: 'Failed to rename session.' },
+        });
+      }
+    } catch (error) {
+      const errorMsg = this.getErrorMessage(error);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: `Failed to rename session: ${errorMsg}` },
+      });
     }
   }
 

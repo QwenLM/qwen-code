@@ -208,7 +208,7 @@ describe('secure-browser-launcher', () => {
       const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
       await expect(
-        openBrowserSecurely('https://example.com')
+        openBrowserSecurely('https://example.com'),
       ).resolves.toBeUndefined();
 
       expect(consoleSpy).toHaveBeenCalledWith(

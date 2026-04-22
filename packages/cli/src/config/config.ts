@@ -62,7 +62,7 @@ const SESSION_ID_REGEX =
  * Accepts a standard UUID, or a UUID followed by `-agent-{suffix}`
  * (used by Arena to give each agent a deterministic session ID).
  */
-function isValidSessionId(value: string): boolean {
+export function isValidSessionId(value: string): boolean {
   return SESSION_ID_REGEX.test(value);
 }
 
@@ -612,9 +612,7 @@ export async function parseArguments(): Promise<CliArgs> {
           ) {
             return `Invalid --session-id: "${argv['sessionId']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
           }
-          if (argv['resume'] && !isValidSessionId(argv['resume'] as string)) {
-            return `Invalid --resume: "${argv['resume']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
-          }
+          // --resume accepts either a session UUID or a custom title
           if (argv['jsonFd'] != null && argv['jsonFile'] != null) {
             return '--json-fd and --json-file are mutually exclusive. Use one or the other.';
           }
@@ -1082,6 +1080,9 @@ export async function loadCliConfig(
     }
 
     if (argv.resume) {
+      // By the time we get here, argv.resume has been resolved to a valid
+      // session UUID by gemini.tsx (which handles custom title lookup and
+      // the interactive picker for ambiguous matches).
       sessionId = argv.resume;
       sessionData = await sessionService.loadSession(argv.resume);
       if (!sessionData) {
