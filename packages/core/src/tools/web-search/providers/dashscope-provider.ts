@@ -4,16 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { promises as fs } from 'node:fs';
-import * as os from 'os';
-import * as path from 'path';
 import { BaseWebSearchProvider } from '../base-provider.js';
 import type {
   WebSearchResult,
   WebSearchResultItem,
   DashScopeProviderConfig,
 } from '../types.js';
-import type { QwenCredentials } from '../../../qwen/qwenOAuth2.js';
 
 interface DashScopeSearchItem {
   _id: string;
@@ -58,29 +54,9 @@ interface DashScopeSearchResponse {
   success: boolean;
 }
 
-// File System Configuration
-const QWEN_DIR = '.qwen';
-const QWEN_CREDENTIAL_FILENAME = 'oauth_creds.json';
-
-/**
- * Get the path to the cached OAuth credentials file.
- */
-function getQwenCachedCredentialPath(): string {
-  return path.join(os.homedir(), QWEN_DIR, QWEN_CREDENTIAL_FILENAME);
-}
-
-/**
- * Load cached Qwen OAuth credentials from disk.
- */
-async function loadQwenCredentials(): Promise<QwenCredentials | null> {
-  try {
-    const keyFile = getQwenCachedCredentialPath();
-    const creds = await fs.readFile(keyFile, 'utf-8');
-    return JSON.parse(creds) as QwenCredentials;
-  } catch {
-    return null;
-  }
-}
+// Standard DashScope web search endpoint (API key auth)
+const DASHSCOPE_WEB_SEARCH_ENDPOINT =
+  'https://dashscope.aliyuncs.com/api/v1/indices/plugin/web_search';
 
 /**
  * Web search provider using Alibaba Cloud DashScope API.
@@ -93,64 +69,29 @@ export class DashScopeProvider extends BaseWebSearchProvider {
   }
 
   isAvailable(): boolean {
-    // DashScope provider is only available when auth type is QWEN_OAUTH
-    // This ensures it's only used when OAuth credentials are available
-    return this.config.authType === 'qwen-oauth';
+    // Available when an explicit API key is provided
+    return !!this.config.apiKey;
   }
 
   /**
-   * Get the access token and API endpoint for authentication and web search.
-   * Tries OAuth credentials first, falls back to apiKey if OAuth is not available.
-   * Returns both token and endpoint to avoid loading credentials multiple times.
+   * Get the access token and API endpoint.
+   * Uses the configured apiKey with the standard DashScope endpoint.
    */
-  private async getAuthConfig(): Promise<{
-    accessToken: string | null;
-    apiEndpoint: string;
-  }> {
-    // Load credentials once
-    const credentials = await loadQwenCredentials();
-
-    // Get access token: try OAuth credentials first, fallback to apiKey
-    let accessToken: string | null = null;
-    if (credentials?.access_token) {
-      // Check if token is not expired
-      if (credentials.expiry_date && credentials.expiry_date > Date.now()) {
-        accessToken = credentials.access_token;
-      }
-    }
+  private getAuthConfig(): { accessToken: string; apiEndpoint: string } {
+    const accessToken = this.config.apiKey;
     if (!accessToken) {
-      accessToken = this.config.apiKey || null;
-    }
-
-    // Get API endpoint: use resource_url from credentials
-    if (!credentials?.resource_url) {
       throw new Error(
-        'No resource_url found in credentials. Please authenticate using OAuth',
+        '[DashScope] Provider is not available. Please set DASHSCOPE_API_KEY or configure apiKey in settings.',
       );
     }
-
-    // Normalize the URL: add protocol if missing
-    const baseUrl = credentials.resource_url.startsWith('http')
-      ? credentials.resource_url
-      : `https://${credentials.resource_url}`;
-    // Remove trailing slash if present
-    const normalizedBaseUrl = baseUrl.replace(/\/$/, '');
-    const apiEndpoint = `${normalizedBaseUrl}/api/v1/indices/plugin/web_search`;
-
-    return { accessToken, apiEndpoint };
+    return { accessToken, apiEndpoint: DASHSCOPE_WEB_SEARCH_ENDPOINT };
   }
 
   protected async performSearch(
     query: string,
     signal: AbortSignal,
   ): Promise<WebSearchResult> {
-    // Get access token and API endpoint (loads credentials once)
-    const { accessToken, apiEndpoint } = await this.getAuthConfig();
-    if (!accessToken) {
-      throw new Error(
-        'No access token available. Please authenticate using OAuth',
-      );
-    }
+    const { accessToken, apiEndpoint } = this.getAuthConfig();
 
     const requestBody = {
       uq: query,

@@ -31,7 +31,6 @@ import type {
   WebSearchProvider,
   WebSearchResultItem,
   WebSearchProviderConfig,
-  DashScopeProviderConfig,
 } from './types.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 
@@ -97,15 +96,8 @@ class WebSearchToolInvocation extends BaseToolInvocation<
         return new TavilyProvider(config);
       case 'google':
         return new GoogleProvider(config);
-      case 'dashscope': {
-        // Pass auth type to DashScope provider for availability check
-        const authType = this.config.getAuthType();
-        const dashscopeConfig: DashScopeProviderConfig = {
-          ...config,
-          authType: authType as string | undefined,
-        };
-        return new DashScopeProvider(dashscopeConfig);
-      }
+      case 'dashscope':
+        return new DashScopeProvider(config);
       case 'glm':
         return new GlmProvider(config);
       default:

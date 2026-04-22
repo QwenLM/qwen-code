@@ -139,9 +139,8 @@ export interface DashScopeProviderConfig {
   scene?: string;
   timeout?: number;
   /**
-   * Optional auth type to determine provider availability.
-   * If set to 'qwen-oauth', the provider will be available.
-   * If set to other values or undefined, the provider will check auth type dynamically.
+   * @deprecated No longer used. DashScope web search now uses apiKey directly.
+   * Kept for backward compatibility with existing configurations.
    */
   authType?: string;
 }

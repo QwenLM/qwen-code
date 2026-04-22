@@ -19,12 +19,13 @@ describe('web_search', () => {
       !!process.env['GOOGLE_API_KEY'] &&
       !!process.env['GOOGLE_SEARCH_ENGINE_ID'];
     const hasGlmKey = !!process.env['GLM_API_KEY'];
+    const hasDashscopeKey = !!process.env['DASHSCOPE_API_KEY'];
 
     // Skip if no provider is configured
-    if (!hasTavilyKey && !hasGoogleKey && !hasGlmKey) {
+    if (!hasTavilyKey && !hasGoogleKey && !hasGlmKey && !hasDashscopeKey) {
       console.warn(
         'Skipping web search test: No web search provider configured. ' +
-          'Set TAVILY_API_KEY, GOOGLE_API_KEY+GOOGLE_SEARCH_ENGINE_ID, or GLM_API_KEY environment variables.',
+          'Set TAVILY_API_KEY, GOOGLE_API_KEY+GOOGLE_SEARCH_ENGINE_ID, GLM_API_KEY, or DASHSCOPE_API_KEY environment variables.',
       );
       return;
     }
@@ -50,6 +51,12 @@ describe('web_search', () => {
     }
     if (hasGlmKey) {
       providers.push({ type: 'glm', apiKey: process.env['GLM_API_KEY'] });
+    }
+    if (hasDashscopeKey) {
+      providers.push({
+        type: 'dashscope',
+        apiKey: process.env['DASHSCOPE_API_KEY'],
+      });
     }
 
     if (providers.length > 0) {

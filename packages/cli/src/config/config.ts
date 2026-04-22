@@ -447,6 +447,10 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           description: 'ZhipuAI (GLM) API key for web search',
         })
+        .option('dashscope-api-key', {
+          type: 'string',
+          description: 'DashScope API key for web search (DASHSCOPE_API_KEY)',
+        })
         .option('web-search-default', {
           type: 'string',
           description:

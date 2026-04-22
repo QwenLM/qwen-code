@@ -31,7 +31,7 @@ Add to your `settings.json`:
 {
   "webSearch": {
     "provider": [
-      { "type": "dashscope" },
+      { "type": "dashscope", "apiKey": "your-dashscope-api-key" },
       { "type": "tavily", "apiKey": "tvly-xxxxx" },
       {
         "type": "google",
@@ -51,7 +51,7 @@ Add to your `settings.json`:
 
 **Notes:**
 
-- DashScope web search currently requires qwen-oauth credentials; it must be explicitly listed in `webSearch.provider` to be used
+- DashScope web search uses a standard API key (`DASHSCOPE_API_KEY`); configure it via environment variable, CLI arg `--dashscope-api-key`, or explicitly in `webSearch.provider`
 - Configure additional providers (Tavily, Google, GLM) if you want alternatives
 - Set `default` to specify which provider to use by default (if not set, priority order: Tavily > Google > GLM > DashScope)
 
@@ -69,6 +69,9 @@ export GOOGLE_SEARCH_ENGINE_ID="your-engine-id"
 
 # GLM (ZhipuAI)
 export GLM_API_KEY="your-zhipuai-api-key"
+
+# DashScope
+export DASHSCOPE_API_KEY="your-dashscope-api-key"
 ```
 
 ### Method 3: Command Line Arguments
@@ -84,6 +87,9 @@ qwen --google-api-key your-key --google-search-engine-id your-id
 
 # GLM (ZhipuAI)
 qwen --glm-api-key your-zhipuai-api-key
+
+# DashScope
+qwen --dashscope-api-key your-dashscope-api-key
 
 # Specify default provider
 qwen --web-search-default glm
@@ -144,7 +150,8 @@ web_search(query="best practices for React 19", provider="dashscope")
 ### DashScope (Official)
 
 - **Cost:** Paid
-- **Configuration:** Must be explicitly configured in `settings.json` web search providers
+- **Sign up:** https://dashscope.aliyuncs.com
+- **Configuration:** Set `DASHSCOPE_API_KEY` env var, use `--dashscope-api-key` CLI flag, or add `{ "type": "dashscope", "apiKey": "..." }` to `webSearch.provider` in `settings.json`
 - **Rate limit:** 15 RPS (shared across all API keys under the same Aliyun account)
 - **Best for:** General queries
 
@@ -200,7 +207,7 @@ web_search(query="best practices for React 19", provider="dashscope")
 
 **Tool not available?**
 
-- Ensure at least one provider (DashScope, Tavily, Google, or GLM) is configured in `settings.json`
+- Ensure at least one provider is configured: set `DASHSCOPE_API_KEY`, `TAVILY_API_KEY`, `GOOGLE_API_KEY`+`GOOGLE_SEARCH_ENGINE_ID`, or `GLM_API_KEY`
 - For Tavily/Google/GLM: Verify your API keys are correct
 
 **Provider-specific errors?**

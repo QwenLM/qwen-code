@@ -15,6 +15,7 @@ export interface WebSearchCliArgs {
   googleApiKey?: string;
   googleSearchEngineId?: string;
   glmApiKey?: string;
+  dashscopeApiKey?: string;
   webSearchDefault?: string;
 }
 
@@ -79,6 +80,15 @@ export function buildWebSearchConfig(
       providers.push({
         type: 'glm',
         apiKey: glmKey,
+      } as WebSearchProviderConfig);
+    }
+
+    const dashscopeKey =
+      argv.dashscopeApiKey || process.env['DASHSCOPE_API_KEY'];
+    if (dashscopeKey) {
+      providers.push({
+        type: 'dashscope',
+        apiKey: dashscopeKey,
       } as WebSearchProviderConfig);
     }
   }
