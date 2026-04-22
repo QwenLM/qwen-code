@@ -147,7 +147,6 @@ export class Session implements SessionContext {
 
   constructor(
     id: string,
-    private readonly chat: GeminiChat,
     readonly config: Config,
     private readonly client: AgentSideConnection,
     private readonly settings: LoadedSettings,
@@ -294,7 +293,9 @@ export class Session implements SessionContext {
         // Increment turn counter for each user prompt
         this.turn += 1;
 
-        const chat = this.chat;
+        // Always fetch the current chat from GeminiClient so that /clear's
+        // resetChat() (which replaces the chat instance) is reflected here.
+        const chat = this.config.getGeminiClient()!.getChat();
         const promptId = this.config.getSessionId() + '########' + this.turn;
 
         // Extract text from all text blocks to construct the full prompt text for logging
@@ -591,12 +592,12 @@ export class Session implements SessionContext {
       // Get response text from the chat history
       const history = chat.getHistory();
       const lastModelMessage = history
-        .filter((msg) => msg.role === 'model')
+        .filter((msg: Content) => msg.role === 'model')
         .pop();
       const responseText =
         lastModelMessage?.parts
-          ?.filter((p): p is { text: string } => 'text' in p)
-          .map((p) => p.text)
+          ?.filter((p: Part): p is { text: string } & Part => 'text' in p)
+          .map((p: { text: string }) => p.text)
           .join('') || '[no response text]';
 
       const response = await messageBus.request<
@@ -894,14 +895,17 @@ export class Session implements SessionContext {
               null;
             const streamStartTime = Date.now();
 
-            const responseStream = await this.chat.sendMessageStream(
-              this.config.getModel(),
-              {
-                message: nextMessage.parts ?? [],
-                config: { abortSignal: ac.signal },
-              },
-              promptId,
-            );
+            const responseStream = await this.config
+              .getGeminiClient()!
+              .getChat()
+              .sendMessageStream(
+                this.config.getModel(),
+                {
+                  message: nextMessage.parts ?? [],
+                  config: { abortSignal: ac.signal },
+                },
+                promptId,
+              );
             nextMessage = null;
 
             for await (const resp of responseStream) {
@@ -1752,44 +1756,59 @@ export class Session implements SessionContext {
         return normalizePartList(result.content);
 
       case 'message': {
-        await this.client.extNotification('_qwencode/slash_command', {
-          sessionId: this.sessionId,
-          command: originalPrompt
-            .filter((block) => block.type === 'text')
-            .map((block) => (block.type === 'text' ? block.text : ''))
-            .join(' '),
-          messageType: result.messageType,
-          message: result.content || '',
-        });
-
         if (result.messageType === 'error') {
           // Throw error to stop execution
           throw new Error(result.content || 'Slash command failed.');
         }
-        // For info messages, return null to indicate command was handled
+        // Emit the message as an agent message chunk so Zed renders it in the
+        // chat UI. extNotification only goes to the ACP debug log and is not
+        // rendered by Zed.
+        // Replace bare \n with Markdown hard line-breaks (two trailing spaces)
+        // so Zed's Markdown renderer preserves the line structure.
+        const rendered = (result.content || '').replace(/\n/g, '  \n');
+        await this.messageEmitter.emitAgentMessage(rendered);
+        // Write a system/slash_command record so history replay on restart can
+        // re-emit this message. system records are skipped by
+        // buildApiHistoryFromConversation, so this won't pollute model context.
+        this.config.getChatRecordingService()?.recordSlashCommand({
+          phase: 'result',
+          rawCommand: originalPrompt
+            .filter((b) => b.type === 'text')
+            .map((b) => (b.type === 'text' ? b.text : ''))
+            .join(' '),
+          outputHistoryItems: [
+            { type: 'assistant', text: result.content || '' },
+          ],
+        });
         return null;
       }
 
       case 'stream_messages': {
         // Command returns multiple messages via async generator (ACP-preferred)
-        const command = originalPrompt
-          .filter((block) => block.type === 'text')
-          .map((block) => (block.type === 'text' ? block.text : ''))
-          .join(' ');
-
-        // Stream all messages to the client
+        // Stream all messages to the client as agent message chunks.
+        const chunks: string[] = [];
         for await (const msg of result.messages) {
-          await this.client.extNotification('_qwencode/slash_command', {
-            sessionId: this.sessionId,
-            command,
-            messageType: msg.messageType,
-            message: msg.content,
-          });
-
-          // If we encounter an error message, throw after sending
           if (msg.messageType === 'error') {
             throw new Error(msg.content || 'Slash command failed.');
           }
+          await this.messageEmitter.emitAgentMessage(
+            (msg.content || '').replace(/\n/g, '  \n'),
+          );
+          chunks.push(msg.content || '');
+        }
+        // Write a system/slash_command record for history replay (same reason as
+        // 'message' case — system records are invisible to model history).
+        if (chunks.length > 0) {
+          this.config.getChatRecordingService()?.recordSlashCommand({
+            phase: 'result',
+            rawCommand: originalPrompt
+              .filter((b) => b.type === 'text')
+              .map((b) => (b.type === 'text' ? b.text : ''))
+              .join(' '),
+            outputHistoryItems: [
+              { type: 'assistant', text: chunks.join('\n') },
+            ],
+          });
         }
 
         // All messages sent successfully, return null to indicate command was handled

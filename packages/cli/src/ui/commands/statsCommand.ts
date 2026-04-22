@@ -10,6 +10,7 @@ import { formatDuration } from '../utils/formatters.js';
 import {
   type CommandContext,
   type SlashCommand,
+  type MessageActionReturn,
   CommandKind,
 } from './types.js';
 import { t } from '../../i18n/index.js';
@@ -21,11 +22,20 @@ export const statsCommand: SlashCommand = {
     return t('check session stats. Usage: /stats [model|tools]');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
-  action: (context: CommandContext) => {
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  action: (context: CommandContext): MessageActionReturn | void => {
     const now = new Date();
     const { sessionStartTime } = context.session.stats;
     if (!sessionStartTime) {
+      if (context.executionMode !== 'interactive') {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t(
+            'Session start time is unavailable, cannot calculate stats.',
+          ),
+        };
+      }
       context.ui.addItem(
         {
           type: MessageType.ERROR,
@@ -36,6 +46,30 @@ export const statsCommand: SlashCommand = {
       return;
     }
     const wallDuration = now.getTime() - sessionStartTime.getTime();
+
+    if (context.executionMode !== 'interactive') {
+      const { promptCount, metrics } = context.session.stats;
+      let totalPromptTokens = 0;
+      let totalCandidateTokens = 0;
+      let totalRequests = 0;
+      for (const modelMetrics of Object.values(metrics.models)) {
+        totalPromptTokens += modelMetrics.tokens.prompt;
+        totalCandidateTokens += modelMetrics.tokens.candidates;
+        totalRequests += modelMetrics.api.totalRequests;
+      }
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: [
+          `Session duration: ${formatDuration(wallDuration)}`,
+          `Prompts: ${promptCount}`,
+          `API requests: ${totalRequests}`,
+          `Tokens — prompt: ${totalPromptTokens}, output: ${totalCandidateTokens}`,
+          `Tool calls: ${metrics.tools.totalCalls} (${metrics.tools.totalSuccess} ok, ${metrics.tools.totalFail} fail)`,
+          `Files: +${metrics.files.totalLinesAdded} / -${metrics.files.totalLinesRemoved} lines`,
+        ].join('\n'),
+      };
+    }
 
     const statsItem: HistoryItemStats = {
       type: MessageType.STATS,
@@ -51,8 +85,27 @@ export const statsCommand: SlashCommand = {
         return t('Show model-specific usage statistics.');
       },
       kind: CommandKind.BUILT_IN,
-      commandType: 'local-jsx',
-      action: (context: CommandContext) => {
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+      action: (context: CommandContext): MessageActionReturn | void => {
+        if (context.executionMode !== 'interactive') {
+          const { metrics } = context.session.stats;
+          const lines: string[] = [];
+          for (const [modelName, modelMetrics] of Object.entries(
+            metrics.models,
+          )) {
+            lines.push(
+              `${modelName}: prompt=${modelMetrics.tokens.prompt}, output=${modelMetrics.tokens.candidates}, cached=${modelMetrics.tokens.cached}`,
+            );
+          }
+          if (lines.length === 0) {
+            lines.push('No model usage data yet.');
+          }
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: lines.join('\n'),
+          };
+        }
         context.ui.addItem(
           {
             type: MessageType.MODEL_STATS,
@@ -67,8 +120,21 @@ export const statsCommand: SlashCommand = {
         return t('Show tool-specific usage statistics.');
       },
       kind: CommandKind.BUILT_IN,
-      commandType: 'local-jsx',
-      action: (context: CommandContext) => {
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+      action: (context: CommandContext): MessageActionReturn | void => {
+        if (context.executionMode !== 'interactive') {
+          const { metrics } = context.session.stats;
+          const { tools } = metrics;
+          const toolNames = Object.keys(tools.byName);
+          const content =
+            toolNames.length > 0
+              ? [
+                  `Tool calls: ${tools.totalCalls} total (${tools.totalSuccess} ok, ${tools.totalFail} fail)`,
+                  ...toolNames.map((name) => `  ${name}`),
+                ].join('\n')
+              : 'No tool usage data yet.';
+          return { type: 'message', messageType: 'info', content };
+        }
         context.ui.addItem(
           {
             type: MessageType.TOOL_STATS,

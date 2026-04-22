@@ -17,7 +17,7 @@ export const agentsCommand: SlashCommand = {
     return t('Manage subagents for specialized task delegation.');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
+  supportedModes: ['interactive'] as const,
   subCommands: [
     {
       name: 'manage',
@@ -25,7 +25,7 @@ export const agentsCommand: SlashCommand = {
         return t('Manage existing subagents (view, edit, delete).');
       },
       kind: CommandKind.BUILT_IN,
-      commandType: 'local-jsx',
+      supportedModes: ['interactive'] as const,
       action: (): OpenDialogActionReturn => ({
         type: 'dialog',
         dialog: 'subagent_list',
@@ -37,7 +37,7 @@ export const agentsCommand: SlashCommand = {
         return t('Create a new subagent with guided setup.');
       },
       kind: CommandKind.BUILT_IN,
-      commandType: 'local-jsx',
+      supportedModes: ['interactive'] as const,
       action: (): OpenDialogActionReturn => ({
         type: 'dialog',
         dialog: 'subagent_create',

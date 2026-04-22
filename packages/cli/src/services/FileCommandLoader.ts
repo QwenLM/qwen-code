@@ -354,6 +354,9 @@ export class FileCommandLoader implements ICommandLoader {
         typeof validDef.frontmatter.description === 'string'
           ? validDef.frontmatter.description
           : undefined,
+      whenToUse: validDef.frontmatter?.when_to_use,
+      disableModelInvocation:
+        validDef.frontmatter?.['disable-model-invocation'],
     };
 
     // Use factory to create command

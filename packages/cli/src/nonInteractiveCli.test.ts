@@ -152,12 +152,14 @@ describe('runNonInteractive', () => {
       isInteractive: vi.fn().mockReturnValue(false),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getCronScheduler: vi.fn().mockReturnValue(null),
+      setModelInvocableCommandsProvider: vi.fn(),
+      setModelInvocableCommandsExecutor: vi.fn(),
+      getDisabledSlashCommands: vi.fn().mockReturnValue([]),
       getBackgroundTaskRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),
         setRegisterCallback: vi.fn(),
         getRunning: vi.fn().mockReturnValue([]),
       }),
-      getDisabledSlashCommands: vi.fn().mockReturnValue([]),
     } as unknown as Config;
 
     mockSettings = {
