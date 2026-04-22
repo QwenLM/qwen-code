@@ -164,26 +164,30 @@ export function preconnectApi(
   preconnectFired = true;
   debugLogger.debug(`Preconnecting to: ${targetUrl}`);
 
-  // Use the same shared undici dispatcher that SDK clients will use,
-  // so the warmed TCP+TLS connection is reused by subsequent API calls.
-  const dispatcher = getOrCreateSharedDispatcher(options.proxy);
+  try {
+    // Use the same shared undici dispatcher that SDK clients will use,
+    // so the warmed TCP+TLS connection is reused by subsequent API calls.
+    const dispatcher = getOrCreateSharedDispatcher(options.proxy);
 
-  // Fire HEAD request to warm connection (fire-and-forget)
-  fetch(targetUrl, {
-    method: 'HEAD',
-    signal: AbortSignal.timeout(5_000),
-    headers: {
-      'User-Agent': 'QwenCode-Preconnect/1.0',
-    },
-    dispatcher,
-  } as RequestInit)
-    .then(() => {
-      debugLogger.debug('Preconnect completed');
-    })
-    .catch((error) => {
-      // Preconnect failure doesn't affect main flow
-      debugLogger.debug(`Preconnect failed (ignored): ${error}`);
-    });
+    // Fire HEAD request to warm connection (fire-and-forget)
+    fetch(targetUrl, {
+      method: 'HEAD',
+      signal: AbortSignal.timeout(5_000),
+      headers: {
+        'User-Agent': 'QwenCode-Preconnect/1.0',
+      },
+      dispatcher,
+    } as RequestInit)
+      .then(() => {
+        debugLogger.debug('Preconnect completed');
+      })
+      .catch((error) => {
+        debugLogger.debug(`Preconnect failed (ignored): ${error}`);
+      });
+  } catch (error) {
+    // Preconnect failure doesn't affect main flow
+    debugLogger.debug(`Preconnect failed (ignored): ${error}`);
+  }
 }
 
 /**

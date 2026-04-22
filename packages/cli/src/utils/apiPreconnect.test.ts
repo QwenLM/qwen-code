@@ -160,6 +160,13 @@ describe('apiPreconnect', () => {
       expect(() => preconnectApi('qwen-oauth')).not.toThrow();
     });
 
+    it('should handle synchronous dispatcher errors gracefully', () => {
+      mockGetOrCreateSharedDispatcher.mockImplementation(() => {
+        throw new Error('Failed to create dispatcher');
+      });
+      expect(() => preconnectApi('qwen-oauth')).not.toThrow();
+    });
+
     it('should skip when QWEN_CODE_DISABLE_PRECONNECT is set', () => {
       process.env['QWEN_CODE_DISABLE_PRECONNECT'] = '1';
       preconnectApi('qwen-oauth');

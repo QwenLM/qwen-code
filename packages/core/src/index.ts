@@ -293,7 +293,6 @@ export * from './utils/ripgrepUtils.js';
 export {
   detectRuntime,
   getOrCreateSharedDispatcher,
-  resetDispatcherCache,
 } from './utils/runtimeFetchOptions.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/shell-utils.js';
