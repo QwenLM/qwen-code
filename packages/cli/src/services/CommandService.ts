@@ -46,11 +46,16 @@ export class CommandService {
    * @param loaders An array of objects that conform to the `ICommandLoader`
    *   interface. Built-in commands should come first, followed by FileCommandLoader.
    * @param signal An AbortSignal to cancel the loading process.
+   * @param disabledNames Optional set of command names to exclude. Matched
+   *   case-insensitively against the final (post-rename) command name. Intended
+   *   for settings- or flag-driven denylists that gate the CLI surface (see
+   *   `slashCommands.disabled` and `--disabled-slash-commands`).
    * @returns A promise that resolves to a new, fully initialized `CommandService` instance.
    */
   static async create(
     loaders: ICommandLoader[],
     signal: AbortSignal,
+    disabledNames?: ReadonlySet<string>,
   ): Promise<CommandService> {
     const results = await Promise.allSettled(
       loaders.map((loader) => loader.loadCommands(signal)),
@@ -87,6 +92,21 @@ export class CommandService {
         ...cmd,
         name: finalName,
       });
+    }
+
+    if (disabledNames && disabledNames.size > 0) {
+      const normalizedDisabled = new Set<string>();
+      for (const entry of disabledNames) {
+        const trimmed = entry.trim();
+        if (trimmed) normalizedDisabled.add(trimmed.toLowerCase());
+      }
+      if (normalizedDisabled.size > 0) {
+        for (const name of Array.from(commandMap.keys())) {
+          if (normalizedDisabled.has(name.toLowerCase())) {
+            commandMap.delete(name);
+          }
+        }
+      }
     }
 
     const finalCommands = Object.freeze(Array.from(commandMap.values()));

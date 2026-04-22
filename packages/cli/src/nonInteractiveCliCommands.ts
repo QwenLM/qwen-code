@@ -205,6 +205,20 @@ export const handleSlashCommand = async (
     new FileCommandLoader(config),
   ];
 
+  // Build the disabled-command set (case-insensitive).
+  const disabledSlashCommandsRaw = config.getDisabledSlashCommands();
+  const disabledNameSet = new Set<string>();
+  for (const name of disabledSlashCommandsRaw) {
+    const trimmed = name.trim();
+    if (trimmed) disabledNameSet.add(trimmed.toLowerCase());
+  }
+  const isDisabled = (cmd: { name: string }) =>
+    disabledNameSet.has(cmd.name.toLowerCase());
+
+  // Load the full command set (unfiltered by the denylist) so that the
+  // fallback existence check below can distinguish a disabled command from a
+  // truly unknown one. Without this, a disabled command would fall through to
+  // `no_command` and be forwarded to the model as plain prompt text.
   const commandService = await CommandService.create(
     allLoaders,
     abortController.signal,
@@ -249,7 +263,9 @@ export const handleSlashCommand = async (
     },
   );
   const allCommands = commandService.getCommands();
-  const filteredCommands = commandService.getCommandsForMode(executionMode);
+  const filteredCommands = commandService
+    .getCommandsForMode(executionMode)
+    .filter((cmd) => !isDisabled(cmd));
 
   // First, try to parse with filtered commands
   const { commandToExecute, args } = parseSlashCommand(
@@ -265,6 +281,16 @@ export const handleSlashCommand = async (
     );
 
     if (knownCommand) {
+      if (isDisabled(knownCommand)) {
+        return {
+          type: 'unsupported',
+          reason: t(
+            'The command "/{{command}}" is disabled by the current configuration.',
+            { command: knownCommand.name },
+          ),
+          originalType: 'filtered_command',
+        };
+      }
       // Command exists but is not allowed in this mode
       return {
         type: 'unsupported',
@@ -349,7 +375,14 @@ export const getAvailableCommands = async (
       new FileCommandLoader(config),
     ];
 
-    const commandService = await CommandService.create(loaders, abortSignal);
+    const disabledSlashCommands = config.getDisabledSlashCommands();
+    const commandService = await CommandService.create(
+      loaders,
+      abortSignal,
+      disabledSlashCommands.length > 0
+        ? new Set(disabledSlashCommands)
+        : undefined,
+    );
     return commandService.getCommandsForMode(mode) as SlashCommand[];
   } catch (error) {
     // Handle errors gracefully - log and return empty array

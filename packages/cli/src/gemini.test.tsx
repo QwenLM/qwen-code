@@ -607,6 +607,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       resume: undefined,
       coreTools: undefined,
       excludeTools: undefined,
+      disabledSlashCommands: undefined,
       authType: undefined,
       maxSessionTurns: undefined,
       experimentalLsp: undefined,
