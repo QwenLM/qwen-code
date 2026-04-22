@@ -1580,37 +1580,9 @@ const SETTINGS_SCHEMA = {
           'Config files remain at ~/.qwen. Env var QWEN_RUNTIME_DIR takes priority.',
         showInDialog: false,
       },
-      tavilyApiKey: {
-        type: 'string',
-        label: 'Tavily API Key (Deprecated)',
-        category: 'Advanced',
-        requiresRestart: false,
-        default: undefined as string | undefined,
-        description:
-          '⚠️ DEPRECATED: Please use webSearch.provider configuration instead. Legacy API key for the Tavily API.',
-        showInDialog: false,
-      },
     },
   },
 
-  webSearch: {
-    type: 'object',
-    label: 'Web Search',
-    category: 'Advanced',
-    requiresRestart: true,
-    default: undefined as
-      | {
-          provider: Array<{
-            type: 'tavily' | 'google' | 'dashscope' | 'glm';
-            apiKey?: string;
-            searchEngineId?: string;
-          }>;
-          default: string;
-        }
-      | undefined,
-    description: 'Configuration for web search providers.',
-    showInDialog: false,
-  },
   agents: {
     type: 'object',
     label: 'Agents',

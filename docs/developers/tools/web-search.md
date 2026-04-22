@@ -8,7 +8,7 @@ Use `web_search` to perform a web search and get information from the internet. 
 
 ### Supported Providers
 
-1. **DashScope** (Official) - Available when explicitly configured in settings
+1. **DashScope** (Official) - Alibaba Cloud DashScope web search, configured via `DASHSCOPE_API_KEY`
 2. **Tavily** - High-quality search API with built-in answer generation
 3. **Google Custom Search** - Google's Custom Search JSON API
 4. **GLM (ZhipuAI)** - ZhipuAI Web Search API with multiple engine options

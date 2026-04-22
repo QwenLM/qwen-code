@@ -583,18 +583,6 @@ export async function start_sandbox(
   if (process.env['OPENAI_API_KEY']) {
     args.push('--env', `OPENAI_API_KEY=${process.env['OPENAI_API_KEY']}`);
   }
-  // copy TAVILY_API_KEY for web search tool
-  if (process.env['TAVILY_API_KEY']) {
-    args.push('--env', `TAVILY_API_KEY=${process.env['TAVILY_API_KEY']}`);
-  }
-  // copy GLM_API_KEY for web search tool
-  if (process.env['GLM_API_KEY']) {
-    args.push('--env', `GLM_API_KEY=${process.env['GLM_API_KEY']}`);
-  }
-  // copy DASHSCOPE_API_KEY for web search tool
-  if (process.env['DASHSCOPE_API_KEY']) {
-    args.push('--env', `DASHSCOPE_API_KEY=${process.env['DASHSCOPE_API_KEY']}`);
-  }
   if (process.env['OPENAI_BASE_URL']) {
     args.push('--env', `OPENAI_BASE_URL=${process.env['OPENAI_BASE_URL']}`);
   }

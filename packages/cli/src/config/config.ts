@@ -67,7 +67,6 @@ function isValidSessionId(value: string): boolean {
 }
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
-import { buildWebSearchConfig } from './webSearch.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 const debugLogger = createDebugLogger('CONFIG');
@@ -138,10 +137,6 @@ export interface CliArgs {
   openaiLoggingDir: string | undefined;
   proxy: string | undefined;
   includeDirectories: string[] | undefined;
-  tavilyApiKey: string | undefined;
-  googleApiKey: string | undefined;
-  googleSearchEngineId: string | undefined;
-  webSearchDefault: string | undefined;
   screenReader: boolean | undefined;
   inputFormat?: string | undefined;
   outputFormat: string | undefined;
@@ -430,31 +425,6 @@ export async function parseArguments(): Promise<CliArgs> {
         .option('openai-base-url', {
           type: 'string',
           description: 'OpenAI base URL (for custom endpoints)',
-        })
-        .option('tavily-api-key', {
-          type: 'string',
-          description: 'Tavily API key for web search',
-        })
-        .option('google-api-key', {
-          type: 'string',
-          description: 'Google Custom Search API key',
-        })
-        .option('google-search-engine-id', {
-          type: 'string',
-          description: 'Google Custom Search Engine ID',
-        })
-        .option('glm-api-key', {
-          type: 'string',
-          description: 'ZhipuAI (GLM) API key for web search',
-        })
-        .option('dashscope-api-key', {
-          type: 'string',
-          description: 'DashScope API key for web search (DASHSCOPE_API_KEY)',
-        })
-        .option('web-search-default', {
-          type: 'string',
-          description:
-            'Default web search provider (dashscope, tavily, google, glm)',
         })
         .option('screen-reader', {
           type: 'boolean',
@@ -1213,9 +1183,6 @@ export async function loadCliConfig(
       ? []
       : (settings.security?.allowedHttpHookUrls ?? []),
     cliVersion: await getCliVersion(),
-    webSearch: bareMode
-      ? undefined
-      : buildWebSearchConfig(argv, settings, selectedAuthType),
     ideMode,
     chatCompression: settings.model?.chatCompression,
     folderTrust,
