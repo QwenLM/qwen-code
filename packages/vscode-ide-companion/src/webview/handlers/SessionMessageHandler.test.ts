@@ -186,6 +186,52 @@ describe('SessionMessageHandler', () => {
     ]);
   });
 
+  it('keeps currentConversationId aligned with the archived sessionId when session/load falls back to a new ACP session', async () => {
+    const archivedSessionId = 'archived-session';
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'old-acp-session',
+      getSessionList: vi
+        .fn()
+        .mockResolvedValue([{ id: archivedSessionId, cwd: '/workspace' }]),
+      loadSessionViaAcp: vi
+        .fn()
+        .mockRejectedValue(new Error('session not found on server')),
+      getSessionMessages: vi.fn().mockResolvedValue([]),
+      createNewSession: vi.fn().mockResolvedValue('new-acp-session'),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'switchQwenSession',
+      data: { sessionId: archivedSessionId },
+    });
+
+    // Backend-tracked current session must match the sessionId the webview sees,
+    // otherwise rename/delete/title-update flows will target the wrong session
+    // during the fallback window (see PR #3093 review).
+    expect(handler.getCurrentConversationId()).toBe(archivedSessionId);
+    expect(agentManager.createNewSession).toHaveBeenCalled();
+    expect(sendToWebView).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'qwenSessionSwitched',
+        data: expect.objectContaining({ sessionId: archivedSessionId }),
+      }),
+    );
+  });
+
   it('forces a fresh ACP session when the webview requests a new session', async () => {
     const agentManager = {
       isConnected: true,

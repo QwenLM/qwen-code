@@ -867,6 +867,111 @@ describe('OpenAIContentConverter', () => {
         content: '',
       });
     });
+
+    describe('assistant message with reasoning-only content (issue #3421)', () => {
+      /**
+       * Regression tests for https://github.com/QwenLM/qwen-code/issues/3421
+       *
+       * When a model (e.g. Ollama qwen3.5:9b) returns a response that contains
+       * reasoning content but an empty text body, the converted assistant message
+       * must use content: "" instead of content: null.
+       * Some OpenAI-compatible providers reject content: null with HTTP 400 when
+       * reasoning_content is also present.
+       */
+      it('should use empty string instead of null for content when assistant has only reasoning parts', () => {
+        const request: GenerateContentParameters = {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Think about this.' }] },
+            {
+              // Assistant turn that only produced a thought, no visible text
+              role: 'model',
+              parts: [{ text: 'I reasoned about it.', thought: true }],
+            },
+            { role: 'user', parts: [{ text: 'What did you conclude?' }] },
+          ],
+        };
+
+        const messages = converter.convertGeminiRequestToOpenAI(request);
+
+        const assistantMsg = messages.find((m) => m.role === 'assistant');
+        expect(assistantMsg).toBeDefined();
+        // Must NOT be null – Ollama and other providers reject null content
+        // when reasoning_content is present (HTTP 400).
+        expect((assistantMsg as { content: unknown }).content).toBe('');
+        // reasoning_content should still be preserved
+        expect(
+          (assistantMsg as { reasoning_content?: string }).reasoning_content,
+        ).toBe('I reasoned about it.');
+      });
+
+      it('should keep content null when assistant has only tool_calls and no reasoning', () => {
+        const request: GenerateContentParameters = {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Call the tool.' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'call_1',
+                    name: 'some_tool',
+                    args: {},
+                  },
+                },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 'call_1',
+                    name: 'some_tool',
+                    response: { output: 'done' },
+                  },
+                },
+              ],
+            },
+          ],
+        };
+
+        const messages = converter.convertGeminiRequestToOpenAI(request);
+
+        const assistantMsg = messages.find((m) => m.role === 'assistant');
+        expect(assistantMsg).toBeDefined();
+        // Tool-call-only messages follow the OpenAI spec: content should be null
+        expect((assistantMsg as { content: unknown }).content).toBeNull();
+      });
+
+      it('should use actual text content when assistant has both reasoning and text', () => {
+        const request: GenerateContentParameters = {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Explain.' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'My hidden reasoning.', thought: true },
+                { text: 'Here is my answer.' },
+              ],
+            },
+          ],
+        };
+
+        const messages = converter.convertGeminiRequestToOpenAI(request);
+
+        const assistantMsg = messages.find((m) => m.role === 'assistant');
+        expect(assistantMsg).toBeDefined();
+        expect((assistantMsg as { content: unknown }).content).toBe(
+          'Here is my answer.',
+        );
+        expect(
+          (assistantMsg as { reasoning_content?: string }).reasoning_content,
+        ).toBe('My hidden reasoning.');
+      });
+    });
   });
 
   describe('MCP multi-part tool results (issue #1520)', () => {

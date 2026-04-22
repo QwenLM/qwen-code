@@ -39,6 +39,7 @@ vi.mock('../utils/generateContentResponseUtilities.js', () => ({
 
 vi.mock('../utils/retry.js', () => ({
   retryWithBackoff: vi.fn(async (fn) => await fn()),
+  isUnattendedMode: vi.fn(() => false),
 }));
 
 const mockGenerateContent = vi.fn();

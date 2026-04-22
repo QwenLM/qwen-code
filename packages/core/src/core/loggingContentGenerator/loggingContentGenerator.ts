@@ -32,6 +32,7 @@ import {
   logApiResponse,
 } from '../../telemetry/loggers.js';
 import { isInternalPromptId } from '../../utils/internalPromptIds.js';
+import { subagentNameContext } from '../../utils/subagentNameContext.js';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
@@ -83,7 +84,12 @@ export class LoggingContentGenerator implements ContentGenerator {
     const requestText = JSON.stringify(contents);
     logApiRequest(
       this.config,
-      new ApiRequestEvent(model, promptId, requestText),
+      new ApiRequestEvent(
+        model,
+        promptId,
+        requestText,
+        subagentNameContext.getStore(),
+      ),
     );
   }
 
@@ -105,6 +111,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         this.config.getAuthType(),
         usageMetadata,
         responseText,
+        subagentNameContext.getStore(),
       ),
     );
   }
@@ -135,6 +142,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         errorMessage,
         errorType,
         statusCode: errorStatus,
+        subagentName: subagentNameContext.getStore(),
       }),
     );
   }

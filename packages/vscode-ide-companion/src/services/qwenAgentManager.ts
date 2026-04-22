@@ -716,6 +716,32 @@ export class QwenAgentManager {
     }
   }
 
+  /**
+   * Delete a session by ID via ACP.
+   */
+  async deleteSession(sessionId: string): Promise<boolean> {
+    try {
+      const res = await this.connection.deleteSession(sessionId);
+      return res.success;
+    } catch (error) {
+      console.error('[QwenAgentManager] Failed to delete session:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Rename a session via ACP.
+   */
+  async renameSession(sessionId: string, title: string): Promise<boolean> {
+    try {
+      const res = await this.connection.renameSession(sessionId, title);
+      return res.success;
+    } catch (error) {
+      console.error('[QwenAgentManager] Failed to rename session:', error);
+      return false;
+    }
+  }
+
   // Read CLI JSONL session file and convert to ChatMessage[] for UI
   private async readJsonlMessages(filePath: string): Promise<ChatMessage[]> {
     const fs = await import('fs');

@@ -62,7 +62,7 @@ const SESSION_ID_REGEX =
  * Accepts a standard UUID, or a UUID followed by `-agent-{suffix}`
  * (used by Arena to give each agent a deterministic session ID).
  */
-function isValidSessionId(value: string): boolean {
+export function isValidSessionId(value: string): boolean {
   return SESSION_ID_REGEX.test(value);
 }
 
@@ -160,6 +160,7 @@ export interface CliArgs {
   maxSessionTurns: number | undefined;
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
+  disabledSlashCommands: string[] | undefined;
   authType: string | undefined;
   channel: string | undefined;
   jsonFd?: number | undefined;
@@ -530,6 +531,17 @@ export async function parseArguments(): Promise<CliArgs> {
           coerce: (tools: string[]) =>
             tools.flatMap((tool) => tool.split(',').map((t) => t.trim())),
         })
+        .option('disabled-slash-commands', {
+          type: 'array',
+          string: true,
+          description:
+            'Slash command names to hide/disable (comma-separated or ' +
+            'repeated). Merged with the `slashCommands.disabled` setting ' +
+            'and QWEN_DISABLED_SLASH_COMMANDS. Matched case-insensitively ' +
+            'against the final command name.',
+          coerce: (names: string[]) =>
+            names.flatMap((n) => n.split(',').map((t) => t.trim())),
+        })
         .option('auth-type', {
           type: 'string',
           choices: [
@@ -600,9 +612,7 @@ export async function parseArguments(): Promise<CliArgs> {
           ) {
             return `Invalid --session-id: "${argv['sessionId']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
           }
-          if (argv['resume'] && !isValidSessionId(argv['resume'] as string)) {
-            return `Invalid --resume: "${argv['resume']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
-          }
+          // --resume accepts either a session UUID or a custom title
           if (argv['jsonFd'] != null && argv['jsonFile'] != null) {
             return '--json-fd and --json-file are mutually exclusive. Use one or the other.';
           }
@@ -926,6 +936,29 @@ export async function loadCliConfig(
     if (t && !mergedDeny.includes(t)) mergedDeny.push(t);
   }
 
+  // Merge the slash-command denylist from settings + CLI flag + env var.
+  // Settings merge (UNION across scopes) is already handled upstream; we
+  // only de-duplicate while preserving case for diagnostic purposes.
+  const disabledSlashCommands: string[] = [];
+  const seenDisabled = new Set<string>();
+  const addDisabled = (value: string | undefined) => {
+    if (!value) return;
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    const key = trimmed.toLowerCase();
+    if (!seenDisabled.has(key)) {
+      seenDisabled.add(key);
+      disabledSlashCommands.push(trimmed);
+    }
+  };
+  for (const name of settings.slashCommands?.disabled ?? []) addDisabled(name);
+  for (const name of argv.disabledSlashCommands ?? []) addDisabled(name);
+  for (const name of (process.env['QWEN_DISABLED_SLASH_COMMANDS'] ?? '').split(
+    ',',
+  )) {
+    addDisabled(name);
+  }
+
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
   // to preserve the original behaviour where "ShellTool", "Shell", and
@@ -1047,6 +1080,9 @@ export async function loadCliConfig(
     }
 
     if (argv.resume) {
+      // By the time we get here, argv.resume has been resolved to a valid
+      // session UUID by gemini.tsx (which handles custom title lookup and
+      // the interactive picker for ambiguous matches).
       sessionId = argv.resume;
       sessionData = await sessionService.loadSession(argv.resume);
       if (!sessionData) {
@@ -1093,6 +1129,8 @@ export async function loadCliConfig(
       ? argv.allowedTools || undefined
       : argv.allowedTools || settings.tools?.allowed || undefined,
     excludeTools: mergedDeny,
+    disabledSlashCommands:
+      disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
     // New unified permissions (PermissionManager source of truth).
     permissions: {
       allow: mergedAllow.length > 0 ? mergedAllow : undefined,

@@ -50,6 +50,9 @@ import {
   createHookOutput,
   generateToolUseId,
   MessageBusType,
+  getPlanModeSystemReminder,
+  getSubagentSystemReminder,
+  getArenaSystemReminder,
 } from '@qwen-code/qwen-code-core';
 
 import { RequestError } from '@agentclientprotocol/sdk';
@@ -73,7 +76,6 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { z } from 'zod';
 import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
 import {
-  ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE,
   handleSlashCommand,
   getAvailableCommands,
   type NonInteractiveSlashCommandResult,
@@ -81,11 +83,6 @@ import {
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
-
-const ACP_ALLOWED_COMMANDS = [
-  ...ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE,
-  'insight',
-];
 
 // Import modular session components
 import type {
@@ -330,13 +327,12 @@ export class Session implements SessionContext {
         let parts: Part[] | null;
 
         if (isSlashCommand(inputText)) {
-          // ACP supports the standard non-interactive built-ins plus /insight.
+          // Handle slash command in ACP mode using capability-based filtering
           const slashCommandResult = await handleSlashCommand(
             inputText,
             pendingSend,
             this.config,
             this.settings,
-            ACP_ALLOWED_COMMANDS,
           );
 
           parts = await this.#processSlashCommandResult(
@@ -398,6 +394,16 @@ export class Session implements SessionContext {
           if (additionalContext) {
             parts = [...parts, { text: additionalContext }];
           }
+        }
+
+        // Prepend session-level system reminders (plan mode / subagent /
+        // arena) so the model sees them, matching the behaviour of
+        // `GeminiClient.sendMessageStream` in the CLI/TUI path. Without this,
+        // plan mode in ACP has no effect because the model never learns it
+        // should avoid edits (#1151).
+        const systemReminders = await this.#buildInitialSystemReminders();
+        if (systemReminders.length > 0) {
+          parts = [...systemReminders, ...parts];
         }
 
         let nextMessage: Content | null = { role: 'user', parts };
@@ -860,9 +866,12 @@ export class Session implements SessionContext {
             _meta: { source: 'cron' },
           });
 
+          // Prepend session-level system reminders (same rationale as the
+          // user-query path in #executePrompt).
+          const cronReminders = await this.#buildInitialSystemReminders();
           let nextMessage: Content | null = {
             role: 'user',
-            parts: [{ text: prompt }],
+            parts: [...cronReminders, { text: prompt }],
           };
 
           while (nextMessage !== null) {
@@ -956,11 +965,11 @@ export class Session implements SessionContext {
   async sendAvailableCommandsUpdate(): Promise<void> {
     const abortController = new AbortController();
     try {
-      // Use default allowed commands from getAvailableCommands
+      // Load commands available in ACP mode
       const slashCommands = await getAvailableCommands(
         this.config,
         abortController.signal,
-        ACP_ALLOWED_COMMANDS,
+        'acp',
       );
 
       // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol
@@ -1149,6 +1158,51 @@ export class Session implements SessionContext {
       }
     }
     return parts;
+  }
+
+  /**
+   * Assemble the per-turn system reminders the model needs to see at the
+   * start of a user query or cron fire. Mirrors the subagent/plan/arena
+   * branches in `GeminiClient.sendMessageStream` (`client.ts:848-878`) —
+   * the ACP path bypasses that code, so without this helper plan mode is
+   * silently inert (#1151) and subagent/arena sessions lose context.
+   *
+   * Scope note: the `relevantAutoMemory` reminder is intentionally NOT
+   * included here. Managed auto-memory requires a prefetch pipeline that
+   * lives in `GeminiClient`, and porting it into the ACP path is tracked
+   * separately as part of the broader middleware-alignment work.
+   */
+  async #buildInitialSystemReminders(): Promise<Part[]> {
+    const reminders: Part[] = [];
+
+    const hasAgentTool = await this.config
+      .getToolRegistry()
+      .ensureTool(ToolNames.AGENT);
+    const subagents = (await this.config.getSubagentManager().listSubagents())
+      .filter((subagent) => subagent.level !== 'builtin')
+      .map((subagent) => subagent.name);
+    if (hasAgentTool && subagents.length > 0) {
+      reminders.push({ text: getSubagentSystemReminder(subagents) });
+    }
+
+    if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+      reminders.push({
+        text: getPlanModeSystemReminder(this.config.getSdkMode?.()),
+      });
+    }
+
+    const arenaManager = this.config.getArenaManager?.();
+    if (arenaManager) {
+      try {
+        const sessionDir = arenaManager.getArenaSessionDir();
+        const configPath = `${sessionDir}/config.json`;
+        reminders.push({ text: getArenaSystemReminder(configPath) });
+      } catch {
+        // Arena config not yet initialized — skip (matches client.ts).
+      }
+    }
+
+    return reminders;
   }
 
   private async runTool(

@@ -12,6 +12,7 @@ import {
   logUserPrompt,
   QWEN_CODE_SIMPLE_ENV_VAR,
   Storage,
+  SessionService,
   type Config,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
@@ -431,23 +432,52 @@ export async function main() {
     }
   }
 
-  // Handle --resume without a session ID by showing the session picker.
-  // Set the runtime output dir early so the picker can find sessions stored
-  // under a custom runtimeOutputDir (setRuntimeBaseDir is idempotent and will
-  // be called again inside loadCliConfig).
-  if (argv.resume === '') {
+  // Handle --resume without a session ID, or with a custom title, by showing
+  // the session picker. Set the runtime output dir early so the picker can find
+  // sessions stored under a custom runtimeOutputDir (setRuntimeBaseDir is
+  // idempotent and will be called again inside loadCliConfig).
+  if (argv.resume !== undefined) {
     Storage.setRuntimeBaseDir(
       settings.merged.advanced?.runtimeOutputDir,
       process.cwd(),
     );
-    const selectedSessionId = await showResumeSessionPicker();
-    if (!selectedSessionId) {
-      // User cancelled or no sessions available
-      process.exit(0);
+
+    let resolvedSessionId: string | undefined;
+
+    if (argv.resume === '') {
+      // No argument — show picker
+      resolvedSessionId = await showResumeSessionPicker();
+    } else if (!cliConfig.isValidSessionId(argv.resume)) {
+      // Non-UUID argument — treat as custom title search
+      const sessionService = new SessionService(process.cwd());
+      const matches = await sessionService.findSessionsByTitle(argv.resume);
+      if (matches.length === 1) {
+        resolvedSessionId = matches[0].sessionId;
+      } else if (matches.length > 1) {
+        // Multiple matches — show picker to let user choose
+        writeStderrLine(
+          `Multiple sessions found with title "${argv.resume}". Please select one:`,
+        );
+        resolvedSessionId = await showResumeSessionPicker(
+          process.cwd(),
+          matches,
+        );
+      }
+      // matches.length === 0 → resolvedSessionId stays undefined, handled below
     }
 
-    // Update argv with the selected session ID
-    argv = { ...argv, resume: selectedSessionId };
+    if (resolvedSessionId !== undefined) {
+      argv = { ...argv, resume: resolvedSessionId };
+    } else if (argv.resume === '' || !cliConfig.isValidSessionId(argv.resume)) {
+      // User cancelled the picker or no sessions found for the title
+      if (argv.resume !== '') {
+        writeStderrLine(`No saved session found with title "${argv.resume}".`);
+        process.exit(1);
+      } else {
+        process.exit(0);
+      }
+    }
+    // else: argv.resume is already a valid UUID, pass through to loadCliConfig
   }
 
   // We are now past the logic handling potentially launching a child process

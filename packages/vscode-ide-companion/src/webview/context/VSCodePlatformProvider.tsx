@@ -97,10 +97,10 @@ export const VSCodePlatformProvider: FC<VSCodePlatformProviderProps> = ({
     });
   }, [vscode]);
 
-  // Login handler
+  // Auth handler
   const login = useCallback(() => {
     vscode.postMessage({
-      type: 'login',
+      type: 'auth',
       data: {},
     });
   }, [vscode]);

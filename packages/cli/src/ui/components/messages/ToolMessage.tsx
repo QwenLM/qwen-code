@@ -10,7 +10,8 @@ import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { DiffRenderer } from './DiffRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
-import { AnsiOutputText } from '../AnsiOutput.js';
+import { AnsiOutputText, ShellStatsBar } from '../AnsiOutput.js';
+import type { ShellStatsBarProps } from '../AnsiOutput.js';
 import { MaxSizedBox } from '../shared/MaxSizedBox.js';
 import { TodoDisplay } from '../TodoDisplay.js';
 import type {
@@ -18,6 +19,7 @@ import type {
   AgentResultDisplay,
   PlanResultDisplay,
   AnsiOutput,
+  AnsiOutputDisplay,
   Config,
   McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
@@ -34,10 +36,12 @@ import {
   ToolStatusIndicator,
   STATUS_INDICATOR_WIDTH,
 } from '../shared/ToolStatusIndicator.js';
+import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 
 const STATIC_HEIGHT = 1;
 const RESERVED_LINE_COUNT = 5; // for tool name, status, padding etc.
 const MIN_LINES_SHOWN = 2; // show at least this many lines
+const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
 
 // Large threshold to ensure we don't cause performance issues for very large
 // outputs that will get truncated further MaxSizedBox anyway.
@@ -51,7 +55,7 @@ type DisplayRendererResult =
   | { type: 'string'; data: string }
   | { type: 'diff'; data: { fileDiff: string; fileName: string } }
   | { type: 'task'; data: AgentResultDisplay }
-  | { type: 'ansi'; data: AnsiOutput };
+  | { type: 'ansi'; data: AnsiOutput; stats?: ShellStatsBarProps };
 
 /**
  * Custom hook to determine the type of result display and return appropriate rendering info
@@ -136,7 +140,16 @@ const useResultDisplayRenderer = (
       resultDisplay !== null &&
       'ansiOutput' in resultDisplay
     ) {
-      return { type: 'ansi', data: resultDisplay.ansiOutput as AnsiOutput };
+      const display = resultDisplay as AnsiOutputDisplay;
+      return {
+        type: 'ansi',
+        data: display.ansiOutput,
+        stats: {
+          totalLines: display.totalLines,
+          totalBytes: display.totalBytes,
+          timeoutMs: display.timeoutMs,
+        },
+      };
     }
 
     // Default to string
@@ -282,6 +295,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   forceShowResult,
   isFocused,
   isWaitingForOtherApproval,
+  executionStartTime,
 }) => {
   const settings = useSettings();
   const isThisShellFocused =
@@ -332,6 +346,33 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         MIN_LINES_SHOWN + 1, // enforce minimum lines shown
       )
     : undefined;
+  // Cap inline shell output. Applies to both the streaming ANSI display and
+  // the completed string display (shell.ts emits the final result as a plain
+  // string via `returnDisplayMessage = result.output`). ShellStatsBar surfaces
+  // hidden lines via `+N lines` for ANSI; MaxSizedBox handles overflow for string.
+  const isShellTool = name === SHELL_COMMAND_NAME || name === SHELL_NAME;
+  const rawShellCap =
+    settings.merged.ui?.shellOutputMaxLines ?? DEFAULT_SHELL_OUTPUT_MAX_LINES;
+  // Defensive: clamp non-negative integers; treat negatives / NaN / fractions
+  // as the user's clear intent (0 = disable, otherwise floor to whole rows).
+  const shellOutputMaxLines = Math.max(0, Math.floor(rawShellCap || 0));
+  const isCappingShell =
+    isShellTool &&
+    shellOutputMaxLines > 0 &&
+    !forceShowResult &&
+    !isThisShellFocused;
+  const shellCapHeight = isCappingShell
+    ? Math.min(availableHeight ?? shellOutputMaxLines, shellOutputMaxLines)
+    : availableHeight;
+  // String path: MaxSizedBox reserves one row for its overflow banner when
+  // content overflows (see MaxSizedBox.tsx visibleContentHeight = max - 1),
+  // so passing the bare cap shows N-1 content rows. ANSI pre-slices to N
+  // (no MaxSizedBox overflow) and renders N rows + the ShellStatsBar line.
+  // +1 keeps the two paths visually symmetric at N visible content rows.
+  const shellStringCapHeight =
+    isCappingShell && shellCapHeight !== undefined
+      ? shellCapHeight + 1
+      : availableHeight;
   const innerWidth = contentWidth - STATUS_INDICATOR_WIDTH;
 
   // Long tool call response in MarkdownDisplay doesn't respect availableTerminalHeight properly,
@@ -366,6 +407,10 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
             </Text>
           </Box>
         )}
+        <ToolElapsedTime
+          status={status}
+          executionStartTime={executionStartTime}
+        />
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
       {effectiveDisplayRenderer.type !== 'none' && (
@@ -400,17 +445,25 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
               />
             )}
             {effectiveDisplayRenderer.type === 'ansi' && (
-              <AnsiOutputText
-                data={effectiveDisplayRenderer.data}
-                availableTerminalHeight={availableHeight}
-                maxWidth={innerWidth}
-              />
+              <>
+                <AnsiOutputText
+                  data={effectiveDisplayRenderer.data}
+                  availableTerminalHeight={shellCapHeight}
+                  maxWidth={innerWidth}
+                />
+                {effectiveDisplayRenderer.stats && (
+                  <ShellStatsBar
+                    {...effectiveDisplayRenderer.stats}
+                    displayHeight={shellCapHeight}
+                  />
+                )}
+              </>
             )}
             {effectiveDisplayRenderer.type === 'string' && (
               <StringResultRenderer
                 data={effectiveDisplayRenderer.data}
                 renderAsMarkdown={renderOutputAsMarkdown}
-                availableHeight={availableHeight}
+                availableHeight={shellStringCapHeight}
                 childWidth={innerWidth}
               />
             )}
@@ -456,7 +509,7 @@ const ToolInfo: React.FC<ToolInfo> = ({
     }
   }, [emphasis]);
   return (
-    <Box>
+    <Box flexGrow={1}>
       <Text
         wrap="truncate-end"
         strikethrough={status === ToolCallStatus.Canceled}

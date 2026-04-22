@@ -17,7 +17,7 @@ import {
   isCodingPlanConfig,
   CodingPlanRegion,
   CODING_PLAN_ENV_KEY,
-} from '../../constants/codingPlan.js';
+} from '@qwen-code/qwen-code-core';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { backupSettingsFile } from '../../utils/settingsUtils.js';
 import { loadSettings, type LoadedSettings } from '../../config/settings.js';
@@ -106,6 +106,7 @@ export async function handleQwenAuth(
       maxSessionTurns: undefined,
       coreTools: undefined,
       excludeTools: undefined,
+      disabledSlashCommands: undefined,
       authType: undefined,
       channel: undefined,
       systemPrompt: undefined,
