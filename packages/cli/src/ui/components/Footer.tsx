@@ -15,10 +15,12 @@ import { ShellModeIndicator } from './ShellModeIndicator.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 
 import { useStatusLine } from '../hooks/useStatusLine.js';
+import { useConfigInitMessage } from '../hooks/useConfigInitMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import { GeminiSpinner } from './GeminiRespondingSpinner.js';
 import { t } from '../../i18n/index.js';
 
 /**
@@ -52,6 +54,7 @@ export const Footer: React.FC = () => {
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
   const { lines: statusLineLines } = useStatusLine();
+  const configInitMessage = useConfigInitMessage(uiState.isConfigInitialized);
   const dreamRunning = useDreamRunning(config.getProjectRoot());
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
@@ -96,6 +99,10 @@ export const Footer: React.FC = () => {
   ) : showAutoAcceptIndicator !== undefined &&
     showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
+  ) : configInitMessage ? (
+    <Text color={theme.text.secondary}>
+      <GeminiSpinner /> {configInitMessage}
+    </Text>
   ) : suppressHint ? null : (
     <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
   );

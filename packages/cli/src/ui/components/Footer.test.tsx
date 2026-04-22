@@ -78,6 +78,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     contextFileNames: [],
     showToolDescriptions: false,
     ideContextState: undefined,
+    isConfigInitialized: true,
     ...overrides,
   }) as UIState;
 
