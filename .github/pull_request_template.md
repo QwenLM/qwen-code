@@ -1,54 +1,73 @@
-## TLDR
-
-<!-- Add a brief description of what this pull request changes and why and any important things for reviewers to look at -->
-
-## Screenshots / Video Demo
-
 <!--
-Please attach a screenshot or short video showing your change in action.
-This helps reviewers understand the change quickly and prioritize reviews.
+Help reviewers verify this PR quickly.
 
-- For bug fixes: show the before/after behavior.
-- For features: show the new functionality in use.
-- For refactors or internal changes with no visible effect: write "N/A — no user-facing change" and briefly explain why.
-
-PRs with visual demos typically get reviewed much faster!
+Maintainers prioritize PRs that include clear proof of work.
+If a PR does not include enough validation detail to reproduce and verify the change efficiently, review may be delayed.
 -->
 
-## Dive Deeper
+## Summary
 
-<!-- more thoughts and in-depth discussion here -->
+- What changed:
+- Why it changed:
+- Reviewer focus:
 
-## Reviewer Test Plan
+## Validation
 
-<!-- when a person reviews your code they should ideally be pulling and running that code. How would they validate your change works and if relevant what are some good classes of example prompts and ways they can exercise your changes -->
+<!--
+Be concrete. Do not write only "tested locally".
+Include the exact commands, prompts, outputs, logs, screenshots, or videos that prove the change was actually run and observed.
+
+For user-visible changes, bug fixes, CLI / TUI behavior changes, or interaction changes, include key screenshots or a short video.
+When possible, show before/after behavior.
+
+If helpful, use the `e2e-testing` skill to gather stronger end-to-end validation evidence.
+-->
+
+- Commands run:
+  ```bash
+  # paste commands here
+  ```
+- Prompts / inputs used:
+- Expected result:
+- Observed result:
+- Quickest reviewer verification path:
+- Evidence (output, logs, screenshots, video, JSON, before/after, etc.):
+
+## Scope / Risk
+
+- Main risk or tradeoff:
+- Not covered / not validated:
+- Breaking changes / migration notes:
 
 ## Testing Matrix
 
-<!-- Before submitting please validate your changes on as many of these options as possible -->
+<!--
+Use:
+- ✅ tested
+- ⚠️ not tested
+- N/A
+If anything is ⚠️, explain why briefly below.
+-->
 
 |          | 🍏  | 🪟  | 🐧  |
 | -------- | --- | --- | --- |
-| npm run  | ❓  | ❓  | ❓  |
-| npx      | ❓  | ❓  | ❓  |
-| Docker   | ❓  | ❓  | ❓  |
-| Podman   | ❓  | -   | -   |
-| Seatbelt | ❓  | -   | -   |
+| npm run  | ⚠️  | ⚠️  | ⚠️  |
+| npx      | ⚠️  | ⚠️  | ⚠️  |
+| Docker   | ⚠️  | ⚠️  | ⚠️  |
+| Podman   | ⚠️  | N/A | N/A |
+| Seatbelt | ⚠️  | N/A | N/A |
 
-## Linked issues / bugs
+Testing matrix notes:
+
+-
+
+## Linked Issues / Bugs
 
 <!--
-Link to any related issues or bugs.
-
-**If this PR fully resolves the issue, use one of the following keywords to automatically close the issue when this PR is merged:**
-
+If this PR fully resolves an issue, use one of:
 - Closes #<issue_number>
 - Fixes #<issue_number>
 - Resolves #<issue_number>
 
-*Example: `Resolves #123`*
-
-**If this PR is only related to an issue or is a partial fix, simply reference the issue number without a keyword:**
-
-*Example: `This PR makes progress on #456` or `Related to #789`*
+Otherwise reference related issues without a closing keyword.
 -->
