@@ -45,7 +45,7 @@ import { SettingsContext } from './ui/contexts/SettingsContext.js';
 import { VimModeProvider } from './ui/contexts/VimModeContext.js';
 import { AgentViewProvider } from './ui/contexts/AgentViewContext.js';
 import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
-import { themeManager } from './ui/themes/theme-manager.js';
+import { themeManager, AUTO_THEME_NAME } from './ui/themes/theme-manager.js';
 import { detectAndEnableKittyProtocol } from './ui/utils/kittyProtocolDetector.js';
 import { checkForUpdates } from './ui/utils/updateCheck.js';
 import {
@@ -332,14 +332,21 @@ export async function main() {
   // Load custom themes from settings
   themeManager.loadCustomThemes(settings.merged.ui?.customThemes);
 
-  if (settings.merged.ui?.theme) {
-    if (!themeManager.setActiveTheme(settings.merged.ui?.theme)) {
+  const configuredTheme = settings.merged.ui?.theme;
+  if (configuredTheme && configuredTheme !== AUTO_THEME_NAME) {
+    if (!themeManager.setActiveTheme(configuredTheme)) {
       // If the theme is not found during initial load, log a warning and continue.
       // The useThemeCommand hook in AppContainer.tsx will handle opening the dialog.
-      writeStderrLine(
-        `Warning: Theme "${settings.merged.ui?.theme}" not found.`,
-      );
+      writeStderrLine(`Warning: Theme "${configuredTheme}" not found.`);
     }
+  } else {
+    // 'auto' or unset: resolve a synchronous baseline (COLORFGBG + macOS)
+    // so non-interactive runs and any pre-render UI (e.g. the --resume
+    // session picker) already have a sensible theme. The interactive
+    // startup block refines this with an OSC 11 probe later on, which is
+    // intentionally deferred to run inside the early-capture window so
+    // terminal response bytes cannot leak into the TUI input.
+    themeManager.setActiveTheme(AUTO_THEME_NAME);
   }
 
   // hop into sandbox if we are outside and sandboxing is enabled
@@ -519,6 +526,7 @@ export async function main() {
 
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
+    let themeAutoDetectionComplete: Promise<void> | undefined;
     if (config.isInteractive() && !wasRaw && process.stdin.isTTY) {
       // Set this as early as possible to avoid spurious characters from
       // input showing up in the output.
@@ -539,6 +547,24 @@ export async function main() {
 
       // Detect and enable Kitty keyboard protocol once at startup.
       kittyProtocolDetectionComplete = detectAndEnableKittyProtocol();
+
+      // Auto-detect theme (OSC 11 + COLORFGBG + macOS) when the user has
+      // opted into 'auto' or has not configured a theme at all. Kicked off
+      // here without awaiting so the OSC 11 timeout overlaps with the
+      // heavier startup work below (initializeApp, warnings) instead of
+      // blocking the critical path. The synchronous baseline picked above
+      // keeps the active theme valid in the meantime; this probe only
+      // refines it. Running inside the early-capture window is deliberate:
+      // the filter in startEarlyInputCapture absorbs the OSC 11 response
+      // bytes so they cannot leak into the TUI input, even though our
+      // probe attaches its own listener to parse the RGB value.
+      if (!configuredTheme || configuredTheme === AUTO_THEME_NAME) {
+        themeAutoDetectionComplete = themeManager
+          .resolveAutoThemeAsync()
+          .catch((err) => {
+            debugLogger.warn('Async theme auto-detection failed:', err);
+          });
+      }
     }
 
     setMaxSizedBoxDebugging(isDebugMode);
@@ -590,6 +616,11 @@ export async function main() {
     if (config.isInteractive()) {
       // Need kitty detection to be complete before we can start the interactive UI.
       await kittyProtocolDetectionComplete;
+      // Drain the auto-theme probe before render so the OSC 11 response is
+      // absorbed by the early-capture filter (which is closed inside
+      // startInteractiveUI) and so the first paint uses the refined theme
+      // when the probe finishes in time.
+      await themeAutoDetectionComplete;
       await startInteractiveUI(
         config,
         settings,
