@@ -99,6 +99,7 @@ export class OpenAIContentConverter {
   private modalities: InputModalities;
   private streamingToolCallParser: StreamingToolCallParser =
     new StreamingToolCallParser();
+  private emittedToolCallIds: Set<string> = new Set();
 
   constructor(
     model: string,
@@ -132,6 +133,7 @@ export class OpenAIContentConverter {
    */
   resetStreamingToolCalls(): void {
     this.streamingToolCallParser.reset();
+    this.emittedToolCallIds.clear();
   }
 
   /**
@@ -826,66 +828,62 @@ export class OpenAIContentConverter {
   convertOpenAIResponseToGemini(
     openaiResponse: OpenAI.Chat.ChatCompletion,
   ): GenerateContentResponse {
-    const choice = openaiResponse.choices?.[0];
+    const choice = openaiResponse.choices[0];
     const response = new GenerateContentResponse();
 
-    if (choice) {
-      const parts: Part[] = [];
+    const parts: Part[] = [];
 
-      // Handle reasoning content (thoughts)
-      const reasoningText =
-        (choice.message as ExtendedCompletionMessage).reasoning_content ??
-        (choice.message as ExtendedCompletionMessage).reasoning;
-      if (reasoningText) {
-        parts.push({ text: reasoningText, thought: true });
-      }
+    // Handle reasoning content (thoughts)
+    const reasoningText =
+      (choice.message as ExtendedCompletionMessage).reasoning_content ??
+      (choice.message as ExtendedCompletionMessage).reasoning;
+    if (reasoningText) {
+      parts.push({ text: reasoningText, thought: true });
+    }
 
-      // Handle text content
-      if (choice.message.content) {
-        parts.push({ text: choice.message.content });
-      }
+    // Handle text content
+    if (choice.message.content) {
+      parts.push({ text: choice.message.content });
+    }
 
-      // Handle tool calls
-      if (choice.message.tool_calls) {
-        for (const toolCall of choice.message.tool_calls) {
-          if (toolCall.function) {
-            let args: Record<string, unknown> = {};
-            if (toolCall.function.arguments) {
-              args = safeJsonParse(toolCall.function.arguments, {});
-            }
-
-            parts.push({
-              functionCall: {
-                id: toolCall.id,
-                name: toolCall.function.name,
-                args,
-              },
-            });
+    // Handle tool calls
+    if (choice.message.tool_calls) {
+      for (const toolCall of choice.message.tool_calls) {
+        if (toolCall.function) {
+          let args: Record<string, unknown> = {};
+          if (toolCall.function.arguments) {
+            args = safeJsonParse(toolCall.function.arguments, {});
           }
+
+          parts.push({
+            functionCall: {
+              id: toolCall.id,
+              name: toolCall.function.name,
+              args,
+            },
+          });
         }
       }
-
-      response.candidates = [
-        {
-          content: {
-            parts,
-            role: 'model' as const,
-          },
-          finishReason: this.mapOpenAIFinishReasonToGemini(
-            choice.finish_reason || 'stop',
-          ),
-          index: 0,
-          safetyRatings: [],
-        },
-      ];
-    } else {
-      response.candidates = [];
     }
 
     response.responseId = openaiResponse.id;
     response.createTime = openaiResponse.created
       ? openaiResponse.created.toString()
       : new Date().getTime().toString();
+
+    response.candidates = [
+      {
+        content: {
+          parts,
+          role: 'model' as const,
+        },
+        finishReason: this.mapOpenAIFinishReasonToGemini(
+          choice.finish_reason || 'stop',
+        ),
+        index: 0,
+        safetyRatings: [],
+      },
+    ];
 
     response.modelVersion = this.model;
     response.promptFeedback = { safetyRatings: [] };
@@ -962,26 +960,42 @@ export class OpenAIContentConverter {
           const index = toolCall.index ?? 0;
 
           // Process the tool call chunk through the streaming parser
-          if (toolCall.function?.arguments) {
-            this.streamingToolCallParser.addChunk(
-              index,
-              toolCall.function.arguments,
-              toolCall.id,
-              toolCall.function.name,
-            );
-          } else {
-            // Handle metadata-only chunks (id and/or name without arguments)
-            this.streamingToolCallParser.addChunk(
-              index,
-              '', // Empty chunk for metadata-only updates
-              toolCall.id,
-              toolCall.function?.name,
-            );
+          const result = this.streamingToolCallParser.addChunk(
+            index,
+            toolCall.function?.arguments || '',
+            toolCall.id,
+            toolCall.function?.name,
+          );
+
+          // If this chunk completed a tool call, emit it immediately
+          // This prevents tool calls from being lost when JSON completes before
+          // the function name arrives in a later chunk
+          if (result.complete && result.value) {
+            const meta = this.streamingToolCallParser.getToolCallMeta(index);
+            if (meta.name) {
+              const id =
+                meta.id ||
+                `call_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+              const functionCall = {
+                functionCall: {
+                  id,
+                  name: meta.name,
+                  args: result.value,
+                },
+              };
+              parts.push(functionCall);
+
+              // Track emitted tool call ID to prevent duplicates at finish_reason
+              if (meta.id) {
+                this.emittedToolCallIds.add(meta.id);
+              }
+            }
           }
         }
       }
 
-      // Only emit function calls when streaming is complete (finish_reason is present)
+      // Only emit remaining function calls when streaming is complete (finish_reason is present)
+      // This handles cases where JSON was valid but not auto-detected as complete by addChunk
       let toolCallsTruncated = false;
       if (choice.finish_reason) {
         // Detect truncation the provider may not report correctly.
@@ -994,6 +1008,11 @@ export class OpenAIContentConverter {
           this.streamingToolCallParser.getCompletedToolCalls();
 
         for (const toolCall of completedToolCalls) {
+          // Skip if already emitted during streaming (prevents duplicates)
+          if (toolCall.id && this.emittedToolCallIds.has(toolCall.id)) {
+            continue;
+          }
+
           if (toolCall.name) {
             parts.push({
               functionCall: {

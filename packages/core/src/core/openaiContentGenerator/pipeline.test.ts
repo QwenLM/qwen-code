@@ -1761,4 +1761,125 @@ describe('ContentGenerationPipeline', () => {
       expect(responses[0]).toBe(finalGeminiResponse);
     });
   });
+
+  describe('Finish chunk handling', () => {
+    it('should skip finish chunk without tool calls when pending finish has tool calls', async () => {
+      // Setup converter to return finish chunk with tool calls first,
+      // then finish chunk without tool calls (simulating duplicate finish)
+      const finishChunkWithToolCalls = {
+        id: 'finish1',
+        created: 123,
+        model: 'test',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_abc',
+                  function: {
+                    name: 'test_func',
+                    arguments: '{"key": "value"}',
+                  },
+                },
+              ],
+            },
+            finish_reason: 'tool_calls',
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      const finishChunkWithoutToolCalls = {
+        id: 'finish2',
+        created: 123,
+        model: 'test',
+        choices: [
+          {
+            index: 0,
+            delta: {},
+            finish_reason: 'tool_calls',
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      const geminiResponseWithToolCalls = new GenerateContentResponse();
+      geminiResponseWithToolCalls.candidates = [
+        {
+          content: {
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_abc',
+                  name: 'test_func',
+                  args: { key: 'value' },
+                },
+              },
+            ],
+            role: 'model',
+          },
+          finishReason: FinishReason.STOP,
+          index: 0,
+          safetyRatings: [],
+        },
+      ];
+
+      const geminiResponseWithoutToolCalls = new GenerateContentResponse();
+      geminiResponseWithoutToolCalls.candidates = [
+        {
+          content: {
+            parts: [],
+            role: 'model',
+          },
+          finishReason: FinishReason.STOP,
+          index: 0,
+          safetyRatings: [],
+        },
+      ];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'test' },
+      ]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock)
+        .mockReturnValueOnce(geminiResponseWithToolCalls)
+        .mockReturnValueOnce(geminiResponseWithoutToolCalls);
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield finishChunkWithToolCalls;
+          yield finishChunkWithoutToolCalls;
+        },
+      };
+
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'test' }] }],
+      };
+
+      const responses: GenerateContentResponse[] = [];
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+      for await (const response of resultGenerator) {
+        responses.push(response);
+      }
+
+      // Should yield the response with tool calls, not the empty one
+      expect(responses.length).toBeGreaterThan(0);
+      const toolCallParts =
+        responses[0].candidates?.[0]?.content?.parts?.filter(
+          (p) => 'functionCall' in p,
+        );
+      expect(toolCallParts).toHaveLength(1);
+      expect(
+        (toolCallParts?.[0] as { functionCall: { name: string } }).functionCall
+          .name,
+      ).toBe('test_func');
+    });
+  });
 });

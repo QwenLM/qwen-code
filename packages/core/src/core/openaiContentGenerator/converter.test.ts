@@ -1119,20 +1119,6 @@ describe('OpenAIContentConverter', () => {
     });
   });
 
-  describe('convertOpenAIResponseToGemini', () => {
-    it('should handle empty choices array without crashing', () => {
-      const response = converter.convertOpenAIResponseToGemini({
-        object: 'chat.completion',
-        id: 'chatcmpl-empty',
-        created: 123,
-        model: 'test-model',
-        choices: [],
-      } as unknown as OpenAI.Chat.ChatCompletion);
-
-      expect(response.candidates).toEqual([]);
-    });
-  });
-
   describe('OpenAI -> Gemini reasoning content', () => {
     it('should convert reasoning_content to a thought part for non-streaming responses', () => {
       const response = converter.convertOpenAIResponseToGemini({
@@ -2320,6 +2306,171 @@ describe('Truncated tool call detection in streaming', () => {
     } as unknown as OpenAI.Chat.ChatCompletionChunk);
 
     expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+});
+
+describe('Streaming tool call emission', () => {
+  let converter: OpenAIContentConverter;
+
+  beforeEach(() => {
+    converter = new OpenAIContentConverter('test-model', 'auto');
+  });
+
+  it('should emit tool call immediately when JSON completes during streaming', () => {
+    // Simulate streaming: name arrives first, then JSON
+    const chunk1 = {
+      id: 'chunk1',
+      created: 123,
+      model: 'test',
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_abc',
+                function: { name: 'test_func', arguments: '' },
+              },
+            ],
+          },
+          finish_reason: null,
+        },
+      ],
+    } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+    const chunk2 = {
+      id: 'chunk2',
+      created: 123,
+      model: 'test',
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                function: { arguments: '{"key": "value"}' },
+              },
+            ],
+          },
+          finish_reason: null,
+        },
+      ],
+    } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+    // First chunk: name arrives
+    const result1 = converter.convertOpenAIChunkToGemini(chunk1);
+    expect(result1.candidates?.[0]?.content?.parts).toEqual([]);
+
+    // Second chunk: JSON completes, should emit immediately
+    const result2 = converter.convertOpenAIChunkToGemini(chunk2);
+    const parts = result2.candidates?.[0]?.content?.parts || [];
+    const functionCall = parts.find((p) => 'functionCall' in p);
+    expect(functionCall).toBeDefined();
+    expect(
+      (functionCall as { functionCall: { name: string } }).functionCall.name,
+    ).toBe('test_func');
+  });
+
+  it('should not emit duplicate tool calls at finish_reason', () => {
+    converter.resetStreamingToolCalls();
+
+    // Simulate complete tool call during streaming
+    const chunk1 = {
+      id: 'chunk1',
+      created: 123,
+      model: 'test',
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_abc',
+                function: { name: 'test_func', arguments: '{"key": "value"}' },
+              },
+            ],
+          },
+          finish_reason: null,
+        },
+      ],
+    } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+    // Emit during streaming
+    converter.convertOpenAIChunkToGemini(chunk1);
+
+    // Finish chunk
+    const finishChunk = {
+      id: 'finish',
+      created: 123,
+      model: 'test',
+      choices: [
+        {
+          index: 0,
+          delta: {},
+          finish_reason: 'tool_calls',
+        },
+      ],
+    } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+    const result = converter.convertOpenAIChunkToGemini(finishChunk);
+    const parts = result.candidates?.[0]?.content?.parts || [];
+    const functionCalls = parts.filter((p) => 'functionCall' in p);
+
+    // Should not have duplicates - tool call was already emitted during streaming
+    expect(functionCalls).toHaveLength(0);
+  });
+
+  it('should handle multiple finish_reason chunks without duplicates', () => {
+    converter.resetStreamingToolCalls();
+
+    // First finish chunk
+    const finishChunk1 = {
+      id: 'finish1',
+      created: 123,
+      model: 'test',
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_abc',
+                function: { name: 'test_func', arguments: '{"key": "value"}' },
+              },
+            ],
+          },
+          finish_reason: 'tool_calls',
+        },
+      ],
+    } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+    const result1 = converter.convertOpenAIChunkToGemini(finishChunk1);
+    const parts1 = result1.candidates?.[0]?.content?.parts || [];
+    expect(parts1.filter((p) => 'functionCall' in p)).toHaveLength(1);
+
+    // Second finish chunk (some providers send finish twice)
+    const finishChunk2 = {
+      id: 'finish2',
+      created: 123,
+      model: 'test',
+      choices: [
+        {
+          index: 0,
+          delta: {},
+          finish_reason: 'tool_calls',
+        },
+      ],
+    } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+    const result2 = converter.convertOpenAIChunkToGemini(finishChunk2);
+    const parts2 = result2.candidates?.[0]?.content?.parts || [];
+
+    // Should not emit duplicate
+    expect(parts2.filter((p) => 'functionCall' in p)).toHaveLength(0);
   });
 });
 

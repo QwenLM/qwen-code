@@ -297,8 +297,9 @@ export class StreamingToolCallParser {
       const depth = this.depths.get(this.nextAvailableIndex)!;
       const meta = this.toolCallMeta.get(this.nextAvailableIndex);
 
-      // If buffer is empty or incomplete (depth > 0), this index is available
-      if (!buffer.trim() || depth > 0 || !meta?.id) {
+      // Tool call is incomplete if: JSON open, buffer empty, missing ID, or missing name
+      // Any condition true → index available for reuse
+      if (!buffer.trim() || depth > 0 || !meta?.id || !meta.name) {
         return this.nextAvailableIndex;
       }
 
@@ -336,8 +337,8 @@ export class StreamingToolCallParser {
       const depth = this.depths.get(index)!;
       const meta = this.toolCallMeta.get(index);
 
-      // Check if this tool call is incomplete
-      if (meta?.id && (depth > 0 || !buffer.trim())) {
+      // Tool call incomplete if: has ID but JSON open, buffer empty, or missing name
+      if (meta?.id && (depth > 0 || !buffer.trim() || !meta.name)) {
         maxIndex = Math.max(maxIndex, index);
       } else if (buffer.trim()) {
         // Check if buffer is parseable (complete)
