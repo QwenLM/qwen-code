@@ -32,6 +32,7 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
   openai: 'https://api.openai.com',
   'qwen-oauth': 'https://coding.dashscope.aliyuncs.com',
   anthropic: 'https://api.anthropic.com',
+  dashscope: 'https://dashscope.aliyuncs.com',
 };
 
 /**

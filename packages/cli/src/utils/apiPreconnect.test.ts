@@ -78,6 +78,23 @@ describe('apiPreconnect', () => {
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
+    it('should use resolvedBaseUrl when it is a dashscope compatible-mode URL', () => {
+      preconnectApi('openai', {
+        resolvedBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      });
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        expect.objectContaining({ method: 'HEAD' }),
+      );
+    });
+
+    it('should skip when resolvedBaseUrl is a dashscope subdomain-spoofed URL', () => {
+      preconnectApi('openai', {
+        resolvedBaseUrl: 'https://dashscope.aliyuncs.com.malicious.com/v1',
+      });
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
     it('should fall back to default URL when resolvedBaseUrl is undefined', () => {
       preconnectApi('qwen-oauth');
       expect(mockFetch).toHaveBeenCalledWith(
