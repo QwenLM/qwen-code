@@ -89,6 +89,29 @@ describe('detectTerminalTheme', () => {
   // ---------------------------------------------------------------------------
 
   describe('detectOsc11Theme', () => {
+    const forceTTY = () => {
+      const origStdinTTY = process.stdin.isTTY;
+      const origStdoutTTY = process.stdout.isTTY;
+      Object.defineProperty(process.stdin, 'isTTY', {
+        value: true,
+        configurable: true,
+      });
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: true,
+        configurable: true,
+      });
+      return () => {
+        Object.defineProperty(process.stdin, 'isTTY', {
+          value: origStdinTTY,
+          configurable: true,
+        });
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: origStdoutTTY,
+          configurable: true,
+        });
+      };
+    };
+
     it('should return undefined when stdin is not a TTY', async () => {
       const origIsTTY = process.stdin.isTTY;
       Object.defineProperty(process.stdin, 'isTTY', {
@@ -104,6 +127,74 @@ describe('detectTerminalTheme', () => {
         value: origIsTTY,
         configurable: true,
       });
+    });
+
+    it('should resolve "dark" when terminal reports a dark background', async () => {
+      const restoreTTY = forceTTY();
+      const writeSpy = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(() => true);
+      const baseline = process.stdin.listenerCount('data');
+
+      try {
+        const { detectOsc11Theme } = await import('./detect-terminal-theme.js');
+        const promise = detectOsc11Theme();
+        // Listener must be attached synchronously so the response is captured.
+        expect(process.stdin.listenerCount('data')).toBe(baseline + 1);
+        expect(writeSpy).toHaveBeenCalledWith('\x1b]11;?\x07');
+
+        process.stdin.emit(
+          'data',
+          Buffer.from('\x1b]11;rgb:0000/0000/0000\x07'),
+        );
+
+        await expect(promise).resolves.toBe('dark');
+        // Regression guard: listener must be removed on every exit path.
+        expect(process.stdin.listenerCount('data')).toBe(baseline);
+      } finally {
+        restoreTTY();
+      }
+    });
+
+    it('should resolve undefined on timeout and remove its data listener', async () => {
+      vi.useFakeTimers();
+      const restoreTTY = forceTTY();
+      vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+      const baseline = process.stdin.listenerCount('data');
+
+      try {
+        const { detectOsc11Theme } = await import('./detect-terminal-theme.js');
+        const promise = detectOsc11Theme();
+        expect(process.stdin.listenerCount('data')).toBe(baseline + 1);
+
+        await vi.advanceTimersByTimeAsync(250);
+
+        await expect(promise).resolves.toBeUndefined();
+        // Regression guard: the listener-leak that motivated earlier fixes
+        // in this PR (OSC 11 bytes bleeding into the input box) only
+        // happens when the timeout path forgets to detach.
+        expect(process.stdin.listenerCount('data')).toBe(baseline);
+      } finally {
+        restoreTTY();
+        vi.useRealTimers();
+      }
+    });
+
+    it('should reassemble OSC 11 responses split across multiple data events', async () => {
+      const restoreTTY = forceTTY();
+      vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+      try {
+        const { detectOsc11Theme } = await import('./detect-terminal-theme.js');
+        const promise = detectOsc11Theme();
+        // Split a pure-white response across two chunks.
+        process.stdin.emit('data', Buffer.from('\x1b]11;rgb:ffff/'));
+        process.stdin.emit('data', Buffer.from('ffff/ffff\x07'));
+
+        await expect(promise).resolves.toBe('light');
+      } finally {
+        restoreTTY();
+      }
     });
   });
 
