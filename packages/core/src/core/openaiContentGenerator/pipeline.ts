@@ -242,7 +242,7 @@ export class ContentGenerationPipeline {
       context.duration = Date.now() - context.startTime;
     } catch (error) {
       // No manual parser cleanup needed — streamCtx is stream-local and
-      // will be garbage collected when this generator unwinds.
+      // becomes eligible for garbage collection once this generator unwinds.
 
       // Re-throw StreamContentError directly so it can be handled by
       // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
