@@ -48,7 +48,7 @@ observability framework — Qwen Code's observability system provides:
 [aliyun-opentelemetry-get-started]: https://www.alibabacloud.com/help/en/arms/tracing-analysis/before-you-begin
 [aliyun-opentelemetry-console-cn]: https://trace.console.aliyun.com
 [aliyun-opentelemetry-console-cn-legacy]: https://tracing.console.aliyun.com
-[aliyun-opentelemetry-console-intl]: https://tracing-sgnew.console.alibabacloud.com
+[aliyun-opentelemetry-console-intl]: https://arms.console.alibabacloud.com
 
 ## Configuration
 
@@ -105,10 +105,14 @@ collector is needed.
        (legacy console:
        [tracing.console.aliyun.com][aliyun-opentelemetry-console-cn-legacy])
      - International:
-       [tracing-sgnew.console.alibabacloud.com][aliyun-opentelemetry-console-intl]
+       [arms.console.alibabacloud.com][aliyun-opentelemetry-console-intl]
    - In the console, use `Applications` to inspect traces and service
-     topology, and `Integration Center` to retrieve OTLP endpoints or
-     tokens when you need manual setup details.
+     topology.
+   - To retrieve OTLP endpoints or tokens for manual setup:
+     - **New console** (`trace.console.aliyun.com` or international):
+       navigate to `Integration Center`.
+     - **Legacy console** (`tracing.console.aliyun.com`): navigate to
+       `Cluster Configurations` → `Access point information`.
 
 ## Local Telemetry
 
