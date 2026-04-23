@@ -209,11 +209,21 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         />
       )}
       {/*
-        `tool_use_summary` items are consumed upstream (see MainContent) to
-        augment the adjacent tool_group's compact rendering. They do not
-        render on their own — rendering both the detailed tool view and a
-        summary line would be redundant noise.
+        `tool_use_summary` as a standalone inline item. This renders in full
+        mode so the summary is always visible (the label arrives via the
+        fast-model call *after* the tool_group has been committed to the
+        append-only <Static> above, so we cannot update the tool_group's
+        header retroactively). Compact mode already folds the label into
+        the merged tool_group header, so the standalone line would be
+        redundant — `mergeCompactToolGroups` drops these items between
+        merge candidates, and the explicit compactMode guard below hides
+        any remaining trailing summary item.
       */}
+      {!compactMode && itemForDisplay.type === 'tool_use_summary' && (
+        <Box paddingLeft={1}>
+          <Text dimColor>● {itemForDisplay.summary}</Text>
+        </Box>
+      )}
       {itemForDisplay.type === 'compression' && (
         <CompressionMessage compression={itemForDisplay.compression} />
       )}
