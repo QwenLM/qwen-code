@@ -7,6 +7,12 @@
 import { useEffect, useCallback } from 'react';
 import { useStdout } from 'ink';
 import { StreamingState } from '../types.js';
+import {
+  OSC,
+  BEL,
+  wrapForMultiplexer,
+  detectTerminal,
+} from '../../utils/osc.js';
 
 /**
  * OSC 9;4 progress sequences for terminal tab/title bar progress.
@@ -15,24 +21,6 @@ import { StreamingState } from '../types.js';
  * @see https://iterm2.com/documentation-escape-codes.html
  * @see https://learn.microsoft.com/en-us/windows/terminal/tutorials/progress-bar-sequences
  */
-const OSC = '\x1b]';
-const BEL = '\x07';
-
-/**
- * Wrap an OSC sequence for tmux/screen passthrough.
- * tmux requires DCS escape: \ePtmux;\e<seq>\e\\
- * screen requires DCS escape: \eP<seq>\e\\
- */
-function wrapForMultiplexer(seq: string): string {
-  if (process.env['TMUX']) {
-    return `\x1bPtmux;\x1b${seq}\x1b\\`;
-  }
-  if (process.env['STY']) {
-    return `\x1bP${seq}\x1b\\`;
-  }
-  return seq;
-}
-
 const PROGRESS_CLEAR = wrapForMultiplexer(`${OSC}9;4;0;${BEL}`);
 const PROGRESS_INDETERMINATE = wrapForMultiplexer(`${OSC}9;4;3;;${BEL}`);
 
@@ -40,7 +28,7 @@ function isProgressBarSupported(): boolean {
   // Don't emit escape sequences when stdout is not a TTY (CI, piped output,
   // redirected to log files, etc.)
   if (!process.stdout?.isTTY) return false;
-  const term = process.env['TERM_PROGRAM'];
+  const term = detectTerminal();
   if (term === 'iTerm.app') return true;
   if (term === 'ghostty') return true;
   if (process.env['ConEmuPID']) return true;

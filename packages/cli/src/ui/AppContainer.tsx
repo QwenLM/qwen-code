@@ -131,6 +131,11 @@ import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useMemoryDialog } from './hooks/useMemoryDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
+import {
+  TerminalWriteProvider,
+  buildTerminalNotification,
+} from './hooks/useTerminalNotification.js';
+import { useTabStatus } from './hooks/useTabStatus.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
@@ -293,6 +298,20 @@ export const AppContainer = (props: AppContainerProps) => {
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
   const { stdin, setRawMode } = useStdin();
   const { stdout } = useStdout();
+
+  // Raw write function for terminal escape sequences (bypasses Ink)
+  const writeRaw = useCallback(
+    (data: string) => {
+      stdout?.write(data);
+    },
+    [stdout],
+  );
+
+  // Terminal notification helpers (constructed directly, not via context)
+  const terminal = useMemo(
+    () => buildTerminalNotification(writeRaw),
+    [writeRaw],
+  );
 
   // Additional hooks moved from App.tsx
   const { stats: sessionStats, startNewSession } = useSessionStats();
@@ -1198,6 +1217,9 @@ export const AppContainer = (props: AppContainerProps) => {
   // Terminal tab progress bar (OSC 9;4) for iTerm2/Ghostty
   useTerminalProgress(streamingState, isToolExecuting(pendingHistoryItems));
 
+  // Terminal tab status indicator (OSC 21337) for cmux sidebar
+  useTabStatus(streamingState, writeRaw);
+
   cancelHandlerRef.current = useCallback(() => {
     const pendingHistoryItems = [
       ...pendingSlashCommandHistoryItems,
@@ -1685,6 +1707,7 @@ export const AppContainer = (props: AppContainerProps) => {
     elapsedTime,
     settings,
     config,
+    terminal,
   });
 
   // Dialog close functionality
@@ -2418,23 +2441,25 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   return (
-    <UIStateContext.Provider value={uiState}>
-      <UIActionsContext.Provider value={uiActions}>
-        <ConfigContext.Provider value={config}>
-          <AppContext.Provider
-            value={{
-              version: props.version,
-              startupWarnings: props.startupWarnings || [],
-            }}
-          >
-            <CompactModeProvider value={compactModeValue}>
-              <ShellFocusContext.Provider value={isFocused}>
-                <App />
-              </ShellFocusContext.Provider>
-            </CompactModeProvider>
-          </AppContext.Provider>
-        </ConfigContext.Provider>
-      </UIActionsContext.Provider>
-    </UIStateContext.Provider>
+    <TerminalWriteProvider value={writeRaw}>
+      <UIStateContext.Provider value={uiState}>
+        <UIActionsContext.Provider value={uiActions}>
+          <ConfigContext.Provider value={config}>
+            <AppContext.Provider
+              value={{
+                version: props.version,
+                startupWarnings: props.startupWarnings || [],
+              }}
+            >
+              <CompactModeProvider value={compactModeValue}>
+                <ShellFocusContext.Provider value={isFocused}>
+                  <App />
+                </ShellFocusContext.Provider>
+              </CompactModeProvider>
+            </AppContext.Provider>
+          </ConfigContext.Provider>
+        </UIActionsContext.Provider>
+      </UIStateContext.Provider>
+    </TerminalWriteProvider>
   );
 };

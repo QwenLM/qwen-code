@@ -101,10 +101,17 @@
           "type": "string",
           "default": "auto"
         },
-        "terminalBell": {
-          "description": "Play terminal bell sound when response completes or needs approval.",
-          "type": "boolean",
-          "default": true
+        "notifications": {
+          "description": "Terminal notification channel when agent finishes or needs attention. \"auto\" detects your terminal (iTerm2/Kitty/Ghostty → native notification, others → bell). Or choose a specific channel. Options: auto, iterm2, kitty, ghostty, terminal_bell, notifications_disabled",
+          "enum": [
+            "auto",
+            "iterm2",
+            "kitty",
+            "ghostty",
+            "terminal_bell",
+            "notifications_disabled"
+          ],
+          "default": "auto"
         },
         "chatRecording": {
           "description": "Enable saving chat history to disk. Disabling this will also prevent --continue and --resume from working.",

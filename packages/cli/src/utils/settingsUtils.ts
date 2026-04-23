@@ -291,7 +291,7 @@ const SETTINGS_DIALOG_ORDER: readonly string[] = [
   'ide.enabled',
   'ui.showLineNumbers',
   'ui.hideTips',
-  'general.terminalBell',
+  'general.notifications',
   'ui.enableWelcomeBack',
 
   // Git Behavior

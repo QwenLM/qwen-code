@@ -8,19 +8,31 @@ import { renderHook } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { StreamingState } from '../types.js';
 import {
-  AttentionNotificationReason,
-  notifyTerminalAttention,
-} from '../../utils/attentionNotification.js';
-import {
   LONG_TASK_NOTIFICATION_THRESHOLD_SECONDS,
   useAttentionNotifications,
 } from './useAttentionNotifications.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import type { TerminalNotification } from './useTerminalNotification.js';
+
+vi.mock('../../services/notificationService.js', () => ({
+  sendNotification: vi.fn(),
+}));
+
+const { sendNotification: mockedSendNotification } = await import(
+  '../../services/notificationService.js'
+);
+
+const mockTerminal: TerminalNotification = {
+  notifyITerm2: vi.fn(),
+  notifyKitty: vi.fn(),
+  notifyGhostty: vi.fn(),
+  notifyBell: vi.fn(),
+};
 
 const mockSettings: LoadedSettings = {
   merged: {
     general: {
-      terminalBell: true,
+      notifications: 'auto',
     },
   },
 } as LoadedSettings;
@@ -28,24 +40,14 @@ const mockSettings: LoadedSettings = {
 const mockSettingsDisabled: LoadedSettings = {
   merged: {
     general: {
-      terminalBell: false,
+      notifications: 'notifications_disabled',
     },
   },
 } as LoadedSettings;
 
-vi.mock('../../utils/attentionNotification.js', () => ({
-  notifyTerminalAttention: vi.fn(),
-  AttentionNotificationReason: {
-    ToolApproval: 'tool_approval',
-    LongTaskComplete: 'long_task_complete',
-  },
-}));
-
-const mockedNotify = vi.mocked(notifyTerminalAttention);
-
 describe('useAttentionNotifications', () => {
   beforeEach(() => {
-    mockedNotify.mockReset();
+    vi.mocked(mockedSendNotification).mockReset();
   });
 
   const render = (
@@ -58,6 +60,7 @@ describe('useAttentionNotifications', () => {
           streamingState: StreamingState.Idle,
           elapsedTime: 0,
           settings: mockSettings,
+          terminal: mockTerminal,
           ...props,
         },
       },
@@ -72,13 +75,11 @@ describe('useAttentionNotifications', () => {
         streamingState: StreamingState.WaitingForConfirmation,
         elapsedTime: 0,
         settings: mockSettings,
+        terminal: mockTerminal,
       },
     });
 
-    expect(mockedNotify).toHaveBeenCalledWith(
-      AttentionNotificationReason.ToolApproval,
-      { enabled: true },
-    );
+    expect(mockedSendNotification).toHaveBeenCalledTimes(1);
   });
 
   it('notifies when focus is lost after entering approval wait state', () => {
@@ -93,10 +94,11 @@ describe('useAttentionNotifications', () => {
         streamingState: StreamingState.WaitingForConfirmation,
         elapsedTime: 0,
         settings: mockSettings,
+        terminal: mockTerminal,
       },
     });
 
-    expect(mockedNotify).toHaveBeenCalledTimes(1);
+    expect(mockedSendNotification).toHaveBeenCalledTimes(1);
   });
 
   it('sends a notification when a long task finishes while unfocused', () => {
@@ -108,6 +110,7 @@ describe('useAttentionNotifications', () => {
         streamingState: StreamingState.Responding,
         elapsedTime: LONG_TASK_NOTIFICATION_THRESHOLD_SECONDS + 5,
         settings: mockSettings,
+        terminal: mockTerminal,
       },
     });
 
@@ -117,13 +120,11 @@ describe('useAttentionNotifications', () => {
         streamingState: StreamingState.Idle,
         elapsedTime: 0,
         settings: mockSettings,
+        terminal: mockTerminal,
       },
     });
 
-    expect(mockedNotify).toHaveBeenCalledWith(
-      AttentionNotificationReason.LongTaskComplete,
-      { enabled: true },
-    );
+    expect(mockedSendNotification).toHaveBeenCalledTimes(1);
   });
 
   it('does not notify about long tasks when the CLI is focused', () => {
@@ -135,6 +136,7 @@ describe('useAttentionNotifications', () => {
         streamingState: StreamingState.Responding,
         elapsedTime: LONG_TASK_NOTIFICATION_THRESHOLD_SECONDS + 2,
         settings: mockSettings,
+        terminal: mockTerminal,
       },
     });
 
@@ -144,13 +146,11 @@ describe('useAttentionNotifications', () => {
         streamingState: StreamingState.Idle,
         elapsedTime: 0,
         settings: mockSettings,
+        terminal: mockTerminal,
       },
     });
 
-    expect(mockedNotify).not.toHaveBeenCalledWith(
-      AttentionNotificationReason.LongTaskComplete,
-      expect.anything(),
-    );
+    expect(mockedSendNotification).not.toHaveBeenCalled();
   });
 
   it('does not treat short responses as long tasks', () => {
@@ -162,6 +162,7 @@ describe('useAttentionNotifications', () => {
         streamingState: StreamingState.Responding,
         elapsedTime: 5,
         settings: mockSettings,
+        terminal: mockTerminal,
       },
     });
 
@@ -171,13 +172,14 @@ describe('useAttentionNotifications', () => {
         streamingState: StreamingState.Idle,
         elapsedTime: 0,
         settings: mockSettings,
+        terminal: mockTerminal,
       },
     });
 
-    expect(mockedNotify).not.toHaveBeenCalled();
+    expect(mockedSendNotification).not.toHaveBeenCalled();
   });
 
-  it('does not notify when terminalBell setting is disabled', () => {
+  it('does not notify when notifications are disabled', () => {
     const { rerender } = render({
       settings: mockSettingsDisabled,
     });
@@ -188,12 +190,10 @@ describe('useAttentionNotifications', () => {
         streamingState: StreamingState.WaitingForConfirmation,
         elapsedTime: 0,
         settings: mockSettingsDisabled,
+        terminal: mockTerminal,
       },
     });
 
-    expect(mockedNotify).toHaveBeenCalledWith(
-      AttentionNotificationReason.ToolApproval,
-      { enabled: false },
-    );
+    expect(mockedSendNotification).not.toHaveBeenCalled();
   });
 });

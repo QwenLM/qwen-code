@@ -411,15 +411,25 @@ const SETTINGS_SCHEMA = {
           'or set a specific language.',
         showInDialog: true,
       },
-      terminalBell: {
-        type: 'boolean',
-        label: 'Terminal Bell Notification',
+      notifications: {
+        type: 'enum',
+        label: 'Notifications',
         category: 'General',
         requiresRestart: false,
-        default: true,
+        default: 'auto',
         description:
-          'Play terminal bell sound when response completes or needs approval.',
+          'Terminal notification channel when agent finishes or needs attention. ' +
+          '"auto" detects your terminal (iTerm2/Kitty/Ghostty → native notification, others → bell). ' +
+          'Or choose a specific channel.',
         showInDialog: true,
+        options: [
+          { value: 'auto', label: 'Auto-detect' },
+          { value: 'iterm2', label: 'iTerm2' },
+          { value: 'kitty', label: 'Kitty' },
+          { value: 'ghostty', label: 'Ghostty' },
+          { value: 'terminal_bell', label: 'Terminal Bell' },
+          { value: 'notifications_disabled', label: 'Disabled' },
+        ],
       },
       chatRecording: {
         type: 'boolean',
