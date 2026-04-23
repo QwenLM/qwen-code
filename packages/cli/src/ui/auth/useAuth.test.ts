@@ -10,6 +10,7 @@ import { AuthType } from '@qwen-code/qwen-code-core';
 import { useAuthCommand } from './useAuth.js';
 import {
   OPENROUTER_OAUTH_CALLBACK_URL,
+  createOpenRouterOAuthSession,
   runOpenRouterOAuthLogin,
 } from '../../commands/auth/openrouterOAuth.js';
 
@@ -30,15 +31,15 @@ vi.mock('../../config/modelProvidersScope.js', () => ({
 
 vi.mock('../../commands/auth/openrouterOAuth.js', () => ({
   OPENROUTER_ENV_KEY: 'OPENROUTER_API_KEY',
-  OPENROUTER_DEFAULT_MODEL: 'openai/gpt-4o-mini',
   OPENROUTER_OAUTH_CALLBACK_URL: 'http://localhost:3000/openrouter/callback',
-  createPkcePair: vi.fn(() => ({
+  createOpenRouterOAuthSession: vi.fn(() => ({
+    callbackUrl: 'http://localhost:3000/openrouter/callback',
     codeVerifier: 'test-verifier',
-    codeChallenge: 'test-challenge',
-  })),
-  buildOpenRouterAuthorizationUrl: vi.fn(
-    () =>
+    authorizationUrl:
       'https://openrouter.ai/auth?callback_url=http%3A%2F%2Flocalhost%3A3000%2Fopenrouter%2Fcallback&code_challenge=test-challenge',
+  })),
+  getPreferredOpenRouterModelId: vi.fn(
+    (models: Array<{ id: string }>) => models[0]?.id,
   ),
   runOpenRouterOAuthLogin: vi.fn(
     () => new Promise(() => undefined) as Promise<{ apiKey: string }>,
@@ -139,10 +140,18 @@ describe('useAuthCommand', () => {
     });
 
     expect(result.current.isAuthenticating).toBe(true);
+    expect(createOpenRouterOAuthSession).toHaveBeenCalledWith(
+      OPENROUTER_OAUTH_CALLBACK_URL,
+    );
     expect(runOpenRouterOAuthLogin).toHaveBeenCalledWith(
       OPENROUTER_OAUTH_CALLBACK_URL,
       expect.objectContaining({
         abortSignal: expect.any(AbortSignal),
+        session: expect.objectContaining({
+          authorizationUrl: expect.stringContaining(
+            'https://openrouter.ai/auth',
+          ),
+        }),
       }),
     );
 

@@ -7,10 +7,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildOpenRouterAuthorizationUrl,
+  createOpenRouterOAuthSession,
   createPkcePair,
   exchangeAuthCodeForApiKey,
   fetchOpenRouterModels,
   getOpenRouterModelsWithFallback,
+  getPreferredOpenRouterModelId,
   mergeOpenRouterConfigs,
   OPENROUTER_DEFAULT_MODELS,
   OPENROUTER_MODELS_URL,
@@ -131,6 +133,22 @@ describe('openrouterOAuth', () => {
     });
 
     await expect(codePromise).resolves.toBe('fast-code-123');
+  });
+
+  it('creates a reusable OAuth session for manual fallback links', () => {
+    const session = createOpenRouterOAuthSession(
+      'http://localhost:3000/openrouter/callback',
+      {
+        codeVerifier: 'verifier-123',
+        codeChallenge: 'challenge-123',
+      },
+    );
+
+    expect(session).toEqual({
+      callbackUrl: 'http://localhost:3000/openrouter/callback',
+      codeVerifier: 'verifier-123',
+      authorizationUrl: expect.stringContaining('code_challenge=challenge-123'),
+    });
   });
 
   it('returns OAuth result without waiting for slow listener close', async () => {
@@ -486,6 +504,23 @@ describe('openrouterOAuth', () => {
       'anthropic/claude-3.7-sonnet',
       'google/gemini-2.5-flash',
     ]);
+  });
+
+  it('prefers the default OpenRouter model when it remains enabled', () => {
+    expect(
+      getPreferredOpenRouterModelId([
+        { id: 'anthropic/claude-3.7-sonnet' },
+        { id: 'openai/gpt-4o-mini' },
+      ] as never),
+    ).toBe('openai/gpt-4o-mini');
+  });
+
+  it('falls back to the first enabled OpenRouter model when the default is unavailable', () => {
+    expect(
+      getPreferredOpenRouterModelId([
+        { id: 'anthropic/claude-3.7-sonnet' },
+      ] as never),
+    ).toBe('anthropic/claude-3.7-sonnet');
   });
 
   it('falls back to default models when dynamic fetch fails', async () => {

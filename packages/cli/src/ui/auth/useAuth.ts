@@ -40,11 +40,10 @@ import {
   type AlibabaStandardRegion,
 } from '../../constants/alibabaStandardApiKey.js';
 import {
-  buildOpenRouterAuthorizationUrl,
-  createPkcePair,
+  createOpenRouterOAuthSession,
   getOpenRouterModelsWithFallback,
+  getPreferredOpenRouterModelId,
   mergeOpenRouterConfigs,
-  OPENROUTER_DEFAULT_MODEL,
   OPENROUTER_ENV_KEY,
   OPENROUTER_OAUTH_CALLBACK_URL,
   runOpenRouterOAuthLogin,
@@ -590,17 +589,15 @@ export const useAuthCommand = (
       setAuthError(null);
       setIsAuthDialogOpen(false);
 
-      const { codeChallenge } = createPkcePair();
-      const manualOpenUrl = buildOpenRouterAuthorizationUrl({
-        callbackUrl: OPENROUTER_OAUTH_CALLBACK_URL,
-        codeChallenge,
-      });
+      const oauthSession = createOpenRouterOAuthSession(
+        OPENROUTER_OAUTH_CALLBACK_URL,
+      );
       setExternalAuthState({
         title: t('OpenRouter Authentication'),
         message: t(
           'Open the authorization page if your browser does not launch automatically.',
         ),
-        detail: manualOpenUrl,
+        detail: oauthSession.authorizationUrl,
       });
 
       const abortController = new AbortController();
@@ -609,6 +606,7 @@ export const useAuthCommand = (
         OPENROUTER_OAUTH_CALLBACK_URL,
         {
           abortSignal: abortController.signal,
+          session: oauthSession,
         },
       );
       setOpenRouterAuthAbortController(null);
@@ -655,7 +653,10 @@ export const useAuthCommand = (
         'security.auth.selectedType',
         AuthType.USE_OPENAI,
       );
-      settings.setValue(persistScope, 'model.name', OPENROUTER_DEFAULT_MODEL);
+      const activeModelId = getPreferredOpenRouterModelId(updatedConfigs);
+      if (activeModelId) {
+        settings.setValue(persistScope, 'model.name', activeModelId);
+      }
 
       const updatedModelProviders: ModelProvidersConfig = {
         ...(settings.merged.modelProviders as ModelProvidersConfig | undefined),

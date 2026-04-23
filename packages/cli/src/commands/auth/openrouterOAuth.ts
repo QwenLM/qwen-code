@@ -57,6 +57,12 @@ export interface PkcePair {
   codeChallenge: string;
 }
 
+export interface OpenRouterOAuthSession {
+  callbackUrl: string;
+  codeVerifier: string;
+  authorizationUrl: string;
+}
+
 export interface OAuthCallbackListener {
   ready: Promise<void>;
   waitForCode: Promise<string>;
@@ -111,6 +117,21 @@ export function buildOpenRouterAuthorizationUrl(params: {
     url.searchParams.set('limit', String(params.limit));
   }
   return url.toString();
+}
+
+export function createOpenRouterOAuthSession(
+  callbackUrl = OPENROUTER_OAUTH_CALLBACK_URL,
+  pkcePair = createPkcePair(),
+): OpenRouterOAuthSession {
+  return {
+    callbackUrl,
+    codeVerifier: pkcePair.codeVerifier,
+    authorizationUrl: buildOpenRouterAuthorizationUrl({
+      callbackUrl,
+      codeChallenge: pkcePair.codeChallenge,
+      codeChallengeMethod: OPENROUTER_CODE_CHALLENGE_METHOD,
+    }),
+  };
 }
 
 export function startOAuthCallbackListener(
@@ -256,6 +277,15 @@ function buildOpenRouterHeaders() {
 const OPENROUTER_MODEL_PRIORITY_PREFIXES = ['qwen/', 'glm/', 'minimax/'];
 const OPENROUTER_RECOMMENDED_MODEL_LIMIT = 16;
 const OPENROUTER_FREE_MODEL_ID_HINT = ':free';
+
+export function getPreferredOpenRouterModelId(
+  models: ModelConfig[],
+): string | undefined {
+  return (
+    models.find((model) => model.id === OPENROUTER_DEFAULT_MODEL)?.id ||
+    models[0]?.id
+  );
+}
 
 function isOpenRouterFreeModelId(modelId: string): boolean {
   const normalizedId = modelId.toLowerCase();
@@ -533,18 +563,15 @@ interface OpenRouterOAuthLoginDeps {
   now?: () => number;
   signalTarget?: OAuthSignalTarget;
   abortSignal?: AbortSignal;
+  session?: OpenRouterOAuthSession;
 }
 
 export async function runOpenRouterOAuthLogin(
   callbackUrl = OPENROUTER_OAUTH_CALLBACK_URL,
   deps: OpenRouterOAuthLoginDeps = {},
 ): Promise<OpenRouterOAuthResult> {
-  const { codeVerifier, codeChallenge } = createPkcePair();
-  const authUrl = buildOpenRouterAuthorizationUrl({
-    callbackUrl,
-    codeChallenge,
-    codeChallengeMethod: OPENROUTER_CODE_CHALLENGE_METHOD,
-  });
+  const session = deps.session || createOpenRouterOAuthSession(callbackUrl);
+  const { codeVerifier, authorizationUrl: authUrl } = session;
 
   const openBrowser = deps.openBrowser || open;
   const startListener = deps.startListener || startOAuthCallbackListener;

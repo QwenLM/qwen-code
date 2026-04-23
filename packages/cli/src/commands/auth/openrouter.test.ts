@@ -51,8 +51,17 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 
 vi.mock('./openrouterOAuth.js', () => ({
   OPENROUTER_ENV_KEY: 'OPENROUTER_API_KEY',
-  OPENROUTER_DEFAULT_MODEL: 'openai/gpt-4o-mini',
   OPENROUTER_OAUTH_CALLBACK_URL: 'http://localhost:3000/openrouter/callback',
+  createOpenRouterOAuthSession: vi.fn(() => ({
+    callbackUrl: 'http://localhost:3000/openrouter/callback',
+    codeVerifier: 'test-verifier',
+    authorizationUrl: 'https://openrouter.ai/auth?manual=1',
+  })),
+  getPreferredOpenRouterModelId: vi.fn(
+    (models: Array<{ id: string }>) =>
+      models.find((model) => model.id === 'openai/gpt-4o-mini')?.id ||
+      models[0]?.id,
+  ),
   getOpenRouterModelsWithFallback: vi.fn(async () => [
     {
       id: 'openai/gpt-4o-mini:free',
@@ -157,7 +166,7 @@ describe('handleQwenAuth openrouter', () => {
     expect(mockSetValue).toHaveBeenCalledWith(
       'user',
       'model.name',
-      'openai/gpt-4o-mini',
+      'openai/gpt-4o-mini:free',
     );
 
     const modelProvidersCall = mockSetValue.mock.calls.find(
@@ -317,5 +326,10 @@ describe('handleQwenAuth openrouter', () => {
         envKey: 'OPENROUTER_API_KEY',
       },
     ]);
+    expect(mockSetValue).toHaveBeenCalledWith(
+      'user',
+      'model.name',
+      'anthropic/claude-3.7-sonnet',
+    );
   });
 });

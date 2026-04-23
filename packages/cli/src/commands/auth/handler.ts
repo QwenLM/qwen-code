@@ -25,10 +25,11 @@ import { loadCliConfig } from '../../config/config.js';
 import type { CliArgs } from '../../config/config.js';
 import { InteractiveSelector } from './interactiveSelector.js';
 import {
+  createOpenRouterOAuthSession,
   getOpenRouterModelsWithFallback,
+  getPreferredOpenRouterModelId,
   isOpenRouterConfig,
   mergeOpenRouterConfigs,
-  OPENROUTER_DEFAULT_MODEL,
   OPENROUTER_ENV_KEY,
   runOpenRouterOAuthLogin,
   selectRecommendedOpenRouterModels,
@@ -314,16 +315,18 @@ async function handleOpenRouterAuth(
 
     if (!selectedKey) {
       const oauthStartMs = Date.now();
-      const oauthResult = await runOpenRouterOAuthLogin();
+      const oauthSession = createOpenRouterOAuthSession();
       writeStdoutLine(
         t(
           'Starting OpenRouter OAuth in your browser. If needed, open this link manually: {{authorizationUrl}}',
           {
-            authorizationUrl:
-              oauthResult.authorizationUrl || 'https://openrouter.ai/auth',
+            authorizationUrl: oauthSession.authorizationUrl,
           },
         ),
       );
+      const oauthResult = await runOpenRouterOAuthLogin(undefined, {
+        session: oauthSession,
+      });
       writeStdoutLine(
         t('Waited for OpenRouter browser authorization in {{elapsed}}.', {
           elapsed:
@@ -389,7 +392,10 @@ async function handleOpenRouterAuth(
       'security.auth.selectedType',
       AuthType.USE_OPENAI,
     );
-    settings.setValue(authTypeScope, 'model.name', OPENROUTER_DEFAULT_MODEL);
+    const activeModelId = getPreferredOpenRouterModelId(updatedConfigs);
+    if (activeModelId) {
+      settings.setValue(authTypeScope, 'model.name', activeModelId);
+    }
 
     const refreshStartMs = Date.now();
     await config.refreshAuth(AuthType.USE_OPENAI);
