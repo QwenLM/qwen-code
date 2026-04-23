@@ -284,6 +284,9 @@ describe('SelfEvolveService', () => {
       'SELF_EVOLVE_PROGRESS {"kind":"selected_task|round_start|command|command_result|final"',
     );
     expect(sendPrompt.mock.calls[0]?.[0]).toContain(
+      'After you choose the candidate, emit the selected_task progress line immediately before any further inspection, editing, or command execution.',
+    );
+    expect(sendPrompt.mock.calls[0]?.[0]).toContain(
       'Small does not mean trivial: the change must still materially improve correctness, reliability, usability, maintainability, or a real user/developer workflow.',
     );
     expect(sendPrompt.mock.calls[0]?.[0]).toContain(

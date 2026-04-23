@@ -170,6 +170,8 @@ export interface SelfEvolveProgressEvent {
   round?: number;
   totalRounds?: number;
   command?: string;
+  childKind?: string;
+  childMessage?: string;
 }
 
 interface AttemptPaths {
@@ -460,6 +462,8 @@ class SelfEvolveChildProgressParser {
         typeof payload.command === 'string'
           ? payload.command.trim()
           : undefined,
+      childKind: kind,
+      childMessage: message,
     });
   }
 }
@@ -1564,6 +1568,8 @@ export class SelfEvolveService {
       'While you work, emit concise machine-readable progress lines so the parent process can surface them in the UI.',
       'Use exactly this format on a single line each time:',
       'SELF_EVOLVE_PROGRESS {"kind":"selected_task|round_start|command|command_result|final","round":1,"message":"short human-readable update","command":"optional shell command"}',
+      'After you choose the candidate, emit the selected_task progress line immediately before any further inspection, editing, or command execution.',
+      'For selected_task progress lines, include the exact chosen task title in the message. Add a short rationale after "Reason:" when it helps explain the choice.',
       'Always emit at least: the selected task, each round start, each validation command start/result, and the final outcome.',
       '',
       'Write a JSON report to this exact path before exiting:',

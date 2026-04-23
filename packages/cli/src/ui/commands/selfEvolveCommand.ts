@@ -128,6 +128,129 @@ function pushList(lines: string[], label: string, items?: string[]): void {
   }
 }
 
+interface SelfEvolveLiveSummary {
+  status: string;
+  selectedTask?: string;
+  selectedTaskReason?: string;
+  currentRound?: number;
+  latestValidation?: string;
+  latestActivity?: string;
+}
+
+function normalizeProgressText(value: string | undefined): string | undefined {
+  const trimmed = value?.replace(/\s+/g, ' ').trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function parseSelectedTaskProgress(message: string | undefined): {
+  task?: string;
+  reason?: string;
+} {
+  const normalized = normalizeProgressText(message);
+  if (!normalized) {
+    return {};
+  }
+
+  const reasonMatch = normalized.match(
+    /^(?<task>.*?)(?:[.。]\s*)?(?:Reason|Why this task|Why):\s*(?<reason>.+)$/i,
+  );
+  const taskPortion =
+    reasonMatch?.groups?.['task']?.trim() ??
+    normalized.replace(/^(?:selected|chosen|picked)\s+/i, '').trim();
+  const reason = normalizeProgressText(reasonMatch?.groups?.['reason']);
+
+  return {
+    task: taskPortion.replace(/[.。]\s*$/u, '').trim() || undefined,
+    reason,
+  };
+}
+
+function formatValidationProgress(
+  command: string | undefined,
+  message: string | undefined,
+): string | undefined {
+  const normalizedMessage = normalizeProgressText(message);
+  if (!normalizedMessage) {
+    return undefined;
+  }
+
+  const trimmedCommand = command?.trim();
+  if (!trimmedCommand || normalizedMessage.includes(trimmedCommand)) {
+    return normalizedMessage;
+  }
+
+  return `${trimmedCommand}: ${normalizedMessage}`;
+}
+
+function formatLiveProgressSummary(
+  summary: SelfEvolveLiveSummary,
+  direction?: string,
+): string {
+  const lines = ['Self-evolve is running...'];
+  pushLine(lines, 'Status', summary.status);
+  pushLine(lines, 'Requested direction', direction);
+  lines.push(
+    `Selected task: ${summary.selectedTask?.trim() || 'Waiting for child selection...'}`,
+  );
+  pushLine(lines, 'Why this task', summary.selectedTaskReason);
+  pushLine(
+    lines,
+    'Current round',
+    summary.currentRound != null ? `Round ${summary.currentRound}` : undefined,
+  );
+  pushLine(lines, 'Latest validation', summary.latestValidation);
+  pushLine(lines, 'Latest activity', summary.latestActivity);
+  return lines.join('\n');
+}
+
+function applyProgressToLiveSummary(
+  summary: SelfEvolveLiveSummary,
+  event: SelfEvolveProgressEvent,
+): SelfEvolveLiveSummary {
+  const nextSummary: SelfEvolveLiveSummary = {
+    ...summary,
+    status: formatProgress(event),
+  };
+
+  if (event.round != null) {
+    nextSummary.currentRound = event.round;
+  }
+
+  if (event.stage !== 'child_activity') {
+    return nextSummary;
+  }
+
+  const childMessage = normalizeProgressText(
+    event.childMessage ?? event.message,
+  );
+  if (!childMessage) {
+    return nextSummary;
+  }
+
+  switch (event.childKind) {
+    case 'selected_task': {
+      const parsed = parseSelectedTaskProgress(childMessage);
+      nextSummary.selectedTask = parsed.task ?? childMessage;
+      nextSummary.selectedTaskReason =
+        parsed.reason ?? nextSummary.selectedTaskReason;
+      nextSummary.latestActivity = childMessage;
+      return nextSummary;
+    }
+    case 'command_result':
+      nextSummary.latestValidation =
+        formatValidationProgress(event.command, childMessage) ??
+        nextSummary.latestValidation;
+      nextSummary.latestActivity = childMessage;
+      return nextSummary;
+    case 'command':
+    case 'round_start':
+    case 'final':
+    default:
+      nextSummary.latestActivity = childMessage;
+      return nextSummary;
+  }
+}
+
 function formatOutcome(
   result: Awaited<ReturnType<SelfEvolveService['run']>>,
 ): string {
@@ -595,18 +718,18 @@ export const selfEvolveCommand: SlashCommand = {
     }
 
     const executionMode = context.executionMode ?? 'interactive';
-    const setInteractivePending = (text: string) => {
-      if (executionMode !== 'interactive') {
-        return;
-      }
-      context.ui.setPendingItem({
-        type: 'info',
-        text,
-      });
-    };
+    const requestedDirection =
+      'direction' in parsed ? parsed.direction : undefined;
     const handleProgress = (event: SelfEvolveProgressEvent) => {
       if (executionMode !== 'interactive') {
         return;
+      }
+      if (useInteractivePending) {
+        Object.assign(
+          liveSummary,
+          applyProgressToLiveSummary(liveSummary, event),
+        );
+        renderInteractivePending();
       }
       if (event.stage === 'child_activity') {
         context.ui.addItem(
@@ -618,18 +741,24 @@ export const selfEvolveCommand: SlashCommand = {
         );
         return;
       }
-      if (!useInteractivePending) {
-        return;
-      }
-      setInteractivePending(formatProgress(event));
     };
     const useInteractivePending =
       executionMode === 'interactive' && parsed.mode !== 'schedule';
+    const liveSummary: SelfEvolveLiveSummary = {
+      status: t('Running self-evolve in an isolated worktree...'),
+    };
+    const renderInteractivePending = () => {
+      if (!useInteractivePending) {
+        return;
+      }
+      context.ui.setPendingItem({
+        type: 'info',
+        text: formatLiveProgressSummary(liveSummary, requestedDirection),
+      });
+    };
 
     if (useInteractivePending) {
-      setInteractivePending(
-        t('Running self-evolve in an isolated worktree...'),
-      );
+      renderInteractivePending();
     }
 
     try {

@@ -157,7 +157,25 @@ describe('selfEvolveCommand', () => {
       });
       options.onProgress?.({
         stage: 'child_activity',
+        message:
+          'Child round 1 [selected_task]: Selected Fix lint error in src/file.ts:10:2',
+        childKind: 'selected_task',
+        childMessage: 'Selected Fix lint error in src/file.ts:10:2',
+        round: 1,
+      });
+      options.onProgress?.({
+        stage: 'child_activity',
         message: 'Child round 1 [command]: Running npm run lint',
+        childKind: 'command',
+        childMessage: 'Running npm run lint',
+        round: 1,
+        command: 'npm run lint',
+      });
+      options.onProgress?.({
+        stage: 'child_activity',
+        message: 'Child round 1 [command_result]: npm run lint passed',
+        childKind: 'command_result',
+        childMessage: 'npm run lint passed',
         round: 1,
         command: 'npm run lint',
       });
@@ -184,7 +202,31 @@ describe('selfEvolveCommand', () => {
     expect(mockContext.ui.setPendingItem).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'info',
-        text: 'Inspecting the repo for small safe tasks...',
+        text: expect.stringContaining(
+          'Status: Inspecting the repo for small safe tasks...',
+        ),
+      }),
+    );
+    expect(mockContext.ui.setPendingItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'info',
+        text: expect.stringContaining(
+          'Selected task: Waiting for child selection...',
+        ),
+      }),
+    );
+    expect(mockContext.ui.setPendingItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'info',
+        text: expect.stringContaining(
+          'Selected task: Fix lint error in src/file.ts:10:2',
+        ),
+      }),
+    );
+    expect(mockContext.ui.setPendingItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'info',
+        text: expect.stringContaining('Latest validation: npm run lint passed'),
       }),
     );
     expect(mockContext.ui.addItem).toHaveBeenCalledWith(
