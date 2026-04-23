@@ -1,0 +1,6 @@
+{
+  "name": "evolve",
+  "version": "0.1.0",
+  "commands": "commands",
+  "agents": "agents"
+}

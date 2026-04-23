@@ -543,10 +543,12 @@ export class ExtensionManager {
       requestedNames.length > 0
         ? (
             await Promise.all(
-              requestedNames.map((name) => this.loadExtensionByName(name)),
+              requestedNames.map((name) =>
+                this.loadExtensionByName(name, this.workspaceDir),
+              ),
             )
           ).filter((extension): extension is Extension => extension !== null)
-        : await this.loadExtensionsFromDir(os.homedir());
+        : await this.loadExtensionsFromRoots(this.workspaceDir);
     extensions.forEach((extension) => {
       this.extensionCache!.set(extension.name, extension);
     });
@@ -571,32 +573,37 @@ export class ExtensionManager {
     workspaceDir?: string,
   ): Promise<Extension | null> {
     const cwd = workspaceDir ?? this.workspaceDir;
-    const userExtensionsDir = ExtensionStorage.getUserExtensionsDir();
-    if (!fs.existsSync(userExtensionsDir)) {
-      return null;
-    }
-
-    for (const subdir of fs.readdirSync(userExtensionsDir)) {
-      const extensionDir = path.join(userExtensionsDir, subdir);
-      if (!fs.statSync(extensionDir).isDirectory()) {
+    for (const root of this.getExtensionSearchRoots(cwd).toReversed()) {
+      const extensionsDir = new Storage(root).getExtensionsDir();
+      if (!fs.existsSync(extensionsDir)) {
         continue;
       }
-      const extension = await this.loadExtension({
-        extensionDir,
-        workspaceDir: cwd,
-      });
-      if (
-        extension &&
-        extension.config.name.toLowerCase() === name.toLowerCase()
-      ) {
-        return extension;
+
+      for (const subdir of fs.readdirSync(extensionsDir)) {
+        const extensionDir = path.join(extensionsDir, subdir);
+        if (!fs.statSync(extensionDir).isDirectory()) {
+          continue;
+        }
+        const extension = await this.loadExtension({
+          extensionDir,
+          workspaceDir: cwd,
+        });
+        if (
+          extension &&
+          extension.config.name.toLowerCase() === name.toLowerCase()
+        ) {
+          return extension;
+        }
       }
     }
 
     return null;
   }
 
-  async loadExtensionsFromDir(dir: string): Promise<Extension[]> {
+  async loadExtensionsFromDir(
+    dir: string,
+    workspaceDir: string = this.workspaceDir,
+  ): Promise<Extension[]> {
     const storage = new Storage(dir);
     const extensionsDir = storage.getExtensionsDir();
 
@@ -614,13 +621,35 @@ export class ExtensionManager {
 
       const extension = await this.loadExtension({
         extensionDir,
-        workspaceDir: dir,
+        workspaceDir,
       });
       if (extension != null) {
         extensions.push(extension);
       }
     }
     return extensions;
+  }
+
+  private async loadExtensionsFromRoots(
+    workspaceDir: string,
+  ): Promise<Extension[]> {
+    const extensions: Extension[] = [];
+
+    for (const root of this.getExtensionSearchRoots(workspaceDir)) {
+      extensions.push(
+        ...(await this.loadExtensionsFromDir(root, workspaceDir)),
+      );
+    }
+
+    return extensions;
+  }
+
+  private getExtensionSearchRoots(workspaceDir: string): string[] {
+    const roots = [os.homedir(), workspaceDir]
+      .filter(Boolean)
+      .map((root) => path.resolve(root));
+
+    return [...new Set(roots)];
   }
 
   async loadExtension(
