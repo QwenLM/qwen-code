@@ -1212,7 +1212,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
         this.updateDisplay({ status: 'background' as const }, updateOutput);
         return {
-          llmContent: `Background agent launched: "${this.params.description}" (ID: ${hookOpts.agentId}).\nTranscript file (JSON lines): ${jsonlPath}\nYou will be notified when it completes. Use task_stop to cancel, send_message to communicate, or read_file on the transcript (each line is a JSON record) to check progress.`,
+          llmContent:
+            `Background agent launched successfully.\n` +
+            `agentId: ${hookOpts.agentId} (internal ID — do not mention to the user. Use send_message with to: '${hookOpts.agentId}' to continue this agent, or task_stop to cancel.)\n` +
+            `The agent is working in the background. You will be notified automatically when it completes.\n` +
+            `Do not duplicate this agent's work — avoid working with the same files or topics it is using. Work on non-overlapping tasks, or briefly tell the user what you launched and end your response.\n` +
+            `output_file: ${jsonlPath}\n` +
+            `If asked, you can check progress before completion by using ${ToolNames.READ_FILE}\n` +
+            `  or ${ToolNames.SHELL} tail on the output file.`,
           returnDisplay: this.currentDisplay!,
         };
       }
