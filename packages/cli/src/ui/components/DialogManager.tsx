@@ -22,6 +22,7 @@ import { EditorSettingsDialog } from './EditorSettingsDialog.js';
 import { TrustDialog } from './TrustDialog.js';
 import { PermissionsDialog } from './PermissionsDialog.js';
 import { ModelDialog } from './ModelDialog.js';
+import { ManageModelsDialog } from './ManageModelsDialog.js';
 import { ArenaStartDialog } from './arena/ArenaStartDialog.js';
 import { ArenaSelectDialog } from './arena/ArenaSelectDialog.js';
 import { ArenaStopDialog } from './arena/ArenaStopDialog.js';
@@ -213,6 +214,14 @@ export const DialogManager = ({
       />
     );
   }
+  if (uiState.isManageModelsDialogOpen) {
+    return (
+      <ManageModelsDialog
+        config={config}
+        onClose={uiActions.closeManageModelsDialog}
+      />
+    );
+  }
   if (uiState.isSettingsDialogOpen) {
     return (
       <Box flexDirection="column">
@@ -319,6 +328,10 @@ export const DialogManager = ({
           title={uiState.externalAuthState.title}
           message={uiState.externalAuthState.message}
           detail={uiState.externalAuthState.detail}
+          onCancel={() => {
+            uiActions.cancelAuthentication();
+            uiActions.setAuthState(AuthState.Updating);
+          }}
         />
       );
     }

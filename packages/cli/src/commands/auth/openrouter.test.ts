@@ -242,6 +242,7 @@ describe('handleQwenAuth openrouter', () => {
     vi.mocked(runOpenRouterOAuthLogin).mockResolvedValue({
       apiKey: 'oauth-key-123',
       userId: 'user-1',
+      authorizationUrl: 'https://openrouter.ai/auth?manual=1',
     });
 
     await handleQwenAuth('openrouter', {});

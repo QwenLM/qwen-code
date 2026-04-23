@@ -40,6 +40,8 @@ import {
   type AlibabaStandardRegion,
 } from '../../constants/alibabaStandardApiKey.js';
 import {
+  buildOpenRouterAuthorizationUrl,
+  createPkcePair,
   getOpenRouterModelsWithFallback,
   mergeOpenRouterConfigs,
   OPENROUTER_DEFAULT_MODEL,
@@ -75,6 +77,8 @@ export const useAuthCommand = (
     message: string;
     detail?: string;
   } | null>(null);
+  const [openRouterAuthAbortController, setOpenRouterAuthAbortController] =
+    useState<AbortController | null>(null);
 
   const { qwenAuthState, cancelQwenAuth } = useQwenAuth(
     pendingAuthType,
@@ -291,6 +295,11 @@ export const useAuthCommand = (
       cancelQwenAuth();
     }
 
+    if (isAuthenticating && pendingAuthType === AuthType.USE_OPENAI) {
+      openRouterAuthAbortController?.abort();
+      setOpenRouterAuthAbortController(null);
+    }
+
     // Log authentication cancellation
     if (isAuthenticating && pendingAuthType) {
       const authEvent = new AuthEvent(pendingAuthType, 'manual', 'cancelled');
@@ -299,9 +308,16 @@ export const useAuthCommand = (
 
     // Do not reset pendingAuthType here, persist the previously selected type.
     setIsAuthenticating(false);
+    setExternalAuthState(null);
     setIsAuthDialogOpen(true);
     setAuthError(null);
-  }, [isAuthenticating, pendingAuthType, cancelQwenAuth, config]);
+  }, [
+    isAuthenticating,
+    pendingAuthType,
+    cancelQwenAuth,
+    config,
+    openRouterAuthAbortController,
+  ]);
 
   /**
    * Handle coding plan submission - generates configs from template and stores api-key
@@ -573,73 +589,34 @@ export const useAuthCommand = (
       setIsAuthenticating(true);
       setAuthError(null);
       setIsAuthDialogOpen(false);
+
+      const { codeChallenge } = createPkcePair();
+      const manualOpenUrl = buildOpenRouterAuthorizationUrl({
+        callbackUrl: OPENROUTER_OAUTH_CALLBACK_URL,
+        codeChallenge,
+      });
       setExternalAuthState({
         title: t('OpenRouter Authentication'),
-        message: t('Waiting for OpenRouter callback...'),
-        detail: OPENROUTER_OAUTH_CALLBACK_URL,
+        message: t(
+          'Open the authorization page if your browser does not launch automatically.',
+        ),
+        detail: manualOpenUrl,
       });
 
-      addItem(
+      const abortController = new AbortController();
+      setOpenRouterAuthAbortController(abortController);
+      const oauthResult = await runOpenRouterOAuthLogin(
+        OPENROUTER_OAUTH_CALLBACK_URL,
         {
-          type: MessageType.INFO,
-          text: t(
-            'Starting OpenRouter OAuth in your browser. Waiting for callback at {{callbackUrl}}',
-            {
-              callbackUrl: OPENROUTER_OAUTH_CALLBACK_URL,
-            },
-          ),
+          abortSignal: abortController.signal,
         },
-        Date.now(),
       );
-
-      const authStartMs = Date.now();
-      const oauthStartMs = Date.now();
-      const oauthResult = await runOpenRouterOAuthLogin();
-      const oauthElapsed = `${((Date.now() - oauthStartMs) / 1000).toFixed(2)}s`;
-      addItem(
-        {
-          type: MessageType.INFO,
-          text: t(
-            'Waited for OpenRouter browser authorization in {{elapsed}}.',
-            {
-              elapsed:
-                typeof oauthResult.authorizationCodeWaitMs === 'number'
-                  ? `${(oauthResult.authorizationCodeWaitMs / 1000).toFixed(2)}s`
-                  : oauthElapsed,
-            },
-          ),
-        },
-        Date.now(),
-      );
-      addItem(
-        {
-          type: MessageType.INFO,
-          text: t(
-            'Exchanged OpenRouter auth code for API key in {{elapsed}}.',
-            {
-              elapsed:
-                typeof oauthResult.apiKeyExchangeMs === 'number'
-                  ? `${(oauthResult.apiKeyExchangeMs / 1000).toFixed(2)}s`
-                  : oauthElapsed,
-            },
-          ),
-        },
-        Date.now(),
-      );
-      addItem(
-        {
-          type: MessageType.INFO,
-          text: t('OpenRouter OAuth callback completed in {{elapsed}}.', {
-            elapsed: oauthElapsed,
-          }),
-        },
-        Date.now(),
-      );
+      setOpenRouterAuthAbortController(null);
       setExternalAuthState({
         title: t('OpenRouter Authentication'),
-        message: t('OpenRouter authorization complete. Requesting API key...'),
+        message: t('Finalizing OpenRouter setup...'),
         detail: t(
-          'Syncing OpenRouter models and finalizing local configuration.',
+          'Syncing OpenRouter models and updating your local configuration.',
         ),
       });
       const selectedKey = oauthResult.apiKey;
@@ -660,17 +637,7 @@ export const useAuthCommand = (
         (settings.merged.modelProviders as ModelProvidersConfig | undefined)?.[
           AuthType.USE_OPENAI
         ] || [];
-      const modelsStartMs = Date.now();
       const openRouterCatalog = await getOpenRouterModelsWithFallback();
-      addItem(
-        {
-          type: MessageType.INFO,
-          text: t('Fetched OpenRouter models in {{elapsed}}.', {
-            elapsed: `${((Date.now() - modelsStartMs) / 1000).toFixed(2)}s`,
-          }),
-        },
-        Date.now(),
-      );
       const openRouterModels =
         selectRecommendedOpenRouterModels(openRouterCatalog);
       const updatedConfigs = mergeOpenRouterConfigs(
@@ -697,31 +664,12 @@ export const useAuthCommand = (
       config.reloadModelProvidersConfig(updatedModelProviders);
       setExternalAuthState({
         title: t('OpenRouter Authentication'),
-        message: t('OpenRouter authorization complete. Requesting API key...'),
+        message: t('Finalizing OpenRouter setup...'),
         detail: t(
-          'Syncing OpenRouter models and finalizing local configuration.',
+          'Syncing OpenRouter models and updating your local configuration.',
         ),
       });
-      const refreshStartMs = Date.now();
       await config.refreshAuth(AuthType.USE_OPENAI);
-      addItem(
-        {
-          type: MessageType.INFO,
-          text: t('Refreshed OpenRouter auth in {{elapsed}}.', {
-            elapsed: `${((Date.now() - refreshStartMs) / 1000).toFixed(2)}s`,
-          }),
-        },
-        Date.now(),
-      );
-      addItem(
-        {
-          type: MessageType.INFO,
-          text: t('Total OpenRouter setup time: {{elapsed}}.', {
-            elapsed: `${((Date.now() - authStartMs) / 1000).toFixed(2)}s`,
-          }),
-        },
-        Date.now(),
-      );
 
       setAuthError(null);
       setExternalAuthState(null);
@@ -742,8 +690,16 @@ export const useAuthCommand = (
       addItem(
         {
           type: MessageType.INFO,
+          text: t('Use /model to switch models.'),
+        },
+        Date.now(),
+      );
+
+      addItem(
+        {
+          type: MessageType.INFO,
           text: t(
-            'You can use /model to switch between available OpenRouter models.',
+            'Want more OpenRouter models? Use /manage-models to browse and enable them.',
           ),
         },
         Date.now(),
@@ -752,9 +708,20 @@ export const useAuthCommand = (
       const authEvent = new AuthEvent(AuthType.USE_OPENAI, 'manual', 'success');
       logAuth(config, authEvent);
     } catch (error) {
+      setOpenRouterAuthAbortController(null);
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return;
+      }
       handleAuthFailure(error);
     }
-  }, [settings, config, handleAuthFailure, addItem, onAuthChange]);
+  }, [
+    settings,
+    config,
+    handleAuthFailure,
+    addItem,
+    onAuthChange,
+    setOpenRouterAuthAbortController,
+  ]);
 
   /**
    /**

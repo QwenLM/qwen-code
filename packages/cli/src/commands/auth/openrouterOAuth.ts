@@ -8,7 +8,7 @@ import { createServer, type Server } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import open from 'open';
 
-import type { ModelConfig } from '@qwen-code/qwen-code-core';
+import type { ProviderModelConfig as ModelConfig } from '@qwen-code/qwen-code-core';
 
 export const OPENROUTER_ENV_KEY = 'OPENROUTER_API_KEY';
 export const OPENROUTER_DEFAULT_MODEL = 'openai/gpt-4o-mini';
@@ -47,6 +47,7 @@ export const OPENROUTER_DEFAULT_MODELS: ModelConfig[] = [
 export interface OpenRouterOAuthResult {
   apiKey: string;
   userId?: string;
+  authorizationUrl?: string;
   authorizationCodeWaitMs?: number;
   apiKeyExchangeMs?: number;
 }
@@ -517,11 +518,21 @@ export async function exchangeAuthCodeForApiKey(params: {
   };
 }
 
+interface OAuthSignalTarget {
+  once(event: NodeJS.Signals, listener: (signal: NodeJS.Signals) => void): void;
+  removeListener(
+    event: NodeJS.Signals,
+    listener: (signal: NodeJS.Signals) => void,
+  ): void;
+}
+
 interface OpenRouterOAuthLoginDeps {
   openBrowser?: typeof open;
   startListener?: typeof startOAuthCallbackListener;
   exchangeApiKey?: typeof exchangeAuthCodeForApiKey;
   now?: () => number;
+  signalTarget?: OAuthSignalTarget;
+  abortSignal?: AbortSignal;
 }
 
 export async function runOpenRouterOAuthLogin(
@@ -539,14 +550,61 @@ export async function runOpenRouterOAuthLogin(
   const startListener = deps.startListener || startOAuthCallbackListener;
   const exchangeApiKey = deps.exchangeApiKey || exchangeAuthCodeForApiKey;
   const now = deps.now || Date.now;
+  const signalTarget = deps.signalTarget || process;
+  const abortSignal = deps.abortSignal;
 
   const listener = startListener(callbackUrl);
+  let cleanupSignalHandlers = () => {};
+  let cleanupAbortListener = () => {};
   try {
     await listener.ready;
     await openBrowser(authUrl);
 
+    const waitForCancel = new Promise<never>((_, reject) => {
+      const handleSignal = (signal: NodeJS.Signals) => {
+        reject(
+          new Error(
+            `OpenRouter OAuth cancelled by user (${signal}) while waiting for browser authorization.`,
+          ),
+        );
+      };
+
+      signalTarget.once('SIGINT', handleSignal);
+      signalTarget.once('SIGTERM', handleSignal);
+      cleanupSignalHandlers = () => {
+        signalTarget.removeListener('SIGINT', handleSignal);
+        signalTarget.removeListener('SIGTERM', handleSignal);
+      };
+    });
+
+    const waitForAbort = new Promise<never>((_, reject) => {
+      if (!abortSignal) {
+        return;
+      }
+
+      const handleAbort = () => {
+        reject(new DOMException('OpenRouter OAuth cancelled.', 'AbortError'));
+      };
+
+      if (abortSignal.aborted) {
+        handleAbort();
+        return;
+      }
+
+      abortSignal.addEventListener('abort', handleAbort, { once: true });
+      cleanupAbortListener = () => {
+        abortSignal.removeEventListener('abort', handleAbort);
+      };
+    });
+
     const waitStartMs = now();
-    const code = await listener.waitForCode;
+    const code = await Promise.race([
+      listener.waitForCode,
+      waitForCancel,
+      waitForAbort,
+    ]);
+    cleanupSignalHandlers();
+    cleanupAbortListener();
     const authorizationCodeWaitMs = now() - waitStartMs;
 
     const exchangeStartMs = now();
@@ -555,10 +613,13 @@ export async function runOpenRouterOAuthLogin(
 
     return {
       ...exchangeResult,
+      authorizationUrl: authUrl,
       authorizationCodeWaitMs,
       apiKeyExchangeMs,
     };
   } finally {
+    cleanupSignalHandlers();
+    cleanupAbortListener();
     void listener.close().catch(() => undefined);
   }
 }

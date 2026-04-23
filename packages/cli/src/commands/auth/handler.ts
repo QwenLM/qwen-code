@@ -30,7 +30,6 @@ import {
   mergeOpenRouterConfigs,
   OPENROUTER_DEFAULT_MODEL,
   OPENROUTER_ENV_KEY,
-  OPENROUTER_OAUTH_CALLBACK_URL,
   runOpenRouterOAuthLogin,
   selectRecommendedOpenRouterModels,
 } from './openrouterOAuth.js';
@@ -314,16 +313,17 @@ async function handleOpenRouterAuth(
     let selectedKey = options.key;
 
     if (!selectedKey) {
+      const oauthStartMs = Date.now();
+      const oauthResult = await runOpenRouterOAuthLogin();
       writeStdoutLine(
         t(
-          'Starting OpenRouter OAuth in your browser. Waiting for callback at {{callbackUrl}}',
+          'Starting OpenRouter OAuth in your browser. If needed, open this link manually: {{authorizationUrl}}',
           {
-            callbackUrl: OPENROUTER_OAUTH_CALLBACK_URL,
+            authorizationUrl:
+              oauthResult.authorizationUrl || 'https://openrouter.ai/auth',
           },
         ),
       );
-      const oauthStartMs = Date.now();
-      const oauthResult = await runOpenRouterOAuthLogin();
       writeStdoutLine(
         t('Waited for OpenRouter browser authorization in {{elapsed}}.', {
           elapsed:

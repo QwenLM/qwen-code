@@ -145,7 +145,7 @@ describe('openrouterOAuth', () => {
           }),
       ),
     };
-    const openBrowser = vi.fn(async () => undefined);
+    const openBrowser = vi.fn(async () => ({}) as never);
     const exchangeApiKey = vi.fn(async () => ({
       apiKey: 'or-key-123',
       userId: 'user-1',
@@ -163,6 +163,7 @@ describe('openrouterOAuth', () => {
     await expect(resultPromise).resolves.toMatchObject({
       apiKey: 'or-key-123',
       userId: 'user-1',
+      authorizationUrl: expect.stringContaining('https://openrouter.ai/auth'),
     });
     expect(listener.close).toHaveBeenCalled();
     resolveClose();
@@ -174,7 +175,7 @@ describe('openrouterOAuth', () => {
       waitForCode: Promise.resolve('auth-code-123'),
       close: vi.fn(async () => undefined),
     };
-    const openBrowser = vi.fn(async () => undefined);
+    const openBrowser = vi.fn(async () => ({}) as never);
     const exchangeApiKey = vi.fn(async () => ({
       apiKey: 'or-key-123',
       userId: 'user-1',
@@ -206,9 +207,108 @@ describe('openrouterOAuth', () => {
     expect(result).toEqual({
       apiKey: 'or-key-123',
       userId: 'user-1',
+      authorizationUrl: expect.stringContaining('https://openrouter.ai/auth'),
       authorizationCodeWaitMs: 1200,
       apiKeyExchangeMs: 450,
     });
+    expect(listener.close).toHaveBeenCalled();
+  });
+
+  it('allows cancelling OAuth wait with process signals after opening the browser', async () => {
+    let sigintHandler: ((signal: NodeJS.Signals) => void) | undefined;
+    let sigtermHandler: ((signal: NodeJS.Signals) => void) | undefined;
+    const signalTarget = {
+      once: vi.fn(
+        (
+          event: 'SIGINT' | 'SIGTERM',
+          handler: (signal: NodeJS.Signals) => void,
+        ) => {
+          if (event === 'SIGINT') {
+            sigintHandler = handler;
+          } else {
+            sigtermHandler = handler;
+          }
+        },
+      ),
+      removeListener: vi.fn(
+        (
+          _event: 'SIGINT' | 'SIGTERM',
+          _handler: (signal: NodeJS.Signals) => void,
+        ) => undefined,
+      ),
+    };
+    const listener = {
+      ready: Promise.resolve(),
+      waitForCode: new Promise<string>(() => undefined),
+      close: vi.fn(async () => undefined),
+    };
+    const openBrowser = vi.fn(async () => ({}) as never);
+    const exchangeApiKey = vi.fn();
+
+    const resultPromise = runOpenRouterOAuthLogin(
+      'http://localhost:3000/openrouter/callback',
+      {
+        openBrowser,
+        startListener: () => listener,
+        exchangeApiKey,
+        signalTarget,
+      },
+    );
+
+    await vi.waitFor(() => {
+      expect(openBrowser).toHaveBeenCalledTimes(1);
+      expect(sigintHandler).toBeTypeOf('function');
+      expect(sigtermHandler).toBeTypeOf('function');
+    });
+
+    sigintHandler?.('SIGINT');
+
+    await expect(resultPromise).rejects.toThrow(
+      'OpenRouter OAuth cancelled by user (SIGINT) while waiting for browser authorization.',
+    );
+    expect(exchangeApiKey).not.toHaveBeenCalled();
+    expect(listener.close).toHaveBeenCalled();
+    expect(signalTarget.removeListener).toHaveBeenCalledWith(
+      'SIGINT',
+      sigintHandler,
+    );
+    expect(signalTarget.removeListener).toHaveBeenCalledWith(
+      'SIGTERM',
+      sigtermHandler,
+    );
+  });
+
+  it('allows cancelling OAuth wait with an abort signal', async () => {
+    const abortController = new AbortController();
+    const listener = {
+      ready: Promise.resolve(),
+      waitForCode: new Promise<string>(() => undefined),
+      close: vi.fn(async () => undefined),
+    };
+    const openBrowser = vi.fn(async () => ({}) as never);
+    const exchangeApiKey = vi.fn();
+
+    const resultPromise = runOpenRouterOAuthLogin(
+      'http://localhost:3000/openrouter/callback',
+      {
+        openBrowser,
+        startListener: () => listener,
+        exchangeApiKey,
+        abortSignal: abortController.signal,
+      },
+    );
+
+    await vi.waitFor(() => {
+      expect(openBrowser).toHaveBeenCalledTimes(1);
+    });
+
+    abortController.abort();
+
+    await expect(resultPromise).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'OpenRouter OAuth cancelled.',
+    });
+    expect(exchangeApiKey).not.toHaveBeenCalled();
     expect(listener.close).toHaveBeenCalled();
   });
 
