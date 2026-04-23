@@ -1214,7 +1214,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         return {
           llmContent:
             `Background agent launched successfully.\n` +
-            `agentId: ${hookOpts.agentId} (internal ID — do not mention to the user. Use send_message with to: '${hookOpts.agentId}' to continue this agent, or task_stop to cancel.)\n` +
+            `agentId: ${hookOpts.agentId} (internal ID — do not mention to the user. Use ${ToolNames.SEND_MESSAGE} to continue this agent, or ${ToolNames.TASK_STOP} to cancel.)\n` +
             `The agent is working in the background. You will be notified automatically when it completes.\n` +
             `Do not duplicate this agent's work — avoid working with the same files or topics it is using. Work on non-overlapping tasks, or briefly tell the user what you launched and end your response.\n` +
             `output_file: ${jsonlPath}\n` +

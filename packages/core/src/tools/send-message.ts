@@ -23,7 +23,7 @@ import {
 
 export interface SendMessageParams {
   /** The ID of the background agent to send the message to. */
-  task_id: string;
+  to: string;
   /** The text message to deliver to the agent. */
   message: string;
 }
@@ -40,19 +40,19 @@ class SendMessageInvocation extends BaseToolInvocation<
   }
 
   getDescription(): string {
-    return `Send message to agent ${this.params.task_id}`;
+    return `Send message to agent ${this.params.to}`;
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
     const registry = this.config.getBackgroundTaskRegistry();
-    const entry = registry.get(this.params.task_id);
+    const entry = registry.get(this.params.to);
 
     if (!entry) {
       return {
-        llmContent: `Error: No background agent found with ID "${this.params.task_id}".`,
+        llmContent: `Error: No background agent found with ID "${this.params.to}".`,
         returnDisplay: 'Agent not found.',
         error: {
-          message: `Agent not found: ${this.params.task_id}`,
+          message: `Agent not found: ${this.params.to}`,
           type: ToolErrorType.SEND_MESSAGE_AGENT_NOT_FOUND,
         },
       };
@@ -60,19 +60,19 @@ class SendMessageInvocation extends BaseToolInvocation<
 
     if (entry.status !== 'running') {
       return {
-        llmContent: `Error: Background agent "${this.params.task_id}" is not running (status: ${entry.status}). Cannot send messages to stopped agents.`,
+        llmContent: `Error: Background agent "${this.params.to}" is not running (status: ${entry.status}). Cannot send messages to stopped agents.`,
         returnDisplay: `Agent not running (${entry.status}).`,
         error: {
-          message: `Agent is ${entry.status}: ${this.params.task_id}`,
+          message: `Agent is ${entry.status}: ${this.params.to}`,
           type: ToolErrorType.SEND_MESSAGE_AGENT_NOT_RUNNING,
         },
       };
     }
 
-    registry.queueMessage(this.params.task_id, this.params.message);
+    registry.queueMessage(this.params.to, this.params.message);
 
     return {
-      llmContent: `Message queued for delivery to background agent "${this.params.task_id}". The agent will receive it at the next tool-round boundary.`,
+      llmContent: `Message queued for delivery to background agent "${this.params.to}". The agent will receive it at the next tool-round boundary.`,
       returnDisplay: `Message queued for ${entry.description}`,
     };
   }
@@ -93,7 +93,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
       {
         type: 'object',
         properties: {
-          task_id: {
+          to: {
             type: 'string',
             description:
               'The ID of the running background agent (from the launch response).',
@@ -103,7 +103,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
             description: 'The text message to send to the agent.',
           },
         },
-        required: ['task_id', 'message'],
+        required: ['to', 'message'],
         additionalProperties: false,
       },
     );

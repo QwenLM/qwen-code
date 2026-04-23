@@ -13,6 +13,7 @@ import {
 import type { PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
 import { ToolConfirmationOutcome } from '../tools.js';
+import { ToolNames } from '../tool-names.js';
 import { type Config, ApprovalMode } from '../../config/config.js';
 import { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
@@ -1481,6 +1482,12 @@ describe('AgentTool', () => {
 
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Background agent launched');
+      expect(llmText).toContain(
+        `Use ${ToolNames.SEND_MESSAGE} to continue this agent`,
+      );
+      expect(llmText).toContain(`or ${ToolNames.TASK_STOP} to cancel.`);
+      expect(llmText).not.toContain('with to:');
+      expect(llmText).not.toContain('Use send_message with task_id:');
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({
           description: 'Start monitor',

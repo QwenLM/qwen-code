@@ -33,7 +33,7 @@ describe('SendMessageTool', () => {
     });
 
     const result = await tool.validateBuildAndExecute(
-      { task_id: 'agent-1', message: 'do more work' },
+      { to: 'agent-1', message: 'do more work' },
       new AbortController().signal,
     );
 
@@ -52,11 +52,11 @@ describe('SendMessageTool', () => {
     });
 
     await tool.validateBuildAndExecute(
-      { task_id: 'agent-1', message: 'first' },
+      { to: 'agent-1', message: 'first' },
       new AbortController().signal,
     );
     await tool.validateBuildAndExecute(
-      { task_id: 'agent-1', message: 'second' },
+      { to: 'agent-1', message: 'second' },
       new AbortController().signal,
     );
 
@@ -68,7 +68,7 @@ describe('SendMessageTool', () => {
 
   it('returns error for non-existent agent', async () => {
     const result = await tool.validateBuildAndExecute(
-      { task_id: 'nope', message: 'hello' },
+      { to: 'nope', message: 'hello' },
       new AbortController().signal,
     );
 
@@ -87,7 +87,7 @@ describe('SendMessageTool', () => {
     registry.complete('agent-1', 'done');
 
     const result = await tool.validateBuildAndExecute(
-      { task_id: 'agent-1', message: 'hello' },
+      { to: 'agent-1', message: 'hello' },
       new AbortController().signal,
     );
 
@@ -112,7 +112,7 @@ describe('SendMessageTool', () => {
     registry.cancel('agent-1');
 
     const result = await tool.validateBuildAndExecute(
-      { task_id: 'agent-1', message: 'too late' },
+      { to: 'agent-1', message: 'too late' },
       new AbortController().signal,
     );
 
@@ -132,7 +132,7 @@ describe('SendMessageTool', () => {
     });
 
     const result = await tool.validateBuildAndExecute(
-      { task_id: 'agent-1', message: 'focus on login' },
+      { to: 'agent-1', message: 'focus on login' },
       new AbortController().signal,
     );
 
