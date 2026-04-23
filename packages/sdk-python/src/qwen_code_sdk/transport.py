@@ -97,10 +97,14 @@ class ProcessTransport:
             if not chunk:
                 return
             text = chunk.decode("utf-8", errors="replace").rstrip("\n")
-            if self._options.stderr is not None:
-                self._options.stderr(text)
-            elif self._options.debug:
-                print(text, file=sys.stderr)
+            try:
+                if self._options.stderr is not None:
+                    self._options.stderr(text)
+                elif self._options.debug:
+                    print(text, file=sys.stderr)
+            except Exception:
+                if self._options.debug:
+                    print(text, file=sys.stderr)
 
     def write(self, data: str) -> None:
         if self._closed:

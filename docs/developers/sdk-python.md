@@ -112,6 +112,9 @@ When the CLI emits a `can_use_tool` control request, the SDK routes it through
 - Default timeout: 60 seconds
 - Timeout fallback: deny
 - Callback exceptions: converted to deny with an error message
+- Callback context: `cancel_event`, `suggestions`, and `blocked_path`
+- Callback contract: `can_use_tool` must be async with 3 positional arguments;
+  `stderr` must accept 1 positional string argument
 
 ## Error Model
 

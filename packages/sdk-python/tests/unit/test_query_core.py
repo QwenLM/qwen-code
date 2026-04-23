@@ -299,6 +299,150 @@ async def test_incoming_control_request_cancel_does_not_block_router() -> None:
 
 
 @pytest.mark.asyncio
+async def test_permission_request_passes_blocked_path_to_callback() -> None:
+    transport = FakeTransport()
+    captured_context: dict[str, Any] | None = None
+
+    async def can_use_tool(
+        tool_name: str,
+        tool_input: dict[str, Any],
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        nonlocal captured_context
+        assert tool_name == "write_file"
+        assert tool_input["path"] == "demo.txt"
+        captured_context = context
+        return {"behavior": "deny", "message": "blocked"}
+
+    query = Query(
+        transport=transport,  # type: ignore[arg-type]
+        options=QueryOptions(
+            can_use_tool=can_use_tool,
+            timeout=TimeoutOptions(
+                can_use_tool=1.0,
+                control_request=0.2,
+                stream_close=0.05,
+            ),
+        ),
+        prompt="hello",
+        session_id=VALID_UUID,
+    )
+    await query._ensure_started()
+
+    init_request = await _wait_for_request(transport, "initialize")
+    transport.push(
+        {
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": init_request["request_id"],
+                "response": {},
+            },
+        }
+    )
+    await _wait_for(
+        lambda: any(payload.get("type") == "user" for payload in transport.writes)
+    )
+
+    transport.push(
+        {
+            "type": "control_request",
+            "request_id": "incoming-2",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "write_file",
+                "tool_use_id": "tool-2",
+                "input": {"path": "demo.txt", "content": "hello"},
+                "permission_suggestions": [],
+                "blocked_path": "/tmp/demo.txt",
+            },
+        }
+    )
+
+    response = await _wait_for_control_response(transport, "incoming-2")
+
+    assert captured_context is not None
+    assert isinstance(captured_context["cancel_event"], asyncio.Event)
+    assert captured_context["suggestions"] == []
+    assert captured_context["blocked_path"] == "/tmp/demo.txt"
+    assert response["response"]["subtype"] == "success"
+    assert response["response"]["response"] == {
+        "behavior": "deny",
+        "message": "blocked",
+    }
+    await query.close()
+
+
+@pytest.mark.asyncio
+async def test_permission_request_cancelled_callback_returns_deny() -> None:
+    transport = FakeTransport()
+
+    async def can_use_tool(
+        tool_name: str,
+        tool_input: dict[str, Any],
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        assert tool_name == "write_file"
+        assert tool_input["path"] == "demo.txt"
+        assert isinstance(context["cancel_event"], asyncio.Event)
+        raise asyncio.CancelledError()
+
+    query = Query(
+        transport=transport,  # type: ignore[arg-type]
+        options=QueryOptions(
+            can_use_tool=can_use_tool,
+            timeout=TimeoutOptions(
+                can_use_tool=1.0,
+                control_request=0.2,
+                stream_close=0.05,
+            ),
+        ),
+        prompt="hello",
+        session_id=VALID_UUID,
+    )
+    await query._ensure_started()
+
+    init_request = await _wait_for_request(transport, "initialize")
+    transport.push(
+        {
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": init_request["request_id"],
+                "response": {},
+            },
+        }
+    )
+    await _wait_for(
+        lambda: any(payload.get("type") == "user" for payload in transport.writes)
+    )
+
+    transport.push(
+        {
+            "type": "control_request",
+            "request_id": "incoming-3",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "write_file",
+                "tool_use_id": "tool-3",
+                "input": {"path": "demo.txt", "content": "hello"},
+                "permission_suggestions": [],
+                "blocked_path": None,
+            },
+        }
+    )
+
+    response = await _wait_for_control_response(transport, "incoming-3")
+
+    assert response["response"]["subtype"] == "success"
+    assert response["response"]["response"] == {
+        "behavior": "deny",
+        "message": "Permission check failed: callback cancelled",
+    }
+    await query.close()
+
+
+@pytest.mark.asyncio
 async def test_finish_with_error_closes_transport_and_fails_pending_requests() -> None:
     transport = FakeTransport()
     query = await _start_query(transport)

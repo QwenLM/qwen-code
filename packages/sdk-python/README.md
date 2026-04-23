@@ -95,6 +95,11 @@ result = query(
 The callback defaults to deny. If it does not return within 60 seconds, the SDK
 auto-denies the tool request.
 
+The `context` argument includes `cancel_event`, `suggestions`, and
+`blocked_path` when the CLI provides a path-specific permission target.
+`can_use_tool` must be an `async def` callback accepting
+`(tool_name, tool_input, context)`. `stderr` must accept a single `str`.
+
 ## Errors
 
 - `ValidationError`: invalid query options or malformed session identifiers

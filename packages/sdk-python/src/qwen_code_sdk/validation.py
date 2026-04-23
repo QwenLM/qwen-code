@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from uuid import RFC_4122, UUID
 
 from .errors import ValidationError
-from .types import QueryOptions
+from .types import (
+    QueryOptions,
+    _validate_can_use_tool_callable,
+    _validate_stderr_callable,
+)
 
 _VALID_PERMISSION_MODES = {"default", "plan", "auto-edit", "yolo"}
 _VALID_AUTH_TYPES = {"openai", "anthropic", "qwen-oauth", "gemini", "vertex-ai"}
@@ -26,6 +31,11 @@ def validate_query_options(options: QueryOptions) -> None:
             f"Invalid auth_type: {options.auth_type!r}. "
             "Expected one of: openai, anthropic, qwen-oauth, gemini, vertex-ai."
         )
+
+    _validate_optional_callable(
+        options.can_use_tool, _validate_can_use_tool_callable
+    )
+    _validate_optional_callable(options.stderr, _validate_stderr_callable)
 
     if options.resume and options.continue_session:
         raise ValidationError(
@@ -55,6 +65,15 @@ def validate_query_options(options: QueryOptions) -> None:
         and not options.path_to_qwen_executable.strip()
     ):
         raise ValidationError("path_to_qwen_executable cannot be empty")
+
+
+def _validate_optional_callable(
+    value: object,
+    validator: Callable[[object, type[ValidationError]], None],
+) -> None:
+    if value is None:
+        return
+    validator(value, ValidationError)
 
 
 def validate_session_id(value: str, param_name: str) -> None:

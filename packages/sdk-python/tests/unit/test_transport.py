@@ -235,3 +235,55 @@ async def test_read_messages_skips_malformed_json_lines() -> None:
 
     assert len(messages) == 1
     assert messages[0]["type"] == "system"
+
+
+@pytest.mark.asyncio
+async def test_stderr_callback_exceptions_do_not_fail_transport() -> None:
+    class FakeStdout:
+        async def readline(self) -> bytes:
+            return b""
+
+    class FakeStderr:
+        def __init__(self) -> None:
+            self._lines = iter([b"error message\n", b""])
+
+        async def readline(self) -> bytes:
+            return next(self._lines, b"")
+
+    transport_module = __import__(
+        "qwen_code_sdk.transport",
+        fromlist=["ProcessTransport"],
+    )
+
+    callback_calls = 0
+
+    def stderr_callback(text: str) -> None:
+        nonlocal callback_calls
+        callback_calls += 1
+        assert text == "error message"
+        raise RuntimeError("sink failed")
+
+    transport = transport_module.ProcessTransport(
+        QueryOptions(
+            stderr=stderr_callback,
+            timeout=TimeoutOptions(),
+        )
+    )
+
+    class FakeProcess:
+        returncode = 0
+        stdin = None
+
+        def __init__(self) -> None:
+            self.stdout = FakeStdout()
+            self.stderr = FakeStderr()
+
+        async def wait(self) -> int:
+            return 0
+
+    transport._process = FakeProcess()
+    transport._stderr_task = asyncio.create_task(transport._forward_stderr())
+
+    await transport.wait_for_exit()
+
+    assert callback_calls == 1

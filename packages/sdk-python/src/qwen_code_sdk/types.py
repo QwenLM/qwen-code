@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass
+from inspect import Parameter, Signature, iscoroutinefunction, signature
 from typing import (
     Any,
     Literal,
     TypeAlias,
     TypedDict,
+    cast,
 )
 
 from typing_extensions import NotRequired
@@ -47,6 +49,7 @@ PermissionResult: TypeAlias = PermissionAllowResult | PermissionDenyResult
 class CanUseToolContext(TypedDict):
     cancel_event: Any
     suggestions: list[PermissionSuggestion] | None
+    blocked_path: str | None
 
 
 CanUseTool: TypeAlias = Callable[
@@ -150,7 +153,10 @@ class QueryOptions:
             model=_as_optional_str(data, "model"),
             path_to_qwen_executable=_as_optional_str(data, "path_to_qwen_executable"),
             permission_mode=data.get("permission_mode"),
-            can_use_tool=data.get("can_use_tool"),
+            can_use_tool=cast(
+                CanUseTool | None,
+                _as_optional_callable(data, "can_use_tool"),
+            ),
             env=_as_optional_str_dict(data, "env"),
             system_prompt=_as_optional_str(data, "system_prompt"),
             append_system_prompt=_as_optional_str(data, "append_system_prompt"),
@@ -169,7 +175,10 @@ class QueryOptions:
             session_id=_as_optional_str(data, "session_id"),
             timeout=timeout,
             mcp_servers=_as_optional_nested_dict(data, "mcp_servers"),
-            stderr=data.get("stderr"),
+            stderr=cast(
+                Callable[[str], None] | None,
+                _as_optional_callable(data, "stderr"),
+            ),
         )
 
 
@@ -198,6 +207,79 @@ def _as_optional_bool(data: Mapping[str, Any], key: str) -> bool | None:
     if not isinstance(raw, bool):
         raise TypeError(f"{key} must be a boolean")
     return raw
+
+
+def _as_optional_callable(
+    data: Mapping[str, Any], key: str
+) -> Callable[..., Any] | None:
+    raw = data.get(key)
+    if raw is None:
+        return None
+    if not callable(raw):
+        raise TypeError(f"{key} must be callable")
+    if key == "can_use_tool":
+        _validate_can_use_tool_callable(raw, error_type=TypeError)
+    elif key == "stderr":
+        _validate_stderr_callable(raw, error_type=TypeError)
+    return cast(Callable[..., Any], raw)
+
+
+def _validate_can_use_tool_callable(
+    value: object, error_type: type[Exception]
+) -> None:
+    if not callable(value):
+        raise error_type("can_use_tool must be callable")
+
+    if not iscoroutinefunction(value):
+        raise error_type("can_use_tool must be an async callable")
+
+    try:
+        sig = signature(value)
+    except (TypeError, ValueError):
+        return
+
+    if not _supports_argument_count(sig, 3):
+        raise error_type(
+            "can_use_tool must accept exactly 3 positional arguments"
+        )
+
+
+def _validate_stderr_callable(value: object, error_type: type[Exception]) -> None:
+    if not callable(value):
+        raise error_type("stderr must be callable")
+
+    try:
+        sig = signature(value)
+    except (TypeError, ValueError):
+        return
+
+    if not _supports_argument_count(sig, 1):
+        raise error_type("stderr must accept exactly 1 positional argument")
+
+
+def _supports_argument_count(sig: Signature, count: int) -> bool:
+    params = list(sig.parameters.values())
+    positional_params = [
+        param
+        for param in params
+        if param.kind
+        in (
+            Parameter.POSITIONAL_ONLY,
+            Parameter.POSITIONAL_OR_KEYWORD,
+        )
+    ]
+    required_positional = [
+        param for param in positional_params if param.default is Parameter.empty
+    ]
+    has_var_positional = any(
+        param.kind is Parameter.VAR_POSITIONAL for param in params
+    )
+
+    if len(required_positional) > count:
+        return False
+    if has_var_positional:
+        return True
+    return len(positional_params) >= count
 
 
 def _as_optional_str_dict(data: Mapping[str, Any], key: str) -> dict[str, str] | None:

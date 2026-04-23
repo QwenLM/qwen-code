@@ -269,6 +269,7 @@ class Query:
         context: CanUseToolContext = {
             "cancel_event": cancel_event,
             "suggestions": payload.get("permission_suggestions"),
+            "blocked_path": payload.get("blocked_path"),
         }
 
         try:
@@ -280,6 +281,13 @@ class Query:
             return {
                 "behavior": "deny",
                 "message": "Permission request timed out",
+            }
+        except asyncio.CancelledError:
+            if cancel_event.is_set():
+                raise
+            return {
+                "behavior": "deny",
+                "message": "Permission check failed: callback cancelled",
             }
         except Exception as exc:
             return {
