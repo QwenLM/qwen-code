@@ -39,6 +39,7 @@ import {
   isInForkExecution,
   runInForkContext,
 } from './fork-subagent.js';
+import { getCurrentAgentId, runWithAgentContext } from './agent-context.js';
 import {
   AgentEventEmitter,
   AgentEventType,
@@ -1106,7 +1107,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           agentType: hookOpts.agentType,
           description: this.params.description,
           parentSessionId: sessionId,
-          parentAgentId: null,
+          // Populated when a subagent (whose reasoning loop is wrapped in
+          // runWithAgentContext below) launches a nested agent. Null at
+          // top-level launches from the user session.
+          parentAgentId: getCurrentAgentId(),
           createdAt: new Date().toISOString(),
         });
 
@@ -1199,7 +1203,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             cleanupJsonl?.();
           }
         };
-        void (isFork ? runInForkContext(bgBody) : bgBody());
+        // Wrap in the agent-identity frame so nested `agent` tool calls
+        // from this subagent's model record this agent's id as their
+        // `parentAgentId` in the sidecar meta.
+        const framedBgBody = () =>
+          runWithAgentContext({ agentId: hookOpts.agentId }, bgBody);
+        void (isFork ? runInForkContext(framedBgBody) : framedBgBody());
 
         this.updateDisplay({ status: 'background' as const }, updateOutput);
         return {
@@ -1208,18 +1217,24 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
       }
 
+      // Same agent-identity frame as the background path: a foreground
+      // subagent can also launch nested agents, and those nested launches
+      // need to see this subagent's id as their `parentAgentId`.
+      const runFramed = () =>
+        runWithAgentContext({ agentId: hookOpts.agentId }, () =>
+          this.runSubagentWithHooks(subagent, contextState, hookOpts),
+        );
+
       if (isFork) {
         // Background fork execution. Run under an AsyncLocalStorage frame so
         // nested `agent` tool calls by the fork's model can be detected.
-        void runInForkContext(() =>
-          this.runSubagentWithHooks(subagent, contextState, hookOpts),
-        );
+        void runInForkContext(runFramed);
         return {
           llmContent: [{ text: FORK_PLACEHOLDER_RESULT }],
           returnDisplay: this.currentDisplay!,
         };
       } else {
-        await this.runSubagentWithHooks(subagent, contextState, hookOpts);
+        await runFramed();
         const finalText = subagent.getFinalText();
         const terminateMode = subagent.getTerminateMode();
         if (terminateMode === AgentTerminateMode.ERROR) {

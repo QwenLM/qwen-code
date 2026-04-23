@@ -31,6 +31,10 @@ import type {
 import { partToString } from '../../utils/partUtils.js';
 import type { HookSystem } from '../../hooks/hookSystem.js';
 import { PermissionMode } from '../../hooks/types.js';
+import { runWithAgentContext } from './agent-context.js';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 // Type for accessing protected methods in tests
 type AgentToolInvocation = {
@@ -1576,6 +1580,77 @@ describe('AgentTool', () => {
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({ toolUseId: 'call-xyz-789' }),
       );
+    });
+
+    describe('parentAgentId sidecar', () => {
+      let tempProjectDir: string;
+
+      beforeEach(() => {
+        tempProjectDir = fs.mkdtempSync(
+          path.join(os.tmpdir(), 'agent-parent-id-'),
+        );
+        (config as unknown as Record<string, unknown>)['storage'] = {
+          getProjectDir: () => tempProjectDir,
+        };
+      });
+
+      afterEach(() => {
+        fs.rmSync(tempProjectDir, { recursive: true, force: true });
+      });
+
+      const readSidecar = (agentId: string) => {
+        const metaPath = path.join(
+          tempProjectDir,
+          'subagents',
+          'test-session-id',
+          `agent-${agentId}.meta.json`,
+        );
+        return JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      };
+
+      it('writes parentAgentId: null at top-level launches', async () => {
+        const params: AgentParams = {
+          description: 'Start monitor',
+          prompt: 'Watch for changes',
+          subagent_type: 'monitor',
+        };
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(params);
+        (
+          invocation as unknown as { setCallId: (id: string) => void }
+        ).setCallId('top-1');
+        await invocation.execute();
+
+        const meta = readSidecar('monitor-top-1');
+        expect(meta.parentAgentId).toBeNull();
+      });
+
+      it('records the launching agent id when launched from a subagent frame', async () => {
+        const params: AgentParams = {
+          description: 'Start monitor',
+          prompt: 'Watch for changes',
+          subagent_type: 'monitor',
+        };
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(params);
+        (
+          invocation as unknown as { setCallId: (id: string) => void }
+        ).setCallId('nested-1');
+
+        await runWithAgentContext(
+          { agentId: 'explore-parent-42' },
+          async () => {
+            await invocation.execute();
+          },
+        );
+
+        const meta = readSidecar('monitor-nested-1');
+        expect(meta.parentAgentId).toBe('explore-parent-42');
+      });
     });
   });
 });
