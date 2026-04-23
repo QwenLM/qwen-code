@@ -6,18 +6,23 @@
 
 import { useEffect, useRef } from 'react';
 import { StreamingState } from '../types.js';
-import {
-  notifyTerminalAttention,
-  AttentionNotificationReason,
-} from '../../utils/attentionNotification.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
   fireNotificationHook,
   NotificationType,
 } from '@qwen-code/qwen-code-core';
+import type { TerminalNotification } from './useTerminalNotification.js';
+import { sendNotification } from '../../services/notificationService.js';
 
 export const LONG_TASK_NOTIFICATION_THRESHOLD_SECONDS = 20;
+
+const NOTIFICATION_TITLE = 'Qwen Code';
+
+interface PendingToolCall {
+  status: string;
+  request: { name: string };
+}
 
 interface UseAttentionNotificationsOptions {
   isFocused: boolean;
@@ -25,6 +30,8 @@ interface UseAttentionNotificationsOptions {
   elapsedTime: number;
   settings: LoadedSettings;
   config?: Config;
+  terminal: TerminalNotification;
+  pendingToolCalls?: PendingToolCall[];
 }
 
 export const useAttentionNotifications = ({
@@ -33,8 +40,12 @@ export const useAttentionNotifications = ({
   elapsedTime,
   settings,
   config,
+  terminal,
+  pendingToolCalls,
 }: UseAttentionNotificationsOptions) => {
-  const terminalBellEnabled = settings?.merged?.general?.terminalBell ?? true;
+  const terminalBellEnabled: boolean =
+    (settings?.merged?.general?.terminalBell as boolean) ?? true;
+
   const awaitingNotificationSentRef = useRef(false);
   const respondingElapsedRef = useRef(0);
   const idleNotificationSentRef = useRef(false);
@@ -43,23 +54,39 @@ export const useAttentionNotifications = ({
     if (
       streamingState === StreamingState.WaitingForConfirmation &&
       !isFocused &&
-      !awaitingNotificationSentRef.current
+      !awaitingNotificationSentRef.current &&
+      terminalBellEnabled
     ) {
-      notifyTerminalAttention(AttentionNotificationReason.ToolApproval, {
-        enabled: terminalBellEnabled,
-      });
+      const awaitingTool = pendingToolCalls?.find(
+        (tc) => tc.status === 'awaiting_approval',
+      );
+      const toolName = awaitingTool?.request.name;
+      const message = toolName
+        ? `Qwen needs your permission to use ${toolName}`
+        : 'Qwen is waiting for your input';
+
+      sendNotification(
+        { message, title: NOTIFICATION_TITLE },
+        terminal,
+        terminalBellEnabled,
+      );
       awaitingNotificationSentRef.current = true;
     }
 
     if (streamingState !== StreamingState.WaitingForConfirmation || isFocused) {
       awaitingNotificationSentRef.current = false;
     }
-  }, [isFocused, streamingState, terminalBellEnabled]);
+  }, [
+    isFocused,
+    streamingState,
+    terminalBellEnabled,
+    terminal,
+    pendingToolCalls,
+  ]);
 
   useEffect(() => {
     if (streamingState === StreamingState.Responding) {
       respondingElapsedRef.current = elapsedTime;
-      // Reset idle notification flag when responding
       idleNotificationSentRef.current = false;
       return;
     }
@@ -68,12 +95,16 @@ export const useAttentionNotifications = ({
       const wasLongTask =
         respondingElapsedRef.current >=
         LONG_TASK_NOTIFICATION_THRESHOLD_SECONDS;
-      if (wasLongTask && !isFocused) {
-        notifyTerminalAttention(AttentionNotificationReason.LongTaskComplete, {
-          enabled: terminalBellEnabled,
-        });
+      if (wasLongTask && !isFocused && terminalBellEnabled) {
+        sendNotification(
+          {
+            message: 'Qwen is waiting for your input',
+            title: NOTIFICATION_TITLE,
+          },
+          terminal,
+          terminalBellEnabled,
+        );
       }
-      // Reset tracking for next task
       respondingElapsedRef.current = 0;
 
       // Fire idle_prompt notification hook when entering idle state
@@ -83,12 +114,11 @@ export const useAttentionNotifications = ({
         if (hooksEnabled && messageBus) {
           fireNotificationHook(
             messageBus,
-            'Qwen Code is waiting for your input',
+            'Qwen is waiting for your input',
             NotificationType.IdlePrompt,
             'Waiting for input',
           ).catch(() => {
             // Silently ignore errors - fireNotificationHook has internal error handling
-            // and notification hooks should not block the idle flow
           });
         }
         idleNotificationSentRef.current = true;
@@ -96,7 +126,13 @@ export const useAttentionNotifications = ({
       return;
     }
 
-    // Reset idle notification flag when in WaitingForConfirmation state
     idleNotificationSentRef.current = false;
-  }, [streamingState, elapsedTime, isFocused, terminalBellEnabled, config]);
+  }, [
+    streamingState,
+    elapsedTime,
+    isFocused,
+    terminalBellEnabled,
+    config,
+    terminal,
+  ]);
 };
