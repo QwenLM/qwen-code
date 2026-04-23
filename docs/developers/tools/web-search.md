@@ -2,6 +2,76 @@
 
 Qwen Code supports web search capabilities through **MCP (Model Context Protocol)** integrations. Rather than a built-in search tool, web search is provided by connecting to external MCP servers, giving you full flexibility to choose the search service that best fits your needs.
 
+## ⚠️ Breaking Change: Built-in `web_search` Tool Removed
+
+> **Affected versions:** `V0.0.7+` through the last release with built-in web search support.
+
+The built-in `web_search` tool and all its associated configuration have been **removed**. If you were using any of the following, you should migrate to the MCP-based approach described in this document:
+
+| Removed                                                                | What to do                                                                                  |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `webSearch` block in `settings.json`                                   | Configure an MCP server in `mcpServers` instead (see below)                                 |
+| `advanced.tavilyApiKey` in `settings.json`                             | Use the [Tavily MCP server](#tavily-websearch)                                              |
+| `TAVILY_API_KEY` environment variable                                  | Use the [Tavily MCP server](#tavily-websearch)                                              |
+| `DASHSCOPE_API_KEY` for web search                                     | Use the [Alibaba Cloud Bailian WebSearch MCP](#alibaba-cloud-bailian-websearch-recommended) |
+| `GLM_API_KEY` for web search                                           | Use the [GLM WebSearch Prime MCP](#glm-websearch-prime-zhipuai)                             |
+| `--tavily-api-key` / `--glm-api-key` / `--dashscope-api-key` CLI flags | Configure via `mcpServers` in `settings.json`                                               |
+
+### Migration Examples
+
+**Before (Tavily via built-in tool):**
+
+```json
+{
+  "webSearch": {
+    "provider": [{ "type": "tavily", "apiKey": "tvly-xxx" }],
+    "default": "tavily"
+  }
+}
+```
+
+**After (Tavily via MCP):**
+
+```json
+{
+  "mcpServers": {
+    "tavily": {
+      "httpUrl": "https://mcp.tavily.com/mcp/?tavilyApiKey=tvly-xxx"
+    }
+  }
+}
+```
+
+---
+
+**Before (DashScope via built-in tool):**
+
+```json
+{
+  "webSearch": {
+    "provider": [{ "type": "dashscope", "apiKey": "sk-xxx" }],
+    "default": "dashscope"
+  }
+}
+```
+
+**After (Alibaba Cloud Bailian WebSearch via MCP):**
+
+```json
+{
+  "mcpServers": {
+    "WebSearch": {
+      "httpUrl": "https://dashscope.aliyuncs.com/api/v1/mcps/WebSearch/mcp",
+      "headers": {
+        "Authorization": "Bearer sk-xxx"
+      }
+    }
+  }
+}
+```
+
+---
+
 ## Supported MCP Web Search Services
 
 ### Alibaba Cloud Bailian WebSearch (Recommended)
