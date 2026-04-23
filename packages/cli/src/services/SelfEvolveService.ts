@@ -107,6 +107,19 @@ interface SelfEvolveAttemptReport {
   changedFiles?: string[];
 }
 
+interface SelfEvolveSelectionReport {
+  status?: 'selected' | 'no_safe_task' | 'failed';
+  selectedCandidateIndex?: number;
+  selectedTask?: {
+    title?: string;
+    source?: CandidateSource | string;
+    location?: string;
+    rationale?: string;
+  };
+  summary?: string;
+  learnings?: string[];
+}
+
 interface SelfEvolveSelectedTaskMetadata {
   selectedTaskSource?: string;
   selectedTaskLocation?: string;
@@ -409,6 +422,7 @@ export class SelfEvolveIdleTimer {
 class SelfEvolveChildProgressParser {
   private pendingLine = '';
   private readonly emittedLines = new Set<string>();
+  private sawSelectedTask = false;
 
   constructor(
     private readonly emit: (event: SelfEvolveProgressEvent) => void,
@@ -441,6 +455,14 @@ class SelfEvolveChildProgressParser {
     }
 
     this.flushPendingLine();
+  }
+
+  hasSeenSelectedTask(): boolean {
+    return this.sawSelectedTask;
+  }
+
+  markSelectedTaskSeen(): void {
+    this.sawSelectedTask = true;
   }
 
   private consumeText(text: string): void {
@@ -500,6 +522,12 @@ class SelfEvolveChildProgressParser {
       typeof payload.kind === 'string' && payload.kind.trim()
         ? payload.kind.trim()
         : 'update';
+    if (kind === 'selected_task' && this.sawSelectedTask) {
+      return;
+    }
+    if (kind === 'selected_task') {
+      this.sawSelectedTask = true;
+    }
     const detailPrefix = round == null ? 'Child' : `Child round ${round}`;
 
     this.emit({
@@ -891,6 +919,11 @@ export class SelfEvolveService {
         '.qwen',
         'self-evolve-report.json',
       );
+      const selectionPath = path.join(
+        reviewWorktree.path,
+        '.qwen',
+        'self-evolve-selection.json',
+      );
       await ensureDir(path.dirname(reportPath));
       const qwenSession = this.deps.createQwenSession({
         cwd: reviewWorktree.path,
@@ -901,28 +934,198 @@ export class SelfEvolveService {
           QWEN_RUNTIME_DIR: path.join(attemptPaths.attemptDir, 'child-runtime'),
         },
       });
+      let selection: SelfEvolveSelectionReport | null = null;
+      let selectionTurnResult: QwenSessionTurnResult | undefined;
       let report: SelfEvolveAttemptReport | null = null;
       let finalTurnResult: QwenSessionTurnResult | undefined;
       const childProgressParser = new SelfEvolveChildProgressParser(
         emitProgress,
       );
+      let selectedCandidateSelection:
+        | {
+            candidate: SelfEvolveCandidate;
+            index: number;
+          }
+        | undefined;
 
       try {
         emitProgress({
           stage: 'starting_session',
-          message: 'Starting the isolated self-evolve session...',
+          message:
+            'Starting the isolated self-evolve session and choosing a task...',
         });
-        finalTurnResult = await qwenSession.sendPrompt(
-          this.buildPrompt({
+        selectionTurnResult = await qwenSession.sendPrompt(
+          this.buildSelectionPrompt({
             projectRoot,
-            reportPath,
+            selectionPath,
             candidates,
             direction,
           }),
           QWEN_ATTEMPT_IDLE_TIMEOUT_MS,
           (message) => childProgressParser.handle(message),
         );
+        selection =
+          await safeReadJson<SelfEvolveSelectionReport>(selectionPath);
+        if (!selection) {
+          emitProgress({
+            stage: 'child_activity',
+            message:
+              'Child omitted the required selection report; requesting a protocol repair.',
+          });
+          selectionTurnResult = await qwenSession.sendPrompt(
+            this.buildSelectionRepairPrompt({
+              projectRoot,
+              selectionPath,
+              candidates,
+              direction,
+            }),
+            QWEN_ATTEMPT_IDLE_TIMEOUT_MS,
+            (message) => childProgressParser.handle(message),
+          );
+          selection =
+            await safeReadJson<SelfEvolveSelectionReport>(selectionPath);
+        }
+
+        if (selectionTurnResult.timedOut || selectionTurnResult.childExited) {
+          const learnings: string[] = [];
+          if (selectionTurnResult.timedOut) {
+            learnings.push(
+              'The child Qwen session timed out while selecting a task.',
+            );
+          }
+          if (selectionTurnResult.childExited) {
+            learnings.push(
+              `The child Qwen session exited with code ${selectionTurnResult.exitCode ?? -1} while selecting a task.`,
+            );
+          }
+          if (selectionTurnResult.stderr.trim()) {
+            learnings.push(
+              selectionTurnResult.stderr.trim().split('\n')[0] ?? '',
+            );
+          }
+          await worktreeService.cleanupSession(reviewSessionId);
+          return this.finishFailure(
+            attemptPaths.recordPath,
+            attemptId,
+            'The isolated self-evolve session did not stay alive long enough to select a task.',
+            learnings,
+            undefined,
+            undefined,
+            direction,
+            'failed',
+            undefined,
+            0,
+            undefined,
+          );
+        }
+
+        if (!selection) {
+          await worktreeService.cleanupSession(reviewSessionId);
+          return this.finishFailure(
+            attemptPaths.recordPath,
+            attemptId,
+            'The isolated self-evolve session finished without writing a task selection report.',
+            [
+              'The child run must write the required self-evolve selection report before implementation begins.',
+            ],
+            undefined,
+            undefined,
+            direction,
+            'failed',
+            undefined,
+            0,
+          );
+        }
+
+        if (selection.status === 'no_safe_task') {
+          await worktreeService.cleanupSession(reviewSessionId);
+          return this.finishFailure(
+            attemptPaths.recordPath,
+            attemptId,
+            selection.summary?.trim() || 'No small safe task was selected.',
+            selection.learnings ?? [
+              direction
+                ? 'The requested direction could not be narrowed into a small safe and verifiable change.'
+                : 'The candidate list did not contain a clearly safe and verifiable task.',
+            ],
+            undefined,
+            undefined,
+            direction,
+            'no_safe_task',
+            undefined,
+            0,
+          );
+        }
+
+        selectedCandidateSelection = this.resolveSelectedCandidateSelection(
+          selection,
+          candidates,
+        );
+        if (!selectedCandidateSelection) {
+          await worktreeService.cleanupSession(reviewSessionId);
+          return this.finishFailure(
+            attemptPaths.recordPath,
+            attemptId,
+            'The isolated self-evolve run did not select one of the provided candidates.',
+            [
+              'The child run must pick exactly one provided candidate and keep its selected index stable.',
+            ],
+            undefined,
+            undefined,
+            direction,
+            'failed',
+            '',
+            0,
+          );
+        }
+
+        if (!childProgressParser.hasSeenSelectedTask()) {
+          const selectedTaskMessage = `Selected ${selectedCandidateSelection.candidate.title}${
+            selection.selectedTask?.rationale?.trim()
+              ? ` Reason: ${selection.selectedTask.rationale.trim()}`
+              : ''
+          }`;
+          childProgressParser.markSelectedTaskSeen();
+          emitProgress({
+            stage: 'child_activity',
+            message: `Child round 1 [selected_task]: ${selectedTaskMessage}`,
+            round: 1,
+            childKind: 'selected_task',
+            childMessage: selectedTaskMessage,
+          });
+        }
+
+        finalTurnResult = await qwenSession.sendPrompt(
+          this.buildExecutionPrompt({
+            projectRoot,
+            reportPath,
+            candidates,
+            direction,
+            selectedCandidateIndex: selectedCandidateSelection.index + 1,
+          }),
+          QWEN_ATTEMPT_IDLE_TIMEOUT_MS,
+          (message) => childProgressParser.handle(message),
+        );
         report = await safeReadJson<SelfEvolveAttemptReport>(reportPath);
+        if (!report) {
+          emitProgress({
+            stage: 'child_activity',
+            message:
+              'Child omitted the required final report; requesting a protocol repair.',
+          });
+          finalTurnResult = await qwenSession.sendPrompt(
+            this.buildExecutionRepairPrompt({
+              projectRoot,
+              reportPath,
+              candidates,
+              direction,
+              selectedCandidateIndex: selectedCandidateSelection.index + 1,
+            }),
+            QWEN_ATTEMPT_IDLE_TIMEOUT_MS,
+            (message) => childProgressParser.handle(message),
+          );
+          report = await safeReadJson<SelfEvolveAttemptReport>(reportPath);
+        }
       } finally {
         await qwenSession.shutdown().catch(() => undefined);
       }
@@ -997,11 +1200,11 @@ export class SelfEvolveService {
         );
       }
 
-      const selectedCandidateSelection = this.resolveSelectedCandidateSelection(
+      const reportedCandidateSelection = this.resolveSelectedCandidateSelection(
         report,
         candidates,
       );
-      if (!selectedCandidateSelection) {
+      if (!reportedCandidateSelection) {
         await worktreeService.cleanupSession(reviewSessionId);
         return this.finishFailure(
           attemptPaths.recordPath,
@@ -1016,6 +1219,27 @@ export class SelfEvolveService {
           'failed',
           '',
           roundsAttempted,
+        );
+      }
+
+      if (
+        reportedCandidateSelection.index !== selectedCandidateSelection?.index
+      ) {
+        await worktreeService.cleanupSession(reviewSessionId);
+        return this.finishFailure(
+          attemptPaths.recordPath,
+          attemptId,
+          'The isolated self-evolve run changed tasks after the initial selection.',
+          [
+            'The child run must keep the initially selected candidate locked for the rest of the session.',
+          ],
+          report,
+          validationResults,
+          direction,
+          'failed',
+          selectedCandidateSelection?.candidate.title,
+          roundsAttempted,
+          selectedCandidateSelection?.candidate,
         );
       }
 
@@ -1036,9 +1260,9 @@ export class SelfEvolveService {
           validationResults,
           direction,
           'max_retries_exhausted',
-          selectedCandidateSelection.candidate.title,
+          reportedCandidateSelection.candidate.title,
           roundsAttempted,
-          selectedCandidateSelection.candidate,
+          reportedCandidateSelection.candidate,
         );
       }
 
@@ -1056,9 +1280,9 @@ export class SelfEvolveService {
           validationResults,
           direction,
           'failed',
-          selectedCandidateSelection.candidate.title,
+          reportedCandidateSelection.candidate.title,
           roundsAttempted,
-          selectedCandidateSelection.candidate,
+          reportedCandidateSelection.candidate,
         );
       }
 
@@ -1080,15 +1304,15 @@ export class SelfEvolveService {
           validationResults,
           direction,
           'failed',
-          selectedCandidateSelection.candidate.title,
+          reportedCandidateSelection.candidate.title,
           roundsAttempted,
-          selectedCandidateSelection.candidate,
+          reportedCandidateSelection.candidate,
         );
       }
 
       const commitMessage = sanitizeCommitMessage(
         report?.suggestedCommitMessage,
-        selectedCandidateSelection.candidate.title,
+        reportedCandidateSelection.candidate.title,
       );
       emitProgress({
         stage: 'committing',
@@ -1114,9 +1338,9 @@ export class SelfEvolveService {
           validationResults,
           direction,
           'failed',
-          selectedCandidateSelection.candidate.title,
+          reportedCandidateSelection.candidate.title,
           roundsAttempted,
-          selectedCandidateSelection.candidate,
+          reportedCandidateSelection.candidate,
         );
       }
 
@@ -1145,9 +1369,9 @@ export class SelfEvolveService {
           validationResults,
           direction,
           'failed',
-          selectedCandidateSelection.candidate.title,
+          reportedCandidateSelection.candidate.title,
           roundsAttempted,
-          selectedCandidateSelection.candidate,
+          reportedCandidateSelection.candidate,
         );
       }
 
@@ -1170,9 +1394,9 @@ export class SelfEvolveService {
           validationResults,
           direction,
           'failed',
-          selectedCandidateSelection.candidate.title,
+          reportedCandidateSelection.candidate.title,
           roundsAttempted,
-          selectedCandidateSelection.candidate,
+          reportedCandidateSelection.candidate,
         );
       }
 
@@ -1199,9 +1423,9 @@ export class SelfEvolveService {
           validationResults,
           direction,
           'failed',
-          selectedCandidateSelection.candidate.title,
+          reportedCandidateSelection.candidate.title,
           roundsAttempted,
-          selectedCandidateSelection.candidate,
+          reportedCandidateSelection.candidate,
         );
       }
 
@@ -1240,10 +1464,10 @@ export class SelfEvolveService {
         summary:
           report?.summary?.trim() ||
           'Completed a self-evolve change and prepared a review commit.',
-        selectedTask: selectedCandidateSelection.candidate.title,
+        selectedTask: reportedCandidateSelection.candidate.title,
         ...this.getSelectedTaskMetadata(
           report,
-          selectedCandidateSelection.candidate,
+          reportedCandidateSelection.candidate,
         ),
         direction,
         validation: validationResults,
@@ -1584,13 +1808,8 @@ export class SelfEvolveService {
     }
   }
 
-  private buildPrompt(params: {
-    projectRoot: string;
-    reportPath: string;
-    candidates: SelfEvolveCandidate[];
-    direction?: string;
-  }): string {
-    const candidateList = params.candidates
+  private buildCandidateList(candidates: SelfEvolveCandidate[]): string {
+    return candidates
       .map((candidate, index) => {
         const location = candidate.location ? ` @ ${candidate.location}` : '';
         const validations =
@@ -1600,35 +1819,149 @@ export class SelfEvolveService {
         return `${index + 1}. [${candidate.source}] ${candidate.title}${location}\n   ${candidate.details}${validations}`;
       })
       .join('\n');
+  }
+
+  private buildSelectionPrompt(params: {
+    projectRoot: string;
+    selectionPath: string;
+    candidates: SelfEvolveCandidate[];
+    direction?: string;
+  }): string {
+    const candidateList = this.buildCandidateList(params.candidates);
 
     return [
       'You are running inside an isolated git worktree created by /self-evolve.',
       `Project root: ${params.projectRoot}`,
       '',
-      'Pick exactly one small, safe, locally verifiable improvement task from the candidate list below.',
+      'Selection phase only: pick exactly one small, safe, locally verifiable improvement task from the candidate list below.',
       'Small does not mean trivial: the change must still materially improve correctness, reliability, usability, maintainability, or a real user/developer workflow.',
       'Pick by candidate index and keep the chosen title/location exactly as written in the candidate list.',
       'For discovered repo candidates, do not rename, paraphrase, or synthesize a new task.',
       'If you choose the [user-direction] candidate, treat that direction as the primary brief and narrow it internally to one concrete small change before editing.',
       'If the [user-direction] candidate still feels too broad after narrowing, write status "no_safe_task" and do not edit anything.',
+      params.direction
+        ? `User direction for task selection: ${params.direction}`
+        : undefined,
+      'This turn is only for task selection. Do not edit files, do not run validation commands, do not install dependencies, and do not make any repo changes in this turn.',
+      'If you need extra context before choosing, limit yourself to lightweight read-only inspection such as read_file, grep, or glob.',
+      'Do not treat low-signal churn as success: avoid trivial copy tweaks, wording polish, comment-only edits, formatting-only edits, or other tiny changes that do not materially improve the product or workflow.',
+      'If the best candidate would only result in a negligible change, write status "no_safe_task" instead of forcing a weak edit.',
+      'If no candidate is clearly safe and verifiable, write status "no_safe_task".',
+      '',
+      'Write a JSON selection report to this exact path before ending this turn:',
+      params.selectionPath,
+      '',
+      'Selection report schema:',
+      JSON.stringify(
+        {
+          status: 'selected | no_safe_task | failed',
+          selectedCandidateIndex:
+            'number (1-based index from the candidate list)',
+          selectedTask: {
+            title: 'string',
+            source: 'string',
+            location: 'string',
+            rationale: 'string',
+          },
+          summary: 'string',
+          learnings: ['string'],
+        },
+        null,
+        2,
+      ),
+      '',
+      'Candidates:',
+      candidateList,
+    ]
+      .filter((line): line is string => Boolean(line))
+      .join('\n');
+  }
+
+  private buildSelectionRepairPrompt(params: {
+    projectRoot: string;
+    selectionPath: string;
+    candidates: SelfEvolveCandidate[];
+    direction?: string;
+  }): string {
+    const candidateList = this.buildCandidateList(params.candidates);
+
+    return [
+      'Protocol repair only.',
+      'The previous selection turn ended without writing the required self-evolve selection report.',
+      `Project root: ${params.projectRoot}`,
+      params.direction
+        ? `User direction for task selection: ${params.direction}`
+        : undefined,
+      'Do not edit files, do not run validation commands, do not install dependencies, and do not make any repo changes in this repair turn.',
+      'Immediately write the missing JSON selection report to this exact path before ending this turn:',
+      params.selectionPath,
+      '',
+      'Use the same selection decision you already made in this session. Pick exactly one candidate from the list below and keep the chosen title/location exactly as written.',
+      'If you did not settle on a safe candidate, write status "no_safe_task" instead of inventing a selection.',
+      '',
+      'Selection report schema:',
+      JSON.stringify(
+        {
+          status: 'selected | no_safe_task | failed',
+          selectedCandidateIndex:
+            'number (1-based index from the candidate list)',
+          selectedTask: {
+            title: 'string',
+            source: 'string',
+            location: 'string',
+            rationale: 'string',
+          },
+          summary: 'string',
+          learnings: ['string'],
+        },
+        null,
+        2,
+      ),
+      '',
+      'Candidates:',
+      candidateList,
+    ]
+      .filter((line): line is string => Boolean(line))
+      .join('\n');
+  }
+
+  private buildExecutionPrompt(params: {
+    projectRoot: string;
+    reportPath: string;
+    candidates: SelfEvolveCandidate[];
+    selectedCandidateIndex: number;
+    direction?: string;
+  }): string {
+    const candidateList = this.buildCandidateList(params.candidates);
+    const selectedCandidate =
+      params.candidates[params.selectedCandidateIndex - 1] ?? null;
+    const selectedCandidateDescriptor = selectedCandidate
+      ? `[${selectedCandidate.source}] ${selectedCandidate.title}${
+          selectedCandidate.location ? ` @ ${selectedCandidate.location}` : ''
+        }`
+      : `candidate ${params.selectedCandidateIndex}`;
+
+    return [
+      'Continue the same isolated /self-evolve child session.',
+      `Project root: ${params.projectRoot}`,
+      '',
+      `You already selected candidate ${params.selectedCandidateIndex}: ${selectedCandidateDescriptor}.`,
+      'Do not reconsider the candidate list and do not switch to a different task.',
       `Own the full implementation and validation loop inside this single child session, with at most ${MAX_SELF_EVOLVE_ROUNDS} internal rounds.`,
       'Do not rely on the parent process to validate or repair the work for you.',
       'Within the same session: edit, run focused validation yourself, inspect failures, repair the task, and retry until it passes or you exhaust the internal round budget.',
       `If you exhaust ${MAX_SELF_EVOLVE_ROUNDS} rounds, discard the isolated change yourself with \`git reset --hard HEAD\` and \`git clean -fd\`, then write status "max_retries_exhausted".`,
       'Success means you personally re-ran focused validation after the final edit and the validation passed.',
       params.direction
-        ? `User direction for task selection: ${params.direction}`
+        ? `Original user direction: ${params.direction}`
         : undefined,
       'Do not push, open PRs, change remotes, or create commits.',
       'Keep the scope narrow. Avoid broad refactors.',
-      'Do not treat low-signal churn as success: avoid trivial copy tweaks, wording polish, comment-only edits, formatting-only edits, or other tiny changes that do not materially improve the product or workflow.',
-      'If the best candidate would only result in a negligible change, write status "no_safe_task" instead of forcing a weak edit.',
-      'If no candidate is clearly safe and verifiable, do not edit anything. Instead write a report with status "no_safe_task".',
       '',
       'While you work, emit concise machine-readable progress lines so the parent process can surface them in the UI.',
       'Use exactly this format on a single line each time:',
       'SELF_EVOLVE_PROGRESS {"kind":"selected_task|round_start|command|command_result|final","round":1,"message":"short human-readable update","command":"optional shell command"}',
-      'After you choose the candidate, emit the selected_task progress line immediately before any further inspection, editing, or command execution.',
+      'Start this execution turn by emitting the selected_task progress line again using the exact chosen task title, then continue with the implementation and validation loop.',
       'For selected_task progress lines, include the exact chosen task title in the message. Add a short rationale after "Reason:" when it helps explain the choice.',
       'Always emit at least: the selected task, each round start, each validation command start/result, and the final outcome.',
       '',
@@ -1666,6 +1999,66 @@ export class SelfEvolveService {
       .join('\n');
   }
 
+  private buildExecutionRepairPrompt(params: {
+    projectRoot: string;
+    reportPath: string;
+    candidates: SelfEvolveCandidate[];
+    selectedCandidateIndex: number;
+    direction?: string;
+  }): string {
+    const selectedCandidate =
+      params.candidates[params.selectedCandidateIndex - 1] ?? null;
+    const selectedCandidateDescriptor = selectedCandidate
+      ? `[${selectedCandidate.source}] ${selectedCandidate.title}${
+          selectedCandidate.location ? ` @ ${selectedCandidate.location}` : ''
+        }`
+      : `candidate ${params.selectedCandidateIndex}`;
+
+    return [
+      'Protocol repair only.',
+      'The previous execution turn ended without writing the required self-evolve final report.',
+      `Project root: ${params.projectRoot}`,
+      `You are still locked to candidate ${params.selectedCandidateIndex}: ${selectedCandidateDescriptor}.`,
+      params.direction
+        ? `Original user direction: ${params.direction}`
+        : undefined,
+      'Do not switch tasks, do not push, do not open PRs, and do not create commits.',
+      'Do not make additional repo edits in this repair turn unless they are strictly required to finish the already selected task truthfully.',
+      'Immediately write the missing JSON report to this exact path before ending this turn:',
+      params.reportPath,
+      '',
+      'Base the report on the work already completed in this same session.',
+      'If the work did not actually succeed, write the truthful status instead of inventing success.',
+      'Reuse the validation results you already observed in this session. Do not re-run validation unless it is strictly required to produce an accurate report.',
+      '',
+      'Report schema:',
+      JSON.stringify(
+        {
+          status: 'success | failed | no_safe_task | max_retries_exhausted',
+          round:
+            'number (total internal rounds attempted inside the child session)',
+          selectedCandidateIndex:
+            'number (1-based index from the candidate list)',
+          selectedTask: {
+            title: 'string',
+            source: 'string',
+            location: 'string',
+            rationale: 'string',
+          },
+          summary: 'string',
+          learnings: ['string'],
+          validation: [{ command: 'string', summary: 'string' }],
+          suggestedCommitMessage: 'string',
+          changedFiles: ['string'],
+        },
+        null,
+        2,
+      ),
+    ]
+      .filter((line): line is string => Boolean(line))
+      .join('\n');
+  }
+
   private prioritizeCandidatesByDirection(
     candidates: SelfEvolveCandidate[],
     direction: string | undefined,
@@ -1695,7 +2088,7 @@ export class SelfEvolveService {
   }
 
   private resolveSelectedCandidateSelection(
-    report: SelfEvolveAttemptReport | null,
+    report: SelfEvolveAttemptReport | SelfEvolveSelectionReport | null,
     candidates: SelfEvolveCandidate[],
   ):
     | {
