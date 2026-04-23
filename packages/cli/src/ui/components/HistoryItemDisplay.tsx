@@ -28,6 +28,7 @@ import {
   ErrorMessage,
   RetryCountdownMessage,
   SuccessMessage,
+  AwayRecapMessage,
 } from './messages/StatusMessages.js';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
@@ -45,6 +46,7 @@ import { SkillsList } from './views/SkillsList.js';
 import { ToolsList } from './views/ToolsList.js';
 import { McpStatus } from './views/McpStatus.js';
 import { ContextUsage } from './views/ContextUsage.js';
+import { DoctorReport } from './views/DoctorReport.js';
 import { ArenaAgentCard, ArenaSessionCard } from './arena/ArenaCards.js';
 import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
 import { BtwMessage } from './messages/BtwMessage.js';
@@ -232,6 +234,13 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           showDetails={itemForDisplay.showDetails}
         />
       )}
+      {itemForDisplay.type === 'doctor' && (
+        <DoctorReport
+          checks={itemForDisplay.checks}
+          summary={itemForDisplay.summary}
+          width={boxWidth}
+        />
+      )}
       {itemForDisplay.type === 'arena_agent_complete' && (
         <ArenaAgentCard agent={itemForDisplay.agent} width={boxWidth} />
       )}
@@ -276,6 +285,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'memory_saved' && (
         <MemorySavedMessage item={itemForDisplay} />
+      )}
+      {itemForDisplay.type === 'away_recap' && (
+        <AwayRecapMessage text={itemForDisplay.text} />
       )}
     </Box>
   );

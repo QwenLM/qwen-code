@@ -241,6 +241,12 @@ export const useGeminiStream = (
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
   const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
   const modelOverrideRef = useRef<string | undefined>(undefined);
+  // --- Real-time token display ---
+  // Accumulates output character count across the whole turn (not per API call).
+  // Uses a ref to avoid re-renders on every text_delta.
+  const streamingResponseLengthRef = useRef(0);
+  // Tracks whether we are receiving content (↓) or waiting for API (↑).
+  const [isReceivingContent, setIsReceivingContent] = useState(false);
   const {
     startNewPrompt,
     getPromptCount,
@@ -671,6 +677,9 @@ export const useGeminiStream = (
         // Prevents additional output after a user initiated cancel.
         return '';
       }
+      // Track output chars for real-time token estimation & mark as receiving.
+      streamingResponseLengthRef.current += eventValue.length;
+      setIsReceivingContent(true);
       let newGeminiMessageBuffer = currentGeminiMessageBuffer + eventValue;
       if (
         pendingHistoryItemRef.current?.type !== 'gemini' &&
@@ -1138,6 +1147,14 @@ export const useGeminiStream = (
             break;
           case ServerGeminiEventType.ToolCallRequest:
             toolCallRequests.push(event.value);
+            // Count tool call args JSON toward token estimation (matches
+            // Claude Code's input_json_delta handling).
+            try {
+              const argsJson = JSON.stringify(event.value.args);
+              streamingResponseLengthRef.current += argsJson.length;
+            } catch {
+              // Best-effort — don't block on serialization errors
+            }
             break;
           case ServerGeminiEventType.UserCancelled:
             handleUserCancelledEvent(userMessageTimestamp);
@@ -1173,10 +1190,26 @@ export const useGeminiStream = (
             loopDetectedRef.current = true;
             break;
           case ServerGeminiEventType.Retry:
-            // Clear any pending partial content from the failed attempt
-            if (pendingHistoryItemRef.current) {
-              setPendingHistoryItem(null);
+            // On fresh restart (escalation / rate-limit / invalid stream),
+            // clear pending content and buffers to discard the failed attempt.
+            // On continuation (recovery), keep the pending gemini item AND
+            // buffers so the model's continuation text appends to them —
+            // otherwise handleContentEvent would see a null pending item,
+            // create a fresh one, and reset the buffer to just the new chunk,
+            // losing the partial text we meant to preserve.
+            if (!event.isContinuation) {
+              if (pendingHistoryItemRef.current) {
+                setPendingHistoryItem(null);
+              }
+              geminiMessageBuffer = '';
+              thoughtBuffer = '';
             }
+            // Always discard tool call requests from the truncated/failed
+            // attempt to prevent duplicate execution after escalation or
+            // recovery. The recovery path now skips turns that already
+            // contain a functionCall (see geminiChat.ts), so this only
+            // clears stale requests from pre-RETRY accumulation.
+            toolCallRequests.length = 0;
             // Show retry info if available (rate-limit / throttling errors)
             if (event.retryInfo) {
               startRetryCountdown(event.retryInfo);
@@ -1386,6 +1419,13 @@ export const useGeminiStream = (
 
         setIsResponding(true);
         setInitError(null);
+        // Entering "requesting" phase — no content yet for this API call.
+        setIsReceivingContent(false);
+        // Reset char counter only on new user queries; tool-result continuations
+        // keep accumulating so the token count only goes up within a turn.
+        if (submitType !== SendMessageType.ToolResult) {
+          streamingResponseLengthRef.current = 0;
+        }
 
         try {
           // Emit user message to dual output sidecar (if enabled).
@@ -1977,5 +2017,7 @@ export const useGeminiStream = (
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
+    streamingResponseLengthRef,
+    isReceivingContent,
   };
 };

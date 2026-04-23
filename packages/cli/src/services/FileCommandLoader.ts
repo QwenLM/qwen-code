@@ -79,6 +79,11 @@ export class FileCommandLoader implements ICommandLoader {
    * @returns A promise that resolves to an array of all loaded SlashCommands.
    */
   async loadCommands(signal: AbortSignal): Promise<SlashCommand[]> {
+    if (this.config?.getBareMode?.()) {
+      debugLogger.debug('Bare mode enabled, skipping auto-discovered commands');
+      return [];
+    }
+
     const allCommands: SlashCommand[] = [];
     const globOptions = {
       nodir: true,
@@ -349,6 +354,9 @@ export class FileCommandLoader implements ICommandLoader {
         typeof validDef.frontmatter.description === 'string'
           ? validDef.frontmatter.description
           : undefined,
+      whenToUse: validDef.frontmatter?.when_to_use,
+      disableModelInvocation:
+        validDef.frontmatter?.['disable-model-invocation'],
     };
 
     // Use factory to create command

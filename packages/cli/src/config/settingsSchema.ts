@@ -324,6 +324,30 @@ const SETTINGS_SCHEMA = {
           'Enable automatic update checks and installations on startup.',
         showInDialog: true,
       },
+      showSessionRecap: {
+        type: 'boolean',
+        label: 'Show Session Recap',
+        category: 'General',
+        requiresRestart: false,
+        // Off by default — an ambient background LLM call isn't something
+        // users should be opted into silently, especially when `fastModel`
+        // is unset and the call would land on the main coding model.
+        // Manual `/recap` works regardless.
+        default: false,
+        description:
+          'Auto-show a one-line "where you left off" recap when returning to the terminal after being away. Off by default. Use /recap to trigger manually regardless of this setting.',
+        showInDialog: true,
+      },
+      sessionRecapAwayThresholdMinutes: {
+        type: 'number',
+        label: 'Session Recap Away Threshold (minutes)',
+        category: 'General',
+        requiresRestart: false,
+        default: 5,
+        description:
+          "How many minutes the terminal must be blurred before an auto-recap fires on the next focus-in. Matches Claude Code's default of 5 minutes; raise if you briefly alt-tab and do not want recaps to pile up.",
+        showInDialog: true,
+      },
       gitCoAuthor: {
         type: 'boolean',
         label: 'Attribution: commit',
@@ -509,8 +533,15 @@ const SETTINGS_SCHEMA = {
         label: 'Status Line',
         category: 'UI',
         requiresRestart: false,
-        default: undefined as { type: 'command'; command: string } | undefined,
-        description: 'Custom status line display configuration.',
+        default: undefined as
+          | {
+              type: 'command';
+              command: string;
+              refreshInterval?: number;
+            }
+          | undefined,
+        description:
+          'Custom status line display configuration. Optional `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.',
         showInDialog: false,
       },
       customThemes: {
@@ -674,6 +705,16 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
+        showInDialog: true,
+      },
+      shellOutputMaxLines: {
+        type: 'number',
+        label: 'Shell Output Max Lines',
+        category: 'UI',
+        requiresRestart: false,
+        default: 5,
+        description:
+          'Max number of shell output lines shown inline. Set to 0 to disable the cap and show full output. The hidden line count is still surfaced via the `+N lines` indicator.',
         showInDialog: true,
       },
     },
@@ -1081,6 +1122,36 @@ const SETTINGS_SCHEMA = {
         description:
           'Enable automatic consolidation (dream) of collected memories.',
         showInDialog: false,
+      },
+    },
+  },
+
+  slashCommands: {
+    type: 'object',
+    label: 'Slash Commands',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Configuration for slash commands exposed by the CLI. Useful for ' +
+      'locking down the command surface in multi-tenant or enterprise ' +
+      'deployments.',
+    showInDialog: false,
+    properties: {
+      disabled: {
+        type: 'array',
+        label: 'Disabled Slash Commands',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Slash command names to hide and refuse to execute. Matched ' +
+          'case-insensitively against the final command name (for extension ' +
+          'commands this is the disambiguated form, e.g. "myext.deploy"). ' +
+          'Merged as a union across settings scopes, so workspace settings ' +
+          'can add to but not remove entries defined in system/user settings.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
       },
     },
   },

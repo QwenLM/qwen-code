@@ -169,6 +169,48 @@ describe('QwenSessionUpdateHandler', () => {
         locations: undefined,
       });
     });
+
+    it('forwards rawOutput for structured agent execution updates', () => {
+      const rawOutput = {
+        type: 'task_execution',
+        subagentName: 'Explore',
+        taskDescription: 'Explore auth logic',
+        taskPrompt: 'Inspect auth flow implementation',
+        status: 'running',
+        toolCalls: [
+          {
+            callId: 'child-1',
+            name: 'read',
+            status: 'executing',
+          },
+        ],
+      };
+
+      const toolCallUpdate = {
+        sessionId: 'test-session',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-agent',
+          kind: 'other',
+          title: 'Launch agent',
+          status: 'in_progress',
+          rawOutput,
+        },
+      } as SessionNotification;
+
+      handler.handleSessionUpdate(toolCallUpdate);
+
+      expect(mockCallbacks.onToolCall).toHaveBeenCalledWith({
+        toolCallId: 'call-agent',
+        kind: 'other',
+        title: 'Launch agent',
+        status: 'in_progress',
+        rawInput: undefined,
+        rawOutput,
+        content: undefined,
+        locations: undefined,
+      });
+    });
   });
 
   describe('plan handling', () => {

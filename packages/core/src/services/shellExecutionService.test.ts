@@ -649,6 +649,7 @@ describe('ShellExecutionService', () => {
 
     it('should normalize PATH-like env keys on Windows for pty execution', async () => {
       mockPlatform.mockReturnValue('win32');
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       setupConflictingPathEnv();
 
       await simulateExecution('dir', (pty) =>
@@ -1125,6 +1126,7 @@ describe('ShellExecutionService child_process fallback', () => {
 
     it('should normalize PATH-like env keys on Windows for child_process fallback', async () => {
       mockPlatform.mockReturnValue('win32');
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       setupConflictingPathEnv();
 
       await simulateExecution('dir', (cp) => cp.emit('exit', 0, null));

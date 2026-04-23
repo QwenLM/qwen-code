@@ -15,10 +15,12 @@ import { authCommand } from '../ui/commands/authCommand.js';
 import { btwCommand } from '../ui/commands/btwCommand.js';
 import { bugCommand } from '../ui/commands/bugCommand.js';
 import { clearCommand } from '../ui/commands/clearCommand.js';
+import { deleteCommand } from '../ui/commands/deleteCommand.js';
 import { compressCommand } from '../ui/commands/compressCommand.js';
 import { contextCommand } from '../ui/commands/contextCommand.js';
 import { copyCommand } from '../ui/commands/copyCommand.js';
 import { docsCommand } from '../ui/commands/docsCommand.js';
+import { doctorCommand } from '../ui/commands/doctorCommand.js';
 import { directoryCommand } from '../ui/commands/directoryCommand.js';
 import { editorCommand } from '../ui/commands/editorCommand.js';
 import { exportCommand } from '../ui/commands/exportCommand.js';
@@ -39,6 +41,8 @@ import { planCommand } from '../ui/commands/planCommand.js';
 import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
 import { trustCommand } from '../ui/commands/trustCommand.js';
 import { quitCommand } from '../ui/commands/quitCommand.js';
+import { recapCommand } from '../ui/commands/recapCommand.js';
+import { renameCommand } from '../ui/commands/renameCommand.js';
 import { restoreCommand } from '../ui/commands/restoreCommand.js';
 import { resumeCommand } from '../ui/commands/resumeCommand.js';
 import { rewindCommand } from '../ui/commands/rewindCommand.js';
@@ -96,7 +100,9 @@ export class BuiltinCommandLoader implements ICommandLoader {
       compressCommand,
       contextCommand,
       copyCommand,
+      deleteCommand,
       docsCommand,
+      doctorCommand,
       directoryCommand,
       editorCommand,
       exportCommand,
@@ -117,6 +123,8 @@ export class BuiltinCommandLoader implements ICommandLoader {
       permissionsCommand,
       ...(this.config?.getFolderTrust() ? [trustCommand] : []),
       quitCommand,
+      recapCommand,
+      renameCommand,
       restoreCommand(this.config),
       resumeCommand,
       rewindCommand,
@@ -133,6 +141,14 @@ export class BuiltinCommandLoader implements ICommandLoader {
       statuslineCommand,
     ];
 
-    return allDefinitions.filter((cmd): cmd is SlashCommand => cmd !== null);
+    return allDefinitions
+      .filter((cmd): cmd is SlashCommand => cmd !== null)
+      .map((cmd) => ({
+        ...cmd,
+        source: 'builtin-command' as const,
+        sourceLabel: 'Built-in',
+        modelInvocable: false,
+        userInvocable: cmd.userInvocable ?? true,
+      }));
   }
 }

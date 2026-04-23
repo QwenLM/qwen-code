@@ -39,6 +39,7 @@ import {
   FileIcon,
   PermissionDrawer,
   AskUserQuestionDialog,
+  InsightProgressCard,
   ImageMessageRenderer,
   ImagePreview,
   // Layout components imported directly from webui
@@ -58,6 +59,110 @@ import type { ModelInfo, AvailableCommand } from '@agentclientprotocol/sdk';
 import type { Question } from '../types/acpTypes.js';
 import { useImagePaste, type WebViewImageMessage } from './hooks/useImage.js';
 import { computeContextUsage } from './utils/contextUsage.js';
+
+/**
+ * Memoized message list that only re-renders when messages or callbacks change,
+ * not on every keystroke in the input field.
+ */
+interface MessageListItem {
+  type: 'message' | 'in-progress-tool-call' | 'completed-tool-call';
+  data: TextMessage | ToolCallData;
+  timestamp: number;
+}
+
+interface MessageListProps {
+  allMessages: MessageListItem[];
+  onFileClick: (path: string) => void;
+}
+
+const MessageList = React.memo<MessageListProps>(
+  ({ allMessages, onFileClick }) => {
+    let imageIndex = 0;
+    return (
+      <>
+        {allMessages.map((item, index) => {
+          switch (item.type) {
+            case 'message': {
+              const msg = item.data as TextMessage;
+
+              if (msg.kind === 'image' && msg.imagePath) {
+                imageIndex += 1;
+                return (
+                  <ImageMessageRenderer
+                    key={`message-${index}`}
+                    msg={msg as WebViewImageMessage}
+                    imageIndex={imageIndex}
+                  />
+                );
+              }
+
+              if (msg.role === 'thinking') {
+                return (
+                  <ThinkingMessage
+                    key={`message-${index}`}
+                    content={msg.content || ''}
+                    timestamp={msg.timestamp || 0}
+                    onFileClick={onFileClick}
+                  />
+                );
+              }
+
+              if (msg.role === 'user') {
+                return (
+                  <UserMessage
+                    key={`message-${index}`}
+                    content={msg.content || ''}
+                    timestamp={msg.timestamp || 0}
+                    onFileClick={onFileClick}
+                    fileContext={msg.fileContext}
+                  />
+                );
+              }
+
+              {
+                const content = (msg.content || '').trim();
+                if (
+                  content === 'Interrupted' ||
+                  content === 'Tool interrupted'
+                ) {
+                  return (
+                    <InterruptedMessage
+                      key={`message-${index}`}
+                      text={content}
+                    />
+                  );
+                }
+                return (
+                  <AssistantMessage
+                    key={`message-${index}`}
+                    content={content}
+                    timestamp={msg.timestamp || 0}
+                    onFileClick={onFileClick}
+                  />
+                );
+              }
+            }
+
+            case 'in-progress-tool-call':
+            case 'completed-tool-call': {
+              return (
+                <ToolCall
+                  key={`toolcall-${(item.data as ToolCallData).toolCallId}-${item.type}`}
+                  toolCall={item.data as ToolCallData}
+                />
+              );
+            }
+
+            default:
+              return null;
+          }
+        })}
+      </>
+    );
+  },
+);
+
+MessageList.displayName = 'MessageList';
 
 export const App: React.FC = () => {
   const vscode = useVSCode();
@@ -95,6 +200,14 @@ export const App: React.FC = () => {
     AvailableCommand[]
   >([]);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
+  const [insightProgress, setInsightProgress] = useState<{
+    stage: string;
+    progress: number;
+    detail?: string;
+  } | null>(null);
+  const [insightReportPath, setInsightReportPath] = useState<string | null>(
+    null,
+  );
   const [showModelSelector, setShowModelSelector] = useState(false);
   const [accountInfo, setAccountInfo] = useState<AccountInfo | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -168,9 +281,9 @@ export const App: React.FC = () => {
         // Account group
         const accountGroupItems: CompletionItem[] = [
           {
-            id: 'login',
-            label: 'Login',
-            description: 'Login to Qwen Code',
+            id: 'auth',
+            label: '/auth',
+            description: 'Configure Coding Plan or API Key',
             type: 'command',
             group: 'Account',
           },
@@ -336,6 +449,8 @@ export const App: React.FC = () => {
     setAccountInfo: (info) => {
       setAccountInfo(info);
     },
+    setInsightReportPath,
+    setInsightProgress,
   });
 
   // Auto-scroll handling: keep the view pinned to bottom when new content arrives,
@@ -582,9 +697,9 @@ export const App: React.FC = () => {
           }
         };
 
-        if (itemId === 'login') {
+        if (itemId === 'auth') {
           clearTriggerText();
-          vscode.postMessage({ type: 'login', data: {} });
+          vscode.postMessage({ type: 'auth', data: {} });
           completion.closeCompletion();
           return;
         }
@@ -734,12 +849,21 @@ export const App: React.FC = () => {
     });
   }, [vscode]);
 
+  const handleOpenInsightReport = useCallback(() => {
+    if (!insightReportPath) {
+      return;
+    }
+    vscode.postMessage({
+      type: 'openInsightReport',
+      data: { path: insightReportPath },
+    });
+  }, [insightReportPath, vscode]);
+
   // Handle toggle edit mode (Default -> Auto-edit -> YOLO -> Default)
   const handleToggleEditMode = useCallback(() => {
     setEditMode((prev) => {
       const next: ApprovalModeValue = NEXT_APPROVAL_MODE[prev];
 
-      // Notify extension to set approval mode via ACP
       try {
         vscode.postMessage({
           type: 'setApprovalMode',
@@ -752,10 +876,25 @@ export const App: React.FC = () => {
     });
   }, [vscode]);
 
-  // Handle toggle thinking
-  const handleToggleThinking = () => {
+  // Handle Tab key to cycle approval modes when input is focused
+  const handleInputKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (
+        e.key === 'Tab' &&
+        !e.shiftKey &&
+        !isComposing &&
+        !completion.isOpen
+      ) {
+        e.preventDefault();
+        handleToggleEditMode();
+      }
+    },
+    [completion.isOpen, handleToggleEditMode, isComposing],
+  );
+
+  const handleToggleThinking = useCallback(() => {
     setThinkingEnabled((prev) => !prev);
-  };
+  }, []);
 
   // When user sends a message after scrolling up, re-pin and jump to the bottom
   const handleSubmitWithScroll = useCallback(
@@ -810,89 +949,15 @@ export const App: React.FC = () => {
     );
   }, [messageHandling.messages, inProgressToolCalls, completedToolCalls]);
 
-  console.log('[App] Rendering messages:', allMessages);
-
-  // Render all messages and tool calls
-  const renderMessages = useCallback<() => React.ReactNode>(() => {
-    let imageIndex = 0;
-    return allMessages.map((item, index) => {
-      switch (item.type) {
-        case 'message': {
-          const msg = item.data as TextMessage;
-          const handleFileClick = (path: string): void => {
-            vscode.postMessage({
-              type: 'openFile',
-              data: { path },
-            });
-          };
-
-          if (msg.kind === 'image' && msg.imagePath) {
-            imageIndex += 1;
-            return (
-              <ImageMessageRenderer
-                key={`message-${index}`}
-                msg={msg as WebViewImageMessage}
-                imageIndex={imageIndex}
-              />
-            );
-          }
-
-          if (msg.role === 'thinking') {
-            return (
-              <ThinkingMessage
-                key={`message-${index}`}
-                content={msg.content || ''}
-                timestamp={msg.timestamp || 0}
-                onFileClick={handleFileClick}
-              />
-            );
-          }
-
-          if (msg.role === 'user') {
-            return (
-              <UserMessage
-                key={`message-${index}`}
-                content={msg.content || ''}
-                timestamp={msg.timestamp || 0}
-                onFileClick={handleFileClick}
-                fileContext={msg.fileContext}
-              />
-            );
-          }
-
-          {
-            const content = (msg.content || '').trim();
-            if (content === 'Interrupted' || content === 'Tool interrupted') {
-              return (
-                <InterruptedMessage key={`message-${index}`} text={content} />
-              );
-            }
-            return (
-              <AssistantMessage
-                key={`message-${index}`}
-                content={content}
-                timestamp={msg.timestamp || 0}
-                onFileClick={handleFileClick}
-              />
-            );
-          }
-        }
-
-        case 'in-progress-tool-call':
-        case 'completed-tool-call': {
-          return (
-            <ToolCall
-              key={`toolcall-${(item.data as ToolCallData).toolCallId}-${item.type}`}
-              toolCall={item.data as ToolCallData}
-            />
-          );
-        }
-
-        default:
-          return null;
-      }
-    });
-  }, [allMessages, vscode]);
+  const handleFileClick = useCallback(
+    (path: string): void => {
+      vscode.postMessage({
+        type: 'openFile',
+        data: { path },
+      });
+    },
+    [vscode],
+  );
 
   const hasContent =
     messageHandling.messages.length > 0 ||
@@ -905,12 +970,14 @@ export const App: React.FC = () => {
   return (
     <div className="chat-container relative">
       {/* Top-level loading overlay */}
-      {isLoading && (
+      {(isLoading || sessionManagement.isSwitchingSession) && (
         <div className="bg-background/80 absolute inset-0 z-50 flex items-center justify-center backdrop-blur-sm">
           <div className="text-center">
             <div className="border-primary mx-auto mb-2 h-8 w-8 animate-spin rounded-full border-b-2"></div>
             <p className="text-muted-foreground text-sm">
-              Preparing Qwen Code...
+              {sessionManagement.isSwitchingSession
+                ? 'Loading conversation...'
+                : 'Preparing Qwen Code...'}
             </p>
           </div>
         </div>
@@ -926,6 +993,8 @@ export const App: React.FC = () => {
           sessionManagement.handleSwitchSession(sessionId);
           sessionManagement.setSessionSearchQuery('');
         }}
+        onRenameSession={sessionManagement.handleRenameSession}
+        onDeleteSession={sessionManagement.handleDeleteSession}
         onClose={() => sessionManagement.setShowSessionSelector(false)}
         hasMore={sessionManagement.hasMore}
         isLoading={sessionManagement.isLoading}
@@ -944,25 +1013,61 @@ export const App: React.FC = () => {
         ref={messagesContainerRef}
         className="chat-messages messages-container flex-1 overflow-y-auto overflow-x-hidden pt-5 pr-5 pl-5 pb-[140px] flex flex-col relative min-w-0 focus:outline-none [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-white/20 [&::-webkit-scrollbar-thumb]:rounded-sm [&::-webkit-scrollbar-thumb]:hover:bg-white/30 [&>*]:flex [&>*]:gap-0 [&>*]:items-start [&>*]:text-left [&>*]:py-2 [&>*:not(:last-child)]:pb-[8px] [&>*]:flex-col [&>*]:relative [&>*]:animate-[fadeIn_0.2s_ease-in]"
       >
-        {!hasContent && !isLoading ? (
+        {!hasContent && !isLoading && !sessionManagement.isSwitchingSession ? (
           isAuthenticated === false ? (
-            <Onboarding
-              onLogin={() => {
-                vscode.postMessage({ type: 'login', data: {} });
-                messageHandling.setWaitingForResponse(
-                  'Logging in to Qwen Code...',
-                );
-              }}
-            />
+            <Onboarding />
           ) : isAuthenticated === null ? (
-            <EmptyState loadingMessage="Checking login status…" />
+            <div className="flex flex-col items-center justify-center h-full gap-3">
+              <span
+                className="inline-block w-6 h-6 animate-spin rounded-full border-2"
+                style={{
+                  borderColor: 'var(--app-secondary-foreground)',
+                  borderTopColor: 'transparent',
+                }}
+              />
+              <span
+                className="text-sm"
+                style={{ color: 'var(--app-secondary-foreground)' }}
+              >
+                Preparing Qwen Code...
+              </span>
+            </div>
           ) : (
             <EmptyState isAuthenticated />
           )
         ) : (
           <>
             {/* Render all messages and tool calls */}
-            {renderMessages()}
+            <MessageList
+              allMessages={allMessages}
+              onFileClick={handleFileClick}
+            />
+
+            {insightProgress && (
+              <InsightProgressCard
+                stage={insightProgress.stage}
+                progress={insightProgress.progress}
+                detail={insightProgress.detail}
+              />
+            )}
+
+            {insightReportPath && (
+              <div className="px-[30px] py-2">
+                <div className="text-sm text-[var(--vscode-descriptionForeground)]">
+                  Insight report generated at:
+                </div>
+                <a
+                  href="#"
+                  className="mt-1 inline-block break-all text-sm text-[var(--vscode-textLink-foreground)] underline decoration-[color-mix(in_srgb,var(--vscode-textLink-foreground)_55%,transparent)] underline-offset-2 hover:text-[var(--vscode-textLink-activeForeground)]"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    handleOpenInsightReport();
+                  }}
+                >
+                  {insightReportPath}
+                </a>
+              </div>
+            )}
 
             {/* Waiting message positioned fixed above the input form to avoid layout shifts */}
             {messageHandling.isWaitingForResponse &&
@@ -994,7 +1099,7 @@ export const App: React.FC = () => {
           onInputChange={setInputText}
           onCompositionStart={() => setIsComposing(true)}
           onCompositionEnd={() => setIsComposing(false)}
-          onKeyDown={() => {}}
+          onKeyDown={handleInputKeyDown}
           onSubmit={handleSubmitWithScroll}
           onCancel={handleCancel}
           onToggleEditMode={handleToggleEditMode}

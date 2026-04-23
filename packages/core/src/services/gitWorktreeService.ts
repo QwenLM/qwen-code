@@ -12,6 +12,7 @@ import type { SimpleGit } from 'simple-git';
 import { Storage } from '../config/storage.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
 import { isNodeError } from '../utils/errors.js';
+import { initRepositoryWithMainBranch } from './gitInit.js';
 
 /**
  * Commit message used for the baseline snapshot in worktrees.
@@ -185,7 +186,7 @@ export class GitWorktreeService {
     }
 
     try {
-      await this.git.init(false, { '--initial-branch': 'main' });
+      await initRepositoryWithMainBranch(this.git);
 
       // Create initial commit so we can create worktrees
       await this.git.add('.');

@@ -14,6 +14,7 @@ import type {
 import type {
   AuthenticateUpdateNotification,
   AskUserQuestionRequest,
+  SlashCommandNotification,
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import { QwenSessionReader, type QwenSession } from './qwenSessionReader.js';
@@ -269,6 +270,12 @@ export class QwenAgentManager {
           err,
         );
       }
+    };
+
+    this.connection.onSlashCommandNotification = (
+      data: SlashCommandNotification,
+    ) => {
+      this.callbacks.onSlashCommandNotification?.(data);
     };
 
     // Initialize callback to surface available modes and current mode to UI
@@ -706,6 +713,32 @@ export class QwenAgentManager {
         error,
       );
       return [];
+    }
+  }
+
+  /**
+   * Delete a session by ID via ACP.
+   */
+  async deleteSession(sessionId: string): Promise<boolean> {
+    try {
+      const res = await this.connection.deleteSession(sessionId);
+      return res.success;
+    } catch (error) {
+      console.error('[QwenAgentManager] Failed to delete session:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Rename a session via ACP.
+   */
+  async renameSession(sessionId: string, title: string): Promise<boolean> {
+    try {
+      const res = await this.connection.renameSession(sessionId, title);
+      return res.success;
+    } catch (error) {
+      console.error('[QwenAgentManager] Failed to rename session:', error);
+      return false;
     }
   }
 
@@ -1450,6 +1483,13 @@ export class QwenAgentManager {
    */
   onAvailableModels(callback: (models: ModelInfo[]) => void): void {
     this.callbacks.onAvailableModels = callback;
+    this.sessionUpdateHandler.updateCallbacks(this.callbacks);
+  }
+
+  onSlashCommandNotification(
+    callback: (event: SlashCommandNotification) => void,
+  ): void {
+    this.callbacks.onSlashCommandNotification = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
   }
 

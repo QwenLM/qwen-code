@@ -137,12 +137,14 @@ export function KeypressProvider({
   pasteWorkaround = false,
   config,
   debugKeystrokeLogging,
+  initialCapturedInput,
 }: {
   children?: React.ReactNode;
   kittyProtocolEnabled: boolean;
   pasteWorkaround?: boolean;
   config?: Config;
   debugKeystrokeLogging?: boolean;
+  initialCapturedInput?: Buffer;
 }) {
   const { stdin, setRawMode } = useStdin();
   const subscribers = useRef<Set<KeypressHandler>>(new Set()).current;
@@ -166,6 +168,11 @@ export function KeypressProvider({
     if (wasRaw === false) {
       setRawMode(true);
     }
+
+    // Use pre-drained captured input passed from outside React.
+    // Draining happens before render() so StrictMode's mount/cleanup/remount
+    // always reads from the stable prop reference, not the (already empty) module buffer.
+    const capturedInput = initialCapturedInput ?? Buffer.alloc(0);
 
     const keypressStream = new PassThrough();
     let usePassthrough = false;
@@ -1102,7 +1109,30 @@ export function KeypressProvider({
       stdin.on('keypress', handleKeypress);
     }
 
+    // Startup optimization: replay captured input if available
+    let replayPending = false;
+    if (capturedInput.length > 0) {
+      debugLogger.debug(
+        `Replaying ${capturedInput.length} bytes of captured input`,
+      );
+      // Process in next event loop tick to ensure subscribers are ready.
+      // Always emit on stdin so that handleRawKeypress processes paste markers
+      // correctly in passthrough mode.
+      // In non-passthrough mode, readline.emitKeypressEvents installs an internal
+      // 'data' listener on stdin that converts data events to keypress events.
+      replayPending = true;
+      setImmediate(() => {
+        if (!replayPending) return;
+        try {
+          stdin.emit('data', capturedInput);
+        } catch (err) {
+          debugLogger.error('Failed to replay captured input:', err);
+        }
+      });
+    }
+
     return () => {
+      replayPending = false;
       if (usePassthrough) {
         keypressStream.removeListener('keypress', handleKeypress);
         stdin.removeListener('data', handleRawKeypress);
@@ -1151,6 +1181,7 @@ export function KeypressProvider({
     pasteWorkaround,
     config,
     subscribers,
+    initialCapturedInput,
   ]);
 
   return (

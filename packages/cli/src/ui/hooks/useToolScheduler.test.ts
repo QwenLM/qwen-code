@@ -763,6 +763,8 @@ describe('mapToDisplay', () => {
       tool: toolForCall2,
       invocation: toolForCall2.build(baseRequest.args),
       liveOutput: 'markdown output',
+      startTime: 1000000000,
+      executionStartTime: 1234567890,
     } as ToolCall;
 
     const display = mapToDisplay([toolCall1, toolCall2]);
@@ -774,5 +776,7 @@ describe('mapToDisplay', () => {
     expect(display.tools[1].status).toBe(ToolCallStatus.Executing);
     expect(display.tools[1].resultDisplay).toBe('markdown output');
     expect(display.tools[1].renderOutputAsMarkdown).toBe(true);
+    expect(display.tools[1].executionStartTime).toBe(1234567890);
+    expect(display.tools[0].executionStartTime).toBeUndefined();
   });
 });

@@ -91,14 +91,23 @@ type OpenAIContentPart =
   | OpenAIContentPartFile;
 
 /**
+ * Per-stream state for tool-call parsing. Created by
+ * `OpenAIContentConverter.createStreamContext()` at the start of each
+ * streaming response and passed into every `convertOpenAIChunkToGemini`
+ * call on that stream, so concurrent streams (parallel subagents, fork
+ * children, …) never share parser state.
+ */
+export interface ConverterStreamContext {
+  toolCallParser: StreamingToolCallParser;
+}
+
+/**
  * Converter class for transforming data between Gemini and OpenAI formats
  */
 export class OpenAIContentConverter {
   private model: string;
   private schemaCompliance: SchemaComplianceMode;
   private modalities: InputModalities;
-  private streamingToolCallParser: StreamingToolCallParser =
-    new StreamingToolCallParser();
 
   constructor(
     model: string,
@@ -126,12 +135,21 @@ export class OpenAIContentConverter {
   }
 
   /**
-   * Reset streaming tool calls parser for new stream processing
-   * This should be called at the beginning of each stream to prevent
-   * data pollution from previous incomplete streams
+   * Create fresh per-stream state for processing one OpenAI streaming
+   * response. The returned context is passed into every
+   * `convertOpenAIChunkToGemini` call for that stream, then discarded.
+   *
+   * Previously the tool-call parser lived on the Converter instance and
+   * was shared by every caller of the singleton `Config.contentGenerator`.
+   * Concurrent streams (e.g. two subagents running in parallel after
+   * PR #3463) raced on that shared state: each stream's stream-start
+   * `reset()` wiped the other's partial tool-call buffers, chunks from
+   * different streams landed at the same `index=0` bucket, and
+   * `getCompletedToolCalls()` returned interleaved corrupt JSON that
+   * surfaced upstream as `NO_RESPONSE_TEXT` (issue #3516).
    */
-  resetStreamingToolCalls(): void {
-    this.streamingToolCallParser.reset();
+  createStreamContext(): ConverterStreamContext {
+    return { toolCallParser: new StreamingToolCallParser() };
   }
 
   /**
@@ -502,7 +520,12 @@ export class OpenAIContentConverter {
         .join('');
       const assistantMessage: ExtendedChatCompletionAssistantMessageParam = {
         role: 'assistant',
-        content: assistantTextContent || null,
+        // When there is reasoning content but no text, use "" instead of null.
+        // Some OpenAI-compatible providers (e.g. Ollama) reject content: null
+        // when reasoning_content is present, returning HTTP 400.
+        // For tool-call-only messages we keep null to stay spec-compliant.
+        content:
+          assistantTextContent || (reasoningParts.length > 0 ? '' : null),
       };
 
       if (toolCalls.length > 0) {
@@ -926,10 +949,17 @@ export class OpenAIContentConverter {
   }
 
   /**
-   * Convert OpenAI stream chunk to Gemini format
+   * Convert OpenAI stream chunk to Gemini format.
+   *
+   * `ctx` carries the tool-call parser for this stream. Callers MUST
+   * obtain it from `createStreamContext()` at the start of the stream
+   * and pass the same instance for every chunk of that stream. Concurrent
+   * streams MUST use distinct contexts or their tool-call buffers will
+   * interleave (issue #3516).
    */
   convertOpenAIChunkToGemini(
     chunk: OpenAI.Chat.ChatCompletionChunk,
+    ctx: ConverterStreamContext,
   ): GenerateContentResponse {
     const choice = chunk.choices?.[0];
     const response = new GenerateContentResponse();
@@ -951,14 +981,14 @@ export class OpenAIContentConverter {
         }
       }
 
-      // Handle tool calls using the streaming parser
+      // Handle tool calls using the stream-local parser
       if (choice.delta?.tool_calls) {
         for (const toolCall of choice.delta.tool_calls) {
           const index = toolCall.index ?? 0;
 
           // Process the tool call chunk through the streaming parser
           if (toolCall.function?.arguments) {
-            this.streamingToolCallParser.addChunk(
+            ctx.toolCallParser.addChunk(
               index,
               toolCall.function.arguments,
               toolCall.id,
@@ -966,7 +996,7 @@ export class OpenAIContentConverter {
             );
           } else {
             // Handle metadata-only chunks (id and/or name without arguments)
-            this.streamingToolCallParser.addChunk(
+            ctx.toolCallParser.addChunk(
               index,
               '', // Empty chunk for metadata-only updates
               toolCall.id,
@@ -982,11 +1012,9 @@ export class OpenAIContentConverter {
         // Detect truncation the provider may not report correctly.
         // Some providers (e.g. DashScope/Qwen) send "stop" or "tool_calls"
         // even when output was cut off mid-JSON due to max_tokens.
-        toolCallsTruncated =
-          this.streamingToolCallParser.hasIncompleteToolCalls();
+        toolCallsTruncated = ctx.toolCallParser.hasIncompleteToolCalls();
 
-        const completedToolCalls =
-          this.streamingToolCallParser.getCompletedToolCalls();
+        const completedToolCalls = ctx.toolCallParser.getCompletedToolCalls();
 
         for (const toolCall of completedToolCalls) {
           if (toolCall.name) {
@@ -1002,8 +1030,9 @@ export class OpenAIContentConverter {
           }
         }
 
-        // Clear the parser for the next stream
-        this.streamingToolCallParser.reset();
+        // Parser is stream-local; it will be discarded with the
+        // ConverterStreamContext when the stream finishes. No manual
+        // reset needed.
       }
 
       // If tool call JSON was truncated, override to "length" so downstream

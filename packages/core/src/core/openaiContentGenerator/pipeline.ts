@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { setMaxListeners } from 'node:events';
 import type OpenAI from 'openai';
 import {
   type GenerateContentParameters,
@@ -14,6 +15,23 @@ import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
 import { OpenAIContentConverter } from './converter.js';
 import type { ErrorHandler, RequestContext } from './errorHandler.js';
+
+/**
+ * The OpenAI SDK adds an abort listener for every `chat.completions.create`
+ * call, and several layers (retryWithBackoff, LoggingContentGenerator, the
+ * SDK's internal stream/fetch wrappers) each register their own listeners
+ * on the same per-request AbortSignal. With 5 retries the count comfortably
+ * exceeds Node's default 10-listener leak warning — and on top of that,
+ * concurrent code paths (e.g., recap + followup speculation) can share or
+ * compose signals, pushing it past any small cap.
+ *
+ * These signals are per-request and short-lived (GC'd when the request
+ * settles), so accumulation here is structural, not a memory leak. Disable
+ * the warning entirely for them. Idempotent.
+ */
+function raiseAbortListenerCap(signal: AbortSignal | undefined): void {
+  if (signal) setMaxListeners(0, signal);
+}
 
 /**
  * Error thrown when the API returns an error embedded as stream content
@@ -59,6 +77,7 @@ export class ContentGenerationPipeline {
     const effectiveModel = request.model || this.contentGeneratorConfig.model;
     this.converter.setModel(effectiveModel);
     this.converter.setModalities(this.contentGeneratorConfig.modalities ?? {});
+    raiseAbortListenerCap(request.config?.abortSignal);
     return this.executeWithErrorHandling(
       request,
       userPromptId,
@@ -87,6 +106,7 @@ export class ContentGenerationPipeline {
     const effectiveModel = request.model || this.contentGeneratorConfig.model;
     this.converter.setModel(effectiveModel);
     this.converter.setModalities(this.contentGeneratorConfig.modalities ?? {});
+    raiseAbortListenerCap(request.config?.abortSignal);
     return this.executeWithErrorHandling(
       request,
       userPromptId,
@@ -123,8 +143,12 @@ export class ContentGenerationPipeline {
   ): AsyncGenerator<GenerateContentResponse> {
     const collectedGeminiResponses: GenerateContentResponse[] = [];
 
-    // Reset streaming tool calls to prevent data pollution from previous streams
-    this.converter.resetStreamingToolCalls();
+    // Stream-local parser state. Previously the tool-call parser lived on
+    // the Converter singleton and was reset at stream start — but that
+    // wiped concurrent streams' in-flight buffers (e.g. parallel subagents
+    // sharing the same Config.contentGenerator). Scoping it per-stream
+    // fixes issue #3516.
+    const streamCtx = this.converter.createStreamContext();
 
     // State for handling chunk merging.
     // pendingFinishResponse holds a finish chunk waiting to be merged with
@@ -150,7 +174,10 @@ export class ContentGenerationPipeline {
           throw new StreamContentError(errorContent);
         }
 
-        const response = this.converter.convertOpenAIChunkToGemini(chunk);
+        const response = this.converter.convertOpenAIChunkToGemini(
+          chunk,
+          streamCtx,
+        );
 
         // Stage 2b: Filter empty responses to avoid downstream issues
         if (
@@ -214,8 +241,8 @@ export class ContentGenerationPipeline {
       // Stage 2e: Stream completed successfully
       context.duration = Date.now() - context.startTime;
     } catch (error) {
-      // Clear streaming tool calls on error to prevent data pollution
-      this.converter.resetStreamingToolCalls();
+      // No manual parser cleanup needed — streamCtx is stream-local and
+      // becomes eligible for garbage collection once this generator unwinds.
 
       // Re-throw StreamContentError directly so it can be handled by
       // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
@@ -398,6 +425,14 @@ export class ContentGenerationPipeline {
 
       return value !== undefined ? { [key]: value } : {};
     };
+
+    // When samplingParams is set, its keys pass through to the wire verbatim.
+    // This lets users target provider-specific parameter names
+    // (e.g. `max_completion_tokens` for GPT-5 / o-series) without a client release.
+    // When absent, the historical default behavior applies.
+    if (configSamplingParams !== undefined) {
+      return { ...configSamplingParams };
+    }
 
     const params: Record<string, unknown> = {
       // Parameters with request fallback but no defaults

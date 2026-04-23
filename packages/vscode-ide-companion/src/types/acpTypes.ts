@@ -12,7 +12,11 @@ import type { ApprovalModeValue } from './approvalModeValueTypes.js';
 // Private / Qwen-specific types (not part of ACP spec)
 // ---------------------------------------------------------------------------
 
-export const authMethod = 'qwen-oauth';
+// Default auth method for ACP authenticate requests.
+// Value matches AuthType.USE_OPENAI from @qwen-code/qwen-code-core.
+// Cannot import directly because this file is used in the webview bundle
+// where core (Node.js-only) is excluded as external.
+export const authMethod = 'openai';
 
 /**
  * Authenticate update notification (Qwen extension, not ACP spec).
@@ -22,6 +26,13 @@ export interface AuthenticateUpdateNotification {
   _meta: {
     authUri: string;
   };
+}
+
+export interface SlashCommandNotification {
+  sessionId: string;
+  command: string;
+  messageType: 'info' | 'error';
+  message: string;
 }
 
 export interface SessionUpdateMeta {
@@ -40,10 +51,10 @@ export {
 export const NEXT_APPROVAL_MODE: {
   [k in ApprovalModeValue]: ApprovalModeValue;
 } = {
+  plan: 'default',
   default: 'auto-edit',
   'auto-edit': 'yolo',
-  plan: 'yolo',
-  yolo: 'default',
+  yolo: 'plan',
 };
 
 // Ask User Question types
