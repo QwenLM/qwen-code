@@ -77,6 +77,16 @@ npm install -g @qwen-code/qwen-code@latest
 brew install qwen-code
 ```
 
+### macOS Desktop App (Optional)
+
+Install Qwen Code as a native macOS desktop app with Spotlight and Launchpad support:
+
+```bash
+bash -c "$(curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-macos-app.sh)"
+```
+
+After installation, launch Qwen Code with `Cmd + Space` → "Qwen Code" from anywhere. See [macOS Desktop App docs](docs/users/installation/macos-desktop-app.md) for details.
+
 ## Quick Start
 
 ```bash
