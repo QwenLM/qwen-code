@@ -100,8 +100,12 @@ export function resolveCliGenerationConfig(
   if (authType && settings.modelProviders) {
     const providers = settings.modelProviders[authType];
     if (providers && Array.isArray(providers)) {
-      // Try to find by requested model (from CLI or settings)
-      const requestedModel = argv.model || settings.model?.name;
+      const envOpenAIModel = env['OPENAI_MODEL'];
+      const envQwenModel = env['QWEN_MODEL'];
+
+      const requestedModel =
+        argv.model || envOpenAIModel || envQwenModel || settings.model?.name;
+
       if (requestedModel) {
         modelProvider = providers.find((p) => p.id === requestedModel) as
           | ProviderModelConfig
