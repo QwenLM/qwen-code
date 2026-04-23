@@ -283,6 +283,12 @@ describe('SelfEvolveService', () => {
     expect(sendPrompt.mock.calls[0]?.[0]).toContain(
       'SELF_EVOLVE_PROGRESS {"kind":"selected_task|round_start|command|command_result|final"',
     );
+    expect(sendPrompt.mock.calls[0]?.[0]).toContain(
+      'Small does not mean trivial: the change must still materially improve correctness, reliability, usability, maintainability, or a real user/developer workflow.',
+    );
+    expect(sendPrompt.mock.calls[0]?.[0]).toContain(
+      'Do not treat low-signal churn as success: avoid trivial copy tweaks, wording polish, comment-only edits, formatting-only edits, or other tiny changes that do not materially improve the product or workflow.',
+    );
     expect(runShellCommand).not.toHaveBeenCalled();
     expect(progressEvents).toEqual(
       expect.arrayContaining([
@@ -473,6 +479,9 @@ describe('SelfEvolveService', () => {
     const sendPrompt = vi.fn(async (prompt: string) => {
       expect(prompt).toContain(directionCandidateTitle);
       expect(prompt).toContain('If you choose the [user-direction] candidate');
+      expect(prompt).toContain(
+        'If the best candidate would only result in a negligible change, write status "no_safe_task" instead of forcing a weak edit.',
+      );
       await fs.writeFile(
         path.join(reviewWorktreePath, '.qwen', 'self-evolve-report.json'),
         JSON.stringify(
@@ -485,15 +494,15 @@ describe('SelfEvolveService', () => {
               source: 'user-direction',
               location: 'packages/cli/src/ui/commands/selfEvolveCommand.ts',
               rationale:
-                'Narrowed the brief to the recurring self-evolve scheduling copy.',
+                'Narrowed the brief to the recurring self-evolve scheduling flow and confirmation behavior.',
             },
-            summary: 'Improved the recurring self-evolve scheduling UX.',
+            summary: 'Improved the recurring self-evolve scheduling flow UX.',
             learnings: [
-              'The broad UI/UX brief was narrowed to the scheduling confirmation flow.',
+              'The broad UI/UX brief was narrowed to the scheduling confirmation flow instead of a copy-only tweak.',
             ],
             validation: [{ command: 'npm run lint', summary: 'passed' }],
             suggestedCommitMessage:
-              'fix(cli): improve self-evolve scheduling UX',
+              'fix(cli): improve self-evolve scheduling flow UX',
             changedFiles: ['src/feature.ts'],
           },
           null,
@@ -535,10 +544,10 @@ describe('SelfEvolveService', () => {
       'packages/cli/src/ui/commands/selfEvolveCommand.ts',
     );
     expect(result.selectedTaskRationale).toBe(
-      'Narrowed the brief to the recurring self-evolve scheduling copy.',
+      'Narrowed the brief to the recurring self-evolve scheduling flow and confirmation behavior.',
     );
     expect(result.summary).toBe(
-      'Improved the recurring self-evolve scheduling UX.',
+      'Improved the recurring self-evolve scheduling flow UX.',
     );
     expect(sendPrompt).toHaveBeenCalledTimes(1);
     expect(runShellCommand).not.toHaveBeenCalled();
