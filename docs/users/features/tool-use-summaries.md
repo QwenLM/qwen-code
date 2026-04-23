@@ -119,6 +119,24 @@ These settings can be configured in `settings.json`:
 }
 ```
 
+## Recommended pairing: enable compact mode
+
+For batches of 3+ parallel tool calls, pairing this feature with `ui.compactMode: true` produces the cleanest transcript. The compact view folds the whole batch into a single labeled row (`✓  Read txt files  · 4 tools`) instead of showing every tool line plus the trailing summary. Details remain one keystroke away via `Ctrl+O`.
+
+```json
+{
+  "fastModel": "qwen3-coder-flash",
+  "ui": {
+    "compactMode": true
+  },
+  "experimental": {
+    "emitToolUseSummaries": true
+  }
+}
+```
+
+In full mode (the default), the summary renders as a trailing `● <label>` line below the tool group — useful for large or heterogeneous batches, but for small same-type batches (e.g. `Read × 3`) the label can read as a restatement of the visible tool lines. If that matches your usual workflow, either turn compact mode on as above, or turn the summary off entirely via `experimental.emitToolUseSummaries: false`.
+
 ## Monitoring
 
 Summary model usage appears in `/stats` output under the fast-model token totals, with the `prompt_id` `tool_use_summary_generation` so it can be distinguished from prompt suggestions and other background tasks.
