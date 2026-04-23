@@ -52,6 +52,7 @@ export interface UIActions {
     region: AlibabaStandardRegion,
     modelIdsInput: string,
   ) => Promise<void>;
+  handleOpenRouterSubmit: () => Promise<void>;
   setAuthState: (state: AuthState) => void;
   onAuthError: (error: string | null) => void;
   cancelAuthentication: () => void;

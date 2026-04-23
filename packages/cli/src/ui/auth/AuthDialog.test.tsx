@@ -34,6 +34,7 @@ const createMockUIActions = (overrides: Partial<UIActions> = {}): UIActions => {
     handleAuthSelect: vi.fn(),
     handleCodingPlanSubmit: vi.fn(),
     handleAlibabaStandardSubmit: vi.fn(),
+    handleOpenRouterSubmit: vi.fn(),
     onAuthError: vi.fn(),
     handleRetryLastPrompt: vi.fn(),
   } as Partial<UIActions>;
@@ -556,6 +557,117 @@ describe('AuthDialog', () => {
 
     // Should call handleAuthSelect with undefined to exit
     expect(handleAuthSelect).toHaveBeenCalledWith(undefined);
+    unmount();
+  });
+
+  it('should show OpenRouter in API key options', async () => {
+    const settings: LoadedSettings = new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        originalSettings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+    const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+    await wait();
+
+    stdin.write('\u001b[B');
+    await wait();
+    stdin.write('\u001b[B');
+    await wait();
+    stdin.write('\r');
+    await wait();
+
+    await vi.waitFor(() => {
+      const frame = lastFrame();
+      expect(frame).toContain('OpenRouter');
+      expect(frame).toContain('Browser OAuth');
+    });
+
+    unmount();
+  });
+
+  it('should trigger OpenRouter OAuth from API key options', async () => {
+    const handleOpenRouterSubmit = vi.fn().mockResolvedValue(undefined);
+    const settings: LoadedSettings = new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        originalSettings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+    const { stdin, unmount } = renderAuthDialog(
+      settings,
+      {},
+      { handleOpenRouterSubmit },
+    );
+    await wait();
+
+    stdin.write('\u001b[B');
+    await wait();
+    stdin.write('\u001b[B');
+    await wait();
+    stdin.write('\r');
+    await wait();
+    stdin.write('\r');
+    await wait();
+
+    await vi.waitFor(() => {
+      expect(handleOpenRouterSubmit).toHaveBeenCalledTimes(1);
+    });
+
     unmount();
   });
 });

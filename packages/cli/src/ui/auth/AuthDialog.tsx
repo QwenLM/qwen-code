@@ -44,7 +44,10 @@ function parseDefaultAuthType(
 
 // Main menu option type
 type MainOption = typeof AuthType.QWEN_OAUTH | 'CODING_PLAN' | 'API_KEY';
-type ApiKeyOption = 'ALIBABA_STANDARD_API_KEY' | 'CUSTOM_API_KEY';
+type ApiKeyOption =
+  | 'OPENROUTER_OAUTH'
+  | 'ALIBABA_STANDARD_API_KEY'
+  | 'CUSTOM_API_KEY';
 
 // View level for navigation
 type ViewLevel =
@@ -77,6 +80,7 @@ export function AuthDialog(): React.JSX.Element {
     handleAuthSelect: onAuthSelect,
     handleCodingPlanSubmit,
     handleAlibabaStandardSubmit,
+    handleOpenRouterSubmit,
     onAuthError,
   } = useUIActions();
   const config = useConfig();
@@ -212,6 +216,15 @@ export function AuthDialog(): React.JSX.Element {
 
   const apiKeyTypeItems = [
     {
+      key: 'OPENROUTER_OAUTH',
+      title: t('OpenRouter'),
+      label: t('OpenRouter'),
+      description: t(
+        'Browser OAuth · Auto-configure API key and OpenRouter models',
+      ),
+      value: 'OPENROUTER_OAUTH' as ApiKeyOption,
+    },
+    {
       key: 'ALIBABA_STANDARD_API_KEY',
       title: t('Alibaba Cloud ModelStudio Standard API Key'),
       label: t('Alibaba Cloud ModelStudio Standard API Key'),
@@ -305,6 +318,11 @@ export function AuthDialog(): React.JSX.Element {
   const handleApiKeyTypeSelect = async (value: ApiKeyOption) => {
     setErrorMessage(null);
     onAuthError(null);
+
+    if (value === 'OPENROUTER_OAUTH') {
+      await handleOpenRouterSubmit();
+      return;
+    }
 
     if (value === 'ALIBABA_STANDARD_API_KEY') {
       setAlibabaStandardModelIdError(null);

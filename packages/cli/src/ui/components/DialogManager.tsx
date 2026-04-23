@@ -16,6 +16,7 @@ import { PluginChoicePrompt } from './PluginChoicePrompt.js';
 import { ThemeDialog } from './ThemeDialog.js';
 import { SettingsDialog } from './SettingsDialog.js';
 import { QwenOAuthProgress } from './QwenOAuthProgress.js';
+import { ExternalAuthProgress } from './ExternalAuthProgress.js';
 import { AuthDialog } from '../auth/AuthDialog.js';
 import { EditorSettingsDialog } from './EditorSettingsDialog.js';
 import { TrustDialog } from './TrustDialog.js';
@@ -309,6 +310,19 @@ export const DialogManager = ({
   }
 
   if (uiState.isAuthenticating) {
+    if (
+      uiState.pendingAuthType === AuthType.USE_OPENAI &&
+      uiState.externalAuthState
+    ) {
+      return (
+        <ExternalAuthProgress
+          title={uiState.externalAuthState.title}
+          message={uiState.externalAuthState.message}
+          detail={uiState.externalAuthState.detail}
+        />
+      );
+    }
+
     // OpenAI authentication now handled through AuthDialog with coding-plan/custom sub-modes
     // Qwen OAuth remains as a separate flow
     if (uiState.pendingAuthType === AuthType.QWEN_OAUTH) {
