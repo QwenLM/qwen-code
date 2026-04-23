@@ -1,91 +1,214 @@
 #!/bin/bash
-# install-qwen-macos-app.sh - Install Qwen Code as a macOS Desktop Application
-# Usage: bash install-qwen-macos-app.sh
 
-set -e
+# Qwen Code macOS Desktop App Installation Script
+# Installs Qwen Code as a native macOS desktop application
+#
+# Usage: bash install-qwen-macos-app.sh [--auto]
+#
+# Options:
+#   --auto    Non-interactive mode, skip prompts and install directly
+#
+# This script is designed to be run after installing qwen-code via
+# the main installation script, or standalone if qwen is already installed.
 
+# Re-execute with bash if running with sh
+if [ -z "${BASH_VERSION}" ]; then
+    if command -v bash >/dev/null 2>&1; then
+        exec bash -- "${0}" "$@"
+    else
+        echo "Error: This script requires bash."
+        exit 1
+    fi
+fi
+
+set -eo pipefail
+
+# ============================================
+# Color definitions
+# ============================================
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+log_info()    { echo -e "${BLUE}ℹ️  $1${NC}"; }
+log_success() { echo -e "${GREEN}✅ $1${NC}"; }
+log_warning() { echo -e "${YELLOW}⚠️  $1${NC}"; }
+log_error()   { echo -e "${RED}❌ $1${NC}"; }
+
+# ============================================
+# Parse arguments
+# ============================================
+AUTO_MODE=false
+for arg in "$@"; do
+    case "$arg" in
+        --auto) AUTO_MODE=true ;;
+    esac
+done
+
+# ============================================
+# Configuration
+# ============================================
 APP_NAME="Qwen Code"
 APP_PATH="/Applications/${APP_NAME}.app"
-ICON_URL="https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/icons/qwen-icon.png"
-TMP_DIR=$(mktemp -d)
 
-echo "🚀 Installing Qwen Code as a macOS Desktop Application..."
+# Icon path: bundled alongside this script in the repository
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ICON_PATH="${SCRIPT_DIR}/qwen-icon.png"
 
-# Check if qwen is installed
-if ! command -v qwen &> /dev/null; then
-    echo "❌ Error: qwen CLI is not installed."
-    echo "   Please install qwen first: https://github.com/QwenLM/qwen-code"
-    echo "   Or run: brew install qwen-code"
+# ============================================
+# Pre-flight checks
+# ============================================
+echo -e "${CYAN}"
+echo "╔═══════════════════════════════════════════════════════════╗"
+echo "║   Qwen Code — macOS Desktop App Installer                ║"
+echo "╚═══════════════════════════════════════════════════════════╝"
+echo -e "${NC}"
+
+# Check macOS
+if [[ "$(uname)" != "Darwin" ]]; then
+    log_error "This script only supports macOS."
     exit 1
 fi
 
-# Check if app already exists
-if [ -d "$APP_PATH" ]; then
-    echo "⚠️  Qwen Code.app already exists in /Applications."
-    read -p "Do you want to reinstall? (y/N) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Aborted."
-        exit 0
-    fi
-    rm -rf "$APP_PATH"
-    echo "🗑️  Removed existing Qwen Code.app"
+# Check qwen is installed
+if ! command -v qwen &>/dev/null; then
+    log_error "qwen CLI is not installed."
+    echo ""
+    echo "Please install qwen-code first:"
+    echo "  bash -c \"\$(curl -fsSL ${ASSETS_BASE}/installation/install-qwen.sh)\""
+    echo ""
+    exit 1
 fi
 
-# Create AppleScript
-cat > "${TMP_DIR}/QwenCode.applescript" << 'EOF'
+QWEN_VERSION=$(qwen --version 2>/dev/null || echo "unknown")
+log_info "Detected qwen version: ${QWEN_VERSION}"
+
+# Check if app already exists
+APP_ALREADY_INSTALLED=false
+if [ -d "$APP_PATH" ]; then
+    APP_ALREADY_INSTALLED=true
+    log_warning "Qwen Code.app already exists in /Applications."
+fi
+
+# ============================================
+# Interactive prompt (skip in auto mode)
+# ============================================
+if [ "$AUTO_MODE" = false ]; then
+    echo ""
+    echo "This will install a desktop app that lets you launch Qwen Code"
+    echo "from Spotlight (Cmd+Space), Launchpad, or the Applications folder."
+    echo ""
+    
+    if [ "$APP_ALREADY_INSTALLED" = true ]; then
+        read -p "Reinstall Qwen Code.app? (y/N) " -n 1 -r
+    else
+        read -p "Continue? (Y/n) " -n 1 -r
+    fi
+    echo
+    
+    if [ "$APP_ALREADY_INSTALLED" = true ]; then
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "Aborted."
+            exit 0
+        fi
+    else
+        if [[ $REPLY =~ ^[Nn]$ ]]; then
+            echo "Aborted."
+            exit 0
+        fi
+    fi
+fi
+
+# ============================================
+# Remove existing app if reinstalling
+# ============================================
+if [ -d "$APP_PATH" ]; then
+    rm -rf "$APP_PATH"
+    log_info "Removed existing Qwen Code.app"
+fi
+
+# ============================================
+# Build the app
+# ============================================
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+echo ""
+log_info "Building Qwen Code.app..."
+
+# Create AppleScript source
+cat > "${TMP_DIR}/QwenCode.applescript" << 'APPLESCRIPT'
 tell application "Terminal"
     activate
     do script "qwen"
 end tell
-EOF
+APPLESCRIPT
 
-# Compile AppleScript to .app
-echo "📦 Building Qwen Code.app..."
+# Compile to .app
 osacompile -o "${TMP_DIR}/${APP_NAME}.app" "${TMP_DIR}/QwenCode.applescript" 2>/dev/null
 
-# Download icon if possible
-echo "🎨 Downloading Qwen icon..."
-ICON_TMP="${TMP_DIR}/qwen-icon.png"
-if curl -fsSL "$ICON_URL" -o "$ICON_TMP" 2>/dev/null; then
-    # Convert PNG to ICNS
+# ============================================
+# Install icon
+# ============================================
+log_info "Applying Qwen icon..."
+
+if [ -f "$ICON_PATH" ]; then
+    # Create iconset for multi-resolution support
     ICONSET_DIR="${TMP_DIR}/qwen-icon.iconset"
     mkdir -p "$ICONSET_DIR"
     
-    sips -z 16 16 "$ICON_TMP" --out "${ICONSET_DIR}/icon_16x16.png" >/dev/null 2>&1
-    sips -z 32 32 "$ICON_TMP" --out "${ICONSET_DIR}/icon_16x16@2x.png" >/dev/null 2>&1
-    sips -z 32 32 "$ICON_TMP" --out "${ICONSET_DIR}/icon_32x32.png" >/dev/null 2>&1
-    sips -z 64 64 "$ICON_TMP" --out "${ICONSET_DIR}/icon_32x32@2x.png" >/dev/null 2>&1
-    sips -z 128 128 "$ICON_TMP" --out "${ICONSET_DIR}/icon_128x128.png" >/dev/null 2>&1
-    sips -z 256 256 "$ICON_TMP" --out "${ICONSET_DIR}/icon_128x128@2x.png" >/dev/null 2>&1
-    sips -z 256 256 "$ICON_TMP" --out "${ICONSET_DIR}/icon_256x256.png" >/dev/null 2>&1
-    sips -z 512 512 "$ICON_TMP" --out "${ICONSET_DIR}/icon_256x256@2x.png" >/dev/null 2>&1
-    sips -z 512 512 "$ICON_TMP" --out "${ICONSET_DIR}/icon_512x512.png" >/dev/null 2>&1
-    cp "$ICON_TMP" "${ICONSET_DIR}/icon_512x512@2x.png"
+    sips -z 16 16   "$ICON_PATH" --out "${ICONSET_DIR}/icon_16x16.png"       >/dev/null 2>&1
+    sips -z 32 32   "$ICON_PATH" --out "${ICONSET_DIR}/icon_16x16@2x.png"     >/dev/null 2>&1
+    sips -z 32 32   "$ICON_PATH" --out "${ICONSET_DIR}/icon_32x32.png"        >/dev/null 2>&1
+    sips -z 64 64   "$ICON_PATH" --out "${ICONSET_DIR}/icon_32x32@2x.png"     >/dev/null 2>&1
+    sips -z 128 128 "$ICON_PATH" --out "${ICONSET_DIR}/icon_128x128.png"      >/dev/null 2>&1
+    sips -z 256 256 "$ICON_PATH" --out "${ICONSET_DIR}/icon_128x128@2x.png"   >/dev/null 2>&1
+    sips -z 256 256 "$ICON_PATH" --out "${ICONSET_DIR}/icon_256x256.png"      >/dev/null 2>&1
+    sips -z 512 512 "$ICON_PATH" --out "${ICONSET_DIR}/icon_256x256@2x.png"   >/dev/null 2>&1
+    sips -z 512 512 "$ICON_PATH" --out "${ICONSET_DIR}/icon_512x512.png"      >/dev/null 2>&1
+    cp "$ICON_PATH" "${ICONSET_DIR}/icon_512x512@2x.png"
     
+    # Convert to ICNS
     iconutil -c icns "$ICONSET_DIR" -o "${TMP_DIR}/qwen-icon.icns" 2>/dev/null
     
     # Replace app icon
     cp "${TMP_DIR}/qwen-icon.icns" "${TMP_DIR}/${APP_NAME}.app/Contents/Resources/applet.icns"
-    echo "✅ Icon installed successfully"
+    log_success "Icon applied from bundled qwen-icon.png"
 else
-    echo "⚠️  Could not download icon, using default"
+    log_warning "Icon file not found at ${ICON_PATH}, using default AppleScript icon"
 fi
 
-# Move to Applications
+# ============================================
+# Install to /Applications
+# ============================================
 cp -R "${TMP_DIR}/${APP_NAME}.app" "/Applications/"
-echo "📍 Installed to: $APP_PATH"
+log_success "Installed to: ${APP_PATH}"
 
-# Clean up
-rm -rf "$TMP_DIR"
+# ============================================
+# Post-install: refresh icon cache
+# ============================================
+rm ~/Library/Application\ Support/Dock/*.db 2>/dev/null || true
+killall Dock 2>/dev/null || true
 
+# ============================================
+# Summary
+# ============================================
 echo ""
-echo "✨ Qwen Code Desktop App installed successfully!"
+echo -e "${CYAN}╔═══════════════════════════════════════════════════════════╗${NC}"
+echo -e "${CYAN}║${NC}  ✨  Qwen Code Desktop App installed successfully!         ${CYAN}║${NC}"
+echo -e "${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo "Usage:"
-echo "  - Spotlight: Press Cmd+Space, type 'Qwen Code'"
-echo "  - Launchpad: Find 'Qwen Code' icon"
-echo "  - Applications: Open /Applications/Qwen Code.app"
+echo -e "${BLUE}Launch methods:${NC}"
+echo "  • Spotlight:  Cmd + Space → type 'Qwen Code' → Enter"
+echo "  • Launchpad:  Find the 'Qwen Code' icon"
+echo "  • Finder:     Open /Applications/Qwen Code.app"
 echo ""
-echo "Uninstall:"
+echo -e "${BLUE}What it does:${NC}"
+echo "  Opens Terminal and automatically runs the 'qwen' command."
+echo ""
+echo -e "${BLUE}Uninstall:${NC}"
 echo "  rm -rf '/Applications/Qwen Code.app'"
+echo ""

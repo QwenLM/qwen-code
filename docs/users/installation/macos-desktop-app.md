@@ -14,10 +14,16 @@ You can install Qwen Code as a native macOS desktop application that opens Termi
 
 ## Installation
 
-### One-Click Install
+### From Repository Clone
 
 ```bash
-bash -c "$(curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-macos-app.sh)"
+bash scripts/installation/install-qwen-macos-app.sh
+```
+
+### One-Click Install (No Clone Required)
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/scripts/installation/install-qwen-macos-app.sh)"
 ```
 
 ### Manual Installation
