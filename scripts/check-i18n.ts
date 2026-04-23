@@ -430,7 +430,7 @@ async function main() {
       );
 
       // Save these keys to a JSON file (skip in CI to avoid dirtying the working tree)
-      if (!process.env.CI) {
+      if (!process.env['CI']) {
         const outputPath = path.join(
           __dirname,
           'unused-keys-only-in-locales.json',
