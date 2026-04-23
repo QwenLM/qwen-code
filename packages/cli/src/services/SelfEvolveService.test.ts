@@ -302,6 +302,7 @@ describe('SelfEvolveService', () => {
     expect(result.selectedTaskLocation).toBe('src/feature.ts:1');
     expect(result.validation).toEqual(['passed: npm run lint']);
     expect(sendPrompt).toHaveBeenCalledTimes(1);
+    expect(sendPrompt.mock.calls[0]?.[1]).toBe(20 * 60_000);
     expect(sendPrompt.mock.calls[0]?.[0]).toContain(
       'Own the full implementation and validation loop inside this single child session',
     );

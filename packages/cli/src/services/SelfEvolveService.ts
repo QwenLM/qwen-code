@@ -36,7 +36,7 @@ const SELF_EVOLVE_DIR = 'self-evolve';
 const MAX_DISCOVERED_CANDIDATES = 8;
 const MAX_SELF_EVOLVE_ROUNDS = 5;
 const DISCOVERY_TIMEOUT_MS = 45_000;
-const QWEN_ATTEMPT_TIMEOUT_MS = 10 * 60_000;
+const QWEN_ATTEMPT_IDLE_TIMEOUT_MS = 20 * 60_000;
 const TODO_PATTERN = /\b(?:TODO|FIXME|HACK)\b[:\s-]*(.*)$/;
 const BACKLOG_FILE_PATTERN = /(^|\/)(backlog|roadmap|tasks?|todo)(\.[^/]+)?$/i;
 const TEST_ARTIFACT_PATTERN =
@@ -382,6 +382,30 @@ interface PersistentQwenSessionParams {
   env?: NodeJS.ProcessEnv;
 }
 
+export class SelfEvolveIdleTimer {
+  private timer: NodeJS.Timeout | undefined;
+
+  constructor(
+    private readonly timeoutMs: number,
+    private readonly onTimeout: () => void,
+  ) {}
+
+  refresh(): void {
+    this.clear();
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      this.onTimeout();
+    }, this.timeoutMs);
+  }
+
+  clear(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+  }
+}
+
 class SelfEvolveChildProgressParser {
   private pendingLine = '';
   private readonly emittedLines = new Set<string>();
@@ -509,7 +533,7 @@ class PersistentQwenSession implements QwenSession {
           message: CLIPartialAssistantMessage | CLIAssistantMessage,
         ) => void;
         settle: (result: QwenSessionTurnResult) => void;
-        timer: NodeJS.Timeout;
+        idleTimer: SelfEvolveIdleTimer;
       }
     | undefined;
   private exitResult: CommandExecutionResult | undefined;
@@ -523,6 +547,10 @@ class PersistentQwenSession implements QwenSession {
       cwd: params.cwd,
       env: params.env,
       stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    this.child.stdout?.on('data', () => {
+      this.currentTurn?.idleTimer.refresh();
     });
 
     const stdoutReader = createInterface({
@@ -616,21 +644,22 @@ class PersistentQwenSession implements QwenSession {
     }
 
     return new Promise((resolve) => {
-      const timer = setTimeout(() => {
+      const idleTimer = new SelfEvolveIdleTimer(timeoutMs, () => {
         if (!this.currentTurn) {
           return;
         }
         this.currentTurn.timedOut = true;
         this.child.kill('SIGTERM');
-      }, timeoutMs);
+      });
       this.currentTurn = {
         stdoutLines: [],
         stderrOffset: this.stderrChunks.length,
         timedOut: false,
         onStreamEvent,
         settle: resolve,
-        timer,
+        idleTimer,
       };
+      idleTimer.refresh();
       const message: CLIUserMessage = {
         type: 'user',
         session_id: this.params.sessionId,
@@ -655,7 +684,7 @@ class PersistentQwenSession implements QwenSession {
     if (!this.currentTurn) {
       return;
     }
-    clearTimeout(this.currentTurn.timer);
+    this.currentTurn.idleTimer.clear();
     const settle = this.currentTurn.settle;
     this.currentTurn = undefined;
     settle(result);
@@ -890,7 +919,7 @@ export class SelfEvolveService {
             candidates,
             direction,
           }),
-          QWEN_ATTEMPT_TIMEOUT_MS,
+          QWEN_ATTEMPT_IDLE_TIMEOUT_MS,
           (message) => childProgressParser.handle(message),
         );
         report = await safeReadJson<SelfEvolveAttemptReport>(reportPath);
