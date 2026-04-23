@@ -94,6 +94,11 @@ function SessionListItemView({
 
   const promptText = session.customTitle || session.prompt || '(empty prompt)';
   const truncatedPrompt = truncateText(promptText, maxPromptWidth);
+  // Dim auto-generated titles so users can distinguish a model guess from
+  // a title they chose themselves with `/rename`. Selected row keeps the
+  // accent color — legibility of the focused row wins over source hinting.
+  const isAutoTitle =
+    session.titleSource === 'auto' && Boolean(session.customTitle);
 
   return (
     <Box flexDirection="column" marginBottom={isLast ? 0 : 1}>
@@ -111,7 +116,13 @@ function SessionListItemView({
           {prefix}
         </Text>
         <Text
-          color={isSelected ? theme.text.accent : theme.text.primary}
+          color={
+            isSelected
+              ? theme.text.accent
+              : isAutoTitle
+                ? theme.text.secondary
+                : theme.text.primary
+          }
           bold={isSelected}
         >
           {truncatedPrompt}

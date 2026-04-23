@@ -11,8 +11,10 @@ import path from 'node:path';
 import {
   extractJsonStringField,
   extractLastJsonStringField,
+  extractLastJsonStringFields,
   LITE_READ_BUF_SIZE,
   readLastJsonStringFieldSync,
+  readLastJsonStringFieldsSync,
   unescapeJsonString,
 } from './sessionStorageUtils.js';
 
@@ -278,6 +280,245 @@ describe('sessionStorageUtils', () => {
       expect(
         readLastJsonStringFieldSync(p, 'customTitle', 'custom_title'),
       ).toBe('last');
+    });
+  });
+
+  describe('extractLastJsonStringFields', () => {
+    it('returns undefined for every key when primary is absent', () => {
+      const hit = extractLastJsonStringFields(
+        '{"type":"user","message":"hi"}',
+        'customTitle',
+        ['titleSource'],
+        'custom_title',
+      );
+      expect(hit).toEqual({ customTitle: undefined, titleSource: undefined });
+    });
+
+    it('extracts secondary field from the same line as the primary', () => {
+      const text =
+        '{"subtype":"custom_title","customTitle":"A","titleSource":"auto"}\n';
+      const hit = extractLastJsonStringFields(
+        text,
+        'customTitle',
+        ['titleSource'],
+        'custom_title',
+      );
+      expect(hit).toEqual({ customTitle: 'A', titleSource: 'auto' });
+    });
+
+    it('when primary appears on multiple lines, picks the latest and its own secondary', () => {
+      const text = [
+        '{"subtype":"custom_title","customTitle":"A","titleSource":"manual"}',
+        '{"subtype":"custom_title","customTitle":"B","titleSource":"auto"}',
+        '',
+      ].join('\n');
+      const hit = extractLastJsonStringFields(
+        text,
+        'customTitle',
+        ['titleSource'],
+        'custom_title',
+      );
+      expect(hit).toEqual({ customTitle: 'B', titleSource: 'auto' });
+    });
+
+    it('returns secondary=undefined when the winning line lacks it (legacy record)', () => {
+      const text = '{"subtype":"custom_title","customTitle":"legacy"}\n';
+      const hit = extractLastJsonStringFields(
+        text,
+        'customTitle',
+        ['titleSource'],
+        'custom_title',
+      );
+      expect(hit).toEqual({ customTitle: 'legacy', titleSource: undefined });
+    });
+
+    it('never lets titleSource from an OLDER line leak into a NEWER primary match', () => {
+      // Older record has both fields; newer record (wins) has only customTitle.
+      // If the implementation did two separate scans, titleSource would leak
+      // from the older line — the single-pass contract forbids this.
+      const text = [
+        '{"subtype":"custom_title","customTitle":"old","titleSource":"auto"}',
+        '{"subtype":"custom_title","customTitle":"new"}',
+        '',
+      ].join('\n');
+      const hit = extractLastJsonStringFields(
+        text,
+        'customTitle',
+        ['titleSource'],
+        'custom_title',
+      );
+      expect(hit).toEqual({ customTitle: 'new', titleSource: undefined });
+    });
+
+    it('respects lineContains — matches on non-tagged lines are ignored', () => {
+      // A user message happens to contain a customTitle substring; the line
+      // doesn't include "custom_title" so it's filtered out.
+      const text = [
+        '{"type":"user","message":"I want customTitle: \\"fake\\""}',
+        '{"subtype":"custom_title","customTitle":"real","titleSource":"manual"}',
+        '',
+      ].join('\n');
+      const hit = extractLastJsonStringFields(
+        text,
+        'customTitle',
+        ['titleSource'],
+        'custom_title',
+      );
+      expect(hit).toEqual({ customTitle: 'real', titleSource: 'manual' });
+    });
+
+    it('rejects a crash-truncated trailing record with no closing quote', () => {
+      // A clean record is followed by a truncated partial write. A naive
+      // implementation would pick the truncated line as "latest" and return
+      // titleSource=undefined (since the line never got its source written).
+      // We require both fields from the last VALID record.
+      const text =
+        '{"subtype":"custom_title","customTitle":"A","titleSource":"auto"}\n' +
+        '{"subtype":"custom_title","customTitle":"B';
+      const hit = extractLastJsonStringFields(
+        text,
+        'customTitle',
+        ['titleSource'],
+        'custom_title',
+      );
+      expect(hit).toEqual({ customTitle: 'A', titleSource: 'auto' });
+    });
+
+    it('handles escaped quotes inside the primary value', () => {
+      const text =
+        '{"subtype":"custom_title","customTitle":"He said \\"hi\\"","titleSource":"manual"}\n';
+      const hit = extractLastJsonStringFields(
+        text,
+        'customTitle',
+        ['titleSource'],
+        'custom_title',
+      );
+      expect(hit).toEqual({
+        customTitle: 'He said "hi"',
+        titleSource: 'manual',
+      });
+    });
+  });
+
+  describe('readLastJsonStringFieldsSync', () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sst-readfields-'));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    function writeFile(name: string, content: string): string {
+      const p = path.join(tmpDir, name);
+      fs.writeFileSync(p, content);
+      return p;
+    }
+
+    it('returns all-undefined for a missing file', () => {
+      const p = path.join(tmpDir, 'nope.jsonl');
+      expect(
+        readLastJsonStringFieldsSync(
+          p,
+          'customTitle',
+          ['titleSource'],
+          'custom_title',
+        ),
+      ).toEqual({ customTitle: undefined, titleSource: undefined });
+    });
+
+    it('returns the atomic pair when tail contains the match', () => {
+      const p = writeFile(
+        'tail.jsonl',
+        '{"subtype":"custom_title","customTitle":"A","titleSource":"auto"}\n',
+      );
+      expect(
+        readLastJsonStringFieldsSync(
+          p,
+          'customTitle',
+          ['titleSource'],
+          'custom_title',
+        ),
+      ).toEqual({ customTitle: 'A', titleSource: 'auto' });
+    });
+
+    it('falls through to full-file scan when tail has no match and finds the pair', () => {
+      // Primary+secondary near start, filler > LITE_READ_BUF_SIZE, nothing in tail.
+      const header =
+        '{"subtype":"custom_title","customTitle":"X","titleSource":"auto"}\n';
+      const filler =
+        '{"type":"user","message":"' + 'x'.repeat(LITE_READ_BUF_SIZE) + '"}\n';
+      const p = writeFile('phase2.jsonl', header + filler);
+      expect(
+        readLastJsonStringFieldsSync(
+          p,
+          'customTitle',
+          ['titleSource'],
+          'custom_title',
+        ),
+      ).toEqual({ customTitle: 'X', titleSource: 'auto' });
+    });
+
+    it('handles records straddling a Phase-2 chunk boundary', () => {
+      // Goal: place the winning custom_title record so it begins in Phase-2
+      // chunk N and ends in chunk N+1. That exercises the `carry` logic in
+      // readLastJsonStringFieldsSync — without it, the partial first chunk
+      // wouldn't contain the closing quote and the match would be missed.
+      //
+      // Layout:
+      //   [padA bytes..............][custom_title line][padB bytes................]
+      // with padA + fixed header bytes + half of the title line <
+      // LITE_READ_BUF_SIZE, and the rest of the title line spilling into
+      // the next chunk. padB is >> tail window so Phase-2 fires (tail miss).
+      const titleLine =
+        '{"subtype":"custom_title","customTitle":"spanner","titleSource":"manual"}';
+      const userHeader = '{"type":"user","message":"';
+      const userFooter = '"}\n';
+      // Position the title line so its middle lands on the chunk boundary.
+      const padALen =
+        LITE_READ_BUF_SIZE -
+        userHeader.length -
+        userFooter.length -
+        Math.floor(titleLine.length / 2);
+      const padA = 'a'.repeat(padALen);
+      const padB = 'b'.repeat(LITE_READ_BUF_SIZE * 2);
+      const p = writeFile(
+        'straddle.jsonl',
+        userHeader +
+          padA +
+          userFooter +
+          titleLine +
+          '\n' +
+          userHeader +
+          padB +
+          userFooter,
+      );
+      expect(
+        readLastJsonStringFieldsSync(
+          p,
+          'customTitle',
+          ['titleSource'],
+          'custom_title',
+        ),
+      ).toEqual({ customTitle: 'spanner', titleSource: 'manual' });
+    });
+
+    it('does not let a truncated trailing partial record win', () => {
+      const p = writeFile(
+        'truncated.jsonl',
+        '{"subtype":"custom_title","customTitle":"A","titleSource":"auto"}\n' +
+          '{"subtype":"custom_title","customTitle":"B',
+      );
+      expect(
+        readLastJsonStringFieldsSync(
+          p,
+          'customTitle',
+          ['titleSource'],
+          'custom_title',
+        ),
+      ).toEqual({ customTitle: 'A', titleSource: 'auto' });
     });
   });
 });

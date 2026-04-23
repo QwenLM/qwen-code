@@ -52,6 +52,8 @@ describe('ChatRecordingService', () => {
           .mockReturnValue('/test/project/root/.gemini/projects/test-project'),
       },
       getModel: vi.fn().mockReturnValue('gemini-pro'),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      isInteractive: vi.fn().mockReturnValue(false),
       getDebugMode: vi.fn().mockReturnValue(false),
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn().mockReturnValue({
