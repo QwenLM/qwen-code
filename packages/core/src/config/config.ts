@@ -385,6 +385,7 @@ export interface ConfigParameters {
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
+  emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
   allowedMcpServers?: string[];
@@ -642,6 +643,7 @@ export class Config {
   private readonly cliVersion?: string;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = false;
+  private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly importFormat: 'tree' | 'flat';
@@ -794,6 +796,7 @@ export class Config {
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
     this.cronEnabled = params.cronEnabled ?? false;
+    this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
     this.noBrowser = params.noBrowser ?? false;
@@ -2008,6 +2011,22 @@ export class Config {
     // Cron is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_CRON'] === '1') return true;
     return this.cronEnabled;
+  }
+
+  /**
+   * Whether the turn loop should fire a fast-model call after each tool batch
+   * to emit a `tool_use_summary` message. Mirrors Claude Code's
+   * `CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES` gate, but defaults to on so the
+   * compact-mode UI benefits without configuration.
+   *
+   * Env overrides (either direction): `QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0`
+   * to force off, `=1` to force on.
+   */
+  getEmitToolUseSummaries(): boolean {
+    const env = process.env['QWEN_CODE_EMIT_TOOL_USE_SUMMARIES'];
+    if (env === '0' || env === 'false') return false;
+    if (env === '1' || env === 'true') return true;
+    return this.emitToolUseSummaries;
   }
 
   getEnableRecursiveFileSearch(): boolean {

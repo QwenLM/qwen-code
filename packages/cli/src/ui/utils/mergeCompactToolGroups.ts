@@ -83,12 +83,16 @@ function isForceExpandGroup(
 
 /**
  * Check if an item is hidden in compact mode (so it shouldn't break tool_group adjacency).
- * This mirrors HistoryItemDisplay.tsx:123-142 which hides gemini_thought / gemini_thought_content
- * when compactMode is true.
+ * This mirrors HistoryItemDisplay.tsx which hides:
+ *  - `gemini_thought` / `gemini_thought_content` (thinking — hidden when compactMode is true),
+ *  - `tool_use_summary` (consumed upstream to decorate the adjacent tool_group's label;
+ *    never rendered standalone so it must not break adjacency between two batches).
  */
 function isHiddenInCompactMode(item: HistoryItem): boolean {
   return (
-    item.type === 'gemini_thought' || item.type === 'gemini_thought_content'
+    item.type === 'gemini_thought' ||
+    item.type === 'gemini_thought_content' ||
+    item.type === 'tool_use_summary'
   );
 }
 

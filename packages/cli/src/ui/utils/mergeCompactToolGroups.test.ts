@@ -343,6 +343,30 @@ describe('mergeCompactToolGroups', () => {
     expect(merged[3].type).toBe('tool_group');
   });
 
+  it('merges tool_groups separated by tool_use_summary (hidden in compact)', () => {
+    // tool_use_summary items are consumed upstream to decorate the adjacent
+    // tool_group's compact label; they never render standalone, so they must
+    // not break the merge streak between two consecutive tool batches.
+    const items: HistoryItem[] = [
+      createToolGroup(1, [createTool('c1', 'Shell', ToolCallStatus.Success)]),
+      {
+        type: 'tool_use_summary',
+        id: 2,
+        summary: 'Ran first shell batch',
+        precedingToolUseIds: ['c1'],
+      },
+      createToolGroup(3, [createTool('c2', 'Shell', ToolCallStatus.Success)]),
+    ];
+
+    const merged = mergeCompactToolGroups(items);
+
+    expect(merged.length).toBe(1);
+    expect(merged[0].id).toBe(1);
+    if (isToolGroup(merged[0])) {
+      expect(merged[0].tools.map((t) => t.callId)).toEqual(['c1', 'c2']);
+    }
+  });
+
   it('preserves trailing gemini_thought after merged group', () => {
     const items: HistoryItem[] = [
       createToolGroup(1, [createTool('c1', 'Shell', ToolCallStatus.Success)]),

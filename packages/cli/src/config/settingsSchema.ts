@@ -1900,6 +1900,16 @@ const SETTINGS_SCHEMA = {
           'Enable in-session cron/loop tools (experimental). When enabled, the model can create recurring prompts using cron_create, cron_list, and cron_delete tools. Can also be enabled via QWEN_CODE_ENABLE_CRON=1 environment variable.',
         showInDialog: true,
       },
+      emitToolUseSummaries: {
+        type: 'boolean',
+        label: 'Tool Use Summaries',
+        category: 'Experimental',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Generate a short LLM-based label after each tool batch completes. The label folds N parallel tool calls into a single row in compact mode and is also emitted to SDK clients as a `tool_use_summary` message. Requires a fast model to be configured; runs in parallel with the next API call so latency is hidden. Can be overridden with QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0 or =1.',
+        showInDialog: true,
+      },
     },
   },
 } as const satisfies SettingsSchema;

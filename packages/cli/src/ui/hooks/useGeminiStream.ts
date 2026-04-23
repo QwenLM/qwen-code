@@ -42,6 +42,7 @@ import {
   ApiCancelEvent,
   isSupportedImageMimeType,
   getUnsupportedImageFormatWarning,
+  generateToolUseSummary,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -79,6 +80,48 @@ import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
+
+/**
+ * Pull the assistant's most recent visible text from the UI history. Used as
+ * an intent prefix for tool-use summary generation so the summarizer knows
+ * what the user was trying to accomplish.
+ */
+function extractLastAssistantText(history: HistoryItem[]): string | undefined {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const item = history[i];
+    if (
+      (item.type === 'gemini' || item.type === 'gemini_content') &&
+      typeof item.text === 'string' &&
+      item.text.trim().length > 0
+    ) {
+      return item.text;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Flatten `functionResponse` parts into a compact string for the summarizer.
+ * The summarizer itself truncates to 300 chars per field, so we just join
+ * whatever is available without re-serializing.
+ */
+function extractToolResultText(parts: Part[] | Part | undefined): unknown {
+  if (!parts) return '';
+  const list = Array.isArray(parts) ? parts : [parts];
+  const chunks: unknown[] = [];
+  for (const part of list) {
+    if ('functionResponse' in part && part.functionResponse) {
+      const response = (part.functionResponse as { response?: unknown })
+        .response;
+      if (response !== undefined) chunks.push(response);
+    } else if ('text' in part && typeof part.text === 'string') {
+      chunks.push(part.text);
+    }
+  }
+  if (chunks.length === 0) return '';
+  if (chunks.length === 1) return chunks[0];
+  return chunks;
+}
 
 /**
  * Classify API error to StopFailureErrorType
@@ -223,6 +266,11 @@ export const useGeminiStream = (
   const dualOutput = useDualOutput();
   const [isResponding, setIsResponding] = useState<boolean>(false);
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
+  // Hold the latest history in a ref so handleCompletedTools can read it
+  // without depending on `history` (which would recreate the tool scheduler
+  // every render).
+  const historyRef = useRef<HistoryItem[]>(history);
+  historyRef.current = history;
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
   const [
@@ -1765,6 +1813,42 @@ export const useGeminiStream = (
       }
 
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
+
+      // Fire tool-use summary generation in parallel with the next API call.
+      // The fast-model Haiku-equivalent latency (~1s) is hidden behind the
+      // main-model streaming (5-30s). Mirrors Claude Code's query.ts:1411-1482
+      // behavior. Fire-and-forget: failures are silent and never block the turn.
+      // Subagent exclusion is implicit — useGeminiStream only drives the
+      // main session; subagents run through agents/runtime/ with their own loop.
+      if (config.getEmitToolUseSummaries()) {
+        const toolInfoForSummary = geminiTools.map((tc) => ({
+          name: tc.request.name,
+          input: tc.request.args,
+          output: extractToolResultText(tc.response.responseParts),
+        }));
+        const toolUseIds = geminiTools.map((tc) => tc.request.callId);
+        const lastAssistantText = extractLastAssistantText(historyRef.current);
+        const summarySignal =
+          abortControllerRef.current?.signal ?? new AbortController().signal;
+
+        void generateToolUseSummary({
+          config,
+          tools: toolInfoForSummary,
+          signal: summarySignal,
+          lastAssistantText,
+        }).then((summary) => {
+          if (summary && !summarySignal.aborted) {
+            addItem(
+              {
+                type: 'tool_use_summary',
+                summary,
+                precedingToolUseIds: toolUseIds,
+              } as HistoryItemWithoutId,
+              Date.now(),
+            );
+          }
+        });
+      }
 
       // Don't continue if model was switched due to quota error
       if (modelSwitchedFromQuotaError) {

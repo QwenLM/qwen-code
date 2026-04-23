@@ -6,6 +6,7 @@
 
 import { Box, Static } from 'ink';
 import { useEffect, useMemo, useRef } from 'react';
+import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ShowMoreLines } from './ShowMoreLines.js';
 import { Notifications } from './Notifications.js';
@@ -55,6 +56,42 @@ export const MainContent = () => {
     ],
   );
 
+  // Build a callId → summary lookup from `tool_use_summary` history items so
+  // compact-mode tool groups can render a semantic label instead of a generic
+  // "Tool × N" line. A summary is indexed under every callId it covers; when
+  // multiple groups are merged, the first group's summary wins (see below).
+  const summaryByCallId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const item of uiState.history) {
+      if (item.type === 'tool_use_summary') {
+        for (const callId of item.precedingToolUseIds) {
+          // First summary wins — earlier summaries represent the opening
+          // intent of a batch streak, later ones would override it otherwise.
+          if (!map.has(callId)) {
+            map.set(callId, item.summary);
+          }
+        }
+      }
+    }
+    return map;
+  }, [uiState.history]);
+
+  const getCompactLabel = useMemo(
+    () =>
+      (item: HistoryItem | HistoryItemWithoutId): string | undefined => {
+        if (item.type !== 'tool_group' || item.tools.length === 0)
+          return undefined;
+        // Match on the first tool's callId — for a merged group this is the
+        // earliest call, so we pick up the summary for the leading intent.
+        for (const tool of item.tools) {
+          const label = summaryByCallId.get(tool.callId);
+          if (label) return label;
+        }
+        return undefined;
+      },
+    [summaryByCallId],
+  );
+
   // Ink's <Static> is append-only: once an item is rendered to the terminal
   // buffer, it cannot be replaced. In compact mode, when a new tool_group is
   // merged into a previous one, the merged result has FEWER items than the
@@ -102,6 +139,7 @@ export const MainContent = () => {
               item={h}
               isPending={false}
               commands={uiState.slashCommands}
+              compactLabel={getCompactLabel(h)}
             />
           )),
         ]}
@@ -123,6 +161,7 @@ export const MainContent = () => {
               isFocused={!uiState.isEditorDialogOpen}
               activeShellPtyId={uiState.activePtyId}
               embeddedShellFocused={uiState.embeddedShellFocused}
+              compactLabel={getCompactLabel(item)}
             />
           ))}
           <ShowMoreLines constrainHeight={uiState.constrainHeight} />

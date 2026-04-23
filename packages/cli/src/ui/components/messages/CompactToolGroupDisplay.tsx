@@ -18,6 +18,13 @@ import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 interface CompactToolGroupDisplayProps {
   toolCalls: IndividualToolCallDisplay[];
   contentWidth: number;
+  /**
+   * Optional LLM-generated label (~30 chars, git-commit-subject style) that
+   * replaces the "active tool name + count + description" header when
+   * present. Falls back to the default rendering while the label is still
+   * being generated or if generation was skipped/failed.
+   */
+  compactLabel?: string;
 }
 
 // Priority: Confirming > Executing > Error > Canceled > Pending > Success
@@ -68,7 +75,7 @@ function getShellTimeoutMs(
 
 export const CompactToolGroupDisplay: React.FC<
   CompactToolGroupDisplayProps
-> = ({ toolCalls, contentWidth }) => {
+> = ({ toolCalls, contentWidth, compactLabel }) => {
   if (toolCalls.length === 0) return null;
 
   const overallStatus = getOverallStatus(toolCalls);
@@ -94,6 +101,11 @@ export const CompactToolGroupDisplay: React.FC<
     ? activeTool.description.split('\n')[0]
     : '';
 
+  // When a generated summary is available, show it in place of the active
+  // tool name + description. The tool count is kept so users still see how
+  // many calls were folded.
+  const hasSummary = !!compactLabel;
+
   return (
     <Box
       flexDirection="column"
@@ -103,24 +115,38 @@ export const CompactToolGroupDisplay: React.FC<
       borderColor={borderColor}
       gap={0}
     >
-      {/* Status line: icon + tool name + count + description + elapsed */}
+      {/* Status line: icon + (summary | tool name + description) + count + elapsed */}
       <Box flexDirection="row">
         <ToolStatusIndicator status={overallStatus} name={activeTool.name} />
         <Box flexGrow={1}>
           <Text wrap="truncate-end">
-            <Text bold>{activeTool.name}</Text>
-            {toolCalls.length > 1 ? (
-              <Text color={theme.text.secondary}>
-                {' × '}
-                {toolCalls.length}
-              </Text>
-            ) : null}
-            {activeToolDescription ? (
-              <Text color={theme.text.secondary}>
-                {'  '}
-                {activeToolDescription}
-              </Text>
-            ) : null}
+            {hasSummary ? (
+              <>
+                <Text bold>{compactLabel}</Text>
+                {toolCalls.length > 1 ? (
+                  <Text color={theme.text.secondary}>
+                    {'  · '}
+                    {toolCalls.length} tools
+                  </Text>
+                ) : null}
+              </>
+            ) : (
+              <>
+                <Text bold>{activeTool.name}</Text>
+                {toolCalls.length > 1 ? (
+                  <Text color={theme.text.secondary}>
+                    {' × '}
+                    {toolCalls.length}
+                  </Text>
+                ) : null}
+                {activeToolDescription ? (
+                  <Text color={theme.text.secondary}>
+                    {'  '}
+                    {activeToolDescription}
+                  </Text>
+                ) : null}
+              </>
+            )}
           </Text>
         </Box>
         <ToolElapsedTime

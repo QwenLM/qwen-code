@@ -64,6 +64,12 @@ interface HistoryItemDisplayProps {
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
   availableTerminalHeightGemini?: number;
+  /**
+   * When the item is a `tool_group`, an optional short LLM-generated label
+   * summarizing the batch. Replaces the generic "Tool × N" line in compact
+   * mode. Computed by the parent from `tool_use_summary` history items.
+   */
+  compactLabel?: string;
 }
 
 const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
@@ -77,6 +83,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   activeShellPtyId,
   embeddedShellFocused,
   availableTerminalHeightGemini,
+  compactLabel,
 }) => {
   const marginTop =
     item.type === 'gemini_content' || item.type === 'gemini_thought_content'
@@ -198,8 +205,15 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           memoryWriteCount={itemForDisplay.memoryWriteCount}
           memoryReadCount={itemForDisplay.memoryReadCount}
           isUserInitiated={itemForDisplay.isUserInitiated}
+          compactLabel={compactLabel}
         />
       )}
+      {/*
+        `tool_use_summary` items are consumed upstream (see MainContent) to
+        augment the adjacent tool_group's compact rendering. They do not
+        render on their own — rendering both the detailed tool view and a
+        summary line would be redundant noise.
+      */}
       {itemForDisplay.type === 'compression' && (
         <CompressionMessage compression={itemForDisplay.compression} />
       )}

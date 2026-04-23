@@ -207,6 +207,8 @@ describe('useGeminiStream', () => {
       getArenaAgentClient: vi.fn(() => null),
       isCronEnabled: vi.fn(() => false),
       getCronScheduler: vi.fn(() => null),
+      getEmitToolUseSummaries: vi.fn(() => false),
+      getFastModel: vi.fn(() => undefined),
       getBackgroundTaskRegistry: vi.fn(() => ({
         setNotificationCallback: vi.fn(),
       })),
@@ -820,6 +822,193 @@ describe('useGeminiStream', () => {
 
     // 6. After submission, the state should remain Responding until the stream completes.
     expect(result.current.streamingState).toBe(StreamingState.Responding);
+  });
+
+  describe('Tool-use summary generation', () => {
+    const makeCompletedToolCall = (
+      callId: string,
+      name: string,
+      args: Record<string, unknown>,
+    ): TrackedCompletedToolCall =>
+      ({
+        request: {
+          callId,
+          name,
+          args,
+          isClientInitiated: false,
+          prompt_id: 'prompt-1',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        tool: {
+          name,
+          displayName: name,
+          description: 'desc',
+          build: vi.fn(),
+        } as any,
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+        startTime: Date.now(),
+        endTime: Date.now(),
+        response: {
+          callId,
+          responseParts: [{ text: `result for ${name}` }],
+          error: undefined,
+          errorType: undefined,
+          resultDisplay: '',
+        },
+      }) as TrackedCompletedToolCall;
+
+    const runCompletion = async (
+      config: Config,
+      completedTools: TrackedCompletedToolCall[],
+    ) => {
+      let capturedOnComplete:
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | null = null;
+
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        capturedOnComplete = onComplete;
+        return [
+          completedTools,
+          mockScheduleToolCalls,
+          mockMarkToolsAsSubmitted,
+        ];
+      });
+
+      renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(config),
+          [],
+          mockAddItem,
+          config,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      await act(async () => {
+        if (capturedOnComplete) {
+          await capturedOnComplete(completedTools);
+        }
+      });
+    };
+
+    it('skips summary generation when the feature is disabled', async () => {
+      const config = {
+        ...mockConfig,
+        getEmitToolUseSummaries: vi.fn(() => false),
+        getFastModel: vi.fn(() => 'qwen-fast'),
+        getGeminiClient: vi.fn(() => ({
+          generateContent: vi.fn(),
+        })),
+      } as unknown as Config;
+
+      await runCompletion(config, [
+        makeCompletedToolCall('c1', 'Read', { file: 'a.ts' }),
+        makeCompletedToolCall('c2', 'Grep', { pattern: 'foo' }),
+      ]);
+
+      // The flag is off — even though a fast model is configured, no summary
+      // history item should be added.
+      const summaryItems = (mockAddItem.mock.calls as any[][]).filter(
+        (call) => call[0]?.type === 'tool_use_summary',
+      );
+      expect(summaryItems).toHaveLength(0);
+    });
+
+    it('skips summary generation when no fast model is configured', async () => {
+      const generateContent = vi.fn();
+      const config = {
+        ...mockConfig,
+        getEmitToolUseSummaries: vi.fn(() => true),
+        getFastModel: vi.fn(() => undefined),
+        getGeminiClient: vi.fn(() => ({ generateContent })),
+      } as unknown as Config;
+
+      await runCompletion(config, [
+        makeCompletedToolCall('c1', 'Read', { file: 'a.ts' }),
+      ]);
+
+      expect(generateContent).not.toHaveBeenCalled();
+    });
+
+    it('fires generation with tool input/output when enabled', async () => {
+      const generateContent = vi.fn().mockResolvedValue({
+        candidates: [{ content: { parts: [{ text: 'Searched auth/' }] } }],
+      });
+      const config = {
+        ...mockConfig,
+        getEmitToolUseSummaries: vi.fn(() => true),
+        getFastModel: vi.fn(() => 'qwen-fast'),
+        getGeminiClient: vi.fn(() => ({ generateContent })),
+      } as unknown as Config;
+
+      await runCompletion(config, [
+        makeCompletedToolCall('c1', 'Grep', { pattern: 'login' }),
+        makeCompletedToolCall('c2', 'Read', { file: 'auth.ts' }),
+      ]);
+
+      // Wait for the fire-and-forget promise chain to settle (addItem happens in .then()).
+      await waitFor(() => {
+        const summaryItems = (mockAddItem.mock.calls as any[][]).filter(
+          (call) => call[0]?.type === 'tool_use_summary',
+        );
+        expect(summaryItems).toHaveLength(1);
+        expect(summaryItems[0][0]).toMatchObject({
+          type: 'tool_use_summary',
+          summary: 'Searched auth/',
+          precedingToolUseIds: ['c1', 'c2'],
+        });
+      });
+
+      // Model was called with the fast model and includes tool names in the prompt.
+      expect(generateContent).toHaveBeenCalledTimes(1);
+      const callArgs = generateContent.mock.calls[0];
+      expect(callArgs[3]).toBe('qwen-fast');
+      const userText = callArgs[0][0].parts[0].text as string;
+      expect(userText).toContain('Tool: Grep');
+      expect(userText).toContain('Tool: Read');
+      expect(userText).toContain('"pattern":"login"');
+    });
+
+    it('does not add a history item when the model returns empty', async () => {
+      const generateContent = vi.fn().mockResolvedValue({
+        candidates: [{ content: { parts: [{ text: '' }] } }],
+      });
+      const config = {
+        ...mockConfig,
+        getEmitToolUseSummaries: vi.fn(() => true),
+        getFastModel: vi.fn(() => 'qwen-fast'),
+        getGeminiClient: vi.fn(() => ({ generateContent })),
+      } as unknown as Config;
+
+      await runCompletion(config, [
+        makeCompletedToolCall('c1', 'Read', { file: 'a.ts' }),
+      ]);
+
+      // The fast-model call happened but produced no label, so no history item.
+      await waitFor(() => {
+        expect(generateContent).toHaveBeenCalled();
+      });
+      const summaryItems = (mockAddItem.mock.calls as any[][]).filter(
+        (call) => call[0]?.type === 'tool_use_summary',
+      );
+      expect(summaryItems).toHaveLength(0);
+    });
   });
 
   describe('Cancellation', () => {
