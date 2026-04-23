@@ -50,6 +50,8 @@ describe('ChatRecordingService - recordCustomTitle', () => {
           .mockReturnValue('/test/project/root/.qwen/projects/test-project'),
       },
       getModel: vi.fn().mockReturnValue('qwen-plus'),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      isInteractive: vi.fn().mockReturnValue(false),
       getDebugMode: vi.fn().mockReturnValue(false),
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn().mockReturnValue({
@@ -94,6 +96,7 @@ describe('ChatRecordingService - recordCustomTitle', () => {
     expect(writtenRecord.subtype).toBe('custom_title');
     expect(writtenRecord.systemPayload).toEqual({
       customTitle: 'my-feature',
+      titleSource: 'manual',
     });
     expect(writtenRecord.sessionId).toBe('test-session-id');
   });
@@ -137,7 +140,10 @@ describe('ChatRecordingService - recordCustomTitle', () => {
         .calls[0][1] as ChatRecord;
       expect(record.type).toBe('system');
       expect(record.subtype).toBe('custom_title');
-      expect(record.systemPayload).toEqual({ customTitle: 'my-feature' });
+      expect(record.systemPayload).toEqual({
+        customTitle: 'my-feature',
+        titleSource: 'manual',
+      });
     });
 
     it('should not write anything when no custom title was set', () => {
@@ -156,7 +162,10 @@ describe('ChatRecordingService - recordCustomTitle', () => {
       expect(jsonl.writeLineSync).toHaveBeenCalledOnce();
       const record = vi.mocked(jsonl.writeLineSync).mock
         .calls[0][1] as ChatRecord;
-      expect(record.systemPayload).toEqual({ customTitle: 'second-name' });
+      expect(record.systemPayload).toEqual({
+        customTitle: 'second-name',
+        titleSource: 'manual',
+      });
     });
   });
 });
