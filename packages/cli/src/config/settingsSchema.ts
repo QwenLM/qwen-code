@@ -335,7 +335,17 @@ const SETTINGS_SCHEMA = {
         // Manual `/recap` works regardless.
         default: false,
         description:
-          'Auto-show a one-line "where you left off" recap when returning to the terminal after being away for 5+ minutes. Off by default. Use /recap to trigger manually regardless of this setting.',
+          'Auto-show a one-line "where you left off" recap when returning to the terminal after being away. Off by default. Use /recap to trigger manually regardless of this setting.',
+        showInDialog: true,
+      },
+      sessionRecapAwayThresholdMinutes: {
+        type: 'number',
+        label: 'Session Recap Away Threshold (minutes)',
+        category: 'General',
+        requiresRestart: false,
+        default: 5,
+        description:
+          "How many minutes the terminal must be blurred before an auto-recap fires on the next focus-in. Matches Claude Code's default of 5 minutes; raise if you briefly alt-tab and do not want recaps to pile up.",
         showInDialog: true,
       },
       gitCoAuthor: {
@@ -695,6 +705,16 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
+        showInDialog: true,
+      },
+      shellOutputMaxLines: {
+        type: 'number',
+        label: 'Shell Output Max Lines',
+        category: 'UI',
+        requiresRestart: false,
+        default: 5,
+        description:
+          'Max number of shell output lines shown inline. Set to 0 to disable the cap and show full output. The hidden line count is still surfaced via the `+N lines` indicator.',
         showInDialog: true,
       },
     },
@@ -1106,6 +1126,36 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  slashCommands: {
+    type: 'object',
+    label: 'Slash Commands',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Configuration for slash commands exposed by the CLI. Useful for ' +
+      'locking down the command surface in multi-tenant or enterprise ' +
+      'deployments.',
+    showInDialog: false,
+    properties: {
+      disabled: {
+        type: 'array',
+        label: 'Disabled Slash Commands',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Slash command names to hide and refuse to execute. Matched ' +
+          'case-insensitively against the final command name (for extension ' +
+          'commands this is the disambiguated form, e.g. "myext.deploy"). ' +
+          'Merged as a union across settings scopes, so workspace settings ' +
+          'can add to but not remove entries defined in system/user settings.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+    },
+  },
+
   permissions: {
     type: 'object',
     label: 'Permissions',
@@ -1149,36 +1199,6 @@ const SETTINGS_SCHEMA = {
         description:
           'Tools or commands that are always blocked. Highest priority rule. ' +
           'Examples: "ShellTool", "Bash(rm -rf *)".',
-        showInDialog: false,
-        mergeStrategy: MergeStrategy.UNION,
-      },
-    },
-  },
-
-  slashCommands: {
-    type: 'object',
-    label: 'Slash Commands',
-    category: 'Advanced',
-    requiresRestart: true,
-    default: {},
-    description:
-      'Configuration for slash commands exposed by the CLI. Useful for ' +
-      'locking down the command surface in multi-tenant or enterprise ' +
-      'deployments.',
-    showInDialog: false,
-    properties: {
-      disabled: {
-        type: 'array',
-        label: 'Disabled Slash Commands',
-        category: 'Advanced',
-        requiresRestart: true,
-        default: undefined as string[] | undefined,
-        description:
-          'Slash command names to hide and refuse to execute. Matched ' +
-          'case-insensitively against the final command name (for extension ' +
-          'commands this is the disambiguated form, e.g. "myext.deploy"). ' +
-          'Merged as a union across settings scopes, so workspace settings ' +
-          'can add to but not remove entries defined in system/user settings.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },

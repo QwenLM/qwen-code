@@ -48,6 +48,7 @@ import type {
   ToolConfig,
 } from './agent-types.js';
 import { AgentTerminateMode } from './agent-types.js';
+import { WriteFileTool } from '../../tools/write-file.js';
 
 vi.mock('../../core/geminiChat.js');
 vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
@@ -1226,6 +1227,219 @@ describe('subagent.ts', () => {
         const readResult = toolResultEvents.find((e) => e.name === 'read_file');
         expect(readResult).toBeDefined();
         expect(readResult!.success).toBe(true);
+      });
+
+      it('should mark truncated subagent write_file calls as output-truncated errors', async () => {
+        const writeFileToolDef: FunctionDeclaration = {
+          name: WriteFileTool.Name,
+          description: 'Writes a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([writeFileToolDef]),
+          getTool: vi.fn().mockImplementation((name: string) => {
+            if (name === WriteFileTool.Name) {
+              return new WriteFileTool(config);
+            }
+            return undefined;
+          }),
+        });
+
+        const toolConfig: ToolConfig = { tools: [WriteFileTool.Name] };
+        const toolResultEvents: AgentToolResultEvent[] = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.TOOL_RESULT, (event: unknown) => {
+          toolResultEvents.push(event as AgentToolResultEvent);
+        });
+
+        mockSendMessageStream.mockImplementation(async () =>
+          (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call_write',
+                    name: WriteFileTool.Name,
+                    args: { file_path: '/tmp/truncated.txt' },
+                  },
+                ],
+              },
+            };
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    finishReason: 'MAX_TOKENS',
+                    content: { parts: [] },
+                  },
+                ],
+              },
+            };
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'done' }],
+                    },
+                  },
+                ],
+              },
+            };
+          })(),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        const writeResult = toolResultEvents.find(
+          (event) => event.name === WriteFileTool.Name,
+        );
+        expect(writeResult).toBeDefined();
+        expect(writeResult!.success).toBe(false);
+        expect(writeResult!.error).toContain(
+          'truncated due to max_tokens limit',
+        );
+        expect(writeResult!.error).toContain(
+          'rejected to prevent writing truncated content',
+        );
+        expect(writeResult!.error).not.toContain(
+          "params must have required property 'content'",
+        );
+      });
+
+      it('should NOT reject write_file when truncated attempt is followed by successful retry', async () => {
+        const writeFileToolDef: FunctionDeclaration = {
+          name: WriteFileTool.Name,
+          description: 'Writes a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([writeFileToolDef]),
+          getTool: vi.fn().mockImplementation((name: string) => {
+            if (name === WriteFileTool.Name) {
+              return new WriteFileTool(config);
+            }
+            return undefined;
+          }),
+        });
+
+        const toolConfig: ToolConfig = { tools: [WriteFileTool.Name] };
+        const toolResultEvents: AgentToolResultEvent[] = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.TOOL_RESULT, (event: unknown) => {
+          toolResultEvents.push(event as AgentToolResultEvent);
+        });
+
+        // First call: truncated (MAX_TOKENS). Retry resets state, second call:
+        // complete write_file. The scheduler should see wasOutputTruncated=false
+        // for the retried response and allow the tool to proceed.
+        let callCount = 0;
+        mockSendMessageStream.mockImplementation(async () => {
+          callCount++;
+          if (callCount === 1) {
+            // First round: truncated response with incomplete write_file args
+            return (async function* () {
+              yield {
+                type: 'chunk',
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call_write_truncated',
+                      name: WriteFileTool.Name,
+                      args: { file_path: '/tmp/retry-test.txt' },
+                    },
+                  ],
+                },
+              };
+              yield {
+                type: 'retry',
+              };
+              // After retry, complete response with all required args
+              yield {
+                type: 'chunk',
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call_write_complete',
+                      name: WriteFileTool.Name,
+                      args: {
+                        file_path: '/tmp/retry-test.txt',
+                        content: 'hello',
+                      },
+                    },
+                  ],
+                },
+              };
+              yield {
+                type: 'chunk',
+                value: {
+                  candidates: [
+                    { finishReason: 'STOP', content: { parts: [] } },
+                  ],
+                },
+              };
+            })();
+          }
+          // Second round: plain text response to end the agent loop
+          return (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    finishReason: 'STOP',
+                    content: { parts: [{ text: 'done' }] },
+                  },
+                ],
+              },
+            };
+          })();
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        const writeResult = toolResultEvents.find(
+          (event) => event.name === WriteFileTool.Name,
+        );
+        expect(writeResult).toBeDefined();
+        // After retry the wasOutputTruncated flag must have been cleared, so
+        // the call should NOT be rejected with a truncation error — even if
+        // execution fails for unrelated reasons (e.g. mock filesystem).
+        expect(writeResult!.error).not.toContain(
+          'truncated due to max_tokens limit',
+        );
+        expect(writeResult!.error).not.toContain(
+          'rejected to prevent writing truncated content',
+        );
       });
     });
   });

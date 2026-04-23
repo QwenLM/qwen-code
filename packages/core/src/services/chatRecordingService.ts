@@ -59,7 +59,8 @@ export interface ChatRecord {
     | 'ui_telemetry'
     | 'at_command'
     | 'notification'
-    | 'cron';
+    | 'cron'
+    | 'custom_title';
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -100,6 +101,7 @@ export interface ChatRecord {
     | SlashCommandRecordPayload
     | UiTelemetryRecordPayload
     | AtCommandRecordPayload
+    | CustomTitleRecordPayload
     | NotificationRecordPayload;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
@@ -158,6 +160,14 @@ export interface AtCommandRecordPayload {
 }
 
 /**
+ * Stored payload for custom title set via /rename.
+ */
+export interface CustomTitleRecordPayload {
+  /** The custom title for the session */
+  customTitle: string;
+}
+
+/**
  * Stored payload for UI telemetry replay.
  */
 export interface UiTelemetryRecordPayload {
@@ -192,11 +202,30 @@ export class ChatRecordingService {
   /** UUID of the last written record in the chain */
   private lastRecordUuid: string | null = null;
   private readonly config: Config;
+  /** In-memory cache of the current session's custom title (for re-append on exit) */
+  private currentCustomTitle: string | undefined;
 
   constructor(config: Config) {
     this.config = config;
     this.lastRecordUuid =
       config.getResumedSessionData()?.lastCompletedUuid ?? null;
+
+    // On resume, load the cached custom title from the session file and
+    // immediately re-append it to EOF. This keeps the title within the
+    // 64KB tail window even as new messages push it deeper into the file.
+    // Without this, a crash mid-session could lose the title if the exit
+    // re-append never runs.
+    if (config.getResumedSessionData()) {
+      try {
+        const sessionService = config.getSessionService();
+        this.currentCustomTitle = sessionService.getSessionTitle(
+          config.getSessionId(),
+        );
+        this.finalize();
+      } catch {
+        // Best-effort — don't block construction
+      }
+    }
   }
 
   /**
@@ -487,6 +516,59 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving ui telemetry record:', error);
+    }
+  }
+
+  /**
+   * Records a custom title for the session (set via /rename).
+   * Appended as a system record so it persists with the session data.
+   * Also caches the title in memory for re-append on shutdown.
+   *
+   * @returns true if the record was written successfully, false on I/O error.
+   */
+  recordCustomTitle(customTitle: string): boolean {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'custom_title',
+        systemPayload: { customTitle },
+      };
+
+      this.appendRecord(record);
+      this.currentCustomTitle = customTitle;
+      return true;
+    } catch (error) {
+      debugLogger.error('Error saving custom title record:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Finalizes the current session by re-appending cached metadata to EOF.
+   *
+   * Call this whenever leaving the current session — whether switching to
+   * another session, shutting down the process, or any other transition.
+   * This single entry point replaces scattered re-append calls and ensures
+   * the custom_title record stays within the last 64KB tail window that
+   * readSessionTitleFromFile() scans.
+   *
+   * Best-effort: errors are logged but never thrown.
+   */
+  finalize(): void {
+    if (!this.currentCustomTitle) {
+      return;
+    }
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'custom_title',
+        systemPayload: { customTitle: this.currentCustomTitle },
+      };
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error finalizing session metadata:', error);
     }
   }
 

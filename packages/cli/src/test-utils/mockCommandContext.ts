@@ -29,6 +29,7 @@ export const createMockCommandContext = (
   overrides: DeepPartial<CommandContext> = {},
 ): CommandContext => {
   const defaultMocks: CommandContext = {
+    executionMode: 'interactive',
     invocation: {
       raw: '',
       name: '',
@@ -59,14 +60,13 @@ export const createMockCommandContext = (
       setBtwItem: vi.fn(),
       cancelBtw: vi.fn(),
       btwAbortControllerRef: { current: null },
-      awayRecapItem: null,
-      setAwayRecapItem: vi.fn(),
       isIdleRef: { current: true },
       loadHistory: vi.fn(),
       toggleVimEnabled: vi.fn(),
       extensionsUpdateState: new Map(),
       setExtensionsUpdateState: vi.fn(),
       reloadCommands: vi.fn(),
+      setSessionName: vi.fn(),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any,
     session: {

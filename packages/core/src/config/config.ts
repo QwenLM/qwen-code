@@ -558,6 +558,12 @@ export class Config {
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
+  private modelInvocableCommandsProvider:
+    | (() => ReadonlyArray<{ name: string; description: string }>)
+    | null = null;
+  private modelInvocableCommandsExecutor:
+    | ((name: string, args?: string) => Promise<string | null>)
+    | null = null;
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
@@ -1331,6 +1337,13 @@ export class Config {
     sessionId?: string,
     sessionData?: ResumedSessionData,
   ): string {
+    // Finalize the outgoing session before switching.
+    try {
+      this.chatRecordingService?.finalize();
+    } catch {
+      // Best-effort — don't block session switch
+    }
+
     this.sessionId = sessionId ?? randomUUID();
     this.sessionData = sessionData;
     setDebugLogSession(this);
@@ -1597,6 +1610,13 @@ export class Config {
       return;
     }
     try {
+      // Finalize the current session's metadata before cleanup.
+      try {
+        this.chatRecordingService?.finalize();
+      } catch {
+        // Best-effort — don't block shutdown
+      }
+
       this.skillManager?.stopWatching();
 
       if (this.toolRegistry) {
@@ -1691,20 +1711,17 @@ export class Config {
     return merged;
   }
 
+  getToolDiscoveryCommand(): string | undefined {
+    return this.toolDiscoveryCommand;
+  }
+
   /**
    * Returns the pre-merged list of slash command names that should be hidden
    * from the CLI surface. Callers should treat this as a case-insensitive
    * denylist; `CommandService.create` handles the normalization.
-   *
-   * CLI callers (loadCliConfig) populate this from settings, the
-   * `--disabled-slash-commands` flag, and `QWEN_DISABLED_SLASH_COMMANDS`.
    */
   getDisabledSlashCommands(): readonly string[] {
     return this.disabledSlashCommands;
-  }
-
-  getToolDiscoveryCommand(): string | undefined {
-    return this.toolDiscoveryCommand;
   }
 
   getToolCallCommand(): string | undefined {
@@ -2486,6 +2503,49 @@ export class Config {
 
   getSkillManager(): SkillManager | null {
     return this.skillManager;
+  }
+
+  /**
+   * Registers a provider that returns model-invocable commands (e.g., bundled
+   * skills, user/project file commands, MCP prompts). Called by the CLI's
+   * CommandService after initialisation so that SkillTool can merge these into
+   * its tool description.
+   */
+  setModelInvocableCommandsProvider(
+    provider: () => ReadonlyArray<{ name: string; description: string }>,
+  ): void {
+    this.modelInvocableCommandsProvider = provider;
+  }
+
+  /**
+   * Returns the registered model-invocable commands provider, or null if none
+   * has been registered (e.g., in SDK mode).
+   */
+  getModelInvocableCommandsProvider():
+    | (() => ReadonlyArray<{ name: string; description: string }>)
+    | null {
+    return this.modelInvocableCommandsProvider;
+  }
+
+  /**
+   * Registers an executor that can invoke a model-invocable command by name
+   * (e.g., MCP prompts). Returns the prompt content as a string, or null if
+   * the command cannot be found or executed. Called by the CLI layer.
+   */
+  setModelInvocableCommandsExecutor(
+    executor: (name: string, args?: string) => Promise<string | null>,
+  ): void {
+    this.modelInvocableCommandsExecutor = executor;
+  }
+
+  /**
+   * Returns the registered model-invocable commands executor, or null if none
+   * has been registered (e.g., in SDK mode).
+   */
+  getModelInvocableCommandsExecutor():
+    | ((name: string, args?: string) => Promise<string | null>)
+    | null {
+    return this.modelInvocableCommandsExecutor;
   }
 
   getPermissionManager(): PermissionManager | null {

@@ -6,7 +6,7 @@
 
 import type { ExtendedSystemInfo } from './systemInfo.js';
 import { t } from '../i18n/index.js';
-import { isCodingPlanConfig } from '../constants/codingPlan.js';
+import { isCodingPlanConfig } from '@qwen-code/qwen-code-core';
 
 /**
  * Field configuration for system information display

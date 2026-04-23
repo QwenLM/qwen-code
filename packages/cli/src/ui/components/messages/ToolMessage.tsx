@@ -41,6 +41,7 @@ import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 const STATIC_HEIGHT = 1;
 const RESERVED_LINE_COUNT = 5; // for tool name, status, padding etc.
 const MIN_LINES_SHOWN = 2; // show at least this many lines
+const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
 
 // Large threshold to ensure we don't cause performance issues for very large
 // outputs that will get truncated further MaxSizedBox anyway.
@@ -146,7 +147,6 @@ const useResultDisplayRenderer = (
         stats: {
           totalLines: display.totalLines,
           totalBytes: display.totalBytes,
-          timeoutMs: display.timeoutMs,
         },
       };
     }
@@ -313,6 +313,21 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     }
   }, [resultDisplay]);
 
+  // Shell tools surface their configured timeout via AnsiOutputDisplay as
+  // soon as streaming starts. Feed it into ToolElapsedTime so the budget is
+  // shown inline (`(elapsed · timeout N)`) instead of in a separate stats
+  // row.
+  const shellTimeoutMs = React.useMemo(() => {
+    if (
+      typeof resultDisplay === 'object' &&
+      resultDisplay !== null &&
+      'ansiOutput' in resultDisplay
+    ) {
+      return (resultDisplay as AnsiOutputDisplay).timeoutMs;
+    }
+    return undefined;
+  }, [resultDisplay]);
+
   React.useEffect(() => {
     if (!lastUpdateTime) {
       return;
@@ -345,6 +360,33 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         MIN_LINES_SHOWN + 1, // enforce minimum lines shown
       )
     : undefined;
+  // Cap inline shell output. Applies to both the streaming ANSI display and
+  // the completed string display (shell.ts emits the final result as a plain
+  // string via `returnDisplayMessage = result.output`). ShellStatsBar surfaces
+  // hidden lines via `+N lines` for ANSI; MaxSizedBox handles overflow for string.
+  const isShellTool = name === SHELL_COMMAND_NAME || name === SHELL_NAME;
+  const rawShellCap =
+    settings.merged.ui?.shellOutputMaxLines ?? DEFAULT_SHELL_OUTPUT_MAX_LINES;
+  // Defensive: clamp non-negative integers; treat negatives / NaN / fractions
+  // as the user's clear intent (0 = disable, otherwise floor to whole rows).
+  const shellOutputMaxLines = Math.max(0, Math.floor(rawShellCap || 0));
+  const isCappingShell =
+    isShellTool &&
+    shellOutputMaxLines > 0 &&
+    !forceShowResult &&
+    !isThisShellFocused;
+  const shellCapHeight = isCappingShell
+    ? Math.min(availableHeight ?? shellOutputMaxLines, shellOutputMaxLines)
+    : availableHeight;
+  // String path: MaxSizedBox reserves one row for its overflow banner when
+  // content overflows (see MaxSizedBox.tsx visibleContentHeight = max - 1),
+  // so passing the bare cap shows N-1 content rows. ANSI pre-slices to N
+  // (no MaxSizedBox overflow) and renders N rows + the ShellStatsBar line.
+  // +1 keeps the two paths visually symmetric at N visible content rows.
+  const shellStringCapHeight =
+    isCappingShell && shellCapHeight !== undefined
+      ? shellCapHeight + 1
+      : availableHeight;
   const innerWidth = contentWidth - STATUS_INDICATOR_WIDTH;
 
   // Long tool call response in MarkdownDisplay doesn't respect availableTerminalHeight properly,
@@ -382,6 +424,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         <ToolElapsedTime
           status={status}
           executionStartTime={executionStartTime}
+          timeoutMs={shellTimeoutMs}
         />
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
@@ -420,13 +463,13 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
               <>
                 <AnsiOutputText
                   data={effectiveDisplayRenderer.data}
-                  availableTerminalHeight={availableHeight}
+                  availableTerminalHeight={shellCapHeight}
                   maxWidth={innerWidth}
                 />
                 {effectiveDisplayRenderer.stats && (
                   <ShellStatsBar
                     {...effectiveDisplayRenderer.stats}
-                    displayHeight={availableHeight}
+                    displayHeight={shellCapHeight}
                   />
                 )}
               </>
@@ -435,7 +478,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
               <StringResultRenderer
                 data={effectiveDisplayRenderer.data}
                 renderAsMarkdown={renderOutputAsMarkdown}
-                availableHeight={availableHeight}
+                availableHeight={shellStringCapHeight}
                 childWidth={innerWidth}
               />
             )}

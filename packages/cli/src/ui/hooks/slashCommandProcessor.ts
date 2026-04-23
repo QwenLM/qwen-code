@@ -25,13 +25,13 @@ import {
   SlashCommandStatus,
   ToolConfirmationOutcome,
   IdeClient,
+  type SessionListItem,
 } from '@qwen-code/qwen-code-core';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import type {
   Message,
   HistoryItemWithoutId,
   HistoryItemBtw,
-  HistoryItemAwayRecap,
   SlashCommandProcessorResult,
   HistoryItem,
   ConfirmationRequest,
@@ -44,6 +44,7 @@ import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
+import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
 import { parseSlashCommand } from '../../utils/commands.js';
 import { isBtwCommand } from '../utils/commandUtils.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
@@ -73,6 +74,7 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'reset',
   'new',
   'resume',
+  'delete',
   'btw',
 ]);
 
@@ -87,7 +89,9 @@ interface SlashCommandProcessorActions {
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
-  openResumeDialog: () => void;
+  openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
+  handleResume: (sessionId: string) => void;
+  openDeleteDialog: () => void;
   quit: (messages: HistoryItem[]) => void;
   setDebugMessage: (message: string) => void;
   dispatchExtensionStateUpdate: (action: ExtensionUpdateAction) => void;
@@ -118,6 +122,7 @@ export const useSlashCommandProcessor = (
   extensionsUpdateState: Map<string, ExtensionUpdateStatus>,
   isConfigInitialized: boolean,
   logger: Logger | null,
+  setSessionName?: (name: string | null) => void,
 ) => {
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
@@ -155,9 +160,6 @@ export const useSlashCommandProcessor = (
 
   const [btwItem, setBtwItem] = useState<HistoryItemBtw | null>(null);
   const btwAbortControllerRef = useRef<AbortController | null>(null);
-
-  const [awayRecapItem, setAwayRecapItem] =
-    useState<HistoryItemAwayRecap | null>(null);
 
   const cancelBtw = useCallback(() => {
     btwAbortControllerRef.current?.abort();
@@ -261,7 +263,6 @@ export const useSlashCommandProcessor = (
   );
   const commandContext = useMemo(
     (): CommandContext => ({
-      executionMode: 'interactive',
       services: {
         config,
         settings,
@@ -272,10 +273,10 @@ export const useSlashCommandProcessor = (
         addItem,
         clear: () => {
           cancelBtw();
-          setAwayRecapItem(null);
           clearItems();
           clearScreen();
           refreshStatic();
+          setSessionName?.(null);
         },
         loadHistory,
         setDebugMessage: actions.setDebugMessage,
@@ -285,12 +286,11 @@ export const useSlashCommandProcessor = (
         setBtwItem,
         cancelBtw,
         btwAbortControllerRef,
-        awayRecapItem,
-        setAwayRecapItem,
         isIdleRef,
         toggleVimEnabled,
         setGeminiMdFileCount,
         reloadCommands,
+        setSessionName: setSessionName ?? (() => {}),
         extensionsUpdateState,
         dispatchExtensionStateUpdate: actions.dispatchExtensionStateUpdate,
         addConfirmUpdateExtensionRequest:
@@ -301,6 +301,7 @@ export const useSlashCommandProcessor = (
         sessionShellAllowlist,
         startNewSession,
       },
+      executionMode: 'interactive' as const,
     }),
     [
       config,
@@ -319,12 +320,11 @@ export const useSlashCommandProcessor = (
       btwItem,
       setBtwItem,
       cancelBtw,
-      awayRecapItem,
-      setAwayRecapItem,
       toggleVimEnabled,
       sessionShellAllowlist,
       setGeminiMdFileCount,
       reloadCommands,
+      setSessionName,
       extensionsUpdateState,
       isIdleRef,
     ],
@@ -360,6 +360,7 @@ export const useSlashCommandProcessor = (
           new McpPromptLoader(config),
           new BuiltinCommandLoader(config),
           new BundledSkillLoader(config),
+          new SkillCommandLoader(config),
           new FileCommandLoader(config),
         ];
         const disabled = config?.getDisabledSlashCommands() ?? [];
@@ -368,6 +369,53 @@ export const useSlashCommandProcessor = (
           controller.signal,
           disabled.length > 0 ? new Set(disabled) : undefined,
         );
+        // Register model-invocable commands provider so SkillTool can include
+        // bundled skills, file commands, and MCP prompts in its description.
+        if (config) {
+          config.setModelInvocableCommandsProvider(() =>
+            commandService.getModelInvocableCommands().map((cmd) => ({
+              name: cmd.name,
+              description:
+                typeof cmd.description === 'string'
+                  ? cmd.description
+                  : cmd.description,
+            })),
+          );
+          // Register executor so SkillTool can actually invoke model-invocable
+          // commands (e.g. MCP prompts) that are not file-based skills.
+          config.setModelInvocableCommandsExecutor(
+            async (name: string, args: string = '') => {
+              const commands = commandService.getModelInvocableCommands();
+              const cmd = commands.find((c) => c.name === name);
+              if (!cmd?.action) return null;
+              // Build a minimal context; submit_prompt actions only need
+              // invocation + services.config, not UI state.
+              const minimalContext = {
+                executionMode: 'non_interactive' as const,
+                invocation: {
+                  raw: args ? `/${name} ${args}` : `/${name}`,
+                  name,
+                  args,
+                },
+                services: { config, settings, git: gitService, logger: null },
+              } as unknown as Parameters<typeof cmd.action>[0];
+              const result = await cmd.action(minimalContext, args);
+              if (!result || result.type !== 'submit_prompt') return null;
+              const content = result.content;
+              if (typeof content === 'string') return content;
+              if (Array.isArray(content)) {
+                return content
+                  .map((p) =>
+                    typeof p === 'string'
+                      ? p
+                      : ((p as { text?: string }).text ?? ''),
+                  )
+                  .join('');
+              }
+              return null;
+            },
+          );
+        }
         // Avoid overwriting newer results from a subsequent effect run
         if (!controller.signal.aborted) {
           setCommands(commandService.getCommandsForMode('interactive'));
@@ -382,7 +430,7 @@ export const useSlashCommandProcessor = (
     return () => {
       controller.abort();
     };
-  }, [config, reloadTrigger, isConfigInitialized]);
+  }, [config, reloadTrigger, isConfigInitialized, settings, gitService]);
 
   const handleSlashCommand = useCallback(
     async (
@@ -568,7 +616,14 @@ export const useSlashCommandProcessor = (
                       actions.openApprovalModeDialog();
                       return { type: 'handled' };
                     case 'resume':
-                      actions.openResumeDialog();
+                      if (result.sessionId) {
+                        actions.handleResume(result.sessionId);
+                      } else {
+                        actions.openResumeDialog(result.matchedSessions);
+                      }
+                      return { type: 'handled' };
+                    case 'delete':
+                      actions.openDeleteDialog();
                       return { type: 'handled' };
                     case 'extensions_manage':
                       actions.openExtensionsManagerDialog();
@@ -794,8 +849,6 @@ export const useSlashCommandProcessor = (
     btwItem,
     setBtwItem,
     cancelBtw,
-    awayRecapItem,
-    setAwayRecapItem,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,

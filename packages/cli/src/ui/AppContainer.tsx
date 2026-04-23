@@ -72,6 +72,7 @@ import { useModelCommand } from './hooks/useModelCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
+import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useVimMode } from './contexts/VimModeContext.js';
 import { CompactModeProvider } from './contexts/CompactModeContext.js';
@@ -320,6 +321,14 @@ export const AppContainer = (props: AppContainerProps) => {
           config,
         );
         historyManager.loadHistory(historyItems);
+
+        // Restore session name tag from custom title
+        const title = config
+          .getSessionService()
+          .getSessionTitle(config.getSessionId());
+        if (title) {
+          setSessionName(title);
+        }
       }
 
       // Fire SessionStart event after config is initialized
@@ -566,16 +575,31 @@ export const AppContainer = (props: AppContainerProps) => {
   const { activeArenaDialog, openArenaDialog, closeArenaDialog } =
     useArenaCommand();
 
+  // Session name state (set via /rename, restored on /resume)
+  const [sessionName, setSessionName] = useState<string | null>(null);
+
   const {
     isResumeDialogOpen,
+    resumeMatchedSessions,
     openResumeDialog,
     closeResumeDialog,
-    handleResume: handleResumeInner,
+    handleResume,
   } = useResumeCommand({
     config,
     historyManager,
     startNewSession,
+    setSessionName,
     remount: refreshStatic,
+  });
+
+  const {
+    isDeleteDialogOpen,
+    openDeleteDialog,
+    closeDeleteDialog,
+    handleDelete,
+  } = useDeleteCommand({
+    config,
+    addItem: historyManager.addItem,
   });
 
   const { toggleVimEnabled } = useVimMode();
@@ -627,6 +651,8 @@ export const AppContainer = (props: AppContainerProps) => {
       openMcpDialog,
       openHooksDialog,
       openResumeDialog,
+      handleResume,
+      openDeleteDialog,
     }),
     [
       openAuthDialog,
@@ -648,6 +674,8 @@ export const AppContainer = (props: AppContainerProps) => {
       openMcpDialog,
       openHooksDialog,
       openResumeDialog,
+      handleResume,
+      openDeleteDialog,
     ],
   );
 
@@ -658,8 +686,6 @@ export const AppContainer = (props: AppContainerProps) => {
     btwItem,
     setBtwItem,
     cancelBtw,
-    awayRecapItem,
-    setAwayRecapItem,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
@@ -679,22 +705,7 @@ export const AppContainer = (props: AppContainerProps) => {
     extensionsUpdateStateInternal,
     isConfigInitialized,
     logger,
-  );
-
-  // Wrap handleResume so the sticky recap from the previous session
-  // doesn't carry over into the new one. Only clear after the inner
-  // handler confirms a session was actually loaded — otherwise (no
-  // session data, missing deps) we'd drop the current session's recap
-  // for no reason.
-  const handleResume = useCallback(
-    async (sessionId: string): Promise<boolean> => {
-      const switched = await handleResumeInner(sessionId);
-      if (switched) {
-        setAwayRecapItem(null);
-      }
-      return switched;
-    },
-    [handleResumeInner, setAwayRecapItem],
+    setSessionName,
   );
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage
@@ -779,6 +790,8 @@ export const AppContainer = (props: AppContainerProps) => {
     activePtyId,
     loopDetectionConfirmationRequest,
     pendingToolCalls,
+    streamingResponseLengthRef,
+    isReceivingContent,
   } = useGeminiStream(
     config.getGeminiClient(),
     historyManager.history,
@@ -1248,7 +1261,7 @@ export const AppContainer = (props: AppContainerProps) => {
         setControlsHeight(fullFooterMeasurement.height);
       }
     }
-  }, [buffer, terminalWidth, terminalHeight, awayRecapItem, btwItem]);
+  }, [buffer, terminalWidth, terminalHeight, btwItem]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
   // is available for input routing. Referenced here for layout computation.
@@ -1281,7 +1294,10 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     isFocused,
     isIdle: streamingState === StreamingState.Idle,
-    setAwayRecapItem,
+    addItem: historyManager.addItem,
+    history: historyManager.history,
+    awayThresholdMinutes:
+      settings.merged.general?.sessionRecapAwayThresholdMinutes,
   });
 
   // Context file names computation
@@ -2009,6 +2025,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isHooksDialogOpen ||
     isApprovalModeDialogOpen ||
     isResumeDialogOpen ||
+    isDeleteDialogOpen ||
     isExtensionsManagerDialogOpen;
   dialogsVisibleRef.current = dialogsVisible;
 
@@ -2052,6 +2069,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isResumeDialogOpen,
+      resumeMatchedSessions,
+      isDeleteDialogOpen,
       slashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
@@ -2101,8 +2120,6 @@ export const AppContainer = (props: AppContainerProps) => {
       btwItem,
       setBtwItem,
       cancelBtw,
-      awayRecapItem,
-      setAwayRecapItem,
       nightly,
       branchName,
       sessionStats,
@@ -2134,6 +2151,12 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      // Real-time token display
+      streamingResponseLengthRef,
+      isReceivingContent,
+      // Session name
+      sessionName,
+      setSessionName,
       // Prompt suggestion
       promptSuggestion,
       dismissPromptSuggestion,
@@ -2161,6 +2184,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isResumeDialogOpen,
+      resumeMatchedSessions,
+      isDeleteDialogOpen,
       slashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
@@ -2209,8 +2234,6 @@ export const AppContainer = (props: AppContainerProps) => {
       btwItem,
       setBtwItem,
       cancelBtw,
-      awayRecapItem,
-      setAwayRecapItem,
       nightly,
       branchName,
       sessionStats,
@@ -2244,6 +2267,12 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      // Real-time token display
+      streamingResponseLengthRef,
+      isReceivingContent,
+      // Session name
+      sessionName,
+      setSessionName,
       // Prompt suggestion
       promptSuggestion,
       dismissPromptSuggestion,
@@ -2307,6 +2336,10 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       closeResumeDialog,
       handleResume,
+      // Delete session dialog
+      openDeleteDialog,
+      closeDeleteDialog,
+      handleDelete,
       // Feedback dialog
       openFeedbackDialog,
       closeFeedbackDialog,
@@ -2367,6 +2400,10 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       closeResumeDialog,
       handleResume,
+      // Delete session dialog
+      openDeleteDialog,
+      closeDeleteDialog,
+      handleDelete,
       // Feedback dialog
       openFeedbackDialog,
       closeFeedbackDialog,

@@ -20,10 +20,19 @@ export const docsCommand: SlashCommand = {
     return t('open full Qwen Code documentation in your browser');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
-  action: async (context: CommandContext): Promise<void> => {
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  action: async (context: CommandContext) => {
     const langPath = getCurrentLanguage()?.startsWith('zh') ? 'zh' : 'en';
     const docsUrl = `https://qwenlm.github.io/qwen-code-docs/${langPath}`;
+
+    // Non-interactive/ACP: return URL directly, no browser, no addItem
+    if (context.executionMode !== 'interactive') {
+      return {
+        type: 'message' as const,
+        messageType: 'info' as const,
+        content: `Qwen Code documentation: ${docsUrl}`,
+      };
+    }
 
     if (process.env['SANDBOX'] && process.env['SANDBOX'] !== 'sandbox-exec') {
       context.ui.addItem(
@@ -50,5 +59,6 @@ export const docsCommand: SlashCommand = {
       );
       await open(docsUrl);
     }
+    return;
   },
 };

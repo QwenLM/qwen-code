@@ -44,6 +44,19 @@ export {
   validateModelConfig,
 } from './models/index.js';
 
+// Coding Plan constants
+export {
+  CodingPlanRegion,
+  type CodingPlanTemplate,
+  CODING_PLAN_ENV_KEY,
+  computeCodingPlanVersion,
+  generateCodingPlanTemplate,
+  getCodingPlanConfig,
+  getCodingPlanBaseUrls,
+  isCodingPlanConfig,
+  getRegionFromBaseUrl,
+} from './constants/codingPlan.js';
+
 // Output formatting
 export * from './output/json-formatter.js';
 export * from './output/types.js';
@@ -277,6 +290,7 @@ export { ConditionalRulesRegistry } from './utils/rulesDiscovery.js';
 export type { RuleFile } from './utils/rulesDiscovery.js';
 export { OpenAILogger, openaiLogger } from './utils/openaiLogger.js';
 export * from './utils/partUtils.js';
+export * from './utils/sessionStorageUtils.js';
 export * from './utils/pathReader.js';
 export * from './utils/paths.js';
 export * from './utils/projectSummary.js';

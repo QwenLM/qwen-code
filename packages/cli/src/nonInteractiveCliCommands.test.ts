@@ -43,6 +43,8 @@ describe('handleSlashCommand', () => {
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
       getFolderTrust: vi.fn().mockReturnValue(false),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+      setModelInvocableCommandsProvider: vi.fn(),
+      setModelInvocableCommandsExecutor: vi.fn(),
       getDisabledSlashCommands: vi.fn().mockReturnValue([]),
       storage: {},
     } as unknown as Config;
@@ -86,7 +88,7 @@ describe('handleSlashCommand', () => {
       name: 'help',
       description: 'Show help',
       kind: CommandKind.BUILT_IN,
-      // No commandType → falls back to BUILT_IN → interactive only
+      // No supportedModes → BUILT_IN fallback → interactive only
       action: vi.fn(),
     };
     mockGetCommands.mockReturnValue([mockHelpCommand]);
@@ -135,7 +137,6 @@ describe('handleSlashCommand', () => {
       name: 'init',
       description: 'Initialize project',
       kind: CommandKind.BUILT_IN,
-      commandType: 'local' as const,
       supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
       action: vi.fn().mockResolvedValue({
         type: 'message',
@@ -163,7 +164,6 @@ describe('handleSlashCommand', () => {
       name: 'btw',
       description: 'Ask a side question',
       kind: CommandKind.BUILT_IN,
-      commandType: 'local' as const,
       supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
       action: vi.fn().mockResolvedValue({
         type: 'message',
@@ -275,5 +275,68 @@ describe('handleSlashCommand', () => {
       expect(result.content).toBe('Command executed successfully.');
       expect(result.messageType).toBe('info');
     }
+  });
+
+  describe('disabled slash commands', () => {
+    const mockDisabledCommand = {
+      name: 'help',
+      description: 'Show help',
+      kind: CommandKind.BUILT_IN,
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+      action: vi.fn().mockResolvedValue({
+        type: 'message',
+        messageType: 'info',
+        content: 'Help content',
+      }),
+    };
+
+    it('should return unsupported with disabled reason for a disabled command', async () => {
+      mockGetCommands.mockReturnValue([mockDisabledCommand]);
+      vi.mocked(mockConfig.getDisabledSlashCommands).mockReturnValue(['help']);
+
+      const result = await handleSlashCommand(
+        '/help',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('unsupported');
+      if (result.type === 'unsupported') {
+        expect(result.reason).toContain('disabled');
+        expect(result.originalType).toBe('filtered_command');
+      }
+    });
+
+    it('should match disabled command names case-insensitively', async () => {
+      mockGetCommands.mockReturnValue([mockDisabledCommand]);
+      vi.mocked(mockConfig.getDisabledSlashCommands).mockReturnValue(['HELP']);
+
+      const result = await handleSlashCommand(
+        '/help',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('unsupported');
+      if (result.type === 'unsupported') {
+        expect(result.reason).toContain('disabled');
+      }
+    });
+
+    it('should still return no_command for genuinely unknown commands even with a denylist', async () => {
+      mockGetCommands.mockReturnValue([mockDisabledCommand]);
+      vi.mocked(mockConfig.getDisabledSlashCommands).mockReturnValue(['help']);
+
+      const result = await handleSlashCommand(
+        '/unknowncommand',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('no_command');
+    });
   });
 });

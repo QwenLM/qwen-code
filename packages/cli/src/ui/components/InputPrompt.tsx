@@ -190,6 +190,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     !justNavigatedHistory,
   );
 
+  // Ref so renderLineWithHighlighting (stable useCallback) can access fresh ghost text
+  const midInputGhostTextRef = useRef<{
+    text: string;
+    insertPosition: number;
+  } | null>(null);
+  midInputGhostTextRef.current = completion.midInputGhostText;
+
   const reverseSearchCompletion = useReverseSearchCompletion(
     buffer,
     shellHistoryData,
@@ -803,6 +810,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
       }
 
+      // Accept mid-input ghost text with Tab (when no dropdown is visible)
+      if (
+        key.name === 'tab' &&
+        !key.paste &&
+        !key.shift &&
+        !completion.showSuggestions &&
+        midInputGhostTextRef.current
+      ) {
+        buffer.insert(midInputGhostTextRef.current.text);
+        return true;
+      }
+
       // Attachment mode handling - process before history navigation
       if (isAttachmentMode && attachments.length > 0) {
         if (key.name === 'left') {
@@ -1136,12 +1155,31 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       });
 
       if (isOnCursorLine && cursorVisualColAbsolute === cpLen(lineText)) {
-        // Add zero-width space after cursor to prevent Ink from trimming trailing whitespace
-        renderedLine.push(
-          <Text key={`cursor-end-${cursorVisualColAbsolute}`}>
-            {showCursorOpt ? chalk.inverse(' ') + '\u200B' : ' \u200B'}
-          </Text>,
-        );
+        // Check for mid-input ghost text (only renders when cursor is at end of input)
+        const ghostText = midInputGhostTextRef.current;
+        if (ghostText && showCursorOpt && ghostText.text.length > 0) {
+          // First ghost char: inverted (as cursor). Rest: dimmed gray.
+          const firstChar = ghostText.text[0]!;
+          const rest = ghostText.text.slice(firstChar.length);
+          renderedLine.push(
+            <Text key="ghost-cursor">{chalk.inverse(firstChar)}</Text>,
+          );
+          if (rest.length > 0) {
+            renderedLine.push(
+              <Text key="ghost-rest" color={theme.text.secondary}>
+                {rest}
+              </Text>,
+            );
+          }
+          renderedLine.push(<Text key="ghost-zwsp">{`\u200B`}</Text>);
+        } else {
+          // Add zero-width space after cursor to prevent Ink from trimming trailing whitespace
+          renderedLine.push(
+            <Text key={`cursor-end-${cursorVisualColAbsolute}`}>
+              {showCursorOpt ? chalk.inverse(' ') + '\u200B' : ' \u200B'}
+            </Text>,
+          );
+        }
       }
 
       return <Text>{renderedLine}</Text>;
@@ -1248,6 +1286,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
         prefix={prefixNode}
         borderColor={borderColor}
+        topRightLabel={uiState.sessionName || undefined}
         isActive={!isEmbeddedShellFocused}
         renderLine={renderLineWithHighlighting}
       />
