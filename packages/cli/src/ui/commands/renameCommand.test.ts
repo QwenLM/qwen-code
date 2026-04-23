@@ -176,6 +176,69 @@ describe('renameCommand', () => {
     });
   });
 
+  describe('bare /rename model selection', () => {
+    // Pins the kebab-case path's model choice: bare `/rename` (no args)
+    // prefers fastModel when one is configured, falls back to the main
+    // model otherwise. Previous tests mocked `getHistory: []` which bailed
+    // before the model selection ran, leaving this regression-prone.
+    function mockConfigForKebab(opts: { fastModel?: string; model?: string }): {
+      config: unknown;
+      generateContent: ReturnType<typeof vi.fn>;
+    } {
+      const generateContent = vi.fn().mockResolvedValue({
+        candidates: [{ content: { parts: [{ text: 'fix-login-bug' }] } }],
+      });
+      const config = {
+        getChatRecordingService: vi.fn().mockReturnValue({
+          recordCustomTitle: vi.fn().mockReturnValue(true),
+        }),
+        getFastModel: vi.fn().mockReturnValue(opts.fastModel),
+        getModel: vi.fn().mockReturnValue(opts.model ?? 'main-model'),
+        getGeminiClient: vi.fn().mockReturnValue({
+          getHistory: vi.fn().mockReturnValue([
+            { role: 'user', parts: [{ text: 'fix the login bug' }] },
+            {
+              role: 'model',
+              parts: [{ text: 'Looking at the handler now.' }],
+            },
+          ]),
+        }),
+        getContentGenerator: vi.fn().mockReturnValue({ generateContent }),
+      };
+      return { config, generateContent };
+    }
+
+    it('uses fastModel when configured', async () => {
+      const { config, generateContent } = mockConfigForKebab({
+        fastModel: 'qwen-turbo',
+        model: 'main-model',
+      });
+      mockContext = createMockCommandContext({
+        services: { config: config as never },
+      });
+
+      await renameCommand.action!(mockContext, '');
+
+      expect(generateContent).toHaveBeenCalledOnce();
+      expect(generateContent.mock.calls[0][0].model).toBe('qwen-turbo');
+    });
+
+    it('falls back to main model when fastModel is unset', async () => {
+      const { config, generateContent } = mockConfigForKebab({
+        fastModel: undefined,
+        model: 'main-model',
+      });
+      mockContext = createMockCommandContext({
+        services: { config: config as never },
+      });
+
+      await renameCommand.action!(mockContext, '');
+
+      expect(generateContent).toHaveBeenCalledOnce();
+      expect(generateContent.mock.calls[0][0].model).toBe('main-model');
+    });
+  });
+
   describe('--auto flag', () => {
     it('refuses --auto when no fast model is configured', async () => {
       const mockConfig = {
