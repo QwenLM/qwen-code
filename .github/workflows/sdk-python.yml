@@ -45,6 +45,9 @@ jobs:
       - name: 'Run Ruff'
         run: 'python -m ruff check --config packages/sdk-python/pyproject.toml packages/sdk-python'
 
+      - name: 'Run Ruff Format'
+        run: 'python -m ruff format --check --config packages/sdk-python/pyproject.toml packages/sdk-python'
+
       - name: 'Run Mypy'
         run: 'python -m mypy --config-file packages/sdk-python/pyproject.toml packages/sdk-python/src'
 

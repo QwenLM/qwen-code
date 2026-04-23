@@ -26,6 +26,7 @@ class SyncQuery:
         self._queue: Queue[SDKMessage | Exception | object] = Queue()
         self._ready = threading.Event()
         self._shutdown = threading.Event()
+        self._stop_sent = threading.Event()
         self._query: Query | None = None
         self._consumer_task: asyncio.Task[None] | None = None
 
@@ -73,7 +74,9 @@ class SyncQuery:
         except Exception as exc:
             self._queue.put(exc)
         finally:
-            self._queue.put(_STOP)
+            if not self._stop_sent.is_set():
+                self._stop_sent.set()
+                self._queue.put(_STOP)
 
     def _require_query(self) -> Query:
         self._ready.wait(timeout=30)
@@ -167,7 +170,9 @@ class SyncQuery:
             except Exception:
                 pass
 
-        self._queue.put(_STOP)
+        if not self._stop_sent.is_set():
+            self._stop_sent.set()
+            self._queue.put(_STOP)
         self._stop_loop()
 
     async def _await_consumer(self) -> None:

@@ -88,9 +88,7 @@ def test_validation_rejects_sync_can_use_tool() -> None:
     ):
         return {"behavior": "deny", "message": "bad"}
 
-    with pytest.raises(
-        ValidationError, match="can_use_tool must be an async callable"
-    ):
+    with pytest.raises(ValidationError, match="can_use_tool must be an async callable"):
         validate_query_options(QueryOptions(can_use_tool=cast(Any, can_use_tool)))
 
 

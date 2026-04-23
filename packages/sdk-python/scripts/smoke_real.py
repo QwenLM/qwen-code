@@ -7,11 +7,25 @@ It is useful for manual verification after changing SDK runtime behavior.
 
 from __future__ import annotations
 
+import sys
+
+if sys.version_info < (3, 10):  # noqa: UP036
+    import json
+
+    version = ".".join(str(part) for part in sys.version_info[:3])
+    payload = {
+        "ok": False,
+        "stage": "startup",
+        "error": f"Python >=3.10 is required, current version is {version}",
+        "error_type": "RuntimeError",
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    raise SystemExit(2)
+
 import argparse
 import asyncio
 import json
 import subprocess
-import sys
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import asdict, dataclass
@@ -24,17 +38,16 @@ SRC_ROOT = SDK_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-if sys.version_info >= (3, 10):  # noqa: UP036
-    from qwen_code_sdk import (
-        SDKUserMessage,
-        SyncQuery,
-        is_sdk_assistant_message,
-        is_sdk_result_message,
-        is_sdk_system_message,
-        query,
-        query_sync,
-    )
-    from qwen_code_sdk.transport import prepare_spawn_info
+from qwen_code_sdk import (  # noqa: E402
+    SDKUserMessage,
+    SyncQuery,
+    is_sdk_assistant_message,
+    is_sdk_result_message,
+    is_sdk_system_message,
+    query,
+    query_sync,
+)
+from qwen_code_sdk.transport import prepare_spawn_info  # noqa: E402
 
 T = TypeVar("T")
 
@@ -313,16 +326,6 @@ def build_failure_payload(
 
 async def main() -> int:
     args = parse_args()
-    if sys.version_info < (3, 10):  # noqa: UP036
-        version = ".".join(str(part) for part in sys.version_info[:3])
-        payload = {
-            "ok": False,
-            "stage": "startup",
-            "error": f"Python >=3.10 is required, current version is {version}",
-            "error_type": "RuntimeError",
-        }
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 2
 
     try:
         qwen_version = check_qwen_cli_available(args.qwen, args.timeout_seconds)

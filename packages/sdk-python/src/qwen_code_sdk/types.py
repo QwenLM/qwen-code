@@ -166,9 +166,7 @@ class QueryOptions:
             exclude_tools=_as_optional_str_list(data, "exclude_tools"),
             allowed_tools=_as_optional_str_list(data, "allowed_tools"),
             auth_type=data.get("auth_type"),
-            include_partial_messages=_as_optional_bool(
-                data, "include_partial_messages"
-            )
+            include_partial_messages=_as_optional_bool(data, "include_partial_messages")
             or False,
             resume=_as_optional_str(data, "resume"),
             continue_session=_as_optional_bool(data, "continue_session") or False,
@@ -224,9 +222,7 @@ def _as_optional_callable(
     return cast(Callable[..., Any], raw)
 
 
-def _validate_can_use_tool_callable(
-    value: object, error_type: type[Exception]
-) -> None:
+def _validate_can_use_tool_callable(value: object, error_type: type[Exception]) -> None:
     if not callable(value):
         raise error_type("can_use_tool must be callable")
 
@@ -239,9 +235,7 @@ def _validate_can_use_tool_callable(
         return
 
     if not _supports_argument_count(sig, 3):
-        raise error_type(
-            "can_use_tool must accept exactly 3 positional arguments"
-        )
+        raise error_type("can_use_tool must accept exactly 3 positional arguments")
 
 
 def _validate_stderr_callable(value: object, error_type: type[Exception]) -> None:
@@ -271,9 +265,7 @@ def _supports_argument_count(sig: Signature, count: int) -> bool:
     required_positional = [
         param for param in positional_params if param.default is Parameter.empty
     ]
-    has_var_positional = any(
-        param.kind is Parameter.VAR_POSITIONAL for param in params
-    )
+    has_var_positional = any(param.kind is Parameter.VAR_POSITIONAL for param in params)
 
     if len(required_positional) > count:
         return False

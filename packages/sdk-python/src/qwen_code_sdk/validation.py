@@ -32,9 +32,7 @@ def validate_query_options(options: QueryOptions) -> None:
             "Expected one of: openai, anthropic, qwen-oauth, gemini, vertex-ai."
         )
 
-    _validate_optional_callable(
-        options.can_use_tool, _validate_can_use_tool_callable
-    )
+    _validate_optional_callable(options.can_use_tool, _validate_can_use_tool_callable)
     _validate_optional_callable(options.stderr, _validate_stderr_callable)
 
     if options.resume and options.continue_session:
@@ -83,11 +81,6 @@ def validate_session_id(value: str, param_name: str) -> None:
         raise ValidationError(
             f"Invalid {param_name}: {value!r}. Must be a valid UUID."
         ) from exc
-
-    if parsed.version not in {1, 2, 3, 4, 5}:
-        raise ValidationError(
-            f"Invalid {param_name}: {value!r}. UUID version must be between 1 and 5."
-        )
 
     if parsed.variant != RFC_4122:
         raise ValidationError(

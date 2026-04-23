@@ -217,12 +217,14 @@ async def test_read_messages_skips_malformed_json_lines() -> None:
         stderr = None
 
         def __init__(self) -> None:
-            self.stdout = FakeStdout([
-                b'not valid json\n',
-                b'{"type":"system","subtype":"init","uuid":"u","session_id":"s"}\n',
-                b'also bad\n',
-                b'',
-            ])
+            self.stdout = FakeStdout(
+                [
+                    b"not valid json\n",
+                    b'{"type":"system","subtype":"init","uuid":"u","session_id":"s"}\n',
+                    b"also bad\n",
+                    b"",
+                ]
+            )
 
         async def wait(self) -> int:
             return 0

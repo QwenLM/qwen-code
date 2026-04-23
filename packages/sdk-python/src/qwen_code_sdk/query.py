@@ -345,9 +345,7 @@ class Query:
             pending.timeout_handle.cancel()
             pending.cancel_event.set()
             if not pending.future.done():
-                pending.future.set_exception(
-                    AbortError("Control request cancelled")
-                )
+                pending.future.set_exception(AbortError("Control request cancelled"))
 
         incoming = self._incoming_control_requests.get(request_id)
         if incoming is None:
