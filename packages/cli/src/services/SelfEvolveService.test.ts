@@ -67,6 +67,31 @@ function partialTextEvent(text: string) {
   } as const;
 }
 
+function assistantTextMessage(text: string) {
+  return {
+    type: 'assistant',
+    uuid: 'assistant-1',
+    session_id: 'session',
+    parent_tool_use_id: null,
+    message: {
+      id: 'message-1',
+      type: 'message',
+      role: 'assistant',
+      model: 'qwen',
+      content: [
+        {
+          type: 'text',
+          text,
+        },
+      ],
+      usage: {
+        input_tokens: 1,
+        output_tokens: 1,
+      },
+    },
+  } as const;
+}
+
 describe('SelfEvolveService', () => {
   let tempDir: string;
   let projectDir: string;
@@ -312,6 +337,161 @@ describe('SelfEvolveService', () => {
     expect(shutdown).toHaveBeenCalledTimes(1);
     expect(removeWorktree).toHaveBeenCalledWith(reviewWorktreePath);
     expect(cleanupSession).not.toHaveBeenCalled();
+  });
+
+  it('parses selected_task progress from assistant messages and deduplicates repeated progress lines', async () => {
+    await fs.mkdir(path.join(reviewWorktreePath, '.qwen'), {
+      recursive: true,
+    });
+
+    const setupWorktrees = vi.fn().mockResolvedValue({
+      success: true,
+      worktreesByName: {
+        review: {
+          path: reviewWorktreePath,
+          branch: 'self-evolve/review',
+        },
+      },
+    });
+    const removeWorktree = vi.fn().mockResolvedValue({ success: true });
+    const cleanupSession = vi.fn().mockResolvedValue({ success: true });
+    let reviewStatusChecks = 0;
+
+    const runCommand = vi.fn(
+      async (cwd: string, command: string, args: string[]) => {
+        const joined = `${command} ${args.join(' ')}`;
+        if (joined === 'git rev-parse --abbrev-ref HEAD') {
+          return ok(joined, cwd, 'main\n');
+        }
+        if (joined === 'git ls-files') {
+          return ok(joined, cwd, 'package.json\nsrc/feature.ts\n');
+        }
+        if (joined === 'git ls-files --others --exclude-standard') {
+          return ok(joined, cwd, '');
+        }
+        if (joined === 'git status --short') {
+          reviewStatusChecks += 1;
+          return ok(
+            joined,
+            cwd,
+            reviewStatusChecks === 1 ? 'M src/feature.ts\n' : '',
+          );
+        }
+        if (joined === 'git add --all') {
+          return ok(joined, cwd);
+        }
+        if (joined.startsWith('git commit --no-verify -m ')) {
+          return ok(joined, cwd, '[branch] commit\n');
+        }
+        if (joined === 'git reset --hard HEAD') {
+          return ok(joined, cwd, 'HEAD is now at review-sha\n');
+        }
+        if (joined === 'git clean -fd') {
+          return ok(joined, cwd, '');
+        }
+        if (joined === 'git rev-parse HEAD' && cwd === reviewWorktreePath) {
+          return ok(joined, cwd, 'review-sha\n');
+        }
+        if (joined === 'git diff-tree --no-commit-id --name-only -r HEAD') {
+          return ok(joined, cwd, 'src/feature.ts\n');
+        }
+        throw new Error(`Unexpected command: ${joined} @ ${cwd}`);
+      },
+    );
+
+    const sendPrompt = vi.fn(
+      async (
+        _prompt: string,
+        _timeoutMs: number,
+        onStreamEvent?: (
+          message:
+            | ReturnType<typeof partialTextEvent>
+            | ReturnType<typeof assistantTextMessage>,
+        ) => void,
+      ) => {
+        const selectedTaskLine =
+          'SELF_EVOLVE_PROGRESS {"kind":"selected_task","round":1,"message":"Selected Address TODO in src/feature.ts:1"}';
+        onStreamEvent?.(partialTextEvent(`${selectedTaskLine}\n`));
+        onStreamEvent?.(
+          assistantTextMessage(
+            [
+              selectedTaskLine,
+              'SELF_EVOLVE_PROGRESS {"kind":"command_result","round":1,"message":"npm run lint passed","command":"npm run lint"}',
+            ].join('\n'),
+          ),
+        );
+
+        await fs.writeFile(
+          path.join(reviewWorktreePath, '.qwen', 'self-evolve-report.json'),
+          JSON.stringify(
+            {
+              round: 1,
+              status: 'success',
+              selectedCandidateIndex: 1,
+              selectedTask: {
+                title: 'Address TODO in src/feature.ts:1',
+                source: 'todo-comment',
+                location: 'src/feature.ts:1',
+              },
+              summary: 'Captured child progress from an assistant message.',
+              learnings: ['The selected task was surfaced before validation.'],
+              validation: [{ command: 'npm run lint', summary: 'passed' }],
+              suggestedCommitMessage:
+                'fix(cli): surface child progress from assistant text',
+              changedFiles: ['src/feature.ts'],
+            },
+            null,
+            2,
+          ),
+        );
+        return successTurn();
+      },
+    );
+    const shutdown = vi
+      .fn()
+      .mockResolvedValue(ok('node qwen', reviewWorktreePath));
+    const progressEvents: Array<{ stage: string; message: string }> = [];
+
+    const service = new SelfEvolveService({
+      createWorktreeService: () =>
+        ({
+          setupWorktrees,
+          removeWorktree,
+          cleanupSession,
+        }) as unknown as GitWorktreeService,
+      runCommand,
+      runShellCommand: vi.fn(),
+      createQwenSession: vi.fn(() => ({
+        sendPrompt,
+        shutdown,
+      })) as never,
+    });
+
+    const result = await service.run(mockConfig, {
+      onProgress: (event) =>
+        progressEvents.push({
+          stage: event.stage,
+          message: event.message,
+        }),
+    });
+
+    expect(result.ok).toBe(true);
+    const selectedTaskMessages = progressEvents.filter((event) =>
+      event.message.includes(
+        'Child round 1 [selected_task]: Selected Address TODO in src/feature.ts:1',
+      ),
+    );
+    expect(selectedTaskMessages).toHaveLength(1);
+    expect(progressEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          stage: 'child_activity',
+          message: expect.stringContaining(
+            'Child round 1 [command_result]: npm run lint passed',
+          ),
+        }),
+      ]),
+    );
   });
 
   it('discards the isolated change when the child reports exhausted internal retries', async () => {

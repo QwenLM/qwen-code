@@ -17,13 +17,16 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 import type {
+  CLIAssistantMessage,
   CLIPartialAssistantMessage,
   CLIResultMessage,
   CLIUserMessage,
 } from '../nonInteractive/types.js';
 import {
+  isCLIAssistantMessage,
   isCLIPartialAssistantMessage,
   isCLIResultMessage,
+  isTextBlock,
 } from '../nonInteractive/types.js';
 
 const execFileAsync = promisify(execFile);
@@ -228,7 +231,9 @@ interface QwenSession {
   sendPrompt(
     prompt: string,
     timeoutMs: number,
-    onStreamEvent?: (message: CLIPartialAssistantMessage) => void,
+    onStreamEvent?: (
+      message: CLIPartialAssistantMessage | CLIAssistantMessage,
+    ) => void,
   ): Promise<QwenSessionTurnResult>;
   shutdown(): Promise<CommandExecutionResult>;
 }
@@ -379,25 +384,39 @@ interface PersistentQwenSessionParams {
 
 class SelfEvolveChildProgressParser {
   private pendingLine = '';
+  private readonly emittedLines = new Set<string>();
 
   constructor(
     private readonly emit: (event: SelfEvolveProgressEvent) => void,
   ) {}
 
-  handle(message: CLIPartialAssistantMessage): void {
-    switch (message.event.type) {
-      case 'content_block_delta':
-        if (message.event.delta.type === 'text_delta') {
-          this.consumeText(message.event.delta.text);
-        }
-        break;
-      case 'message_stop':
-      case 'content_block_stop':
-        this.flushPendingLine();
-        break;
-      default:
-        break;
+  handle(message: CLIPartialAssistantMessage | CLIAssistantMessage): void {
+    if (isCLIPartialAssistantMessage(message)) {
+      switch (message.event.type) {
+        case 'content_block_delta':
+          if (message.event.delta.type === 'text_delta') {
+            this.consumeText(message.event.delta.text);
+          }
+          break;
+        case 'message_stop':
+        case 'content_block_stop':
+          this.flushPendingLine();
+          break;
+        default:
+          break;
+      }
+      return;
     }
+
+    for (const block of message.message.content) {
+      if (!isTextBlock(block)) {
+        this.flushPendingLine();
+        continue;
+      }
+      this.consumeText(block.text);
+    }
+
+    this.flushPendingLine();
   }
 
   private consumeText(text: string): void {
@@ -430,6 +449,11 @@ class SelfEvolveChildProgressParser {
     if (!trimmed.startsWith(SELF_EVOLVE_PROGRESS_PREFIX)) {
       return;
     }
+
+    if (this.emittedLines.has(trimmed)) {
+      return;
+    }
+    this.emittedLines.add(trimmed);
 
     const rawPayload = trimmed.slice(SELF_EVOLVE_PROGRESS_PREFIX.length).trim();
     let payload: SelfEvolveChildProgressPayload;
@@ -481,7 +505,9 @@ class PersistentQwenSession implements QwenSession {
         stdoutLines: string[];
         stderrOffset: number;
         timedOut: boolean;
-        onStreamEvent?: (message: CLIPartialAssistantMessage) => void;
+        onStreamEvent?: (
+          message: CLIPartialAssistantMessage | CLIAssistantMessage,
+        ) => void;
         settle: (result: QwenSessionTurnResult) => void;
         timer: NodeJS.Timeout;
       }
@@ -516,7 +542,10 @@ class PersistentQwenSession implements QwenSession {
       } catch {
         return;
       }
-      if (isCLIPartialAssistantMessage(parsed)) {
+      if (
+        isCLIPartialAssistantMessage(parsed) ||
+        isCLIAssistantMessage(parsed)
+      ) {
         this.currentTurn.onStreamEvent?.(parsed);
         return;
       }
@@ -569,7 +598,9 @@ class PersistentQwenSession implements QwenSession {
   async sendPrompt(
     prompt: string,
     timeoutMs: number,
-    onStreamEvent?: (message: CLIPartialAssistantMessage) => void,
+    onStreamEvent?: (
+      message: CLIPartialAssistantMessage | CLIAssistantMessage,
+    ) => void,
   ): Promise<QwenSessionTurnResult> {
     if (this.currentTurn) {
       throw new Error('A self-evolve child session turn is already running.');
