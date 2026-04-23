@@ -211,8 +211,13 @@ export function cleanSummary(raw: string): string {
   // is stripped.
   text = text.replace(/^[-*•]\s+/, '').trim();
 
-  // Strip surrounding quotes/backticks
-  text = text.replace(/^["'`]+|["'`]+$/g, '').trim();
+  // Strip surrounding quotes/backticks. Bounded to {1,10} to keep the
+  // regex engine linear on pathological model output (CodeQL rule
+  // js/polynomial-redos) — real labels never have ten-plus opening quotes.
+  text = text
+    .replace(/^["'`]{1,10}/, '')
+    .replace(/["'`]{1,10}$/, '')
+    .trim();
 
   // Strip common prefix labels like "Label:" "Summary:"
   text = text.replace(/^(label|summary|result|output)\s*[:：]\s*/i, '').trim();
