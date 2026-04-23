@@ -120,6 +120,7 @@ describe('extension tests', () => {
   let tempHomeDir: string;
   let tempWorkspaceDir: string;
   let userExtensionsDir: string;
+  let workspaceExtensionsDir: string;
 
   beforeEach(() => {
     tempHomeDir = fs.mkdtempSync(
@@ -129,7 +130,12 @@ describe('extension tests', () => {
       path.join(tempHomeDir, 'qwen-code-test-workspace-'),
     );
     userExtensionsDir = path.join(tempHomeDir, EXTENSIONS_DIRECTORY_NAME);
+    workspaceExtensionsDir = path.join(
+      tempWorkspaceDir,
+      EXTENSIONS_DIRECTORY_NAME,
+    );
     fs.mkdirSync(userExtensionsDir, { recursive: true });
+    fs.mkdirSync(workspaceExtensionsDir, { recursive: true });
 
     mockHomedir.mockReturnValue(tempHomeDir);
     vi.spyOn(process, 'cwd').mockReturnValue(tempWorkspaceDir);
@@ -330,6 +336,48 @@ describe('extension tests', () => {
 
       expect(extensions).toHaveLength(1);
       expect(extensions[0].name).toBe('ext2');
+    });
+
+    it('should load extensions from the workspace .qwen/extensions directory', async () => {
+      createExtension({
+        extensionsDir: workspaceExtensionsDir,
+        name: 'workspace-ext',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager.getLoadedExtensions();
+
+      expect(extensions).toHaveLength(1);
+      expect(extensions[0].name).toBe('workspace-ext');
+      expect(extensions[0].path).toBe(
+        path.join(workspaceExtensionsDir, 'workspace-ext'),
+      );
+    });
+
+    it('should prefer a workspace extension over a user extension with the same name', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'shared-ext',
+        version: '1.0.0',
+      });
+      createExtension({
+        extensionsDir: workspaceExtensionsDir,
+        name: 'shared-ext',
+        version: '2.0.0',
+      });
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager.getLoadedExtensions();
+
+      expect(extensions).toHaveLength(1);
+      expect(extensions[0].name).toBe('shared-ext');
+      expect(extensions[0].version).toBe('2.0.0');
+      expect(extensions[0].path).toBe(
+        path.join(workspaceExtensionsDir, 'shared-ext'),
+      );
     });
   });
 

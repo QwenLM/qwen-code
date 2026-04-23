@@ -165,11 +165,17 @@ qwen extensions update --all
 
 ## How it works
 
-On startup, Qwen Code looks for extensions in `<home>/.qwen/extensions`
+On startup, Qwen Code looks for extensions in both
+`<home>/.qwen/extensions` and `<workspace>/.qwen/extensions`.
+If the same extension name exists in both places, the workspace copy wins.
 
 Extensions exist as a directory that contains a `qwen-extension.json` file. For example:
 
 `<home>/.qwen/extensions/my-extension/qwen-extension.json`
+
+or
+
+`<workspace>/.qwen/extensions/my-extension/qwen-extension.json`
 
 ### `qwen-extension.json`
 
