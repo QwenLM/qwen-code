@@ -90,6 +90,10 @@ export const Footer: React.FC = () => {
   // the residual-blank-line artifact left behind when a separate block unmounts.
   // When a custom status line is active, the row shrinks by 1 on transition to
   // ready — a one-time, small regression preferred over hiding init progress.
+  //
+  // `configInitMessage` is placed ahead of `showAutoAcceptIndicator` so users
+  // launched with YOLO / auto-accept-edits still see the ~1s startup progress;
+  // the approval-mode indicator takes over as soon as init finishes.
   const leftBottomContent = uiState.ctrlCPressedOnce ? (
     <Text color={theme.status.warning}>{t('Press Ctrl+C again to exit.')}</Text>
   ) : uiState.ctrlDPressedOnce ? (
@@ -100,13 +104,13 @@ export const Footer: React.FC = () => {
     <Text color={theme.text.secondary}>-- INSERT --</Text>
   ) : uiState.shellModeActive ? (
     <ShellModeIndicator />
-  ) : showAutoAcceptIndicator !== undefined &&
-    showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
-    <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
   ) : configInitMessage ? (
     <Text color={theme.text.secondary}>
       <GeminiSpinner /> {configInitMessage}
     </Text>
+  ) : showAutoAcceptIndicator !== undefined &&
+    showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
+    <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
   ) : suppressHint ? null : (
     <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
   );

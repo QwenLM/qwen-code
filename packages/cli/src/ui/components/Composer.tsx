@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Box, Text, useIsScreenReaderEnabled } from 'ink';
+import { Box, useIsScreenReaderEnabled } from 'ink';
 import { useCallback, useState } from 'react';
 import { LoadingIndicator } from './LoadingIndicator.js';
 import { InputPrompt } from './InputPrompt.js';
@@ -17,7 +17,6 @@ import { useVimMode } from '../contexts/VimModeContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { StreamingState, type HistoryItemToolGroup } from '../types.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
-import { useConfigInitMessage } from '../hooks/useConfigInitMessage.js';
 import { t } from '../../i18n/index.js';
 
 export const Composer = () => {
@@ -26,7 +25,6 @@ export const Composer = () => {
   const uiState = useUIState();
   const uiActions = useUIActions();
   const { vimEnabled } = useVimMode();
-  const configInitMessage = useConfigInitMessage(uiState.isConfigInitialized);
 
   const {
     showAutoAcceptIndicator,
@@ -103,10 +101,6 @@ export const Composer = () => {
           isStreaming={isStreaming}
           isReceivingContent={isReceivingContent}
         />
-      )}
-
-      {isScreenReaderEnabled && configInitMessage && (
-        <Text>{configInitMessage}</Text>
       )}
 
       <QueuedMessageDisplay messageQueue={uiState.messageQueue} />
