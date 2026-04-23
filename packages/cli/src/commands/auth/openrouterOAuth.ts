@@ -8,7 +8,14 @@ import { createServer, type Server } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import open from 'open';
 
-import type { ProviderModelConfig as ModelConfig } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  type Config,
+  type ModelProvidersConfig,
+  type ProviderModelConfig as ModelConfig,
+} from '@qwen-code/qwen-code-core';
+import type { LoadedSettings } from '../../config/settings.js';
+import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 
 export const OPENROUTER_ENV_KEY = 'OPENROUTER_API_KEY';
 export const OPENROUTER_DEFAULT_MODEL = 'openai/gpt-4o-mini';
@@ -469,6 +476,66 @@ export function mergeOpenRouterConfigs(
   return [...openRouterModels, ...nonOpenRouterConfigs];
 }
 
+export interface ApplyOpenRouterModelsResult {
+  updatedConfigs: ModelConfig[];
+  activeModelId?: string;
+  persistScope: ReturnType<typeof getPersistScopeForModelSelection>;
+}
+
+export async function applyOpenRouterModelsConfiguration(params: {
+  settings: LoadedSettings;
+  config: Config;
+  apiKey: string;
+  reloadConfig: boolean;
+}): Promise<ApplyOpenRouterModelsResult> {
+  const { settings, config, apiKey, reloadConfig } = params;
+  const persistScope = getPersistScopeForModelSelection(settings);
+
+  settings.setValue(persistScope, `env.${OPENROUTER_ENV_KEY}`, apiKey);
+  process.env[OPENROUTER_ENV_KEY] = apiKey;
+
+  const existingConfigs =
+    (settings.merged.modelProviders as ModelProvidersConfig | undefined)?.[
+      AuthType.USE_OPENAI
+    ] || [];
+  const openRouterCatalog = await getOpenRouterModelsWithFallback();
+  const openRouterModels = selectRecommendedOpenRouterModels(openRouterCatalog);
+  const updatedConfigs = mergeOpenRouterConfigs(
+    existingConfigs,
+    openRouterModels,
+  );
+
+  settings.setValue(
+    persistScope,
+    `modelProviders.${AuthType.USE_OPENAI}`,
+    updatedConfigs,
+  );
+  settings.setValue(
+    persistScope,
+    'security.auth.selectedType',
+    AuthType.USE_OPENAI,
+  );
+
+  const activeModelId = getPreferredOpenRouterModelId(updatedConfigs);
+  if (activeModelId) {
+    settings.setValue(persistScope, 'model.name', activeModelId);
+  }
+
+  if (reloadConfig) {
+    const updatedModelProviders: ModelProvidersConfig = {
+      ...(settings.merged.modelProviders as ModelProvidersConfig | undefined),
+      [AuthType.USE_OPENAI]: updatedConfigs,
+    };
+    config.reloadModelProvidersConfig(updatedModelProviders);
+  }
+
+  return {
+    updatedConfigs,
+    activeModelId,
+    persistScope,
+  };
+}
+
 export async function fetchOpenRouterModels(): Promise<ModelConfig[]> {
   const response = await fetch(OPENROUTER_MODELS_URL, {
     method: 'GET',
@@ -571,7 +638,11 @@ export async function runOpenRouterOAuthLogin(
   deps: OpenRouterOAuthLoginDeps = {},
 ): Promise<OpenRouterOAuthResult> {
   const session = deps.session || createOpenRouterOAuthSession(callbackUrl);
-  const { codeVerifier, authorizationUrl: authUrl } = session;
+  const {
+    callbackUrl: effectiveCallbackUrl,
+    codeVerifier,
+    authorizationUrl: authUrl,
+  } = session;
 
   const openBrowser = deps.openBrowser || open;
   const startListener = deps.startListener || startOAuthCallbackListener;
@@ -580,7 +651,7 @@ export async function runOpenRouterOAuthLogin(
   const signalTarget = deps.signalTarget || process;
   const abortSignal = deps.abortSignal;
 
-  const listener = startListener(callbackUrl);
+  const listener = startListener(effectiveCallbackUrl);
   let cleanupSignalHandlers = () => {};
   let cleanupAbortListener = () => {};
   try {

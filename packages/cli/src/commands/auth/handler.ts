@@ -25,14 +25,11 @@ import { loadCliConfig } from '../../config/config.js';
 import type { CliArgs } from '../../config/config.js';
 import { InteractiveSelector } from './interactiveSelector.js';
 import {
+  applyOpenRouterModelsConfiguration,
   createOpenRouterOAuthSession,
-  getOpenRouterModelsWithFallback,
-  getPreferredOpenRouterModelId,
   isOpenRouterConfig,
-  mergeOpenRouterConfigs,
   OPENROUTER_ENV_KEY,
   runOpenRouterOAuthLogin,
-  selectRecommendedOpenRouterModels,
 } from './openrouterOAuth.js';
 
 function formatElapsedTime(startMs: number): string {
@@ -361,41 +358,18 @@ async function handleOpenRouterAuth(
     const settingsFile = settings.forScope(authTypeScope);
     backupSettingsFile(settingsFile.path);
 
-    settings.setValue(authTypeScope, `env.${OPENROUTER_ENV_KEY}`, selectedKey);
-    process.env[OPENROUTER_ENV_KEY] = selectedKey;
-
-    const existingConfigs =
-      (settings.merged.modelProviders as Record<string, ModelConfig[]>)?.[
-        AuthType.USE_OPENAI
-      ] || [];
     const modelsStartMs = Date.now();
-    const openRouterCatalog = await getOpenRouterModelsWithFallback();
+    await applyOpenRouterModelsConfiguration({
+      settings,
+      config,
+      apiKey: selectedKey,
+      reloadConfig: true,
+    });
     writeStdoutLine(
       t('Fetched OpenRouter models in {{elapsed}}.', {
         elapsed: formatElapsedTime(modelsStartMs),
       }),
     );
-    const openRouterModels =
-      selectRecommendedOpenRouterModels(openRouterCatalog);
-    const updatedConfigs = mergeOpenRouterConfigs(
-      existingConfigs,
-      openRouterModels,
-    );
-
-    settings.setValue(
-      authTypeScope,
-      `modelProviders.${AuthType.USE_OPENAI}`,
-      updatedConfigs,
-    );
-    settings.setValue(
-      authTypeScope,
-      'security.auth.selectedType',
-      AuthType.USE_OPENAI,
-    );
-    const activeModelId = getPreferredOpenRouterModelId(updatedConfigs);
-    if (activeModelId) {
-      settings.setValue(authTypeScope, 'model.name', activeModelId);
-    }
 
     const refreshStartMs = Date.now();
     await config.refreshAuth(AuthType.USE_OPENAI);

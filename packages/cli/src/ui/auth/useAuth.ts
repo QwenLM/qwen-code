@@ -40,14 +40,10 @@ import {
   type AlibabaStandardRegion,
 } from '../../constants/alibabaStandardApiKey.js';
 import {
+  applyOpenRouterModelsConfiguration,
   createOpenRouterOAuthSession,
-  getOpenRouterModelsWithFallback,
-  getPreferredOpenRouterModelId,
-  mergeOpenRouterConfigs,
-  OPENROUTER_ENV_KEY,
   OPENROUTER_OAUTH_CALLBACK_URL,
   runOpenRouterOAuthLogin,
-  selectRecommendedOpenRouterModels,
 } from '../../commands/auth/openrouterOAuth.js';
 
 export type { QwenAuthState } from '../hooks/useQwenAuth.js';
@@ -628,47 +624,11 @@ export const useAuthCommand = (
       const settingsFile = settings.forScope(persistScope);
       backupSettingsFile(settingsFile.path);
 
-      settings.setValue(persistScope, `env.${OPENROUTER_ENV_KEY}`, selectedKey);
-      process.env[OPENROUTER_ENV_KEY] = selectedKey;
-
-      const existingConfigs =
-        (settings.merged.modelProviders as ModelProvidersConfig | undefined)?.[
-          AuthType.USE_OPENAI
-        ] || [];
-      const openRouterCatalog = await getOpenRouterModelsWithFallback();
-      const openRouterModels =
-        selectRecommendedOpenRouterModels(openRouterCatalog);
-      const updatedConfigs = mergeOpenRouterConfigs(
-        existingConfigs,
-        openRouterModels,
-      );
-
-      settings.setValue(
-        persistScope,
-        `modelProviders.${AuthType.USE_OPENAI}`,
-        updatedConfigs,
-      );
-      settings.setValue(
-        persistScope,
-        'security.auth.selectedType',
-        AuthType.USE_OPENAI,
-      );
-      const activeModelId = getPreferredOpenRouterModelId(updatedConfigs);
-      if (activeModelId) {
-        settings.setValue(persistScope, 'model.name', activeModelId);
-      }
-
-      const updatedModelProviders: ModelProvidersConfig = {
-        ...(settings.merged.modelProviders as ModelProvidersConfig | undefined),
-        [AuthType.USE_OPENAI]: updatedConfigs,
-      };
-      config.reloadModelProvidersConfig(updatedModelProviders);
-      setExternalAuthState({
-        title: t('OpenRouter Authentication'),
-        message: t('Finalizing OpenRouter setup...'),
-        detail: t(
-          'Syncing OpenRouter models and updating your local configuration.',
-        ),
+      await applyOpenRouterModelsConfiguration({
+        settings,
+        config,
+        apiKey: selectedKey,
+        reloadConfig: true,
       });
       await config.refreshAuth(AuthType.USE_OPENAI);
 

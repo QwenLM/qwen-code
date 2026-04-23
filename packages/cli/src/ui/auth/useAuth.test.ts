@@ -10,6 +10,7 @@ import { AuthType } from '@qwen-code/qwen-code-core';
 import { useAuthCommand } from './useAuth.js';
 import {
   OPENROUTER_OAUTH_CALLBACK_URL,
+  applyOpenRouterModelsConfiguration,
   createOpenRouterOAuthSession,
   runOpenRouterOAuthLogin,
 } from '../../commands/auth/openrouterOAuth.js';
@@ -30,7 +31,6 @@ vi.mock('../../config/modelProvidersScope.js', () => ({
 }));
 
 vi.mock('../../commands/auth/openrouterOAuth.js', () => ({
-  OPENROUTER_ENV_KEY: 'OPENROUTER_API_KEY',
   OPENROUTER_OAUTH_CALLBACK_URL: 'http://localhost:3000/openrouter/callback',
   createOpenRouterOAuthSession: vi.fn(() => ({
     callbackUrl: 'http://localhost:3000/openrouter/callback',
@@ -38,36 +38,20 @@ vi.mock('../../commands/auth/openrouterOAuth.js', () => ({
     authorizationUrl:
       'https://openrouter.ai/auth?callback_url=http%3A%2F%2Flocalhost%3A3000%2Fopenrouter%2Fcallback&code_challenge=test-challenge',
   })),
-  getPreferredOpenRouterModelId: vi.fn(
-    (models: Array<{ id: string }>) => models[0]?.id,
-  ),
+  applyOpenRouterModelsConfiguration: vi.fn(async () => ({
+    updatedConfigs: [
+      {
+        id: 'openai/gpt-4o-mini:free',
+        name: 'OpenRouter · GPT-4o mini',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+    ],
+    activeModelId: 'openai/gpt-4o-mini:free',
+    persistScope: 'user',
+  })),
   runOpenRouterOAuthLogin: vi.fn(
     () => new Promise(() => undefined) as Promise<{ apiKey: string }>,
-  ),
-  getOpenRouterModelsWithFallback: vi.fn(async () => [
-    {
-      id: 'openai/gpt-4o-mini:free',
-      name: 'OpenRouter · GPT-4o mini',
-      baseUrl: 'https://openrouter.ai/api/v1',
-      envKey: 'OPENROUTER_API_KEY',
-    },
-    {
-      id: 'anthropic/claude-3.7-sonnet',
-      name: 'OpenRouter · Claude 3.7 Sonnet',
-      baseUrl: 'https://openrouter.ai/api/v1',
-      envKey: 'OPENROUTER_API_KEY',
-    },
-  ]),
-  selectRecommendedOpenRouterModels: vi.fn((models: unknown[]) =>
-    (models as Array<{ id: string }>).filter(
-      (model) => model.id === 'openai/gpt-4o-mini:free',
-    ),
-  ),
-  mergeOpenRouterConfigs: vi.fn(
-    (existingConfigs: unknown[], models: unknown[]) => [
-      ...models,
-      ...existingConfigs,
-    ],
   ),
 }));
 
@@ -184,6 +168,14 @@ describe('useAuthCommand', () => {
       await result.current.handleOpenRouterSubmit();
     });
 
+    expect(applyOpenRouterModelsConfiguration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        settings: expect.anything(),
+        config: expect.anything(),
+        apiKey: 'oauth-key-123',
+        reloadConfig: true,
+      }),
+    );
     expect(addItem).toHaveBeenCalledWith(
       expect.objectContaining({ text: 'Successfully configured OpenRouter.' }),
       expect.any(Number),

@@ -57,54 +57,68 @@ vi.mock('./openrouterOAuth.js', () => ({
     codeVerifier: 'test-verifier',
     authorizationUrl: 'https://openrouter.ai/auth?manual=1',
   })),
-  getPreferredOpenRouterModelId: vi.fn(
-    (models: Array<{ id: string }>) =>
-      models.find((model) => model.id === 'openai/gpt-4o-mini')?.id ||
-      models[0]?.id,
-  ),
-  getOpenRouterModelsWithFallback: vi.fn(async () => [
-    {
-      id: 'openai/gpt-4o-mini:free',
-      name: 'OpenRouter · GPT-4o mini',
-      baseUrl: 'https://openrouter.ai/api/v1',
-      envKey: 'OPENROUTER_API_KEY',
-    },
-    {
-      id: 'anthropic/claude-3.7-sonnet',
-      name: 'OpenRouter · Claude 3.7 Sonnet',
-      baseUrl: 'https://openrouter.ai/api/v1',
-      envKey: 'OPENROUTER_API_KEY',
-    },
-    {
-      id: 'google/gemini-2.5-flash',
-      name: 'OpenRouter · Gemini 2.5 Flash',
-      baseUrl: 'https://openrouter.ai/api/v1',
-      envKey: 'OPENROUTER_API_KEY',
-    },
-  ]),
-  selectRecommendedOpenRouterModels: vi.fn((models: unknown[]) =>
-    (models as Array<{ id: string }>).filter((model) =>
-      ['openai/gpt-4o-mini:free', 'anthropic/claude-3.7-sonnet'].includes(
-        model.id,
-      ),
-    ),
-  ),
-  isOpenRouterConfig: (config: { baseUrl?: string }) =>
-    (config.baseUrl || '').includes('openrouter.ai'),
-  mergeOpenRouterConfigs: (
-    existingConfigs: Array<{ baseUrl?: string }>,
-    openRouterModels: unknown[],
-  ) => [
-    ...openRouterModels,
-    ...existingConfigs.filter(
-      (config) => !(config.baseUrl || '').includes('openrouter.ai'),
-    ),
-  ],
+  applyOpenRouterModelsConfiguration: vi.fn(async ({ settings, apiKey }) => {
+    process.env['OPENROUTER_API_KEY'] = apiKey;
+    settings.setValue('user', 'env.OPENROUTER_API_KEY', apiKey);
+    settings.setValue(
+      'user',
+      'security.auth.selectedType',
+      AuthType.USE_OPENAI,
+    );
+    settings.setValue('user', 'model.name', 'openai/gpt-4o-mini:free');
+    settings.setValue('user', `modelProviders.${AuthType.USE_OPENAI}`, [
+      {
+        id: 'openai/gpt-4o-mini:free',
+        name: 'OpenRouter · GPT-4o mini',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'anthropic/claude-3.7-sonnet',
+        name: 'OpenRouter · Claude 3.7 Sonnet',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'gpt-4.1',
+        name: 'OpenAI GPT-4.1',
+        baseUrl: 'https://api.openai.com/v1',
+        envKey: 'OPENAI_API_KEY',
+      },
+    ]);
+    return {
+      updatedConfigs: [
+        {
+          id: 'openai/gpt-4o-mini:free',
+          name: 'OpenRouter · GPT-4o mini',
+          baseUrl: 'https://openrouter.ai/api/v1',
+          envKey: 'OPENROUTER_API_KEY',
+        },
+        {
+          id: 'anthropic/claude-3.7-sonnet',
+          name: 'OpenRouter · Claude 3.7 Sonnet',
+          baseUrl: 'https://openrouter.ai/api/v1',
+          envKey: 'OPENROUTER_API_KEY',
+        },
+        {
+          id: 'gpt-4.1',
+          name: 'OpenAI GPT-4.1',
+          baseUrl: 'https://api.openai.com/v1',
+          envKey: 'OPENAI_API_KEY',
+        },
+      ],
+      activeModelId: 'openai/gpt-4o-mini:free',
+      persistScope: 'user',
+    };
+  }),
   runOpenRouterOAuthLogin: vi.fn(),
 }));
 
 import { loadSettings } from '../../config/settings.js';
-import { runOpenRouterOAuthLogin } from './openrouterOAuth.js';
+import {
+  applyOpenRouterModelsConfiguration,
+  runOpenRouterOAuthLogin,
+} from './openrouterOAuth.js';
 
 describe('handleQwenAuth openrouter', () => {
   beforeEach(() => {
@@ -193,6 +207,14 @@ describe('handleQwenAuth openrouter', () => {
         envKey: 'OPENAI_API_KEY',
       },
     ]);
+    expect(applyOpenRouterModelsConfiguration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        settings: expect.anything(),
+        config: expect.anything(),
+        apiKey: 'or-key-123',
+        reloadConfig: true,
+      }),
+    );
     expect(mockRefreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
     expect(process.env['OPENROUTER_API_KEY']).toBe('or-key-123');
   });
@@ -265,71 +287,18 @@ describe('handleQwenAuth openrouter', () => {
     expect(process.env['OPENROUTER_API_KEY']).toBe('oauth-key-123');
   });
 
-  it('stores recommended OpenRouter models instead of the full fetched catalog', async () => {
-    const {
-      getOpenRouterModelsWithFallback,
-      selectRecommendedOpenRouterModels,
-    } = await import('./openrouterOAuth.js');
+  it('delegates OpenRouter provider updates to the shared configuration helper', async () => {
     vi.mocked(loadSettings).mockReturnValue(createMockSettings({}));
-    vi.mocked(getOpenRouterModelsWithFallback).mockResolvedValue([
-      {
-        id: 'openai/gpt-5-mini',
-        name: 'OpenRouter · GPT-5 Mini',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
-      {
-        id: 'anthropic/claude-3.7-sonnet',
-        name: 'OpenRouter · Claude 3.7 Sonnet',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
-      {
-        id: 'google/gemini-2.5-flash',
-        name: 'OpenRouter · Gemini 2.5 Flash',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
-    ]);
 
     await handleQwenAuth('openrouter', { key: 'or-key-dynamic' });
 
-    expect(selectRecommendedOpenRouterModels).toHaveBeenCalledWith([
-      {
-        id: 'openai/gpt-5-mini',
-        name: 'OpenRouter · GPT-5 Mini',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
-      {
-        id: 'anthropic/claude-3.7-sonnet',
-        name: 'OpenRouter · Claude 3.7 Sonnet',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
-      {
-        id: 'google/gemini-2.5-flash',
-        name: 'OpenRouter · Gemini 2.5 Flash',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
-    ]);
-
-    const modelProvidersCall = mockSetValue.mock.calls.find(
-      (call) => call[1] === `modelProviders.${AuthType.USE_OPENAI}`,
-    );
-    expect(modelProvidersCall?.[2]).toEqual([
-      {
-        id: 'anthropic/claude-3.7-sonnet',
-        name: 'OpenRouter · Claude 3.7 Sonnet',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
-    ]);
-    expect(mockSetValue).toHaveBeenCalledWith(
-      'user',
-      'model.name',
-      'anthropic/claude-3.7-sonnet',
+    expect(applyOpenRouterModelsConfiguration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        settings: expect.anything(),
+        config: expect.anything(),
+        apiKey: 'or-key-dynamic',
+        reloadConfig: true,
+      }),
     );
   });
 });
