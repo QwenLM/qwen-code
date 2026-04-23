@@ -14,14 +14,9 @@ export interface UseMessageQueueOptions {
   submitQuery: (query: string) => void | Promise<unknown>;
 }
 
-// Extract the first submission segment from a queue. A segment is either a
-// single slash-command message (submitted alone so `isSlashCommand` still
-// fires at the receiver), or a batch of consecutive plain-text messages
-// joined with `\n\n` (preserves the long-standing behavior where queued
-// plain-text prompts are sent as one turn). The remaining messages stay in
-// the queue; the next natural state transition drains them one segment at a
-// time, which ensures a dialog-opening slash command (e.g. `/model`) does
-// not auto-advance into subsequent messages while the dialog is still open.
+// Extract the first queue segment in original order. A segment is either a
+// single slash command or a batch of consecutive plain-text prompts joined
+// with `\n\n`.
 function extractFirstSegment(messages: string[]): {
   segment: string;
   rest: string[];
@@ -46,11 +41,10 @@ export interface UseMessageQueueReturn {
   getQueuedMessagesText: () => string;
   popAllMessages: () => string | null;
   /**
-   * Atomically drain leading plain-text messages from the queue, stopping
-   * at the first slash command. Returns the drained messages and updates
-   * both the synchronous ref and React state. Slash commands stay queued
-   * because they're UI actions, not model input — they should be executed
-   * via the normal idle drain, not injected as tool-result context.
+   * Atomically drain every queued plain-text prompt from the queue while
+   * leaving slash commands deferred for manual execution. Returns the
+   * drained prompts in their original order and updates both the
+   * synchronous ref and React state.
    * Safe to call from non-React contexts (e.g., tool completion callbacks).
    */
   drainQueue: () => string[];
@@ -97,33 +91,25 @@ export function useMessageQueue(
     return messageQueue.join('\n\n');
   }, [messageQueue]);
 
-  // Pop all messages from the queue for editing (atomic via ref to prevent
-  // duplicate pops from key auto-repeat before React re-renders)
+  // Pop deferred queue content for editing (atomic via ref to prevent
+  // duplicate pops from key auto-repeat before React re-renders).
   const popAllMessages = useCallback((): string | null => {
     const current = queueRef.current;
     if (current.length === 0) return null;
-    const allText = current.join('\n\n');
-    queueRef.current = [];
-    setMessageQueue([]);
-    return allText;
+    const { segment, rest } = extractFirstSegment(current);
+    queueRef.current = rest;
+    setMessageQueue(rest);
+    return segment;
   }, []);
 
-  // Atomically drain leading plain-text messages (synchronous, safe from
-  // callbacks). Stops at the first slash command so those stay queued and
-  // get dispatched through the normal idle-drain path instead of being
-  // injected into the model's context as raw text.
+  // Atomically drain every plain-text prompt (synchronous, safe from
+  // callbacks) while leaving slash commands deferred for manual execution.
   const drainQueue = useCallback((): string[] => {
     const current = queueRef.current;
     if (current.length === 0) return [];
-    if (isSlashCommand(current[0])) return [];
-    const slashIdx = current.findIndex((m) => isSlashCommand(m));
-    if (slashIdx === -1) {
-      queueRef.current = [];
-      setMessageQueue([]);
-      return current;
-    }
-    const drained = current.slice(0, slashIdx);
-    const rest = current.slice(slashIdx);
+    const drained = current.filter((message) => !isSlashCommand(message));
+    if (drained.length === 0) return [];
+    const rest = current.filter((message) => isSlashCommand(message));
     queueRef.current = rest;
     setMessageQueue(rest);
     return drained;

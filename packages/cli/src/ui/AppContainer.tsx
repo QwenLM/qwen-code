@@ -88,7 +88,7 @@ import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useGeminiStream } from './hooks/useGeminiStream.js';
 import { useVim } from './hooks/vim.js';
-import { isBtwCommand } from './utils/commandUtils.js';
+import { isBtwCommand, isSlashCommand } from './utils/commandUtils.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
 import { useFocus } from './hooks/useFocus.js';
@@ -1163,6 +1163,14 @@ export const AppContainer = (props: AppContainerProps) => {
         speculationRef.current = IDLE_SPECULATION;
       }
 
+      if (
+        streamingState === StreamingState.Idle &&
+        isSlashCommand(submittedValue)
+      ) {
+        void submitQuery(submittedValue);
+        return;
+      }
+
       addMessage(submittedValue);
     },
     [
@@ -1218,8 +1226,8 @@ export const AppContainer = (props: AppContainerProps) => {
     // particular, do NOT repopulate it with the previous prompt; the user
     // can still recall it via history navigation (Up/Ctrl+P).
     //
-    // popAllMessages is atomic via the queue's synchronous ref, matching
-    // the drain behavior used during tool completion.
+    // popAllMessages is atomic via the queue's synchronous ref,
+    // matching the drain behavior used during tool completion.
     const popped = popAllMessages();
     if (popped) {
       const currentText = buffer.text;
@@ -2036,21 +2044,14 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Drain the queued-messages queue when we're idle and not blocked by a
   // dialog. One segment per effect run: consecutive plain-text messages are
-  // batched into a single submission, while each slash command is submitted
-  // alone so it's recognized as a command. When a slash command opens a
-  // dialog, `dialogsVisible` flips to true and subsequent segments stay
-  // queued until the dialog closes — avoids sending a queued prompt to the
-  // model while a picker is still open.
+  // batched into a single submission, while queued slash commands are
+  // submitted alone once the app is idle again. Mid-turn drain still keeps
+  // slash commands out of tool-result injection.
   //
   // `queueDrainingRef` blocks re-entry while an in-flight submission is
-  // still settling. Without it, calling `submitQuery` for a slash command
-  // returns control to React before the dialog-opening state flip commits;
-  // the effect would otherwise re-run on the fresh `messageQueue` value
-  // (post-pop) and drain the next segment before `dialogsVisible` has had a
-  // chance to flip true. `queueDrainNonce` is bumped once the submission
+  // still settling. `queueDrainNonce` is bumped once the submission
   // settles so the effect re-fires for any remaining segments even when
-  // `streamingState` / `messageQueue` did not change (e.g. slash commands
-  // that don't start a model turn).
+  // `streamingState` / `messageQueue` did not change.
   const queueDrainingRef = useRef(false);
   const [queueDrainNonce, setQueueDrainNonce] = useState(0);
   useEffect(() => {

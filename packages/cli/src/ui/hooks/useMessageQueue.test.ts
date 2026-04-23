@@ -200,7 +200,7 @@ describe('useMessageQueue', () => {
       expect(drained).toEqual([]);
     });
 
-    it('drains only leading plain-text messages and leaves slash commands queued', () => {
+    it('drains all plain-text messages and leaves slash commands queued', () => {
       const { result } = renderHook(() =>
         useMessageQueue({
           isConfigInitialized: true,
@@ -221,11 +221,11 @@ describe('useMessageQueue', () => {
         drained = result.current.drainQueue();
       });
 
-      expect(drained).toEqual(['one', 'two']);
-      expect(result.current.messageQueue).toEqual(['/model', 'three']);
+      expect(drained).toEqual(['one', 'two', 'three']);
+      expect(result.current.messageQueue).toEqual(['/model']);
     });
 
-    it('drains nothing when a slash command leads the queue', () => {
+    it('still drains later plain-text messages when a slash command leads the queue', () => {
       const { result } = renderHook(() =>
         useMessageQueue({
           isConfigInitialized: true,
@@ -244,8 +244,8 @@ describe('useMessageQueue', () => {
         drained = result.current.drainQueue();
       });
 
-      expect(drained).toEqual([]);
-      expect(result.current.messageQueue).toEqual(['/model', 'hello']);
+      expect(drained).toEqual(['hello']);
+      expect(result.current.messageQueue).toEqual(['/model']);
     });
 
     it('drains the whole queue when it contains no slash commands', () => {
@@ -415,7 +415,8 @@ describe('useMessageQueue', () => {
       act(() => {
         popped = result.current.popAllMessages();
       });
-      expect(popped).toBe('/model\n\nafter');
+      expect(popped).toBe('/model');
+      expect(result.current.messageQueue).toEqual(['after']);
     });
   });
 });
