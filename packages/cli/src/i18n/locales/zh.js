@@ -413,6 +413,8 @@ export default {
   'Tool Schema Compliance': '工具 Schema 兼容性',
   // Settings enum options
   'Auto (detect from system)': '自动（从系统检测）',
+  'Auto (detect terminal theme)': '自动（检测终端主题）',
+  Auto: '自动',
   Text: '文本',
   JSON: 'JSON',
   Plan: '规划',

@@ -432,6 +432,8 @@ export default {
   'Tool Schema Compliance': 'Tool Schema Compliance',
   // Settings enum options
   'Auto (detect from system)': 'Auto (detect from system)',
+  'Auto (detect terminal theme)': 'Auto (detect terminal theme)',
+  Auto: 'Auto',
   Text: 'Text',
   JSON: 'JSON',
   Plan: 'Plan',

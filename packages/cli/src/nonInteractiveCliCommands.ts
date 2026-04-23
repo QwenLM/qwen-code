@@ -16,6 +16,7 @@ import { CommandService } from './services/CommandService.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from './services/BundledSkillLoader.js';
 import { FileCommandLoader } from './services/FileCommandLoader.js';
+import { SkillCommandLoader } from './services/SkillCommandLoader.js';
 import {
   type CommandContext,
   type SlashCommand,
@@ -200,15 +201,72 @@ export const handleSlashCommand = async (
   const allLoaders = [
     new BuiltinCommandLoader(config),
     new BundledSkillLoader(config),
+    new SkillCommandLoader(config),
     new FileCommandLoader(config),
   ];
 
+  // Build the disabled-command set (case-insensitive).
+  const disabledSlashCommandsRaw = config.getDisabledSlashCommands();
+  const disabledNameSet = new Set<string>();
+  for (const name of disabledSlashCommandsRaw) {
+    const trimmed = name.trim();
+    if (trimmed) disabledNameSet.add(trimmed.toLowerCase());
+  }
+  const isDisabled = (cmd: { name: string; altNames?: readonly string[] }) =>
+    disabledNameSet.has(cmd.name.toLowerCase()) ||
+    (cmd.altNames ?? []).some((a) => disabledNameSet.has(a.toLowerCase()));
+
+  // Load the full command set (unfiltered by the denylist) so that the
+  // fallback existence check below can distinguish a disabled command from a
+  // truly unknown one. Without this, a disabled command would fall through to
+  // `no_command` and be forwarded to the model as plain prompt text.
   const commandService = await CommandService.create(
     allLoaders,
     abortController.signal,
   );
+  // Register model-invocable commands provider so SkillTool description stays
+  // up-to-date in non-interactive / ACP mode.
+  config.setModelInvocableCommandsProvider(() =>
+    commandService.getModelInvocableCommands().map((cmd) => ({
+      name: cmd.name,
+      description:
+        typeof cmd.description === 'string' ? cmd.description : cmd.description,
+    })),
+  );
+  // Register executor so SkillTool can invoke model-invocable commands
+  // (e.g. MCP prompts) that are not file-based skills.
+  config.setModelInvocableCommandsExecutor(
+    async (name: string, args: string = '') => {
+      const commands = commandService.getModelInvocableCommands();
+      const cmd = commands.find((c) => c.name === name);
+      if (!cmd?.action) return null;
+      const minimalContext = {
+        executionMode,
+        invocation: {
+          raw: args ? `/${name} ${args}` : `/${name}`,
+          name,
+          args,
+        },
+        services: { config, settings, git: undefined, logger: null },
+      } as unknown as CommandContext;
+      const result = await cmd.action(minimalContext, args);
+      if (!result || result.type !== 'submit_prompt') return null;
+      const content = result.content;
+      if (typeof content === 'string') return content;
+      if (Array.isArray(content)) {
+        return content
+          .map((p) =>
+            typeof p === 'string' ? p : ((p as { text?: string }).text ?? ''),
+          )
+          .join('');
+      }
+      return null;
+    },
+  );
   const allCommands = commandService.getCommands();
-  const filteredCommands = commandService.getCommandsForMode(executionMode);
+  const filteredCommands = commandService
+    .getCommandsForMode(executionMode)
+    .filter((cmd) => !isDisabled(cmd));
 
   // First, try to parse with filtered commands
   const { commandToExecute, args } = parseSlashCommand(
@@ -224,11 +282,26 @@ export const handleSlashCommand = async (
     );
 
     if (knownCommand) {
+      // Derive the token the user actually typed (e.g. "about" when the
+      // primary name is "status") to surface a helpful error message.
+      const typedToken =
+        rawQuery.trim().substring(1).trim().split(/\s+/)[0] ??
+        knownCommand.name;
+      if (isDisabled(knownCommand)) {
+        return {
+          type: 'unsupported',
+          reason: t(
+            'The command "/{{command}}" is disabled by the current configuration.',
+            { command: typedToken },
+          ),
+          originalType: 'filtered_command',
+        };
+      }
       // Command exists but is not allowed in this mode
       return {
         type: 'unsupported',
         reason: t('The command "/{{command}}" is not supported in this mode.', {
-          command: knownCommand.name,
+          command: typedToken,
         }),
         originalType: 'filtered_command',
       };
@@ -304,10 +377,18 @@ export const getAvailableCommands = async (
     const loaders = [
       new BuiltinCommandLoader(config),
       new BundledSkillLoader(config),
+      new SkillCommandLoader(config),
       new FileCommandLoader(config),
     ];
 
-    const commandService = await CommandService.create(loaders, abortSignal);
+    const disabledSlashCommands = config.getDisabledSlashCommands();
+    const commandService = await CommandService.create(
+      loaders,
+      abortSignal,
+      disabledSlashCommands.length > 0
+        ? new Set(disabledSlashCommands)
+        : undefined,
+    );
     return commandService.getCommandsForMode(mode) as SlashCommand[];
   } catch (error) {
     // Handle errors gracefully - log and return empty array

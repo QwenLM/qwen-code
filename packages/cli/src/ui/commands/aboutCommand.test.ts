@@ -280,4 +280,65 @@ describe('aboutCommand', () => {
       expect.any(Number),
     );
   });
+
+  describe('non-interactive mode', () => {
+    it('should return text summary without calling addItem', async () => {
+      if (!aboutCommand.action) {
+        throw new Error('The about command must have an action.');
+      }
+
+      const nonInteractiveContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+      } as unknown as Partial<CommandContext>);
+      // Attach a spy to the non-interactive context's ui
+      nonInteractiveContext.ui.addItem = vi.fn();
+
+      const result = await aboutCommand.action(nonInteractiveContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('test-version'),
+      });
+      expect(result).toEqual(
+        expect.objectContaining({
+          content: expect.stringContaining('test-model'),
+        }),
+      );
+      expect(nonInteractiveContext.ui.addItem).not.toHaveBeenCalled();
+    });
+
+    it('should include git commit and IDE when available', async () => {
+      if (!aboutCommand.action) throw new Error('No action');
+
+      vi.mocked(systemInfoUtils.getExtendedSystemInfo).mockResolvedValue({
+        cliVersion: 'test-version',
+        osPlatform: 'test-os',
+        osArch: 'x64',
+        osRelease: '22.0.0',
+        nodeVersion: 'v20.0.0',
+        npmVersion: '10.0.0',
+        sandboxEnv: 'no sandbox',
+        modelVersion: 'test-model',
+        selectedAuthType: 'test-auth',
+        ideClient: 'vscode',
+        sessionId: 'sess-1',
+        memoryUsage: '100 MB',
+        baseUrl: undefined,
+        gitCommit: 'abc1234',
+      });
+
+      const nonInteractiveContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+      } as unknown as Partial<CommandContext>);
+
+      const result = (await aboutCommand.action(nonInteractiveContext, '')) as {
+        type: string;
+        content: string;
+      };
+
+      expect(result.content).toContain('abc1234');
+      expect(result.content).toContain('vscode');
+    });
+  });
 });

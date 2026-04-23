@@ -80,6 +80,21 @@ export interface SkillConfig {
    * For extension-level skills: the name of the providing extension
    */
   extensionName?: string;
+
+  /**
+   * Describes when to invoke this skill — shown to the model in the SkillTool
+   * description so it can decide whether to use it. Parsed from the
+   * `when_to_use` frontmatter field in SKILL.md.
+   */
+  whenToUse?: string;
+
+  /**
+   * When true, the skill is hidden from the model's SkillTool listing and
+   * cannot be invoked by the model. Only the user can trigger it via
+   * `/<skill-name>`. Parsed from the `disable-model-invocation` frontmatter
+   * field in SKILL.md.
+   */
+  disableModelInvocation?: boolean;
 }
 
 /**

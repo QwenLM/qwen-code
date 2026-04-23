@@ -21,7 +21,7 @@ export const modelCommand: SlashCommand = {
     return t('Switch the model for this session (--fast for suggestion model)');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (_context, partialArg) => {
     if (partialArg && '--fast'.startsWith(partialArg)) {
       return [
@@ -54,7 +54,16 @@ export const modelCommand: SlashCommand = {
     if (args.startsWith('--fast')) {
       const modelName = args.replace('--fast', '').trim();
       if (!modelName) {
-        // Open model dialog in fast-model mode
+        // Open model dialog in fast-model mode (interactive) or return current fast model (non-interactive)
+        if (context.executionMode !== 'interactive') {
+          const fastModel =
+            context.services.settings?.merged?.fastModel ?? 'not set';
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: `Current fast model: ${fastModel}\nUse "/model --fast <model-id>" to set fast model.`,
+          };
+        }
         return {
           type: 'dialog',
           dialog: 'fast-model',
@@ -98,6 +107,39 @@ export const modelCommand: SlashCommand = {
         type: 'message',
         messageType: 'error',
         content: t('Authentication type not available.'),
+      };
+    }
+
+    // Non-interactive/ACP: set model if an arg was provided, otherwise show current model
+    if (context.executionMode !== 'interactive') {
+      const modelName = args.trim();
+      if (modelName) {
+        // /model <model-id> — set the main model
+        if (!settings) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t('Settings service not available.'),
+          };
+        }
+        settings.setValue(
+          getPersistScopeForModelSelection(settings),
+          'model.name',
+          modelName,
+        );
+        await config.setModel(modelName);
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: t('Model') + ': ' + modelName,
+        };
+      }
+      // /model with no args — show current model
+      const currentModel = config.getModel() ?? 'unknown';
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: `Current model: ${currentModel}\nUse "/model <model-id>" to switch models or "/model --fast <model-id>" to set the fast model.`,
       };
     }
 

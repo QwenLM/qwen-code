@@ -315,6 +315,8 @@ export default {
   'Vision Model Preview': 'ビジョンモデルプレビュー',
   'Tool Schema Compliance': 'ツールスキーマ準拠',
   'Auto (detect from system)': '自動(システムから検出)',
+  'Auto (detect terminal theme)': '自動（端末テーマを検出）',
+  Auto: '自動',
   'check session stats. Usage: /stats [model|tools]':
     'セッション統計を確認。使い方: /stats [model|tools]',
   'Show model-specific usage statistics.': 'モデル別の使用統計を表示',

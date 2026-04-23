@@ -23,7 +23,7 @@ export const terminalSetupCommand: SlashCommand = {
     );
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
+  supportedModes: ['interactive'] as const,
 
   action: async (): Promise<MessageActionReturn> => {
     try {

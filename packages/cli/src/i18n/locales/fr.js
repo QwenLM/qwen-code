@@ -443,6 +443,8 @@ export default {
   'Vision Model Preview': 'Aperçu du modèle de vision',
   'Tool Schema Compliance': 'Conformité au schéma des outils',
   'Auto (detect from system)': 'Auto (détecter depuis le système)',
+  'Auto (detect terminal theme)': 'Auto (détecter le thème du terminal)',
+  Auto: 'Auto',
   Text: 'Texte',
   JSON: 'JSON',
   Plan: 'Plan',

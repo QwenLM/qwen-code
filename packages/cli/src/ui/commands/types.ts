@@ -278,23 +278,6 @@ export type CommandSource =
 // | 'plugin-skill'
 // | 'dynamic-skill'
 
-/**
- * The execution type of a slash command, describing *how* it runs.
- *
- * - prompt: Produces a submit_prompt — content is sent to the model.
- *   Default supportedModes: all. Default modelInvocable: true.
- *
- * - local: Runs local logic with no React/Ink UI dependency.
- *   Can return message, stream_messages, submit_prompt, tool, etc.
- *   Default supportedModes: ['interactive'] — must explicitly declare
- *   supportedModes to unlock other modes (mirrors Claude Code's
- *   supportsNonInteractive: true pattern).
- *
- * - local-jsx: Depends on React/Ink UI (dialogs, JSX components, etc.).
- *   Default supportedModes: ['interactive'] only.
- */
-export type CommandType = 'prompt' | 'local' | 'local-jsx';
-
 export interface CommandCompletionItem {
   value: string;
   label?: string;
@@ -333,17 +316,11 @@ export interface SlashCommand {
    */
   sourceLabel?: string;
 
-  /**
-   * How this command executes. Set by built-in command files (local/local-jsx)
-   * or by Loaders (prompt). Used by getEffectiveSupportedModes() to infer
-   * which execution modes are supported.
-   */
-  commandType?: CommandType;
-
   // ── Phase 1: mode capability ───────────────────────────────────────────
   /**
    * Which execution modes this command is available in.
-   * Explicit declaration takes priority over commandType inference.
+   * Explicit declaration is always authoritative. If omitted, the system falls
+   * back to a conservative default based on CommandKind.
    * See getEffectiveSupportedModes() in commandUtils.ts for the full logic.
    */
   supportedModes?: ExecutionMode[];
