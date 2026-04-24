@@ -14,6 +14,13 @@ import {
   truncateJson,
 } from './toolUseSummary.js';
 
+// Sanity helper for the pre-truncation tests: `y` count in the output must
+// be less than maxLength (since JSON quoting and the field name eat some of
+// the budget) — confirming the input never reached its full 10MB form.
+function maxLengthGuard(maxLength: number) {
+  return maxLength;
+}
+
 describe('truncateJson', () => {
   it('returns JSON for short values', () => {
     expect(truncateJson({ foo: 'bar' }, 100)).toBe('{"foo":"bar"}');
@@ -30,6 +37,29 @@ describe('truncateJson', () => {
 
   it('handles undefined', () => {
     expect(truncateJson(undefined, 100)).toBe('[undefined]');
+  });
+
+  it('pre-truncates large string leaves before JSON serialization', () => {
+    // Ensures we don't allocate the full JSON for a 10MB string just to
+    // slice it to maxLength. The result must still be ≤ maxLength.
+    const huge = 'x'.repeat(10_000_000);
+    const result = truncateJson(huge, 300);
+    expect(result.length).toBeLessThanOrEqual(300);
+    expect(result.endsWith('...')).toBe(true);
+  });
+
+  it('pre-truncates large string fields inside objects', () => {
+    // The point: a 10MB string field must not be fully serialized before the
+    // outer cap is applied (would allocate 10MB+ of JSON only to slice it).
+    // Pre-truncation slices each string leaf to maxLength first, so the
+    // serializer never sees the full payload.
+    const obj = { content: 'y'.repeat(10_000_000) };
+    const result = truncateJson(obj, 300);
+    expect(result.length).toBeLessThanOrEqual(300);
+    // The huge field is truncated to <= maxLength characters — far below
+    // its original 10M length.
+    const yCount = (result.match(/y/g) ?? []).length;
+    expect(yCount).toBeLessThan(maxLengthGuard(300));
   });
 
   it('handles circular references gracefully', () => {

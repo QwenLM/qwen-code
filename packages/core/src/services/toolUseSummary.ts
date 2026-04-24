@@ -184,15 +184,50 @@ export async function generateToolUseSummary(
 /**
  * Truncates a JSON value to a maximum length for the prompt. Mirrors
  * Claude Code's `truncateJson` behavior (including the `...` suffix).
+ *
+ * For large string inputs, pre-truncates BEFORE serialization to avoid
+ * allocating the full JSON representation on the interactive turn path —
+ * a 10MB ReadFile result would otherwise be fully stringified just to be
+ * sliced down to 300 chars and discarded.
+ *
+ * For object/array inputs, recursively pre-truncates string fields one
+ * level deep before serialization. Tool inputs (`args`) and outputs
+ * (functionResponse content) are typically shallow objects with the
+ * dominant cost in a small number of long string fields.
  */
 export function truncateJson(value: unknown, maxLength: number): string {
   try {
-    const str = JSON.stringify(value);
+    const pre = preTruncate(value, maxLength);
+    const str = JSON.stringify(pre);
     if (str == null) return '[undefined]';
     return str.length <= maxLength ? str : str.slice(0, maxLength - 3) + '...';
   } catch {
     return '[unable to serialize]';
   }
+}
+
+/**
+ * Walks an arbitrary value and pre-truncates string leaves that exceed
+ * `maxLength`. Bounded to depth 4 to keep the cost predictable on deeply
+ * nested objects (rare in tool args/outputs but possible).
+ */
+function preTruncate(value: unknown, maxLength: number, depth = 0): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') {
+    return value.length > maxLength ? value.slice(0, maxLength) : value;
+  }
+  if (depth >= 4) return value;
+  if (Array.isArray(value)) {
+    return value.map((v) => preTruncate(v, maxLength, depth + 1));
+  }
+  if (typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = preTruncate(v, maxLength, depth + 1);
+    }
+    return out;
+  }
+  return value;
 }
 
 /**

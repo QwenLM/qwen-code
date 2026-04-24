@@ -112,12 +112,20 @@ function isHiddenInCompactMode(item: HistoryItem): boolean {
  * @param items - History items array
  * @param embeddedShellFocused - Whether embedded shell is focused
  * @param activeShellPtyId - PTY ID of the active shell (if any)
+ * @param absorbedCallIds - Set of tool callIds whose summary label is consumed
+ *   by a compact-mode tool_group header (i.e., the corresponding tool_group is
+ *   NOT force-expanded). Summaries for these callIds are dropped from the
+ *   merged result so MainContent's refreshStatic heuristic fires and the
+ *   tool_group re-renders with its label. Summaries for force-expanded groups
+ *   pass through unchanged so HistoryItemDisplay can render them as standalone
+ *   `● <label>` lines (the compact path doesn't consume their label).
  * @returns New array with merged tool_groups (does not mutate input)
  */
 export function mergeCompactToolGroups(
   items: HistoryItem[],
   embeddedShellFocused: boolean = false,
   activeShellPtyId: number | undefined = undefined,
+  absorbedCallIds: ReadonlySet<string> = new Set(),
 ): HistoryItem[] {
   const result: HistoryItem[] = [];
   let i = 0;
@@ -125,18 +133,30 @@ export function mergeCompactToolGroups(
   while (i < items.length) {
     const item = items[i];
 
-    // Drop `tool_use_summary` items unconditionally (not only between merge
-    // anchors). Keeps `mergedHistory.length` flat when a summary arrives so
-    // MainContent's refreshStatic trigger (compares merged-length vs
-    // history-length) fires and Ink's <Static> repaints the tool_group with
-    // its newly-looked-up compactLabel. Without this, a trailing summary
-    // after a single batch would never surface in compact mode.
+    // Drop `tool_use_summary` items whose preceding callIds are *all* absorbed
+    // by a compact tool_group header. Those headers will display the label
+    // directly (via the `compactLabel` lookup in MainContent), so keeping the
+    // standalone summary in the merged result would either double-display the
+    // label (if HistoryItemDisplay rendered both) or, more importantly, would
+    // bump mergedHistory.length lock-step with history.length and prevent
+    // refreshStatic from firing — Ink's <Static> would never repaint the
+    // committed tool_group with the new label.
     //
-    // `gemini_thought` is a different case — it stays in the merged result
-    // so a pure thought arriving between turns doesn't trigger an unnecessary
-    // full-screen repaint (it renders as nothing in compact mode anyway, so
-    // dropping it would be cosmetically invisible but cost a refresh).
+    // Summaries with at least one non-absorbed preceding callId — e.g., when
+    // the corresponding tool_group is force-expanded (errors / confirming /
+    // user-initiated / focused shell) and renders through the full
+    // ToolGroupMessage path that does not consume `compactLabel` — must
+    // survive in the merged result so HistoryItemDisplay can render them as
+    // standalone `● <label>` lines.
     if (item.type === 'tool_use_summary') {
+      const allAbsorbed =
+        item.precedingToolUseIds.length > 0 &&
+        item.precedingToolUseIds.every((id) => absorbedCallIds.has(id));
+      if (allAbsorbed) {
+        i++;
+        continue;
+      }
+      result.push(item);
       i++;
       continue;
     }

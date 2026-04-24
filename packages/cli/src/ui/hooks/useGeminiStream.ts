@@ -1874,6 +1874,12 @@ export const useGeminiStream = (
           const summaryAbort = new AbortController();
           summaryAbortRefsRef.current.add(summaryAbort);
 
+          // Capture the first callId so we can locate "our" tool_group at
+          // resolve time. If a newer tool_group has been added since we
+          // fired (i.e., the conversation moved on), we drop the summary
+          // rather than wedging the `● <label>` line between later items.
+          const anchorCallId = toolUseIds[0];
+
           void generateToolUseSummary({
             config,
             tools: toolInfoForSummary,
@@ -1886,6 +1892,26 @@ export const useGeminiStream = (
                 turnCancelledRef.current ||
                 abortControllerRef.current?.signal.aborted ||
                 summaryAbort.signal.aborted;
+              if (!summary || cancelled) return;
+
+              // Stale-summary check: only append if our tool_group is still
+              // the latest one in history. If a newer batch landed while
+              // the fast-model call was in flight, the conversation has
+              // moved past this batch and dropping in a `● <label>` line
+              // now would land it after later content (full mode) or
+              // attribute it to the wrong group (compact mode).
+              const currentHistory = historyRef.current;
+              const ourIdx = currentHistory.findIndex(
+                (h) =>
+                  h.type === 'tool_group' &&
+                  h.tools.some((t) => t.callId === anchorCallId),
+              );
+              if (ourIdx < 0) return;
+              const laterToolGroupExists = currentHistory
+                .slice(ourIdx + 1)
+                .some((h) => h.type === 'tool_group');
+              if (laterToolGroupExists) return;
+
               if (summary && !cancelled) {
                 addItem(
                   {

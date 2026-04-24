@@ -41,7 +41,47 @@ export const MainContent = () => {
     availableTerminalHeight,
   } = uiState;
 
-  // Merge consecutive tool_groups for compact mode display
+  // Set of callIds whose label is absorbed by a compact-mode tool_group header.
+  // Computed from RAW history (not merged) — force-expand status depends only
+  // on the tool_group's own state, and mergeable groups don't change force-
+  // expand status when merged. Iterating raw history avoids a circular
+  // dependency with mergedHistory (which receives absorbedCallIds).
+  //
+  // In compact mode, non-force-expanded tool_groups render via
+  // CompactToolGroupDisplay and consume the label as their header replacement.
+  // Force-expanded groups (errors, confirmations, user-initiated, focused
+  // shell) render through the full ToolGroupMessage path and ignore
+  // compactLabel — their callIds are intentionally NOT in this set so the
+  // standalone `● <label>` line in HistoryItemDisplay is the label's only
+  // path to the screen.
+  const absorbedCallIds = useMemo(() => {
+    const absorbed = new Set<string>();
+    if (!compactMode) return absorbed;
+    for (const item of uiState.history) {
+      if (item.type !== 'tool_group') continue;
+      if (
+        isForceExpandGroup(
+          item,
+          uiState.embeddedShellFocused ?? false,
+          uiState.activePtyId,
+        )
+      ) {
+        continue;
+      }
+      for (const tool of item.tools) absorbed.add(tool.callId);
+    }
+    return absorbed;
+  }, [
+    compactMode,
+    uiState.history,
+    uiState.embeddedShellFocused,
+    uiState.activePtyId,
+  ]);
+
+  // Merge consecutive tool_groups for compact mode display. Summaries for
+  // absorbed call IDs are dropped during merge so refreshStatic fires;
+  // summaries for force-expanded (non-absorbed) groups pass through so
+  // HistoryItemDisplay can render them as standalone `● <label>` lines.
   const mergedHistory = useMemo(
     () =>
       compactMode
@@ -49,6 +89,7 @@ export const MainContent = () => {
             uiState.history,
             uiState.embeddedShellFocused,
             uiState.activePtyId,
+            absorbedCallIds,
           )
         : uiState.history,
     [
@@ -56,6 +97,7 @@ export const MainContent = () => {
       uiState.history,
       uiState.embeddedShellFocused,
       uiState.activePtyId,
+      absorbedCallIds,
     ],
   );
 
@@ -78,40 +120,6 @@ export const MainContent = () => {
     }
     return map;
   }, [uiState.history]);
-
-  // Set of callIds whose label is absorbed by a compact-mode tool_group header.
-  // In compact mode, non-force-expanded tool_groups render via CompactToolGroupDisplay
-  // and consume the label as their header replacement. Their callIds go in here so
-  // HistoryItemDisplay knows to hide the standalone `● <label>` line (avoiding
-  // duplicate display).
-  //
-  // Force-expanded tool_groups (errors, confirmations, user-initiated, focused
-  // shell) render through the full ToolGroupMessage path and ignore compactLabel,
-  // so their callIds are intentionally NOT in this set — the standalone line is
-  // the only way their label reaches the screen.
-  const absorbedCallIds = useMemo(() => {
-    const absorbed = new Set<string>();
-    if (!compactMode) return absorbed;
-    for (const item of mergedHistory) {
-      if (item.type !== 'tool_group') continue;
-      if (
-        isForceExpandGroup(
-          item,
-          uiState.embeddedShellFocused ?? false,
-          uiState.activePtyId,
-        )
-      ) {
-        continue;
-      }
-      for (const tool of item.tools) absorbed.add(tool.callId);
-    }
-    return absorbed;
-  }, [
-    compactMode,
-    mergedHistory,
-    uiState.embeddedShellFocused,
-    uiState.activePtyId,
-  ]);
 
   const isSummaryAbsorbed = useCallback(
     (item: HistoryItem | HistoryItemWithoutId): boolean => {

@@ -877,10 +877,29 @@ describe('useGeminiStream', () => {
         ];
       });
 
+      // Seed history with a tool_group whose callIds match the completed
+      // tools, so the staleness check (which verifies the tool_group is
+      // still the latest in history) passes. Without this seed the summary
+      // would be dropped as stale before addItem is called.
+      const historyWithToolGroup = [
+        {
+          type: 'tool_group',
+          id: 1,
+          tools: completedTools.map((tc) => ({
+            callId: tc.request.callId,
+            name: tc.request.name,
+            description: '',
+            status: 0,
+            resultDisplay: undefined,
+            confirmationDetails: undefined,
+          })),
+        } as unknown as HistoryItem,
+      ];
+
       renderHook(() =>
         useGeminiStream(
           new MockedGeminiClientClass(config),
-          [],
+          historyWithToolGroup,
           mockAddItem,
           config,
           mockLoadedSettings,
@@ -983,6 +1002,116 @@ describe('useGeminiStream', () => {
       expect(userText).toContain('Tool: Grep');
       expect(userText).toContain('Tool: Read');
       expect(userText).toContain('"pattern":"login"');
+    });
+
+    it('drops a late summary when a newer tool_group has been added', async () => {
+      // Resolve the fast-model call but ensure history shows a NEWER
+      // tool_group AFTER ours — simulates a slow summary landing during
+      // the next turn. The summary must not be appended; otherwise the
+      // ● label line would land in the wrong transcript position.
+      let resolveSummary: (val: { candidates: unknown[] }) => void;
+      const generateContent = vi.fn().mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveSummary = resolve;
+          }),
+      );
+      const config = {
+        ...mockConfig,
+        getEmitToolUseSummaries: vi.fn(() => true),
+        getFastModel: vi.fn(() => 'qwen-fast'),
+        getGeminiClient: vi.fn(() => ({ generateContent })),
+      } as unknown as Config;
+
+      let capturedOnComplete:
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | null = null;
+      const completedTools = [
+        makeCompletedToolCall('c1', 'Read', { file: 'a.ts' }),
+      ];
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        capturedOnComplete = onComplete;
+        return [
+          completedTools,
+          mockScheduleToolCalls,
+          mockMarkToolsAsSubmitted,
+        ];
+      });
+
+      // History initially has our tool_group, but a newer tool_group is
+      // added before the summary resolves.
+      const history: HistoryItem[] = [
+        {
+          type: 'tool_group',
+          id: 1,
+          tools: [
+            {
+              callId: 'c1',
+              name: 'Read',
+              description: '',
+              status: 0,
+              resultDisplay: undefined,
+              confirmationDetails: undefined,
+            },
+          ],
+        } as unknown as HistoryItem,
+        {
+          type: 'tool_group',
+          id: 2,
+          tools: [
+            {
+              callId: 'c2',
+              name: 'Edit',
+              description: '',
+              status: 0,
+              resultDisplay: undefined,
+              confirmationDetails: undefined,
+            },
+          ],
+        } as unknown as HistoryItem,
+      ];
+
+      renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(config),
+          history,
+          mockAddItem,
+          config,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      await act(async () => {
+        if (capturedOnComplete) {
+          await capturedOnComplete(completedTools);
+        }
+      });
+
+      // Resolve the summary — it should be dropped because tool_group id=2
+      // is newer than our anchor tool_group id=1.
+      await act(async () => {
+        resolveSummary!({
+          candidates: [{ content: { parts: [{ text: 'Read file' }] } }],
+        });
+      });
+
+      const summaryItems = (mockAddItem.mock.calls as any[][]).filter(
+        (call) => call[0]?.type === 'tool_use_summary',
+      );
+      expect(summaryItems).toHaveLength(0);
     });
 
     it('does not add a history item when the model returns empty', async () => {

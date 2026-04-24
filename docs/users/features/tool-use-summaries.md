@@ -153,6 +153,19 @@ In full mode (the default), the summary renders as a trailing `● <label>` line
 
 Summary model usage appears in `/stats` output under the fast-model token totals, with the `prompt_id` `tool_use_summary_generation` so it can be distinguished from prompt suggestions and other background tasks.
 
+## Data flow & privacy
+
+The summary call sends each successful tool's name, truncated `args`, and truncated result (each field capped at 300 characters) to the **fast model**, plus the first 200 characters of the assistant's most recent text as an intent prefix.
+
+If your fast model is configured for the same provider/auth as your main session model, the data flows along the same boundary your main session already uses — no change in trust scope. If you have configured a fast model from a **different provider**, tool inputs and outputs (potentially including file contents read by `read_file`, command output from shell calls, or values surfaced through MCP tools) will be sent to that other provider as part of the summarization prompt. That is a strictly larger data-sharing scope than the main session alone.
+
+If this matters for your workflow, you have two clean options:
+
+- Configure `fastModel` to a model under the same provider as your main session, so the summary call doesn't cross any new auth/data boundary.
+- Disable the feature entirely with `experimental.emitToolUseSummaries: false` (or `QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0`).
+
+The 300-character per-field cap limits exposure but does not eliminate it — secrets discovered in tool output during the cap window can still be sent. Treat the fast model's data boundary the same way you treat the main model's.
+
 ## Cost
 
 One fast-model call per qualifying tool batch. Input is a small fixed system prompt plus the truncated tool inputs/outputs (each capped at 300 characters per field). Output is a single short line (capped at 100 characters, typically 20 tokens or fewer). On a typical fast model this is roughly $0.001 per batch.
