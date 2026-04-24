@@ -309,8 +309,8 @@ describe('AuthDialog', () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // QWEN_OAUTH is the first option, so it should be selected
-      expect(lastFrame()).toContain('Qwen OAuth');
+      // QWEN_OAUTH maps to 'OAUTH' in the new three-option main menu
+      expect(lastFrame()).toContain('OAuth');
     });
 
     it('should fall back to default if QWEN_DEFAULT_AUTH_TYPE is not set', () => {
@@ -392,8 +392,8 @@ describe('AuthDialog', () => {
       const { lastFrame } = renderAuthDialog(settings);
 
       // Since the auth dialog doesn't show QWEN_DEFAULT_AUTH_TYPE errors anymore,
-      // it will just show the default Qwen OAuth option
-      expect(lastFrame()).toContain('Qwen OAuth');
+      // it will just show the default OAuth option
+      expect(lastFrame()).toContain('OAuth');
     });
   });
 
@@ -597,10 +597,7 @@ describe('AuthDialog', () => {
     const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
     await wait();
 
-    stdin.write('\u001b[B');
-    await wait();
-    stdin.write('\u001b[B');
-    await wait();
+    // OAuth is selected by default, press Enter to enter OAuth provider list
     stdin.write('\r');
     await wait();
 
@@ -655,12 +652,10 @@ describe('AuthDialog', () => {
     );
     await wait();
 
-    stdin.write('\u001b[B');
-    await wait();
-    stdin.write('\u001b[B');
-    await wait();
+    // OAuth is selected by default, press Enter to enter OAuth provider list
     stdin.write('\r');
     await wait();
+    // OpenRouter is the first option, press Enter to trigger OAuth
     stdin.write('\r');
     await wait();
 
