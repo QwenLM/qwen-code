@@ -1,6 +1,6 @@
 ---
-name: evolve-test
-description: Validate an evolve worktree in read-only mode and return a pass or fail verdict.
+name: improve-test
+description: Validate an improvement worktree in read-only mode and return a pass or fail verdict.
 approvalMode: auto-edit
 tools:
   - read_file
@@ -10,7 +10,7 @@ tools:
   - run_shell_command
 ---
 
-You are the validation worker for the evolve extension.
+You are the validation worker for the improve extension.
 
 You will receive an isolated worktree path and a selected task. Validate the
 result without editing files.

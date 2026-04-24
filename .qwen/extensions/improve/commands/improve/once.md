@@ -1,22 +1,33 @@
 ---
-description: Execute one isolated evolve attempt in a temporary worktree.
-whenToUse: Use when a scheduled evolve job needs a one-shot implementation and verification pass.
+description: Execute one isolated improvement attempt in a temporary worktree.
+whenToUse: Use when a scheduled improve job needs a one-shot implementation and verification pass.
 ---
 
-You are the one-shot executor for `/evolve:once`.
+You are the one-shot executor for `/improve:once`.
 
 The raw user arguments are:
 
 `{{args}}`
 
-Parse the direction like this:
+If the raw user arguments are empty, this is a valid request to run one
+immediate improvement. Do not explain the command, do not show usage examples,
+and do not ask what the user wants to do. Select one meaningful repository
+improvement yourself.
+
+Parse the arguments like this:
 
 - if the args are empty, there is no direction
-- if the args start with `--direction`, the rest is the direction
+- parse these optional stored context flags when present:
+  - `--direction <text>`: the original high-level direction
+  - `--context-sources <csv>`: comma-separated values such as
+    `github-issues`, `repo-specs`, `codebase-signals`, and `user-context`
+  - `--scope <text>`: the concrete product/code area selected during
+    recurring setup
+  - `--user-context <text>`: free-form context supplied by the user
 - otherwise, the whole args string is the direction
 
-Do not schedule anything in this command. Perform exactly one isolated evolve
-attempt.
+Do not schedule anything in this command. Perform exactly one isolated
+improvement attempt.
 
 ## Hard Rules
 
@@ -27,6 +38,8 @@ attempt.
 - Keep the change coherent, worthwhile, and locally verifiable.
 - Touch the files required to complete the task, while avoiding unrelated churn.
 - Do not commit.
+- Never ask the user questions from `/improve:once`. Recurring setup already
+  encoded the user's choices in this prompt.
 
 ## Workflow
 
@@ -34,13 +47,27 @@ attempt.
 
 - Discover the repo root with git.
 - Create a unique temporary worktree from `HEAD`.
-- Use a branch name like `evolve/<slug>-<timestamp>`.
+- Use a branch name like `improve/<slug>-<timestamp>`.
 - Use a temp directory under `${TMPDIR:-/tmp}`.
 
 ### 2. Select a task
 
 - Narrow the direction into exactly one coherent, locally verifiable repository
   improvement.
+- If `--context-sources` is present, use those sources to gather task
+  candidates before choosing:
+  - `github-issues`: use `gh` to inspect open issues that look actionable,
+    clear, and locally verifiable. Prefer bugs or scoped enhancements that do
+    not require product judgment.
+  - `repo-specs`: look for repository specs, PRDs, plans, RFCs, design notes,
+    and docs that describe intended behavior or unfinished work.
+  - `codebase-signals`: inspect the codebase for high-signal local
+    opportunities such as TODOs tied to behavior, brittle tests, obvious missing
+    coverage, complexity hotspots, recent churn, or small correctness issues.
+  - `user-context`: apply the user-provided context as a hard preference while
+    still requiring the task to be locally verifiable.
+- If `--scope` is present, stay inside that scope unless it leads to no
+  worthwhile task; if you step outside it, explain why in the final response.
 - Prefer meaningful bug fixes, feature slices, test coverage that protects real
   behavior, maintainability improvements, or refactors with a clear payoff.
 - The task may touch as many files as the implementation genuinely requires, but
@@ -57,7 +84,7 @@ attempt.
 
 ### 3. Delegate implementation
 
-Call the `agent` tool with `subagent_type="evolve-dev"`.
+Call the `agent` tool with `subagent_type="improve-dev"`.
 
 The dev prompt must include:
 
@@ -72,7 +99,7 @@ The dev prompt must include:
 
 ### 4. Delegate verification
 
-Call the `agent` tool with `subagent_type="evolve-test"`.
+Call the `agent` tool with `subagent_type="improve-test"`.
 
 The test prompt must include:
 
@@ -88,7 +115,7 @@ The test prompt must include:
 ### 5. Repair loop
 
 - If validation returns `Status: fail`, do up to 2 repair rounds.
-- Feed the failure output back to `evolve-dev`, then rerun `evolve-test`.
+- Feed the failure output back to `improve-dev`, then rerun `improve-test`.
 - If validation still fails after 2 repair rounds, remove the worktree and
   report `Outcome: rolled back`.
 - If validation is `Status: blocked`, remove the worktree and report
