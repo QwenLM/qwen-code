@@ -66,6 +66,8 @@ export class WebViewProvider {
   // Track current ACP mode id to influence permission/diff behavior
   private currentModeId: ApprovalModeValue | null = null;
   private authState: boolean | null = null;
+  /** Global tracker: the provider whose webview most recently received a contextmenu event */
+  private static lastContextMenuProvider: WebViewProvider | null = null;
   /** Cached available commands for re-sending on webview ready */
   private cachedAvailableCommands: AvailableCommand[] | null = null;
   /** Cached available models for re-sending on webview ready */
@@ -659,18 +661,7 @@ export class WebViewProvider {
     // Handle messages from WebView
     webview.onDidReceiveMessage(
       async (message: { type: string; data?: unknown }) => {
-        if (message.type === 'openDiff' && this.isAutoMode()) {
-          return;
-        }
-        if (message.type === 'webviewReady') {
-          this.handleWebviewReady();
-          return;
-        }
-        if (message.type === 'resolveImagePaths') {
-          this.handleResolveImagePaths(message.data, webview);
-          return;
-        }
-        if (await this.handleOpenInsightReportMessage(message)) {
+        if (await this.handleCommonWebviewMessage(message, webview)) {
           return;
         }
         if (this.handleNewChatByContext(message)) {
@@ -820,19 +811,7 @@ export class WebViewProvider {
     // Handle messages from WebView
     newPanel.webview.onDidReceiveMessage(
       async (message: { type: string; data?: unknown }) => {
-        // Suppress UI-originated diff opens in auto/yolo mode
-        if (message.type === 'openDiff' && this.isAutoMode()) {
-          return;
-        }
-        if (message.type === 'webviewReady') {
-          this.handleWebviewReady();
-          return;
-        }
-        if (message.type === 'resolveImagePaths') {
-          this.handleResolveImagePaths(message.data, newPanel.webview);
-          return;
-        }
-        if (await this.handleOpenInsightReportMessage(message)) {
+        if (await this.handleCommonWebviewMessage(message, newPanel.webview)) {
           return;
         }
         // Allow webview to request updating the VS Code tab title
@@ -1666,6 +1645,18 @@ export class WebViewProvider {
   }
 
   /**
+   * Send a copy command to the webview (triggered by native context menu).
+   * The webview resolves the content and posts back a 'copyToClipboard' message.
+   */
+  sendCopyCommand(action: string): boolean {
+    if (WebViewProvider.lastContextMenuProvider !== this) return false;
+    const webview = this.getActiveWebview();
+    if (!webview) return false;
+    webview.postMessage({ type: 'copyCommand', data: { action } });
+    return true;
+  }
+
+  /**
    * Send message to WebView
    */
   private sendMessageToWebView(message: unknown): void {
@@ -1718,6 +1709,41 @@ export class WebViewProvider {
   /** Get current ACP mode id (if known). */
   getCurrentModeId(): ApprovalModeValue | null {
     return this.currentModeId;
+  }
+
+  /**
+   * Handle common webview message types shared across all host contexts
+   * (sidebar view, editor panel, restored panel).
+   * Returns true if the message was handled and no further processing is needed.
+   */
+  private async handleCommonWebviewMessage(
+    message: { type: string; data?: unknown },
+    webview: vscode.Webview,
+  ): Promise<boolean> {
+    if (message.type === 'openDiff' && this.isAutoMode()) {
+      return true;
+    }
+    if (message.type === 'webviewReady') {
+      this.handleWebviewReady();
+      return true;
+    }
+    if (message.type === 'contextMenuTriggered') {
+      WebViewProvider.lastContextMenuProvider = this;
+      return true;
+    }
+    if (message.type === 'copyToClipboard') {
+      const { text } = message.data as { text: string };
+      await vscode.env.clipboard.writeText(text);
+      return true;
+    }
+    if (message.type === 'resolveImagePaths') {
+      this.handleResolveImagePaths(message.data, webview);
+      return true;
+    }
+    if (await this.handleOpenInsightReportMessage(message)) {
+      return true;
+    }
+    return false;
   }
 
   /** True if diffs/permissions should be auto-handled without prompting. */
@@ -1843,19 +1869,7 @@ export class WebViewProvider {
     // Handle messages from WebView (restored panel)
     panel.webview.onDidReceiveMessage(
       async (message: { type: string; data?: unknown }) => {
-        // Suppress UI-originated diff opens in auto/yolo mode
-        if (message.type === 'openDiff' && this.isAutoMode()) {
-          return;
-        }
-        if (message.type === 'webviewReady') {
-          this.handleWebviewReady();
-          return;
-        }
-        if (message.type === 'resolveImagePaths') {
-          this.handleResolveImagePaths(message.data, panel.webview);
-          return;
-        }
-        if (await this.handleOpenInsightReportMessage(message)) {
+        if (await this.handleCommonWebviewMessage(message, panel.webview)) {
           return;
         }
         if (message.type === 'updatePanelTitle') {
@@ -2094,6 +2108,9 @@ export class WebViewProvider {
       this.pendingAskUserQuestionResolve({ optionId: 'cancel' });
       this.pendingAskUserQuestionResolve = null;
       this.pendingAskUserQuestionRequest = null;
+    }
+    if (WebViewProvider.lastContextMenuProvider === this) {
+      WebViewProvider.lastContextMenuProvider = null;
     }
     this.panelManager.dispose();
     this.agentManager.disconnect();
