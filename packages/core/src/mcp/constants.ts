@@ -42,6 +42,15 @@ export const OAUTH_REDIRECT_PATH = '/oauth/callback';
  * When dsw_baseUrl is not set (local dev), fall back to localhost.
  */
 export function getOAuthRedirectUri(): string {
+  // 新版，走 bff 代理转发的逻辑
+  const bffEndpoint = process.env['BFF_ENDPOINT'];
+  const dataAgentInstanceId = process.env['DATA_AGENT_INSTANCE_ID'];
+  if (bffEndpoint && dataAgentInstanceId) {
+    const bffOAuthProxyPath = '/skwacb/kxuth/';
+    return `${bffEndpoint}${bffOAuthProxyPath}${dataAgentInstanceId}${OAUTH_REDIRECT_PATH}`;
+  }
+
+  // 兼容旧版 DSW 实例
   const dswBaseUrl = process.env['dsw_baseUrl'];
   if (dswBaseUrl) {
     const base = dswBaseUrl.replace(/\/+$/, '');
