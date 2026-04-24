@@ -19,6 +19,7 @@ export interface DesktopServerOptions {
   now?: () => Date;
   acpClient?: AcpSessionClient;
   permissionRequestTimeoutMs?: number;
+  settingsPath?: string;
 }
 
 export interface DesktopHealthResponse {
@@ -38,7 +39,7 @@ export interface DesktopRuntimeResponse {
   cli: {
     path: string | null;
     channel: 'Desktop';
-    acpReady: false;
+    acpReady: boolean;
   };
   platform: {
     type: NodeJS.Platform;
@@ -46,8 +47,13 @@ export interface DesktopRuntimeResponse {
     release: string;
   };
   auth: {
-    status: 'unknown';
-    account: null;
+    status: 'unknown' | 'authenticated';
+    account: {
+      authType: string | null;
+      model: string | null;
+      baseUrl: string | null;
+      apiKeyEnvKey: string | null;
+    } | null;
   };
 }
 

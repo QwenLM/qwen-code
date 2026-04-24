@@ -5,6 +5,7 @@
  */
 
 import {
+  type Dispatch,
   type FormEvent,
   useCallback,
   useEffect,
@@ -14,9 +15,16 @@ import {
   useState,
 } from 'react';
 import {
+  authenticateDesktop,
   createDesktopSession,
+  getDesktopSessionModeState,
+  getDesktopSessionModelState,
+  getDesktopUserSettings,
   listDesktopSessions,
   loadDesktopStatus,
+  setDesktopSessionMode,
+  setDesktopSessionModel,
+  updateDesktopUserSettings,
   type DesktopConnectionStatus,
   type DesktopSessionSummary,
 } from './api/client.js';
@@ -27,9 +35,27 @@ import {
 import {
   chatReducer,
   createInitialChatState,
+  type ChatAction,
   type ChatState,
   type ChatTimelineItem,
 } from './stores/chatStore.js';
+import {
+  createInitialModelState,
+  type ModelAction,
+  modelReducer,
+  type ModelState,
+} from './stores/modelStore.js';
+import {
+  buildSettingsUpdateRequest,
+  createInitialSettingsState,
+  settingsReducer,
+  type SettingsAction,
+  type SettingsState,
+} from './stores/settingsStore.js';
+import type {
+  DesktopApprovalMode,
+  DesktopServerMessage,
+} from '../shared/desktopProtocol.js';
 
 type LoadState =
   | { state: 'loading' }
@@ -47,6 +73,16 @@ export function App() {
     chatReducer,
     undefined,
     createInitialChatState,
+  );
+  const [settingsState, dispatchSettings] = useReducer(
+    settingsReducer,
+    undefined,
+    createInitialSettingsState,
+  );
+  const [modelState, dispatchModel] = useReducer(
+    modelReducer,
+    undefined,
+    createInitialModelState,
   );
   const socketRef = useRef<SessionSocketClient | null>(null);
 
@@ -85,6 +121,33 @@ export function App() {
     }
 
     let disposed = false;
+    dispatchSettings({ type: 'load_start' });
+    void getDesktopUserSettings(loadState.status.serverInfo)
+      .then((settings) => {
+        if (!disposed) {
+          dispatchSettings({ type: 'load_success', settings });
+        }
+      })
+      .catch((error: unknown) => {
+        if (!disposed) {
+          dispatchSettings({
+            type: 'load_error',
+            message: getErrorMessage(error),
+          });
+        }
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, [loadState]);
+
+  useEffect(() => {
+    if (loadState.state !== 'ready') {
+      return;
+    }
+
+    let disposed = false;
     void listDesktopSessions(
       loadState.status.serverInfo,
       workspacePath || undefined,
@@ -109,6 +172,7 @@ export function App() {
   useEffect(() => {
     socketRef.current?.close();
     socketRef.current = null;
+    dispatchModel({ type: 'reset' });
 
     if (loadState.state !== 'ready' || !activeSessionId) {
       return;
@@ -120,7 +184,7 @@ export function App() {
       activeSessionId,
       {
         onMessage: (message) =>
-          dispatchChat({ type: 'server_message', message }),
+          handleSessionSocketMessage(message, dispatchChat, dispatchModel),
         onClose: () => dispatchChat({ type: 'disconnect' }),
         onError: () => setSessionError('Session socket connection failed.'),
       },
@@ -132,6 +196,32 @@ export function App() {
       if (socketRef.current === socket) {
         socketRef.current = null;
       }
+    };
+  }, [activeSessionId, loadState]);
+
+  useEffect(() => {
+    if (loadState.state !== 'ready' || !activeSessionId) {
+      return;
+    }
+
+    let disposed = false;
+    void Promise.allSettled([
+      getDesktopSessionModelState(loadState.status.serverInfo, activeSessionId),
+      getDesktopSessionModeState(loadState.status.serverInfo, activeSessionId),
+    ]).then(([models, modes]) => {
+      if (disposed) {
+        return;
+      }
+
+      dispatchModel({
+        type: 'session_runtime_loaded',
+        models: models.status === 'fulfilled' ? models.value : undefined,
+        modes: modes.status === 'fulfilled' ? modes.value : undefined,
+      });
+    });
+
+    return () => {
+      disposed = true;
     };
   }, [activeSessionId, loadState]);
 
@@ -158,11 +248,91 @@ export function App() {
       );
       setSessions((current) => [session, ...current]);
       setActiveSessionId(session.sessionId);
+      dispatchModel({
+        type: 'session_runtime_loaded',
+        models: session.models,
+        modes: session.modes,
+      });
       setSessionError(null);
     } catch (error) {
       setSessionError(getErrorMessage(error));
     }
   }, [loadState, workspacePath]);
+
+  const saveSettings = useCallback(async () => {
+    if (loadState.state !== 'ready') {
+      return;
+    }
+
+    dispatchSettings({ type: 'save_start' });
+    try {
+      const settings = await updateDesktopUserSettings(
+        loadState.status.serverInfo,
+        buildSettingsUpdateRequest(settingsState.form),
+      );
+      dispatchSettings({ type: 'save_success', settings });
+    } catch (error) {
+      dispatchSettings({ type: 'save_error', message: getErrorMessage(error) });
+    }
+  }, [loadState, settingsState.form]);
+
+  const authenticate = useCallback(
+    async (methodId: string) => {
+      if (loadState.state !== 'ready') {
+        return;
+      }
+
+      try {
+        await authenticateDesktop(loadState.status.serverInfo, methodId);
+        setSessionError(null);
+      } catch (error) {
+        setSessionError(getErrorMessage(error));
+      }
+    },
+    [loadState],
+  );
+
+  const changeModel = useCallback(
+    async (modelId: string) => {
+      if (loadState.state !== 'ready' || !activeSessionId) {
+        return;
+      }
+
+      dispatchModel({ type: 'model_save_start' });
+      try {
+        const models = await setDesktopSessionModel(
+          loadState.status.serverInfo,
+          activeSessionId,
+          modelId,
+        );
+        dispatchModel({ type: 'model_saved', models });
+      } catch (error) {
+        dispatchModel({ type: 'error', message: getErrorMessage(error) });
+      }
+    },
+    [activeSessionId, loadState],
+  );
+
+  const changeMode = useCallback(
+    async (mode: DesktopApprovalMode) => {
+      if (loadState.state !== 'ready' || !activeSessionId) {
+        return;
+      }
+
+      dispatchModel({ type: 'mode_save_start' });
+      try {
+        const modes = await setDesktopSessionMode(
+          loadState.status.serverInfo,
+          activeSessionId,
+          mode,
+        );
+        dispatchModel({ type: 'mode_saved', modes });
+      } catch (error) {
+        dispatchModel({ type: 'error', message: getErrorMessage(error) });
+      }
+    },
+    [activeSessionId, loadState],
+  );
 
   const sendMessage = useCallback(
     (event: FormEvent<HTMLFormElement>) => {
@@ -311,7 +481,16 @@ export function App() {
             <SessionDetails
               activeSessionId={activeSessionId}
               chatState={chatState}
+              modelState={modelState}
               sessionError={sessionError}
+              onModeChange={changeMode}
+              onModelChange={changeModel}
+            />
+            <SettingsPanel
+              state={settingsState}
+              onAuthenticate={authenticate}
+              onDispatch={dispatchSettings}
+              onSave={saveSettings}
             />
           </section>
         </div>
@@ -558,12 +737,23 @@ function RuntimeDetails({ loadState }: { loadState: LoadState }) {
 function SessionDetails({
   activeSessionId,
   chatState,
+  modelState,
+  onModeChange,
+  onModelChange,
   sessionError,
 }: {
   activeSessionId: string | null;
   chatState: ChatState;
+  modelState: ModelState;
+  onModeChange: (mode: DesktopApprovalMode) => void;
+  onModelChange: (modelId: string) => void;
   sessionError: string | null;
 }) {
+  const currentMode =
+    modelState.modes?.currentModeId || chatState.mode || 'default';
+  const currentModel =
+    modelState.models?.currentModelId || chatState.currentModelId || '';
+
   return (
     <div className="session-details">
       <div className="panel-header panel-header-inline">
@@ -576,7 +766,45 @@ function SessionDetails({
         </div>
         <div>
           <dt>Mode</dt>
-          <dd>{chatState.mode || 'Unknown'}</dd>
+          <dd>
+            {modelState.modes ? (
+              <select
+                disabled={!activeSessionId || modelState.savingMode}
+                value={currentMode}
+                onChange={(event) =>
+                  onModeChange(event.target.value as DesktopApprovalMode)
+                }
+              >
+                {modelState.modes.availableModes.map((mode) => (
+                  <option key={mode.id} value={mode.id}>
+                    {mode.name}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              currentMode || 'Unknown'
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>Model</dt>
+          <dd>
+            {modelState.models ? (
+              <select
+                disabled={!activeSessionId || modelState.savingModel}
+                value={currentModel}
+                onChange={(event) => onModelChange(event.target.value)}
+              >
+                {modelState.models.availableModels.map((model) => (
+                  <option key={model.modelId} value={model.modelId}>
+                    {model.name}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              currentModel || 'Unknown'
+            )}
+          </dd>
         </div>
         <div>
           <dt>Commands</dt>
@@ -596,8 +824,170 @@ function SessionDetails({
             <dd className="error-text">{sessionError || chatState.error}</dd>
           </div>
         ) : null}
+        {modelState.error ? (
+          <div>
+            <dt>Config</dt>
+            <dd className="error-text">{modelState.error}</dd>
+          </div>
+        ) : null}
       </dl>
     </div>
+  );
+}
+
+function SettingsPanel({
+  onAuthenticate,
+  onDispatch,
+  onSave,
+  state,
+}: {
+  onAuthenticate: (methodId: string) => void;
+  onDispatch: Dispatch<SettingsAction>;
+  onSave: () => void;
+  state: SettingsState;
+}) {
+  const provider = state.form.provider;
+
+  return (
+    <div className="settings-panel">
+      <div className="panel-header panel-header-inline">
+        <h3>Settings</h3>
+      </div>
+      <div className="settings-form">
+        <label>
+          <span>Provider</span>
+          <select
+            value={provider}
+            onChange={(event) =>
+              onDispatch({
+                type: 'set_provider',
+                provider: event.target.value as 'api-key' | 'coding-plan',
+              })
+            }
+          >
+            <option value="api-key">API key</option>
+            <option value="coding-plan">Coding Plan</option>
+          </select>
+        </label>
+
+        {provider === 'coding-plan' ? (
+          <label>
+            <span>Region</span>
+            <select
+              value={state.form.codingPlanRegion}
+              onChange={(event) =>
+                onDispatch({
+                  type: 'set_coding_plan_region',
+                  region: event.target.value as 'china' | 'global',
+                })
+              }
+            >
+              <option value="china">China</option>
+              <option value="global">Global</option>
+            </select>
+          </label>
+        ) : (
+          <>
+            <label>
+              <span>Model</span>
+              <input
+                value={state.form.activeModel}
+                onChange={(event) =>
+                  onDispatch({
+                    type: 'set_active_model',
+                    model: event.target.value,
+                  })
+                }
+              />
+            </label>
+            <label>
+              <span>Base URL</span>
+              <input
+                value={state.form.baseUrl}
+                onChange={(event) =>
+                  onDispatch({
+                    type: 'set_base_url',
+                    baseUrl: event.target.value,
+                  })
+                }
+              />
+            </label>
+          </>
+        )}
+
+        <label>
+          <span>API key</span>
+          <input
+            autoComplete="off"
+            placeholder={
+              provider === 'coding-plan'
+                ? state.settings?.codingPlan.hasApiKey
+                  ? 'Configured'
+                  : ''
+                : state.settings?.openai.hasApiKey
+                  ? 'Configured'
+                  : ''
+            }
+            type="password"
+            value={state.form.apiKey}
+            onChange={(event) =>
+              onDispatch({ type: 'set_api_key', apiKey: event.target.value })
+            }
+          />
+        </label>
+
+        <div className="settings-actions">
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => onAuthenticate('qwen-oauth')}
+          >
+            OAuth
+          </button>
+          <button
+            className="primary-button"
+            disabled={state.loading || state.saving}
+            type="button"
+            onClick={onSave}
+          >
+            {state.saving ? 'Saving' : 'Save'}
+          </button>
+        </div>
+
+        {state.settings ? (
+          <p className="settings-summary">
+            {state.settings.selectedAuthType || 'No auth'} ·{' '}
+            {state.settings.model.name || 'No model'}
+          </p>
+        ) : null}
+        {state.error ? <p className="error-text">{state.error}</p> : null}
+      </div>
+    </div>
+  );
+}
+
+function handleSessionSocketMessage(
+  message: DesktopServerMessage,
+  dispatchChat: Dispatch<ChatAction>,
+  dispatchModel: Dispatch<ModelAction>,
+): void {
+  dispatchChat({ type: 'server_message', message });
+
+  if (message.type === 'mode_changed' && isApprovalMode(message.mode)) {
+    dispatchModel({ type: 'mode_changed', mode: message.mode });
+  }
+
+  if (message.type === 'model_changed') {
+    dispatchModel({ type: 'model_changed', modelId: message.modelId });
+  }
+}
+
+function isApprovalMode(value: string): value is DesktopApprovalMode {
+  return (
+    value === 'plan' ||
+    value === 'default' ||
+    value === 'auto-edit' ||
+    value === 'yolo'
   );
 }
 

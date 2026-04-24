@@ -8,6 +8,8 @@ export type DesktopClientMessage =
   | { type: 'ping' }
   | { type: 'stop_generation' }
   | { type: 'user_message'; content: string }
+  | { type: 'set_permission_mode'; mode: DesktopApprovalMode }
+  | { type: 'set_model'; modelId: string }
   | { type: 'permission_response'; requestId: string; optionId: string }
   | {
       type: 'ask_user_question_response';
@@ -15,6 +17,29 @@ export type DesktopClientMessage =
       optionId: string;
       answers?: Record<string, string>;
     };
+
+export type DesktopApprovalMode = 'plan' | 'default' | 'auto-edit' | 'yolo';
+
+export interface DesktopModelInfo {
+  modelId: string;
+  name: string;
+  description?: string | null;
+  _meta?: Record<string, unknown> | null;
+}
+
+export interface DesktopSessionModelState {
+  currentModelId: string;
+  availableModels: DesktopModelInfo[];
+}
+
+export interface DesktopSessionModeState {
+  currentModeId: DesktopApprovalMode;
+  availableModes: Array<{
+    id: DesktopApprovalMode;
+    name: string;
+    description: string;
+  }>;
+}
 
 export interface DesktopPlanEntry {
   content: string;
@@ -100,6 +125,7 @@ export type DesktopServerMessage =
   | { type: 'plan'; entries: DesktopPlanEntry[] }
   | { type: 'usage'; data: DesktopUsageStats }
   | { type: 'mode_changed'; mode: string }
+  | { type: 'model_changed'; modelId: string }
   | {
       type: 'available_commands';
       commands: DesktopAvailableCommand[];

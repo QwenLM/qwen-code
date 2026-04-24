@@ -8,6 +8,7 @@ import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
 import { getSingleHeader, isAllowedOrigin } from '../http/auth.js';
+import { isDesktopApprovalMode } from '../services/sessionService.js';
 import type { AcpSessionClient } from '../services/sessionService.js';
 import type {
   DesktopClientMessage,
@@ -143,6 +144,12 @@ export class SessionSocketHub {
       case 'stop_generation':
         await this.cancelPrompt(sessionId, socket);
         return;
+      case 'set_permission_mode':
+        await this.setPermissionMode(sessionId, socket, message.mode);
+        return;
+      case 'set_model':
+        await this.setModel(sessionId, socket, message.modelId);
+        return;
       case 'user_message':
         await this.sendPrompt(sessionId, socket, message.content);
         return;
@@ -210,6 +217,44 @@ export class SessionSocketHub {
     this.activePrompts.delete(sessionId);
     sendMessage(socket, { type: 'message_complete', stopReason: 'cancelled' });
   }
+
+  private async setPermissionMode(
+    sessionId: string,
+    socket: WebSocket,
+    mode: string,
+  ): Promise<void> {
+    if (!this.options.acpClient?.setMode) {
+      sendMessage(socket, {
+        type: 'error',
+        code: 'acp_set_mode_unavailable',
+        message: 'ACP client does not support setting a session mode.',
+        retryable: true,
+      });
+      return;
+    }
+
+    await this.options.acpClient.setMode(sessionId, mode);
+    this.broadcast(sessionId, { type: 'mode_changed', mode });
+  }
+
+  private async setModel(
+    sessionId: string,
+    socket: WebSocket,
+    modelId: string,
+  ): Promise<void> {
+    if (!this.options.acpClient?.setModel) {
+      sendMessage(socket, {
+        type: 'error',
+        code: 'acp_set_model_unavailable',
+        message: 'ACP client does not support setting a session model.',
+        retryable: true,
+      });
+      return;
+    }
+
+    await this.options.acpClient.setModel(sessionId, modelId);
+    this.broadcast(sessionId, { type: 'model_changed', modelId });
+  }
 }
 
 function parseSocketUrl(request: IncomingMessage): URL | null {
@@ -246,6 +291,27 @@ function parseClientMessage(
   const candidate = parsed as Partial<DesktopClientMessage>;
   if (candidate.type === 'ping' || candidate.type === 'stop_generation') {
     return { type: candidate.type };
+  }
+
+  if (
+    candidate.type === 'set_permission_mode' &&
+    isDesktopApprovalMode(candidate.mode)
+  ) {
+    return {
+      type: 'set_permission_mode',
+      mode: candidate.mode,
+    };
+  }
+
+  if (
+    candidate.type === 'set_model' &&
+    typeof candidate.modelId === 'string' &&
+    candidate.modelId.length > 0
+  ) {
+    return {
+      type: 'set_model',
+      modelId: candidate.modelId,
+    };
   }
 
   if (

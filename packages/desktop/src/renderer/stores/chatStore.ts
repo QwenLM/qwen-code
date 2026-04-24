@@ -60,6 +60,7 @@ export interface ChatState {
     request: DesktopAskUserQuestionRequest;
   } | null;
   mode: string | null;
+  currentModelId: string | null;
   error: string | null;
 }
 
@@ -82,6 +83,7 @@ export function createInitialChatState(): ChatState {
     pendingPermission: null,
     pendingAskUserQuestion: null,
     mode: null,
+    currentModelId: null,
     error: null,
   };
 }
@@ -179,6 +181,12 @@ function applyServerMessage(
       return {
         ...state,
         mode: message.mode,
+      };
+
+    case 'model_changed':
+      return {
+        ...state,
+        currentModelId: message.modelId,
       };
 
     case 'available_commands':

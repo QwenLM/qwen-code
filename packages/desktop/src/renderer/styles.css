@@ -23,6 +23,7 @@ body {
 }
 
 button,
+select,
 input,
 textarea {
   font: inherit;
@@ -34,6 +35,8 @@ button {
 }
 
 button:disabled,
+select:disabled,
+input:disabled,
 textarea:disabled {
   cursor: not-allowed;
   opacity: 0.55;
@@ -457,6 +460,22 @@ textarea:disabled {
   outline: 0;
 }
 
+select,
+input {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid rgba(238, 240, 237, 0.13);
+  background: rgba(238, 240, 237, 0.035);
+  color: #eef0ed;
+  padding: 0 10px;
+}
+
+select:focus,
+input:focus {
+  border-color: rgba(231, 189, 115, 0.55);
+  outline: 0;
+}
+
 .composer-actions {
   display: flex;
   justify-content: flex-end;
@@ -505,6 +524,42 @@ textarea:disabled {
 
 .session-details {
   border-top: 1px solid rgba(238, 240, 237, 0.08);
+}
+
+.settings-panel {
+  border-top: 1px solid rgba(238, 240, 237, 0.08);
+}
+
+.settings-form {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+}
+
+.settings-form label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.settings-form label span {
+  color: #9ca39b;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.settings-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.settings-summary {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #858c84;
+  font-size: 12px;
 }
 
 .panel-header-inline {

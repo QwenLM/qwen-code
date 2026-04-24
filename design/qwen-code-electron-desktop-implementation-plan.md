@@ -156,7 +156,7 @@ order, verification, decisions, and remaining work.
 
 ### Slice 7: Settings, Auth, Model, and Mode UI
 
-- Status: pending
+- Status: complete
 - Goal: expose settings/auth/model/mode controls while reusing Qwen Code
   configuration semantics.
 - Files:
@@ -168,6 +168,19 @@ order, verification, decisions, and remaining work.
   - Settings writes target the existing Qwen settings locations.
   - Auth actions go through ACP or shared settings writer logic.
   - Approval mode values remain `plan/default/auto-edit/yolo`.
+- Progress:
+  - 2026-04-25: added a desktop settings service for reading/writing
+    `~/.qwen/settings.json` using Qwen core `Storage`, `AuthType`, and Coding
+    Plan constants; API-key and Coding Plan writes preserve the existing
+    Qwen settings shape and never return API key values in REST payloads.
+  - 2026-04-25: added authenticated REST routes for user settings,
+    ACP-backed authentication, session model state, and session mode state;
+    cached model/mode state is captured from ACP `newSession`/`loadSession`
+    responses and updates call `unstable_setSessionModel` / `setSessionMode`.
+  - 2026-04-25: added renderer settings/model stores and basic controls for
+    provider setup, OAuth authentication, active model, and approval mode.
+    WebSocket protocol now also accepts `set_model` and
+    `set_permission_mode` messages.
 - Verification:
   - `npm run test --workspace=packages/desktop`
   - temp HOME/QWEN_RUNTIME_DIR settings tests
@@ -211,6 +224,11 @@ order, verification, decisions, and remaining work.
   in desktop, matching the VS Code companion behavior. The bridge returns
   `cancelled` for cancel/reject option ids and passes answer payloads through
   for submit responses.
+- 2026-04-25: Reimplemented the VS Code settings-writer semantics inside the
+  desktop server instead of importing from `packages/vscode-ide-companion`.
+  The desktop package now depends directly on `@qwen-code/qwen-code-core` for
+  `Storage`, auth constants, and Coding Plan templates while keeping extension
+  code out of the desktop runtime boundary.
 
 ## Verification Log
 
@@ -286,6 +304,16 @@ order, verification, decisions, and remaining work.
   - `npm run typecheck` passed across workspaces.
   - `npm run build` passed across the configured build order. Existing VS Code
     companion lint warnings were reported by its build script, with no errors.
+- 2026-04-25 Slice 7:
+  - `npm install --ignore-scripts --workspace=@qwen-code/desktop` passed.
+  - `npx prettier --check design/qwen-code-electron-desktop-implementation-plan.md packages/desktop` passed.
+  - `npm run test --workspace=packages/desktop` passed: 6 files, 40 tests.
+  - `npm run lint --workspace=packages/desktop` passed.
+  - `npm run typecheck --workspace=packages/desktop` passed.
+  - `npm run build --workspace=packages/desktop` passed.
+  - `npm run typecheck` passed across workspaces.
+  - `npm run build` passed across the configured build order. Existing VS Code
+    companion lint warnings were reported by its build script, with no errors.
 
 ## Self Review Notes
 
@@ -347,11 +375,20 @@ order, verification, decisions, and remaining work.
   - The renderer prompt UI is intentionally minimal for this slice; richer
     answer collection can reuse `@qwen-code/webui` dialogs once the shared
     desktop state surface is stable.
+- 2026-04-25 Slice 7:
+  - Settings REST responses intentionally expose only `hasApiKey` booleans and
+    provider metadata; tests assert API key values are written to the existing
+    Qwen settings shape but not returned to the renderer.
+  - Model and mode changes remain ACP-backed. REST updates also refresh the
+    server cache used by the UI, while WebSocket `set_model` and
+    `set_permission_mode` are available for future lower-latency controls.
+  - Runtime auth status now reports `authenticated` only when ACP account info
+    contains an auth/model/baseUrl signal, avoiding a misleading state for
+    empty account payloads.
 
 ## Remaining Work
 
-- Commit Slice 6.
-- Start Slice 7 settings/auth/model/mode UI and supporting services while
-  preserving existing Qwen settings/auth semantics.
-- Continue through settings/auth/model/mode, real ACP runtime startup, and
-  packaging slices until the architecture MVP is fully verified.
+- Commit Slice 7.
+- Start Slice 8 packaging and smoke testing. The remaining MVP gap is wiring a
+  packaged desktop app to launch the bundled CLI ACP child with
+  `ELECTRON_RUN_AS_NODE=1`, then verifying a packaged smoke launch.

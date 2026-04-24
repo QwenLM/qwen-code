@@ -8,10 +8,15 @@ import { readFile } from 'node:fs/promises';
 import { arch, platform, release } from 'node:os';
 import process from 'node:process';
 import type { DesktopRuntimeResponse } from '../types.js';
+import type { AcpSessionClient } from './sessionService.js';
 
 let packageVersionPromise: Promise<string> | undefined;
 
-export async function getRuntimeInfo(): Promise<DesktopRuntimeResponse> {
+export async function getRuntimeInfo(
+  acpClient?: AcpSessionClient,
+): Promise<DesktopRuntimeResponse> {
+  const account = await getAccountInfo(acpClient);
+
   return {
     ok: true,
     desktop: {
@@ -22,7 +27,7 @@ export async function getRuntimeInfo(): Promise<DesktopRuntimeResponse> {
     cli: {
       path: process.env['QWEN_DESKTOP_CLI_PATH'] ?? null,
       channel: 'Desktop',
-      acpReady: false,
+      acpReady: acpClient?.isConnected === true,
     },
     platform: {
       type: platform(),
@@ -30,10 +35,41 @@ export async function getRuntimeInfo(): Promise<DesktopRuntimeResponse> {
       release: release(),
     },
     auth: {
-      status: 'unknown',
-      account: null,
+      status:
+        account && hasAccountSignal(account) ? 'authenticated' : 'unknown',
+      account,
     },
   };
+}
+
+async function getAccountInfo(
+  acpClient: AcpSessionClient | undefined,
+): Promise<DesktopRuntimeResponse['auth']['account']> {
+  if (!acpClient || acpClient.isConnected !== true) {
+    return null;
+  }
+
+  try {
+    const result = await acpClient.extMethod('getAccountInfo', {});
+    return {
+      authType: getNullableString(result['authType']),
+      model: getNullableString(result['model']),
+      baseUrl: getNullableString(result['baseUrl']),
+      apiKeyEnvKey: getNullableString(result['apiKeyEnvKey']),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getNullableString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+function hasAccountSignal(
+  account: NonNullable<DesktopRuntimeResponse['auth']['account']>,
+): boolean {
+  return Boolean(account.authType || account.model || account.baseUrl);
 }
 
 function getDesktopVersion(): Promise<string> {

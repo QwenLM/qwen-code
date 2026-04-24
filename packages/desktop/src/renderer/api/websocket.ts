@@ -6,6 +6,7 @@
 
 import type { DesktopServerInfo } from '../../shared/desktopApi.js';
 import type {
+  DesktopApprovalMode,
   DesktopClientMessage,
   DesktopServerMessage,
 } from '../../shared/desktopProtocol.js';
@@ -25,6 +26,8 @@ export interface SessionSocketClient {
     optionId: string,
     answers?: Record<string, string>,
   ): void;
+  setPermissionMode(mode: DesktopApprovalMode): void;
+  setModel(modelId: string): void;
   stopGeneration(): void;
   ping(): void;
   close(): void;
@@ -69,6 +72,12 @@ export function connectSessionSocket(
         optionId,
         answers,
       });
+    },
+    setPermissionMode(mode: DesktopApprovalMode): void {
+      sendClientMessage(socket, { type: 'set_permission_mode', mode });
+    },
+    setModel(modelId: string): void {
+      sendClientMessage(socket, { type: 'set_model', modelId });
     },
     stopGeneration(): void {
       sendClientMessage(socket, { type: 'stop_generation' });

@@ -4,20 +4,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import type {
   RequestPermissionRequest,
   SessionNotification,
 } from '@agentclientprotocol/sdk';
+import { CODING_PLAN_ENV_KEY } from '@qwen-code/qwen-code-core';
 import { startDesktopServer } from './index.js';
 import type { DesktopServer } from './types.js';
 import type { AcpSessionClient } from './services/sessionService.js';
 
 const servers: DesktopServer[] = [];
+const tempDirs: string[] = [];
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
+  await Promise.all(
+    tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
+  );
 });
 
 describe('DesktopServer', () => {
@@ -105,6 +113,92 @@ describe('DesktopServer', () => {
     });
   });
 
+  it('reads and writes user settings without returning API key secrets', async () => {
+    const settingsPath = await createTempSettingsPath();
+    const server = await createTestServer(undefined, settingsPath);
+
+    const initial = await getJson(server, '/api/settings/user', {
+      Authorization: 'Bearer test-token',
+    });
+    expect(initial.status).toBe(200);
+    expect(initial.body).toMatchObject({
+      ok: true,
+      settingsPath,
+      provider: 'none',
+      openai: { hasApiKey: false, providers: [] },
+    });
+
+    const updated = await putJson(server, '/api/settings/user', {
+      provider: 'api-key',
+      apiKey: 'sk-test-secret',
+      activeModel: 'qwen-plus',
+      modelProviders: {
+        'qwen-plus': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      },
+    });
+    expect(updated.status).toBe(200);
+    expect(updated.body).toMatchObject({
+      ok: true,
+      provider: 'api-key',
+      selectedAuthType: 'openai',
+      model: { name: 'qwen-plus' },
+      openai: {
+        hasApiKey: true,
+        providers: [
+          {
+            id: 'qwen-plus',
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            envKey: 'OPENAI_API_KEY',
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(updated.body)).not.toContain('sk-test-secret');
+
+    const written = JSON.parse(await readFile(settingsPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect(written).toMatchObject({
+      security: { auth: { selectedType: 'openai' } },
+      env: { OPENAI_API_KEY: 'sk-test-secret' },
+      model: { name: 'qwen-plus' },
+    });
+  });
+
+  it('writes Coding Plan settings through the shared Qwen settings shape', async () => {
+    const settingsPath = await createTempSettingsPath();
+    const server = await createTestServer(undefined, settingsPath);
+
+    const response = await putJson(server, '/api/settings/user', {
+      provider: 'coding-plan',
+      apiKey: 'cp-secret',
+      codingPlanRegion: 'global',
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      ok: true,
+      provider: 'coding-plan',
+      codingPlan: {
+        region: 'global',
+        hasApiKey: true,
+      },
+      selectedAuthType: 'openai',
+    });
+    expect(JSON.stringify(response.body)).not.toContain('cp-secret');
+
+    const written = JSON.parse(await readFile(settingsPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect(written).toMatchObject({
+      security: { auth: { selectedType: 'openai' } },
+      env: { [CODING_PLAN_ENV_KEY]: 'cp-secret' },
+      codingPlan: { region: 'global' },
+    });
+  });
+
   it('protects runtime information with the desktop token', async () => {
     const server = await createTestServer();
 
@@ -173,10 +267,73 @@ describe('DesktopServer', () => {
     expect(loaded.status).toBe(200);
     expect(loaded.body).toMatchObject({
       ok: true,
-      session: { models: [] },
+      session: { models: { currentModelId: 'openai/qwen-plus' } },
     });
     expect(acpClient.newSession).toHaveBeenCalledWith('/repo');
     expect(acpClient.loadSession).toHaveBeenCalledWith('session-1', '/repo');
+  });
+
+  it('authenticates through the ACP client', async () => {
+    const acpClient = createAcpClient();
+    const server = await createTestServer(acpClient);
+
+    const response = await postJson(server, '/api/auth/qwen-oauth', {});
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      ok: true,
+      methodId: 'qwen-oauth',
+    });
+    expect(acpClient.authenticate).toHaveBeenCalledWith('qwen-oauth');
+  });
+
+  it('gets and updates session model and mode state through ACP', async () => {
+    const acpClient = createAcpClient();
+    const server = await createTestServer(acpClient);
+    await postJson(server, '/api/sessions', { cwd: '/repo' });
+
+    const modelState = await getJson(server, '/api/sessions/session-1/model', {
+      Authorization: 'Bearer test-token',
+    });
+    const modeState = await getJson(server, '/api/sessions/session-1/mode', {
+      Authorization: 'Bearer test-token',
+    });
+    const modelUpdate = await putJson(server, '/api/sessions/session-1/model', {
+      modelId: 'openai/qwen-max',
+    });
+    const modeUpdate = await putJson(server, '/api/sessions/session-1/mode', {
+      mode: 'auto-edit',
+    });
+
+    expect(modelState.body).toMatchObject({
+      ok: true,
+      models: {
+        currentModelId: 'openai/qwen-plus',
+        availableModels: [{ modelId: 'openai/qwen-plus' }],
+      },
+    });
+    expect(modeState.body).toMatchObject({
+      ok: true,
+      modes: {
+        currentModeId: 'default',
+      },
+    });
+    expect(getAvailableModes(modeState.body)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'default' })]),
+    );
+    expect(modelUpdate.body).toMatchObject({
+      ok: true,
+      models: { currentModelId: 'openai/qwen-max' },
+    });
+    expect(modeUpdate.body).toMatchObject({
+      ok: true,
+      modes: { currentModeId: 'auto-edit' },
+    });
+    expect(acpClient.setModel).toHaveBeenCalledWith(
+      'session-1',
+      'openai/qwen-max',
+    );
+    expect(acpClient.setMode).toHaveBeenCalledWith('session-1', 'auto-edit');
   });
 
   it('renames and deletes sessions through ACP extension methods', async () => {
@@ -453,6 +610,36 @@ describe('DesktopServer', () => {
     testSocket.socket.close();
   });
 
+  it('updates mode and model over WebSocket', async () => {
+    const acpClient = createAcpClient();
+    const server = await createTestServer(acpClient);
+    const testSocket = await connectSocket(server, '/ws/session-1');
+    await testSocket.readMessage();
+
+    testSocket.socket.send(
+      JSON.stringify({ type: 'set_permission_mode', mode: 'yolo' }),
+    );
+    expect(await testSocket.readMessage()).toMatchObject({
+      type: 'mode_changed',
+      mode: 'yolo',
+    });
+
+    testSocket.socket.send(
+      JSON.stringify({ type: 'set_model', modelId: 'openai/qwen-max' }),
+    );
+    expect(await testSocket.readMessage()).toMatchObject({
+      type: 'model_changed',
+      modelId: 'openai/qwen-max',
+    });
+
+    expect(acpClient.setMode).toHaveBeenCalledWith('session-1', 'yolo');
+    expect(acpClient.setModel).toHaveBeenCalledWith(
+      'session-1',
+      'openai/qwen-max',
+    );
+    testSocket.socket.close();
+  });
+
   it('rejects WebSocket connections without the desktop token', async () => {
     const server = await createTestServer(createAcpClient());
 
@@ -478,14 +665,22 @@ describe('DesktopServer', () => {
 
 async function createTestServer(
   acpClient?: AcpSessionClient,
+  settingsPath?: string,
 ): Promise<DesktopServer> {
   const server = await startDesktopServer({
     token: 'test-token',
     now: () => new Date('2026-04-25T00:00:00.000Z'),
     acpClient,
+    settingsPath,
   });
   servers.push(server);
   return server;
+}
+
+async function createTempSettingsPath(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'qwen-desktop-settings-'));
+  tempDirs.push(dir);
+  return join(dir, '.qwen', 'settings.json');
 }
 
 async function getJson(
@@ -516,6 +711,14 @@ async function patchJson(
   return writeJson(server, path, 'PATCH', body);
 }
 
+async function putJson(
+  server: DesktopServer,
+  path: string,
+  body: Record<string, unknown>,
+): Promise<{ status: number; body: unknown }> {
+  return writeJson(server, path, 'PUT', body);
+}
+
 async function deleteJson(
   server: DesktopServer,
   path: string,
@@ -535,7 +738,7 @@ async function deleteJson(
 async function writeJson(
   server: DesktopServer,
   path: string,
-  method: 'PATCH' | 'POST',
+  method: 'PATCH' | 'POST' | 'PUT',
   body: Record<string, unknown>,
 ): Promise<{ status: number; body: unknown }> {
   const response = await fetch(`${server.info.url}${path}`, {
@@ -577,10 +780,49 @@ function createAcpClient(): TestAcpClient {
       sessions: [{ sessionId: 'session-1', title: 'Test session' }],
       nextCursor: '3',
     }),
-    newSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
-    loadSession: vi.fn().mockResolvedValue({ models: [] }),
+    newSession: vi.fn().mockResolvedValue({
+      sessionId: 'session-1',
+      models: {
+        currentModelId: 'openai/qwen-plus',
+        availableModels: [
+          {
+            modelId: 'openai/qwen-plus',
+            name: 'Qwen Plus',
+            description: 'Test model',
+          },
+        ],
+      },
+      modes: {
+        currentModeId: 'default',
+        availableModes: [
+          {
+            id: 'default',
+            name: 'Default',
+            description: 'Ask before risky actions',
+          },
+          {
+            id: 'auto-edit',
+            name: 'Auto Edit',
+            description: 'Apply edits automatically',
+          },
+        ],
+      },
+    }),
+    loadSession: vi.fn().mockResolvedValue({
+      models: {
+        currentModelId: 'openai/qwen-plus',
+        availableModels: [{ modelId: 'openai/qwen-plus', name: 'Qwen Plus' }],
+      },
+      modes: {
+        currentModeId: 'default',
+        availableModes: [{ id: 'default', name: 'Default', description: '' }],
+      },
+    }),
     prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
     cancel: vi.fn().mockResolvedValue(undefined),
+    authenticate: vi.fn().mockResolvedValue({}),
+    setMode: vi.fn().mockResolvedValue({}),
+    setModel: vi.fn().mockResolvedValue({}),
     extMethod: vi.fn().mockResolvedValue({ success: true }),
   };
   return client;
@@ -613,6 +855,22 @@ function getPermissionRequestId(message: unknown): string {
   }
 
   return message.requestId;
+}
+
+function getAvailableModes(message: unknown): unknown[] {
+  if (
+    !message ||
+    typeof message !== 'object' ||
+    !('modes' in message) ||
+    !message.modes ||
+    typeof message.modes !== 'object' ||
+    !('availableModes' in message.modes) ||
+    !Array.isArray(message.modes.availableModes)
+  ) {
+    throw new Error('Expected available mode list.');
+  }
+
+  return message.modes.availableModes;
 }
 
 async function connectSocket(

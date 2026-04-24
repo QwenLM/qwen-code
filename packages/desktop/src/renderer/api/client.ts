@@ -5,6 +5,11 @@
  */
 
 import type { DesktopServerInfo } from '../../shared/desktopApi.js';
+import type {
+  DesktopApprovalMode,
+  DesktopSessionModeState,
+  DesktopSessionModelState,
+} from '../../shared/desktopProtocol.js';
 
 export interface DesktopHealth {
   ok: true;
@@ -30,7 +35,7 @@ export interface DesktopRuntime {
   cli: {
     path: string | null;
     channel: 'Desktop';
-    acpReady: false;
+    acpReady: boolean;
   };
   platform: {
     type: string;
@@ -38,8 +43,13 @@ export interface DesktopRuntime {
     release: string;
   };
   auth: {
-    status: 'unknown';
-    account: null;
+    status: 'unknown' | 'authenticated';
+    account: {
+      authType: string | null;
+      model: string | null;
+      baseUrl: string | null;
+      apiKeyEnvKey: string | null;
+    } | null;
   };
 }
 
@@ -47,11 +57,45 @@ export interface DesktopSessionSummary {
   sessionId: string;
   title?: string;
   cwd?: string;
+  models?: DesktopSessionModelState;
+  modes?: DesktopSessionModeState;
 }
 
 export interface DesktopSessionList {
   sessions: DesktopSessionSummary[];
   nextCursor?: string;
+}
+
+export interface DesktopUserSettings {
+  ok: true;
+  settingsPath: string;
+  provider: 'api-key' | 'coding-plan' | 'none';
+  selectedAuthType: string | null;
+  model: {
+    name: string | null;
+  };
+  codingPlan: {
+    region: 'china' | 'global';
+    hasApiKey: boolean;
+    version: string | null;
+  };
+  openai: {
+    hasApiKey: boolean;
+    providers: Array<{
+      id: string;
+      name: string;
+      baseUrl: string;
+      envKey: string;
+    }>;
+  };
+}
+
+export interface UpdateDesktopSettingsRequest {
+  provider: 'api-key' | 'coding-plan';
+  apiKey?: string;
+  codingPlanRegion?: 'china' | 'global';
+  activeModel?: string;
+  modelProviders?: Record<string, string>;
 }
 
 export async function loadDesktopStatus(): Promise<DesktopConnectionStatus> {
@@ -95,6 +139,92 @@ export async function createDesktopSession(
   return response.session;
 }
 
+export async function getDesktopUserSettings(
+  serverInfo: DesktopServerInfo,
+): Promise<DesktopUserSettings> {
+  return getJson(serverInfo, '/api/settings/user', isDesktopUserSettings);
+}
+
+export async function updateDesktopUserSettings(
+  serverInfo: DesktopServerInfo,
+  request: UpdateDesktopSettingsRequest,
+): Promise<DesktopUserSettings> {
+  return writeJson(
+    serverInfo,
+    '/api/settings/user',
+    'PUT',
+    request,
+    isDesktopUserSettings,
+  );
+}
+
+export async function authenticateDesktop(
+  serverInfo: DesktopServerInfo,
+  methodId: string,
+): Promise<void> {
+  await writeJson(
+    serverInfo,
+    `/api/auth/${encodeURIComponent(methodId)}`,
+    'POST',
+    {},
+    isOkResponse,
+  );
+}
+
+export async function getDesktopSessionModelState(
+  serverInfo: DesktopServerInfo,
+  sessionId: string,
+): Promise<DesktopSessionModelState> {
+  const response = await getJson(
+    serverInfo,
+    `/api/sessions/${encodeURIComponent(sessionId)}/model`,
+    isModelStateResponse,
+  );
+  return response.models;
+}
+
+export async function setDesktopSessionModel(
+  serverInfo: DesktopServerInfo,
+  sessionId: string,
+  modelId: string,
+): Promise<DesktopSessionModelState> {
+  const response = await writeJson(
+    serverInfo,
+    `/api/sessions/${encodeURIComponent(sessionId)}/model`,
+    'PUT',
+    { modelId },
+    isModelStateResponse,
+  );
+  return response.models;
+}
+
+export async function getDesktopSessionModeState(
+  serverInfo: DesktopServerInfo,
+  sessionId: string,
+): Promise<DesktopSessionModeState> {
+  const response = await getJson(
+    serverInfo,
+    `/api/sessions/${encodeURIComponent(sessionId)}/mode`,
+    isModeStateResponse,
+  );
+  return response.modes;
+}
+
+export async function setDesktopSessionMode(
+  serverInfo: DesktopServerInfo,
+  sessionId: string,
+  mode: DesktopApprovalMode,
+): Promise<DesktopSessionModeState> {
+  const response = await writeJson(
+    serverInfo,
+    `/api/sessions/${encodeURIComponent(sessionId)}/mode`,
+    'PUT',
+    { mode },
+    isModeStateResponse,
+  );
+  return response.modes;
+}
+
 async function getJson<T>(
   serverInfo: DesktopServerInfo,
   path: string,
@@ -117,8 +247,8 @@ async function getJson<T>(
 async function writeJson<T>(
   serverInfo: DesktopServerInfo,
   path: string,
-  method: 'POST',
-  body: Record<string, unknown>,
+  method: 'POST' | 'PUT' | 'PATCH',
+  body: unknown,
   isExpectedPayload: (value: unknown) => value is T,
 ): Promise<T> {
   const response = await fetch(new URL(path, serverInfo.url), {
@@ -179,13 +309,15 @@ function isDesktopRuntime(value: unknown): value is DesktopRuntime {
   }
 
   const candidate = value as Partial<DesktopRuntime>;
+  const auth = candidate.auth;
   return (
     candidate.ok === true &&
     isDesktopRuntimeDesktop(candidate.desktop) &&
     isDesktopRuntimeCli(candidate.cli) &&
     isDesktopRuntimePlatform(candidate.platform) &&
-    candidate.auth?.status === 'unknown' &&
-    candidate.auth.account === null
+    !!auth &&
+    (auth.status === 'unknown' || auth.status === 'authenticated') &&
+    (auth.account === null || isRuntimeAccount(auth.account))
   );
 }
 
@@ -208,7 +340,23 @@ function isDesktopRuntimeCli(
     !!value &&
     (typeof value.path === 'string' || value.path === null) &&
     value.channel === 'Desktop' &&
-    value.acpReady === false
+    typeof value.acpReady === 'boolean'
+  );
+}
+
+function isRuntimeAccount(
+  value: unknown,
+): value is DesktopRuntime['auth']['account'] {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as NonNullable<DesktopRuntime['auth']['account']>;
+  return (
+    isNullableString(candidate.authType) &&
+    isNullableString(candidate.model) &&
+    isNullableString(candidate.baseUrl) &&
+    isNullableString(candidate.apiKeyEnvKey)
   );
 }
 
@@ -248,6 +396,62 @@ function isCreateSessionResponse(
   return candidate.ok === true && isSessionSummary(candidate.session);
 }
 
+function isDesktopUserSettings(value: unknown): value is DesktopUserSettings {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as DesktopUserSettings;
+  return (
+    candidate.ok === true &&
+    typeof candidate.settingsPath === 'string' &&
+    (candidate.provider === 'api-key' ||
+      candidate.provider === 'coding-plan' ||
+      candidate.provider === 'none') &&
+    isNullableString(candidate.selectedAuthType) &&
+    !!candidate.model &&
+    isNullableString(candidate.model.name) &&
+    !!candidate.codingPlan &&
+    (candidate.codingPlan.region === 'china' ||
+      candidate.codingPlan.region === 'global') &&
+    typeof candidate.codingPlan.hasApiKey === 'boolean' &&
+    isNullableString(candidate.codingPlan.version) &&
+    !!candidate.openai &&
+    typeof candidate.openai.hasApiKey === 'boolean' &&
+    Array.isArray(candidate.openai.providers)
+  );
+}
+
+function isModelStateResponse(
+  value: unknown,
+): value is { ok: true; models: DesktopSessionModelState } {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as { ok?: unknown; models?: unknown };
+  return candidate.ok === true && isModelState(candidate.models);
+}
+
+function isModeStateResponse(
+  value: unknown,
+): value is { ok: true; modes: DesktopSessionModeState } {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as { ok?: unknown; modes?: unknown };
+  return candidate.ok === true && isModeState(candidate.modes);
+}
+
+function isOkResponse(value: unknown): value is { ok: true } {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    (value as { ok?: unknown }).ok === true
+  );
+}
+
 function isSessionSummary(value: unknown): value is DesktopSessionSummary {
   if (!value || typeof value !== 'object') {
     return false;
@@ -257,6 +461,60 @@ function isSessionSummary(value: unknown): value is DesktopSessionSummary {
   return (
     typeof candidate.sessionId === 'string' &&
     (typeof candidate.title === 'string' || candidate.title === undefined) &&
-    (typeof candidate.cwd === 'string' || candidate.cwd === undefined)
+    (typeof candidate.cwd === 'string' || candidate.cwd === undefined) &&
+    (candidate.models === undefined || isModelState(candidate.models)) &&
+    (candidate.modes === undefined || isModeState(candidate.modes))
   );
+}
+
+function isModelState(value: unknown): value is DesktopSessionModelState {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as DesktopSessionModelState;
+  return (
+    typeof candidate.currentModelId === 'string' &&
+    Array.isArray(candidate.availableModels) &&
+    candidate.availableModels.every(
+      (model) =>
+        !!model &&
+        typeof model === 'object' &&
+        typeof model.modelId === 'string' &&
+        typeof model.name === 'string',
+    )
+  );
+}
+
+function isModeState(value: unknown): value is DesktopSessionModeState {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as DesktopSessionModeState;
+  return (
+    isApprovalMode(candidate.currentModeId) &&
+    Array.isArray(candidate.availableModes) &&
+    candidate.availableModes.every(
+      (mode) =>
+        !!mode &&
+        typeof mode === 'object' &&
+        isApprovalMode(mode.id) &&
+        typeof mode.name === 'string' &&
+        typeof mode.description === 'string',
+    )
+  );
+}
+
+function isApprovalMode(value: unknown): value is DesktopApprovalMode {
+  return (
+    value === 'plan' ||
+    value === 'default' ||
+    value === 'auto-edit' ||
+    value === 'yolo'
+  );
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return typeof value === 'string' || value === null;
 }

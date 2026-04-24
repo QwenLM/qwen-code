@@ -21,19 +21,22 @@ import { AcpEventRouter } from './acp/AcpEventRouter.js';
 import { PermissionBridge } from './acp/permissionBridge.js';
 import { isDesktopHttpError, DesktopHttpError } from './http/errors.js';
 import { getRuntimeInfo } from './services/runtimeService.js';
-import { DesktopSessionService } from './services/sessionService.js';
+import {
+  DesktopSessionService,
+  isDesktopApprovalMode,
+} from './services/sessionService.js';
+import { DesktopSettingsService } from './services/settingsService.js';
+import type { DesktopUpdateUserSettingsRequest } from './services/settingsService.js';
 import { SessionSocketHub } from './ws/SessionSocketHub.js';
-import type {
-  DesktopJsonResponse,
-  DesktopServer,
-  DesktopServerOptions,
-} from './types.js';
+import type { DesktopServer, DesktopServerOptions } from './types.js';
 
 interface HandlerContext {
   token: string;
   startedAt: number;
   now: () => Date;
   sessionService: DesktopSessionService;
+  settingsService: DesktopSettingsService;
+  acpClient: DesktopServerOptions['acpClient'];
 }
 
 export async function startDesktopServer(
@@ -43,6 +46,7 @@ export async function startDesktopServer(
   const now = options.now ?? (() => new Date());
   const startedAt = now().getTime();
   const sessionService = new DesktopSessionService(options.acpClient);
+  const settingsService = new DesktopSettingsService(options.settingsPath);
   const socketHubRef: { current: SessionSocketHub | null } = { current: null };
   const permissionBridge = new PermissionBridge({
     timeoutMs: options.permissionRequestTimeoutMs,
@@ -74,6 +78,8 @@ export async function startDesktopServer(
       startedAt,
       now,
       sessionService,
+      settingsService,
+      acpClient: options.acpClient,
     }).catch((error: unknown) => {
       const origin = getSingleHeader(request.headers.origin);
       if (isDesktopHttpError(error)) {
@@ -184,7 +190,49 @@ async function handleRequest(
   }
 
   if (request.method === 'GET' && requestUrl.pathname === '/api/runtime') {
-    sendJson(response, origin, 200, await getRuntimeInfo());
+    sendJson(response, origin, 200, await getRuntimeInfo(context.acpClient));
+    return;
+  }
+
+  if (requestUrl.pathname === '/api/settings/user') {
+    await handleUserSettingsRoute(request, response, origin, context);
+    return;
+  }
+
+  if (requestUrl.pathname === '/api/auth') {
+    await handleAuthRoute(request, response, origin, context);
+    return;
+  }
+
+  const authMethodMatch = matchSessionRoute(
+    requestUrl.pathname,
+    /^\/api\/auth\/([^/]+)$/u,
+  );
+  if (authMethodMatch) {
+    await handleAuthMethodRoute(
+      request,
+      response,
+      origin,
+      context,
+      authMethodMatch,
+    );
+    return;
+  }
+
+  if (request.method === 'GET' && requestUrl.pathname === '/api/models') {
+    const sessionId = requestUrl.searchParams.get('sessionId');
+    if (!sessionId) {
+      throw new DesktopHttpError(
+        400,
+        'bad_request',
+        'sessionId query parameter is required.',
+      );
+    }
+
+    sendJson(response, origin, 200, {
+      ok: true,
+      models: context.sessionService.getModelState(sessionId),
+    });
     return;
   }
 
@@ -204,6 +252,36 @@ async function handleRequest(
       origin,
       context,
       loadSessionMatch,
+    );
+    return;
+  }
+
+  const sessionModelMatch = matchSessionRoute(
+    requestUrl.pathname,
+    /^\/api\/sessions\/([^/]+)\/model$/u,
+  );
+  if (sessionModelMatch) {
+    await handleSessionModelRoute(
+      request,
+      response,
+      origin,
+      context,
+      sessionModelMatch,
+    );
+    return;
+  }
+
+  const sessionModeMatch = matchSessionRoute(
+    requestUrl.pathname,
+    /^\/api\/sessions\/([^/]+)\/mode$/u,
+  );
+  if (sessionModeMatch) {
+    await handleSessionModeRoute(
+      request,
+      response,
+      origin,
+      context,
+      sessionModeMatch,
     );
     return;
   }
@@ -253,6 +331,129 @@ async function handleSessionsRoute(
     const cwd = getRequiredString(body, 'cwd');
     const session = await context.sessionService.createSession(cwd);
     sendJson(response, origin, 200, { ok: true, session });
+    return;
+  }
+
+  sendMethodNotAllowed(response, origin);
+}
+
+async function handleUserSettingsRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  origin: string | undefined,
+  context: HandlerContext,
+): Promise<void> {
+  if (request.method === 'GET') {
+    sendJson(
+      response,
+      origin,
+      200,
+      await context.settingsService.readUserSettings(),
+    );
+    return;
+  }
+
+  if (request.method === 'PUT') {
+    const body = await readObjectBody(request);
+    sendJson(
+      response,
+      origin,
+      200,
+      await context.settingsService.updateUserSettings(
+        parseUserSettingsUpdate(body),
+      ),
+    );
+    return;
+  }
+
+  sendMethodNotAllowed(response, origin);
+}
+
+async function handleAuthRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  origin: string | undefined,
+  context: HandlerContext,
+): Promise<void> {
+  if (request.method === 'DELETE') {
+    sendJson(
+      response,
+      origin,
+      200,
+      await context.settingsService.clearPersistedAuth(),
+    );
+    return;
+  }
+
+  sendMethodNotAllowed(response, origin);
+}
+
+async function handleAuthMethodRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  origin: string | undefined,
+  context: HandlerContext,
+  methodId: string,
+): Promise<void> {
+  if (request.method !== 'POST') {
+    sendMethodNotAllowed(response, origin);
+    return;
+  }
+
+  await context.sessionService.authenticate(methodId);
+  sendJson(response, origin, 200, { ok: true, methodId });
+}
+
+async function handleSessionModelRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  origin: string | undefined,
+  context: HandlerContext,
+  sessionId: string,
+): Promise<void> {
+  if (request.method === 'GET') {
+    sendJson(response, origin, 200, {
+      ok: true,
+      models: context.sessionService.getModelState(sessionId),
+    });
+    return;
+  }
+
+  if (request.method === 'PUT') {
+    const body = await readObjectBody(request);
+    const modelId = getRequiredString(body, 'modelId');
+    sendJson(response, origin, 200, {
+      ok: true,
+      models: await context.sessionService.setSessionModel(sessionId, modelId),
+    });
+    return;
+  }
+
+  sendMethodNotAllowed(response, origin);
+}
+
+async function handleSessionModeRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  origin: string | undefined,
+  context: HandlerContext,
+  sessionId: string,
+): Promise<void> {
+  if (request.method === 'GET') {
+    sendJson(response, origin, 200, {
+      ok: true,
+      modes: context.sessionService.getModeState(sessionId),
+    });
+    return;
+  }
+
+  if (request.method === 'PUT') {
+    const body = await readObjectBody(request);
+    const mode = getRequiredApprovalMode(body, 'mode');
+    sendJson(response, origin, 200, {
+      ok: true,
+      modes: await context.sessionService.setSessionMode(sessionId, mode),
+    });
     return;
   }
 
@@ -321,7 +522,7 @@ function sendJson(
   response: ServerResponse,
   origin: string | undefined,
   statusCode: number,
-  payload: DesktopJsonResponse,
+  payload: unknown,
 ) {
   if (response.headersSent) {
     response.end();
@@ -414,6 +615,71 @@ function getRequiredString(body: Record<string, unknown>, key: string): string {
   return value;
 }
 
+function getRequiredApprovalMode(
+  body: Record<string, unknown>,
+  key: string,
+): ReturnType<typeof parseApprovalMode> {
+  return parseApprovalMode(body[key], key);
+}
+
+function parseApprovalMode(
+  value: unknown,
+  key: string,
+): 'plan' | 'default' | 'auto-edit' | 'yolo' {
+  if (!isDesktopApprovalMode(value)) {
+    throw new DesktopHttpError(
+      400,
+      'bad_request',
+      `${key} must be plan, default, auto-edit, or yolo.`,
+    );
+  }
+
+  return value;
+}
+
+function parseUserSettingsUpdate(
+  body: Record<string, unknown>,
+): DesktopUpdateUserSettingsRequest {
+  const provider = body['provider'];
+  if (provider !== 'api-key' && provider !== 'coding-plan') {
+    throw new DesktopHttpError(
+      400,
+      'bad_request',
+      'provider must be api-key or coding-plan.',
+    );
+  }
+
+  const codingPlanRegion = body['codingPlanRegion'];
+  if (
+    codingPlanRegion !== undefined &&
+    codingPlanRegion !== 'china' &&
+    codingPlanRegion !== 'global'
+  ) {
+    throw new DesktopHttpError(
+      400,
+      'bad_request',
+      'codingPlanRegion must be china or global.',
+    );
+  }
+
+  const modelProviders = body['modelProviders'];
+  if (modelProviders !== undefined && !isStringRecord(modelProviders)) {
+    throw new DesktopHttpError(
+      400,
+      'bad_request',
+      'modelProviders must be an object of model ids to base URLs.',
+    );
+  }
+
+  return {
+    provider,
+    apiKey: getOptionalString(body, 'apiKey'),
+    activeModel: getOptionalString(body, 'activeModel'),
+    codingPlanRegion,
+    modelProviders,
+  };
+}
+
 function getOptionalString(
   body: Record<string, unknown>,
   key: string,
@@ -448,6 +714,14 @@ function getOptionalNumberSearchParam(
   }
 
   return numberValue;
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+
+  return Object.values(value).every((entry) => typeof entry === 'string');
 }
 
 function isAddressInfo(
