@@ -64,6 +64,10 @@ import {
   isSkillsSecondaryQuery,
   shouldOpenSkillsSecondaryPicker,
 } from './utils/completionUtils.js';
+import {
+  buildSlashCommandItems,
+  isExpandableSlashCommand,
+} from './utils/slashCommandUtils.js';
 
 /**
  * Memoized message list that only re-renders when messages or callbacks change,
@@ -318,16 +322,9 @@ export const App: React.FC = () => {
           },
         ];
 
-        // Slash Commands group - commands from server (available_commands_update)
-        const slashCommandItems: CompletionItem[] = availableCommands.map(
-          (cmd) => ({
-            id: cmd.name,
-            label: `/${cmd.name}`,
-            description: cmd.description,
-            type: 'command' as const,
-            group: 'Slash Commands',
-            value: cmd.name,
-          }),
+        const slashCommandItems = buildSlashCommandItems(
+          query,
+          availableCommands,
         );
 
         // Combine all commands
@@ -338,12 +335,11 @@ export const App: React.FC = () => {
         ];
 
         // Filter by query
-        const lowerQuery = query.toLowerCase();
         return allCommands.filter(
           (cmd) =>
-            cmd.label.toLowerCase().includes(lowerQuery) ||
+            cmd.label.toLowerCase().includes(query.toLowerCase()) ||
             (cmd.description &&
-              cmd.description.toLowerCase().includes(lowerQuery)),
+              cmd.description.toLowerCase().includes(query.toLowerCase())),
         );
       }
     },
@@ -777,7 +773,12 @@ export const App: React.FC = () => {
           item,
           availableSkills,
         );
-        if (serverCmd && !fillOnly && !isSkillsCmd) {
+        if (
+          serverCmd &&
+          !fillOnly &&
+          !isSkillsCmd &&
+          !isExpandableSlashCommand(serverCmd.name)
+        ) {
           // Clear the trigger text since we're sending the command
           clearTriggerText();
           // Send the slash command as a user message
@@ -897,6 +898,17 @@ export const App: React.FC = () => {
           void openCompletion('/', `${insertValue} `, position);
           return;
         }
+
+        if (
+          completion.triggerChar === '/' &&
+          isExpandableSlashCommand(insertValue.trim())
+        ) {
+          completion.closeCompletion();
+          requestAnimationFrame(() => {
+            inputElement.dispatchEvent(new Event('input', { bubbles: true }));
+          });
+          return;
+        }
       }
 
       // Close the completion menu
@@ -906,6 +918,7 @@ export const App: React.FC = () => {
       availableCommands,
       availableSkills,
       closeCompletion,
+      completion,
       completionTriggerChar,
       fileContext,
       inputFieldRef,

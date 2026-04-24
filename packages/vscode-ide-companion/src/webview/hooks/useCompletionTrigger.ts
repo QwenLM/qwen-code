@@ -7,7 +7,7 @@
 import type { RefObject } from 'react';
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type { CompletionItem } from '../../types/completionItemTypes.js';
-import { isSkillsSecondaryQuery } from '../utils/completionUtils.js';
+import { shouldAllowCompletionQuery } from '../utils/slashCommandUtils.js';
 
 interface CompletionTriggerState {
   isOpen: boolean;
@@ -335,12 +335,7 @@ export function useCompletionTrigger(
         if (isValidTrigger) {
           const query = text.substring(triggerPos + 1, effectiveCursorPosition);
 
-          // For @ mentions: no spaces allowed (still typing the reference).
-          // For / commands: allow spaces when typing sub-command arguments
-          // (e.g., "/skills review" triggers the secondary skill picker).
-          const allowSpaces =
-            triggerChar === '/' && isSkillsSecondaryQuery(query);
-          if (!query.includes('\n') && (allowSpaces || !query.includes(' '))) {
+          if (shouldAllowCompletionQuery(triggerChar, query)) {
             // Get precise cursor position for menu
             const cursorPos = getCursorPosition();
             if (cursorPos) {

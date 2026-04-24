@@ -203,8 +203,6 @@ export interface ChatCompressionSettings {
  * Threshold values of -1 mean "never clear" (disabled).
  */
 export interface ClearContextOnIdleSettings {
-  /** Minutes idle before clearing old thinking blocks. Default 5. Use -1 to disable. */
-  thinkingThresholdMinutes?: number;
   /** Minutes idle before clearing old tool results. Default 60. Use -1 to disable. */
   toolResultsThresholdMinutes?: number;
   /** Number of most-recent tool results to preserve. Default 5. */
@@ -766,8 +764,6 @@ export class Config {
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
     this.clearContextOnIdle = {
-      thinkingThresholdMinutes:
-        params.clearContextOnIdle?.thinkingThresholdMinutes ?? 5,
       toolResultsThresholdMinutes:
         params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
       toolResultsNumToKeep:

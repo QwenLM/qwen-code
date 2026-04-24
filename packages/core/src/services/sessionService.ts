@@ -865,7 +865,9 @@ export interface BuildApiHistoryOptions {
   /**
    * Whether to strip thought parts from the history.
    * Thought parts are content parts that have `thought: true`.
-   * @default true
+   * Keeping thoughts ensures `reasoning_content` from reasoning models
+   * (e.g. DeepSeek) is properly passed back in subsequent API calls.
+   * @default false
    */
   stripThoughtsFromHistory?: boolean;
 }
@@ -906,7 +908,7 @@ export function buildApiHistoryFromConversation(
   conversation: ConversationRecord,
   options: BuildApiHistoryOptions = {},
 ): Content[] {
-  const { stripThoughtsFromHistory = true } = options;
+  const { stripThoughtsFromHistory = false } = options;
   const { messages } = conversation;
 
   let lastCompressionIndex = -1;
