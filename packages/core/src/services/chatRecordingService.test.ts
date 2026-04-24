@@ -82,8 +82,10 @@ describe('ChatRecordingService', () => {
 
     chatRecordingService = new ChatRecordingService(mockConfig);
 
-    // Mock jsonl-utils
-    vi.mocked(jsonl.writeLineSync).mockImplementation(() => undefined);
+    // Mock jsonl-utils. writeLine is async — mockResolvedValue returns
+    // a settled Promise so the writeChain in ChatRecordingService advances
+    // when flushed.
+    vi.mocked(jsonl.writeLine).mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -91,13 +93,13 @@ describe('ChatRecordingService', () => {
   });
 
   describe('recordUserMessage', () => {
-    it('should record a user message immediately', () => {
+    it('should record a user message immediately', async () => {
       const userParts: Part[] = [{ text: 'Hello, world!' }];
       chatRecordingService.recordUserMessage(userParts);
+      await chatRecordingService.flush();
 
-      expect(jsonl.writeLineSync).toHaveBeenCalledTimes(1);
-      const record = vi.mocked(jsonl.writeLineSync).mock
-        .calls[0][1] as ChatRecord;
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
 
       expect(record.uuid).toBe('00000000-0000-0000-0000-000000000001');
       expect(record.parentUuid).toBeNull();
@@ -110,15 +112,16 @@ describe('ChatRecordingService', () => {
       expect(record.gitBranch).toBe('main');
     });
 
-    it('should chain messages correctly with parentUuid', () => {
+    it('should chain messages correctly with parentUuid', async () => {
       chatRecordingService.recordUserMessage([{ text: 'First message' }]);
       chatRecordingService.recordAssistantTurn({
         model: 'gemini-pro',
         message: [{ text: 'Response' }],
       });
       chatRecordingService.recordUserMessage([{ text: 'Second message' }]);
+      await chatRecordingService.flush();
 
-      const calls = vi.mocked(jsonl.writeLineSync).mock.calls;
+      const calls = vi.mocked(jsonl.writeLine).mock.calls;
       const user1 = calls[0][1] as ChatRecord;
       const assistant = calls[1][1] as ChatRecord;
       const user2 = calls[2][1] as ChatRecord;
@@ -135,7 +138,7 @@ describe('ChatRecordingService', () => {
   });
 
   describe('recordAtCommand', () => {
-    it('should record @-command metadata as a system payload', () => {
+    it('should record @-command metadata as a system payload', async () => {
       const userParts: Part[] = [{ text: 'Hello, world!' }];
       const payload: AtCommandRecordPayload = {
         filesRead: ['foo.txt'],
@@ -146,11 +149,12 @@ describe('ChatRecordingService', () => {
 
       chatRecordingService.recordUserMessage(userParts);
       chatRecordingService.recordAtCommand(payload);
+      await chatRecordingService.flush();
 
-      expect(jsonl.writeLineSync).toHaveBeenCalledTimes(2);
-      const userRecord = vi.mocked(jsonl.writeLineSync).mock
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
+      const userRecord = vi.mocked(jsonl.writeLine).mock
         .calls[0][1] as ChatRecord;
-      const systemRecord = vi.mocked(jsonl.writeLineSync).mock
+      const systemRecord = vi.mocked(jsonl.writeLine).mock
         .calls[1][1] as ChatRecord;
 
       expect(userRecord.type).toBe('user');
@@ -162,16 +166,16 @@ describe('ChatRecordingService', () => {
   });
 
   describe('recordAssistantTurn', () => {
-    it('should record assistant turn with content only', () => {
+    it('should record assistant turn with content only', async () => {
       const parts: Part[] = [{ text: 'Hello!' }];
       chatRecordingService.recordAssistantTurn({
         model: 'gemini-pro',
         message: parts,
       });
+      await chatRecordingService.flush();
 
-      expect(jsonl.writeLineSync).toHaveBeenCalledTimes(1);
-      const record = vi.mocked(jsonl.writeLineSync).mock
-        .calls[0][1] as ChatRecord;
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
 
       expect(record.type).toBe('assistant');
       // The service wraps parts in a Content object using createModelContent
@@ -181,7 +185,7 @@ describe('ChatRecordingService', () => {
       expect(record.toolCallResult).toBeUndefined();
     });
 
-    it('should record assistant turn with all data', () => {
+    it('should record assistant turn with all data', async () => {
       const parts: Part[] = [
         { thought: true, text: 'Thinking...' },
         { text: 'Here is the result.' },
@@ -197,9 +201,9 @@ describe('ChatRecordingService', () => {
           totalTokenCount: 160,
         },
       });
+      await chatRecordingService.flush();
 
-      const record = vi.mocked(jsonl.writeLineSync).mock
-        .calls[0][1] as ChatRecord;
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
 
       // The service wraps parts in a Content object using createModelContent
       expect(record.message).toEqual({ role: 'model', parts });
@@ -207,7 +211,7 @@ describe('ChatRecordingService', () => {
       expect(record.usageMetadata?.totalTokenCount).toBe(160);
     });
 
-    it('should record assistant turn with only tokens', () => {
+    it('should record assistant turn with only tokens', async () => {
       chatRecordingService.recordAssistantTurn({
         model: 'gemini-pro',
         tokens: {
@@ -217,9 +221,9 @@ describe('ChatRecordingService', () => {
           totalTokenCount: 30,
         },
       });
+      await chatRecordingService.flush();
 
-      const record = vi.mocked(jsonl.writeLineSync).mock
-        .calls[0][1] as ChatRecord;
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
 
       expect(record.message).toBeUndefined();
       expect(record.usageMetadata?.totalTokenCount).toBe(30);
@@ -227,7 +231,7 @@ describe('ChatRecordingService', () => {
   });
 
   describe('recordToolResult', () => {
-    it('should record tool result with Parts', () => {
+    it('should record tool result with Parts', async () => {
       // First record a user and assistant message to set up the chain
       chatRecordingService.recordUserMessage([{ text: 'Hello' }]);
       chatRecordingService.recordAssistantTurn({
@@ -246,17 +250,17 @@ describe('ChatRecordingService', () => {
         },
       ];
       chatRecordingService.recordToolResult(toolResultParts);
+      await chatRecordingService.flush();
 
-      expect(jsonl.writeLineSync).toHaveBeenCalledTimes(3);
-      const record = vi.mocked(jsonl.writeLineSync).mock
-        .calls[2][1] as ChatRecord;
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(3);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[2][1] as ChatRecord;
 
       expect(record.type).toBe('tool_result');
       // The service wraps parts in a Content object using createUserContent
       expect(record.message).toEqual({ role: 'user', parts: toolResultParts });
     });
 
-    it('should record tool result with toolCallResult metadata', () => {
+    it('should record tool result with toolCallResult metadata', async () => {
       const toolResultParts: Part[] = [
         {
           functionResponse: {
@@ -275,9 +279,9 @@ describe('ChatRecordingService', () => {
       } as any;
 
       chatRecordingService.recordToolResult(toolResultParts, metadata);
+      await chatRecordingService.flush();
 
-      const record = vi.mocked(jsonl.writeLineSync).mock
-        .calls[0][1] as ChatRecord;
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
 
       expect(record.type).toBe('tool_result');
       // The service wraps parts in a Content object using createUserContent
@@ -286,7 +290,7 @@ describe('ChatRecordingService', () => {
       expect(record.toolCallResult?.callId).toBe('call-1');
     });
 
-    it('should chain tool result correctly with parentUuid', () => {
+    it('should chain tool result correctly with parentUuid', async () => {
       chatRecordingService.recordUserMessage([{ text: 'Hello' }]);
       chatRecordingService.recordAssistantTurn({
         model: 'gemini-pro',
@@ -302,12 +306,13 @@ describe('ChatRecordingService', () => {
         },
       ];
       chatRecordingService.recordToolResult(toolResultParts);
+      await chatRecordingService.flush();
 
-      const userRecord = vi.mocked(jsonl.writeLineSync).mock
+      const userRecord = vi.mocked(jsonl.writeLine).mock
         .calls[0][1] as ChatRecord;
-      const assistantRecord = vi.mocked(jsonl.writeLineSync).mock
+      const assistantRecord = vi.mocked(jsonl.writeLine).mock
         .calls[1][1] as ChatRecord;
-      const toolResultRecord = vi.mocked(jsonl.writeLineSync).mock
+      const toolResultRecord = vi.mocked(jsonl.writeLine).mock
         .calls[2][1] as ChatRecord;
 
       expect(userRecord.parentUuid).toBeNull();
@@ -317,15 +322,15 @@ describe('ChatRecordingService', () => {
   });
 
   describe('recordSlashCommand', () => {
-    it('should record slash command with payload and subtype', () => {
+    it('should record slash command with payload and subtype', async () => {
       chatRecordingService.recordSlashCommand({
         phase: 'invocation',
         rawCommand: '/about',
       });
+      await chatRecordingService.flush();
 
-      expect(jsonl.writeLineSync).toHaveBeenCalledTimes(1);
-      const record = vi.mocked(jsonl.writeLineSync).mock
-        .calls[0][1] as ChatRecord;
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
 
       expect(record.type).toBe('system');
       expect(record.subtype).toBe('slash_command');
@@ -335,16 +340,17 @@ describe('ChatRecordingService', () => {
       });
     });
 
-    it('should chain slash command after prior records', () => {
+    it('should chain slash command after prior records', async () => {
       chatRecordingService.recordUserMessage([{ text: 'Hello' }]);
       chatRecordingService.recordSlashCommand({
         phase: 'result',
         rawCommand: '/about',
       });
+      await chatRecordingService.flush();
 
-      const userRecord = vi.mocked(jsonl.writeLineSync).mock
+      const userRecord = vi.mocked(jsonl.writeLine).mock
         .calls[0][1] as ChatRecord;
-      const slashRecord = vi.mocked(jsonl.writeLineSync).mock
+      const slashRecord = vi.mocked(jsonl.writeLine).mock
         .calls[1][1] as ChatRecord;
 
       expect(userRecord.parentUuid).toBeNull();

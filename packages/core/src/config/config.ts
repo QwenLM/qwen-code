@@ -1610,9 +1610,11 @@ export class Config {
       return;
     }
     try {
-      // Finalize the current session's metadata before cleanup.
+      // Finalize the current session's metadata before cleanup, then drain
+      // the async write queue so no records are lost on exit.
       try {
         this.chatRecordingService?.finalize();
+        await this.chatRecordingService?.flush();
       } catch {
         // Best-effort — don't block shutdown
       }
