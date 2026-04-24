@@ -5,6 +5,7 @@
  */
 
 import type { IBufferCell, Terminal } from '@xterm/headless';
+
 export interface AnsiToken {
   text: string;
   bold: boolean;
@@ -18,6 +19,25 @@ export interface AnsiToken {
 
 export type AnsiLine = AnsiToken[];
 export type AnsiOutput = AnsiLine[];
+
+export function serializeTerminalToText(terminal: Terminal): string {
+  const buffer = terminal.buffer.active;
+  const lines: string[] = [];
+
+  for (let i = 0; i < buffer.length; i++) {
+    const line = buffer.getLine(i);
+    const lineContent = line ? line.translateToString(true) : '';
+
+    if (line?.isWrapped && lines.length > 0) {
+      lines[lines.length - 1] += lineContent;
+      continue;
+    }
+
+    lines.push(lineContent);
+  }
+
+  return lines.join('\n').trimEnd();
+}
 
 const enum Attribute {
   inverse = 1,

@@ -17,6 +17,7 @@ import { getShellConfiguration } from '../utils/shell-utils.js';
 import pkg from '@xterm/headless';
 import {
   serializeTerminalToObject,
+  serializeTerminalToText,
   type AnsiOutput,
 } from '../utils/terminalSerializer.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
@@ -135,17 +136,6 @@ const isExpectedPtyExitRaceError = (error: unknown): boolean => {
   );
 };
 
-const getFullBufferText = (terminal: pkg.Terminal): string => {
-  const buffer = terminal.buffer.active;
-  const lines: string[] = [];
-  for (let i = 0; i < buffer.length; i++) {
-    const line = buffer.getLine(i);
-    const lineContent = line ? line.translateToString(true) : '';
-    lines.push(lineContent);
-  }
-  return lines.join('\n').trimEnd();
-};
-
 const replayTerminalOutput = async (
   output: string,
   cols: number,
@@ -163,7 +153,7 @@ const replayTerminalOutput = async (
     replayTerminal.write(output, () => resolve());
   });
 
-  return getFullBufferText(replayTerminal);
+  return serializeTerminalToText(replayTerminal);
 };
 
 interface ProcessCleanupStrategy {
@@ -558,7 +548,7 @@ export class ShellExecutionService {
 
           if (!shellExecutionConfig.disableDynamicLineTrimming) {
             if (!hasStartedOutput) {
-              const bufferText = getFullBufferText(headlessTerminal);
+              const bufferText = serializeTerminalToText(headlessTerminal);
               if (bufferText.trim().length === 0) {
                 return;
               }
@@ -759,11 +749,11 @@ export class ShellExecutionService {
                     rows,
                   );
                 } else {
-                  fullOutput = getFullBufferText(headlessTerminal);
+                  fullOutput = serializeTerminalToText(headlessTerminal);
                 }
               } catch {
                 try {
-                  fullOutput = getFullBufferText(headlessTerminal);
+                  fullOutput = serializeTerminalToText(headlessTerminal);
                 } catch {
                   // Ignore fallback rendering errors and resolve with empty text.
                 }
