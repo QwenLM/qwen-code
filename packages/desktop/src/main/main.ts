@@ -8,10 +8,13 @@ import { app, BrowserWindow, dialog, session } from 'electron';
 import { shouldQuitWhenWindowsClosed } from './lifecycle/AppLifecycle.js';
 import { registerIpc } from './ipc/registerIpc.js';
 import { createMainWindow } from './windows/MainWindow.js';
+import { resolveDesktopAcpLaunchConfig } from './acp/resolveCli.js';
+import { AcpProcessClient } from '../server/acp/AcpProcessClient.js';
 import { startDesktopServer } from '../server/index.js';
 import type { DesktopServer } from '../server/types.js';
 
 let desktopServer: DesktopServer | undefined;
+let acpClient: AcpProcessClient | undefined;
 let mainWindow: BrowserWindow | null = null;
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
@@ -53,6 +56,7 @@ if (!gotSingleInstanceLock) {
   });
 
   app.on('before-quit', () => {
+    acpClient?.disconnect();
     void desktopServer?.close();
   });
 }
@@ -61,7 +65,16 @@ async function bootstrap(): Promise<void> {
   app.setName('Qwen Code');
   registerContentSecurityPolicy();
 
-  desktopServer = await startDesktopServer();
+  const acpLaunchConfig = resolveDesktopAcpLaunchConfig({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    mainModuleUrl: import.meta.url,
+    env: process.env,
+    execPath: process.execPath,
+  });
+  process.env['QWEN_DESKTOP_CLI_PATH'] ??= acpLaunchConfig.cliEntryPath;
+  acpClient = new AcpProcessClient(acpLaunchConfig);
+  desktopServer = await startDesktopServer({ acpClient });
   registerIpc({
     getServerInfo: () => {
       if (!desktopServer) {

@@ -187,7 +187,7 @@ order, verification, decisions, and remaining work.
 
 ### Slice 8: Packaging and Smoke Test
 
-- Status: pending
+- Status: complete
 - Goal: package a desktop app that can launch the bundled CLI ACP child.
 - Files:
   - `packages/desktop/electron-builder.*`
@@ -197,6 +197,22 @@ order, verification, decisions, and remaining work.
   - Packaged app starts renderer and DesktopServer.
   - Production ACP launch uses `ELECTRON_RUN_AS_NODE=1`.
   - Required CLI bundle and native/vendor resources are present.
+- Progress:
+  - 2026-04-25: added a tested desktop ACP launch resolver. Development uses
+    the built workspace CLI entrypoint, explicit `QWEN_DESKTOP_CLI_PATH`
+    remains supported, and packaged apps resolve
+    `process.resourcesPath/qwen-cli/cli.js` with
+    `ELECTRON_RUN_AS_NODE=1`.
+  - 2026-04-25: Electron main now creates a real `AcpProcessClient`, passes it
+    into `DesktopServer`, exposes the resolved CLI path through runtime info,
+    and disconnects ACP on app quit.
+  - 2026-04-25: added electron-builder configuration and package scripts.
+    Packaging copies the root CLI bundle resources from `dist/` to
+    `resources/qwen-cli` while excluding the desktop package output to avoid
+    recursive resource copies.
+  - 2026-04-25: added a packaged-app smoke script that verifies `app.asar`,
+    bundled `qwen-cli/cli.js`, and optionally launches the packaged app long
+    enough to confirm startup before terminating it.
 - Verification:
   - `npm run build`
   - `npm run typecheck`
@@ -229,6 +245,14 @@ order, verification, decisions, and remaining work.
   The desktop package now depends directly on `@qwen-code/qwen-code-core` for
   `Storage`, auth constants, and Coding Plan templates while keeping extension
   code out of the desktop runtime boundary.
+- 2026-04-25: Package the root `dist/` bundle as an Electron `extraResources`
+  directory named `qwen-cli` rather than relying on `app.asar` paths for the
+  CLI sidecar. This keeps `cli.js`, sandbox profiles, vendor binaries, and
+  bundled skills together and lets the main process launch the CLI via
+  `ELECTRON_RUN_AS_NODE=1`.
+- 2026-04-25: Keep the electron-builder smoke script non-launching by default
+  so it works in headless environments; use `--launch` for local packaged
+  startup verification.
 
 ## Verification Log
 
@@ -314,6 +338,26 @@ order, verification, decisions, and remaining work.
   - `npm run typecheck` passed across workspaces.
   - `npm run build` passed across the configured build order. Existing VS Code
     companion lint warnings were reported by its build script, with no errors.
+- 2026-04-25 Slice 8:
+  - `npm install --save-dev --ignore-scripts --workspace=@qwen-code/desktop electron-builder` passed.
+  - `npm run test --workspace=packages/desktop` passed: 7 files, 43 tests.
+  - `npm run lint --workspace=packages/desktop` passed.
+  - `npm run typecheck --workspace=packages/desktop` passed.
+  - `npm run build --workspace=packages/desktop` passed.
+  - `npm run bundle` passed and copied sandbox profiles, vendor resources,
+    bundled skills, and docs into root `dist/`.
+  - `npm run package:dir --workspace=packages/desktop` passed after fixing the
+    initial recursive `dist/desktop` resource copy by excluding `desktop/**`.
+    electron-builder reported non-fatal warnings for missing package author,
+    default Electron icon, ad-hoc macOS signing, skipped notarization, and
+    existing npm dependency tree issues.
+  - `npm run smoke:package --workspace=packages/desktop` passed.
+  - `npm run smoke:package --workspace=packages/desktop -- --launch` passed;
+    the packaged macOS app stayed alive through startup and was terminated by
+    the smoke script.
+  - `npm run typecheck` passed across workspaces.
+  - `npm run build` passed across the configured build order. Existing VS Code
+    companion lint warnings were reported by its build script, with no errors.
 
 ## Self Review Notes
 
@@ -385,10 +429,21 @@ order, verification, decisions, and remaining work.
   - Runtime auth status now reports `authenticated` only when ACP account info
     contains an auth/model/baseUrl signal, avoiding a misleading state for
     empty account payloads.
+- 2026-04-25 Slice 8:
+  - Packaged CLI launch is lazy: desktop startup creates the ACP client but the
+    child process still starts on the first session/auth operation. This keeps
+    app launch independent of user credentials while preserving the ACP
+    boundary for real work.
+  - The renderer security posture remains unchanged after packaging:
+    `nodeIntegration: false`, context isolation enabled, preload whitelist only,
+    and CSP restricted to self plus local `127.0.0.1` HTTP/WS.
+  - The package smoke validates resource presence and startup, but does not run
+    an authenticated model turn. A live credentialed packaged chat test remains
+    outside MVP verification.
 
 ## Remaining Work
 
-- Commit Slice 7.
-- Start Slice 8 packaging and smoke testing. The remaining MVP gap is wiring a
-  packaged desktop app to launch the bundled CLI ACP child with
-  `ELECTRON_RUN_AS_NODE=1`, then verifying a packaged smoke launch.
+- Commit Slice 8.
+- MVP scope from the architecture plan is complete and verified. Future work:
+  signed/notarized distributables, app icon/metadata polish, and a credentialed
+  packaged chat smoke test.

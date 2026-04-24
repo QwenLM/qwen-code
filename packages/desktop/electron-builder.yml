@@ -1,0 +1,32 @@
+appId: com.qwen.code.desktop
+productName: Qwen Code
+asar: true
+npmRebuild: false
+
+directories:
+  output: ../../dist/desktop
+
+files:
+  - dist/**/*
+  - package.json
+
+extraResources:
+  - from: ../../dist
+    to: qwen-cli
+    filter:
+      - '**/*'
+      - '!desktop/**'
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - dir
+
+win:
+  target:
+    - dir
+
+linux:
+  category: Development
+  target:
+    - dir
