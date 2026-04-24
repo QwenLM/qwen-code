@@ -1070,11 +1070,21 @@ export const App: React.FC = () => {
     [buildFence],
   );
 
-  // Track the right-click target so we can identify which message was clicked
-  const contextMenuTargetRef = useRef<HTMLElement | null>(null);
+  // Track which message was right-clicked by resolving the index immediately.
+  // Storing the DOM element reference would be fragile: React re-renders between
+  // the right-click and the async copy command (routed via extension host) can
+  // detach the element, causing findMessageIndex to fail intermittently.
+  const contextMenuMsgIdxRef = useRef<number>(-1);
   useEffect(() => {
     const trackTarget = (e: MouseEvent) => {
-      contextMenuTargetRef.current = e.target as HTMLElement;
+      const container = messagesContainerRef.current;
+      if (container && e.target instanceof Element) {
+        contextMenuMsgIdxRef.current = findMessageIndex(
+          e.target,
+          container,
+          childIndexMapRef.current,
+        );
+      }
       // Notify extension that this webview was right-clicked, so copy commands route here
       vscode.postMessage({ type: 'contextMenuTriggered', data: {} });
     };
@@ -1099,26 +1109,21 @@ export const App: React.FC = () => {
       const { action } = message.data as { action: string };
 
       if (action === 'copyMessage') {
-        const target = contextMenuTargetRef.current;
-        if (target) {
-          const container = messagesContainerRef.current;
-          if (!container) return;
-          const idx = findMessageIndex(
-            target,
-            container,
-            childIndexMapRef.current,
-          );
-          if (idx >= 0 && idx < allMessages.length) {
-            const item = allMessages[idx];
-            if (item.type === 'message') {
-              const msg = item.data as TextMessage;
+        const idx = contextMenuMsgIdxRef.current;
+        if (idx >= 0 && idx < allMessages.length) {
+          const item = allMessages[idx];
+          if (item.type === 'message') {
+            const msg = item.data as TextMessage;
+            if (msg.kind === 'image' && msg.imagePath) {
+              copyToClipboard(`![image](${msg.imagePath})`);
+            } else {
               copyToClipboard(msg.content || '');
-            } else if (
-              item.type === 'completed-tool-call' ||
-              item.type === 'in-progress-tool-call'
-            ) {
-              copyToClipboard(formatToolCallForCopy(item.data as ToolCallData));
             }
+          } else if (
+            item.type === 'completed-tool-call' ||
+            item.type === 'in-progress-tool-call'
+          ) {
+            copyToClipboard(formatToolCallForCopy(item.data as ToolCallData));
           }
         }
       } else if (action === 'copyAllMessages') {
@@ -1126,7 +1131,10 @@ export const App: React.FC = () => {
         for (const item of allMessages) {
           if (item.type === 'message') {
             const msg = item.data as TextMessage;
-            const content = (msg.content || '').trim();
+            const content =
+              msg.kind === 'image' && msg.imagePath
+                ? `![image](${msg.imagePath})`
+                : (msg.content || '').trim();
             if (!content) continue;
             if (msg.role === 'user') {
               parts.push(`**User:** ${content}`);
@@ -1153,8 +1161,8 @@ export const App: React.FC = () => {
           const item = allMessages[i];
           if (item.type === 'message') {
             const msg = item.data as TextMessage;
-            if (msg.role === 'assistant') {
-              copyToClipboard(msg.content || '');
+            if (msg.role === 'assistant' && msg.content?.trim()) {
+              copyToClipboard(msg.content);
               return;
             }
           }
