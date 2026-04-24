@@ -27,6 +27,9 @@ export interface PerFileStats {
   removed: number;
   isBinary: boolean;
   isUntracked?: boolean;
+  /** Only meaningful for untracked files: `true` when the file exceeded the
+   *  line-counting read cap and `added` is therefore a lower bound. */
+  truncated?: boolean;
 }
 
 export interface GitDiffResult {
@@ -116,30 +119,34 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
     // changes already fill the `MAX_FILES` slot.
     stats.filesCount += untrackedCount;
     const untrackedPaths = splitNulDelimited(untrackedOut);
-    const remainingSlots = Math.max(0, MAX_FILES - perFileStats.size);
-    const visiblePaths = untrackedPaths.slice(0, remainingSlots);
-    // Count lines in each newly-created file so the header's `+N` reflects
-    // the true additions a user would see if they `git add`'d. Reads are
-    // capped per-file and binary content is detected so huge log files or
-    // blobs don't stall /diff.
-    const untrackedStats = await Promise.all(
-      visiblePaths.map((relPath) =>
-        countUntrackedLines(path.join(cwd, relPath)),
-      ),
+    // Keep line-counting decoupled from per-file rendering. We read up to
+    // `MAX_FILES` untracked files for their line counts (bounds worst-case
+    // I/O at ~50 MB) and fold all of them into `linesAdded`, even if only
+    // `remainingSlots` of them end up as visible rows. That avoids the
+    // header silently under-reporting additions when tracked changes have
+    // already filled the per-file map.
+    const countable = untrackedPaths.slice(0, MAX_FILES);
+    const countableStats = await Promise.all(
+      countable.map((relPath) => countUntrackedLines(path.join(cwd, relPath))),
     );
-    for (let i = 0; i < visiblePaths.length; i++) {
-      const relPath = visiblePaths[i] ?? '';
-      const u = untrackedStats[i] ?? {
+    for (const s of countableStats) stats.linesAdded += s.added;
+
+    const remainingSlots = Math.max(0, MAX_FILES - perFileStats.size);
+    const visibleCount = Math.min(remainingSlots, countable.length);
+    for (let i = 0; i < visibleCount; i++) {
+      const relPath = countable[i] ?? '';
+      const u = countableStats[i] ?? {
         added: 0,
         isBinary: false,
+        truncated: false,
       };
       perFileStats.set(relPath, {
         added: u.added,
         removed: 0,
         isBinary: u.isBinary,
         isUntracked: true,
+        truncated: u.truncated,
       });
-      stats.linesAdded += u.added;
     }
   }
 
@@ -370,13 +377,18 @@ function splitNulDelimited(stdout: string | null): string[] {
 interface UntrackedLineStats {
   added: number;
   isBinary: boolean;
+  /** `true` when the file was larger than the read cap so `added` is a lower
+   *  bound (the caller is expected to surface this so the user knows). */
+  truncated: boolean;
 }
 
 /**
  * Count lines in an untracked file so the /diff totals include it. Reads up
  * to `UNTRACKED_READ_CAP_BYTES`, bails on NUL in the first `BINARY_SNIFF_BYTES`
- * (git's own heuristic), and swallows read errors into `{added:0,isBinary:false}`
- * so one unreadable file can't block the whole command.
+ * (git's own heuristic), and swallows read errors into a zero-result so one
+ * unreadable file can't block the whole command. `truncated` is set when
+ * `fstat(size) > bytesRead`, so the UI can mark partial counts honestly
+ * instead of silently under-reporting a 10 MB log as `+20k`.
  */
 async function countUntrackedLines(
   absPath: string,
@@ -385,25 +397,39 @@ async function countUntrackedLines(
   try {
     fh = await open(absPath, 'r');
   } catch {
-    return { added: 0, isBinary: false };
+    return { added: 0, isBinary: false, truncated: false };
   }
   try {
     const buf = Buffer.alloc(UNTRACKED_READ_CAP_BYTES);
     const { bytesRead } = await fh.read(buf, 0, UNTRACKED_READ_CAP_BYTES, 0);
-    if (bytesRead === 0) return { added: 0, isBinary: false };
+    if (bytesRead === 0) {
+      return { added: 0, isBinary: false, truncated: false };
+    }
     const sniffEnd = Math.min(BINARY_SNIFF_BYTES, bytesRead);
     for (let i = 0; i < sniffEnd; i++) {
-      if (buf[i] === 0) return { added: 0, isBinary: true };
+      if (buf[i] === 0) {
+        return { added: 0, isBinary: true, truncated: false };
+      }
     }
+    // Compare against real file size rather than "bytesRead === cap" —
+    // a file that happens to be exactly UNTRACKED_READ_CAP_BYTES isn't
+    // truncated, and a short-read against a larger file still is.
+    const { size } = await fh.stat();
+    const truncated = size > bytesRead;
     let lines = 0;
     for (let i = 0; i < bytesRead; i++) {
       if (buf[i] === 0x0a) lines++;
     }
-    // If the file does not end in a newline, count the trailing partial line.
-    if (buf[bytesRead - 1] !== 0x0a) lines++;
-    return { added: lines, isBinary: false };
+    // If the portion we read does not end on a newline, count the trailing
+    // partial line — but only when the read reached EOF. When the read was
+    // cut short by the cap, the "trailing partial" is actually a complete
+    // line that continues past the buffer and will be counted when the
+    // following `\n` is eventually seen by a future larger cap; counting it
+    // here would double-count once the cap is raised.
+    if (!truncated && buf[bytesRead - 1] !== 0x0a) lines++;
+    return { added: lines, isBinary: false, truncated };
   } catch {
-    return { added: 0, isBinary: false };
+    return { added: 0, isBinary: false, truncated: false };
   } finally {
     await fh.close().catch(() => {});
   }

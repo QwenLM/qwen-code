@@ -121,7 +121,12 @@ function formatPerFile(perFileStats: Map<string, PerFileStats>): string[] {
     } else {
       const added = `+${String(s.added).padStart(addWidth)}`;
       const removed = `-${String(s.removed).padStart(remWidth)}`;
-      const suffix = s.isUntracked ? ` ${t('(new)')}` : '';
+      let suffix = '';
+      if (s.isUntracked) {
+        // `truncated` means we only counted part of a large new file — surface
+        // that so `+N` isn't read as the exact line count.
+        suffix = s.truncated ? ` ${t('(new, partial)')}` : ` ${t('(new)')}`;
+      }
       rows.push(`  ${added} ${removed}  ${filename}${suffix}`);
     }
   }

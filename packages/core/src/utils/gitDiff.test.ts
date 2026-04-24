@@ -243,7 +243,32 @@ describe('fetchGitDiff', () => {
       removed: 0,
       isBinary: false,
       isUntracked: true,
+      truncated: false,
     });
+  });
+
+  it('marks oversized untracked text files as truncated', async () => {
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'x\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+
+    // Write a 1.5 MB text file — larger than UNTRACKED_READ_CAP_BYTES (1 MB),
+    // so the counter can only see part of the lines. The flag lets the UI
+    // mark `+N` as a lower bound instead of silently under-reporting.
+    const line = 'a'.repeat(99) + '\n'; // 100 bytes per line
+    const totalLines = 15_000; // 1.5 MB
+    await fs.writeFile(path.join(repo, 'big.log'), line.repeat(totalLines));
+
+    const result = await fetchGitDiff(repo);
+    expect(result).not.toBeNull();
+    const entry = result!.perFileStats.get('big.log');
+    expect(entry?.isUntracked).toBe(true);
+    expect(entry?.isBinary).toBe(false);
+    expect(entry?.truncated).toBe(true);
+    // We counted at most UNTRACKED_READ_CAP_BYTES / 100 = 10_000 lines, less
+    // than the file's real line count.
+    expect(entry?.added).toBeGreaterThan(0);
+    expect(entry!.added).toBeLessThan(totalLines);
   });
 
   it('flags untracked binary files without counting lines', async () => {
@@ -264,6 +289,7 @@ describe('fetchGitDiff', () => {
       removed: 0,
       isBinary: true,
       isUntracked: true,
+      truncated: false,
     });
     // Binary bytes must not contaminate the linesAdded total.
     expect(result!.stats.linesAdded).toBe(0);
@@ -651,6 +677,39 @@ describe('fetchGitDiff untracked counting', () => {
   });
   afterEach(async () => {
     await fs.rm(repo, { recursive: true, force: true });
+  });
+
+  it('aggregates untracked line counts into linesAdded even when the per-file map is full of tracked entries', async () => {
+    // Seed MAX_FILES tracked files, then modify them so the per-file map
+    // saturates with tracked entries. Add a handful of untracked files that
+    // would otherwise be cut out of the display slots — their line counts
+    // still need to land in `stats.linesAdded`.
+    for (let i = 0; i < MAX_FILES; i++) {
+      await fs.writeFile(path.join(repo, `t${i}.txt`), `hello${i}\n`);
+    }
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'seed');
+    for (let i = 0; i < MAX_FILES; i++) {
+      await fs.writeFile(path.join(repo, `t${i}.txt`), `HELLO${i}\n`);
+    }
+    // Each untracked file has 3 lines; 5 files × 3 = 15 lines we must keep.
+    const untrackedCount = 5;
+    const linesPerFile = 3;
+    for (let i = 0; i < untrackedCount; i++) {
+      await fs.writeFile(path.join(repo, `u${i}.txt`), 'a\nb\nc\n');
+    }
+
+    const result = await fetchGitDiff(repo);
+    expect(result).not.toBeNull();
+    expect(result!.stats.filesCount).toBe(MAX_FILES + untrackedCount);
+    // Per-file map is still capped — none of the u* entries will be visible
+    // because the t* entries filled every slot. But the totals must still
+    // include the untracked additions.
+    expect(result!.perFileStats.size).toBe(MAX_FILES);
+    const trackedLinesAdded = MAX_FILES; // each t* gained 1 char → numstat 1/1
+    expect(result!.stats.linesAdded).toBe(
+      trackedLinesAdded + untrackedCount * linesPerFile,
+    );
   });
 
   it('counts untracked files in filesCount even after the per-file map is full', async () => {

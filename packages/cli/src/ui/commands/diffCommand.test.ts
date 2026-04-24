@@ -155,6 +155,30 @@ describe('diffCommand', () => {
     expect(aLine.indexOf('src/a.ts')).toBe(newLine.indexOf('notes.md'));
   });
 
+  it('marks truncated untracked text files with (new, partial)', async () => {
+    if (!diffCommand.action) throw new Error('Command has no action');
+    mockFetchGitDiff.mockResolvedValue({
+      stats: { filesCount: 1, linesAdded: 10000, linesRemoved: 0 },
+      perFileStats: new Map([
+        [
+          'big.log',
+          {
+            added: 10000,
+            removed: 0,
+            isBinary: false,
+            isUntracked: true,
+            truncated: true,
+          },
+        ],
+      ]),
+    } satisfies GitDiffResult);
+    const result = await diffCommand.action(mockContext, '');
+    const content = (result as { content: string }).content;
+    const row = content.split('\n').find((l) => l.includes('big.log'))!;
+    expect(row).toContain('(new, partial)');
+    expect(row).not.toContain(' (new)');
+  });
+
   it('marks binary untracked files with (binary, new) and no line count', async () => {
     if (!diffCommand.action) throw new Error('Command has no action');
     mockFetchGitDiff.mockResolvedValue({

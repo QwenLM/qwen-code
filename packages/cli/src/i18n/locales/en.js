@@ -171,6 +171,7 @@ export default {
   '(binary)': '(binary)',
   '(binary, new)': '(binary, new)',
   '(new)': '(new)',
+  '(new, partial)': '(new, partial)',
 
   // ============================================================================
   // Commands - Agents
