@@ -876,6 +876,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const {
     messageQueue,
     addMessage,
+    clearQueue,
     popAllMessages,
     drainQueue,
     popNextSegment,
@@ -1217,19 +1218,24 @@ export const AppContainer = (props: AppContainerProps) => {
       ...pendingGeminiHistoryItems,
     ];
     if (isToolExecuting(pendingHistoryItems)) {
-      buffer.setText(''); // Just clear the prompt
+      // Cancel during tool execution: clear the buffer AND drop any
+      // queued follow-ups. The cancel contract is the same as the
+      // non-tool path — abort and redirect — so queued segments must
+      // not auto-fire once the tool settles and the app returns to idle.
+      buffer.setText('');
+      clearQueue();
       return;
     }
 
-    // Move any queued follow-up messages back into the buffer so the user
-    // can edit or resubmit them. Otherwise leave the buffer alone — in
-    // particular, do NOT repopulate it with the previous prompt; the user
-    // can still recall it via history navigation (Up/Ctrl+P).
-    //
-    // popAllMessages is atomic via the queue's synchronous ref,
-    // matching the drain behavior used during tool completion.
+    // Cancel is "abort and redirect": restore the most recent queued
+    // segment into the buffer for editing, and discard the rest of the
+    // queue so the user is not surprised later by auto-submission of
+    // forgotten follow-ups. Segment boundaries still matter for the
+    // normal idle drain, which is the primary consumer of the queue;
+    // on cancel, the user's intent is a clean slate.
     const popped = popAllMessages();
     if (popped) {
+      clearQueue();
       const currentText = buffer.text;
       // Preserve any in-progress draft the user typed since submitting (this
       // is reachable via Ctrl+C cancel, which fires regardless of buffer
@@ -1239,6 +1245,7 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [
     buffer,
     popAllMessages,
+    clearQueue,
     pendingSlashCommandHistoryItems,
     pendingGeminiHistoryItems,
   ]);

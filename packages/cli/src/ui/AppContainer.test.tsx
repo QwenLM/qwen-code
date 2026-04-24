@@ -28,6 +28,7 @@ import {
   UIActionsContext,
   type UIActions,
 } from './contexts/UIActionsContext.js';
+import { ToolCallStatus } from './types.js';
 import { useContext } from 'react';
 
 // Mock useStdout to capture terminal title writes
@@ -647,6 +648,7 @@ describe('AppContainer State Management', () => {
     it('moves queued follow-up messages into an empty buffer on cancel', async () => {
       const mockSetText = vi.fn();
       const mockPopAllMessages = vi.fn().mockReturnValue('queued follow-up');
+      const mockClearQueue = vi.fn();
       mockedUseTextBuffer.mockReturnValue({
         text: '',
         setText: mockSetText,
@@ -668,7 +670,7 @@ describe('AppContainer State Management', () => {
       mockedUseMessageQueue.mockReturnValue({
         messageQueue: ['queued follow-up'],
         addMessage: vi.fn(),
-        clearQueue: vi.fn(),
+        clearQueue: mockClearQueue,
         getQueuedMessagesText: vi.fn().mockReturnValue('queued follow-up'),
         popAllMessages: mockPopAllMessages,
         drainQueue: vi.fn().mockReturnValue(['queued follow-up']),
@@ -696,6 +698,75 @@ describe('AppContainer State Management', () => {
         expect.stringContaining('the previous prompt'),
       );
       expect(mockPopAllMessages).toHaveBeenCalled();
+      // Option C: cancel restores the first segment and drops the rest of
+      // the queue so forgotten follow-ups never auto-submit later.
+      expect(mockClearQueue).toHaveBeenCalled();
+    });
+
+    it('drops the queue when cancelling during tool execution', async () => {
+      // Simulates: user asks for a shell tool (e.g. sleep 30), queues
+      // `/model` and `hi` while the tool is running, then hits Ctrl+C.
+      // The cancel must clear BOTH the buffer and the queue so that
+      // `hi` does not auto-fire once the tool settles and the app
+      // returns to idle.
+      const mockSetText = vi.fn();
+      const mockClearQueue = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [
+          {
+            type: 'tool_group',
+            tools: [
+              {
+                callId: 'call-1',
+                name: 'run_shell_command',
+                description: 'sleep 30',
+                status: ToolCallStatus.Executing,
+                resultDisplay: undefined,
+                confirmationDetails: undefined,
+                renderOutputAsMarkdown: false,
+              },
+            ],
+          },
+        ],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: ['/model', 'hi'],
+        addMessage: vi.fn(),
+        clearQueue: mockClearQueue,
+        getQueuedMessagesText: vi.fn().mockReturnValue('/model\n\nhi'),
+        popAllMessages: vi.fn().mockReturnValue('/model'),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue('/model'),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      triggerCancel();
+
+      // Buffer cleared and queue dropped — same "abort and redirect"
+      // contract as the non-tool cancel path.
+      expect(mockSetText).toHaveBeenCalledWith('');
+      expect(mockClearQueue).toHaveBeenCalled();
     });
 
     it('preserves an in-progress draft when restoring queued messages on cancel', async () => {
