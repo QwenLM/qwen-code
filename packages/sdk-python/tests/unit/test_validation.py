@@ -165,3 +165,10 @@ def test_timeout_rejects_negative_value() -> None:
 def test_timeout_rejects_boolean_value() -> None:
     with pytest.raises(TypeError, match=r"timeout\.stream_close must be a positive"):
         TimeoutOptions.from_mapping({"stream_close": True})
+
+
+def test_rejects_mcp_servers() -> None:
+    with pytest.raises(ValidationError, match="mcp_servers is not supported"):
+        validate_query_options(
+            QueryOptions(mcp_servers={"my-server": {"command": "node", "args": []}})
+        )

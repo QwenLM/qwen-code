@@ -471,6 +471,94 @@ async def test_ensure_started_raises_after_close() -> None:
 
 
 @pytest.mark.asyncio
+async def test_anext_after_exhaustion_raises_stop_async_iteration() -> None:
+    """After the async iterator is exhausted, subsequent __anext__ calls must
+    raise StopAsyncIteration immediately instead of blocking."""
+    transport = FakeTransport()
+    query = await _start_query(transport)
+
+    # Deliver one assistant message, then a result to end the turn.
+    transport.push(
+        {
+            "type": "assistant",
+            "session_id": VALID_UUID,
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "hi"}],
+            },
+        }
+    )
+    transport.push(
+        {
+            "type": "result",
+            "session_id": VALID_UUID,
+            "result": "done",
+            "is_error": False,
+            "duration_ms": 10,
+            "duration_api_ms": 5,
+            "num_turns": 1,
+        }
+    )
+    # Signal end of transport stream so the router finishes naturally.
+    await transport.close()
+
+    # Consume all messages until exhaustion.
+    messages: list[Any] = []
+    with pytest.raises(StopAsyncIteration):
+        while True:
+            messages.append(await query.__anext__())
+
+    assert len(messages) >= 1
+
+    # The iterator is now exhausted — a second call must raise immediately.
+    with pytest.raises(StopAsyncIteration):
+        await query.__anext__()
+
+
+@pytest.mark.asyncio
+async def test_initialize_failure_no_unhandled_task_exception(
+    recwarn: pytest.WarningsChecker,
+) -> None:
+    """When _initialize fails, no 'Task exception was never retrieved' warning
+    should appear — _finish_with_error already surfaces the error."""
+    transport = FakeTransport()
+    query = Query(
+        transport=transport,  # type: ignore[arg-type]
+        options=QueryOptions(
+            timeout=TimeoutOptions(
+                can_use_tool=0.05,
+                control_request=0.05,
+                stream_close=0.05,
+            )
+        ),
+        prompt="hello",
+        session_id=VALID_UUID,
+    )
+    await query._ensure_started()
+
+    # Let the initialize request time out — this triggers _finish_with_error
+    # inside _initialize.
+    init_request = await _wait_for_request(transport, "initialize")
+    assert init_request is not None  # init was sent
+
+    # Don't respond to initialize — let the control-request timeout fire.
+    # The error propagates through _message_queue.
+    with pytest.raises(Exception):
+        await query.__anext__()
+
+    await query.close()
+
+    # Give the event loop a moment to report any unhandled task exceptions.
+    await asyncio.sleep(0.1)
+
+    # No "Task exception was never retrieved" warnings should have appeared.
+    task_warnings = [
+        w for w in recwarn.list if "never retrieved" in str(w.message)
+    ]
+    assert task_warnings == []
+
+
+@pytest.mark.asyncio
 async def test_async_context_manager_closes_on_exit() -> None:
     transport = FakeTransport()
     query = Query(
@@ -491,3 +579,32 @@ async def test_async_context_manager_closes_on_exit() -> None:
         assert not q.is_closed()
 
     assert query.is_closed() is True
+
+
+def test_sync_next_after_exhaustion_raises_stop_iteration() -> None:
+    """After the sync iterator is exhausted, subsequent __next__ calls must
+    raise StopIteration immediately instead of blocking on queue.get()."""
+    from queue import Queue
+
+    from qwen_code_sdk.sync_query import SyncQuery, _STOP
+
+    # Build a minimal SyncQuery without spawning the real event-loop thread.
+    sq = object.__new__(SyncQuery)
+    sq._queue = Queue()
+    sq._exhausted = False
+
+    # Put one message then the sentinel.
+    sq._queue.put({"type": "assistant", "message": {"role": "assistant", "content": []}})
+    sq._queue.put(_STOP)
+
+    # First call returns the message.
+    msg = next(sq)
+    assert msg["type"] == "assistant"
+
+    # Second call should exhaust.
+    with pytest.raises(StopIteration):
+        next(sq)
+
+    # Third call must raise immediately, not block.
+    with pytest.raises(StopIteration):
+        next(sq)

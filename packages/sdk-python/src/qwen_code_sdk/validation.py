@@ -64,6 +64,12 @@ def validate_query_options(options: QueryOptions) -> None:
     ):
         raise ValidationError("path_to_qwen_executable cannot be empty")
 
+    if options.mcp_servers:
+        raise ValidationError(
+            "mcp_servers is not supported in Python SDK v1. "
+            "Remove the mcp_servers option or use the TypeScript SDK."
+        )
+
 
 def _validate_optional_callable(
     value: object,
