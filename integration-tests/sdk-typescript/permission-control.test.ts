@@ -905,7 +905,6 @@ describe('Permission Control (E2E)', () => {
         'grep_search',
         'glob',
         'list_directory',
-        'web_search',
         'web_fetch',
       ];
 

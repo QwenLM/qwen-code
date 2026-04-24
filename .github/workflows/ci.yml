@@ -83,6 +83,9 @@ jobs:
       - name: 'Run sensitive keyword linter'
         run: 'node scripts/lint.js --sensitive-keywords'
 
+      - name: 'Run i18n check'
+        run: 'npm run check-i18n'
+
       - name: 'Build CLI package'
         run: 'npm run build --workspace=packages/cli'
 
