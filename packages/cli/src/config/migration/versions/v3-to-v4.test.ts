@@ -113,6 +113,41 @@ describe('V3ToV4Migration', () => {
       expect(warnings[0]).toContain('user');
     });
 
+    it.each([
+      ['null', null],
+      ['array', []],
+      ['number', 42],
+    ])('treats %s as invalid and resets with a warning', (_label, bad) => {
+      const input = { $version: 3, general: { gitCoAuthor: bad } };
+      const { settings, warnings } = migration.migrate(input, 'user') as {
+        settings: Record<string, unknown>;
+        warnings: string[];
+      };
+
+      expect(
+        (settings['general'] as Record<string, unknown>)['gitCoAuthor'],
+      ).toEqual({});
+      expect(warnings).toHaveLength(1);
+    });
+
+    it('leaves a partially-specified object unchanged', () => {
+      // Downstream normalizeGitCoAuthor fills missing sub-keys with defaults;
+      // the migration only reshapes, it does not paternalistically fill defaults.
+      const input = {
+        $version: 3,
+        general: { gitCoAuthor: { commit: false } },
+      };
+      const { settings, warnings } = migration.migrate(input, 'user') as {
+        settings: Record<string, unknown>;
+        warnings: string[];
+      };
+
+      expect(
+        (settings['general'] as Record<string, unknown>)['gitCoAuthor'],
+      ).toEqual({ commit: false });
+      expect(warnings).toEqual([]);
+    });
+
     it('does not mutate the input settings object', () => {
       const input = { $version: 3, general: { gitCoAuthor: false } };
       migration.migrate(input, 'user');
