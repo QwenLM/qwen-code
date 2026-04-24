@@ -7,6 +7,7 @@
 export type SupportedLanguage =
   | 'en'
   | 'zh'
+  | 'zh-TW'
   | 'ru'
   | 'de'
   | 'ja'
@@ -37,6 +38,12 @@ export const SUPPORTED_LANGUAGES: readonly LanguageDefinition[] = [
     id: 'zh-CN',
     fullName: 'Chinese',
     nativeName: '中文',
+  },
+  {
+    code: 'zh-TW',
+    id: 'zh-TW',
+    fullName: 'Traditional Chinese',
+    nativeName: '繁體中文',
   },
   {
     code: 'ru',
