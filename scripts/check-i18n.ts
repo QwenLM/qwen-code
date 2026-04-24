@@ -13,7 +13,6 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 
 // Get __dirname for ESM modules
-// @ts-expect-error - import.meta is supported in NodeNext module system at runtime
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 interface CheckResult {
@@ -23,6 +22,7 @@ interface CheckResult {
   stats: {
     totalKeys: number;
     translatedKeys: number;
+    zhTWTranslatedKeys: number;
     unusedKeys: string[];
     unusedKeysOnlyInLocales?: string[]; // 新增：只在 locales 中存在的未使用键
   };

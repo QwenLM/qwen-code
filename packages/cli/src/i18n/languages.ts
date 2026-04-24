@@ -34,16 +34,16 @@ export const SUPPORTED_LANGUAGES: readonly LanguageDefinition[] = [
     nativeName: 'English',
   },
   {
-    code: 'zh',
-    id: 'zh-CN',
-    fullName: 'Chinese',
-    nativeName: '中文',
-  },
-  {
     code: 'zh-TW',
     id: 'zh-TW',
     fullName: 'Traditional Chinese',
     nativeName: '繁體中文',
+  },
+  {
+    code: 'zh',
+    id: 'zh-CN',
+    fullName: 'Chinese',
+    nativeName: '中文',
   },
   {
     code: 'ru',
