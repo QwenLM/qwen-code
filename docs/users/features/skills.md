@@ -131,6 +131,20 @@ Qwen Code discovers Skills from:
 - Personal Skills: `~/.qwen/skills/`
 - Project Skills: `.qwen/skills/`
 - Extension Skills: Skills provided by installed extensions
+- Bundled Skills: built-in Skills shipped with Qwen Code
+
+### Bundled Skills
+
+Qwen Code ships with a small set of built-in Skills. Bundled Skills are also
+available as slash commands.
+
+| Skill               | Use when                                                                        |
+| ------------------- | ------------------------------------------------------------------------------- |
+| `batch`             | Processing many files with parallel worker agents                               |
+| `loop`              | Scheduling a prompt to run repeatedly in the current session                    |
+| `oh-my-agent-check` | Auditing agent wrappers, memory, tools, rendering, or hidden retry loops        |
+| `qc-helper`         | Answering Qwen Code usage, feature, configuration, or troubleshooting questions |
+| `review`            | Reviewing local changes, files, or pull requests                                |
 
 ### Extension Skills
 
