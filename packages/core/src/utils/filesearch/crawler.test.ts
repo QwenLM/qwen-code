@@ -692,7 +692,6 @@ describe('crawler', () => {
       execSync('git config user.email "test@test.com"', { cwd: tmpDir });
       execSync('git config user.name "Test"', { cwd: tmpDir });
 
-      // Create a submodule directory structure
       const subDir = path.join(tmpDir, 'sub');
       await fs.mkdir(subDir, { recursive: true });
       await fs.writeFile(path.join(subDir, 'sub-file.ts'), '');
