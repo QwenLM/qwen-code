@@ -347,6 +347,9 @@ describe('Gemini Client (client.ts)', () => {
       warmAll: vi.fn().mockResolvedValue(undefined),
       ensureTool: vi.fn().mockResolvedValue(null),
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
+      getDeferredToolSummary: vi.fn().mockReturnValue([]),
+      clearRevealedDeferredTools: vi.fn(),
+      revealDeferredTool: vi.fn(),
       getTool: vi.fn().mockReturnValue(null),
     };
     const fileService = new FileDiscoveryService('/test/dir');
@@ -2918,6 +2921,7 @@ Other open files:
         'Override prompt',
         'Saved memory',
         undefined,
+        undefined,
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -2949,6 +2953,7 @@ Other open files:
         '',
         'test-model',
         'Be extra concise.',
+        undefined,
       );
     });
 
@@ -2980,6 +2985,7 @@ Other open files:
         'Override prompt',
         'Saved memory',
         'Focus on findings only.',
+        undefined,
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({

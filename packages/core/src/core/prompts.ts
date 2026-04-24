@@ -79,6 +79,7 @@ export function getCustomSystemPrompt(
   customInstruction: GenerateContentConfig['systemInstruction'],
   userMemory?: string,
   appendInstruction?: string,
+  deferredTools?: Array<{ name: string; description: string }>,
 ): string {
   // Extract text from custom instruction
   let instructionText = '';
@@ -103,8 +104,11 @@ export function getCustomSystemPrompt(
 
   // Append user memory using the same pattern as getCoreSystemPrompt
   const memorySuffix = buildSystemPromptSuffix(userMemory);
+  const deferredSuffix = deferredTools
+    ? buildDeferredToolsSection(deferredTools)
+    : '';
 
-  return `${instructionText}${memorySuffix}${buildSystemPromptSuffix(appendInstruction)}`;
+  return `${instructionText}${deferredSuffix}${memorySuffix}${buildSystemPromptSuffix(appendInstruction)}`;
 }
 
 function buildSystemPromptSuffix(text?: string): string {
@@ -112,10 +116,44 @@ function buildSystemPromptSuffix(text?: string): string {
   return trimmed ? `\n\n---\n\n${trimmed}` : '';
 }
 
+/**
+ * Builds the "deferred tools" section injected into the system prompt.
+ *
+ * When non-empty, informs the model that additional tools exist but are not
+ * listed in the function-declaration array — they must be discovered via
+ * `ToolSearch` before use. Keeps the initial prompt small while still letting
+ * the model reason about available capabilities.
+ */
+export function buildDeferredToolsSection(
+  deferredTools: Array<{ name: string; description: string }>,
+): string {
+  if (!deferredTools || deferredTools.length === 0) return '';
+  // One line per tool, truncated to keep the prompt lean. The model only needs
+  // enough info to decide whether to call ToolSearch; the full schema is
+  // fetched on demand.
+  const MAX_DESC_LEN = 160;
+  const lines = deferredTools.map(({ name, description }) => {
+    const firstLine = (description || '').split('\n')[0].trim();
+    const truncated =
+      firstLine.length > MAX_DESC_LEN
+        ? firstLine.slice(0, MAX_DESC_LEN - 1) + '…'
+        : firstLine;
+    return `- ${name}: ${truncated}`;
+  });
+  return `
+
+## Deferred Tools
+
+The following tools are available but their full schemas are not listed above to save tokens. To use any of them, first call \`${ToolNames.TOOL_SEARCH}\` with the tool name (e.g. \`select:${deferredTools[0].name}\`) or a keyword query. Once loaded, the schema will be available for subsequent tool calls in this session.
+
+${lines.join('\n')}`;
+}
+
 export function getCoreSystemPrompt(
   userMemory?: string,
   model?: string,
   appendInstruction?: string,
+  deferredTools?: Array<{ name: string; description: string }>,
 ): string {
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md but can be modified via custom path in QWEN_SYSTEM_MD
@@ -347,8 +385,11 @@ Your core function is efficient and safe assistance. Balance extreme conciseness
       ? buildSystemPromptSuffix(userMemory)
       : '';
   const appendSuffix = buildSystemPromptSuffix(appendInstruction);
+  const deferredSuffix = deferredTools
+    ? buildDeferredToolsSection(deferredTools)
+    : '';
 
-  return `${basePrompt}${memorySuffix}${appendSuffix}`;
+  return `${basePrompt}${deferredSuffix}${memorySuffix}${appendSuffix}`;
 }
 
 /**

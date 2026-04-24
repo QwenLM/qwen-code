@@ -103,8 +103,13 @@ export async function collectContextData(
 
   const toolRegistry = config.getToolRegistry();
   const allTools = toolRegistry ? toolRegistry.getAllTools() : [];
+  // Pass includeDeferred so this token estimate lines up with the per-tool
+  // breakdown below (which iterates getAllTools, unfiltered). Without it the
+  // "all tools" total would exclude deferred tools while the per-tool sum
+  // still includes them, and displayBuiltinTools = total - mcp would go
+  // negative.
   const toolDeclarations = toolRegistry
-    ? toolRegistry.getFunctionDeclarations()
+    ? toolRegistry.getFunctionDeclarations({ includeDeferred: true })
     : [];
   const toolsJsonStr = JSON.stringify(toolDeclarations);
   const allToolsTokens = estimateTokens(toolsJsonStr);
