@@ -13,6 +13,7 @@ import {
 } from './useAttentionNotifications.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { TerminalNotification } from './useTerminalNotification.js';
+import type { TrackedToolCall } from './useReactToolScheduler.js';
 
 vi.mock('../../services/notificationService.js', () => ({
   sendNotification: vi.fn(),
@@ -196,14 +197,14 @@ describe('useAttentionNotifications', () => {
         terminal: mockTerminal,
         pendingToolCalls: [
           { status: 'awaiting_approval', request: { name: 'Bash' } },
-        ],
+        ] as unknown as TrackedToolCall[],
       },
     });
 
     expect(mockedSendNotification).toHaveBeenCalledTimes(1);
     expect(mockedSendNotification).toHaveBeenCalledWith(
       expect.objectContaining({
-        message: 'Qwen needs your permission to use Bash',
+        message: 'Qwen Code needs your permission to use Bash',
       }),
       mockTerminal,
       true,
@@ -220,13 +221,13 @@ describe('useAttentionNotifications', () => {
         elapsedTime: 0,
         settings: mockSettings,
         terminal: mockTerminal,
-        pendingToolCalls: [],
+        pendingToolCalls: [] as TrackedToolCall[],
       },
     });
 
     expect(mockedSendNotification).toHaveBeenCalledWith(
       expect.objectContaining({
-        message: 'Qwen is waiting for your input',
+        message: 'Qwen Code is waiting for your input',
       }),
       mockTerminal,
       true,
@@ -258,7 +259,7 @@ describe('useAttentionNotifications', () => {
 
     expect(mockedSendNotification).toHaveBeenCalledWith(
       expect.objectContaining({
-        message: 'Qwen is waiting for your input',
+        message: 'Qwen Code is waiting for your input',
       }),
       mockTerminal,
       true,

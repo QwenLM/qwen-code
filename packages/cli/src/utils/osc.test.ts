@@ -12,6 +12,7 @@ import {
   oscITerm2Notify,
   oscKittyNotify,
   oscGhosttyNotify,
+  sanitizeOscPayload,
   OSC,
   BEL,
   ST,
@@ -69,22 +70,22 @@ describe('detectTerminal', () => {
     expect(detectTerminal()).toBe('unknown');
   });
 
-  it('TERM takes priority over KITTY_WINDOW_ID', () => {
-    process.env['TERM'] = 'xterm-kitty';
-    process.env['KITTY_WINDOW_ID'] = '1';
-    expect(detectTerminal()).toBe('kitty');
-  });
-
-  it('TERM takes priority over TERM_PROGRAM when TERM matches a known terminal', () => {
+  it('TERM_PROGRAM takes priority over TERM', () => {
     process.env['TERM'] = 'xterm-ghostty';
     process.env['TERM_PROGRAM'] = 'iTerm.app';
+    expect(detectTerminal()).toBe('iTerm.app');
+  });
+
+  it('falls back to TERM when TERM_PROGRAM is not a known terminal', () => {
+    process.env['TERM'] = 'xterm-ghostty';
+    process.env['TERM_PROGRAM'] = 'some-unknown-terminal';
     expect(detectTerminal()).toBe('ghostty');
   });
 
-  it('falls back to TERM_PROGRAM when TERM does not match a known terminal', () => {
+  it('KITTY_WINDOW_ID is last resort fallback', () => {
     process.env['TERM'] = 'xterm-256color';
-    process.env['TERM_PROGRAM'] = 'iTerm.app';
-    expect(detectTerminal()).toBe('iTerm.app');
+    process.env['KITTY_WINDOW_ID'] = '1';
+    expect(detectTerminal()).toBe('kitty');
   });
 });
 
@@ -207,5 +208,44 @@ describe('oscGhosttyNotify', () => {
     delete process.env['TERM'];
     const result = oscGhosttyNotify('Title', 'Body');
     expect(result).toBe(`\x1b]${OSC.GHOSTTY};notify;Title;Body${BEL}`);
+  });
+});
+
+describe('sanitizeOscPayload', () => {
+  it('strips ESC character', () => {
+    expect(sanitizeOscPayload('hello\x1bworld')).toBe('helloworld');
+  });
+
+  it('strips BEL character', () => {
+    expect(sanitizeOscPayload('hello\x07world')).toBe('helloworld');
+  });
+
+  it('strips all C0 control characters', () => {
+    expect(sanitizeOscPayload('a\x00b\x01c\x1fd')).toBe('abcd');
+  });
+
+  it('preserves normal text', () => {
+    expect(sanitizeOscPayload('Hello World! 你好')).toBe('Hello World! 你好');
+  });
+
+  it('strips C1 control characters', () => {
+    expect(sanitizeOscPayload('hello\x9cworld')).toBe('helloworld');
+  });
+});
+
+describe('osc sanitizes payloads', () => {
+  const originalEnv = { ...process.env };
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  it('strips control characters from string parts', () => {
+    process.env['TERM_PROGRAM'] = 'ghostty';
+    delete process.env['TERM'];
+    const result = osc(OSC.GHOSTTY, 'notify', 'Title\x1b]hack', 'Body\x07end');
+    expect(result).not.toContain('\x1b]hack');
+    expect(result).toContain('Title]hack');
+    expect(result).toContain('Bodyend');
   });
 });

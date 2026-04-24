@@ -40,19 +40,16 @@ export type TerminalType =
 
 /**
  * Detect the current terminal emulator from environment variables.
+ *
+ * Strategy: check TERM_PROGRAM first (identifies the actual emulator),
+ * then fall back to TERM (describes capabilities, but Ghostty/Kitty set
+ * distinctive TERM values when TERM_PROGRAM is absent — e.g. over SSH
+ * or inside multiplexers), and finally check terminal-specific env vars.
  */
 export function detectTerminal(): TerminalType {
-  // Check TERM before TERM_PROGRAM — some terminals (e.g. Kitty, Ghostty)
-  // set TERM but not TERM_PROGRAM, especially on macOS.
-  if (process.env['TERM'] === 'xterm-ghostty') {
-    return 'ghostty';
-  }
-  if (process.env['TERM']?.includes('kitty')) {
-    return 'kitty';
-  }
-
-  const term = process.env['TERM_PROGRAM'];
-  switch (term) {
+  // 1. TERM_PROGRAM — most reliable for identifying the emulator
+  const termProgram = process.env['TERM_PROGRAM'];
+  switch (termProgram) {
     case 'iTerm.app':
       return 'iTerm.app';
     case 'kitty':
@@ -62,10 +59,35 @@ export function detectTerminal(): TerminalType {
     case 'Apple_Terminal':
       return 'Apple_Terminal';
     default:
-      // Fallback: check terminal-specific env vars
-      if (process.env['KITTY_WINDOW_ID']) return 'kitty';
-      return 'unknown';
+      break;
   }
+
+  // 2. TERM — Ghostty and Kitty set distinctive TERM values even when
+  //    TERM_PROGRAM is absent (SSH sessions, multiplexers)
+  if (process.env['TERM'] === 'xterm-ghostty') {
+    return 'ghostty';
+  }
+  if (process.env['TERM']?.includes('kitty')) {
+    return 'kitty';
+  }
+
+  // 3. Terminal-specific env vars as last resort
+  if (process.env['KITTY_WINDOW_ID']) return 'kitty';
+
+  return 'unknown';
+}
+
+// ── Sanitization ───────────────────────────────────────────────────
+
+/**
+ * Strip control characters that could break out of an OSC payload.
+ * Removes ESC (\x1b), BEL (\x07), ST (ESC + \), and other C0/C1
+ * control bytes that terminals interpret as sequence boundaries.
+ * Preserves HT (\t), LF (\n), and CR (\r) which are safe in payloads.
+ */
+export function sanitizeOscPayload(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]/g, '');
 }
 
 // ── Core OSC builders ───────────────────────────────────────────────
@@ -74,10 +96,15 @@ export function detectTerminal(): TerminalType {
  * Build an OSC escape sequence from parts.
  * Uses ST terminator for Kitty (which doesn't support BEL in OSC),
  * and BEL for all other terminals.
+ *
+ * All string parts are sanitized to prevent control character injection.
  */
 export function osc(...parts: Array<string | number>): string {
   const terminator = detectTerminal() === 'kitty' ? ST : BEL;
-  return `${OSC_PREFIX}${parts.join(SEP)}${terminator}`;
+  const sanitized = parts.map((p) =>
+    typeof p === 'string' ? sanitizeOscPayload(p) : p,
+  );
+  return `${OSC_PREFIX}${sanitized.join(SEP)}${terminator}`;
 }
 
 /**

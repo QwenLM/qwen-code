@@ -48,6 +48,12 @@ export function sendNotification(
     return 'disabled';
   }
 
+  // Don't write raw escape sequences when stdout is not a TTY
+  // (CI, piped output, redirected to log files, etc.)
+  if (!process.stdout?.isTTY) {
+    return 'disabled';
+  }
+
   const title = opts.title ?? DEFAULT_TITLE;
 
   try {

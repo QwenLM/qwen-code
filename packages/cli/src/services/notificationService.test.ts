@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sendNotification } from './notificationService.js';
 import type { TerminalNotification } from '../ui/hooks/useTerminalNotification.js';
 
@@ -33,9 +33,22 @@ function createMockTerminal(): TerminalNotification {
 describe('sendNotification', () => {
   let terminal: TerminalNotification;
 
+  const origIsTTY = process.stdout.isTTY;
+
   beforeEach(() => {
     terminal = createMockTerminal();
     vi.mocked(mockedDetectTerminal).mockReturnValue('unknown');
+    Object.defineProperty(process.stdout, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process.stdout, 'isTTY', {
+      value: origIsTTY,
+      configurable: true,
+    });
   });
 
   it('returns disabled when not enabled', () => {
@@ -117,5 +130,15 @@ describe('sendNotification', () => {
     });
     const result = sendNotification({ message: 'test' }, terminal, true);
     expect(result).toBe('error');
+  });
+
+  it('returns disabled when stdout is not a TTY', () => {
+    Object.defineProperty(process.stdout, 'isTTY', {
+      value: false,
+      configurable: true,
+    });
+    const result = sendNotification({ message: 'test' }, terminal, true);
+    expect(result).toBe('disabled');
+    expect(terminal.notifyBell).not.toHaveBeenCalled();
   });
 });

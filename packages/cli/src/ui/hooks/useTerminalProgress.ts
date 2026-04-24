@@ -37,7 +37,7 @@ function isProgressBarSupported(): boolean {
 }
 
 /**
- * Emits OSC_PREFIX 9;4 terminal progress bar sequences based on streaming state.
+ * Emits OSC 9;4 terminal progress bar sequences based on streaming state.
  * Shows an indeterminate progress spinner in the terminal tab when tools
  * are executing, and clears it when idle.
  */

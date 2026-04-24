@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { StreamingState } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -13,16 +13,12 @@ import {
   NotificationType,
 } from '@qwen-code/qwen-code-core';
 import type { TerminalNotification } from './useTerminalNotification.js';
+import type { TrackedToolCall } from './useReactToolScheduler.js';
 import { sendNotification } from '../../services/notificationService.js';
 
 export const LONG_TASK_NOTIFICATION_THRESHOLD_SECONDS = 20;
 
 const NOTIFICATION_TITLE = 'Qwen Code';
-
-interface PendingToolCall {
-  status: string;
-  request: { name: string };
-}
 
 interface UseAttentionNotificationsOptions {
   isFocused: boolean;
@@ -31,7 +27,7 @@ interface UseAttentionNotificationsOptions {
   settings: LoadedSettings;
   config?: Config;
   terminal: TerminalNotification;
-  pendingToolCalls?: PendingToolCall[];
+  pendingToolCalls?: TrackedToolCall[];
 }
 
 export const useAttentionNotifications = ({
@@ -50,6 +46,15 @@ export const useAttentionNotifications = ({
   const respondingElapsedRef = useRef(0);
   const idleNotificationSentRef = useRef(false);
 
+  // Extract the awaiting tool name as a primitive so the effect doesn't
+  // re-fire on every render due to pendingToolCalls array identity changes.
+  const awaitingToolName = useMemo(() => {
+    const awaitingTool = pendingToolCalls?.find(
+      (tc) => tc.status === 'awaiting_approval',
+    );
+    return awaitingTool?.request.name;
+  }, [pendingToolCalls]);
+
   useEffect(() => {
     if (
       streamingState === StreamingState.WaitingForConfirmation &&
@@ -57,13 +62,9 @@ export const useAttentionNotifications = ({
       !awaitingNotificationSentRef.current &&
       terminalBellEnabled
     ) {
-      const awaitingTool = pendingToolCalls?.find(
-        (tc) => tc.status === 'awaiting_approval',
-      );
-      const toolName = awaitingTool?.request.name;
-      const message = toolName
-        ? `Qwen needs your permission to use ${toolName}`
-        : 'Qwen is waiting for your input';
+      const message = awaitingToolName
+        ? `Qwen Code needs your permission to use ${awaitingToolName}`
+        : 'Qwen Code is waiting for your input';
 
       sendNotification(
         { message, title: NOTIFICATION_TITLE },
@@ -81,7 +82,7 @@ export const useAttentionNotifications = ({
     streamingState,
     terminalBellEnabled,
     terminal,
-    pendingToolCalls,
+    awaitingToolName,
   ]);
 
   useEffect(() => {
@@ -98,7 +99,7 @@ export const useAttentionNotifications = ({
       if (wasLongTask && !isFocused && terminalBellEnabled) {
         sendNotification(
           {
-            message: 'Qwen is waiting for your input',
+            message: 'Qwen Code is waiting for your input',
             title: NOTIFICATION_TITLE,
           },
           terminal,
@@ -114,7 +115,7 @@ export const useAttentionNotifications = ({
         if (hooksEnabled && messageBus) {
           fireNotificationHook(
             messageBus,
-            'Qwen is waiting for your input',
+            'Qwen Code is waiting for your input',
             NotificationType.IdlePrompt,
             'Waiting for input',
           ).catch(() => {

@@ -12,7 +12,6 @@
  * and terminal progress reporting.
  */
 
-import { createContext, useContext, useMemo } from 'react';
 import {
   BEL,
   wrapForMultiplexer,
@@ -21,15 +20,9 @@ import {
   oscGhosttyNotify,
 } from '../../utils/osc.js';
 
-// ── TerminalWriteContext ────────────────────────────────────────────
+// ── Types ──────────────────────────────────────────────────────────
 
 type WriteRaw = (data: string) => void;
-
-export const TerminalWriteContext = createContext<WriteRaw | null>(null);
-
-export const TerminalWriteProvider = TerminalWriteContext.Provider;
-
-// ── Hook interface ──────────────────────────────────────────────────
 
 export interface TerminalNotification {
   notifyITerm2: (opts: { message: string; title?: string }) => void;
@@ -67,17 +60,4 @@ export function buildTerminalNotification(
       writeRaw(BEL);
     },
   };
-}
-
-// ── Hook ────────────────────────────────────────────────────────────
-
-export function useTerminalNotification(): TerminalNotification {
-  const writeRaw = useContext(TerminalWriteContext);
-  if (!writeRaw) {
-    throw new Error(
-      'useTerminalNotification must be used within TerminalWriteProvider',
-    );
-  }
-
-  return useMemo(() => buildTerminalNotification(writeRaw), [writeRaw]);
 }
