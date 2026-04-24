@@ -166,6 +166,8 @@ export default {
     '{{count}} file changed, +{{added}} / -{{removed}}',
   '{{count}} files changed, +{{added}} / -{{removed}}':
     '{{count}} files changed, +{{added}} / -{{removed}}',
+  '{{count}} file changed': '{{count}} file changed',
+  '{{count}} files changed': '{{count}} files changed',
   '…and {{hidden}} more (showing first {{shown}})':
     '…and {{hidden}} more (showing first {{shown}})',
   '(binary)': '(binary)',

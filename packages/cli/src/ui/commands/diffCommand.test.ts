@@ -22,7 +22,24 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
 });
 
 function makeContextWithCwd(cwd = '/tmp/repo'): CommandContext {
+  // Non-interactive by default here because these tests assert on the
+  // plain-text `MessageActionReturn`; interactive mode dispatches via
+  // `context.ui.addItem` and is covered in a separate describe block.
   return createMockCommandContext({
+    executionMode: 'non_interactive',
+    services: {
+      config: {
+        getWorkingDir: () => cwd,
+        getProjectRoot: () => cwd,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+    },
+  });
+}
+
+function makeInteractiveContext(cwd = '/tmp/repo'): CommandContext {
+  return createMockCommandContext({
+    executionMode: 'interactive',
     services: {
       config: {
         getWorkingDir: () => cwd,
@@ -240,6 +257,86 @@ describe('diffCommand', () => {
     const content = (result as { content: string }).content;
     expect(content).toContain('1000 files changed');
     expect(content).not.toMatch(/more \(showing first/);
+  });
+});
+
+describe('diffCommand interactive mode', () => {
+  let mockFetchGitDiff: Mock;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFetchGitDiff = vi.mocked(fetchGitDiff);
+  });
+
+  it('dispatches a diff_stats history item instead of returning text', async () => {
+    if (!diffCommand.action) throw new Error('Command has no action');
+    const ctx = makeInteractiveContext();
+    mockFetchGitDiff.mockResolvedValue({
+      stats: { filesCount: 2, linesAdded: 7, linesRemoved: 3 },
+      perFileStats: new Map([
+        ['src/a.ts', { added: 5, removed: 2, isBinary: false }],
+        ['src/b.ts', { added: 2, removed: 1, isBinary: false }],
+      ]),
+    } satisfies GitDiffResult);
+
+    const result = await diffCommand.action(ctx, '');
+    expect(result).toBeUndefined();
+    expect(ctx.ui.addItem).toHaveBeenCalledTimes(1);
+    const call = (ctx.ui.addItem as Mock).mock.calls[0][0];
+    expect(call.type).toBe('diff_stats');
+    expect(call.model).toMatchObject({
+      filesCount: 2,
+      linesAdded: 7,
+      linesRemoved: 3,
+      hiddenCount: 0,
+    });
+    expect(call.model.rows).toHaveLength(2);
+    expect(call.model.rows[0]).toMatchObject({
+      filename: 'src/a.ts',
+      added: 5,
+      removed: 2,
+      isBinary: false,
+      isUntracked: false,
+    });
+  });
+
+  it('still returns a plain-text info message for the "clean tree" case', async () => {
+    if (!diffCommand.action) throw new Error('Command has no action');
+    const ctx = makeInteractiveContext();
+    mockFetchGitDiff.mockResolvedValue({
+      stats: { filesCount: 0, linesAdded: 0, linesRemoved: 0 },
+      perFileStats: new Map(),
+    } satisfies GitDiffResult);
+
+    const result = await diffCommand.action(ctx, '');
+    expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+    expect(ctx.ui.addItem).not.toHaveBeenCalled();
+  });
+
+  it('still returns an error MessageActionReturn when fetchGitDiff throws', async () => {
+    if (!diffCommand.action) throw new Error('Command has no action');
+    const ctx = makeInteractiveContext();
+    mockFetchGitDiff.mockRejectedValueOnce(new Error('boom'));
+
+    const result = await diffCommand.action(ctx, '');
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+    expect(ctx.ui.addItem).not.toHaveBeenCalled();
+  });
+
+  it('propagates hiddenCount to the history item for fast-path results', async () => {
+    if (!diffCommand.action) throw new Error('Command has no action');
+    const ctx = makeInteractiveContext();
+    mockFetchGitDiff.mockResolvedValue({
+      stats: { filesCount: 60, linesAdded: 100, linesRemoved: 20 },
+      perFileStats: new Map([
+        ['src/a.ts', { added: 1, removed: 0, isBinary: false }],
+      ]),
+    } satisfies GitDiffResult);
+
+    await diffCommand.action(ctx, '');
+    const call = (ctx.ui.addItem as Mock).mock.calls[0][0];
+    expect(call.model.hiddenCount).toBe(59);
+    expect(call.model.rows).toHaveLength(1);
   });
 });
 

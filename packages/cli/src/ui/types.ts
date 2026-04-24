@@ -175,6 +175,38 @@ export type HistoryItemStats = HistoryItemBase & {
   duration: string;
 };
 
+/**
+ * Structured payload rendered by `/diff`. Kept as plain data (not React nodes)
+ * so the same model can feed both the Ink-based interactive display and the
+ * plain-text non-interactive / ACP output.
+ */
+export interface DiffRenderRow {
+  filename: string;
+  /** `undefined` for binary files; a line count (lower bound if `truncated`)
+   *  otherwise. */
+  added?: number;
+  /** `undefined` for binary and untracked files. */
+  removed?: number;
+  isBinary: boolean;
+  isUntracked: boolean;
+  /** Only set for untracked text files that exceeded the read cap. */
+  truncated: boolean;
+}
+
+export interface DiffRenderModel {
+  filesCount: number;
+  linesAdded: number;
+  linesRemoved: number;
+  rows: DiffRenderRow[];
+  /** `filesCount - rows.length` when the per-file cap truncated the listing. */
+  hiddenCount: number;
+}
+
+export type HistoryItemDiffStats = HistoryItemBase & {
+  type: 'diff_stats';
+  model: DiffRenderModel;
+};
+
 export type HistoryItemModelStats = HistoryItemBase & {
   type: 'model_stats';
 };
@@ -492,7 +524,8 @@ export type HistoryItemWithoutId =
   | HistoryItemUserPromptSubmitBlocked
   | HistoryItemStopHookLoop
   | HistoryItemStopHookSystemMessage
-  | HistoryItemDoctor;
+  | HistoryItemDoctor
+  | HistoryItemDiffStats;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 
@@ -521,6 +554,7 @@ export enum MessageType {
   ARENA_SESSION_COMPLETE = 'arena_session_complete',
   INSIGHT_PROGRESS = 'insight_progress',
   BTW = 'btw',
+  DIFF_STATS = 'diff_stats',
 }
 
 export interface InsightProgressProps {

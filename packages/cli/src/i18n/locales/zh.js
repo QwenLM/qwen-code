@@ -161,6 +161,8 @@ export default {
     '{{count}} 个文件变更，+{{added}} / -{{removed}}',
   '{{count}} files changed, +{{added}} / -{{removed}}':
     '{{count}} 个文件变更，+{{added}} / -{{removed}}',
+  '{{count}} file changed': '{{count}} 个文件变更',
+  '{{count}} files changed': '{{count}} 个文件变更',
   '…and {{hidden}} more (showing first {{shown}})':
     '…还有 {{hidden}} 个（仅显示前 {{shown}} 个）',
   '(binary)': '（二进制）',
