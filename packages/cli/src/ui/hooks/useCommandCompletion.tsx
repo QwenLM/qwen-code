@@ -19,6 +19,7 @@ import { useAtCompletion } from './useAtCompletion.js';
 import { useSlashCompletion } from './useSlashCompletion.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { useCompletion } from './useCompletion.js';
+import { parseSlashCommand } from '../../utils/commands.js';
 
 export enum CompletionMode {
   IDLE = 'IDLE',
@@ -40,7 +41,12 @@ export interface UseCommandCompletionReturn {
   navigateDown: () => void;
   handleAutocomplete: (indexToUse: number) => void;
   /** Inline ghost text for mid-input slash commands (not at line start). */
-  midInputGhostText: { text: string; insertPosition: number } | null;
+  midInputGhostText: {
+    text: string;
+    insertPosition: number;
+    acceptText?: string;
+    showCursorBeforeText?: boolean;
+  } | null;
 }
 
 export function useCommandCompletion(
@@ -243,17 +249,46 @@ export function useCommandCompletion(
   const midInputGhostText = useMemo((): {
     text: string;
     insertPosition: number;
+    acceptText?: string;
+    showCursorBeforeText?: boolean;
   } | null => {
     if (!active || reverseSearchActive) return null;
     const cursorOffset = logicalPosToOffset(buffer.lines, cursorRow, cursorCol);
     const midCmd = findMidInputSlashCommand(buffer.text, cursorOffset);
-    if (!midCmd) return null;
-    const match = getBestSlashCommandMatch(
-      midCmd.partialCommand,
+    if (midCmd) {
+      const match = getBestSlashCommandMatch(
+        midCmd.partialCommand,
+        slashCommands,
+      );
+      if (!match) return null;
+      return {
+        text: match.suffix,
+        insertPosition: cursorOffset,
+        acceptText: match.suffix,
+      };
+    }
+
+    if (cursorRow !== 0) return null;
+    const currentLine = buffer.lines[cursorRow] || '';
+    const lineCodePoints = toCodePoints(currentLine);
+    if (cursorCol !== lineCodePoints.length) return null;
+
+    const lineToCursor = lineCodePoints.slice(0, cursorCol).join('');
+    if (!isSlashCommand(lineToCursor.trim())) return null;
+
+    const { commandToExecute, args } = parseSlashCommand(
+      lineToCursor,
       slashCommands,
     );
-    if (!match) return null;
-    return { text: match.suffix, insertPosition: cursorOffset };
+    if (!commandToExecute?.argumentHint || args.trim().length > 0) {
+      return null;
+    }
+
+    return {
+      text: commandToExecute.argumentHint,
+      insertPosition: cursorOffset,
+      showCursorBeforeText: true,
+    };
   }, [
     buffer.text,
     buffer.lines,
