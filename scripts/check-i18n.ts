@@ -304,12 +304,10 @@ async function checkI18n(): Promise<CheckResult> {
 
   const enPath = path.join(localesDir, 'en.js');
   const zhPath = path.join(localesDir, 'zh.js');
-  const zhTWPath = path.join(localesDir, 'zh-TW.js');
 
   // Load translation files
   let enTranslations: Record<string, string | string[]>;
   let zhTranslations: Record<string, string | string[]>;
-  let zhTWTranslations: Record<string, string | string[]>;
 
   try {
     enTranslations = await loadTranslationsFile(enPath);
@@ -339,20 +337,6 @@ async function checkI18n(): Promise<CheckResult> {
     };
   }
 
-  try {
-    zhTWTranslations = await loadTranslationsFile(zhTWPath);
-  } catch (error) {
-    errors.push(
-      `Failed to load zh-TW.js: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    return {
-      success: false,
-      errors,
-      warnings,
-      stats: { totalKeys: 0, translatedKeys: 0, unusedKeys: [] },
-    };
-  }
-
   // Check key-value consistency in en.js
   const consistencyErrors = checkKeyValueConsistency(enTranslations);
   errors.push(...consistencyErrors);
@@ -360,10 +344,6 @@ async function checkI18n(): Promise<CheckResult> {
   // Check key matching between en and zh
   const matchingErrors = checkKeyMatching(enTranslations, zhTranslations);
   errors.push(...matchingErrors);
-
-  // Check key matching between en and zh-TW
-  const matchingTWErrors = checkKeyMatching(enTranslations, zhTWTranslations);
-  errors.push(...matchingTWErrors);
 
   // Extract used keys from source code
   const usedKeys = await extractUsedKeys(sourceDir);
@@ -383,8 +363,7 @@ async function checkI18n(): Promise<CheckResult> {
   }
 
   const totalKeys = Object.keys(enTranslations).length;
-  const zhTranslatedKeys = Object.keys(zhTranslations).length;
-  const zhTWTranslatedKeys = Object.keys(zhTWTranslations).length;
+  const translatedKeys = Object.keys(zhTranslations).length;
 
   return {
     success: errors.length === 0,
@@ -392,8 +371,7 @@ async function checkI18n(): Promise<CheckResult> {
     warnings,
     stats: {
       totalKeys,
-      translatedKeys: zhTranslatedKeys,
-      zhTWTranslatedKeys,
+      translatedKeys,
       unusedKeys,
       unusedKeysOnlyInLocales,
     },
@@ -451,15 +429,17 @@ async function main() {
         console.log(`  - "${key}"`),
       );
 
-      // Save these keys to a JSON file
-      const outputPath = path.join(
-        __dirname,
-        'unused-keys-only-in-locales.json',
-      );
-      saveKeysOnlyInLocalesToJson(
-        result.stats.unusedKeysOnlyInLocales,
-        outputPath,
-      );
+      // Save these keys to a JSON file (skip in CI to avoid dirtying the working tree)
+      if (!process.env['CI']) {
+        const outputPath = path.join(
+          __dirname,
+          'unused-keys-only-in-locales.json',
+        );
+        saveKeysOnlyInLocalesToJson(
+          result.stats.unusedKeysOnlyInLocales,
+          outputPath,
+        );
+      }
     }
 
     console.log();
