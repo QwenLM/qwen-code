@@ -39,6 +39,9 @@ describe('imageSupport browser bundling', () => {
       write: false,
       logLevel: 'silent',
       external: ['@qwen-code/qwen-code-core'],
+      loader: {
+        '.png': 'dataurl',
+      },
     });
 
     const output = result.outputFiles[0]?.text ?? '';

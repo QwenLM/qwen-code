@@ -171,4 +171,62 @@ describe('insightCommand', () => {
       ),
     });
   });
+
+  it('non_interactive: returns message with output path and does not open browser', async () => {
+    const nonInteractiveContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      services: {
+        config: {} as CommandContext['services']['config'],
+      },
+      ui: {
+        addItem: vi.fn(),
+        setPendingItem: vi.fn(),
+        setDebugMessage: vi.fn(),
+      },
+    } as unknown as CommandContext);
+
+    if (!insightCommand.action) {
+      throw new Error('insight command must have action');
+    }
+
+    const result = await insightCommand.action(nonInteractiveContext, '');
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+    });
+    expect((result as { content: string }).content).toContain(
+      path.resolve('runtime-output', 'insights', 'insight-2026-03-05.html'),
+    );
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it('non_interactive: returns error message when generation fails', async () => {
+    mockGenerateStaticInsight.mockRejectedValue(new Error('disk full'));
+
+    const nonInteractiveContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      services: {
+        config: {} as CommandContext['services']['config'],
+      },
+      ui: {
+        addItem: vi.fn(),
+        setPendingItem: vi.fn(),
+        setDebugMessage: vi.fn(),
+      },
+    } as unknown as CommandContext);
+
+    if (!insightCommand.action) {
+      throw new Error('insight command must have action');
+    }
+
+    const result = await insightCommand.action(nonInteractiveContext, '');
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+    });
+    expect((result as { content: string }).content).toContain('disk full');
+    expect(open).not.toHaveBeenCalled();
+  });
 });

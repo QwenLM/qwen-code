@@ -348,6 +348,8 @@ export default {
   'Tool Schema Compliance': 'Werkzeug-Schema-Konformität',
   // Settings enum options
   'Auto (detect from system)': 'Automatisch (vom System erkennen)',
+  'Auto (detect terminal theme)': 'Automatisch (Terminal-Theme erkennen)',
+  Auto: 'Automatisch',
   Text: 'Text',
   JSON: 'JSON',
   Plan: 'Plan',

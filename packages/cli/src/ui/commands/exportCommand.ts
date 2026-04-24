@@ -325,7 +325,8 @@ export const exportCommand: SlashCommand = {
     return t('Export current session message history to a file');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local',
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  action: exportHtmlAction,
   subCommands: [
     {
       name: 'html',
@@ -333,7 +334,7 @@ export const exportCommand: SlashCommand = {
         return t('Export session to HTML format');
       },
       kind: CommandKind.BUILT_IN,
-      commandType: 'local',
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
       action: exportHtmlAction,
     },
     {
@@ -342,7 +343,7 @@ export const exportCommand: SlashCommand = {
         return t('Export session to markdown format');
       },
       kind: CommandKind.BUILT_IN,
-      commandType: 'local',
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
       action: exportMarkdownAction,
     },
     {
@@ -351,7 +352,7 @@ export const exportCommand: SlashCommand = {
         return t('Export session to JSON format');
       },
       kind: CommandKind.BUILT_IN,
-      commandType: 'local',
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
       action: exportJsonAction,
     },
     {
@@ -360,7 +361,7 @@ export const exportCommand: SlashCommand = {
         return t('Export session to JSONL format (one message per line)');
       },
       kind: CommandKind.BUILT_IN,
-      commandType: 'local',
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
       action: exportJsonlAction,
     },
   ],

@@ -47,6 +47,7 @@ interface UseWebViewMessagesProps {
     setNextCursor: (cursor: number | undefined) => void;
     setHasMore: (hasMore: boolean) => void;
     setIsLoading: (loading: boolean) => void;
+    setIsSwitchingSession: (switching: boolean) => void;
   };
 
   // File context
@@ -456,15 +457,8 @@ export const useWebViewMessages = ({
           break;
         }
 
-        case 'loginSuccess': {
-          // Clear loading state and show a short assistant notice
+        case 'authSuccess': {
           handlers.messageHandling.clearWaitingForResponse();
-          handlers.messageHandling.addMessage({
-            role: 'assistant',
-            content: 'Successfully logged in. You can continue chatting.',
-            timestamp: Date.now(),
-          });
-          // Set authentication state to true
           handlers.setIsAuthenticated?.(true);
           break;
         }
@@ -494,12 +488,12 @@ export const useWebViewMessages = ({
           break;
         }
 
-        case 'loginError': {
+        case 'authError': {
           // Clear loading state and show error notice
           handlers.messageHandling.clearWaitingForResponse();
           const errorMsg =
             (message?.data?.message as string) ||
-            'Login failed. Please try again.';
+            'Auth failed. Please try again.';
           handlers.messageHandling.addMessage({
             role: 'assistant',
             content: errorMsg,
@@ -679,6 +673,7 @@ export const useWebViewMessages = ({
             clearInsightState();
           }
           handlers.messageHandling.clearWaitingForResponse();
+          handlers.sessionManagement.setIsSwitchingSession(false);
           // Display error message to user so they know what went wrong
           const errorMessage =
             (message?.data?.message as string) ||
@@ -1033,6 +1028,11 @@ export const useWebViewMessages = ({
           lastPlanSnapshotRef.current = null;
           break;
 
+        case 'sessionLoadComplete':
+        case 'sessionExpired':
+          handlers.sessionManagement.setIsSwitchingSession(false);
+          break;
+
         case 'conversationCleared':
           clearInsightState();
           resetConversationState({
@@ -1056,6 +1056,35 @@ export const useWebViewMessages = ({
             handlers.sessionManagement.setCurrentSessionTitle(title);
             // Ask extension host to reflect this title in the tab label
             vscode.postMessage({ type: 'updatePanelTitle', data: { title } });
+          }
+          break;
+        }
+
+        case 'sessionDeleted': {
+          const deletedId = message.data?.sessionId as string;
+          if (deletedId) {
+            handlers.sessionManagement.setQwenSessions(
+              (prev: Array<Record<string, unknown>>) =>
+                prev.filter(
+                  (s) => s.sessionId !== deletedId && s.id !== deletedId,
+                ),
+            );
+          }
+          break;
+        }
+
+        case 'sessionRenamed': {
+          const renamedId = message.data?.sessionId as string;
+          const newTitle = message.data?.title as string;
+          if (renamedId && newTitle) {
+            handlers.sessionManagement.setQwenSessions(
+              (prev: Array<Record<string, unknown>>) =>
+                prev.map((s) =>
+                  s.sessionId === renamedId || s.id === renamedId
+                    ? { ...s, title: newTitle, name: newTitle }
+                    : s,
+                ),
+            );
           }
           break;
         }

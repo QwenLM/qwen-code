@@ -69,6 +69,9 @@ export enum GeminiEventType {
 export type ServerGeminiRetryEvent = {
   type: GeminiEventType.Retry;
   retryInfo?: RetryInfo;
+  /** When true, the retry is a continuation (recovery) rather than a fresh
+   *  restart. The UI should keep accumulated text so the continuation appends. */
+  isContinuation?: boolean;
 };
 
 export interface StructuredError {
@@ -298,6 +301,7 @@ export class Turn {
           yield {
             type: GeminiEventType.Retry,
             retryInfo: streamEvent.retryInfo,
+            isContinuation: streamEvent.isContinuation,
           };
           continue; // Skip to the next event in the stream
         }

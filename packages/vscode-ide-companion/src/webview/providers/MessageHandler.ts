@@ -75,10 +75,19 @@ export class MessageHandler {
   }
 
   /**
-   * Set login handler
+   * Set auth interactive handler — interactive auth flow.
    */
-  setLoginHandler(handler: () => Promise<void>): void {
-    this.router.setLoginHandler(handler);
+  setAuthInteractiveHandler(
+    handler: (
+      provider: string,
+      region?: string,
+      apiKey?: string,
+      baseUrl?: string,
+      model?: string,
+      modelIds?: string,
+    ) => Promise<void>,
+  ): void {
+    this.router.setAuthInteractiveHandler(handler);
   }
 
   /**

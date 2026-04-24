@@ -374,5 +374,29 @@ describe('<LoadingIndicator />', () => {
       const output = lastFrame();
       expect(output).toContain('(5s · ↓ 5.4k tokens · esc to cancel)');
     });
+
+    it('should show ↑ arrow when waiting for API response', () => {
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator
+          {...defaultProps}
+          candidatesTokens={500}
+          isReceivingContent={false}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame();
+      expect(output).toContain('↑ 500 tokens');
+      expect(output).not.toContain('↓');
+    });
+
+    it('should show ↓ arrow when receiving content (default)', () => {
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator {...defaultProps} candidatesTokens={500} />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame();
+      expect(output).toContain('↓ 500 tokens');
+      expect(output).not.toContain('↑');
+    });
   });
 });

@@ -203,4 +203,102 @@ describe('MessageRewriteMiddleware', () => {
       expect(meta['turnIndex']).toBe(1);
     });
   });
+
+  describe('timeoutMs config', () => {
+    it('should use configured timeoutMs for the rewrite abort signal', async () => {
+      vi.useFakeTimers();
+      try {
+        const capturedSignals: AbortSignal[] = [];
+        const { LlmRewriter } = await import('./LlmRewriter.js');
+        (
+          LlmRewriter as unknown as {
+            mockImplementation: (fn: unknown) => void;
+          }
+        ).mockImplementation(() => ({
+          rewrite: vi.fn((_content: unknown, signal: AbortSignal) => {
+            capturedSignals.push(signal);
+            return new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () =>
+                reject(new Error('aborted')),
+              );
+            });
+          }),
+        }));
+
+        const mockSendUpdate = vi.fn().mockResolvedValue(undefined);
+        const middleware = new MessageRewriteMiddleware(
+          {} as Config,
+          {
+            enabled: true,
+            target: 'all',
+            prompt: 'test prompt',
+            timeoutMs: 5_000,
+          },
+          mockSendUpdate,
+        );
+
+        await middleware.interceptUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'content' },
+        } as unknown as SessionUpdate);
+        await middleware.flushTurn();
+
+        expect(capturedSignals).toHaveLength(1);
+        expect(capturedSignals[0].aborted).toBe(false);
+
+        // Advance past the configured 5s timeout
+        await vi.advanceTimersByTimeAsync(5_100);
+        expect(capturedSignals[0].aborted).toBe(true);
+
+        await middleware.waitForPendingRewrites();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should default to 30s when timeoutMs is not provided', async () => {
+      vi.useFakeTimers();
+      try {
+        const capturedSignals: AbortSignal[] = [];
+        const { LlmRewriter } = await import('./LlmRewriter.js');
+        (
+          LlmRewriter as unknown as {
+            mockImplementation: (fn: unknown) => void;
+          }
+        ).mockImplementation(() => ({
+          rewrite: vi.fn((_content: unknown, signal: AbortSignal) => {
+            capturedSignals.push(signal);
+            return new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () =>
+                reject(new Error('aborted')),
+              );
+            });
+          }),
+        }));
+
+        const mockSendUpdate = vi.fn().mockResolvedValue(undefined);
+        const middleware = new MessageRewriteMiddleware(
+          {} as Config,
+          { enabled: true, target: 'all', prompt: 'test prompt' },
+          mockSendUpdate,
+        );
+
+        await middleware.interceptUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'content' },
+        } as unknown as SessionUpdate);
+        await middleware.flushTurn();
+
+        expect(capturedSignals).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(29_000);
+        expect(capturedSignals[0].aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1_500);
+        expect(capturedSignals[0].aborted).toBe(true);
+
+        await middleware.waitForPendingRewrites();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });

@@ -14,7 +14,7 @@ export const trustCommand: SlashCommand = {
     return t('Manage folder trust settings');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
+  supportedModes: ['interactive'] as const,
   action: (): OpenDialogActionReturn => ({
     type: 'dialog',
     dialog: 'trust',

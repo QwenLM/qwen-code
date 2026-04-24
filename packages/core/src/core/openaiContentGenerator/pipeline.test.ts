@@ -12,6 +12,7 @@ import { GenerateContentResponse, Type, FinishReason } from '@google/genai';
 import type { PipelineConfig } from './pipeline.js';
 import { ContentGenerationPipeline, StreamContentError } from './pipeline.js';
 import { OpenAIContentConverter } from './converter.js';
+import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
 import type { ContentGeneratorConfig, AuthType } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
@@ -44,7 +45,8 @@ describe('ContentGenerationPipeline', () => {
       },
     } as unknown as OpenAI;
 
-    // Mock converter
+    // Mock converter. `createStreamContext` returns a fresh parser each
+    // stream; tests that don't care about tool-call buffers just ignore it.
     mockConverter = {
       setModel: vi.fn(),
       setModalities: vi.fn(),
@@ -52,7 +54,9 @@ describe('ContentGenerationPipeline', () => {
       convertOpenAIResponseToGemini: vi.fn(),
       convertOpenAIChunkToGemini: vi.fn(),
       convertGeminiToolsToOpenAI: vi.fn(),
-      resetStreamingToolCalls: vi.fn(),
+      createStreamContext: vi.fn(() => ({
+        toolCallParser: new StreamingToolCallParser(),
+      })),
     } as unknown as OpenAIContentConverter;
 
     // Mock provider
@@ -607,7 +611,9 @@ describe('ContentGenerationPipeline', () => {
       expect(results).toHaveLength(2);
       expect(results[0]).toBe(mockGeminiResponse1);
       expect(results[1]).toBe(mockGeminiResponse2);
-      expect(mockConverter.resetStreamingToolCalls).toHaveBeenCalled();
+      // Parser is now created per-stream via createStreamContext — assert
+      // that the pipeline asked for a fresh one at stream entry.
+      expect(mockConverter.createStreamContext).toHaveBeenCalled();
       expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
         expect.objectContaining({
           stream: true,
@@ -719,7 +725,10 @@ describe('ContentGenerationPipeline', () => {
       }
 
       expect(results).toHaveLength(0); // No results due to error
-      expect(mockConverter.resetStreamingToolCalls).toHaveBeenCalledTimes(2); // Once at start, once on error
+      // createStreamContext is called exactly once at stream entry; the
+      // error path no longer needs an explicit parser reset because the
+      // stream-local context is discarded when the generator unwinds.
+      expect(mockConverter.createStreamContext).toHaveBeenCalledTimes(1);
       expect(mockErrorHandler.handle).toHaveBeenCalledWith(
         testError,
         expect.any(Object),
@@ -1473,6 +1482,80 @@ describe('ContentGenerationPipeline', () => {
         expect.objectContaining({
           signal: undefined,
         }),
+      );
+    });
+
+    it('should pass arbitrary samplingParams keys through verbatim (e.g. max_completion_tokens for GPT-5)', async () => {
+      // Arrange: user sets a GPT-5 / o-series shape in samplingParams.
+      // None of these are typed fields; all must appear on the wire because
+      // samplingParams is the source of truth.
+      mockContentGeneratorConfig.samplingParams = {
+        max_completion_tokens: 4096,
+        reasoning_effort: 'medium',
+        verbosity: 'low',
+      } as ContentGeneratorConfig['samplingParams'];
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { maxOutputTokens: 999 },
+      };
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'r' } }],
+      });
+
+      // Act
+      await pipeline.execute(request, 'prompt-id');
+
+      // Assert: the exact samplingParams keys reach the wire; max_tokens is NOT
+      // synthesized from request.config.maxOutputTokens.
+      const call = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(call).toMatchObject({
+        max_completion_tokens: 4096,
+        reasoning_effort: 'medium',
+        verbosity: 'low',
+      });
+      expect(call).not.toHaveProperty('max_tokens');
+    });
+
+    it('should preserve historical default behavior when samplingParams is absent', async () => {
+      // Arrange: no samplingParams — request.config.maxOutputTokens must still
+      // fall through to max_tokens on the wire (original behavior unchanged).
+      mockContentGeneratorConfig.samplingParams = undefined;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { temperature: 0.5, topP: 0.6, maxOutputTokens: 2048 },
+      };
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'r' } }],
+      });
+
+      // Act
+      await pipeline.execute(request, 'prompt-id');
+
+      // Assert: identical to upstream behavior for existing users
+      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          temperature: 0.5,
+          top_p: 0.6,
+          max_tokens: 2048,
+        }),
+        expect.objectContaining({ signal: undefined }),
       );
     });
   });
