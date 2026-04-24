@@ -358,6 +358,34 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('flush', () => {
+    it('resolves immediately on a service with no enqueued writes', async () => {
+      // The writeChain starts as Promise.resolve(), so flush() on a fresh
+      // service should settle in a single microtask — important because
+      // Config.shutdown awaits flush on every exit path, even for sessions
+      // that never recorded anything.
+      await expect(chatRecordingService.flush()).resolves.toBeUndefined();
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('a failed write does not block subsequent records', async () => {
+      // Regression guard: the inner .catch swallows fs errors and keeps
+      // the chain alive so the next record's write still runs.
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(
+        new Error('simulated EACCES'),
+      );
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      chatRecordingService.recordUserMessage([{ text: 'second' }]);
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
+      const second = vi.mocked(jsonl.writeLine).mock.calls[1][1] as ChatRecord;
+      expect(
+        (second.message as { parts: Array<{ text: string }> }).parts[0].text,
+      ).toBe('second');
+    });
+  });
+
   // Note: Session management tests (listSessions, loadSession, deleteSession, etc.)
   // have been moved to sessionService.test.ts
   // Session resume integration tests should test via SessionService mock

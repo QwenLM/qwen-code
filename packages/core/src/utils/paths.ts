@@ -20,9 +20,24 @@ export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
  * created file is picked up immediately. Same path validated by back-to-back
  * tool calls (very common: model reads several files in one dir) used to
  * cost one syscall each.
+ *
+ * **Known tradeoff:** if a path is deleted and recreated as a different
+ * type (dir→file or file→dir) within the same process, the cache returns
+ * the stale type. The downstream tool will then hit a meaningful error
+ * (e.g., "not a directory") instead of a clean "does not exist", but no
+ * files are corrupted. This is rare enough in model-driven workflows that
+ * we accept the staleness for the common-case perf win.
  */
 const isDirectoryCache = new Map<string, boolean>();
 const VALIDATE_PATH_CACHE_MAX = 1024;
+
+/**
+ * Test-only: clear the validatePath stat cache. Module-level state would
+ * otherwise leak across vitest cases — `beforeEach(() => _resetValidatePathCacheForTest())`.
+ */
+export function _resetValidatePathCacheForTest(): void {
+  isDirectoryCache.clear();
+}
 
 /**
  * Special characters that need to be escaped in file paths for shell compatibility.

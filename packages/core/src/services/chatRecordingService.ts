@@ -418,6 +418,16 @@ export class ChatRecordingService {
    * the correct parentUuid without waiting for the previous write. The actual
    * fs write is enqueued on {@link writeChain} and runs async; per-file
    * mutex inside {@link jsonl.writeLine} preserves on-disk ordering.
+   *
+   * **Known tradeoff (parentUuid chain integrity on write failure):** if the
+   * enqueued write rejects (e.g., disk full, permission dropped), the error
+   * is logged but subsequent records still claim the failed record's uuid
+   * as their parent. On resume, readers that walk parentUuid (e.g.
+   * sessionService.reconstructHistory) will silently drop records whose
+   * ancestor is missing on disk. This matches the sync version's behavior
+   * when its own throw was caught and logged by the caller — under normal
+   * local-disk writes failures are rare enough to accept the fire-and-forget
+   * simplification.
    */
   private appendRecord(record: ChatRecord): void {
     let conversationFile: string;

@@ -30,9 +30,10 @@ const debugLogger = createDebugLogger('RIPGREP');
  * `dirIsDir`: searchPath → boolean (is the path itself a directory?)
  * `qwenIgnore`: dir → string | null (cached `.qwenignore` path or null)
  *
- * Filesystem-state cache: a `.qwenignore` created mid-session won't be
- * picked up until the cache rolls. That's an acceptable tradeoff; users
- * rarely add ignore files between Grep calls.
+ * **Known staleness window:** a `.qwenignore` created mid-session, or a
+ * searchPath whose type flips (dir→file or vice versa), will not be
+ * picked up until the entry rotates out of the FIFO (256 entries). Users
+ * rarely add ignore files mid-session; a process restart resets the cache.
  */
 const dirIsDirCache = new Map<string, boolean>();
 const qwenIgnoreCache = new Map<string, string | null>();
@@ -41,6 +42,14 @@ function trimCache<K, V>(m: Map<K, V>): void {
   if (m.size <= RIPGREP_CACHE_MAX) return;
   const oldest = m.keys().next().value;
   if (oldest !== undefined) m.delete(oldest as K);
+}
+
+/**
+ * Test-only: clear ripGrep's module-level discovery caches between cases.
+ */
+export function _resetRipGrepCachesForTest(): void {
+  dirIsDirCache.clear();
+  qwenIgnoreCache.clear();
 }
 
 /**

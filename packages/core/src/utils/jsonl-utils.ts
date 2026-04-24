@@ -117,6 +117,14 @@ export async function read<T = unknown>(filePath: string): Promise<T[]> {
 const ensuredDirs = new Set<string>();
 
 /**
+ * Test-only: clear the per-directory mkdir cache. Needed when tests mutate
+ * fs state at the same directory path across cases.
+ */
+export function _resetEnsuredDirsCacheForTest(): void {
+  ensuredDirs.clear();
+}
+
+/**
  * Appends a line to a JSONL file with concurrency control.
  * Uses a per-file mutex so concurrent callers serialize, and `fs.promises`
  * so the actual I/O does not block the event loop.
