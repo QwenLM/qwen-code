@@ -192,6 +192,13 @@ function InsightApp({ data }: { data: InsightData }) {
     navSections.push({ href: '#section-horizon', label: 'On the Horizon' });
   }
 
+  const atAGlanceTargetSections = {
+    wins: showImpressiveWorkflows,
+    friction: showFrictionPoints,
+    features: showFeatures,
+    horizon: showFutureOpportunities,
+  };
+
   return (
     <div>
       {/* Elegant Header */}
@@ -212,7 +219,10 @@ function InsightApp({ data }: { data: InsightData }) {
       </header>
 
       {showAtAGlance && data.qualitative && (
-        <AtAGlance qualitative={data.qualitative} />
+        <AtAGlance
+          qualitative={data.qualitative}
+          targetSections={atAGlanceTargetSections}
+        />
       )}
 
       {navSections.length > 0 && <NavToc sections={navSections} />}

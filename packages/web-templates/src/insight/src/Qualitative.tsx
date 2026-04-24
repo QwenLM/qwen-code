@@ -10,7 +10,20 @@ import React from 'react';
 // Qualitative Insight Components
 // -----------------------------------------------------------------------------
 
-export function AtAGlance({ qualitative }: { qualitative: QualitativeData }) {
+export interface AtAGlanceTargetSections {
+  wins: boolean;
+  friction: boolean;
+  features: boolean;
+  horizon: boolean;
+}
+
+export function AtAGlance({
+  qualitative,
+  targetSections,
+}: {
+  qualitative: QualitativeData;
+  targetSections: AtAGlanceTargetSections;
+}) {
   const { atAGlance } = qualitative;
   if (!atAGlance) return null;
 
@@ -21,30 +34,38 @@ export function AtAGlance({ qualitative }: { qualitative: QualitativeData }) {
         <div className="glance-section">
           <strong>What&apos;s working:</strong>{' '}
           <MarkdownText>{atAGlance.whats_working}</MarkdownText>
-          <a href="#section-wins" className="see-more">
-            Impressive Things You Did →
-          </a>
+          {targetSections.wins && (
+            <a href="#section-wins" className="see-more">
+              Impressive Things You Did →
+            </a>
+          )}
         </div>
         <div className="glance-section">
           <strong>What&apos;s hindering you:</strong>{' '}
           <MarkdownText>{atAGlance.whats_hindering}</MarkdownText>
-          <a href="#section-friction" className="see-more">
-            Where Things Go Wrong →
-          </a>
+          {targetSections.friction && (
+            <a href="#section-friction" className="see-more">
+              Where Things Go Wrong →
+            </a>
+          )}
         </div>
         <div className="glance-section">
           <strong>Quick wins to try:</strong>{' '}
           <MarkdownText>{atAGlance.quick_wins}</MarkdownText>
-          <a href="#section-features" className="see-more">
-            Features to Try →
-          </a>
+          {targetSections.features && (
+            <a href="#section-features" className="see-more">
+              Features to Try →
+            </a>
+          )}
         </div>
         <div className="glance-section">
           <strong>Ambitious workflows:</strong>{' '}
           <MarkdownText>{atAGlance.ambitious_workflows}</MarkdownText>
-          <a href="#section-horizon" className="see-more">
-            On the Horizon →
-          </a>
+          {targetSections.horizon && (
+            <a href="#section-horizon" className="see-more">
+              On the Horizon →
+            </a>
+          )}
         </div>
       </div>
     </div>
