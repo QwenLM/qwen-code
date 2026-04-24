@@ -202,6 +202,37 @@ export function truncateJson(value: unknown, maxLength: number): string {
  * labels (e.g. CJK phrases) survive. Returns empty string if the result is
  * unusable (error message, prefixed label, etc.).
  */
+/**
+ * Character class covering ASCII and common Unicode quote / bracket-quote
+ * pairs. Chinese-instruct models frequently emit U+2018/U+2019 (curly single),
+ * U+201C/U+201D (curly double), U+300C-F (CJK corner brackets). Bounded
+ * quantifier keeps the regex linear (js/polynomial-redos).
+ */
+const QUOTE_CHARS = '"\'`‘’“”「」『』';
+const LEADING_QUOTES_RE = new RegExp(`^[${QUOTE_CHARS}]{1,10}`);
+const TRAILING_QUOTES_RE = new RegExp(`[${QUOTE_CHARS}]{1,10}$`);
+
+/**
+ * Error/refusal-like response markers, matched case-insensitively anywhere
+ * the label should not produce. Covers English and Chinese refusals common
+ * in mixed-provider deployments.
+ */
+const REFUSAL_PREFIXES = [
+  /^api error\b/i,
+  /^error[:：]/i,
+  // Match "I can't" (ASCII U+0027 apostrophe), "I can’t" (curly U+2019),
+  // and "I cannot" as a single pattern.
+  /^i can(?:['’]t|not)\b/i,
+  /^unable to\b/i,
+  /^failed to\b/i,
+  /^sorry[,，]/i,
+  /^request failed\b/i,
+  /^我无法/,
+  /^我不能/,
+  /^抱歉[,，]?/,
+  /^无法/,
+];
+
 export function cleanSummary(raw: string): string {
   // Take first line only
   let text = raw.split('\n')[0]?.trim() ?? '';
@@ -211,12 +242,17 @@ export function cleanSummary(raw: string): string {
   // is stripped.
   text = text.replace(/^[-*•]\s+/, '').trim();
 
-  // Strip surrounding quotes/backticks. Bounded to {1,10} to keep the
-  // regex engine linear on pathological model output (CodeQL rule
-  // js/polynomial-redos) — real labels never have ten-plus opening quotes.
+  // Strip markdown emphasis (`**bold**`, `__bold__`, `_italic_`). Bounded
+  // quantifiers keep the regex linear.
   text = text
-    .replace(/^["'`]{1,10}/, '')
-    .replace(/["'`]{1,10}$/, '')
+    .replace(/^[*_]{1,3}/, '')
+    .replace(/[*_]{1,3}$/, '')
+    .trim();
+
+  // Strip surrounding ASCII + Unicode quotes/backticks.
+  text = text
+    .replace(LEADING_QUOTES_RE, '')
+    .replace(TRAILING_QUOTES_RE, '')
     .trim();
 
   // Strip common prefix labels like "Label:" "Summary:"
@@ -224,16 +260,9 @@ export function cleanSummary(raw: string): string {
 
   if (!text) return '';
 
-  // Reject error-message-like responses
-  const lower = text.toLowerCase();
-  if (
-    lower.startsWith('api error') ||
-    lower.startsWith('error:') ||
-    lower.startsWith('i cannot') ||
-    lower.startsWith("i can't") ||
-    lower.startsWith('unable to')
-  ) {
-    return '';
+  // Reject error/refusal-like responses (English + Chinese variants).
+  for (const re of REFUSAL_PREFIXES) {
+    if (re.test(text)) return '';
   }
 
   // Hard cap length

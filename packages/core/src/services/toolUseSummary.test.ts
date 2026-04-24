@@ -93,6 +93,42 @@ describe('cleanSummary', () => {
   it('preserves CJK labels', () => {
     expect(cleanSummary('搜索了 auth 模块')).toBe('搜索了 auth 模块');
   });
+
+  it('strips Unicode curly quotes', () => {
+    expect(cleanSummary('“Read config.json”')).toBe('Read config.json');
+    expect(cleanSummary('‘Ran tests’')).toBe('Ran tests');
+  });
+
+  it('strips CJK corner brackets', () => {
+    expect(cleanSummary('「搜索了 auth 模块」')).toBe('搜索了 auth 模块');
+    expect(cleanSummary('『Fixed bug』')).toBe('Fixed bug');
+  });
+
+  it('strips markdown emphasis markers', () => {
+    expect(cleanSummary('**Read 4 files**')).toBe('Read 4 files');
+    expect(cleanSummary('_Searched auth_')).toBe('Searched auth');
+    expect(cleanSummary('__Fixed NPE__')).toBe('Fixed NPE');
+  });
+
+  it('rejects Chinese refusal responses', () => {
+    expect(cleanSummary('我无法生成摘要')).toBe('');
+    expect(cleanSummary('我不能回答这个')).toBe('');
+    expect(cleanSummary('抱歉，我不能帮助')).toBe('');
+    expect(cleanSummary('无法确定')).toBe('');
+    expect(cleanSummary('无法完成')).toBe('');
+  });
+
+  it('rejects curly-apostrophe English refusals', () => {
+    // U+2019 right single quotation mark — models often emit this for
+    // typographic apostrophes and the ASCII-only check missed it.
+    expect(cleanSummary('I can’t generate that')).toBe('');
+  });
+
+  it('rejects additional English refusal patterns', () => {
+    expect(cleanSummary('Failed to read files')).toBe('');
+    expect(cleanSummary('Sorry, I cannot')).toBe('');
+    expect(cleanSummary('Request failed')).toBe('');
+  });
 });
 
 describe('createToolUseSummaryMessage', () => {

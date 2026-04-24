@@ -5,7 +5,7 @@
  */
 
 import { Box, Static } from 'ink';
-import { useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ShowMoreLines } from './ShowMoreLines.js';
@@ -17,7 +17,10 @@ import { useAppContext } from '../contexts/AppContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
-import { mergeCompactToolGroups } from '../utils/mergeCompactToolGroups.js';
+import {
+  isForceExpandGroup,
+  mergeCompactToolGroups,
+} from '../utils/mergeCompactToolGroups.js';
 
 // Limit Gemini messages to a very high number of lines to mitigate performance
 // issues in the worst case if we somehow get an enormous response from Gemini.
@@ -76,19 +79,63 @@ export const MainContent = () => {
     return map;
   }, [uiState.history]);
 
-  const getCompactLabel = useMemo(
-    () =>
-      (item: HistoryItem | HistoryItemWithoutId): string | undefined => {
-        if (item.type !== 'tool_group' || item.tools.length === 0)
-          return undefined;
-        // Match on the first tool's callId — for a merged group this is the
-        // earliest call, so we pick up the summary for the leading intent.
-        for (const tool of item.tools) {
-          const label = summaryByCallId.get(tool.callId);
-          if (label) return label;
-        }
+  // Set of callIds whose label is absorbed by a compact-mode tool_group header.
+  // In compact mode, non-force-expanded tool_groups render via CompactToolGroupDisplay
+  // and consume the label as their header replacement. Their callIds go in here so
+  // HistoryItemDisplay knows to hide the standalone `● <label>` line (avoiding
+  // duplicate display).
+  //
+  // Force-expanded tool_groups (errors, confirmations, user-initiated, focused
+  // shell) render through the full ToolGroupMessage path and ignore compactLabel,
+  // so their callIds are intentionally NOT in this set — the standalone line is
+  // the only way their label reaches the screen.
+  const absorbedCallIds = useMemo(() => {
+    const absorbed = new Set<string>();
+    if (!compactMode) return absorbed;
+    for (const item of mergedHistory) {
+      if (item.type !== 'tool_group') continue;
+      if (
+        isForceExpandGroup(
+          item,
+          uiState.embeddedShellFocused ?? false,
+          uiState.activePtyId,
+        )
+      ) {
+        continue;
+      }
+      for (const tool of item.tools) absorbed.add(tool.callId);
+    }
+    return absorbed;
+  }, [
+    compactMode,
+    mergedHistory,
+    uiState.embeddedShellFocused,
+    uiState.activePtyId,
+  ]);
+
+  const isSummaryAbsorbed = useCallback(
+    (item: HistoryItem | HistoryItemWithoutId): boolean => {
+      if (item.type !== 'tool_use_summary') return false;
+      return item.precedingToolUseIds.some((id) => absorbedCallIds.has(id));
+    },
+    [absorbedCallIds],
+  );
+
+  const getCompactLabel = useCallback(
+    (item: HistoryItem | HistoryItemWithoutId): string | undefined => {
+      if (item.type !== 'tool_group' || item.tools.length === 0)
         return undefined;
-      },
+      // Look up ONLY the first tool's callId. A merged group concatenates
+      // batch A (earliest calls) then batch B; earlier iterations scanned
+      // all callIds and returned "first hit", but async resolution order
+      // breaks that — if B's summary resolves first, the header renders
+      // SB; when A later resolves, the next render flips to SA. Anchoring
+      // on item.tools[0].callId gives stable "leading batch governs"
+      // semantics; if A's call failed and only B resolved, the header
+      // stays blank for that group (acceptable — the fallback is the
+      // default "Tool × N" rendering once the lookup misses).
+      return summaryByCallId.get(item.tools[0].callId);
+    },
     [summaryByCallId],
   );
 
@@ -140,6 +187,7 @@ export const MainContent = () => {
               isPending={false}
               commands={uiState.slashCommands}
               compactLabel={getCompactLabel(h)}
+              summaryAbsorbed={isSummaryAbsorbed(h)}
             />
           )),
         ]}
@@ -162,6 +210,7 @@ export const MainContent = () => {
               activeShellPtyId={uiState.activePtyId}
               embeddedShellFocused={uiState.embeddedShellFocused}
               compactLabel={getCompactLabel(item)}
+              summaryAbsorbed={isSummaryAbsorbed(item)}
             />
           ))}
           <ShowMoreLines constrainHeight={uiState.constrainHeight} />

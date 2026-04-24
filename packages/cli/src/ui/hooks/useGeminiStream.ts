@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
+import {
+  useState,
+  useRef,
+  useCallback,
+  useEffect,
+  useMemo,
+  useLayoutEffect,
+} from 'react';
 import type {
   Config,
   EditorType,
@@ -268,9 +275,20 @@ export const useGeminiStream = (
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
   // Hold the latest history in a ref so handleCompletedTools can read it
   // without depending on `history` (which would recreate the tool scheduler
-  // every render).
+  // every render). Use useLayoutEffect instead of writing during render —
+  // writing refs in the render phase is unsafe under React's concurrent
+  // rendering (a bailed-out render could leave the ref with a dropped value).
   const historyRef = useRef<HistoryItem[]>(history);
-  historyRef.current = history;
+  useLayoutEffect(() => {
+    historyRef.current = history;
+  }, [history]);
+  // In-flight tool-use-summary aborters. Each batch gets its own AbortController
+  // because the captured turn controller is replaced when submitQuery starts
+  // the next turn, and the summary call outlives the current turn (that's the
+  // whole point — it overlaps with the next turn's streaming). cancelOngoingRequest
+  // aborts all in-flight summaries so Ctrl+C during the next turn also kills
+  // this turn's stale summary work.
+  const summaryAbortRefsRef = useRef<Set<AbortController>>(new Set());
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
   const [
@@ -534,6 +552,12 @@ export const useGeminiStream = (
     turnCancelledRef.current = true;
     isSubmittingQueryRef.current = false;
     abortControllerRef.current?.abort();
+    // Cancel any in-flight tool-use-summary generations so their Promise.then
+    // doesn't addItem a stale label after the user cancelled.
+    for (const ac of summaryAbortRefsRef.current) {
+      ac.abort();
+    }
+    summaryAbortRefsRef.current.clear();
 
     // Report cancellation to arena status reporter (if in arena mode).
     // This is needed because cancellation during tool execution won't
@@ -1821,33 +1845,62 @@ export const useGeminiStream = (
       // Subagent exclusion is implicit — useGeminiStream only drives the
       // main session; subagents run through agents/runtime/ with their own loop.
       if (config.getEmitToolUseSummaries()) {
-        const toolInfoForSummary = geminiTools.map((tc) => ({
-          name: tc.request.name,
-          input: tc.request.args,
-          output: extractToolResultText(tc.response.responseParts),
-        }));
-        const toolUseIds = geminiTools.map((tc) => tc.request.callId);
-        const lastAssistantText = extractLastAssistantText(historyRef.current);
-        const summarySignal =
-          abortControllerRef.current?.signal ?? new AbortController().signal;
+        // Only summarize successful tools. Error/cancelled entries push
+        // "Cancelled by user" / retry-loop warnings into the summarizer
+        // prompt and produce plausibly-worded but misleading labels (the
+        // fast model happily synthesizes "Attempted to read files" from a
+        // batch that was mostly failures). cleanSummary can reject output
+        // prefixes but not prevent this kind of polluted-input hallucination.
+        const successfulTools = geminiTools.filter(
+          (tc) => tc.status === 'success',
+        );
+        if (successfulTools.length > 0) {
+          const toolInfoForSummary = successfulTools.map((tc) => ({
+            name: tc.request.name,
+            input: tc.request.args,
+            output: extractToolResultText(tc.response.responseParts),
+          }));
+          const toolUseIds = successfulTools.map((tc) => tc.request.callId);
+          const lastAssistantText = extractLastAssistantText(
+            historyRef.current,
+          );
+          // Dedicated AbortController for this batch. Scoping it to the
+          // current turn via abortControllerRef.current would be wrong —
+          // submitQuery() below allocates a new controller for the next
+          // turn, so the captured signal becomes stale the moment the
+          // next turn starts. Instead, check the live abort state at
+          // resolve time (which covers both Ctrl+C on the next turn and
+          // mid-flight cancellation of this batch via turnCancelledRef).
+          const summaryAbort = new AbortController();
+          summaryAbortRefsRef.current.add(summaryAbort);
 
-        void generateToolUseSummary({
-          config,
-          tools: toolInfoForSummary,
-          signal: summarySignal,
-          lastAssistantText,
-        }).then((summary) => {
-          if (summary && !summarySignal.aborted) {
-            addItem(
-              {
-                type: 'tool_use_summary',
-                summary,
-                precedingToolUseIds: toolUseIds,
-              } as HistoryItemWithoutId,
-              Date.now(),
-            );
-          }
-        });
+          void generateToolUseSummary({
+            config,
+            tools: toolInfoForSummary,
+            signal: summaryAbort.signal,
+            lastAssistantText,
+          })
+            .then((summary) => {
+              summaryAbortRefsRef.current.delete(summaryAbort);
+              const cancelled =
+                turnCancelledRef.current ||
+                abortControllerRef.current?.signal.aborted ||
+                summaryAbort.signal.aborted;
+              if (summary && !cancelled) {
+                addItem(
+                  {
+                    type: 'tool_use_summary',
+                    summary,
+                    precedingToolUseIds: toolUseIds,
+                  } as HistoryItemWithoutId,
+                  Date.now(),
+                );
+              }
+            })
+            .catch(() => {
+              summaryAbortRefsRef.current.delete(summaryAbort);
+            });
+        }
       }
 
       // Don't continue if model was switched due to quota error

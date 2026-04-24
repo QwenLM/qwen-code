@@ -343,6 +343,52 @@ describe('mergeCompactToolGroups', () => {
     expect(merged[3].type).toBe('tool_group');
   });
 
+  it('drops trailing tool_use_summary after a single tool_group', () => {
+    // Single-batch turn: one tool_group, then its summary arrives. No second
+    // group follows. The summary must not survive in the merged output,
+    // otherwise mergedHistory.length grows lock-step with history.length
+    // and MainContent's refreshStatic heuristic (currMLen <= prevMLen) never
+    // fires — the already-committed tool_group never repaints with the label.
+    const items: HistoryItem[] = [
+      createToolGroup(1, [createTool('c1', 'Shell', ToolCallStatus.Success)]),
+      {
+        type: 'tool_use_summary',
+        id: 2,
+        summary: 'Ran shell batch',
+        precedingToolUseIds: ['c1'],
+      },
+    ];
+
+    const merged = mergeCompactToolGroups(items);
+
+    // Only the tool_group survives; the trailing summary is dropped.
+    expect(merged.length).toBe(1);
+    expect(merged[0].id).toBe(1);
+    expect(merged[0].type).toBe('tool_group');
+  });
+
+  it('drops trailing tool_use_summary even when followed by visible non-mergeable items', () => {
+    // A summary between a tool_group and the next visible boundary (user
+    // message) must also be dropped — otherwise the refreshStatic heuristic
+    // is off by one the moment the summary arrives.
+    const items: HistoryItem[] = [
+      createToolGroup(1, [createTool('c1', 'Shell', ToolCallStatus.Success)]),
+      {
+        type: 'tool_use_summary',
+        id: 2,
+        summary: 'Ran shell batch',
+        precedingToolUseIds: ['c1'],
+      },
+      { type: 'user', id: 3, text: 'next prompt' },
+    ];
+
+    const merged = mergeCompactToolGroups(items);
+
+    expect(merged.length).toBe(2);
+    expect(merged[0].type).toBe('tool_group');
+    expect(merged[1].type).toBe('user');
+  });
+
   it('merges tool_groups separated by tool_use_summary (hidden in compact)', () => {
     // tool_use_summary items are consumed upstream to decorate the adjacent
     // tool_group's compact label; they never render standalone, so they must

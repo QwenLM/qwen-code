@@ -34,8 +34,12 @@ function isAgentWithPendingConfirmation(
 /**
  * Check if a tool_group history item should be excluded from merging due to force-expand conditions.
  * These conditions match ToolGroupMessage.tsx:105-112 showCompact logic.
+ * Exported so MainContent can determine which callIds get their label
+ * "absorbed" by the compact tool_group header vs which need the standalone
+ * `● <label>` line rendered (force-expanded groups never go through the
+ * compact path, so their label would otherwise be invisible).
  */
-function isForceExpandGroup(
+export function isForceExpandGroup(
   item: HistoryItem,
   embeddedShellFocused: boolean,
   activeShellPtyId: number | undefined,
@@ -120,6 +124,22 @@ export function mergeCompactToolGroups(
 
   while (i < items.length) {
     const item = items[i];
+
+    // Drop `tool_use_summary` items unconditionally (not only between merge
+    // anchors). Keeps `mergedHistory.length` flat when a summary arrives so
+    // MainContent's refreshStatic trigger (compares merged-length vs
+    // history-length) fires and Ink's <Static> repaints the tool_group with
+    // its newly-looked-up compactLabel. Without this, a trailing summary
+    // after a single batch would never surface in compact mode.
+    //
+    // `gemini_thought` is a different case — it stays in the merged result
+    // so a pure thought arriving between turns doesn't trigger an unnecessary
+    // full-screen repaint (it renders as nothing in compact mode anyway, so
+    // dropping it would be cosmetically invisible but cost a refresh).
+    if (item.type === 'tool_use_summary') {
+      i++;
+      continue;
+    }
 
     // Pass through non-mergeable items unchanged
     if (

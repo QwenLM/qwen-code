@@ -73,6 +73,54 @@ function getShellTimeoutMs(
   return undefined;
 }
 
+/**
+ * Summary-label header: bold label + " · N tools" count when there are 2+
+ * tools in the batch. The count is intentionally suppressed for N=1 so
+ * single-tool batches don't read as `Read config.json · 1 tools`. Future
+ * edits: keep the `length > 1` guard, not `>= 1`.
+ */
+function renderSummaryHeader(label: string, count: number) {
+  return (
+    <>
+      <Text bold>{label}</Text>
+      {count > 1 ? (
+        <Text color={theme.text.secondary}>
+          {'  · '}
+          {count} tools
+        </Text>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * Default header: active tool name + " × N" count + first-line description.
+ * Same N=1 suffix suppression as `renderSummaryHeader`.
+ */
+function renderDefaultHeader(
+  activeToolName: string,
+  activeToolDescription: string,
+  count: number,
+) {
+  return (
+    <>
+      <Text bold>{activeToolName}</Text>
+      {count > 1 ? (
+        <Text color={theme.text.secondary}>
+          {' × '}
+          {count}
+        </Text>
+      ) : null}
+      {activeToolDescription ? (
+        <Text color={theme.text.secondary}>
+          {'  '}
+          {activeToolDescription}
+        </Text>
+      ) : null}
+    </>
+  );
+}
+
 export const CompactToolGroupDisplay: React.FC<
   CompactToolGroupDisplayProps
 > = ({ toolCalls, contentWidth, compactLabel }) => {
@@ -101,11 +149,6 @@ export const CompactToolGroupDisplay: React.FC<
     ? activeTool.description.split('\n')[0]
     : '';
 
-  // When a generated summary is available, show it in place of the active
-  // tool name + description. The tool count is kept so users still see how
-  // many calls were folded.
-  const hasSummary = !!compactLabel;
-
   return (
     <Box
       flexDirection="column"
@@ -120,33 +163,13 @@ export const CompactToolGroupDisplay: React.FC<
         <ToolStatusIndicator status={overallStatus} name={activeTool.name} />
         <Box flexGrow={1}>
           <Text wrap="truncate-end">
-            {hasSummary ? (
-              <>
-                <Text bold>{compactLabel}</Text>
-                {toolCalls.length > 1 ? (
-                  <Text color={theme.text.secondary}>
-                    {'  · '}
-                    {toolCalls.length} tools
-                  </Text>
-                ) : null}
-              </>
-            ) : (
-              <>
-                <Text bold>{activeTool.name}</Text>
-                {toolCalls.length > 1 ? (
-                  <Text color={theme.text.secondary}>
-                    {' × '}
-                    {toolCalls.length}
-                  </Text>
-                ) : null}
-                {activeToolDescription ? (
-                  <Text color={theme.text.secondary}>
-                    {'  '}
-                    {activeToolDescription}
-                  </Text>
-                ) : null}
-              </>
-            )}
+            {compactLabel
+              ? renderSummaryHeader(compactLabel, toolCalls.length)
+              : renderDefaultHeader(
+                  activeTool.name,
+                  activeToolDescription,
+                  toolCalls.length,
+                )}
           </Text>
         </Box>
         <ToolElapsedTime
