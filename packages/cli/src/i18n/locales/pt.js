@@ -1309,6 +1309,8 @@ export default {
     'Pago \u00B7 Até 6.000 solicitações/5 hrs \u00B7 Todos os modelos Alibaba Cloud Coding Plan',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
   'Bring your own API key': 'Traga sua própria chave API',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    'Autenticação baseada em navegador com provedores terceiros (por exemplo, OpenRouter, ModelScope)',
   'API-KEY': 'API-KEY',
   'Use coding plan credentials or your own api-keys/providers.':
     'Use credenciais do Coding Plan ou suas próprias chaves API/provedores.',

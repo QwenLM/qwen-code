@@ -43,11 +43,15 @@ function parseDefaultAuthType(
 }
 
 // Main menu option type
-type MainOption = typeof AuthType.QWEN_OAUTH | 'CODING_PLAN' | 'API_KEY';
+type MainOption = 'OAUTH' | 'CODING_PLAN' | 'API_KEY';
 type ApiKeyOption =
   | 'OPENROUTER_OAUTH'
   | 'ALIBABA_STANDARD_API_KEY'
   | 'CUSTOM_API_KEY';
+type OAuthOption =
+  | 'OPENROUTER_OAUTH'
+  | 'MODELSCOPE_OAUTH'
+  | 'QWEN_OAUTH_DISCONTINUED';
 
 // View level for navigation
 type ViewLevel =
@@ -58,7 +62,8 @@ type ViewLevel =
   | 'alibaba-standard-region-select'
   | 'alibaba-standard-api-key-input'
   | 'alibaba-standard-model-id-input'
-  | 'custom-info';
+  | 'custom-info'
+  | 'oauth-provider-select';
 
 const ALIBABA_STANDARD_MODEL_IDS_PLACEHOLDER = 'qwen3.5-plus,glm-5,kimi-k2.5';
 const ALIBABA_STANDARD_API_DOCUMENTATION_URLS: Record<
@@ -94,6 +99,7 @@ export function AuthDialog(): React.JSX.Element {
   const [alibabaStandardRegionIndex, setAlibabaStandardRegionIndex] =
     useState<number>(0);
   const [apiKeyTypeIndex, setApiKeyTypeIndex] = useState<number>(0);
+  const [oauthProviderIndex, setOAuthProviderIndex] = useState<number>(0);
   const [alibabaStandardRegion, setAlibabaStandardRegion] =
     useState<AlibabaStandardRegion>('cn-beijing');
   const [alibabaStandardApiKey, setAlibabaStandardApiKey] = useState('');
@@ -123,11 +129,13 @@ export function AuthDialog(): React.JSX.Element {
       value: 'API_KEY' as MainOption,
     },
     {
-      key: AuthType.QWEN_OAUTH,
-      title: t('Qwen OAuth'),
-      label: t('Qwen OAuth'),
-      description: t('Discontinued — switch to Coding Plan or API Key'),
-      value: AuthType.QWEN_OAUTH as MainOption,
+      key: 'OAUTH',
+      title: t('OAuth'),
+      label: t('OAuth'),
+      description: t(
+        'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)',
+      ),
+      value: 'OAUTH' as MainOption,
     },
   ];
 
@@ -216,15 +224,6 @@ export function AuthDialog(): React.JSX.Element {
 
   const apiKeyTypeItems = [
     {
-      key: 'OPENROUTER_OAUTH',
-      title: t('OpenRouter'),
-      label: t('OpenRouter'),
-      description: t(
-        'Browser OAuth · Auto-configure API key and OpenRouter models',
-      ),
-      value: 'OPENROUTER_OAUTH' as ApiKeyOption,
-    },
-    {
       key: 'ALIBABA_STANDARD_API_KEY',
       title: t('Alibaba Cloud ModelStudio Standard API Key'),
       label: t('Alibaba Cloud ModelStudio Standard API Key'),
@@ -242,8 +241,36 @@ export function AuthDialog(): React.JSX.Element {
     },
   ];
 
+  const oauthProviderItems = [
+    {
+      key: 'OPENROUTER_OAUTH',
+      title: t('OpenRouter'),
+      label: t('OpenRouter'),
+      description: t(
+        'Browser OAuth · Auto-configure API key and OpenRouter models',
+      ),
+      value: 'OPENROUTER_OAUTH' as OAuthOption,
+    },
+    {
+      key: 'MODELSCOPE_OAUTH',
+      title: t('ModelScope'),
+      label: t('ModelScope'),
+      description: t(
+        'Browser OAuth · Auto-configure API key and ModelScope models',
+      ),
+      value: 'MODELSCOPE_OAUTH' as OAuthOption,
+    },
+    {
+      key: 'QWEN_OAUTH_DISCONTINUED',
+      title: t('Qwen'),
+      label: t('Qwen'),
+      description: t('Discontinued — switch to Coding Plan or API Key'),
+      value: 'QWEN_OAUTH_DISCONTINUED' as OAuthOption,
+    },
+  ];
+
   // Map an AuthType to the corresponding main menu option.
-  // QWEN_OAUTH maps directly; USE_OPENAI maps to:
+  // QWEN_OAUTH maps to 'OAUTH'; USE_OPENAI maps to:
   // - CODING_PLAN when current config matches coding plan
   // - API_KEY for other OpenAI / Anthropic / Gemini-compatible configs
   const contentGenConfig = config.getContentGeneratorConfig();
@@ -253,7 +280,7 @@ export function AuthDialog(): React.JSX.Element {
       contentGenConfig?.apiKeyEnvKey,
     ) !== false;
   const authTypeToMainOption = (authType: AuthType): MainOption => {
-    if (authType === AuthType.QWEN_OAUTH) return AuthType.QWEN_OAUTH;
+    if (authType === AuthType.QWEN_OAUTH) return 'OAUTH';
     if (authType === AuthType.USE_OPENAI && isCurrentlyCodingPlan) {
       return 'CODING_PLAN';
     }
@@ -282,8 +309,8 @@ export function AuthDialog(): React.JSX.Element {
         return item.value === authTypeToMainOption(defaultAuthType);
       }
 
-      // Priority 4: default to QWEN_OAUTH
-      return item.value === AuthType.QWEN_OAUTH;
+      // Priority 4: default to OAUTH
+      return item.value === 'OAUTH';
     }),
   );
 
@@ -302,13 +329,8 @@ export function AuthDialog(): React.JSX.Element {
       return;
     }
 
-    // Qwen OAuth free tier discontinued — show warning instead of proceeding
-    if (value === AuthType.QWEN_OAUTH) {
-      setErrorMessage(
-        t(
-          'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.',
-        ),
-      );
+    if (value === 'OAUTH') {
+      setViewLevel('oauth-provider-select');
       return;
     }
 
@@ -319,11 +341,6 @@ export function AuthDialog(): React.JSX.Element {
     setErrorMessage(null);
     onAuthError(null);
 
-    if (value === 'OPENROUTER_OAUTH') {
-      await handleOpenRouterSubmit();
-      return;
-    }
-
     if (value === 'ALIBABA_STANDARD_API_KEY') {
       setAlibabaStandardModelIdError(null);
       setAlibabaStandardApiKeyError(null);
@@ -332,6 +349,40 @@ export function AuthDialog(): React.JSX.Element {
     }
 
     setViewLevel('custom-info');
+  };
+
+  const handleOAuthProviderSelect = async (value: OAuthOption) => {
+    setErrorMessage(null);
+    onAuthError(null);
+
+    if (value === 'OPENROUTER_OAUTH') {
+      await handleOpenRouterSubmit();
+      return;
+    }
+
+    // Qwen OAuth free tier discontinued — show warning instead of proceeding
+    if (value === 'QWEN_OAUTH_DISCONTINUED') {
+      setErrorMessage(
+        t(
+          'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.',
+        ),
+      );
+      return;
+    }
+
+    // Future: Add support for ModelScope OAuth when implemented
+    if (value === 'MODELSCOPE_OAUTH') {
+      // Currently not implemented, show message
+      setErrorMessage(
+        t(
+          'ModelScope OAuth is not yet implemented. Please select another option.',
+        ),
+      );
+      return;
+    }
+
+    // For other OAuth providers, you can extend the functionality here
+    await onAuthSelect(AuthType.USE_OPENAI);
   };
 
   const handleRegionSelect = async (selectedRegion: CodingPlanRegion) => {
@@ -417,6 +468,8 @@ export function AuthDialog(): React.JSX.Element {
       setViewLevel('alibaba-standard-region-select');
     } else if (viewLevel === 'alibaba-standard-model-id-input') {
       setViewLevel('alibaba-standard-api-key-input');
+    } else if (viewLevel === 'oauth-provider-select') {
+      setViewLevel('main');
     }
   };
 
@@ -437,7 +490,8 @@ export function AuthDialog(): React.JSX.Element {
           viewLevel === 'api-key-type-select' ||
           viewLevel === 'alibaba-standard-region-select' ||
           viewLevel === 'alibaba-standard-api-key-input' ||
-          viewLevel === 'alibaba-standard-model-id-input'
+          viewLevel === 'alibaba-standard-model-id-input' ||
+          viewLevel === 'oauth-provider-select'
         ) {
           handleGoBack();
           return;
@@ -667,6 +721,30 @@ export function AuthDialog(): React.JSX.Element {
     </>
   );
 
+  const renderOAuthProviderSelectView = () => (
+    <>
+      <Box marginTop={1}>
+        <DescriptiveRadioButtonSelect
+          items={oauthProviderItems}
+          initialIndex={oauthProviderIndex}
+          onSelect={handleOAuthProviderSelect}
+          onHighlight={(value) => {
+            const index = oauthProviderItems.findIndex(
+              (item) => item.value === value,
+            );
+            setOAuthProviderIndex(index);
+          }}
+          itemGap={1}
+        />
+      </Box>
+      <Box marginTop={1}>
+        <Text color={theme?.text?.secondary}>
+          {t('Enter to select, ↑↓ to navigate, Esc to go back')}
+        </Text>
+      </Box>
+    </>
+  );
+
   const getViewTitle = () => {
     switch (viewLevel) {
       case 'main':
@@ -687,6 +765,8 @@ export function AuthDialog(): React.JSX.Element {
         return t('Enter Alibaba Cloud ModelStudio Standard API Key');
       case 'alibaba-standard-model-id-input':
         return t('Enter Model IDs');
+      case 'oauth-provider-select':
+        return t('Select OAuth Provider');
       default:
         return t('Select Authentication Method');
     }
@@ -713,6 +793,7 @@ export function AuthDialog(): React.JSX.Element {
       {viewLevel === 'alibaba-standard-model-id-input' &&
         renderAlibabaStandardModelIdInputView()}
       {viewLevel === 'custom-info' && renderCustomInfoView()}
+      {viewLevel === 'oauth-provider-select' && renderOAuthProviderSelectView()}
 
       {(authError || errorMessage) && (
         <Box marginTop={1}>
