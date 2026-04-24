@@ -486,6 +486,50 @@ describe('modelConfigUtils', () => {
       );
     });
 
+    it('should find modelProvider from QWEN_MODEL when OPENAI_MODEL is not provided', () => {
+      const argv = {};
+      const modelProvider: ProviderModelConfig = {
+        id: 'qwen-env-model',
+        name: 'Qwen Env Model',
+        generationConfig: {
+          samplingParams: { temperature: 0.7 },
+        },
+      };
+      const settings = makeMockSettings({
+        model: { name: 'settings-model' },
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [
+            { id: 'settings-model', name: 'Settings Model' },
+            modelProvider,
+          ],
+        },
+      });
+      const selectedAuthType = AuthType.USE_OPENAI;
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'qwen-env-model',
+          apiKey: '',
+          baseUrl: '',
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType,
+        env: { QWEN_MODEL: 'qwen-env-model' },
+      });
+
+      expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          modelProvider,
+        }),
+      );
+    });
+
     it('should prefer OPENAI_MODEL over QWEN_MODEL and settings.model.name for USE_OPENAI provider lookup', () => {
       const argv = {};
       const openAIProvider: ProviderModelConfig = {
