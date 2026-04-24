@@ -102,27 +102,27 @@ function formatPerFile(perFileStats: Map<string, PerFileStats>): string[] {
   let maxAdded = 0;
   let maxRemoved = 0;
   for (const s of perFileStats.values()) {
-    if (s.isBinary || s.isUntracked) continue;
+    if (s.isBinary) continue;
     if (s.added > maxAdded) maxAdded = s.added;
     if (s.removed > maxRemoved) maxRemoved = s.removed;
   }
   const addWidth = String(maxAdded).length;
   const remWidth = String(maxRemoved).length;
-  // Width of the `+X -Y` stat column so `?` / `~` rows line up with it.
+  // Width of the `+X -Y` stat column so `~` (binary) rows line up with it.
   const statColumnWidth = 1 + addWidth + 1 + 1 + remWidth;
 
   const rows: string[] = [];
   for (const [filename, s] of perFileStats) {
-    if (s.isUntracked) {
-      rows.push(`  ${padMarker('?', statColumnWidth)}  ${filename}`);
-    } else if (s.isBinary) {
-      rows.push(
-        `  ${padMarker('~', statColumnWidth)}  ${filename} ${t('(binary)')}`,
-      );
+    if (s.isBinary) {
+      const suffix = s.isUntracked
+        ? ` ${t('(binary, new)')}`
+        : ` ${t('(binary)')}`;
+      rows.push(`  ${padMarker('~', statColumnWidth)}  ${filename}${suffix}`);
     } else {
       const added = `+${String(s.added).padStart(addWidth)}`;
       const removed = `-${String(s.removed).padStart(remWidth)}`;
-      rows.push(`  ${added} ${removed}  ${filename}`);
+      const suffix = s.isUntracked ? ` ${t('(new)')}` : '';
+      rows.push(`  ${added} ${removed}  ${filename}${suffix}`);
     }
   }
   return rows;

@@ -169,6 +169,8 @@ export default {
   '…and {{hidden}} more (showing first {{shown}})':
     '…and {{hidden}} more (showing first {{shown}})',
   '(binary)': '(binary)',
+  '(binary, new)': '(binary, new)',
+  '(new)': '(new)',
 
   // ============================================================================
   // Commands - Agents

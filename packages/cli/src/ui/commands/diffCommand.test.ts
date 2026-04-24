@@ -132,28 +132,46 @@ describe('diffCommand', () => {
     expect(content).toContain('src/b.ts');
   });
 
-  it('aligns untracked/binary rows with the numeric stat column', async () => {
+  it('shows untracked text files with their line count and a (new) marker', async () => {
     if (!diffCommand.action) throw new Error('Command has no action');
     mockFetchGitDiff.mockResolvedValue({
-      stats: { filesCount: 3, linesAdded: 10, linesRemoved: 2 },
+      stats: { filesCount: 2, linesAdded: 12, linesRemoved: 2 },
       perFileStats: new Map([
         ['src/a.ts', { added: 10, removed: 2, isBinary: false }],
         [
-          'new.txt',
-          { added: 0, removed: 0, isBinary: false, isUntracked: true },
+          'notes.md',
+          { added: 2, removed: 0, isBinary: false, isUntracked: true },
         ],
-        ['img.png', { added: 0, removed: 0, isBinary: true }],
       ]),
     } satisfies GitDiffResult);
     const result = await diffCommand.action(mockContext, '');
-    const lines = (result as { content: string }).content.split('\n');
+    const content = (result as { content: string }).content;
+    const lines = content.split('\n');
     const aLine = lines.find((l) => l.endsWith('src/a.ts'))!;
-    const newLine = lines.find((l) => l.endsWith('new.txt'))!;
-    const imgLine = lines.find((l) => l.endsWith('img.png (binary)'))!;
-    // Filename column starts at the same offset in every row so that `?` / `~`
-    // markers line up with `+X -Y` entries.
-    expect(aLine.indexOf('src/a.ts')).toBe(newLine.indexOf('new.txt'));
-    expect(aLine.indexOf('src/a.ts')).toBe(imgLine.indexOf('img.png'));
+    const newLine = lines.find((l) => l.includes('notes.md'))!;
+    expect(newLine).toContain('+ 2');
+    expect(newLine).toContain('(new)');
+    // Stat columns stay aligned across tracked and new rows.
+    expect(aLine.indexOf('src/a.ts')).toBe(newLine.indexOf('notes.md'));
+  });
+
+  it('marks binary untracked files with (binary, new) and no line count', async () => {
+    if (!diffCommand.action) throw new Error('Command has no action');
+    mockFetchGitDiff.mockResolvedValue({
+      stats: { filesCount: 1, linesAdded: 0, linesRemoved: 0 },
+      perFileStats: new Map([
+        [
+          'blob.bin',
+          { added: 0, removed: 0, isBinary: true, isUntracked: true },
+        ],
+      ]),
+    } satisfies GitDiffResult);
+    const result = await diffCommand.action(mockContext, '');
+    const content = (result as { content: string }).content;
+    const binaryLine = content.split('\n').find((l) => l.includes('blob.bin'))!;
+    expect(binaryLine).toContain('(binary, new)');
+    expect(binaryLine).not.toMatch(/\+\d/);
+    expect(binaryLine.trimStart().startsWith('~')).toBe(true);
   });
 
   it('pads counts consistently for 4-digit values', async () => {

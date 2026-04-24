@@ -38,8 +38,8 @@ async function makeRepo(): Promise<string> {
 }
 
 describe('parseGitNumstat', () => {
-  it('parses added/removed counts and file totals', () => {
-    const out = '3\t1\tsrc/a.ts\n10\t0\tsrc/b.ts\n0\t5\tsrc/c.ts\n';
+  it('parses added/removed counts and file totals (NUL-delimited -z format)', () => {
+    const out = '3\t1\tsrc/a.ts\0' + '10\t0\tsrc/b.ts\0' + '0\t5\tsrc/c.ts\0';
     const { stats, perFileStats } = parseGitNumstat(out);
     expect(stats).toEqual({
       filesCount: 3,
@@ -55,7 +55,7 @@ describe('parseGitNumstat', () => {
   });
 
   it('treats `-` counts as binary with zero line deltas', () => {
-    const out = '-\t-\timg/logo.png\n';
+    const out = '-\t-\timg/logo.png\0';
     const { stats, perFileStats } = parseGitNumstat(out);
     expect(stats.filesCount).toBe(1);
     expect(stats.linesAdded).toBe(0);
@@ -68,28 +68,44 @@ describe('parseGitNumstat', () => {
   });
 
   it('keeps accurate totals but caps per-file entries at MAX_FILES', () => {
-    const lines: string[] = [];
+    const tokens: string[] = [];
     const totalFiles = MAX_FILES + 5;
     for (let i = 0; i < totalFiles; i++) {
-      lines.push(`1\t0\tfile${i}.ts`);
+      tokens.push(`1\t0\tfile${i}.ts`);
     }
-    const { stats, perFileStats } = parseGitNumstat(lines.join('\n'));
+    const { stats, perFileStats } = parseGitNumstat(tokens.join('\0') + '\0');
     expect(stats.filesCount).toBe(totalFiles);
     expect(stats.linesAdded).toBe(totalFiles);
     expect(perFileStats.size).toBe(MAX_FILES);
   });
 
   it('ignores malformed rows without crashing', () => {
-    const out = 'garbage-line\n2\t1\tsrc/a.ts\n';
+    const out = 'garbage-token\0' + '2\t1\tsrc/a.ts\0';
     const { stats, perFileStats } = parseGitNumstat(out);
     expect(stats.filesCount).toBe(1);
     expect(perFileStats.has('src/a.ts')).toBe(true);
   });
 
-  it('handles filenames containing tabs', () => {
-    const out = '1\t2\tweird\tname.ts\n';
+  it('preserves literal tabs in tracked filenames via the -z wire format', () => {
+    // With -z, git emits the raw path; no C-style quoting. `split('\t')`
+    // would mis-attribute characters after the first tab, so the parser has
+    // to use index-based slicing instead.
+    const out = '1\t2\tweird\tname.ts\0';
     const { perFileStats } = parseGitNumstat(out);
     expect(perFileStats.has('weird\tname.ts')).toBe(true);
+    expect(perFileStats.get('weird\tname.ts')).toEqual({
+      added: 1,
+      removed: 2,
+      isBinary: false,
+    });
+  });
+
+  it('combines rename-pair tokens into a single entry', () => {
+    // `-z` rename format: `<a>\t<b>\t\0<old>\0<new>\0`.
+    const out = '0\t0\t\0' + 'src/old.ts\0' + 'src/new.ts\0';
+    const { stats, perFileStats } = parseGitNumstat(out);
+    expect(stats.filesCount).toBe(1);
+    expect(perFileStats.has('src/old.ts => src/new.ts')).toBe(true);
   });
 });
 
@@ -205,7 +221,7 @@ describe('fetchGitDiff', () => {
     }
   });
 
-  it('captures tracked modifications and untracked files', async () => {
+  it('captures tracked modifications and counts lines in untracked text files', async () => {
     await fs.writeFile(path.join(repo, 'tracked.txt'), 'one\ntwo\nthree\n');
     await git(repo, 'add', '.');
     await git(repo, 'commit', '-q', '-m', 'init');
@@ -214,14 +230,43 @@ describe('fetchGitDiff', () => {
       path.join(repo, 'tracked.txt'),
       'one\ntwo\nthree\nfour\n',
     );
-    await fs.writeFile(path.join(repo, 'new.txt'), 'brand new\n');
+    await fs.writeFile(path.join(repo, 'new.txt'), 'brand new\nsecond\n');
 
     const result = await fetchGitDiff(repo);
     expect(result).not.toBeNull();
-    expect(result!.stats.linesAdded).toBeGreaterThanOrEqual(1);
     expect(result!.stats.filesCount).toBe(2);
+    // Tracked: +1 from adding `four`. Untracked `new.txt`: 2 lines.
+    expect(result!.stats.linesAdded).toBe(3);
     expect(result!.perFileStats.get('tracked.txt')?.added).toBe(1);
-    expect(result!.perFileStats.get('new.txt')?.isUntracked).toBe(true);
+    expect(result!.perFileStats.get('new.txt')).toEqual({
+      added: 2,
+      removed: 0,
+      isBinary: false,
+      isUntracked: true,
+    });
+  });
+
+  it('flags untracked binary files without counting lines', async () => {
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'x\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+
+    // A NUL byte in the first few bytes is git's own binary heuristic.
+    await fs.writeFile(
+      path.join(repo, 'blob.bin'),
+      Buffer.from([0x89, 0x00, 0xff, 0x10]),
+    );
+
+    const result = await fetchGitDiff(repo);
+    expect(result).not.toBeNull();
+    expect(result!.perFileStats.get('blob.bin')).toEqual({
+      added: 0,
+      removed: 0,
+      isBinary: true,
+      isUntracked: true,
+    });
+    // Binary bytes must not contaminate the linesAdded total.
+    expect(result!.stats.linesAdded).toBe(0);
   });
 
   it('returns zero stats on a clean working tree', async () => {
@@ -452,6 +497,85 @@ describe('fetchGitDiff transient-state detection', () => {
     }
     expect(await fetchGitDiff(repo)).toBeNull();
     expect((await fetchGitDiffHunks(repo)).size).toBe(0);
+  });
+});
+
+describe('fetchGitDiff tracked-file filename robustness', () => {
+  it('keeps the real filename for tracked files that contain a tab', async () => {
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdiff-tab-'));
+    try {
+      await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+      await execFileAsync('git', ['config', 'user.email', 't@e.com'], {
+        cwd: repo,
+      });
+      await execFileAsync('git', ['config', 'user.name', 'T'], { cwd: repo });
+      await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+        cwd: repo,
+      });
+      const weirdName = 'tab\there.txt';
+      try {
+        await fs.writeFile(path.join(repo, weirdName), 'x\n');
+      } catch {
+        return; // Filesystem refused the name; nothing to assert.
+      }
+      await execFileAsync('git', ['add', '.'], { cwd: repo });
+      await execFileAsync('git', ['commit', '-q', '-m', 'init'], { cwd: repo });
+      await fs.writeFile(path.join(repo, weirdName), 'y\n');
+
+      const result = await fetchGitDiff(repo);
+      expect(result).not.toBeNull();
+      // With plain --numstat, git would C-quote this as `"tab\\there.txt"`
+      // and the map key would not match the real path. `--numstat -z` gives
+      // us the raw bytes back.
+      expect(result!.perFileStats.has(weirdName)).toBe(true);
+      expect(result!.perFileStats.has(`"tab\\there.txt"`)).toBe(false);
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('combines a rename into a single "old => new" per-file entry', async () => {
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdiff-mv-'));
+    try {
+      await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+      await execFileAsync('git', ['config', 'user.email', 't@e.com'], {
+        cwd: repo,
+      });
+      await execFileAsync('git', ['config', 'user.name', 'T'], { cwd: repo });
+      await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+        cwd: repo,
+      });
+      await fs.writeFile(path.join(repo, 'old.txt'), 'x\n');
+      await execFileAsync('git', ['add', '.'], { cwd: repo });
+      await execFileAsync('git', ['commit', '-q', '-m', 'init'], { cwd: repo });
+      await execFileAsync('git', ['mv', 'old.txt', 'new.txt'], { cwd: repo });
+
+      const result = await fetchGitDiff(repo);
+      expect(result).not.toBeNull();
+      // Rename detection is the git default with -M; we preserve that display
+      // shape rather than splitting into delete + add rows.
+      const keys = [...result!.perFileStats.keys()];
+      expect(keys.some((k) => k.includes('old.txt => new.txt'))).toBe(true);
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('parseShortstat ReDoS guard', () => {
+  it('runs in bounded time on pathological input', () => {
+    // CodeQL #137 flagged the previous regex as polynomial on many `0`s.
+    // After hardening (anchors + bounded digit runs), even 1e5 `0`s parse fast.
+    const adversarial = `${'0'.repeat(100_000)} files changed, ${'0'.repeat(
+      100_000,
+    )} insertions(+)`;
+    const start = Date.now();
+    const result = parseShortstat(adversarial);
+    const elapsed = Date.now() - start;
+    // Expect the bounded regex to either reject (too long for \d{1,10}) or
+    // match trivially. Either way it must not spin.
+    expect(elapsed).toBeLessThan(250);
+    expect(result).toBeNull();
   });
 });
 

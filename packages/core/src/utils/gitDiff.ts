@@ -5,7 +5,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { access, readFile, stat } from 'node:fs/promises';
+import { access, open, readFile, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import type { Hunk } from 'diff';
@@ -43,6 +43,10 @@ export const MAX_DIFF_SIZE_BYTES = 1_000_000;
 export const MAX_LINES_PER_FILE = 400;
 /** Skip per-file parsing when the diff touches more than this many files. */
 export const MAX_FILES_FOR_DETAILS = 500;
+/** How much of an untracked file to read when counting its lines. */
+const UNTRACKED_READ_CAP_BYTES = MAX_DIFF_SIZE_BYTES;
+/** Scan the first N bytes for NUL to detect binary files (matches git's heuristic). */
+const BINARY_SNIFF_BYTES = 8 * 1024;
 
 /**
  * Fetch numstat-based git diff stats (files changed, lines added/removed) and
@@ -58,22 +62,40 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
   if (!isGitRepository(cwd)) return null;
   if (await isInTransientGitState(cwd)) return null;
 
-  // Quick probe + untracked list run in parallel — both are needed regardless
-  // of which path we take, and shortstat is O(1) memory so it can short-circuit
-  // huge generated workspaces before we pay the per-file numstat cost.
-  const [shortstatOut, untrackedPathsRaw] = await Promise.all([
+  // Shortstat probe + untracked scan run in parallel — both are needed
+  // regardless of which path we take, and shortstat is O(1) memory so it can
+  // short-circuit huge generated workspaces before we pay the per-file
+  // numstat cost. For untracked we hold the raw stdout rather than the parsed
+  // list so the fast path only has to count NUL bytes instead of allocating
+  // a full path array.
+  const [shortstatOut, untrackedOut] = await Promise.all([
     runGit(['--no-optional-locks', 'diff', 'HEAD', '--shortstat'], cwd),
-    fetchUntrackedPaths(cwd),
+    runGit(
+      [
+        '--no-optional-locks',
+        'ls-files',
+        '-z',
+        '--others',
+        '--exclude-standard',
+      ],
+      cwd,
+    ),
   ]);
-  const untrackedPaths = untrackedPathsRaw ?? [];
+  const untrackedCount = countNulDelimited(untrackedOut);
 
   if (shortstatOut != null) {
     const quickStats = parseShortstat(shortstatOut);
-    if (quickStats && quickStats.filesCount > MAX_FILES_FOR_DETAILS) {
+    // Base the short-circuit on tracked + untracked so repos with relatively
+    // few edits but a flood of untracked files (e.g. large generated
+    // workspaces) still take the summary-only path.
+    if (
+      quickStats &&
+      quickStats.filesCount + untrackedCount > MAX_FILES_FOR_DETAILS
+    ) {
       return {
         stats: {
           ...quickStats,
-          filesCount: quickStats.filesCount + untrackedPaths.length,
+          filesCount: quickStats.filesCount + untrackedCount,
         },
         perFileStats: new Map(),
       };
@@ -81,29 +103,43 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
   }
 
   const numstatOut = await runGit(
-    ['--no-optional-locks', 'diff', 'HEAD', '--numstat'],
+    ['--no-optional-locks', 'diff', 'HEAD', '--numstat', '-z'],
     cwd,
   );
   if (numstatOut == null) return null;
 
   const { stats, perFileStats } = parseGitNumstat(numstatOut);
 
-  if (untrackedPaths.length > 0) {
+  if (untrackedCount > 0) {
     // Count every untracked file in the totals, even if the per-file map is
     // already full. Otherwise `filesCount` under-reports whenever tracked
     // changes already fill the `MAX_FILES` slot.
-    stats.filesCount += untrackedPaths.length;
-    const remainingSlots = MAX_FILES - perFileStats.size;
-    for (const filePath of untrackedPaths.slice(
-      0,
-      Math.max(0, remainingSlots),
-    )) {
-      perFileStats.set(filePath, {
+    stats.filesCount += untrackedCount;
+    const untrackedPaths = splitNulDelimited(untrackedOut);
+    const remainingSlots = Math.max(0, MAX_FILES - perFileStats.size);
+    const visiblePaths = untrackedPaths.slice(0, remainingSlots);
+    // Count lines in each newly-created file so the header's `+N` reflects
+    // the true additions a user would see if they `git add`'d. Reads are
+    // capped per-file and binary content is detected so huge log files or
+    // blobs don't stall /diff.
+    const untrackedStats = await Promise.all(
+      visiblePaths.map((relPath) =>
+        countUntrackedLines(path.join(cwd, relPath)),
+      ),
+    );
+    for (let i = 0; i < visiblePaths.length; i++) {
+      const relPath = visiblePaths[i] ?? '';
+      const u = untrackedStats[i] ?? {
         added: 0,
-        removed: 0,
         isBinary: false,
+      };
+      perFileStats.set(relPath, {
+        added: u.added,
+        removed: 0,
+        isBinary: u.isBinary,
         isUntracked: true,
       });
+      stats.linesAdded += u.added;
     }
   }
 
@@ -126,33 +162,83 @@ export async function fetchGitDiffHunks(
 }
 
 /**
- * Parse `git diff --numstat` output.
- * Format per line: `<added>\t<removed>\t<filename>`. Binary files use `-` for
- * counts. Only the first `MAX_FILES` entries are kept in `perFileStats`, but
- * total stats account for every line.
+ * Parse `git diff --numstat -z` output.
+ *
+ * Wire format (stable per `git-diff(1)`):
+ * - Non-rename:  `<added>\t<removed>\t<path>\0`
+ * - Rename:      `<added>\t<removed>\t\0<oldpath>\0<newpath>\0`
+ *
+ * Using `-z` (vs the default newline-delimited form) keeps paths byte-accurate:
+ * tabs, newlines, and non-ASCII characters all round-trip without git's
+ * C-style quoting, so `perFileStats` keys match the real on-disk filenames.
+ *
+ * Binary files use `-` for both counts. Only the first `MAX_FILES` entries are
+ * retained in `perFileStats`; totals account for every entry.
  */
 export function parseGitNumstat(stdout: string): GitDiffResult {
-  const lines = stdout.split('\n').filter(Boolean);
+  // Drop the trailing empty chunk from the terminating NUL.
+  const tokens = stdout.split('\0');
+  if (tokens.length > 0 && tokens[tokens.length - 1] === '') tokens.pop();
+
   let added = 0;
   let removed = 0;
   let validFileCount = 0;
   const perFileStats = new Map<string, PerFileStats>();
 
-  for (const line of lines) {
-    const parts = line.split('\t');
-    if (parts.length < 3) continue;
+  // Rename entries span three tokens ({counts}, oldPath, newPath). When we
+  // see an empty path in the counts token we stash the counts here and
+  // consume the next two tokens as the rename pair.
+  let pending: { added: number; removed: number; isBinary: boolean } | null =
+    null;
+  let renameOld: string | null = null;
 
-    validFileCount++;
-    const addStr = parts[0];
-    const remStr = parts[1];
-    const filePath = parts.slice(2).join('\t');
+  for (const token of tokens) {
+    if (pending) {
+      if (renameOld === null) {
+        renameOld = token;
+        continue;
+      }
+      commitEntry(
+        `${renameOld} => ${token}`,
+        pending.added,
+        pending.removed,
+        pending.isBinary,
+      );
+      pending = null;
+      renameOld = null;
+      continue;
+    }
+
+    // Index-based parse — `split('\t')` is unsafe because `-z` preserves
+    // literal tabs inside filenames.
+    const firstTab = token.indexOf('\t');
+    if (firstTab < 0) continue;
+    const secondTab = token.indexOf('\t', firstTab + 1);
+    if (secondTab < 0) continue;
+    const addStr = token.slice(0, firstTab);
+    const remStr = token.slice(firstTab + 1, secondTab);
+    const filePath = token.slice(secondTab + 1);
     const isBinary = addStr === '-' || remStr === '-';
-    const fileAdded = isBinary ? 0 : parseInt(addStr ?? '0', 10) || 0;
-    const fileRemoved = isBinary ? 0 : parseInt(remStr ?? '0', 10) || 0;
+    const fileAdded = isBinary ? 0 : parseInt(addStr, 10) || 0;
+    const fileRemoved = isBinary ? 0 : parseInt(remStr, 10) || 0;
 
+    if (filePath === '') {
+      // Rename header — wait for oldPath and newPath tokens.
+      pending = { added: fileAdded, removed: fileRemoved, isBinary };
+      continue;
+    }
+    commitEntry(filePath, fileAdded, fileRemoved, isBinary);
+  }
+
+  function commitEntry(
+    filePath: string,
+    fileAdded: number,
+    fileRemoved: number,
+    isBinary: boolean,
+  ): void {
+    validFileCount++;
     added += fileAdded;
     removed += fileRemoved;
-
     if (perFileStats.size < MAX_FILES) {
       perFileStats.set(filePath, {
         added: fileAdded,
@@ -249,10 +335,15 @@ export function parseGitDiff(stdout: string): Map<string, Hunk[]> {
 /**
  * Parse `git diff --shortstat` output, e.g.
  * ` 3 files changed, 42 insertions(+), 7 deletions(-)`.
+ *
+ * The regex is anchored (line start/end with the `m` flag) and uses single
+ * literal spaces plus bounded `\d{1,10}` digit runs. This closes CodeQL alert
+ * #137: the previous unanchored form with `\s+` and `\d+` in nested optional
+ * groups could backtrack polynomially on crafted strings of `0`s.
  */
 export function parseShortstat(stdout: string): GitDiffStats | null {
   const match = stdout.match(
-    /(\d+)\s+files?\s+changed(?:,\s+(\d+)\s+insertions?\(\+\))?(?:,\s+(\d+)\s+deletions?\(-\))?/,
+    /^ ?(\d{1,10}) files? changed(?:, (\d{1,10}) insertions?\(\+\))?(?:, (\d{1,10}) deletions?\(-\))?$/m,
   );
   if (!match) return null;
   return {
@@ -260,6 +351,62 @@ export function parseShortstat(stdout: string): GitDiffStats | null {
     linesAdded: parseInt(match[2] ?? '0', 10),
     linesRemoved: parseInt(match[3] ?? '0', 10),
   };
+}
+
+function countNulDelimited(stdout: string | null): number {
+  if (!stdout) return 0;
+  let count = 0;
+  for (let i = 0; i < stdout.length; i++) {
+    if (stdout.charCodeAt(i) === 0) count++;
+  }
+  return count;
+}
+
+function splitNulDelimited(stdout: string | null): string[] {
+  if (!stdout) return [];
+  return stdout.split('\0').filter(Boolean);
+}
+
+interface UntrackedLineStats {
+  added: number;
+  isBinary: boolean;
+}
+
+/**
+ * Count lines in an untracked file so the /diff totals include it. Reads up
+ * to `UNTRACKED_READ_CAP_BYTES`, bails on NUL in the first `BINARY_SNIFF_BYTES`
+ * (git's own heuristic), and swallows read errors into `{added:0,isBinary:false}`
+ * so one unreadable file can't block the whole command.
+ */
+async function countUntrackedLines(
+  absPath: string,
+): Promise<UntrackedLineStats> {
+  let fh;
+  try {
+    fh = await open(absPath, 'r');
+  } catch {
+    return { added: 0, isBinary: false };
+  }
+  try {
+    const buf = Buffer.alloc(UNTRACKED_READ_CAP_BYTES);
+    const { bytesRead } = await fh.read(buf, 0, UNTRACKED_READ_CAP_BYTES, 0);
+    if (bytesRead === 0) return { added: 0, isBinary: false };
+    const sniffEnd = Math.min(BINARY_SNIFF_BYTES, bytesRead);
+    for (let i = 0; i < sniffEnd; i++) {
+      if (buf[i] === 0) return { added: 0, isBinary: true };
+    }
+    let lines = 0;
+    for (let i = 0; i < bytesRead; i++) {
+      if (buf[i] === 0x0a) lines++;
+    }
+    // If the file does not end in a newline, count the trailing partial line.
+    if (buf[bytesRead - 1] !== 0x0a) lines++;
+    return { added: lines, isBinary: false };
+  } catch {
+    return { added: 0, isBinary: false };
+  } finally {
+    await fh.close().catch(() => {});
+  }
 }
 
 /**
@@ -308,18 +455,6 @@ async function isInTransientGitState(cwd: string): Promise<boolean> {
     ),
   );
   return results.some(Boolean);
-}
-
-async function fetchUntrackedPaths(cwd: string): Promise<string[] | null> {
-  // `-z` emits NUL-delimited paths with no C-style quoting, so filenames
-  // containing newlines, tabs, or non-ASCII bytes round-trip cleanly.
-  const stdout = await runGit(
-    ['--no-optional-locks', 'ls-files', '-z', '--others', '--exclude-standard'],
-    cwd,
-  );
-  if (!stdout) return null;
-  const paths = stdout.split('\0').filter(Boolean);
-  return paths.length > 0 ? paths : null;
 }
 
 async function runGit(args: string[], cwd: string): Promise<string | null> {

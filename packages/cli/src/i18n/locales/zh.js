@@ -164,6 +164,8 @@ export default {
   '…and {{hidden}} more (showing first {{shown}})':
     '…还有 {{hidden}} 个（仅显示前 {{shown}} 个）',
   '(binary)': '（二进制）',
+  '(binary, new)': '（二进制，新增）',
+  '(new)': '（新增）',
 
   // ============================================================================
   // Commands - Agents
