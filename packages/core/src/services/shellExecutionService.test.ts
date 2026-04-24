@@ -143,6 +143,17 @@ const createExpectedAnsiOutput = (text: string | string[]): AnsiOutput => {
   return expected;
 };
 
+const createAnsiToken = (text: string) => ({
+  text,
+  bold: false,
+  italic: false,
+  underline: false,
+  dim: false,
+  inverse: false,
+  fg: '',
+  bg: '',
+});
+
 const setupConflictingPathEnv = () => {
   process.env = {
     ...originalProcessEnv,
@@ -745,6 +756,59 @@ describe('ShellExecutionService', () => {
           chunk: mockAnsiOutput,
         }),
       );
+    });
+
+    it('does not re-emit live output when only soft-wrap segmentation changes', async () => {
+      const coloredShellExecutionConfig = {
+        ...shellExecutionConfig,
+        showColor: true,
+        disableDynamicLineTrimming: true,
+      };
+      const firstWrappedOutput = [
+        [createAnsiToken('abcd')],
+        [createAnsiToken('efgh')],
+      ];
+      const rewrappedOutput = [
+        [createAnsiToken('ab')],
+        [createAnsiToken('cdef')],
+        [createAnsiToken('gh')],
+      ];
+      const logicalOutput = [[createAnsiToken('abcdefgh')]];
+      let rawRenderCount = 0;
+
+      mockSerializeTerminalToObject.mockImplementation(
+        (
+          _terminal,
+          _scrollOffset,
+          options?: { unwrapWrappedLines?: boolean },
+        ) => {
+          if (options?.unwrapWrappedLines) {
+            return logicalOutput;
+          }
+
+          rawRenderCount += 1;
+          return rawRenderCount === 1 ? firstWrappedOutput : rewrappedOutput;
+        },
+      );
+
+      await simulateExecution(
+        'narrow-output',
+        (pty) => {
+          pty.onData.mock.calls[0][0]('abcdefgh');
+          pty.onData.mock.calls[0][0]('\r');
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+        },
+        coloredShellExecutionConfig,
+      );
+
+      const dataEvents = onOutputEventMock.mock.calls.filter(
+        ([event]) => event.type === 'data',
+      );
+      expect(dataEvents).toHaveLength(1);
+      expect(dataEvents[0][0]).toEqual({
+        type: 'data',
+        chunk: firstWrappedOutput,
+      });
     });
 
     it('should call onOutputEvent with AnsiOutput when showColor is false', async () => {

@@ -156,6 +156,55 @@ const replayTerminalOutput = async (
   return serializeTerminalToText(replayTerminal);
 };
 
+const getLastNonEmptyAnsiLineIndex = (output: AnsiOutput): number => {
+  for (let i = output.length - 1; i >= 0; i--) {
+    const line = output[i];
+    if (
+      line
+        .map((segment) => segment.text)
+        .join('')
+        .trim().length > 0
+    ) {
+      return i;
+    }
+  }
+
+  return -1;
+};
+
+const trimTrailingEmptyAnsiLines = (output: AnsiOutput): AnsiOutput =>
+  output.slice(0, getLastNonEmptyAnsiLineIndex(output) + 1);
+
+const areAnsiOutputsEqual = (
+  left: AnsiOutput | null,
+  right: AnsiOutput,
+): boolean => {
+  if (!left || left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((leftLine, lineIndex) => {
+    const rightLine = right[lineIndex];
+    if (leftLine.length !== rightLine.length) {
+      return false;
+    }
+
+    return leftLine.every((leftToken, tokenIndex) => {
+      const rightToken = rightLine[tokenIndex];
+      return (
+        leftToken.text === rightToken.text &&
+        leftToken.bold === rightToken.bold &&
+        leftToken.italic === rightToken.italic &&
+        leftToken.underline === rightToken.underline &&
+        leftToken.dim === rightToken.dim &&
+        leftToken.inverse === rightToken.inverse &&
+        leftToken.fg === rightToken.fg &&
+        leftToken.bg === rightToken.bg
+      );
+    });
+  });
+};
+
 interface ProcessCleanupStrategy {
   killPty(pid: number, pty: ActivePty): void;
   killChildProcesses(pids: Set<number>): void;
@@ -526,7 +575,7 @@ export class ShellExecutionService {
 
         let processingChain = Promise.resolve();
         let decoder: TextDecoder | null = null;
-        let output: string | AnsiOutput | null = null;
+        let outputComparison: AnsiOutput | null = null;
         const outputChunks: Buffer[] = [];
         const error: Error | null = null;
         let exited = false;
@@ -557,8 +606,14 @@ export class ShellExecutionService {
           }
 
           let newOutput: AnsiOutput;
+          let newOutputComparison: AnsiOutput;
           if (shellExecutionConfig.showColor) {
             newOutput = serializeTerminalToObject(headlessTerminal);
+            newOutputComparison = serializeTerminalToObject(
+              headlessTerminal,
+              0,
+              { unwrapWrappedLines: true },
+            );
           } else {
             const buffer = headlessTerminal.buffer.active;
             const lines: AnsiOutput = [];
@@ -579,31 +634,23 @@ export class ShellExecutionService {
               ]);
             }
             newOutput = lines;
+            newOutputComparison = lines;
           }
 
-          let lastNonEmptyLine = -1;
-          for (let i = newOutput.length - 1; i >= 0; i--) {
-            const line = newOutput[i];
-            if (
-              line
-                .map((segment) => segment.text)
-                .join('')
-                .trim().length > 0
-            ) {
-              lastNonEmptyLine = i;
-              break;
-            }
-          }
-
-          const trimmedOutput = newOutput.slice(0, lastNonEmptyLine + 1);
+          const trimmedOutput = trimTrailingEmptyAnsiLines(newOutput);
+          const trimmedOutputComparison =
+            trimTrailingEmptyAnsiLines(newOutputComparison);
 
           const finalOutput = shellExecutionConfig.disableDynamicLineTrimming
             ? newOutput
             : trimmedOutput;
+          const finalOutputComparison = shellExecutionConfig
+            .disableDynamicLineTrimming
+            ? newOutputComparison
+            : trimmedOutputComparison;
 
-          // Using stringify for a quick deep comparison.
-          if (JSON.stringify(output) !== JSON.stringify(finalOutput)) {
-            output = finalOutput;
+          if (!areAnsiOutputsEqual(outputComparison, finalOutputComparison)) {
+            outputComparison = finalOutputComparison;
             onOutputEvent({
               type: 'data',
               chunk: finalOutput,
