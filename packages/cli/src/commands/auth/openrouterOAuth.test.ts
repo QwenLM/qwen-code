@@ -5,7 +5,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { AuthType, type Config } from '@qwen-code/qwen-code-core';
+import type { LoadedSettings } from '../../config/settings.js';
 import {
   buildOpenRouterAuthorizationUrl,
   createOpenRouterOAuthSession,
@@ -523,10 +524,10 @@ describe('openrouterOAuth', () => {
       systemDefaults: { settings: {}, path: '/system-defaults.json' },
       setValue: vi.fn(),
       forScope: vi.fn(),
-    } as never;
+    } as unknown as LoadedSettings;
     const config = {
       reloadModelProvidersConfig: vi.fn(),
-    } as never;
+    } as unknown as Config;
     const fetchSpy = vi
       .spyOn(
         await import('./openrouterOAuth.js'),
