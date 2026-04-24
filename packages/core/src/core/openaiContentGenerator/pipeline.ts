@@ -10,11 +10,10 @@ import {
   type GenerateContentParameters,
   GenerateContentResponse,
 } from '@google/genai';
-import type { Config } from '../../config/config.js';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
-import type { OpenAICompatibleProvider } from './provider/index.js';
 import { OpenAIContentConverter } from './converter.js';
-import type { ErrorHandler, RequestContext } from './errorHandler.js';
+import { StreamingToolCallParser } from './streamingToolCallParser.js';
+import type { PipelineConfig, RequestContext } from './types.js';
 
 /**
  * The OpenAI SDK adds an abort listener for every `chat.completions.create`
@@ -46,44 +45,27 @@ export class StreamContentError extends Error {
   }
 }
 
-export interface PipelineConfig {
-  cliConfig: Config;
-  provider: OpenAICompatibleProvider;
-  contentGeneratorConfig: ContentGeneratorConfig;
-  errorHandler: ErrorHandler;
-}
+export type { PipelineConfig } from './types.js';
 
 export class ContentGenerationPipeline {
   client: OpenAI;
-  private converter: OpenAIContentConverter;
   private contentGeneratorConfig: ContentGeneratorConfig;
 
   constructor(private config: PipelineConfig) {
     this.contentGeneratorConfig = config.contentGeneratorConfig;
     this.client = this.config.provider.buildClient();
-    this.converter = new OpenAIContentConverter(
-      this.contentGeneratorConfig.model,
-      this.contentGeneratorConfig.schemaCompliance,
-      this.contentGeneratorConfig.modalities ?? {},
-    );
   }
 
   async execute(
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
-    // Use request.model when explicitly provided (e.g., fastModel for suggestion
-    // generation), falling back to the configured model as the default.
-    const effectiveModel = request.model || this.contentGeneratorConfig.model;
-    this.converter.setModel(effectiveModel);
-    this.converter.setModalities(this.contentGeneratorConfig.modalities ?? {});
     raiseAbortListenerCap(request.config?.abortSignal);
     return this.executeWithErrorHandling(
       request,
       userPromptId,
       false,
-      effectiveModel,
-      async (openaiRequest) => {
+      async (openaiRequest, context) => {
         const openaiResponse = (await this.client.chat.completions.create(
           openaiRequest,
           {
@@ -92,7 +74,10 @@ export class ContentGenerationPipeline {
         )) as OpenAI.Chat.ChatCompletion;
 
         const geminiResponse =
-          this.converter.convertOpenAIResponseToGemini(openaiResponse);
+          OpenAIContentConverter.convertOpenAIResponseToGemini(
+            openaiResponse,
+            context,
+          );
 
         return geminiResponse;
       },
@@ -103,15 +88,11 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
-    const effectiveModel = request.model || this.contentGeneratorConfig.model;
-    this.converter.setModel(effectiveModel);
-    this.converter.setModalities(this.contentGeneratorConfig.modalities ?? {});
     raiseAbortListenerCap(request.config?.abortSignal);
     return this.executeWithErrorHandling(
       request,
       userPromptId,
       true,
-      effectiveModel,
       async (openaiRequest, context) => {
         // Stage 1: Create OpenAI stream
         const stream = (await this.client.chat.completions.create(
@@ -143,13 +124,6 @@ export class ContentGenerationPipeline {
   ): AsyncGenerator<GenerateContentResponse> {
     const collectedGeminiResponses: GenerateContentResponse[] = [];
 
-    // Stream-local parser state. Previously the tool-call parser lived on
-    // the Converter singleton and was reset at stream start — but that
-    // wiped concurrent streams' in-flight buffers (e.g. parallel subagents
-    // sharing the same Config.contentGenerator). Scoping it per-stream
-    // fixes issue #3516.
-    const streamCtx = this.converter.createStreamContext();
-
     // State for handling chunk merging.
     // pendingFinishResponse holds a finish chunk waiting to be merged with
     // a subsequent usage-metadata chunk before yielding.
@@ -174,9 +148,9 @@ export class ContentGenerationPipeline {
           throw new StreamContentError(errorContent);
         }
 
-        const response = this.converter.convertOpenAIChunkToGemini(
+        const response = OpenAIContentConverter.convertOpenAIChunkToGemini(
           chunk,
-          streamCtx,
+          context,
         );
 
         // Stage 2b: Filter empty responses to avoid downstream issues
@@ -237,13 +211,7 @@ export class ContentGenerationPipeline {
       if (pendingFinishResponse && !finishYielded) {
         yield pendingFinishResponse;
       }
-
-      // Stage 2e: Stream completed successfully
-      context.duration = Date.now() - context.startTime;
     } catch (error) {
-      // No manual parser cleanup needed — streamCtx is stream-local and
-      // becomes eligible for garbage collection once this generator unwinds.
-
       // Re-throw StreamContentError directly so it can be handled by
       // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
       if (error instanceof StreamContentError) {
@@ -337,20 +305,23 @@ export class ContentGenerationPipeline {
   private async buildRequest(
     request: GenerateContentParameters,
     userPromptId: string,
-    streaming: boolean = false,
-    effectiveModel: string,
+    context: RequestContext,
+    isStreaming: boolean,
   ): Promise<OpenAI.Chat.ChatCompletionCreateParams> {
-    const messages = this.converter.convertGeminiRequestToOpenAI(request);
+    const messages = OpenAIContentConverter.convertGeminiRequestToOpenAI(
+      request,
+      context,
+    );
 
     // Apply provider-specific enhancements
     const baseRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-      model: effectiveModel,
+      model: context.model,
       messages,
       ...this.buildGenerateContentConfig(request),
     };
 
     // Add streaming options if present
-    if (streaming) {
+    if (isStreaming) {
       (
         baseRequest as unknown as OpenAI.Chat.ChatCompletionCreateParamsStreaming
       ).stream = true;
@@ -360,9 +331,11 @@ export class ContentGenerationPipeline {
     // Add tools if present and non-empty.
     // Some providers reject tools: [] (empty array), so skip when there are no tools.
     if (request.config?.tools && request.config.tools.length > 0) {
-      baseRequest.tools = await this.converter.convertGeminiToolsToOpenAI(
-        request.config.tools,
-      );
+      baseRequest.tools =
+        await OpenAIContentConverter.convertGeminiToolsToOpenAI(
+          request.config.tools,
+          this.contentGeneratorConfig.schemaCompliance ?? 'auto',
+        );
     }
 
     // Let provider enhance the request (e.g., add metadata, cache control)
@@ -497,29 +470,22 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
     userPromptId: string,
     isStreaming: boolean,
-    effectiveModel: string,
     executor: (
       openaiRequest: OpenAI.Chat.ChatCompletionCreateParams,
       context: RequestContext,
     ) => Promise<T>,
   ): Promise<T> {
-    const context = this.createRequestContext(
-      userPromptId,
-      isStreaming,
-      effectiveModel,
-    );
+    const context = this.createRequestContext(request, isStreaming);
 
     try {
       const openaiRequest = await this.buildRequest(
         request,
         userPromptId,
+        context,
         isStreaming,
-        effectiveModel,
       );
 
       const result = await executor(openaiRequest, context);
-
-      context.duration = Date.now() - context.startTime;
       return result;
     } catch (error) {
       // Use shared error handling logic
@@ -536,7 +502,6 @@ export class ContentGenerationPipeline {
     context: RequestContext,
     request: GenerateContentParameters,
   ): Promise<never> {
-    context.duration = Date.now() - context.startTime;
     this.config.errorHandler.handle(error, context, request);
   }
 
@@ -544,17 +509,19 @@ export class ContentGenerationPipeline {
    * Create request context with common properties
    */
   private createRequestContext(
-    userPromptId: string,
+    request: GenerateContentParameters,
     isStreaming: boolean,
-    effectiveModel: string,
   ): RequestContext {
+    const effectiveModel = request.model || this.contentGeneratorConfig.model;
+    const toolCallParser = isStreaming
+      ? new StreamingToolCallParser()
+      : undefined;
+
     return {
-      userPromptId,
       model: effectiveModel,
-      authType: this.contentGeneratorConfig.authType || 'unknown',
+      modalities: this.contentGeneratorConfig.modalities ?? {},
       startTime: Date.now(),
-      duration: 0,
-      isStreaming,
+      ...(toolCallParser ? { toolCallParser } : {}),
     };
   }
 }

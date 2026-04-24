@@ -154,6 +154,20 @@ function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
   });
 }
 
+// Exported for tests. Given a newest-first list of messages, return a list
+// with duplicates removed, keeping the first (newest) occurrence of each.
+export function dedupeNewestFirst(messages: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const msg of messages) {
+    if (!seen.has(msg)) {
+      seen.add(msg);
+      result.push(msg);
+    }
+  }
+  return result;
+}
+
 interface AppContainerProps {
   config: Config;
   settings: LoadedSettings;
@@ -451,20 +465,15 @@ export const AppContainer = (props: AppContainerProps) => {
         )
         .map((item) => item.text)
         .reverse();
+      // Current-session messages are already newest-first; combining with past
+      // messages gives a newest-first list. dedupeNewestFirst keeps the first
+      // (newest) occurrence so resubmitting an old prompt promotes it to
+      // "most recent" rather than leaving a stale copy at an older position.
       const combinedMessages = [
         ...currentSessionUserMessages,
         ...pastMessagesRaw,
       ];
-      const deduplicatedMessages: string[] = [];
-      if (combinedMessages.length > 0) {
-        deduplicatedMessages.push(combinedMessages[0]);
-        for (let i = 1; i < combinedMessages.length; i++) {
-          if (combinedMessages[i] !== combinedMessages[i - 1]) {
-            deduplicatedMessages.push(combinedMessages[i]);
-          }
-        }
-      }
-      setUserMessages(deduplicatedMessages.reverse());
+      setUserMessages(dedupeNewestFirst(combinedMessages).reverse());
     };
     fetchUserMessages();
   }, [historyManager.history, logger]);
