@@ -42,6 +42,7 @@ execSync('npm run generate', { stdio: 'inherit', cwd: root });
 // 6. webui (shared UI components - used by vscode companion)
 // 7. sdk (no internal dependencies)
 // 8. vscode-ide-companion (depends on webui)
+// 9. desktop (depends on webui and launches the built CLI in later slices)
 const buildOrder = [
   'packages/core',
   'packages/web-templates',
@@ -54,6 +55,7 @@ const buildOrder = [
   'packages/webui',
   'packages/sdk-typescript',
   'packages/vscode-ide-companion',
+  'packages/desktop',
 ];
 
 for (const workspace of buildOrder) {

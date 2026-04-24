@@ -1,0 +1,264 @@
+* {
+  box-sizing: border-box;
+}
+
+:root {
+  color: #eef0ed;
+  background: #101214;
+  font-family:
+    ui-sans-serif,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background:
+    linear-gradient(135deg, rgba(48, 77, 64, 0.28), transparent 38%),
+    linear-gradient(180deg, #17191b 0%, #101214 100%);
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.desktop-shell {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  min-width: 0;
+  padding: 22px;
+  border-right: 1px solid rgba(238, 240, 237, 0.09);
+  background: rgba(18, 20, 21, 0.92);
+}
+
+.brand-lockup {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+}
+
+.brand-mark {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border: 1px solid rgba(238, 240, 237, 0.16);
+  background: #e7bd73;
+  color: #161311;
+  font-weight: 800;
+}
+
+.brand-lockup h1,
+.brand-lockup p,
+.topbar h2,
+.topbar p,
+.panel h3 {
+  margin: 0;
+}
+
+.brand-lockup h1 {
+  font-size: 17px;
+  font-weight: 750;
+}
+
+.brand-lockup p,
+.eyebrow {
+  color: #9ca39b;
+  font-size: 12px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.sidebar-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sidebar-section-fill {
+  flex: 1;
+}
+
+.sidebar-section h2 {
+  margin: 0;
+  color: #b7bdb6;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.empty-row {
+  min-height: 42px;
+  padding: 12px;
+  border: 1px solid rgba(238, 240, 237, 0.09);
+  color: #858c84;
+  font-size: 13px;
+}
+
+.workbench {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  padding: 24px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 64px;
+  padding-bottom: 22px;
+}
+
+.topbar h2 {
+  font-size: 28px;
+  font-weight: 760;
+}
+
+.status-pill {
+  min-width: 86px;
+  padding: 7px 10px;
+  border: 1px solid rgba(238, 240, 237, 0.12);
+  color: #d8dcd6;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.status-pill-ready {
+  border-color: rgba(99, 214, 157, 0.45);
+  color: #96e6ba;
+}
+
+.status-pill-error {
+  border-color: rgba(235, 111, 91, 0.55);
+  color: #ff9a84;
+}
+
+.workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 18px;
+  min-height: 0;
+  flex: 1;
+}
+
+.panel {
+  min-width: 0;
+  border: 1px solid rgba(238, 240, 237, 0.1);
+  background: rgba(20, 23, 23, 0.74);
+}
+
+.panel-main {
+  display: flex;
+  min-height: 520px;
+  flex-direction: column;
+}
+
+.panel-side {
+  min-height: 240px;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 48px;
+  padding: 0 16px;
+  border-bottom: 1px solid rgba(238, 240, 237, 0.08);
+}
+
+.panel-header h3 {
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.panel-header span {
+  color: #858c84;
+  font-size: 12px;
+}
+
+.conversation-empty {
+  display: grid;
+  flex: 1;
+  min-height: 260px;
+  place-items: center;
+  color: #858c84;
+  font-size: 14px;
+}
+
+.runtime-row,
+.runtime-details {
+  padding: 16px;
+}
+
+.runtime-details {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+}
+
+.runtime-details div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.runtime-details dt {
+  color: #9ca39b;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.runtime-details dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #eef0ed;
+  font-size: 13px;
+}
+
+.muted {
+  color: #858c84;
+}
+
+.error-text {
+  color: #ff9a84;
+}
+
+@media (max-width: 860px) {
+  .desktop-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid rgba(238, 240, 237, 0.09);
+  }
+
+  .workspace-grid {
+    grid-template-columns: 1fr;
+  }
+}

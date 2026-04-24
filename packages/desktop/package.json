@@ -1,0 +1,38 @@
+{
+  "name": "@qwen-code/desktop",
+  "version": "0.15.2",
+  "description": "Electron desktop client for Qwen Code",
+  "private": true,
+  "type": "module",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build": "npm run build:main && npm run build:preload && npm run build:renderer",
+    "build:main": "tsc --project tsconfig.main.json",
+    "build:preload": "esbuild src/preload/index.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist/preload/index.cjs",
+    "build:renderer": "vite build",
+    "dev:renderer": "vite --host 127.0.0.1",
+    "lint": "eslint src --ext .ts,.tsx",
+    "start": "electron .",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit --project tsconfig.main.json && tsc --noEmit --project tsconfig.renderer.json"
+  },
+  "dependencies": {
+    "@qwen-code/webui": "file:../webui",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.2.0",
+    "electron": "^41.3.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.0",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
