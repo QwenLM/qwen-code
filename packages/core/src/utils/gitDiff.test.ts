@@ -478,6 +478,45 @@ describe('fetchGitDiff non-ASCII filenames', () => {
   });
 });
 
+describe('fetchGitDiff untracked with special filenames', () => {
+  it('counts an untracked file whose name contains a newline as one entry', async () => {
+    // Skip on platforms where the filesystem rejects `\n` in names (e.g. some
+    // Windows filesystems). POSIX filesystems accept it; we rely on that here.
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdiff-nl-'));
+    try {
+      await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+      await execFileAsync('git', ['config', 'user.email', 't@example.com'], {
+        cwd: repo,
+      });
+      await execFileAsync('git', ['config', 'user.name', 'T'], { cwd: repo });
+      await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+        cwd: repo,
+      });
+      await fs.writeFile(path.join(repo, 'seed.txt'), 'x\n');
+      await execFileAsync('git', ['add', '.'], { cwd: repo });
+      await execFileAsync('git', ['commit', '-q', '-m', 'seed'], { cwd: repo });
+
+      const weirdName = 'line1\nline2.txt';
+      try {
+        await fs.writeFile(path.join(repo, weirdName), 'content\n');
+      } catch {
+        // Filesystem refused newline in name — nothing to assert here.
+        return;
+      }
+
+      const result = await fetchGitDiff(repo);
+      expect(result).not.toBeNull();
+      // Without `-z`, `ls-files` would quote this as `"line1\nline2.txt"`
+      // and split-on-\n would produce two phantom entries. With `-z` we get
+      // exactly one entry, keyed by the real name.
+      expect(result!.stats.filesCount).toBe(1);
+      expect(result!.perFileStats.has(weirdName)).toBe(true);
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('fetchGitDiff untracked counting', () => {
   let repo: string;
   beforeEach(async () => {

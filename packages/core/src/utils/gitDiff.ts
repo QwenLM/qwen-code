@@ -58,15 +58,14 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
   if (!isGitRepository(cwd)) return null;
   if (await isInTransientGitState(cwd)) return null;
 
-  // Quick probe first — O(1) memory regardless of diff size. Lets us bail out
-  // of huge diffs (e.g. generated workspaces) before paying for per-file work.
-  const shortstatOut = await runGit(
-    ['--no-optional-locks', 'diff', 'HEAD', '--shortstat'],
-    cwd,
-  );
-  // Fetch untracked filenames up front so both the shortstat fast path and
-  // the numstat slow path report the same `filesCount` surface.
-  const untrackedPaths = (await fetchUntrackedPaths(cwd)) ?? [];
+  // Quick probe + untracked list run in parallel — both are needed regardless
+  // of which path we take, and shortstat is O(1) memory so it can short-circuit
+  // huge generated workspaces before we pay the per-file numstat cost.
+  const [shortstatOut, untrackedPathsRaw] = await Promise.all([
+    runGit(['--no-optional-locks', 'diff', 'HEAD', '--shortstat'], cwd),
+    fetchUntrackedPaths(cwd),
+  ]);
+  const untrackedPaths = untrackedPathsRaw ?? [];
 
   if (shortstatOut != null) {
     const quickStats = parseShortstat(shortstatOut);
@@ -189,7 +188,10 @@ export function parseGitDiff(stdout: string): Map<string, Hunk[]> {
 
   for (const fileDiff of fileDiffs) {
     if (result.size >= MAX_FILES) break;
-    if (fileDiff.length > MAX_DIFF_SIZE_BYTES) continue;
+    // Use UTF-8 byte length (not JS string .length, which counts UTF-16 code
+    // units) so the cap matches the documented `MAX_DIFF_SIZE_BYTES` semantic
+    // on non-ASCII diffs.
+    if (Buffer.byteLength(fileDiff, 'utf8') > MAX_DIFF_SIZE_BYTES) continue;
 
     const lines = fileDiff.split('\n');
     const headerMatch = lines[0]?.match(/^a\/(.+?) b\/(.+)$/);
@@ -309,12 +311,15 @@ async function isInTransientGitState(cwd: string): Promise<boolean> {
 }
 
 async function fetchUntrackedPaths(cwd: string): Promise<string[] | null> {
+  // `-z` emits NUL-delimited paths with no C-style quoting, so filenames
+  // containing newlines, tabs, or non-ASCII bytes round-trip cleanly.
   const stdout = await runGit(
-    ['--no-optional-locks', 'ls-files', '--others', '--exclude-standard'],
+    ['--no-optional-locks', 'ls-files', '-z', '--others', '--exclude-standard'],
     cwd,
   );
-  if (!stdout || !stdout.trim()) return null;
-  return stdout.trim().split('\n').filter(Boolean);
+  if (!stdout) return null;
+  const paths = stdout.split('\0').filter(Boolean);
+  return paths.length > 0 ? paths : null;
 }
 
 async function runGit(args: string[], cwd: string): Promise<string | null> {
