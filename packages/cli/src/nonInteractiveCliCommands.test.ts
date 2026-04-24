@@ -360,6 +360,7 @@ describe('getAvailableCommands', () => {
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
       getFolderTrust: vi.fn().mockReturnValue(false),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+      getDisabledSlashCommands: vi.fn().mockReturnValue([]),
       storage: {},
     } as unknown as Config;
   });
