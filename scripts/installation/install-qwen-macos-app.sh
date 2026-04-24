@@ -114,6 +114,19 @@ if [ "${AUTO_MODE}" = false ]; then
   fi
 fi
 
+if [ -d "${SYSTEM_APP_PATH}" ] && [ ! -w "${SYSTEM_APP_DIR}" ]; then
+  log_error "${SYSTEM_APP_PATH} already exists, but ${SYSTEM_APP_DIR} is not writable."
+  echo ''
+  echo "The installer will not fall back to ${USER_APP_DIR} because Spotlight or Launchpad"
+  echo "may keep launching the stale system app from ${SYSTEM_APP_PATH}."
+  echo ''
+  echo 'Please update or remove the existing system app with administrator privileges, then rerun this installer:'
+  echo "  sudo rm -rf '${SYSTEM_APP_PATH}'"
+  echo ''
+  echo "Or reinstall from an account that can write to ${SYSTEM_APP_DIR}."
+  exit 1
+fi
+
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 

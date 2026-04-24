@@ -68,7 +68,8 @@ After installation, you can launch Qwen Code in three ways:
 - **Launchpad:** Find the "Qwen Code" icon in Launchpad
 - **Applications:** Open `/Applications/Qwen Code.app` directly
 
-If `/Applications` is not writable, the installer falls back to `~/Applications`.
+If `/Applications` is not writable, the installer falls back to `~/Applications` for new installs.
+If `/Applications/Qwen Code.app` already exists but `/Applications` is not writable, the installer stops instead of creating a second app in `~/Applications`; remove or update the system app with administrator privileges first so Spotlight and Launchpad do not keep opening the stale app.
 
 The app will:
 1. Open the Terminal application
@@ -93,6 +94,17 @@ macOS caches application icons. If the icon does not appear immediately, wait a 
 
 ```bash
 killall Dock
+```
+
+### Reinstall stops because an existing `/Applications` app is not writable
+
+If `/Applications/Qwen Code.app` already exists and your user cannot write to `/Applications`, the installer stops instead of installing a second copy under `~/Applications`. This avoids Spotlight or Launchpad continuing to open the stale system app.
+
+Remove or update the system app with administrator privileges, then rerun the installer:
+
+```bash
+sudo rm -rf "/Applications/Qwen Code.app"
+bash scripts/installation/install-qwen-macos-app.sh
 ```
 
 ### "qwen: command not found" when opening the app
