@@ -187,8 +187,7 @@ Then apply the fix, remove instrumentation, and verify with a clean run.
 
 ## Worked examples
 
--
-  `examples/headless-bg-agent-empty-stdout.md`
+- `examples/headless-bg-agent-empty-stdout.md`
   — pipe-captured runs all passed; the user's TTY printed nothing. The
   contradiction _was_ the bug. Illustrates _reproduction contradiction is data_
   and _instrument data, not code paths_.

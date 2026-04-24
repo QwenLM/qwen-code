@@ -60,6 +60,11 @@ import type { Question } from '../types/acpTypes.js';
 import { useImagePaste, type WebViewImageMessage } from './hooks/useImage.js';
 import { computeContextUsage } from './utils/contextUsage.js';
 import {
+  SKILL_ITEM_ID_PREFIX,
+  isSkillsSecondaryQuery,
+  shouldOpenSkillsSecondaryPicker,
+} from './utils/completionUtils.js';
+import {
   buildSlashCommandItems,
   isExpandableSlashCommand,
 } from './utils/slashCommandUtils.js';
@@ -254,6 +259,7 @@ export const App: React.FC = () => {
   const [availableCommands, setAvailableCommands] = useState<
     AvailableCommand[]
   >([]);
+  const [availableSkills, setAvailableSkills] = useState<string[]>([]);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [insightProgress, setInsightProgress] = useState<{
     stage: string;
@@ -324,6 +330,22 @@ export const App: React.FC = () => {
 
         return allItems;
       } else {
+        if (availableSkills.length > 0 && isSkillsSecondaryQuery(query)) {
+          const skillQuery = query.replace(/^skills\s+/i, '').toLowerCase();
+          return availableSkills
+            .map(
+              (skill) =>
+                ({
+                  id: `${SKILL_ITEM_ID_PREFIX}${skill}`,
+                  label: skill,
+                  type: 'command' as const,
+                  group: 'Skills',
+                  value: `skills ${skill}`,
+                }) satisfies CompletionItem,
+            )
+            .filter((item) => item.label.toLowerCase().includes(skillQuery));
+        }
+
         // Handle slash commands with grouping
         // Model group - special items without / prefix
         const modelGroupItems: CompletionItem[] = [
@@ -375,10 +397,19 @@ export const App: React.FC = () => {
         );
       }
     },
-    [fileContext, availableCommands, modelInfo?.name],
+    [fileContext, availableCommands, availableSkills, modelInfo?.name],
   );
 
   const completion = useCompletionTrigger(inputFieldRef, getCompletionItems);
+  const {
+    isOpen: completionIsOpen,
+    triggerChar: completionTriggerChar,
+    query: completionQuery,
+    items: completionItems,
+    closeCompletion,
+    openCompletion,
+    refreshCompletion,
+  } = completion;
 
   const contextUsage = useMemo(
     () => computeContextUsage(usageStats, modelInfo),
@@ -401,17 +432,32 @@ export const App: React.FC = () => {
   // Note: Avoid depending on the entire `completion` object here, since its identity
   // changes on every render which would retrigger this effect and can cause a refresh loop.
   useEffect(() => {
-    if (completion.isOpen && completion.triggerChar === '@') {
+    if (completionIsOpen && completionTriggerChar === '@') {
       // Only refresh items; do not change other completion state to avoid re-renders loops
-      completion.refreshCompletion();
+      refreshCompletion();
     }
-    // Only re-run when the actual data source changes, not on every render
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     workspaceFilesSignature,
-    completion.isOpen,
-    completion.triggerChar,
-    completion.query,
+    completionIsOpen,
+    completionTriggerChar,
+    completionQuery,
+    refreshCompletion,
+  ]);
+
+  useEffect(() => {
+    if (
+      completionIsOpen &&
+      completionTriggerChar === '/' &&
+      isSkillsSecondaryQuery(completionQuery)
+    ) {
+      refreshCompletion();
+    }
+  }, [
+    availableSkills,
+    completionIsOpen,
+    completionTriggerChar,
+    completionQuery,
+    refreshCompletion,
   ]);
 
   const { attachedImages, handleRemoveImage, clearImages, handlePaste } =
@@ -492,6 +538,9 @@ export const App: React.FC = () => {
     },
     setAvailableCommands: (commands) => {
       setAvailableCommands(commands);
+    },
+    setAvailableSkills: (skills) => {
+      setAvailableSkills(skills);
     },
     setAvailableModels: (models) => {
       setAvailableModels(models);
@@ -683,7 +732,7 @@ export const App: React.FC = () => {
 
       // Ignore info items (placeholders like "Searching files…")
       if (item.type === 'info') {
-        completion.closeCompletion();
+        closeCompletion();
         return;
       }
 
@@ -750,31 +799,38 @@ export const App: React.FC = () => {
         if (itemId === 'auth') {
           clearTriggerText();
           vscode.postMessage({ type: 'auth', data: {} });
-          completion.closeCompletion();
+          closeCompletion();
           return;
         }
 
         if (itemId === 'account') {
           clearTriggerText();
           vscode.postMessage({ type: 'getAccountInfo', data: {} });
-          completion.closeCompletion();
+          closeCompletion();
           return;
         }
 
         if (itemId === 'model') {
           clearTriggerText();
           setShowModelSelector(true);
-          completion.closeCompletion();
+          closeCompletion();
           return;
         }
 
         // Handle server-provided slash commands by sending them as messages.
         // Skip when fillOnly (Tab) — let the generic insertion path fill the
         // command text so the user can keep typing arguments.
+        // Special case: /skills always uses fill behavior (Enter = Tab) to
+        // allow the secondary skill picker to appear.
         const serverCmd = availableCommands.find((c) => c.name === itemId);
+        const isSkillsCmd = shouldOpenSkillsSecondaryPicker(
+          item,
+          availableSkills,
+        );
         if (
           serverCmd &&
           !fillOnly &&
+          !isSkillsCmd &&
           !isExpandableSlashCommand(serverCmd.name)
         ) {
           // Clear the trigger text since we're sending the command
@@ -784,7 +840,23 @@ export const App: React.FC = () => {
             type: 'sendMessage',
             data: { text: `/${serverCmd.name}` },
           });
-          completion.closeCompletion();
+          closeCompletion();
+          return;
+        }
+
+        // Handle secondary skill selection — send `/skills <name>` with
+        // optional trailing user text
+        if (itemId.startsWith(SKILL_ITEM_ID_PREFIX) && !fillOnly) {
+          clearTriggerText();
+          const value =
+            typeof item.value === 'string'
+              ? item.value
+              : itemId.slice(SKILL_ITEM_ID_PREFIX.length);
+          vscode.postMessage({
+            type: 'sendMessage',
+            data: { text: `/${value}` },
+          });
+          closeCompletion();
           return;
         }
       }
@@ -846,7 +918,7 @@ export const App: React.FC = () => {
       const atPos = textBeforeCursor.lastIndexOf('@');
       // Only consider slash as trigger if we're in slash command mode
       const slashPos =
-        completion.triggerChar === '/' ? textBeforeCursor.lastIndexOf('/') : -1;
+        completionTriggerChar === '/' ? textBeforeCursor.lastIndexOf('/') : -1;
       const triggerPos = Math.max(atPos, slashPos);
 
       if (triggerPos >= 0) {
@@ -869,6 +941,18 @@ export const App: React.FC = () => {
         sel?.removeAllRanges();
         sel?.addRange(newRange);
 
+        if (shouldOpenSkillsSecondaryPicker(item, availableSkills)) {
+          const rangeRect = newRange.getBoundingClientRect();
+          const inputRect = inputElement.getBoundingClientRect();
+          const position =
+            rangeRect.top > 0 || rangeRect.left > 0
+              ? { top: rangeRect.top, left: rangeRect.left }
+              : { top: inputRect.top, left: inputRect.left };
+
+          void openCompletion('/', `${insertValue} `, position);
+          return;
+        }
+
         if (
           completion.triggerChar === '/' &&
           isExpandableSlashCommand(insertValue.trim())
@@ -882,15 +966,19 @@ export const App: React.FC = () => {
       }
 
       // Close the completion menu
-      completion.closeCompletion();
+      closeCompletion();
     },
     [
-      completion,
-      inputFieldRef,
-      setInputText,
-      fileContext,
-      vscode,
       availableCommands,
+      availableSkills,
+      closeCompletion,
+      completion,
+      completionTriggerChar,
+      fileContext,
+      inputFieldRef,
+      openCompletion,
+      setInputText,
+      vscode,
     ],
   );
 
@@ -1370,16 +1458,16 @@ export const App: React.FC = () => {
                 position = { top: inputRect.top, left: inputRect.left };
               }
 
-              await completion.openCompletion('/', '', position);
+              await openCompletion('/', '', position);
             }
           }}
           onAttachContext={handleAttachContextClick}
           onPaste={handlePaste}
-          completionIsOpen={completion.isOpen}
-          completionItems={completion.items}
+          completionIsOpen={completionIsOpen}
+          completionItems={completionItems}
           onCompletionSelect={handleCompletionSelect}
           onCompletionFill={(item) => handleCompletionSelect(item, true)}
-          onCompletionClose={completion.closeCompletion}
+          onCompletionClose={closeCompletion}
           canSubmit={canSubmit}
           extraContent={
             attachedImages.length > 0 ? (

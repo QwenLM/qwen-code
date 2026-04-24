@@ -165,12 +165,12 @@ applicable.
 
 Project artifacts live under `.qwen/`:
 
-| Directory | Purpose |
-|---|---|
-| `.qwen/design/` | Design docs for planned features |
-| `.qwen/e2e-tests/` | E2E test plans and results |
-| `.qwen/issues/` | Issue drafts before filing on GitHub |
-| `.qwen/pr-drafts/` | PR drafts before submitting |
-| `.qwen/pr-reviews/` | PR review notes |
-| `.qwen/investigations/` | Structured debugging journals |
-| `.qwen/scripts/` | Utility scripts |
+| Directory               | Purpose                              |
+| ----------------------- | ------------------------------------ |
+| `.qwen/design/`         | Design docs for planned features     |
+| `.qwen/e2e-tests/`      | E2E test plans and results           |
+| `.qwen/issues/`         | Issue drafts before filing on GitHub |
+| `.qwen/pr-drafts/`      | PR drafts before submitting          |
+| `.qwen/pr-reviews/`     | PR review notes                      |
+| `.qwen/investigations/` | Structured debugging journals        |
+| `.qwen/scripts/`        | Utility scripts                      |

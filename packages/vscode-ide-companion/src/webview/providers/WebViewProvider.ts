@@ -70,6 +70,8 @@ export class WebViewProvider {
   private static lastContextMenuProvider: WebViewProvider | null = null;
   /** Cached available commands for re-sending on webview ready */
   private cachedAvailableCommands: AvailableCommand[] | null = null;
+  /** Cached available skills for re-sending on webview ready */
+  private cachedAvailableSkills: string[] | null = null;
   /** Cached available models for re-sending on webview ready */
   private cachedAvailableModels: ModelInfo[] | null = null;
   /** Model to apply once a new editor-tab session is initialized */
@@ -334,6 +336,15 @@ export class WebViewProvider {
       this.sendMessageToWebView({
         type: 'availableCommands',
         data: { commands },
+      });
+    });
+
+    // Surface available skills for the /skills secondary picker
+    this.agentManager.onAvailableSkills((skills) => {
+      this.cachedAvailableSkills = skills;
+      this.sendMessageToWebView({
+        type: 'availableSkills',
+        data: { skills },
       });
     });
 
@@ -1591,6 +1602,13 @@ export class WebViewProvider {
       this.sendMessageToWebView({
         type: 'availableCommands',
         data: { commands: this.cachedAvailableCommands },
+      });
+    }
+
+    if (this.cachedAvailableSkills !== null) {
+      this.sendMessageToWebView({
+        type: 'availableSkills',
+        data: { skills: this.cachedAvailableSkills },
       });
     }
 
