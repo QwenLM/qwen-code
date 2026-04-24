@@ -52,7 +52,6 @@ if [ -n "${BASH_SOURCE[0]:-}" ]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
 ICON_PATH="${SCRIPT_DIR}/qwen-icon.png"
-ICON_PATH="${SCRIPT_DIR}/qwen-icon.png"
 
 echo -e "${CYAN}"
 echo '╔═══════════════════════════════════════════════════════════╗'
