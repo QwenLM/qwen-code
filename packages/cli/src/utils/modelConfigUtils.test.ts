@@ -486,7 +486,7 @@ describe('modelConfigUtils', () => {
       );
     });
 
-    it('should prefer OPENAI_MODEL over QWEN_MODEL and settings.model.name for modelProvider lookup', () => {
+    it('should prefer OPENAI_MODEL over QWEN_MODEL and settings.model.name for USE_OPENAI provider lookup', () => {
       const argv = {};
       const openAIProvider: ProviderModelConfig = {
         id: 'openai-env-model',
@@ -535,6 +535,50 @@ describe('modelConfigUtils', () => {
       );
     });
 
+    it('should ignore OPENAI_MODEL for non-USE_OPENAI provider lookup', () => {
+      const argv = {};
+      const settingsModelProvider: ProviderModelConfig = {
+        id: 'settings-model',
+        name: 'Settings Model',
+      };
+      const unrelatedOpenAIProvider: ProviderModelConfig = {
+        id: 'openai-env-model',
+        name: 'OpenAI Env Model',
+      };
+      const settings = makeMockSettings({
+        model: { name: 'settings-model' },
+        modelProviders: {
+          [AuthType.USE_ANTHROPIC]: [
+            settingsModelProvider,
+            unrelatedOpenAIProvider,
+          ],
+        },
+      });
+      const selectedAuthType = AuthType.USE_ANTHROPIC;
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'settings-model',
+          apiKey: '',
+          baseUrl: '',
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType,
+        env: { OPENAI_MODEL: 'openai-env-model' },
+      });
+
+      expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          modelProvider: settingsModelProvider,
+        }),
+      );
+    });
     it('should not find modelProvider when authType is undefined', () => {
       const argv = { model: 'test-model' };
       const settings = makeMockSettings({
@@ -882,6 +926,5 @@ describe('modelConfigUtils', () => {
       });
       expect(result4.model).toBe('settings-model');
     });
-
   });
 });

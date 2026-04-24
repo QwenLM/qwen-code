@@ -100,12 +100,13 @@ export function resolveCliGenerationConfig(
   if (authType && settings.modelProviders) {
     const providers = settings.modelProviders[authType];
     if (providers && Array.isArray(providers)) {
-      const envOpenAIModel = env['OPENAI_MODEL'];
-      const envQwenModel = env['QWEN_MODEL'];
-
       const requestedModel =
-        argv.model || envOpenAIModel || envQwenModel || settings.model?.name;
-
+        authType === AuthType.USE_OPENAI
+          ? argv.model ||
+            env['OPENAI_MODEL'] ||
+            env['QWEN_MODEL'] ||
+            settings.model?.name
+          : argv.model || settings.model?.name;
       if (requestedModel) {
         modelProvider = providers.find((p) => p.id === requestedModel) as
           | ProviderModelConfig
