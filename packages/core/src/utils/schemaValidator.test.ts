@@ -443,4 +443,40 @@ describe('SchemaValidator', () => {
       expect(SchemaValidator.validate(schema, params)).toBeNull();
     });
   });
+
+  describe('compileStrict', () => {
+    it('returns null for a simple valid schema', () => {
+      expect(
+        SchemaValidator.compileStrict({
+          type: 'object',
+          properties: { foo: { type: 'string' } },
+        }),
+      ).toBeNull();
+    });
+
+    it('returns null for draft-2020-12 schemas', () => {
+      expect(
+        SchemaValidator.compileStrict({
+          $schema: 'https://json-schema.org/draft/2020-12/schema',
+          type: 'object',
+        }),
+      ).toBeNull();
+    });
+
+    it('returns null for empty object schema', () => {
+      expect(SchemaValidator.compileStrict({})).toBeNull();
+    });
+
+    it('returns an error string when type keyword has an illegal value', () => {
+      const err = SchemaValidator.compileStrict({ type: 42 });
+      expect(err).not.toBeNull();
+      expect(typeof err).toBe('string');
+    });
+
+    it('returns a descriptive error when schema is not an object', () => {
+      expect(SchemaValidator.compileStrict(null)).toMatch(/JSON object/);
+      expect(SchemaValidator.compileStrict(undefined)).toMatch(/JSON object/);
+      expect(SchemaValidator.compileStrict('a string')).toMatch(/JSON object/);
+    });
+  });
 });
