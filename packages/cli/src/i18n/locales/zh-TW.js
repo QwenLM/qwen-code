@@ -4,9 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Traditional Chinese (zh-TW) translations
-// Auto-generated from zh.js (Simplified Chinese) using opencc
-// Keys are copied from en.js; values are converted from zh.js
+// Traditional Chinese (zh-TW) translations for Qwen Code CLI
+// Auto-generated: structure from en.js, values from zh-TW (manual) or opencc(zh.js s2t)
 
 export default {
   '↑ to manage attachments': '↑ 管理附件',
@@ -62,7 +61,7 @@ export default {
   'Connecting to MCP servers... ({{connected}}/{{total}})': '正在連接到 MCP 服務器... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': '輸入您的消息或 @ 文件路徑',
   '? for shortcuts': '按 ? 查看快捷鍵',
-  'Press 'i' for INSERT mode and 'Esc' for NORMAL mode.': '按 \'i\' 進入插入模式，按 \'Esc\' 進入普通模式',
+  "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.": '按 \'i\' 進入插入模式，按 \'Esc\' 進入普通模式',
   'Cancel operation / Clear input (double press)': '取消操作 / 清空輸入（雙擊）',
   'Cycle approval modes': '循環切換審批模式',
   'Cycle through your prompt history': '循環瀏覽提示歷史',
@@ -135,7 +134,7 @@ export default {
   'Enter to submit, Esc to go back': 'Enter 提交，Esc 返回',
   'Invalid step: {{step}}': '無效步驟: {{step}}',
   'No subagents found.': '未找到子智能體。',
-  'Use '/agents create' to create your first subagent.': '使用 \'/agents create\' 創建您的第一個子智能體。',
+  "Use '/agents create' to create your first subagent.": '使用 \'/agents create\' 創建您的第一個子智能體。',
   '(built-in)': '（內置）',
   '(overridden by project level agent)': '（已被項目級智能體覆蓋）',
   'Project Level ({{path}})': '項目級 ({{path}})',
@@ -205,7 +204,7 @@ export default {
   'Enter a clear, unique name for this subagent.': '爲此子智能體輸入一個清晰、唯一的名稱。',
   'e.g., Code Reviewer': '例如：代碼審查員',
   'Name cannot be empty.': '名稱不能爲空。',
-  'Write the system prompt that defines this subagent's behavior. Be comprehensive for best results.': '編寫定義此子智能體行爲的系統提示。爲了獲得最佳效果，請全面描述。',
+  "Write the system prompt that defines this subagent's behavior. Be comprehensive for best results.": '編寫定義此子智能體行爲的系統提示。爲了獲得最佳效果，請全面描述。',
   'e.g., You are an expert code reviewer...': '例如：您是一位專業的代碼審查員...',
   'System prompt cannot be empty.': '系統提示不能爲空。',
   'Describe when and how this subagent should be used.': '描述何時以及如何使用此子智能體。',
@@ -260,7 +259,7 @@ export default {
   'Press Y/Enter to confirm, N/Esc to cancel': '按 Y/Enter 確認，N/Esc 取消',
   'Y/Enter to confirm, N/Esc to cancel': 'Y/Enter 確認，N/Esc 取消',
   '{{count}} extensions installed': '已安裝 {{count}} 個擴展',
-  'Use '/extensions install' to install your first extension.': '使用 \'/extensions install\' 安裝您的第一個擴展。',
+  "Use '/extensions install' to install your first extension.": '使用 \'/extensions install\' 安裝您的第一個擴展。',
   'up to date': '已是最新',
   'update available': '有可用更新',
   'checking...': '檢查中...',
@@ -446,7 +445,7 @@ export default {
   '(user)': '（用戶）',
   '[not set]': '［未設置］',
   '[value stored in keychain]': '［值存儲在鑰匙串中］',
-  'Value:': 'Value:',
+  'Value:': '值：',
   'Manage extension settings.': '管理擴展設置。',
   'You need to specify a command (set or list).': '您需要指定命令（set 或 list）。',
   'No plugins available in this marketplace.': '此市場中沒有可用的插件。',
@@ -643,24 +642,8 @@ export default {
   'Project memory file not found or is currently empty.': '項目記憶文件未找到或當前爲空',
   'Global memory file not found or is currently empty.': '全局記憶文件未找到或當前爲空',
   'Global memory is currently empty.': '全局記憶當前爲空',
-  'Global memory content:
-
----
-{{content}}
----': '全局記憶內容：
-
----
-{{content}}
----',
-  'Project memory content from {{path}}:
-
----
-{{content}}
----': '項目記憶內容來自 {{path}}：
-
----
-{{content}}
----',
+  'Global memory content:\n\n---\n{{content}}\n---': '全局記憶內容：\n\n---\n{{content}}\n---',
+  'Project memory content from {{path}}:\n\n---\n{{content}}\n---': '項目記憶內容來自 {{path}}：\n\n---\n{{content}}\n---',
   'Project memory is currently empty.': '項目記憶當前爲空',
   'Refreshing memory from source files...': '正在從源文件刷新記憶...',
   'Add content to the memory. Use --global for global memory or --project for project memory.': '添加內容到記憶。使用 --global 表示全局記憶，使用 --project 表示項目記憶',
@@ -698,11 +681,11 @@ export default {
   'No MCP servers configured with OAuth authentication.': '未配置支持 OAuth 認證的 MCP 服務器',
   'MCP servers with OAuth authentication:': '支持 OAuth 認證的 MCP 服務器：',
   'Use /mcp auth <server-name> to authenticate.': '使用 /mcp auth <server-name> 進行認證',
-  'MCP server '{{name}}' not found.': '未找到 MCP 服務器 \'{{name}}\'',
-  'Successfully authenticated and refreshed tools for '{{name}}'.': '成功認證並刷新了 \'{{name}}\' 的工具',
-  'Failed to authenticate with MCP server '{{name}}': {{error}}': '認證 MCP 服務器 \'{{name}}\' 失敗：{{error}}',
-  'Re-discovering tools from '{{name}}'...': '正在重新發現 \'{{name}}\' 的工具...',
-  'Discovered {{count}} tool(s) from '{{name}}'.': '從 \'{{name}}\' 發現了 {{count}} 個工具。',
+  "MCP server '{{name}}' not found.": '未找到 MCP 服務器 \'{{name}}\'',
+  "Successfully authenticated and refreshed tools for '{{name}}'.": '成功認證並刷新了 \'{{name}}\' 的工具',
+  "Failed to authenticate with MCP server '{{name}}': {{error}}": '認證 MCP 服務器 \'{{name}}\' 失敗：{{error}}',
+  "Re-discovering tools from '{{name}}'...": '正在重新發現 \'{{name}}\' 的工具...',
+  "Discovered {{count}} tool(s) from '{{name}}'.": '從 \'{{name}}\' 發現了 {{count}} 個工具。',
   'Authentication complete. Returning to server details...': '認證完成，正在返回服務器詳情...',
   'Authentication successful.': '認證成功。',
   'If the browser does not open, copy and paste this URL into your browser:': '如果瀏覽器未自動打開，請複製以下 URL 並粘貼到瀏覽器中：',
@@ -735,8 +718,8 @@ export default {
   'Command:': '命令：',
   'Working Directory:': '工作目錄：',
   'Capabilities:': '功能：',
-  'No server selected': 'No server selected',
-  'prompts': 'prompts',
+  'No server selected': '未選擇服務器',
+  'prompts': '提示詞',
   '(disabled)': '(已禁用)',
   'Error:': '錯誤：',
   'tool': '工具',
@@ -766,9 +749,9 @@ export default {
   'Tools for {{name}}': '{{name}} 的工具',
   'Tools for {{serverName}}': '{{serverName}} 的工具',
   '{{current}}/{{total}}': '{{current}}/{{total}}',
-  'required': 'required',
+  'required': '必填',
   'Type': '類型',
-  'Enum': 'Enum',
+  'Enum': '枚舉',
   'Parameters': '參數',
   'No tool selected': '未選擇工具',
   'Annotations': '註解',
@@ -796,8 +779,8 @@ export default {
   'Missing tag. Usage: /chat save <tag>': '缺少標籤。用法：/chat save <tag>',
   'Delete a conversation checkpoint. Usage: /chat delete <tag>': '刪除對話檢查點。用法：/chat delete <tag>',
   'Missing tag. Usage: /chat delete <tag>': '缺少標籤。用法：/chat delete <tag>',
-  'Conversation checkpoint '{{tag}}' has been deleted.': '對話檢查點 \'{{tag}}\' 已刪除',
-  'Error: No checkpoint found with tag '{{tag}}'.': '錯誤：未找到標籤爲 \'{{tag}}\' 的檢查點',
+  "Conversation checkpoint '{{tag}}' has been deleted.": '對話檢查點 \'{{tag}}\' 已刪除',
+  "Error: No checkpoint found with tag '{{tag}}'.": '錯誤：未找到標籤爲 \'{{tag}}\' 的檢查點',
   'Resume a conversation from a checkpoint. Usage: /chat resume <tag>': '從檢查點恢復對話。用法：/chat resume <tag>',
   'Missing tag. Usage: /chat resume <tag>': '缺少標籤。用法：/chat resume <tag>',
   'No saved checkpoint found with tag: {{tag}}.': '未找到標籤爲 {{tag}} 的已保存檢查點',
@@ -839,20 +822,12 @@ export default {
   'Configuration is not available.': '配置不可用。',
   'Please provide at least one path to add.': '請提供至少一個要添加的路徑。',
   'The /directory add command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.': '/directory add 命令在限制性沙箱配置文件中不受支持。請改爲在啓動會話時使用 --include-directories。',
-  'Error adding '{{path}}': {{error}}': '添加 \'{{path}}\' 時出錯：{{error}}',
-  'Successfully added QWEN.md files from the following directories if there are:
-- {{directories}}': '如果存在，已成功從以下目錄添加 QWEN.md 文件：
-- {{directories}}',
+  "Error adding '{{path}}': {{error}}": '添加 \'{{path}}\' 時出錯：{{error}}',
+  'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}': '如果存在，已成功從以下目錄添加 QWEN.md 文件：\n- {{directories}}',
   'Error refreshing memory: {{error}}': '刷新內存時出錯：{{error}}',
-  'Successfully added directories:
-- {{directories}}': '成功添加目錄：
-- {{directories}}',
-  'Current workspace directories:
-{{directories}}': '當前工作區目錄：
-{{directories}}',
-  'Please open the following URL in your browser to view the documentation:
-{{url}}': '請在瀏覽器中打開以下 URL 以查看文檔：
-{{url}}',
+  'Successfully added directories:\n- {{directories}}': '成功添加目錄：\n- {{directories}}',
+  'Current workspace directories:\n{{directories}}': '當前工作區目錄：\n{{directories}}',
+  'Please open the following URL in your browser to view the documentation:\n{{url}}': '請在瀏覽器中打開以下 URL 以查看文檔：\n{{url}}',
   'Opening documentation in your browser: {{url}}': '正在瀏覽器中打開文檔：{{url}}',
   'Do you want to proceed?': '是否繼續？',
   'Yes, allow once': '是，允許一次',
@@ -867,7 +842,7 @@ export default {
   'Yes, allow always': '是，總是允許',
   'Modify with external editor': '使用外部編輯器修改',
   'No, suggest changes (esc)': '否，建議更改 (esc)',
-  'Allow execution of: '{{command}}'?': '允許執行：\'{{command}}\'？',
+  "Allow execution of: '{{command}}'?": '允許執行：\'{{command}}\'？',
   'Yes, allow always ...': '是，總是允許 ...',
   'Always allow in this project': '在本項目中總是允許',
   'Always allow {{action}} in this project': '在本項目中總是允許{{action}}',
@@ -908,11 +883,7 @@ export default {
   'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch provider.': 'Qwen OAuth 免費額度已於 2026-04-15 停用。請運行 /auth 切換服務商。',
   'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.': 'Qwen OAuth 免費額度已於 2026-04-15 停用。請選擇 Coding Plan 或 API Key。',
   'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.': 'Qwen OAuth免費層已於2026-04-15停止服務。請選擇其他提供商的模型或運行 /auth 切換。',
-  '
-⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.
-': '
-⚠ Qwen OAuth 免費額度已於 2026-04-15 停用。請選擇其他選項。
-',
+  '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n': '\n⚠ Qwen OAuth 免費額度已於 2026-04-15 停用。請選擇其他選項。\n',
   'Paid · Up to 6,000 requests/5 hrs · All Alibaba Cloud Coding Plan Models': '付費 · 每 5 小時最多 6,000 次請求 · 支持阿里雲百鍊 Coding Plan 全部模型',
   'Alibaba Cloud Coding Plan': '阿里雲百鍊 Coding Plan',
   'Bring your own API key': '使用自己的 API 密鑰',
@@ -974,11 +945,7 @@ export default {
   'not set': '未設置',
   'none': '無',
   'unknown': '未知',
-  'Failed to switch model to '{{modelId}}'.
-
-{{error}}': '無法切換到模型 \'{{modelId}}\'.
-
-{{error}}',
+  "Failed to switch model to '{{modelId}}'.\n\n{{error}}": '無法切換到模型 \'{{modelId}}\'.\n\n{{error}}',
   'Qwen 3.6 Plus — efficient hybrid model with leading coding performance': 'Qwen 3.6 Plus — 高效混合架構，編程性能業界領先',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)': '來自阿里雲 ModelStudio 的最新 Qwen Vision 模型（版本：qwen3-vl-plus-2025-09-23）',
   'Manage folder trust settings': '管理文件夾信任設置',
@@ -987,12 +954,12 @@ export default {
   'Ask': '詢問',
   'Deny': '拒絕',
   'Workspace': '工作區',
-  'Qwen Code won't ask before using allowed tools.': 'Qwen Code 使用已允許的工具前不會詢問。',
+  "Qwen Code won't ask before using allowed tools.": 'Qwen Code 使用已允許的工具前不會詢問。',
   'Qwen Code will ask before using these tools.': 'Qwen Code 使用這些工具前會先詢問。',
   'Qwen Code is not allowed to use denied tools.': 'Qwen Code 不允許使用被拒絕的工具。',
   'Manage trusted directories for this workspace.': '管理此工作區的受信任目錄。',
   'Any use of the {{tool}} tool': '{{tool}} 工具的任何使用',
-  '{{tool}} commands matching '{{pattern}}'': '匹配 \'{{pattern}}\' 的 {{tool}} 命令',
+  "{{tool}} commands matching '{{pattern}}'": '匹配 \'{{pattern}}\' 的 {{tool}} 命令',
   'From user settings': '來自用戶設置',
   'From project settings': '來自項目設置',
   'From session': '來自會話',
@@ -1077,7 +1044,7 @@ export default {
   'to authenticate with OAuth-enabled servers': '使用支持 OAuth 的服務器進行認證',
   'Press': '按',
   'to toggle tool descriptions on/off': '切換工具描述開關',
-  'Starting OAuth authentication for MCP server '{{name}}'...': '正在爲 MCP 服務器 \'{{name}}\' 啓動 OAuth 認證...',
+  "Starting OAuth authentication for MCP server '{{name}}'...": '正在爲 MCP 服務器 \'{{name}}\' 啓動 OAuth 認證...',
   'Restarting MCP servers...': '正在重啓 MCP 服務器...',
   'Tips:': '提示：',
   'Use /compress when the conversation gets long to summarize history and free up context.': '對話變長時用 /compress，總結歷史並釋放上下文。',
@@ -1153,7 +1120,7 @@ export default {
   '(Backups will be created and original files will be preserved)': '（將創建備份，原始文件將保留）',
   'Waiting for user confirmation...': '等待用戶確認...',
   '(esc to cancel, {{time}})': '（按 esc 取消，{{time}}）',
-  WITTY_LOADING_PHRASES: [
+  'WITTY_LOADING_PHRASES': [
     '正在努力搬磚，請稍候...',
     '老闆在身後，快加載啊！',
     '頭髮掉光前，一定能加載完...',
@@ -1217,7 +1184,7 @@ export default {
   'You can configure your API key and models in settings.json': '您可以在 settings.json 中配置 API Key 和模型',
   'Refer to the documentation for setup instructions': '請參考文檔瞭解配置說明',
   'Coding Plan': 'Coding Plan',
-  'Paste your api key of ModelStudio Coding Plan and you're all set!': '粘貼您的百鍊 Coding Plan API Key，即可完成設置！',
+  "Paste your api key of ModelStudio Coding Plan and you're all set!": '粘貼您的百鍊 Coding Plan API Key，即可完成設置！',
   'Custom': '自定義',
   'More instructions about configuring `modelProviders` manually.': '關於手動配置 `modelProviders` 的更多說明。',
   'Select API-KEY configuration mode:': '選擇 API-KEY 配置模式：',
@@ -1291,58 +1258,34 @@ export default {
   'Select region for Coding Plan:': '選擇 Coding Plan 區域：',
   'Enter your Coding Plan API key: ': '請輸入您的 Coding Plan API 密鑰：',
   'Select authentication method:': '選擇認證方式：',
-  '
-=== Authentication Status ===
-': '
-=== 認證狀態 ===
-',
-  '⚠️  No authentication method configured.
-': '⚠️  未配置認證方式。
-',
-  'Run one of the following commands to get started:
-': '運行以下命令之一開始配置：
-',
+  '\n=== Authentication Status ===\n': '\n=== 認證狀態 ===\n',
+  '⚠️  No authentication method configured.\n': '⚠️  未配置認證方式。\n',
+  'Run one of the following commands to get started:\n': '運行以下命令之一開始配置：\n',
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)': '  qwen auth qwen-oauth     - 使用 Qwen OAuth 登錄（已停用）',
-  '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan
-': '  qwen auth coding-plan      - 使用阿里雲百鍊 Coding Plan 認證
-',
+  '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n': '  qwen auth coding-plan      - 使用阿里雲百鍊 Coding Plan 認證\n',
   'Or simply run:': '或者直接運行：',
-  '  qwen auth                - Interactive authentication setup
-': '  qwen auth                - 交互式認證配置
-',
+  '  qwen auth                - Interactive authentication setup\n': '  qwen auth                - 交互式認證配置\n',
   '✓ Authentication Method: Qwen OAuth': '✓ 認證方式：Qwen OAuth',
   '  Type: Free tier (discontinued 2026-04-15)': '  類型：免費額度（2026-04-15 已停用）',
   '  Limit: No longer available': '  限額：已不可用',
   'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan, OpenRouter, Fireworks AI, or another provider.': 'Qwen OAuth 免費額度已於 2026-04-15 停用。請運行 /auth 切換到 Coding Plan、OpenRouter、Fireworks AI 或其他服務商。',
-  '  Models: Qwen latest models
-': '  模型：Qwen 最新模型
-',
+  '  Models: Qwen latest models\n': '  模型：Qwen 最新模型\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan': '✓ 認證方式：阿里雲百鍊 Coding Plan',
   '中国 (China) - 阿里云百炼': '中國 (China) - 阿里雲百鍊',
   'Global - Alibaba Cloud': '全球 - Alibaba Cloud',
   '  Region: {{region}}': '  區域：{{region}}',
   '  Current Model: {{model}}': '  當前模型：{{model}}',
   '  Config Version: {{version}}': '  配置版本：{{version}}',
-  '  Status: API key configured
-': '  狀態：API 密鑰已配置
-',
+  '  Status: API key configured\n': '  狀態：API 密鑰已配置\n',
   '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)': '⚠️  認證方式：阿里雲百鍊 Coding Plan（不完整）',
-  '  Issue: API key not found in environment or settings
-': '  問題：在環境變量或設置中未找到 API 密鑰
-',
-  '  Run `qwen auth coding-plan` to re-configure.
-': '  運行 `qwen auth coding-plan` 重新配置。
-',
+  '  Issue: API key not found in environment or settings\n': '  問題：在環境變量或設置中未找到 API 密鑰\n',
+  '  Run `qwen auth coding-plan` to re-configure.\n': '  運行 `qwen auth coding-plan` 重新配置。\n',
   '✓ Authentication Method: {{type}}': '✓ 認證方式：{{type}}',
-  '  Status: Configured
-': '  狀態：已配置
-',
+  '  Status: Configured\n': '  狀態：已配置\n',
   'Failed to check authentication status: {{error}}': '檢查認證狀態失敗：{{error}}',
   'Select an option:': '請選擇：',
   'Raw mode not available. Please run in an interactive terminal.': '原始模式不可用。請在交互式終端中運行。',
-  '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)
-': '(使用 ↑ ↓ 箭頭導航，Enter 選擇，Ctrl+C 退出)
-',
+  '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n': '(使用 ↑ ↓ 箭頭導航，Enter 選擇，Ctrl+C 退出)\n',
   'compact': '緊湊',
   'compact mode: on (Ctrl+O off)': '緊湊模式：開（Ctrl+O 關閉）',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).': '緊湊模式下隱藏工具輸出和思考過程，界面更簡潔（Ctrl+O 切換）。',
@@ -1352,5 +1295,5 @@ export default {
   'Enabled plan mode. The agent will analyze and plan without executing tools.': '啓用計劃模式。智能體將只分析和規劃，而不執行工具。',
   'Already in plan mode. Use "/plan exit" to exit plan mode.': '已處於計劃模式。使用 "/plan exit" 退出計劃模式。',
   'Not in plan mode. Use "/plan" to enter plan mode first.': '未處於計劃模式。請先使用 "/plan" 進入計劃模式。',
-  'Set up Qwen Code's status line UI': '配置 Qwen Code 的狀態欄',
+  "Set up Qwen Code's status line UI": '配置 Qwen Code 的狀態欄',
 };
