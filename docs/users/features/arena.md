@@ -90,8 +90,9 @@ When all agents complete, the Arena enters the result comparison phase. You'll s
 
 - **Status summary**: Which agents succeeded, failed, or were cancelled
 - **Execution metrics**: Duration, rounds of reasoning, token usage, and tool call counts for each agent
+- **Arena comparison summary**: Files changed in common vs. by one agent only, line-change counts, token efficiency, and a high-level approach summary generated from each agent's diff, metrics, and conversation history
 
-A selection dialog presents the successful agents. Choose one to apply its changes to your main workspace, or discard all results.
+A selection dialog presents the successful agents. Choose one to apply its changes to your main workspace, or discard all results. Press `p` to toggle a quick preview for the highlighted agent, or `d` to toggle that agent's detailed diff before selecting a winner.
 
 ### What happens when you select a winner
 
@@ -99,7 +100,7 @@ A selection dialog presents the successful agents. Choose one to apply its chang
 2. The diff is applied to your main working directory
 3. All worktrees and temporary branches are cleaned up automatically
 
-If you want to inspect results before deciding, each agent's full conversation history is available via the tab bar while the selection dialog is active.
+If you want to inspect the complete reasoning path before deciding, each agent's full conversation history is still available via the tab bar while the selection dialog is active.
 
 ## Configuration
 
@@ -199,9 +200,9 @@ Agent Arena is experimental. Current limitations:
 
 ## Comparison with other multi-agent modes
 
-Agent Arena is one of several multi-agent modes in Qwen Code. **Agent Team** is not yet implemented. **Agent Swarm** is available as a lightweight tool for batch-style parallel worker execution.
+Agent Arena is one of several planned multi-agent modes in Qwen Code. **Agent Team** and **Agent Swarm** are not yet implemented — the table below describes their intended design for reference.
 
-|                   | **Agent Arena**                                        | **Agent Team** (planned)                           | **Agent Swarm**                                          |
+|                   | **Agent Arena**                                        | **Agent Team** (planned)                           | **Agent Swarm** (planned)                                |
 | :---------------- | :----------------------------------------------------- | :------------------------------------------------- | :------------------------------------------------------- |
 | **Goal**          | Competitive: Find the best solution to the _same_ task | Collaborative: Tackle _different_ aspects together | Batch parallel: Dynamically spawn workers for bulk tasks |
 | **Agents**        | Pre-configured models compete independently            | Teammates collaborate with assigned roles          | Workers spawned on-the-fly, destroyed on completion      |

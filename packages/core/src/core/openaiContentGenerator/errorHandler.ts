@@ -6,29 +6,10 @@
 
 import type { GenerateContentParameters } from '@google/genai';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import type { ErrorHandler, RequestContext } from './types.js';
 
 const debugLogger = createDebugLogger('OPENAI_ERROR');
-
-export interface RequestContext {
-  userPromptId: string;
-  model: string;
-  authType: string;
-  startTime: number;
-  duration: number;
-  isStreaming: boolean;
-}
-
-export interface ErrorHandler {
-  handle(
-    error: unknown,
-    context: RequestContext,
-    request: GenerateContentParameters,
-  ): never;
-  shouldSuppressErrorLogging(
-    error: unknown,
-    request: GenerateContentParameters,
-  ): boolean;
-}
+export type { ErrorHandler } from './types.js';
 
 export class EnhancedErrorHandler implements ErrorHandler {
   constructor(
@@ -48,16 +29,13 @@ export class EnhancedErrorHandler implements ErrorHandler {
 
     // Allow subclasses to suppress error logging for specific scenarios
     if (!this.shouldSuppressErrorLogging(error, request)) {
-      const logPrefix = context.isStreaming
-        ? 'OpenAI API Streaming Error:'
-        : 'OpenAI API Error:';
-      debugLogger.error(logPrefix, errorMessage);
+      debugLogger.error('OpenAI API Error:', errorMessage);
     }
 
     // Provide helpful timeout-specific error message
     if (isTimeoutError) {
       throw new Error(
-        `${errorMessage}\n\n${this.getTimeoutTroubleshootingTips(context)}`,
+        `${errorMessage}\n\n${this.getTimeoutTroubleshootingTips()}`,
       );
     }
 
@@ -105,36 +83,21 @@ export class EnhancedErrorHandler implements ErrorHandler {
     context: RequestContext,
     isTimeoutError: boolean,
   ): string {
-    const durationSeconds = Math.round(context.duration / 1000);
+    const durationSeconds = Math.round((Date.now() - context.startTime) / 1000);
 
     if (isTimeoutError) {
-      const prefix = context.isStreaming
-        ? 'Streaming request timeout'
-        : 'Request timeout';
-      return `${prefix} after ${durationSeconds}s. Try reducing input length or increasing timeout in config.`;
+      return `Request timeout after ${durationSeconds}s. Try reducing input length or increasing timeout in config.`;
     }
 
     return error instanceof Error ? error.message : String(error);
   }
 
-  private getTimeoutTroubleshootingTips(context: RequestContext): string {
-    const baseTitle = context.isStreaming
-      ? 'Streaming timeout troubleshooting:'
-      : 'Troubleshooting tips:';
-
-    const baseTips = [
+  private getTimeoutTroubleshootingTips(): string {
+    const tips = [
       '- Reduce input length or complexity',
       '- Increase timeout in config: contentGenerator.timeout',
       '- Check network connectivity',
     ];
-
-    const streamingSpecificTips = context.isStreaming
-      ? [
-          '- Check network stability for streaming connections',
-          '- Consider using non-streaming mode for very long inputs',
-        ]
-      : ['- Consider using streaming mode for long responses'];
-
-    return `${baseTitle}\n${[...baseTips, ...streamingSpecificTips].join('\n')}`;
+    return `Troubleshooting tips:\n${tips.join('\n')}`;
   }
 }

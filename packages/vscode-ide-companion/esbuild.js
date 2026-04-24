@@ -228,6 +228,9 @@ async function main() {
     logLevel: 'silent',
     plugins: [reactDedupPlugin, cssInjectPlugin, esbuildProblemMatcherPlugin],
     jsx: 'automatic', // Use new JSX transform (React 17+)
+    loader: {
+      '.png': 'dataurl',
+    },
     define: {
       'process.env.NODE_ENV': production ? '"production"' : '"development"',
     },

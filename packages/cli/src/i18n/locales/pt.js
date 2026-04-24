@@ -374,6 +374,8 @@ export default {
 
   // Settings enum options
   'Auto (detect from system)': 'Automático (detectar do sistema)',
+  'Auto (detect terminal theme)': 'Automático (detectar tema do terminal)',
+  Auto: 'Automático',
   Text: 'Texto',
   JSON: 'JSON',
   Plan: 'Planejamento',

@@ -19,6 +19,7 @@ import {
   USER_AGREEMENT_RATE_MEDIUM,
 } from '../utils/displayUtils.js';
 import { computeSessionStats } from '../utils/computeStats.js';
+import { flattenModelsBySource } from '../utils/modelsBySource.js';
 import { t } from '../../i18n/index.js';
 
 // A more flexible and powerful StatRow component
@@ -75,10 +76,16 @@ const ModelUsageTable: React.FC<{
   totalCachedTokens: number;
   cacheEfficiency: number;
 }> = ({ models, totalCachedTokens, cacheEfficiency }) => {
-  const nameWidth = 25;
+  // 35 + 8 + 15 + 15 = 73, fitting within the 76-column panel allocated
+  // when the terminal is at the default 80-column width. Subagent labels
+  // longer than 35 characters will wrap — acceptable cosmetic trade-off
+  // given the alternative is overflowing the panel border.
+  const nameWidth = 35;
   const requestsWidth = 8;
   const inputTokensWidth = 15;
   const outputTokensWidth = 15;
+
+  const entries = flattenModelsBySource(models);
 
   return (
     <Box flexDirection="column" marginTop={1}>
@@ -117,24 +124,22 @@ const ModelUsageTable: React.FC<{
       ></Box>
 
       {/* Rows */}
-      {Object.entries(models).map(([name, modelMetrics]) => (
-        <Box key={name}>
+      {entries.map(({ key, label, metrics }) => (
+        <Box key={key}>
           <Box width={nameWidth}>
-            <Text color={theme.text.primary}>{name.replace('-001', '')}</Text>
+            <Text color={theme.text.primary}>{label}</Text>
           </Box>
           <Box width={requestsWidth} justifyContent="flex-end">
-            <Text color={theme.text.primary}>
-              {modelMetrics.api.totalRequests}
-            </Text>
+            <Text color={theme.text.primary}>{metrics.api.totalRequests}</Text>
           </Box>
           <Box width={inputTokensWidth} justifyContent="flex-end">
             <Text color={theme.status.warning}>
-              {modelMetrics.tokens.prompt.toLocaleString()}
+              {metrics.tokens.prompt.toLocaleString()}
             </Text>
           </Box>
           <Box width={outputTokensWidth} justifyContent="flex-end">
             <Text color={theme.status.warning}>
-              {modelMetrics.tokens.candidates.toLocaleString()}
+              {metrics.tokens.candidates.toLocaleString()}
             </Text>
           </Box>
         </Box>

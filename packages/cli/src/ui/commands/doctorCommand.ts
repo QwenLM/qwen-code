@@ -16,6 +16,7 @@ export const doctorCommand: SlashCommand = {
     return t('Run installation and environment diagnostics');
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context) => {
     const executionMode = context.executionMode ?? 'interactive';
     const abortSignal = context.abortSignal;

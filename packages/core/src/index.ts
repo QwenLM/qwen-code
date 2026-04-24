@@ -44,6 +44,19 @@ export {
   validateModelConfig,
 } from './models/index.js';
 
+// Coding Plan constants
+export {
+  CodingPlanRegion,
+  type CodingPlanTemplate,
+  CODING_PLAN_ENV_KEY,
+  computeCodingPlanVersion,
+  generateCodingPlanTemplate,
+  getCodingPlanConfig,
+  getCodingPlanBaseUrls,
+  isCodingPlanConfig,
+  getRegionFromBaseUrl,
+} from './constants/codingPlan.js';
+
 // Output formatting
 export * from './output/json-formatter.js';
 export * from './output/types.js';
@@ -85,7 +98,6 @@ export * from './tools/sdk-control-client-transport.js';
 export * from './tools/modifiable-tool.js';
 
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
-export type { WebSearchProviderConfig } from './tools/web-search/types.js';
 export { buildSkillLlmContent } from './tools/skill-utils.js';
 
 // Backward-compatible type re-exports for tool classes removed from eager loading.
@@ -109,19 +121,12 @@ export type {
 } from './tools/shell.js';
 export type { SkillTool, SkillParams } from './tools/skill.js';
 export type { AgentTool, AgentParams } from './tools/agent/agent.js';
-export type { SwarmTool, SwarmParams, SwarmTask } from './tools/swarm.js';
 export type {
   TodoWriteTool,
   TodoItem,
   TodoWriteParams,
 } from './tools/todoWrite.js';
 export type { WebFetchTool, WebFetchToolParams } from './tools/web-fetch.js';
-export type {
-  WebSearchTool,
-  WebSearchToolParams,
-  WebSearchToolResult,
-  WebSearchConfig,
-} from './tools/web-search/index.js';
 export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
 export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
@@ -139,6 +144,8 @@ export * from './services/gitService.js';
 export * from './services/gitWorktreeService.js';
 export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
+export * from './services/sessionTitle.js';
+export { stripTerminalControlSequences } from './utils/terminalSafe.js';
 export * from './services/shellExecutionService.js';
 export * from './utils/bareMode.js';
 
@@ -278,6 +285,7 @@ export { ConditionalRulesRegistry } from './utils/rulesDiscovery.js';
 export type { RuleFile } from './utils/rulesDiscovery.js';
 export { OpenAILogger, openaiLogger } from './utils/openaiLogger.js';
 export * from './utils/partUtils.js';
+export * from './utils/sessionStorageUtils.js';
 export * from './utils/pathReader.js';
 export * from './utils/paths.js';
 export * from './utils/projectSummary.js';

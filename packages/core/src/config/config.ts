@@ -404,15 +404,6 @@ export interface ConfigParameters {
   loadMemoryFromIncludeDirectories?: boolean;
   importFormat?: 'tree' | 'flat';
   chatRecording?: boolean;
-  // Web search providers
-  webSearch?: {
-    provider: Array<{
-      type: 'tavily' | 'google' | 'dashscope';
-      apiKey?: string;
-      searchEngineId?: string;
-    }>;
-    default: string;
-  };
   chatCompression?: ChatCompressionSettings;
   interactive?: boolean;
   trustedFolder?: boolean;
@@ -558,6 +549,12 @@ export class Config {
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
+  private modelInvocableCommandsProvider:
+    | (() => ReadonlyArray<{ name: string; description: string }>)
+    | null = null;
+  private modelInvocableCommandsExecutor:
+    | ((name: string, args?: string) => Promise<string | null>)
+    | null = null;
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
@@ -639,14 +636,6 @@ export class Config {
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly importFormat: 'tree' | 'flat';
-  private readonly webSearch?: {
-    provider: Array<{
-      type: 'tavily' | 'google' | 'dashscope';
-      apiKey?: string;
-      searchEngineId?: string;
-    }>;
-    default: string;
-  };
   private readonly chatCompression: ChatCompressionSettings | undefined;
   private readonly interactive: boolean;
   private readonly trustedFolder: boolean | undefined;
@@ -812,8 +801,7 @@ export class Config {
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
 
-    // Web search
-    this.webSearch = params.webSearch;
+    // (web search removed)
     this.useRipgrep = params.useRipgrep ?? true;
     this.useBuiltinRipgrep = params.useBuiltinRipgrep ?? true;
     this.shouldUseNodePtyShell =
@@ -1331,6 +1319,13 @@ export class Config {
     sessionId?: string,
     sessionData?: ResumedSessionData,
   ): string {
+    // Finalize the outgoing session before switching.
+    try {
+      this.chatRecordingService?.finalize();
+    } catch {
+      // Best-effort — don't block session switch
+    }
+
     this.sessionId = sessionId ?? randomUUID();
     this.sessionData = sessionData;
     setDebugLogSession(this);
@@ -1597,6 +1592,13 @@ export class Config {
       return;
     }
     try {
+      // Finalize the current session's metadata before cleanup.
+      try {
+        this.chatRecordingService?.finalize();
+      } catch {
+        // Best-effort — don't block shutdown
+      }
+
       this.skillManager?.stopWatching();
 
       if (this.toolRegistry) {
@@ -1691,20 +1693,17 @@ export class Config {
     return merged;
   }
 
+  getToolDiscoveryCommand(): string | undefined {
+    return this.toolDiscoveryCommand;
+  }
+
   /**
    * Returns the pre-merged list of slash command names that should be hidden
    * from the CLI surface. Callers should treat this as a case-insensitive
    * denylist; `CommandService.create` handles the normalization.
-   *
-   * CLI callers (loadCliConfig) populate this from settings, the
-   * `--disabled-slash-commands` flag, and `QWEN_DISABLED_SLASH_COMMANDS`.
    */
   getDisabledSlashCommands(): readonly string[] {
     return this.disabledSlashCommands;
-  }
-
-  getToolDiscoveryCommand(): string | undefined {
-    return this.toolDiscoveryCommand;
   }
 
   getToolCallCommand(): string | undefined {
@@ -2232,11 +2231,6 @@ export class Config {
     return this.getNoBrowser() || !shouldAttemptBrowserLaunch();
   }
 
-  // Web search provider configuration
-  getWebSearchConfig() {
-    return this.getBareMode() ? undefined : this.webSearch;
-  }
-
   getIdeMode(): boolean {
     return this.ideMode;
   }
@@ -2488,6 +2482,49 @@ export class Config {
     return this.skillManager;
   }
 
+  /**
+   * Registers a provider that returns model-invocable commands (e.g., bundled
+   * skills, user/project file commands, MCP prompts). Called by the CLI's
+   * CommandService after initialisation so that SkillTool can merge these into
+   * its tool description.
+   */
+  setModelInvocableCommandsProvider(
+    provider: () => ReadonlyArray<{ name: string; description: string }>,
+  ): void {
+    this.modelInvocableCommandsProvider = provider;
+  }
+
+  /**
+   * Returns the registered model-invocable commands provider, or null if none
+   * has been registered (e.g., in SDK mode).
+   */
+  getModelInvocableCommandsProvider():
+    | (() => ReadonlyArray<{ name: string; description: string }>)
+    | null {
+    return this.modelInvocableCommandsProvider;
+  }
+
+  /**
+   * Registers an executor that can invoke a model-invocable command by name
+   * (e.g., MCP prompts). Returns the prompt content as a string, or null if
+   * the command cannot be found or executed. Called by the CLI layer.
+   */
+  setModelInvocableCommandsExecutor(
+    executor: (name: string, args?: string) => Promise<string | null>,
+  ): void {
+    this.modelInvocableCommandsExecutor = executor;
+  }
+
+  /**
+   * Returns the registered model-invocable commands executor, or null if none
+   * has been registered (e.g., in SDK mode).
+   */
+  getModelInvocableCommandsExecutor():
+    | ((name: string, args?: string) => Promise<string | null>)
+    | null {
+    return this.modelInvocableCommandsExecutor;
+  }
+
   getPermissionManager(): PermissionManager | null {
     return this.permissionManager;
   }
@@ -2565,10 +2602,6 @@ export class Config {
     await registerLazy(ToolNames.AGENT, async () => {
       const { AgentTool } = await import('../tools/agent/agent.js');
       return new AgentTool(this);
-    });
-    await registerLazy(ToolNames.SWARM, async () => {
-      const { SwarmTool } = await import('../tools/swarm.js');
-      return new SwarmTool(this);
     });
     await registerLazy(ToolNames.SKILL, async () => {
       const { SkillTool } = await import('../tools/skill.js');
@@ -2654,13 +2687,6 @@ export class Config {
       const { WebFetchTool } = await import('../tools/web-fetch.js');
       return new WebFetchTool(this);
     });
-    // Conditionally register web search tool if web search provider is configured
-    if (this.getWebSearchConfig()) {
-      await registerLazy(ToolNames.WEB_SEARCH, async () => {
-        const { WebSearchTool } = await import('../tools/web-search/index.js');
-        return new WebSearchTool(this);
-      });
-    }
     if (this.isLspEnabled() && this.getLspClient()) {
       await registerLazy(ToolNames.LSP, async () => {
         const { LspTool } = await import('../tools/lsp.js');

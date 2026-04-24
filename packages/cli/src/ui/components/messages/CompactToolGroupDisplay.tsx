@@ -8,10 +8,12 @@ import type React from 'react';
 import { Box, Text } from 'ink';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
+import type { AnsiOutputDisplay } from '@qwen-code/qwen-code-core';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
 import { theme } from '../../semantic-colors.js';
 import { t } from '../../../i18n/index.js';
 import { ToolStatusIndicator } from '../shared/ToolStatusIndicator.js';
+import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 
 interface CompactToolGroupDisplayProps {
   toolCalls: IndividualToolCallDisplay[];
@@ -44,6 +46,24 @@ function getActiveTool(
     toolCalls.find((t) => t.status === ToolCallStatus.Executing) ??
     toolCalls[toolCalls.length - 1]
   );
+}
+
+// Pull the configured shell timeout off an AnsiOutputDisplay result so
+// ToolElapsedTime can surface it inline (matches the expanded
+// ToolMessage path). Non-ansi resultDisplay → undefined → legacy
+// quiet-then-elapsed behavior.
+function getShellTimeoutMs(
+  tool: IndividualToolCallDisplay,
+): number | undefined {
+  const display = tool.resultDisplay;
+  if (
+    typeof display === 'object' &&
+    display !== null &&
+    'ansiOutput' in display
+  ) {
+    return (display as AnsiOutputDisplay).timeoutMs;
+  }
+  return undefined;
 }
 
 export const CompactToolGroupDisplay: React.FC<
@@ -83,7 +103,7 @@ export const CompactToolGroupDisplay: React.FC<
       borderColor={borderColor}
       gap={0}
     >
-      {/* Status line: icon + tool name + count + description */}
+      {/* Status line: icon + tool name + count + description + elapsed */}
       <Box flexDirection="row">
         <ToolStatusIndicator status={overallStatus} name={activeTool.name} />
         <Box flexGrow={1}>
@@ -103,6 +123,11 @@ export const CompactToolGroupDisplay: React.FC<
             ) : null}
           </Text>
         </Box>
+        <ToolElapsedTime
+          status={overallStatus}
+          executionStartTime={activeTool.executionStartTime}
+          timeoutMs={getShellTimeoutMs(activeTool)}
+        />
       </Box>
 
       {/* Hint line */}

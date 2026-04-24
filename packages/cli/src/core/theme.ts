@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { themeManager } from '../ui/themes/theme-manager.js';
+import { themeManager, AUTO_THEME_NAME } from '../ui/themes/theme-manager.js';
 import { type LoadedSettings } from '../config/settings.js';
 import { t } from '../i18n/index.js';
 
@@ -15,7 +15,11 @@ import { t } from '../i18n/index.js';
  */
 export function validateTheme(settings: LoadedSettings): string | null {
   const effectiveTheme = settings.merged.ui?.theme;
-  if (effectiveTheme && !themeManager.findThemeByName(effectiveTheme)) {
+  if (
+    effectiveTheme &&
+    effectiveTheme !== AUTO_THEME_NAME &&
+    !themeManager.findThemeByName(effectiveTheme)
+  ) {
     return t('Theme "{{themeName}}" not found.', {
       themeName: effectiveTheme,
     });
