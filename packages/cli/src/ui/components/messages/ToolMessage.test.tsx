@@ -573,6 +573,28 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('line 5000');
   });
 
+  it('pre-slices single-line output by visual width before MaxSizedBox layout', () => {
+    const longSingleLine = Array.from({ length: 1000 }, (_, i) =>
+      String(i % 10),
+    ).join('');
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="some-other-tool"
+        contentWidth={20}
+        resultDisplay={longSingleLine}
+        status={ToolCallStatus.Success}
+        availableTerminalHeight={12}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+
+    expect(output).toMatch(/\.\.\. first \d+ lin/);
+    expect(output).not.toContain(longSingleLine);
+    expect(output).toContain(longSingleLine.slice(-10));
+  });
+
   it('does not pre-slice string output that exactly fits available height', () => {
     const exactFitString = Array.from(
       { length: 6 },
