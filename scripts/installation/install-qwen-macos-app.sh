@@ -47,7 +47,11 @@ SYSTEM_APP_PATH="${SYSTEM_APP_DIR}/${APP_NAME}.app"
 USER_APP_PATH="${USER_APP_DIR}/${APP_NAME}.app"
 INSTALL_URL='https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh'
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+ICON_PATH="${SCRIPT_DIR}/qwen-icon.png"
 ICON_PATH="${SCRIPT_DIR}/qwen-icon.png"
 
 echo -e "${CYAN}"
