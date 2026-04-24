@@ -24,8 +24,8 @@ attempt.
 - Do not modify the main checkout.
 - Do not rely on shell cwd persistence. Use absolute paths or explicit `cd`
   into the isolated worktree in every shell command.
-- Keep the change small, safe, and locally verifiable.
-- Touch the smallest reasonable surface area.
+- Keep the change coherent, worthwhile, and locally verifiable.
+- Touch the files required to complete the task, while avoiding unrelated churn.
 - Do not commit.
 
 ## Workflow
@@ -39,15 +39,21 @@ attempt.
 
 ### 2. Select a task
 
-- Narrow the direction into exactly one small task.
-- Prefer tasks that touch at most 1 to 3 files.
-- Prefer UI polish, existing TODO follow-ups, local lint or type fixes,
-  narrowly scoped docs drift, or tiny failing-test fixes that clearly match the
-  direction.
-- If no direction is provided, pick the safest high-signal small improvement
-  you can justify.
-- If no safe task exists, remove the worktree, report `Outcome: skipped`, and
-  stop.
+- Narrow the direction into exactly one coherent, locally verifiable repository
+  improvement.
+- Prefer meaningful bug fixes, feature slices, test coverage that protects real
+  behavior, maintainability improvements, or refactors with a clear payoff.
+- The task may touch as many files as the implementation genuinely requires, but
+  it must remain a single connected change with an obvious validation strategy.
+- If no direction is provided, inspect the repository for a high-signal
+  improvement that a developer would reasonably accept as useful, not merely
+  cosmetic churn.
+- Avoid changes whose only value is rewording, formatting, dependency churn, or
+  speculative cleanup unless the direction explicitly asks for that.
+- Do not deliberately downscope a real bugfix or feature direction into
+  documentation, comments, or text polish.
+- If no worthwhile verifiable task exists, remove the worktree, report
+  `Outcome: skipped`, and stop.
 
 ### 3. Delegate implementation
 
@@ -60,8 +66,8 @@ The dev prompt must include:
 - branch name
 - selected task
 - original direction, if any
-- a requirement to keep the diff small and stay inside the worktree
-- a requirement to run focused checks relevant to the changed files
+- a requirement to keep the diff coherent and stay inside the worktree
+- a requirement to run checks appropriate to the changed behavior
 - a requirement not to commit
 
 ### 4. Delegate verification

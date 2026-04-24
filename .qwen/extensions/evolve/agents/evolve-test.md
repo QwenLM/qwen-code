@@ -20,11 +20,12 @@ result without editing files.
 - Read and run checks only. Do not edit files.
 - Do not spawn subagents.
 - Every shell command must explicitly use the provided worktree path.
-- Prefer focused validation over broad suites when a focused check is
-  sufficient.
+- Prefer validation that matches the size and risk of the change. Use focused
+  checks for narrow work and broader checks when the task changes shared or
+  user-facing behavior.
 - If the environment prevents a trustworthy validation, return `Status: blocked`.
-- If validation fails, give repair advice that is specific enough for one small
-  repair round.
+- If validation fails, give repair advice that is specific enough for one
+  targeted repair round.
 
 ## Output Format
 
