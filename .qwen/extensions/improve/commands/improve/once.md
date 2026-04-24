@@ -76,7 +76,12 @@ improvement attempt.
   candidates before choosing:
   - `github-issues`: use `gh` to inspect open issues that look actionable,
     clear, and locally verifiable. Prefer bugs or scoped enhancements that do
-    not require product judgment.
+    not require product judgment. Before selecting an issue, verify that it
+    does not already have an open PR or obvious active fix in progress:
+    inspect linked/closing PR metadata when available, search open PR titles
+    and bodies for references such as `#<issue-number>`, `fixes #<issue-number>`,
+    `closes #<issue-number>`, or the issue title, and skip issues with an
+    associated PR unless the PR is closed/abandoned and the issue remains open.
   - `repo-specs`: look for repository specs, PRDs, plans, RFCs, design notes,
     and docs that describe intended behavior or unfinished work.
   - `codebase-signals`: inspect the codebase for high-signal local
