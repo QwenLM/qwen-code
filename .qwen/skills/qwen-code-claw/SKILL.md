@@ -1,6 +1,7 @@
 ---
 name: qwen-code-claw
-description: Use Qwen Code as a Code Agent for code understanding, project generation, features, bug fixes, refactoring, and various programming tasks
+description: Use Qwen Code as a Code Agent for code understanding, project
+  generation, features, bug fixes, refactoring, and various programming tasks
 ---
 
 # Qwen Code Claw
@@ -13,7 +14,8 @@ Use this skill when you need to:
 - Generate new projects or add new features
 - Review pull requests in the codebase
 - Fix bugs or refactor existing code
-- Execute various programming tasks such as code review, testing, documentation generation, etc.
+- Execute various programming tasks such as code review, testing, documentation
+  generation, etc.
 - Collaborate with other tools and agents to complete complex development tasks
 
 ## Install
@@ -32,7 +34,8 @@ Check if authentication is already configured:
 qwen auth status
 ```
 
-If authentication exists, skip this section. If not authenticated, check if the `BAILIAN_CODING_PLAN_API_KEY` environment variable exists:
+If authentication exists, skip this section. If not authenticated, check if the
+`BAILIAN_CODING_PLAN_API_KEY` environment variable exists:
 
 ```bash
 echo $BAILIAN_CODING_PLAN_API_KEY
@@ -44,7 +47,8 @@ echo $BAILIAN_CODING_PLAN_API_KEY
 qwen auth coding-plan --region china --key $BAILIAN_CODING_PLAN_API_KEY
 ```
 
-**If the environment variable does not exist**, interrupt and prompt the user to authenticate via `qwen-oauth` or `coding-plan`:
+**If the environment variable does not exist**, interrupt and prompt the user to
+authenticate via `qwen-oauth` or `coding-plan`:
 
 ```bash
 qwen auth
@@ -54,35 +58,37 @@ Or configure custom API after launching Qwen Code via `/auth`.
 
 ## ACPX Integration
 
-You should always use `acpx` to run Qwen Code over the Agent Client Protocol (ACP) instead of scraping PTY sessions.
+You should always use `acpx` to run Qwen Code over the Agent Client Protocol
+(ACP) instead of scraping PTY sessions.
 
 To use acpx:
 
-1. **Install acpx globally** (recommended) or use npx:
+1.  **Install acpx globally** (recommended) or use npx:
 
-   ```bash
-   npm install -g acpx@latest
-   ```
+```bash
+npm install -g acpx@latest
+```
 
-   Or without installing:
+Or without installing:
 
-   ```bash
-   npx acpx@latest
-   ```
+```bash
+npx acpx@latest
+```
 
-2. **Install the acpx skill** for full reference:
+2.  **Install the acpx skill** for full reference:
 
-   ```bash
-   npx acpx@latest --skill install acpx
-   ```
+```bash
+npx acpx@latest --skill install acpx
+```
 
-3. **Read the acpx skill reference** for every command, flag, and workflow pattern:
-   See the [ACPX Reference](#acpx-reference) section below for details
+3.  **Read the acpx skill reference** for every command, flag, and workflow
+    pattern: See the [ACPX Reference](#acpx-reference) section below for details
 
-4. **For complete CLI reference with all options and examples**:
-   https://raw.githubusercontent.com/openclaw/acpx/main/docs/CLI.md
+4.  **For complete CLI reference with all options and examples**:
+    https://raw.githubusercontent.com/openclaw/acpx/main/docs/CLI.md
 
-From now on, when you need to delegate work to Qwen Code, use `acpx` instead of spawning raw terminal sessions. For example:
+From now on, when you need to delegate work to Qwen Code, use `acpx` instead of
+spawning raw terminal sessions. For example:
 
 ```bash
 npx acpx@latest qwen "fix the failing tests"
@@ -90,7 +96,8 @@ npx acpx@latest qwen "refactor the auth module"
 npx acpx@latest qwen exec "one-shot: summarize this repo"
 ```
 
-> **Tip:** You should typically use the `--approve-all` flag to prevent task interruptions.
+> **Tip:** You should typically use the `--approve-all` flag to prevent task
+> interruptions.
 
 ## Practical Workflows
 
@@ -140,15 +147,16 @@ acpx --cwd ~/repos/my-project --approve-all qwen -s pr-123 \
 - `--approve-reads` (default): Auto-approve reads/searches, prompt for writes
 - `--deny-all`: Deny all permission requests
 
-If every permission request is denied/cancelled and none are approved, `acpx` exits with permission denied.
+If every permission request is denied/cancelled and none are approved, `acpx`
+exits with permission denied.
 
 ## Best Practices
 
-1. Use **named sessions** for organizing different types of development tasks
-2. Use `--no-wait` for long-running tasks to avoid blocking
-3. Use `--approve-all` for non-interactive batch operations
-4. Use `--format json` for automation and script integration
-5. Use `--cwd` to manage context across multiple projects
+1.  Use **named sessions** for organizing different types of development tasks
+2.  Use `--no-wait` for long-running tasks to avoid blocking
+3.  Use `--approve-all` for non-interactive batch operations
+4.  Use `--format json` for automation and script integration
+5.  Use `--cwd` to manage context across multiple projects
 
 ## QwenCode Reference
 
@@ -163,11 +171,13 @@ If every permission request is denied/cancelled and none are approved, `acpx` ex
 | `/auth`     | Configure authentication        |
 | `/exit`     | Exit Qwen Code                  |
 
-Full reference: https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/features/commands.md
+Full reference: `docs/users/features/commands.md`.
 
 ### Configuration
 
-Config files (highest priority first): CLI args > env vars > system > project (`.qwen/settings.json`) > user (`~/.qwen/settings.json`) > defaults. Format: JSONC with env var interpolation.
+Config files (highest priority first): CLI args > env vars > system > project
+(`.qwen/settings.json`) > user (`~/.qwen/settings.json`) > defaults. Format:
+JSONC with env var interpolation.
 
 Key settings:
 
@@ -178,30 +188,36 @@ Key settings:
 | `permissions.allow/ask/deny` | Tool permission rules                     |
 | `mcpServers.*`               | MCP server configurations                 |
 
-Full reference: https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/configuration/settings.md
+Full reference: `docs/users/configuration/settings.md`.
 
 ### Authentication
 
-Supports Alibaba Cloud Coding Plan, OpenAI-compatible API keys, and Qwen OAuth (free tier discontinued 2026-04-15).
+Supports Alibaba Cloud Coding Plan, OpenAI-compatible API keys, and Qwen OAuth
+(free tier discontinued 2026-04-15).
 
-Full reference: https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/configuration/auth.md
+Full reference: `docs/users/configuration/auth.md`.
 
 ### Model Providers
 
-Configure custom model providers via `modelProviders` in settings or environment variables (`OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`).
+Configure custom model providers via `modelProviders` in settings or environment
+variables (`OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`).
 
-Full reference: https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/configuration/model-providers.md
+Full reference: `docs/users/configuration/model-providers.md`.
 
 ### Key Features
 
-| Feature       | Description                               | Docs                                                                                                    |
-| ------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| Approval Mode | Control tool execution permissions        | https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/features/approval-mode.md |
-| MCP           | Model Context Protocol server integration | https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/features/mcp.md           |
-| Skills        | Reusable skill system via `/skill`        | https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/features/skills.md        |
-| Sub-agents    | Delegate tasks to specialized agents      | https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/features/sub-agents.md    |
-| Sandbox       | Secure code execution environment         | https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/features/sandbox.md       |
-| Headless      | Non-interactive / CI mode                 | https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/features/headless.md      |
+- Approval Mode: control tool execution permissions.
+  See `docs/users/features/approval-mode.md`.
+- MCP: Model Context Protocol server integration.
+  See `docs/users/features/mcp.md`.
+- Skills: reusable skill system via `/skill`.
+  See `docs/users/features/skills.md`.
+- Sub-agents: delegate tasks to specialized agents.
+  See `docs/users/features/sub-agents.md`.
+- Sandbox: secure code execution environment.
+  See `docs/users/features/sandbox.md`.
+- Headless: non-interactive or CI mode.
+  See `docs/users/features/headless.md`.
 
 ## ACPX Reference
 
@@ -226,7 +242,10 @@ acpx [global options] cancel [-s <name>]
 acpx [global options] set-mode <mode> [-s <name>]
 acpx [global options] set <key> <value> [-s <name>]
 acpx [global options] status [-s <name>]
-acpx [global options] sessions [list | new [--name <name>] | close [name] | show [name] | history [name] [--limit <count>]]
+acpx [global options] sessions [
+  list | new [--name <name>] | close [name] | show [name] |
+  history [name] [--limit <count>]
+]
 acpx [global options] config [show | init]
 
 # With explicit agent
@@ -235,20 +254,19 @@ acpx [global options] <agent> prompt [options] [prompt text...]
 acpx [global options] <agent> exec [options] [prompt text...]
 ```
 
-> **Note:** If prompt text is omitted and stdin is piped, `acpx` reads prompt from stdin.
+> **Note:** If prompt text is omitted and stdin is piped, `acpx` reads prompt
+> from stdin.
 
 ### Global Options
 
-| Option                | Description                                                  |
-| --------------------- | ------------------------------------------------------------ |
-| `--agent <command>`   | Raw ACP agent command (fallback mechanism)                   |
-| `--cwd <directory>`   | Session working directory                                    |
-| `--approve-all`       | Auto-approve all requests                                    |
-| `--approve-reads`     | Auto-approve reads/searches, prompt for writes (default)     |
-| `--deny-all`          | Deny all requests                                            |
-| `--format <format>`   | Output format: `text`, `json`, `quiet`                       |
-| `--timeout <seconds>` | Maximum wait time (positive integer)                         |
-| `--ttl <seconds>`     | Idle TTL for queue owners (default: `300`, `0` disables TTL) |
-| `--verbose`           | Verbose ACP/debug logs to stderr                             |
+- `--agent <command>`: raw ACP agent command fallback.
+- `--cwd <directory>`: session working directory.
+- `--approve-all`: auto-approve all requests.
+- `--approve-reads`: auto-approve reads/searches, prompt for writes.
+- `--deny-all`: deny all requests.
+- `--format <format>`: output format, one of `text`, `json`, or `quiet`.
+- `--timeout <seconds>`: maximum wait time.
+- `--ttl <seconds>`: idle TTL for queue owners.
+- `--verbose`: verbose ACP/debug logs to stderr.
 
 Flags are mutually exclusive where applicable.

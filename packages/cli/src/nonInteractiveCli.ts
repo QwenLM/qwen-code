@@ -175,15 +175,21 @@ export async function runNonInteractive(
     let totalApiDurationMs = 0;
     const startTime = Date.now();
 
-    const stdoutErrorHandler = (err: NodeJS.ErrnoException) => {
-      if (err.code === 'EPIPE') {
-        process.stdout.removeListener('error', stdoutErrorHandler);
-        process.exit(0);
-      }
-    };
-
     const geminiClient = config.getGeminiClient();
     const abortController = options.abortController ?? new AbortController();
+
+    // EPIPE: don't process.exit here — that bypasses the caller's
+    // runExitCleanup → flush() and drops queued JSONL writes. Destroy
+    // stdout instead and let the natural return drive cleanup. (Aborting
+    // is also wrong: the abort path runs handleCancellationError → exit
+    // 130 and re-introduces the same bypass.)
+    let pipeBroken = false;
+    const stdoutErrorHandler = (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EPIPE' && !pipeBroken) {
+        pipeBroken = true;
+        process.stdout.destroy();
+      }
+    };
 
     // Setup signal handlers for graceful shutdown
     const shutdownHandler = () => {

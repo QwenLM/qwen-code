@@ -5,19 +5,23 @@
  */
 
 import { useEffect, useState } from 'react';
-import { appEvents } from './../../utils/events.js';
-import { Box, Text } from 'ink';
-import { useConfig } from '../contexts/ConfigContext.js';
+import { appEvents } from '../../utils/events.js';
 import { type McpClient, MCPServerStatus } from '@qwen-code/qwen-code-core';
-import { GeminiSpinner } from './GeminiRespondingSpinner.js';
-import { theme } from '../semantic-colors.js';
 import { t } from '../../i18n/index.js';
 
-export const ConfigInitDisplay = () => {
-  const config = useConfig();
-  const [message, setMessage] = useState(t('Initializing...'));
+// Tracks MCP connection progress. Returns the current status string while
+// config is initializing, or `null` once complete so callers can fall
+// through to their default content.
+export function useConfigInitMessage(
+  isConfigInitialized: boolean,
+): string | null {
+  const [message, setMessage] = useState<string>(() => t('Initializing...'));
 
   useEffect(() => {
+    if (isConfigInitialized) {
+      return;
+    }
+
     const onChange = (clients?: Map<string, McpClient>) => {
       if (!clients || clients.size === 0) {
         setMessage(t('Initializing...'));
@@ -41,13 +45,10 @@ export const ConfigInitDisplay = () => {
     return () => {
       appEvents.off('mcp-client-update', onChange);
     };
-  }, [config]);
+  }, [isConfigInitialized]);
 
-  return (
-    <Box marginTop={1}>
-      <Text>
-        <GeminiSpinner /> <Text color={theme.text.primary}>{message}</Text>
-      </Text>
-    </Box>
-  );
-};
+  // Gating on isConfigInitialized (rather than clearing state from the effect)
+  // ensures the first render that flips to initialized returns null without
+  // a transient frame still showing the old message.
+  return isConfigInitialized ? null : message;
+}
