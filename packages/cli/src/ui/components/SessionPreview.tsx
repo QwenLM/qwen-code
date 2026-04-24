@@ -92,7 +92,10 @@ export function SessionPreview(props: SessionPreviewProps) {
     { isActive: true },
   );
 
-  const boxWidth = columns - 4;
+  // Clamp to a safe minimum: `'─'.repeat(boxWidth - 2)` would throw RangeError
+  // in very narrow terminals (tmux splits, small panes) if boxWidth < 2.
+  const boxWidth = Math.max(10, columns - 4);
+  const separatorWidth = Math.max(0, boxWidth - 2);
 
   const metaParts: string[] = [];
   if (typeof messageCount === 'number') {
@@ -115,7 +118,7 @@ export function SessionPreview(props: SessionPreviewProps) {
         </Text>
       </Box>
       <Box>
-        <Text color={theme.border.default}>{'─'.repeat(boxWidth - 2)}</Text>
+        <Text color={theme.border.default}>{'─'.repeat(separatorWidth)}</Text>
       </Box>
 
       {/* Body: render all items, let the terminal's scrollback own overflow. */}
@@ -144,7 +147,7 @@ export function SessionPreview(props: SessionPreviewProps) {
 
       {/* Footer */}
       <Box>
-        <Text color={theme.border.default}>{'─'.repeat(boxWidth - 2)}</Text>
+        <Text color={theme.border.default}>{'─'.repeat(separatorWidth)}</Text>
       </Box>
       {metaLine && (
         <Box paddingX={1}>
