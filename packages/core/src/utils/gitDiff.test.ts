@@ -375,6 +375,19 @@ describe('fetchGitDiffHunks', () => {
     );
   });
 
+  it('keys hunks by the real path for files whose name contains " b/"', async () => {
+    await fs.mkdir(path.join(repo, 'a b'), { recursive: true });
+    await fs.writeFile(path.join(repo, 'a b', 'c.txt'), 'x\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+    await fs.writeFile(path.join(repo, 'a b', 'c.txt'), 'y\n');
+
+    const hunks = await fetchGitDiffHunks(repo);
+    // `diff --git a/a b/c.txt b/a b/c.txt` is ambiguous to split; the parser
+    // must anchor on `+++ b/<path>\t` instead.
+    expect([...hunks.keys()]).toEqual(['a b/c.txt']);
+  });
+
   it('handles multi-hunk diffs', async () => {
     const initial = Array.from({ length: 40 }, (_, i) => `line${i}`).join('\n');
     await fs.writeFile(path.join(repo, 'big.txt'), initial + '\n');
@@ -390,6 +403,64 @@ describe('fetchGitDiffHunks', () => {
     const fileHunks = hunks.get('big.txt');
     expect(fileHunks).toBeDefined();
     expect(fileHunks!.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('parseGitDiff path disambiguation', () => {
+  it('keys hunks by the real path when the filename contains " b/"', () => {
+    // `a b/c.txt` produces `diff --git a/a b/c.txt b/a b/c.txt`, which is
+    // ambiguous to split on ` b/`. Git appends a TAB on the `---`/`+++` lines
+    // when the path contains whitespace — that's the unambiguous anchor.
+    const diff = `diff --git a/a b/c.txt b/a b/c.txt
+index 111..222 100644
+--- a/a b/c.txt\t
++++ b/a b/c.txt\t
+@@ -1 +1 @@
+-x
++y
+`;
+    const result = parseGitDiff(diff);
+    expect([...result.keys()]).toEqual(['a b/c.txt']);
+    expect(result.get('a b/c.txt')![0].lines).toEqual(['-x', '+y']);
+  });
+
+  it('uses `rename to` for renames, ignoring the ambiguous header', () => {
+    const diff = `diff --git a/old name.txt b/renamed name.txt
+similarity index 100%
+rename from old name.txt
+rename to renamed name.txt
+`;
+    // No hunks — nothing to key — but the extractor should still not confuse
+    // paths. The file block is dropped because there are no `@@` lines, which
+    // is the existing behavior for mode-only / rename-only changes.
+    const result = parseGitDiff(diff);
+    expect(result.size).toBe(0);
+  });
+
+  it('falls back to `--- a/<path>` when the file was deleted', () => {
+    const diff = `diff --git a/gone.txt b/gone.txt
+deleted file mode 100644
+index 111..000
+--- a/gone.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-bye
+`;
+    const result = parseGitDiff(diff);
+    expect([...result.keys()]).toEqual(['gone.txt']);
+  });
+
+  it('uses `+++ b/<path>` for newly-created files', () => {
+    const diff = `diff --git a/new.txt b/new.txt
+new file mode 100644
+index 000..111
+--- /dev/null
++++ b/new.txt
+@@ -0,0 +1 @@
++hi
+`;
+    const result = parseGitDiff(diff);
+    expect([...result.keys()]).toEqual(['new.txt']);
   });
 });
 

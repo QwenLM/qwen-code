@@ -287,9 +287,14 @@ export function parseGitDiff(stdout: string): Map<string, Hunk[]> {
     if (Buffer.byteLength(fileDiff, 'utf8') > MAX_DIFF_SIZE_BYTES) continue;
 
     const lines = fileDiff.split('\n');
-    const headerMatch = lines[0]?.match(/^a\/(.+?) b\/(.+)$/);
-    if (!headerMatch) continue;
-    const filePath = headerMatch[2] ?? headerMatch[1] ?? '';
+    // The `diff --git a/X b/Y` header is ambiguous for paths that contain
+    // ` b/` (e.g. `a b/c.txt` yields `diff --git a/a b/c.txt b/a b/c.txt`).
+    // Prefer the unambiguous metadata that follows: `rename to`, `copy to`,
+    // or the `+++ b/<path>` / `--- a/<path>` lines. Git appends a trailing
+    // TAB to those paths when they contain whitespace — that's our real
+    // end-of-path marker.
+    const filePath = extractFilePath(lines);
+    if (filePath === null) continue;
 
     const fileHunks: Hunk[] = [];
     let currentHunk: Hunk | null = null;
@@ -337,6 +342,58 @@ export function parseGitDiff(stdout: string): Map<string, Hunk[]> {
   }
 
   return result;
+}
+
+/**
+ * Extract the real filename from a `diff --git` file block, avoiding the
+ * ambiguity of `diff --git a/X b/Y` when `X` itself contains ` b/`.
+ *
+ * Preference order:
+ *   1. `rename to <path>` / `copy to <path>` — the authoritative new name.
+ *   2. `+++ b/<path>` — the new-side path for in-place modifications. When
+ *      the file was deleted the line reads `+++ /dev/null`; we then fall back
+ *      to `--- a/<path>` for the old name.
+ *   3. `--- a/<path>` alone — for the rare case where `+++` is absent.
+ *
+ * Git appends a TAB after the path on `---` / `+++` / `rename to` lines when
+ * the path contains whitespace; `stripTab` cuts at that marker.
+ *
+ * Returns `null` when the block has no hunks or no recognizable path line
+ * (mode-only changes, for example).
+ */
+function extractFilePath(lines: string[]): string | null {
+  let plus: string | null = null;
+  let minus: string | null = null;
+  let renameTo: string | null = null;
+  let copyTo: string | null = null;
+  for (const line of lines) {
+    if (line.startsWith('@@ ')) break;
+    if (line.startsWith('+++ ')) plus = line.slice(4);
+    else if (line.startsWith('--- ')) minus = line.slice(4);
+    else if (line.startsWith('rename to ')) renameTo = line.slice(10);
+    else if (line.startsWith('copy to ')) copyTo = line.slice(8);
+  }
+  const stripTab = (s: string): string => {
+    const t = s.indexOf('\t');
+    return t >= 0 ? s.slice(0, t) : s;
+  };
+  if (renameTo !== null) return stripTab(renameTo);
+  if (copyTo !== null) return stripTab(copyTo);
+  if (plus !== null) {
+    const p = stripTab(plus);
+    if (p !== '/dev/null' && p.startsWith('b/')) return p.slice(2);
+    // Deleted file — fall back to the old path.
+    if (minus !== null) {
+      const m = stripTab(minus);
+      if (m !== '/dev/null' && m.startsWith('a/')) return m.slice(2);
+    }
+    return null;
+  }
+  if (minus !== null) {
+    const m = stripTab(minus);
+    if (m !== '/dev/null' && m.startsWith('a/')) return m.slice(2);
+  }
+  return null;
 }
 
 /**
