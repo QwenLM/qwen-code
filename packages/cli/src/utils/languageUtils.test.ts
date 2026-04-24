@@ -22,6 +22,7 @@ vi.mock('../i18n/index.js', () => ({
   getLanguageNameFromLocale: vi.fn((locale: string) => {
     const map: Record<string, string> = {
       en: 'English',
+      'zh-tw': 'Traditional Chinese',
       zh: 'Chinese',
       ru: 'Russian',
       de: 'German',
@@ -30,7 +31,7 @@ vi.mock('../i18n/index.js', () => ({
       fr: 'French',
       es: 'Spanish',
     };
-    return map[locale] || 'English';
+    return map[locale.toLowerCase()] || 'English';
   }),
 }));
 
