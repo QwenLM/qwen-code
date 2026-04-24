@@ -543,7 +543,7 @@ async def test_initialize_failure_no_unhandled_task_exception(
 
     # Don't respond to initialize — let the control-request timeout fire.
     # The error propagates through _message_queue.
-    with pytest.raises(Exception):
+    with pytest.raises(ControlRequestTimeoutError):
         await query.__anext__()
 
     await query.close()
@@ -586,7 +586,7 @@ def test_sync_next_after_exhaustion_raises_stop_iteration() -> None:
     raise StopIteration immediately instead of blocking on queue.get()."""
     from queue import Queue
 
-    from qwen_code_sdk.sync_query import SyncQuery, _STOP
+    from qwen_code_sdk.sync_query import _STOP, SyncQuery
 
     # Build a minimal SyncQuery without spawning the real event-loop thread.
     sq = object.__new__(SyncQuery)
@@ -594,7 +594,11 @@ def test_sync_next_after_exhaustion_raises_stop_iteration() -> None:
     sq._exhausted = False
 
     # Put one message then the sentinel.
-    sq._queue.put({"type": "assistant", "message": {"role": "assistant", "content": []}})
+    msg_payload = {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": []},
+    }
+    sq._queue.put(msg_payload)
     sq._queue.put(_STOP)
 
     # First call returns the message.
