@@ -74,6 +74,7 @@ Entry (gemini.tsx)
 | --- | --- |
 | [04-gemini-cli-research.md](./04-gemini-cli-research.md) | Gemini CLI 的启动、渲染模式、防闪烁、滚动、Markdown、MCP 调研 |
 | [05-claude-code-research.md](./05-claude-code-research.md) | Claude Code 的自定义 Ink、diff 输出、虚拟滚动、Markdown、MCP 生命周期调研 |
+| [15-complete-tui-flicker-closure-plan.md](./15-complete-tui-flicker-closure-plan.md) | PR1-4 之后剩余闪烁 / 重复输出 issue 的彻底闭环方案，以及 Claude 魔改 Ink 迁移可行性评估 |
 
 ### 2.4 社区反馈汇总
 
@@ -205,3 +206,4 @@ Entry (gemini.tsx)
 | [12-pr2-implementation-checklist.md](./12-pr2-implementation-checklist.md) | `PR-2` 的大输出与详情展开稳定性实操清单 |
 | [13-pr3-implementation-checklist.md](./13-pr3-implementation-checklist.md) | `PR-3` 的窄屏 / interactive shell 专项实操清单 |
 | [14-pr4-implementation-checklist.md](./14-pr4-implementation-checklist.md) | `PR-4` 的 synchronized output 灰度实操清单 |
+| [15-complete-tui-flicker-closure-plan.md](./15-complete-tui-flicker-closure-plan.md) | `PR-1` 到 `PR-4` 之后剩余 TUI 闪烁 / 重复输出 issue 的彻底闭环方案 |

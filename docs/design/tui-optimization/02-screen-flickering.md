@@ -528,6 +528,8 @@ Claude Code 的自研 Ink 内核提供了五层防闪烁保护：
 
 **关键洞察**：Claude Code 的经验表明，同步输出（第 3 层）是**单项收益最大**的优化；双缓冲 + diff（第 1-2 层）则是最彻底但也最昂贵的路线。qwen-code 的 Phase 1 策略应继续聚焦“同步输出 + 节流 + 中层治理”，不要过早跳入自研 renderer。
 
+对于 `PR-1` 到 `PR-4` 之后仍未闭环的 `refreshStatic()` 替换型清屏、detail / subagent / long output bounded surface、JetBrains / Windows / cmux 终端矩阵，以及 Claude 魔改 Ink 是否可迁移的问题，详见 [15-complete-tui-flicker-closure-plan.md](./15-complete-tui-flicker-closure-plan.md)。
+
 ## 4. 实施优先级与里程碑
 
 如果目标是彻底解决闪屏，而不是继续维护一条“大而全”的 patch 集合，那么实施顺序就不应再建立在 `#3013` 的 diff 结构上。`#3013` 只保留为参考样本：它证明了 pre-slicing、stable height、stream throttle 这些方向有收益，但真正开 PR 时应按用户 issue 归纳出的故障类来组织，详见 [10-issue-oriented-flicker-plan.md](./10-issue-oriented-flicker-plan.md)。下面这张里程碑表给的是**技术演进顺序**，`10` 给的是**真正开 PR 时的切分粒度**。

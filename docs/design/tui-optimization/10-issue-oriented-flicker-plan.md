@@ -44,6 +44,10 @@
 - `Follow-up-F1`：通用 tool budgeting 与 summary/detail 语义，主要对应 `#2818` `#1008` `#355`
 - `Follow-up-F2`：markdown-heavy 大输出的 parser/block 级降峰，属于渲染层 follow-up，不纳入当前 4 条 flicker 主 PR
 
+**PR1-4 之后的彻底闭环口径**：
+
+当前 4 条 PR 是必要基础，但它们不应被描述为“已经彻底关闭所有 TUI 闪烁 / 重复输出 issue”。`refreshStatic()` 替换型整屏 clear、bounded detail / virtual scroll、JetBrains / Windows / cmux 终端矩阵、以及 Claude 式 renderer ownership 的取舍，统一在 [15-complete-tui-flicker-closure-plan.md](./15-complete-tui-flicker-closure-plan.md) 中继续推进。后续不建议再拆成过多小 PR，而应按 `Closure-A`、`Closure-B`、`Closure-C` 三个闭环包组织。
+
 ## 4. 推荐顺序
 
 推荐按下面顺序推进：

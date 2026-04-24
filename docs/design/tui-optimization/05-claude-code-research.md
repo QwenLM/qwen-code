@@ -524,3 +524,5 @@ Claude 会监听多类 MCP 通知：
 ## 13. 一句话判断
 
 Claude Code 提供的最大价值，不是“它已经把 CLI 做得很复杂”，而是它把 **启动、终端、滚动、渲染、MCP 生命周期** 串成了一套完整的工程体系。qwen-code 不需要复制它的整套内核，但完全可以沿着同一张路线图，分阶段把收益最大的能力先补起来。
+
+进一步针对“是否直接拷贝 Claude 魔改 Ink”的工程、许可证和可维护性评估，见 [15-complete-tui-flicker-closure-plan.md](./15-complete-tui-flicker-closure-plan.md)。该文档的结论是：不建议复制实现代码，应迁移设计原则并实现 qwen-owned renderer / managed viewport。
