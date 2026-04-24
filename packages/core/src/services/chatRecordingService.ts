@@ -351,10 +351,11 @@ export class ChatRecordingService {
     }
     try {
       fs.mkdirSync(chatsDir, { recursive: true });
+      // Only cache success — keep transient mkdir failures self-healing.
+      this.chatsDirEnsured = true;
     } catch {
-      // Ignore errors - directory will be created if it doesn't exist
+      // ignored
     }
-    this.chatsDirEnsured = true;
     return chatsDir;
   }
 

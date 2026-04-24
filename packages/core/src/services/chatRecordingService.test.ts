@@ -386,6 +386,49 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('ensureChatsDir caching', () => {
+    it('does not cache when mkdirSync throws so the next write retries', async () => {
+      // Regression: a transient mkdir failure used to poison the cache and
+      // silently drop the rest of the session's records. We have to fail
+      // both mkdir AND the wx-create, otherwise ensureConversationFile's
+      // own cache short-circuits ensureChatsDir on the second call.
+      const mkdirSpy = vi.spyOn(fs, 'mkdirSync');
+      mkdirSpy.mockImplementationOnce(() => {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      });
+      mkdirSpy.mockImplementation(() => undefined);
+
+      const writeSpy = vi.spyOn(fs, 'writeFileSync');
+      writeSpy.mockImplementationOnce(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+      writeSpy.mockImplementation(() => undefined);
+
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await chatRecordingService.flush();
+      chatRecordingService.recordUserMessage([{ text: 'second' }]);
+      await chatRecordingService.flush();
+
+      // ≥ rather than === leaves room for a future flush()-side retry.
+      expect(mkdirSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('caches after a successful mkdir so steady-state writes skip the syscall', async () => {
+      const mkdirSpy = vi
+        .spyOn(fs, 'mkdirSync')
+        .mockImplementation(() => undefined);
+
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await chatRecordingService.flush();
+      chatRecordingService.recordUserMessage([{ text: 'second' }]);
+      await chatRecordingService.flush();
+      chatRecordingService.recordUserMessage([{ text: 'third' }]);
+      await chatRecordingService.flush();
+
+      expect(mkdirSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
   // Note: Session management tests (listSessions, loadSession, deleteSession, etc.)
   // have been moved to sessionService.test.ts
   // Session resume integration tests should test via SessionService mock
