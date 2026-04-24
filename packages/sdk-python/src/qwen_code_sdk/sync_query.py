@@ -14,6 +14,7 @@ from .query import Query, query
 from .types import QueryOptions, QueryOptionsDict
 
 _STOP = object()
+_SYNC_TIMEOUT_MARGIN = 5.0
 
 
 class SyncQuery:
@@ -37,8 +38,8 @@ class SyncQuery:
         )
         self._thread.start()
 
-        if isinstance(prompt, str) or hasattr(prompt, "__aiter__"):
-            source_prompt: str | AsyncIterable[SDKUserMessage] = prompt  # type: ignore[assignment]
+        if isinstance(prompt, str) or isinstance(prompt, AsyncIterable):
+            source_prompt: str | AsyncIterable[SDKUserMessage] = prompt
         else:
             source_prompt = _iterable_to_async(prompt)
 
@@ -106,13 +107,13 @@ class SyncQuery:
     def interrupt(self) -> None:
         q = self._require_query()
         asyncio.run_coroutine_threadsafe(q.interrupt(), self._loop).result(
-            timeout=q.control_request_timeout
+            timeout=q.control_request_timeout + _SYNC_TIMEOUT_MARGIN
         )
 
     def set_model(self, model: str) -> None:
         q = self._require_query()
         asyncio.run_coroutine_threadsafe(q.set_model(model), self._loop).result(
-            timeout=q.control_request_timeout
+            timeout=q.control_request_timeout + _SYNC_TIMEOUT_MARGIN
         )
 
     def set_permission_mode(self, mode: str) -> None:
@@ -120,21 +121,21 @@ class SyncQuery:
         asyncio.run_coroutine_threadsafe(
             q.set_permission_mode(mode),
             self._loop,
-        ).result(timeout=q.control_request_timeout)
+        ).result(timeout=q.control_request_timeout + _SYNC_TIMEOUT_MARGIN)
 
     def supported_commands(self) -> Any:
         q = self._require_query()
         return asyncio.run_coroutine_threadsafe(
             q.supported_commands(),
             self._loop,
-        ).result(timeout=q.control_request_timeout)
+        ).result(timeout=q.control_request_timeout + _SYNC_TIMEOUT_MARGIN)
 
     def mcp_server_status(self) -> Any:
         q = self._require_query()
         return asyncio.run_coroutine_threadsafe(
             q.mcp_server_status(),
             self._loop,
-        ).result(timeout=q.control_request_timeout)
+        ).result(timeout=q.control_request_timeout + _SYNC_TIMEOUT_MARGIN)
 
     def get_session_id(self) -> str:
         q = self._require_query()
@@ -197,6 +198,10 @@ class SyncQuery:
                     ResourceWarning,
                     stacklevel=1,
                 )
+                try:
+                    self.close()
+                except Exception:
+                    pass
         except AttributeError:
             pass
 

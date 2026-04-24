@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, TypeGuard
 
 from typing_extensions import NotRequired, TypedDict
 
@@ -292,11 +292,11 @@ ControlMessage: TypeAlias = (
 )
 
 
-def is_sdk_user_message(msg: Any) -> bool:
+def is_sdk_user_message(msg: Any) -> TypeGuard[SDKUserMessage]:
     return isinstance(msg, dict) and msg.get("type") == "user" and "message" in msg
 
 
-def is_sdk_assistant_message(msg: Any) -> bool:
+def is_sdk_assistant_message(msg: Any) -> TypeGuard[SDKAssistantMessage]:
     return (
         isinstance(msg, dict)
         and msg.get("type") == "assistant"
@@ -305,7 +305,7 @@ def is_sdk_assistant_message(msg: Any) -> bool:
     )
 
 
-def is_sdk_system_message(msg: Any) -> bool:
+def is_sdk_system_message(msg: Any) -> TypeGuard[SDKSystemMessage]:
     return (
         isinstance(msg, dict)
         and msg.get("type") == "system"
@@ -314,7 +314,7 @@ def is_sdk_system_message(msg: Any) -> bool:
     )
 
 
-def is_sdk_result_message(msg: Any) -> bool:
+def is_sdk_result_message(msg: Any) -> TypeGuard[SDKResultMessage]:
     return (
         isinstance(msg, dict)
         and msg.get("type") == "result"
@@ -323,7 +323,7 @@ def is_sdk_result_message(msg: Any) -> bool:
     )
 
 
-def is_sdk_partial_assistant_message(msg: Any) -> bool:
+def is_sdk_partial_assistant_message(msg: Any) -> TypeGuard[SDKPartialAssistantMessage]:
     return (
         isinstance(msg, dict)
         and msg.get("type") == "stream_event"
@@ -332,7 +332,7 @@ def is_sdk_partial_assistant_message(msg: Any) -> bool:
     )
 
 
-def is_control_request(msg: Any) -> bool:
+def is_control_request(msg: Any) -> TypeGuard[CLIControlRequest]:
     return (
         isinstance(msg, dict)
         and msg.get("type") == "control_request"
@@ -341,7 +341,7 @@ def is_control_request(msg: Any) -> bool:
     )
 
 
-def is_control_response(msg: Any) -> bool:
+def is_control_response(msg: Any) -> TypeGuard[CLIControlResponse]:
     return (
         isinstance(msg, dict)
         and msg.get("type") == "control_response"
@@ -349,7 +349,7 @@ def is_control_response(msg: Any) -> bool:
     )
 
 
-def is_control_cancel(msg: Any) -> bool:
+def is_control_cancel(msg: Any) -> TypeGuard[ControlCancelRequest]:
     return (
         isinstance(msg, dict)
         and msg.get("type") == "control_cancel_request"

@@ -96,6 +96,7 @@ Supported options in v1:
 - `session_id`
 - `timeout`
 - `mcp_servers`
+- `stderr`
 
 Session argument priority is fixed as:
 

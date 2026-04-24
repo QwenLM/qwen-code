@@ -48,17 +48,14 @@ asyncio.run(main())
 from qwen_code_sdk import query_sync
 
 
-result = query_sync(
+with query_sync(
     "Say hello",
     {
         "path_to_qwen_executable": "qwen",
     },
-)
-
-for message in result:
-    print(message)
-
-result.close()
+) as result:
+    for message in result:
+        print(message)
 ```
 
 ## Main APIs

@@ -152,7 +152,10 @@ class QueryOptions:
             cwd=_as_optional_str(data, "cwd"),
             model=_as_optional_str(data, "model"),
             path_to_qwen_executable=_as_optional_str(data, "path_to_qwen_executable"),
-            permission_mode=data.get("permission_mode"),
+            permission_mode=cast(
+                PermissionMode | None,
+                _as_optional_str(data, "permission_mode"),
+            ),
             can_use_tool=cast(
                 CanUseTool | None,
                 _as_optional_callable(data, "can_use_tool"),
@@ -165,7 +168,10 @@ class QueryOptions:
             core_tools=_as_optional_str_list(data, "core_tools"),
             exclude_tools=_as_optional_str_list(data, "exclude_tools"),
             allowed_tools=_as_optional_str_list(data, "allowed_tools"),
-            auth_type=data.get("auth_type"),
+            auth_type=cast(
+                AuthType | None,
+                _as_optional_str(data, "auth_type"),
+            ),
             include_partial_messages=_as_optional_bool(data, "include_partial_messages")
             or False,
             resume=_as_optional_str(data, "resume"),
