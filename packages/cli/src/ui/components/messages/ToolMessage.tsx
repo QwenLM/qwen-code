@@ -12,7 +12,7 @@ import { DiffRenderer } from './DiffRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
 import { AnsiOutputText, ShellStatsBar } from '../AnsiOutput.js';
 import type { ShellStatsBarProps } from '../AnsiOutput.js';
-import { MaxSizedBox } from '../shared/MaxSizedBox.js';
+import { MaxSizedBox, MINIMUM_MAX_HEIGHT } from '../shared/MaxSizedBox.js';
 import { TodoDisplay } from '../TodoDisplay.js';
 import type {
   TodoResultDisplay,
@@ -47,6 +47,29 @@ const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
 // outputs that will get truncated further MaxSizedBox anyway.
 const MAXIMUM_RESULT_DISPLAY_CHARACTERS = 1000000;
 export type TextEmphasis = 'high' | 'medium' | 'low';
+
+function sliceTextForMaxHeight(
+  text: string,
+  maxHeight: number | undefined,
+): { text: string; hiddenLinesCount: number } {
+  if (maxHeight === undefined) {
+    return { text, hiddenLinesCount: 0 };
+  }
+
+  const targetMaxHeight = Math.max(Math.round(maxHeight), MINIMUM_MAX_HEIGHT);
+  const lines = text.split('\n');
+
+  if (lines.length <= targetMaxHeight) {
+    return { text, hiddenLinesCount: 0 };
+  }
+
+  const visibleContentHeight = targetMaxHeight - 1;
+  const hiddenLinesCount = lines.length - visibleContentHeight;
+  return {
+    text: lines.slice(hiddenLinesCount).join('\n'),
+    hiddenLinesCount,
+  };
+}
 
 type DisplayRendererResult =
   | { type: 'none' }
@@ -234,11 +257,17 @@ const StringResultRenderer: React.FC<{
     );
   }
 
+  const sliced = sliceTextForMaxHeight(displayData, availableHeight);
+
   return (
-    <MaxSizedBox maxHeight={availableHeight} maxWidth={childWidth}>
+    <MaxSizedBox
+      maxHeight={availableHeight}
+      maxWidth={childWidth}
+      additionalHiddenLinesCount={sliced.hiddenLinesCount}
+    >
       <Box>
         <Text wrap="wrap" color={theme.text.primary}>
-          {displayData}
+          {sliced.text}
         </Text>
       </Box>
     </MaxSizedBox>
