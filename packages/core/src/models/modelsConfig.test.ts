@@ -739,7 +739,7 @@ describe('ModelsConfig', () => {
     modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'provider-model');
 
     const gc = currentGenerationConfig(modelsConfig);
-    // Same authType + same modelId → short-circuit preserves existing key
+    // Same authType + same modelId → apiKey preserved via save/restore around applyResolvedModelDefaults
     expect(gc.apiKey).toBe('programmatic-key');
   });
 
@@ -900,6 +900,45 @@ describe('ModelsConfig', () => {
     expect(gc.apiKey).toBeUndefined();
     expect(gc.model).toBe('cli-provider-b');
     expect(gc.baseUrl).toBe('https://api-b.example.com/v1');
+  });
+
+  it('should NOT preserve apiKey on first syncAfterAuthRefresh when previousAuthType is undefined (cold start)', () => {
+    // Cold start: ModelsConfig created without initialAuthType, then
+    // syncAfterAuthRefresh is called for the first time. previousAuthType
+    // is undefined, so isUnchanged must be false — no key preservation.
+    const envKey = 'COLD_START_KEY_TEST_3417';
+    delete process.env[envKey];
+
+    const modelProvidersConfig: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'cold-start-model',
+          name: 'Cold Start Model',
+          baseUrl: 'https://api.example.com/v1',
+          envKey,
+        },
+      ],
+    };
+
+    const modelsConfig = new ModelsConfig({
+      modelProvidersConfig,
+      generationConfig: {
+        model: 'cold-start-model',
+        apiKey: 'stale-key-from-previous-session',
+      },
+      generationConfigSources: {
+        model: { kind: 'settings', detail: 'settings.model.name' },
+        apiKey: { kind: 'settings', detail: 'security.auth.apiKey' },
+      },
+    });
+
+    // First auth refresh — previousAuthType is undefined
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'cold-start-model');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    // previousAuthType (undefined) !== USE_OPENAI → isUnchanged is false → no preservation
+    expect(gc.apiKey).toBeUndefined();
+    expect(gc.model).toBe('cold-start-model');
   });
 
   it('should preserve general env var apiKey (e.g. OPENAI_API_KEY) when provider envKey is absent', () => {

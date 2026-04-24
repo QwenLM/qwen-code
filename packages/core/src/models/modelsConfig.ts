@@ -900,7 +900,9 @@ export class ModelsConfig {
         // cleared it (env var not found) and this is the same model.
         if (isUnchanged && !this._generationConfig.apiKey && savedApiKey) {
           this._generationConfig.apiKey = savedApiKey;
-          this.generationConfigSources['apiKey'] = savedApiKeySource!;
+          if (savedApiKeySource) {
+            this.generationConfigSources['apiKey'] = savedApiKeySource;
+          }
         }
 
         this.strictModelProviderSelection = true;
