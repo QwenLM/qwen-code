@@ -16,6 +16,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./export": {
+      "types": "./dist/src/export/index.d.ts",
+      "import": "./dist/src/export/index.js"
     }
   },
   "scripts": {
