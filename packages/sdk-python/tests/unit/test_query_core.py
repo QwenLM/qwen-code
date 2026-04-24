@@ -552,9 +552,7 @@ async def test_initialize_failure_no_unhandled_task_exception(
     await asyncio.sleep(0.1)
 
     # No "Task exception was never retrieved" warnings should have appeared.
-    task_warnings = [
-        w for w in recwarn.list if "never retrieved" in str(w.message)
-    ]
+    task_warnings = [w for w in recwarn.list if "never retrieved" in str(w.message)]
     assert task_warnings == []
 
 
