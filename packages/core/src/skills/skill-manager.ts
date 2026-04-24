@@ -268,13 +268,19 @@ export class SkillManager {
     this.parseErrors.clear();
 
     const levels: SkillLevel[] = ['project', 'user', 'extension', 'bundled'];
-    let totalSkills = 0;
 
-    for (const level of levels) {
-      const levelSkills = await this.listSkillsAtLevel(level);
+    const loaded = await Promise.all(
+      levels.map(async (level) => {
+        const levelSkills = await this.listSkillsAtLevel(level);
+        debugLogger.debug(`Loaded ${levelSkills.length} ${level} level skills`);
+        return [level, levelSkills] as const;
+      }),
+    );
+
+    let totalSkills = 0;
+    for (const [level, levelSkills] of loaded) {
       skillsCache.set(level, levelSkills);
       totalSkills += levelSkills.length;
-      debugLogger.debug(`Loaded ${levelSkills.length} ${level} level skills`);
     }
 
     this.skillsCache = skillsCache;
@@ -689,13 +695,19 @@ export class SkillManager {
     // Iterate provider directories in PROVIDER_CONFIG_DIRS order.
     // The first directory that contains a skill with a given name wins,
     // so the order defines implicit precedence (.qwen > .agent > .cursor > ...).
+    // Load in parallel but fold sequentially to preserve precedence.
     const baseDirs = this.getSkillsBaseDirs(level);
+    const perDirSkills = await Promise.all(
+      baseDirs.map((baseDir) => {
+        debugLogger.debug(`Loading ${level} level skills from: ${baseDir}`);
+        return this.loadSkillsFromDir(baseDir, level);
+      }),
+    );
     const skills: SkillConfig[] = [];
     const seenNames = new Set<string>();
-    for (const baseDir of baseDirs) {
-      debugLogger.debug(`Loading ${level} level skills from: ${baseDir}`);
-      const skillsFromDir = await this.loadSkillsFromDir(baseDir, level);
-      for (const skill of skillsFromDir) {
+    for (let i = 0; i < baseDirs.length; i++) {
+      const baseDir = baseDirs[i];
+      for (const skill of perDirSkills[i]) {
         if (seenNames.has(skill.name)) {
           debugLogger.debug(
             `Skipping duplicate skill at ${level} level: ${skill.name} from ${baseDir}`,
@@ -717,67 +729,64 @@ export class SkillManager {
     debugLogger.debug(`Loading skills from directory: ${baseDir}`);
     try {
       const entries = await fs.readdir(baseDir, { withFileTypes: true });
-      const skills: SkillConfig[] = [];
       debugLogger.debug(`Found ${entries.length} entries in ${baseDir}`);
 
-      for (const entry of entries) {
-        // Check if it's a directory or a symlink
-        const isDirectory = entry.isDirectory();
-        const isSymlink = entry.isSymbolicLink();
+      // The returned `loaded` array preserves entries order via Promise.all,
+      // but `parseSkillFileInternal` writes into `this.parseErrors` as each
+      // promise settles, so the Map's insertion order reflects parse-finish
+      // order, not on-disk order. Today the only consumer iterates without
+      // any ordering assumption (`tools/skill.ts`); preserve that contract.
+      const loaded = await Promise.all(
+        entries.map(async (entry) => {
+          const isDirectory = entry.isDirectory();
+          const isSymlink = entry.isSymbolicLink();
 
-        if (!isDirectory && !isSymlink) {
-          debugLogger.warn(`Skipping non-directory entry: ${entry.name}`);
-          continue;
-        }
+          if (!isDirectory && !isSymlink) {
+            debugLogger.warn(`Skipping non-directory entry: ${entry.name}`);
+            return null;
+          }
 
-        const skillDir = path.join(baseDir, entry.name);
+          const skillDir = path.join(baseDir, entry.name);
 
-        // For symlinks, verify the target is a directory
-        if (isSymlink) {
-          try {
-            const targetStat = await fs.stat(skillDir);
-            if (!targetStat.isDirectory()) {
+          // For symlinks, verify the target is a directory
+          if (isSymlink) {
+            try {
+              const targetStat = await fs.stat(skillDir);
+              if (!targetStat.isDirectory()) {
+                debugLogger.warn(
+                  `Skipping symlink ${entry.name} that does not point to a directory`,
+                );
+                return null;
+              }
+            } catch (error) {
               debugLogger.warn(
-                `Skipping symlink ${entry.name} that does not point to a directory`,
+                `Skipping invalid symlink ${entry.name}: ${error instanceof Error ? error.message : 'Unknown error'}`,
               );
-              continue;
+              return null;
             }
+          }
+
+          const skillManifest = path.join(skillDir, SKILL_MANIFEST_FILE);
+
+          try {
+            await fs.access(skillManifest);
+            return await this.parseSkillFileInternal(skillManifest, level);
           } catch (error) {
-            debugLogger.warn(
-              `Skipping invalid symlink ${entry.name}: ${error instanceof Error ? error.message : 'Unknown error'}`,
-            );
-            continue;
+            if (error instanceof SkillError) {
+              debugLogger.error(
+                `Failed to parse skill at ${skillDir}: ${error.message}`,
+              );
+            } else {
+              debugLogger.debug(
+                `No valid SKILL.md found in ${skillDir}, skipping`,
+              );
+            }
+            return null;
           }
-        }
+        }),
+      );
 
-        const skillManifest = path.join(skillDir, SKILL_MANIFEST_FILE);
-
-        try {
-          // Check if SKILL.md exists
-          await fs.access(skillManifest);
-
-          const config = await this.parseSkillFileInternal(
-            skillManifest,
-            level,
-          );
-          skills.push(config);
-        } catch (error) {
-          // Skip directories without valid SKILL.md
-          if (error instanceof SkillError) {
-            // Parse error was already recorded
-            debugLogger.error(
-              `Failed to parse skill at ${skillDir}: ${error.message}`,
-            );
-          } else {
-            debugLogger.debug(
-              `No valid SKILL.md found in ${skillDir}, skipping`,
-            );
-          }
-          continue;
-        }
-      }
-
-      return skills;
+      return loaded.filter((s): s is SkillConfig => s !== null);
     } catch (error) {
       // Directory doesn't exist or can't be read
       const errorMessage =
