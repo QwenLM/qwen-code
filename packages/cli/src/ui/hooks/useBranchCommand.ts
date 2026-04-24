@@ -10,6 +10,7 @@ import {
   type Config,
   type SessionService,
   type ChatRecord,
+  type ResumedSessionData,
   SessionStartSource,
   type PermissionMode,
 } from '@qwen-code/qwen-code-core';
@@ -123,6 +124,21 @@ export function useBranchCommand(
       const newSessionId = randomUUID();
       const sessionService = config.getSessionService();
 
+      // Snapshot the parent JSONL state up front so a post-swap failure
+      // (see the catch block) can faithfully restore sessionId + recorder
+      // with the correct parentUuid chain tail. `/branch` is guarded on
+      // `isIdleRef`, so the file isn't being mutated concurrently.
+      let prevSessionData: ResumedSessionData | undefined;
+      try {
+        prevSessionData = await sessionService.loadSession(oldSessionId);
+      } catch {
+        // Best-effort snapshot. Falling back to undefined still rolls
+        // back sessionId + recorder, which is the load-bearing invariant;
+        // we just lose the parentUuid chain on the restored recorder.
+      }
+
+      let coreSwapped = false;
+
       try {
         // 1. Flush outgoing recorder.
         try {
@@ -144,8 +160,12 @@ export function useBranchCommand(
         //    client init) runs while the UI is still showing the parent
         //    session, so a throw leaves the user safely on the parent
         //    instead of stranded with a cleared history and a half-live
-        //    client.
+        //    client. `coreSwapped` gates the rollback path in the catch
+        //    block below — without it, a failure between swap and UI
+        //    update would leave core on the fork while UI still shows
+        //    the parent, silently recording user input into an orphan.
         config.startNewSession(newSessionId, resumed);
+        coreSwapped = true;
         await config.getGeminiClient()?.initialize?.();
 
         // 5. Swap UI.
@@ -212,6 +232,25 @@ export function useBranchCommand(
           Date.now(),
         );
       } catch (err) {
+        if (coreSwapped) {
+          // Core already switched to the fork before the failure — put it
+          // back on the parent, otherwise the recorder would keep writing
+          // new user messages into the orphan fork JSONL while UI still
+          // shows the parent.
+          try {
+            config.startNewSession(oldSessionId, prevSessionData);
+            // Re-hydrate chat history against the restored session. Best-
+            // effort: if this throws too, sessionId + recorder are still
+            // back on the parent, which is the load-bearing invariant.
+            await config.getGeminiClient()?.initialize?.();
+          } catch (rollbackErr) {
+            config
+              .getDebugLogger()
+              .warn(
+                `Rollback after failed /branch init failed: ${rollbackErr}`,
+              );
+          }
+        }
         historyManager.addItem(
           {
             type: 'error',

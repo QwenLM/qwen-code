@@ -89,7 +89,10 @@ describe('useBranchCommand', () => {
     };
   });
 
-  it('runs finalize → forkSession → loadSession → config.startNewSession in order', async () => {
+  it('runs snapshot → finalize → forkSession → loadSession → config.startNewSession in order', async () => {
+    // The leading snapshot load (of the parent session) exists so the catch
+    // block can roll core back to the parent with the correct parentUuid
+    // chain tail if getGeminiClient().initialize() rejects after the swap.
     const order: string[] = [];
     finalize.mockImplementation(() => order.push('finalize'));
     forkSession.mockImplementation(async () => {
@@ -111,7 +114,13 @@ describe('useBranchCommand', () => {
       await result.current.handleBranch('my-branch');
     });
 
-    expect(order).toEqual(['finalize', 'fork', 'load', 'config.start']);
+    expect(order).toEqual([
+      'load', // parent snapshot for rollback
+      'finalize',
+      'fork',
+      'load', // forked session
+      'config.start',
+    ]);
   });
 
   it('records the user-provided name with a (Branch) suffix', async () => {
@@ -250,6 +259,113 @@ describe('useBranchCommand', () => {
       expect.objectContaining({
         type: 'error',
         text: expect.stringMatching(/Failed to branch conversation.*disk full/),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('rolls core back to the parent session when getGeminiClient().initialize() rejects after swap', async () => {
+    // The reviewer's scenario: config.startNewSession succeeds (core is now
+    // on the fork), but then getGeminiClient().initialize() rejects. Without
+    // rollback, core stays on the fork while UI is still on the parent, so
+    // the recorder silently writes subsequent user input into an orphan
+    // JSONL. This test pins the rollback invariant — after the failure core
+    // must be back on the parent sessionId with the parent's ResumedSessionData.
+    const oldSessionId = '12345678-aaaa-bbbb-cccc-dddddddddddd';
+    const parentResumed = {
+      conversation: { messages: [userRecord('parent msg')] },
+      filePath: `/tmp/${oldSessionId}.jsonl`,
+      lastCompletedUuid: 'uparent',
+    };
+    const forkResumed = {
+      conversation: { messages: [userRecord('parent msg')] },
+      filePath: '/tmp/new.jsonl',
+      lastCompletedUuid: 'uparent',
+    };
+    // Called twice: once up front to snapshot the parent for rollback,
+    // once after forkSession to load the fork.
+    loadSession.mockImplementation(async (sid: string) =>
+      sid === oldSessionId ? parentResumed : forkResumed,
+    );
+
+    const initialize = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('init boom')) // fork init fails
+      .mockResolvedValueOnce(undefined); // rollback re-init succeeds
+    config.getGeminiClient = () => ({ initialize });
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('x');
+    });
+
+    // Core was swapped to the fork, then rolled back to the parent.
+    expect(startNewSessionConfig).toHaveBeenNthCalledWith(
+      1,
+      expect.not.stringMatching(oldSessionId),
+      forkResumed,
+    );
+    expect(startNewSessionConfig).toHaveBeenNthCalledWith(
+      2,
+      oldSessionId,
+      parentResumed,
+    );
+    // Client was re-initialized after rollback so chat history re-hydrates
+    // against the parent session.
+    expect(initialize).toHaveBeenCalledTimes(2);
+    // UI never switched — no cleared history, no UI sessionId swap.
+    expect(clearItems).not.toHaveBeenCalled();
+    expect(loadHistory).not.toHaveBeenCalled();
+    expect(startNewSessionUI).not.toHaveBeenCalled();
+    expect(setSessionName).not.toHaveBeenCalled();
+    // User sees the failure.
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringMatching(/Failed to branch conversation.*init boom/),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('still surfaces the error and leaves core on the parent when rollback re-init also throws', async () => {
+    // If the rollback initialize() itself rejects, the swap of sessionId +
+    // recorder has still happened — that is the load-bearing invariant —
+    // so we just log and surface the original failure without crashing.
+    const oldSessionId = '12345678-aaaa-bbbb-cccc-dddddddddddd';
+    loadSession.mockResolvedValue({
+      conversation: { messages: [userRecord('parent msg')] },
+      filePath: '/tmp/new.jsonl',
+      lastCompletedUuid: 'u2',
+    });
+    const debugWarn = vi.fn();
+    config.getDebugLogger = () => ({ warn: debugWarn });
+
+    const initialize = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('init boom'))
+      .mockRejectedValueOnce(new Error('rollback boom'));
+    config.getGeminiClient = () => ({ initialize });
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('x');
+    });
+
+    // Core was still rolled back to the parent sessionId.
+    expect(startNewSessionConfig).toHaveBeenNthCalledWith(
+      2,
+      oldSessionId,
+      expect.any(Object),
+    );
+    expect(debugWarn).toHaveBeenCalledWith(
+      expect.stringContaining('Rollback after failed /branch init failed'),
+    );
+    // Original failure is what the user sees, not the rollback failure.
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringMatching(/Failed to branch conversation.*init boom/),
       }),
       expect.any(Number),
     );
