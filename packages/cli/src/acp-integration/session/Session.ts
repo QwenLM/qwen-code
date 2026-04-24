@@ -522,17 +522,11 @@ export class Session implements SessionContext {
           }
 
           if (functionCalls.length > 0) {
-            const toolResponseParts: Part[] = [];
-
-            for (const fc of functionCalls) {
-              const response = await this.runTool(
-                pendingSend.signal,
-                promptId,
-                fc,
-              );
-              toolResponseParts.push(...response);
-            }
-
+            const toolResponseParts = await this.runToolCalls(
+              pendingSend.signal,
+              promptId,
+              functionCalls,
+            );
             nextMessage = { role: 'user', parts: toolResponseParts };
           }
         }
@@ -763,17 +757,11 @@ export class Session implements SessionContext {
 
           // Process tool calls from the follow-up message
           if (functionCalls.length > 0) {
-            const toolResponseParts: Part[] = [];
-
-            for (const fc of functionCalls) {
-              const toolResponse = await this.runTool(
-                pendingSend.signal,
-                promptId,
-                fc,
-              );
-              toolResponseParts.push(...toolResponse);
-            }
-
+            const toolResponseParts = await this.runToolCalls(
+              pendingSend.signal,
+              promptId,
+              functionCalls,
+            );
             nextMessage = { role: 'user', parts: toolResponseParts };
           }
         }
@@ -956,11 +944,11 @@ export class Session implements SessionContext {
             }
 
             if (functionCalls.length > 0) {
-              const toolResponseParts: Part[] = [];
-              for (const fc of functionCalls) {
-                const response = await this.runTool(ac.signal, promptId, fc);
-                toolResponseParts.push(...response);
-              }
+              const toolResponseParts = await this.runToolCalls(
+                ac.signal,
+                promptId,
+                functionCalls,
+              );
               nextMessage = { role: 'user', parts: toolResponseParts };
             }
           }
@@ -1101,6 +1089,79 @@ export class Session implements SessionContext {
     };
 
     await this.sendUpdate(update);
+  }
+
+  /**
+   * Execute a batch of model-returned tool calls, running Agent calls
+   * concurrently while keeping other tools sequential.
+   *
+   * Mirrors the partition logic in `coreToolScheduler.partitionToolCalls`:
+   * consecutive Agent calls form a parallel batch (they spawn independent
+   * sub-agents with no shared mutable state); any other tool forms its own
+   * sequential batch to preserve the implicit ordering the model may rely
+   * on. Response-part ordering matches the original `functionCalls` order.
+   */
+  private async runToolCalls(
+    abortSignal: AbortSignal,
+    promptId: string,
+    functionCalls: FunctionCall[],
+  ): Promise<Part[]> {
+    type Batch = { concurrent: boolean; calls: FunctionCall[] };
+    const batches: Batch[] = [];
+    for (const fc of functionCalls) {
+      const isAgent = fc.name === ToolNames.AGENT;
+      const last = batches[batches.length - 1];
+      if (isAgent && last?.concurrent) {
+        last.calls.push(fc);
+      } else {
+        batches.push({ concurrent: isAgent, calls: [fc] });
+      }
+    }
+
+    // Bounded-concurrency runner: matches core's `runConcurrently`
+    // behaviour (`coreToolScheduler.ts:1506`), capped by
+    // `QWEN_CODE_MAX_TOOL_CONCURRENCY` (default 10). Results are returned
+    // in input order regardless of resolution order.
+    const runBounded = async (calls: FunctionCall[]): Promise<Part[][]> => {
+      const parsed = parseInt(
+        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] || '',
+        10,
+      );
+      const maxConcurrency =
+        Number.isFinite(parsed) && parsed >= 1 ? parsed : 10;
+      const results: Part[][] = new Array(calls.length);
+      const executing = new Set<Promise<void>>();
+      for (let i = 0; i < calls.length; i++) {
+        const idx = i;
+        const p = this.runTool(abortSignal, promptId, calls[idx])
+          .then((r) => {
+            results[idx] = r;
+          })
+          .finally(() => {
+            executing.delete(p);
+          });
+        executing.add(p);
+        if (executing.size >= maxConcurrency) {
+          await Promise.race(executing);
+        }
+      }
+      await Promise.all(executing);
+      return results;
+    };
+
+    const parts: Part[] = [];
+    for (const batch of batches) {
+      if (batch.concurrent && batch.calls.length > 1) {
+        const results = await runBounded(batch.calls);
+        for (const r of results) parts.push(...r);
+      } else {
+        for (const fc of batch.calls) {
+          const r = await this.runTool(abortSignal, promptId, fc);
+          parts.push(...r);
+        }
+      }
+    }
+    return parts;
   }
 
   /**
@@ -1247,14 +1308,19 @@ export class Session implements SessionContext {
     try {
       const invocation = tool.build(args);
 
-      if (isAgentTool && 'eventEmitter' in invocation) {
-        // Access eventEmitter from AgentTool invocation
-        const taskEventEmitter = (
-          invocation as {
-            eventEmitter: AgentEventEmitter;
-          }
-        ).eventEmitter;
-
+      // Production AgentTool always initializes `eventEmitter` on its
+      // invocation (`agent.ts:392`). Be defensive about the `undefined`
+      // case too so an incomplete/custom AgentTool invocation degrades
+      // gracefully (no sub-agent event forwarding) instead of throwing
+      // inside SubAgentTracker.setup — the `'eventEmitter' in invocation`
+      // key-presence check passed for `{ eventEmitter: undefined }` and
+      // the ensuing `eventEmitter.on(...)` blew up.
+      const taskEventEmitter = (
+        invocation as {
+          eventEmitter?: AgentEventEmitter;
+        }
+      ).eventEmitter;
+      if (isAgentTool && taskEventEmitter) {
         // Extract subagent metadata from AgentTool call
         const parentToolCallId = callId;
         const subagentType = (args['subagent_type'] as string) ?? '';
