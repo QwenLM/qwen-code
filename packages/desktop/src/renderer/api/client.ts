@@ -14,6 +14,7 @@ export interface DesktopHealth {
 }
 
 export interface DesktopConnectionStatus {
+  serverInfo: DesktopServerInfo;
   serverUrl: string;
   health: DesktopHealth;
   runtime: DesktopRuntime;
@@ -42,6 +43,17 @@ export interface DesktopRuntime {
   };
 }
 
+export interface DesktopSessionSummary {
+  sessionId: string;
+  title?: string;
+  cwd?: string;
+}
+
+export interface DesktopSessionList {
+  sessions: DesktopSessionSummary[];
+  nextCursor?: string;
+}
+
 export async function loadDesktopStatus(): Promise<DesktopConnectionStatus> {
   const serverInfo = await getServerInfo();
   const [health, runtime] = await Promise.all([
@@ -50,10 +62,37 @@ export async function loadDesktopStatus(): Promise<DesktopConnectionStatus> {
   ]);
 
   return {
+    serverInfo,
     serverUrl: serverInfo.url,
     health,
     runtime,
   };
+}
+
+export async function listDesktopSessions(
+  serverInfo: DesktopServerInfo,
+  cwd?: string,
+): Promise<DesktopSessionList> {
+  const url = new URL('/api/sessions', serverInfo.url);
+  if (cwd) {
+    url.searchParams.set('cwd', cwd);
+  }
+
+  return getJson(serverInfo, `${url.pathname}${url.search}`, isSessionList);
+}
+
+export async function createDesktopSession(
+  serverInfo: DesktopServerInfo,
+  cwd: string,
+): Promise<DesktopSessionSummary> {
+  const response = await writeJson(
+    serverInfo,
+    '/api/sessions',
+    'POST',
+    { cwd },
+    isCreateSessionResponse,
+  );
+  return response.session;
 }
 
 async function getJson<T>(
@@ -69,7 +108,31 @@ async function getJson<T>(
   const payload = (await response.json()) as unknown;
 
   if (!response.ok || !isExpectedPayload(payload)) {
-    throw new Error(`Desktop service request failed: ${path}`);
+    throw new Error(getResponseErrorMessage(payload, path));
+  }
+
+  return payload;
+}
+
+async function writeJson<T>(
+  serverInfo: DesktopServerInfo,
+  path: string,
+  method: 'POST',
+  body: Record<string, unknown>,
+  isExpectedPayload: (value: unknown) => value is T,
+): Promise<T> {
+  const response = await fetch(new URL(path, serverInfo.url), {
+    method,
+    headers: {
+      Authorization: `Bearer ${serverInfo.token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  const payload = (await response.json()) as unknown;
+
+  if (!response.ok || !isExpectedPayload(payload)) {
+    throw new Error(getResponseErrorMessage(payload, path));
   }
 
   return payload;
@@ -81,6 +144,19 @@ async function getServerInfo(): Promise<DesktopServerInfo> {
   }
 
   return window.qwenDesktop.getServerInfo();
+}
+
+function getResponseErrorMessage(payload: unknown, path: string): string {
+  if (
+    payload &&
+    typeof payload === 'object' &&
+    'message' in payload &&
+    typeof payload.message === 'string'
+  ) {
+    return payload.message;
+  }
+
+  return `Desktop service request failed: ${path}`;
 }
 
 function isDesktopHealth(value: unknown): value is DesktopHealth {
@@ -144,5 +220,43 @@ function isDesktopRuntimePlatform(
     typeof value.type === 'string' &&
     typeof value.arch === 'string' &&
     typeof value.release === 'string'
+  );
+}
+
+function isSessionList(value: unknown): value is DesktopSessionList {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as { sessions?: unknown; nextCursor?: unknown };
+  return (
+    Array.isArray(candidate.sessions) &&
+    candidate.sessions.every(isSessionSummary) &&
+    (typeof candidate.nextCursor === 'string' ||
+      candidate.nextCursor === undefined)
+  );
+}
+
+function isCreateSessionResponse(
+  value: unknown,
+): value is { ok: true; session: DesktopSessionSummary } {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as { ok?: unknown; session?: unknown };
+  return candidate.ok === true && isSessionSummary(candidate.session);
+}
+
+function isSessionSummary(value: unknown): value is DesktopSessionSummary {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Partial<DesktopSessionSummary>;
+  return (
+    typeof candidate.sessionId === 'string' &&
+    (typeof candidate.title === 'string' || candidate.title === undefined) &&
+    (typeof candidate.cwd === 'string' || candidate.cwd === undefined)
   );
 }

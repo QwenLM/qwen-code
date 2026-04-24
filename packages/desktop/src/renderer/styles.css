@@ -28,6 +28,17 @@ textarea {
   font: inherit;
 }
 
+button {
+  border: 0;
+  cursor: pointer;
+}
+
+button:disabled,
+textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 #root {
   min-height: 100vh;
 }
@@ -112,6 +123,76 @@ textarea {
   border: 1px solid rgba(238, 240, 237, 0.09);
   color: #858c84;
   font-size: 13px;
+}
+
+.workspace-path {
+  min-height: 42px;
+  padding: 12px;
+  border: 1px solid rgba(238, 240, 237, 0.09);
+  overflow-wrap: anywhere;
+  color: #d8dcd6;
+  font-size: 13px;
+}
+
+.primary-button,
+.secondary-button {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.primary-button {
+  background: #e7bd73;
+  color: #161311;
+}
+
+.secondary-button {
+  border-color: rgba(238, 240, 237, 0.13);
+  background: rgba(238, 240, 237, 0.04);
+  color: #d8dcd6;
+}
+
+.session-list {
+  display: grid;
+  gap: 8px;
+}
+
+.session-row {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  min-height: 54px;
+  padding: 10px 12px;
+  border: 1px solid rgba(238, 240, 237, 0.09);
+  background: transparent;
+  color: #d8dcd6;
+  text-align: left;
+}
+
+.session-row-active {
+  border-color: rgba(231, 189, 115, 0.55);
+  background: rgba(231, 189, 115, 0.1);
+}
+
+.session-row span,
+.session-row small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-row span {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.session-row small {
+  color: #858c84;
+  font-size: 11px;
 }
 
 .workbench {
@@ -208,6 +289,133 @@ textarea {
   font-size: 14px;
 }
 
+.chat-timeline {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+  padding: 16px;
+}
+
+.chat-message,
+.chat-tool,
+.chat-plan {
+  display: grid;
+  gap: 8px;
+  max-width: min(760px, 100%);
+  padding: 12px 14px;
+  border: 1px solid rgba(238, 240, 237, 0.09);
+  background: rgba(238, 240, 237, 0.035);
+}
+
+.chat-message-user {
+  align-self: flex-end;
+  border-color: rgba(231, 189, 115, 0.36);
+  background: rgba(231, 189, 115, 0.1);
+}
+
+.chat-message-thinking {
+  border-color: rgba(113, 169, 239, 0.32);
+  background: rgba(113, 169, 239, 0.08);
+}
+
+.chat-message p,
+.chat-tool strong,
+.chat-tool span,
+.chat-plan ol {
+  margin: 0;
+}
+
+.chat-message p {
+  white-space: pre-wrap;
+  color: #eef0ed;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.message-role {
+  color: #9ca39b;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.chat-tool {
+  border-color: rgba(99, 214, 157, 0.28);
+}
+
+.chat-tool strong {
+  color: #eef0ed;
+  font-size: 14px;
+}
+
+.chat-tool span {
+  color: #96e6ba;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chat-plan ol {
+  display: grid;
+  gap: 8px;
+  padding-left: 18px;
+}
+
+.chat-plan li {
+  color: #d8dcd6;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.chat-plan li span {
+  display: inline-block;
+  min-width: 88px;
+  color: #9ca39b;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.chat-event {
+  align-self: center;
+  max-width: 100%;
+  padding: 6px 10px;
+  color: #858c84;
+  font-size: 12px;
+}
+
+.composer {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-top: 1px solid rgba(238, 240, 237, 0.08);
+  background: rgba(16, 18, 20, 0.76);
+}
+
+.composer textarea {
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  border: 1px solid rgba(238, 240, 237, 0.13);
+  background: rgba(238, 240, 237, 0.035);
+  color: #eef0ed;
+  padding: 12px;
+  line-height: 1.45;
+}
+
+.composer textarea:focus {
+  border-color: rgba(231, 189, 115, 0.55);
+  outline: 0;
+}
+
+.composer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .runtime-row,
 .runtime-details {
   padding: 16px;
@@ -246,6 +454,14 @@ textarea {
 
 .error-text {
   color: #ff9a84;
+}
+
+.session-details {
+  border-top: 1px solid rgba(238, 240, 237, 0.08);
+}
+
+.panel-header-inline {
+  border-bottom: 0;
 }
 
 @media (max-width: 860px) {

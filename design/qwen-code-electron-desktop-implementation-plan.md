@@ -107,7 +107,7 @@ order, verification, decisions, and remaining work.
 
 ### Slice 5: WebSocket Chat Loop
 
-- Status: in progress
+- Status: complete
 - Goal: add per-session WS connections and send user prompts through ACP.
 - Files:
   - `packages/desktop/src/server/ws/SessionSocketHub.ts`
@@ -122,8 +122,11 @@ order, verification, decisions, and remaining work.
   - 2026-04-25: authenticated `/ws/:sessionId` handshake, `ping`/`pong`,
     `user_message` to ACP `prompt`, `stop_generation` to ACP `cancel`, and
     one-active-prompt guard are implemented on the server.
-  - Remaining: ACP `sessionUpdate` normalization, renderer WebSocket client,
-    and chat store integration.
+  - 2026-04-25: added `AcpEventRouter` normalization for ACP message, tool,
+    plan, mode, commands, and usage updates; routed session updates into the
+    per-session socket hub; added a renderer WebSocket client, chat reducer,
+    and basic workbench wiring for session selection, streaming messages,
+    tool updates, plan updates, usage, stop, and send.
 - Verification:
   - `npm run test --workspace=packages/desktop`
   - fake ACP integration test for prompt and stream completion
@@ -193,6 +196,11 @@ order, verification, decisions, and remaining work.
   committing to an HTTP framework before the ACP routing shape is known.
 - 2026-04-25: Allow CORS preflight without bearer auth, but only for allowed
   app origins. Actual REST requests remain bearer-token protected.
+- 2026-04-25: Keep ACP update normalization inside `packages/desktop` for now
+  instead of importing the VS Code session update handler. The desktop protocol
+  needs WebSocket message shapes, while the VS Code handler is callback/UI
+  oriented; shared extraction can happen after permission and settings slices
+  stabilize the common surface.
 
 ## Verification Log
 
@@ -254,6 +262,11 @@ order, verification, decisions, and remaining work.
   - `npm run typecheck` passed across workspaces.
   - `npm run build` passed across the configured build order. Existing VS Code
     companion lint warnings were reported by its build script, with no errors.
+- 2026-04-25 Slice 5b:
+  - `npm run test --workspace=packages/desktop` passed: 3 files, 26 tests.
+  - `npm run lint --workspace=packages/desktop` passed.
+  - `npm run typecheck --workspace=packages/desktop` passed.
+  - `npm run build --workspace=packages/desktop` passed.
 
 ## Self Review Notes
 
@@ -297,11 +310,21 @@ order, verification, decisions, and remaining work.
     injected, rather than silently dropping user messages.
   - Session update broadcasting is intentionally a follow-up; this keeps the
     prompt/cancel transport independently testable before event normalization.
+- 2026-04-25 Slice 5b:
+  - ACP session updates now broadcast only to sockets for the matching session;
+    tests cover a second session socket receiving only its own `pong`.
+  - Renderer chat state consumes the shared desktop WebSocket protocol without
+    Node access and keeps the server token in memory from preload-provided
+    server info.
+  - Main still does not auto-start a real ACP child process; the chat loop is
+    verified with an injected fake ACP client and remains ready for the runtime
+    integration slice.
 
 ## Remaining Work
 
-- Commit Slice 5a.
-- Continue with ACP event normalization and renderer WebSocket client for the
-  rest of Slice 5.
-- Continue through the ACP, session, WebSocket, permission, settings, and
-  packaging slices until the architecture MVP is fully verified.
+- Commit Slice 5b.
+- Start Slice 6 permission bridge: route ACP permission and ask-user-question
+  callbacks through the existing per-session WebSocket channel with timeout
+  cancellation.
+- Continue through permission, settings/auth/model/mode, real ACP runtime
+  startup, and packaging slices until the architecture MVP is fully verified.

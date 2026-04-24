@@ -9,11 +9,13 @@ import type {
   LoadSessionResponse,
   NewSessionResponse,
   PromptResponse,
+  SessionNotification,
 } from '@agentclientprotocol/sdk';
 import { DesktopHttpError } from '../http/errors.js';
 
 export interface AcpSessionClient {
   readonly isConnected?: boolean;
+  onSessionUpdate?: (notification: SessionNotification) => void;
   connect?(): Promise<unknown>;
   listSessions(options?: {
     cwd?: string;

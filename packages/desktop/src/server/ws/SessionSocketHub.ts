@@ -9,17 +9,10 @@ import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
 import { getSingleHeader, isAllowedOrigin } from '../http/auth.js';
 import type { AcpSessionClient } from '../services/sessionService.js';
-
-type ClientMessage =
-  | { type: 'ping' }
-  | { type: 'stop_generation' }
-  | { type: 'user_message'; content: string };
-
-type ServerMessage =
-  | { type: 'connected'; sessionId: string }
-  | { type: 'pong' }
-  | { type: 'message_complete'; stopReason?: string }
-  | { type: 'error'; code: string; message: string; retryable?: boolean };
+import type {
+  DesktopClientMessage,
+  DesktopServerMessage,
+} from '../../shared/desktopProtocol.js';
 
 interface SessionSocketHubOptions {
   token: string;
@@ -73,7 +66,7 @@ export class SessionSocketHub {
     this.server.close();
   }
 
-  broadcast(sessionId: string, message: ServerMessage): void {
+  broadcast(sessionId: string, message: DesktopServerMessage): void {
     const sockets = this.socketsBySession.get(sessionId);
     if (!sockets) {
       return;
@@ -225,7 +218,7 @@ function matchSessionId(pathname: string): string | null {
 
 function parseClientMessage(
   rawMessage: WebSocket.RawData,
-): ClientMessage | null {
+): DesktopClientMessage | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(rawMessage.toString()) as unknown;
@@ -237,7 +230,7 @@ function parseClientMessage(
     return null;
   }
 
-  const candidate = parsed as Partial<ClientMessage>;
+  const candidate = parsed as Partial<DesktopClientMessage>;
   if (candidate.type === 'ping' || candidate.type === 'stop_generation') {
     return { type: candidate.type };
   }
@@ -252,7 +245,7 @@ function parseClientMessage(
   return null;
 }
 
-function sendMessage(socket: WebSocket, message: ServerMessage): void {
+function sendMessage(socket: WebSocket, message: DesktopServerMessage): void {
   if (socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(message));
   }

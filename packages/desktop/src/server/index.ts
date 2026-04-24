@@ -17,6 +17,7 @@ import {
   isAllowedOrigin,
   isAuthorized,
 } from './http/auth.js';
+import { AcpEventRouter } from './acp/AcpEventRouter.js';
 import { isDesktopHttpError, DesktopHttpError } from './http/errors.js';
 import { getRuntimeInfo } from './services/runtimeService.js';
 import { DesktopSessionService } from './services/sessionService.js';
@@ -45,6 +46,16 @@ export async function startDesktopServer(
     token,
     acpClient: options.acpClient,
   });
+  const acpEventRouter = new AcpEventRouter({
+    broadcast: (sessionId, message) => socketHub.broadcast(sessionId, message),
+  });
+  const previousSessionUpdateHandler = options.acpClient?.onSessionUpdate;
+  if (options.acpClient) {
+    options.acpClient.onSessionUpdate = (notification) => {
+      previousSessionUpdateHandler?.(notification);
+      acpEventRouter.handleSessionUpdate(notification);
+    };
+  }
   const server = createServer((request, response) => {
     void handleRequest(request, response, {
       token,

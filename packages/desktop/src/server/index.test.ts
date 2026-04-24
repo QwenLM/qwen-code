@@ -6,6 +6,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
+import type { SessionNotification } from '@agentclientprotocol/sdk';
 import { startDesktopServer } from './index.js';
 import type { DesktopServer } from './types.js';
 import type { AcpSessionClient } from './services/sessionService.js';
@@ -254,6 +255,95 @@ describe('DesktopServer', () => {
     testSocket.socket.close();
   });
 
+  it('broadcasts normalized ACP session updates over WebSocket', async () => {
+    const acpClient = createAcpClient();
+    const server = await createTestServer(acpClient);
+    const testSocket = await connectSocket(server, '/ws/session-1');
+    await testSocket.readMessage();
+
+    acpClient.emitSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'streamed text' },
+        _meta: {
+          usage: {
+            inputTokens: 5,
+            outputTokens: 3,
+            totalTokens: 8,
+          },
+        },
+      },
+    } as SessionNotification);
+
+    expect(await testSocket.readMessage()).toMatchObject({
+      type: 'message_delta',
+      role: 'assistant',
+      text: 'streamed text',
+    });
+    expect(await testSocket.readMessage()).toMatchObject({
+      type: 'usage',
+      data: {
+        usage: {
+          inputTokens: 5,
+          outputTokens: 3,
+          totalTokens: 8,
+        },
+      },
+    });
+    testSocket.socket.close();
+  });
+
+  it('broadcasts ACP tool and plan updates only to the matching session', async () => {
+    const acpClient = createAcpClient();
+    const server = await createTestServer(acpClient);
+    const matchingSocket = await connectSocket(server, '/ws/session-1');
+    const otherSocket = await connectSocket(server, '/ws/session-2');
+    await matchingSocket.readMessage();
+    await otherSocket.readMessage();
+
+    acpClient.emitSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-1',
+        title: 'Run command',
+        kind: 'execute',
+        status: 'in_progress',
+      },
+    } as SessionNotification);
+    acpClient.emitSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'plan',
+        entries: [
+          { content: 'Wire events', priority: 'medium', status: 'completed' },
+        ],
+      },
+    } as SessionNotification);
+
+    expect(await matchingSocket.readMessage()).toMatchObject({
+      type: 'tool_call',
+      data: {
+        toolCallId: 'tool-1',
+        title: 'Run command',
+        kind: 'execute',
+        status: 'in_progress',
+      },
+    });
+    expect(await matchingSocket.readMessage()).toMatchObject({
+      type: 'plan',
+      entries: [
+        { content: 'Wire events', priority: 'medium', status: 'completed' },
+      ],
+    });
+
+    otherSocket.socket.send(JSON.stringify({ type: 'ping' }));
+    expect(await otherSocket.readMessage()).toMatchObject({ type: 'pong' });
+    matchingSocket.socket.close();
+    otherSocket.socket.close();
+  });
+
   it('cancels generation over WebSocket', async () => {
     const acpClient = createAcpClient();
     const server = await createTestServer(acpClient);
@@ -369,9 +459,17 @@ async function writeJson(
   };
 }
 
-function createAcpClient(): AcpSessionClient {
-  return {
+interface TestAcpClient extends AcpSessionClient {
+  emitSessionUpdate(notification: SessionNotification): void;
+}
+
+function createAcpClient(): TestAcpClient {
+  const client: TestAcpClient = {
     isConnected: true,
+    onSessionUpdate: undefined,
+    emitSessionUpdate(notification: SessionNotification): void {
+      client.onSessionUpdate?.(notification);
+    },
     listSessions: vi.fn().mockResolvedValue({
       sessions: [{ sessionId: 'session-1', title: 'Test session' }],
       nextCursor: '3',
@@ -382,6 +480,7 @@ function createAcpClient(): AcpSessionClient {
     cancel: vi.fn().mockResolvedValue(undefined),
     extMethod: vi.fn().mockResolvedValue({ success: true }),
   };
+  return client;
 }
 
 async function connectSocket(
