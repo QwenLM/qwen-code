@@ -72,7 +72,7 @@ order, verification, decisions, and remaining work.
 
 ### Slice 3: ACP Process Client Wrapper
 
-- Status: pending
+- Status: complete
 - Goal: implement a desktop-local ACP child-process client around
   `qwen --acp --channel=Desktop`.
 - Files:
@@ -213,6 +213,18 @@ order, verification, decisions, and remaining work.
   - `npm run typecheck` passed across workspaces.
   - `npm run build` passed across the configured build order. Existing VS Code
     companion lint warnings were reported by its build script, with no errors.
+- 2026-04-25 Slice 3:
+  - `npm install --ignore-scripts --workspace=@qwen-code/desktop` passed.
+  - `npx prettier --check design/qwen-code-electron-desktop-implementation-plan.md scripts/build.js packages/desktop` passed.
+  - `npm run test --workspace=packages/desktop` passed: 2 files, 12 tests.
+  - `npm run lint --workspace=packages/desktop` passed.
+  - `npm run typecheck --workspace=packages/desktop` passed.
+  - `npm run build --workspace=packages/desktop` passed.
+  - `npm exec --workspace=packages/desktop -- electron --version` passed:
+    `v41.3.0`.
+  - `npm run typecheck` passed across workspaces.
+  - `npm run build` passed across the configured build order. Existing VS Code
+    companion lint warnings were reported by its build script, with no errors.
 
 ## Self Review Notes
 
@@ -234,10 +246,17 @@ order, verification, decisions, and remaining work.
     placeholders until ACP is connected.
   - Renderer displays runtime summary from REST only and still obtains the
     server token only through preload.
+- 2026-04-25 Slice 3:
+  - `AcpProcessClient` follows the existing Qwen ACP boundary:
+    `ClientSideConnection`, `ndJsonStream`, and `qwen --acp`.
+  - The wrapper defaults permission requests to cancellation until the
+    permission bridge slice supplies a UI-backed resolver.
+  - Startup failures race initialize against child exit; later process exits
+    clear connection state without leaving a rejected startup promise.
 
 ## Remaining Work
 
-- Commit Slice 2.
-- Continue with Slice 3 ACP process client wrapper.
+- Commit Slice 3.
+- Continue with Slice 4 session REST API.
 - Continue through the ACP, session, WebSocket, permission, settings, and
   packaging slices until the architecture MVP is fully verified.
