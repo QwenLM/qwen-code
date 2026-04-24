@@ -10,7 +10,7 @@ the **only** location that works for E2E testing.
 Common mistakes that waste time:
 
 - `.mcp.json` — Claude Code convention, not Qwen Code
-- `settings.local.json` — the JSON schema validation rejects `mcpServers` here
+- `settings.local.json` — schema validation rejects `mcpServers` here
 - `--mcp-config` CLI flag — does not exist
 
 ## Setup
@@ -42,8 +42,8 @@ cd /tmp/test-dir && <qwen> "prompt" \
 
 ## Writing Test Servers
 
-Use `scripts/mcp-test-server.js` as a template. It's a zero-dependency
-JSON-RPC server over stdin/stdout — no npm install needed.
+Use `scripts/mcp-test-server.js` as a template. It's a zero-dependency JSON-RPC
+server over stdin/stdout — no npm install needed.
 
 To create a server with custom tools, copy the template and edit the
 `TOOL_DEFINITIONS` array and the `handleToolCall` function. Each tool definition
@@ -55,7 +55,16 @@ Test the server without the CLI by piping JSON-RPC directly:
 
 ```bash
 node /tmp/my-mcp-server.js << 'EOF'
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {},
+    "clientInfo": { "name": "test", "version": "1.0" }
+  }
+}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
 EOF
