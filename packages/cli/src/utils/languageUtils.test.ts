@@ -123,6 +123,12 @@ describe('languageUtils', () => {
       expect(normalizeOutputLanguage('Ru')).toBe('Russian');
     });
 
+    it('should convert "zh-TW" (mixed case) to "Traditional Chinese"', () => {
+      expect(normalizeOutputLanguage('zh-TW')).toBe('Traditional Chinese');
+      expect(normalizeOutputLanguage('zh-tw')).toBe('Traditional Chinese');
+      expect(normalizeOutputLanguage('ZH-TW')).toBe('Traditional Chinese');
+    });
+
     it('should preserve explicit language names as-is', () => {
       expect(normalizeOutputLanguage('Japanese')).toBe('Japanese');
       expect(normalizeOutputLanguage('French')).toBe('French');

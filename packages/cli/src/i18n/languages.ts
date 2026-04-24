@@ -82,7 +82,8 @@ export const SUPPORTED_LANGUAGES: readonly LanguageDefinition[] = [
  * Used for LLM output language instructions.
  */
 export function getLanguageNameFromLocale(locale: SupportedLanguage): string {
-  const lang = SUPPORTED_LANGUAGES.find((l) => l.code === locale);
+  const lower = locale.toLowerCase();
+  const lang = SUPPORTED_LANGUAGES.find((l) => l.code.toLowerCase() === lower);
   return lang?.fullName || 'English';
 }
 
