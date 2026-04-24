@@ -92,7 +92,6 @@ Notes:
         ToolNames.SHELL,
         ToolNames.LS,
         ToolNames.WEB_FETCH,
-        ToolNames.WEB_SEARCH,
         ToolNames.TODO_WRITE,
         ToolNames.MEMORY,
         ToolNames.SKILL,

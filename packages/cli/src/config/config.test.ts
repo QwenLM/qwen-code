@@ -1734,7 +1734,6 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(config.getToolDiscoveryCommand()).toBeUndefined();
     expect(config.getToolCallCommand()).toBeUndefined();
     expect(config.getMcpServers()).toEqual({});
-    expect(config.getWebSearchConfig()).toBeUndefined();
     expect(config.isLspEnabled()).toBe(false);
   });
 
