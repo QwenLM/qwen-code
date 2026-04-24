@@ -1,25 +1,31 @@
 ---
 name: e2e-testing
-description: Guide for running end-to-end tests of the Qwen Code CLI, including headless mode, MCP server testing, and API traffic inspection. Use this skill whenever you need to verify CLI behavior with real model calls, reproduce user-reported bugs end-to-end, test MCP tool integrations, or inspect raw API request/response payloads. Trigger on mentions of E2E testing, headless testing, MCP tool testing, or reproducing issues.
+description: Guide for running end-to-end tests of the Qwen Code CLI, including
+  headless mode, MCP server testing, and API traffic inspection. Use this skill
+  whenever you need to verify CLI behavior with real model calls, reproduce
+  user-reported bugs end-to-end, test MCP tool integrations, or inspect raw API
+  request/response payloads. Trigger on mentions of E2E testing, headless
+  testing, MCP tool testing, or reproducing issues.
 ---
 
 # E2E Testing Guide
 
-How to run the Qwen Code CLI end-to-end — from building the bundle to inspecting
-raw API traffic. Use when unit tests aren't enough and you need to verify behavior
-through the full pipeline (model API → tool validation → tool execution).
+How to run the Qwen Code CLI end-to-end, from building the bundle to inspecting
+raw API traffic. Use when unit tests are not enough and you need to verify
+behavior through the full pipeline (model API → tool validation → tool
+execution).
 
 ## Which binary to use
 
-- **Reproducing bugs**: use the globally installed `qwen` command — this matches
-  what the user ran when they filed the issue.
-- **Verifying fixes**: build first (`npm run build && npm run bundle`), then run
-  `node dist/cli.js` — this tests your local changes.
+- **Reproducing bugs**: use the globally installed `qwen` command — this
+  matches what the user ran when they filed the issue.
+- **Verifying fixes**: build first (`npm run build && npm run bundle`), then
+  run `node dist/cli.js` — this tests your local changes.
 
 ## Headless Mode
 
-Run the CLI non-interactively with JSON output (`<qwen>` = `qwen` or
-`node dist/cli.js` per above):
+Run the CLI non-interactively with JSON output (`<qwen>` = `qwen` or `node
+dist/cli.js` per above):
 
 ```bash
 <qwen> "your prompt here" \
@@ -31,12 +37,15 @@ Run the CLI non-interactively with JSON output (`<qwen>` = `qwen` or
 The JSON output is a stream of objects. Key types:
 
 - `type: "system"` — init: `tools`, `mcp_servers`, `model`, `permission_mode`
-- `type: "assistant"` — model output: `content[].type` is `text`, `tool_use`, or `thinking`
-- `type: "user"` — tool results: `content[].type` is `tool_result` with `is_error`
+- `type: "assistant"` — model output: `content[].type` is `text`, `tool_use`,
+  or `thinking`
+- `type: "user"` — tool results: `content[].type` is `tool_result` with
+  `is_error`
 - `type: "result"` — final output with `result` text and `usage` stats
 
 Pipe through `jq` to filter the verbose stream, e.g. extract tool-result errors:
-`... 2>/dev/null | jq 'select(.type=="user") | .message.content[] | select(.is_error)'`
+`... 2>/dev/null | jq 'select(.type=="user") | .message.content[] |
+select(.is_error)'`
 
 ## Inspecting Raw API Traffic
 
@@ -59,7 +68,11 @@ The bulk is in `request.messages` (conversation history). Trimmed structure:
   "request": {
     "model": "coder-model",
     "messages": [
-      { "role": "system|user|assistant", "content": "...", "tool_calls?": [...] }
+      {
+        "role": "system|user|assistant",
+        "content": "...",
+        "tool_calls?": []
+      }
     ],
     "tools": [
       {
@@ -97,7 +110,8 @@ The bulk is in `request.messages` (conversation history). Trimmed structure:
 ## Interactive Mode (tmux)
 
 Use when you need to verify TUI rendering, test keyboard interactions, or see
-what the user sees. Headless mode is simpler when you only need structured output.
+what the user sees. Headless mode is simpler when you only need structured
+output.
 
 ### Launching
 
@@ -154,8 +168,8 @@ tmux kill-session -t test
 ## MCP Server Testing
 
 For testing MCP tool behavior end-to-end, read `references/mcp-testing.md`. It
-covers the setup gotchas (config location, git repo requirement) and includes
-a reusable zero-dependency test server template in `scripts/mcp-test-server.js`.
+covers the setup gotchas (config location, git repo requirement) and includes a
+reusable zero-dependency test server template in `scripts/mcp-test-server.js`.
 
 ## Token Usage Stats
 

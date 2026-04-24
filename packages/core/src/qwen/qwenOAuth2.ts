@@ -8,7 +8,7 @@ import crypto from 'crypto';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import * as os from 'os';
-
+import type { ChildProcess } from 'node:child_process';
 import open from 'open';
 import { EventEmitter } from 'events';
 import type { Config } from '../config/config.js';
@@ -717,26 +717,35 @@ async function authWithQwenDeviceFlow(
 
   // Helper to handle browser launch with error handling
   const launchBrowser = async (url: string): Promise<void> => {
-    try {
-      const childProcess = await open(url);
+    let childProcess: ChildProcess | undefined;
 
-      // IMPORTANT: Attach an error handler to the returned child process.
-      // Without this, if `open` fails to spawn a process (e.g., `xdg-open` is not found
-      // in a minimal Docker container), it will emit an unhandled 'error' event,
-      // causing the entire Node.js process to crash.
-      if (childProcess) {
-        childProcess.on('error', (err) => {
-          debugLogger.debug('Browser launch failed:', err.message || err);
+    try {
+      // Call open and get the process
+      childProcess = await open(url);
+
+      // CRITICAL FIX: Attach error listener IMMEDIATELY if a process object exists.
+      // We do this outside the 'if' check scope to ensure it's bound as soon as possible.
+      if (childProcess && typeof childProcess.on === 'function') {
+        childProcess.on('error', (err: Error) => {
+          debugLogger.warn(`Browser launch process error: ${err.message}`);
+          debugLogger.info(`Please open this URL manually: ${url}`);
         });
+
+        // Optional: Also listen for 'close' or 'exit' if needed for cleanup,
+        // but 'error' is the main crasher.
+      } else {
+        // Fallback: If open() didn't return a valid process object, log a warning
+        debugLogger.debug(
+          'open() did not return a valid child process object.',
+        );
       }
     } catch (err) {
-      debugLogger.debug(
-        'Failed to open browser:',
-        err instanceof Error ? err.message : 'Unknown error',
-      );
+      // Handle synchronous errors or promise rejections from open()
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      debugLogger.warn(`Failed to open browser automatically: ${errorMessage}`);
+      debugLogger.info(`Please open this URL manually: ${url}`);
     }
   };
-
   try {
     // Generate PKCE code verifier and challenge
     const { code_verifier, code_challenge } = generatePKCEPair();

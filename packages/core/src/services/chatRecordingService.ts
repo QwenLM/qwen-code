@@ -262,6 +262,20 @@ export class ChatRecordingService {
    * context record).
    */
   private turnParentUuids: Array<string | null> = [];
+  /**
+   * Cached chats-dir / conversation-file path so per-record appendRecord
+   * doesn't re-stat them on every write. The first call performs the
+   * mkdir / wx-create; subsequent calls short-circuit.
+   */
+  private chatsDirEnsured = false;
+  private cachedConversationFile: string | undefined;
+  /**
+   * Serialized async write queue for appendRecord. We update lastRecordUuid
+   * synchronously so the next createBaseRecord sees the right parentUuid,
+   * but the actual fs write runs in this chain so the event loop is not
+   * blocked. Must be flushed before process exit (see {@link flush}).
+   */
+  private writeChain: Promise<void> = Promise.resolve();
   /** In-memory cache of the current session's custom title (for re-append on exit) */
   private currentCustomTitle: string | undefined;
   /**
@@ -354,38 +368,42 @@ export class ChatRecordingService {
     const projectDir = this.config.storage.getProjectDir();
     const chatsDir = path.join(projectDir, 'chats');
 
+    if (this.chatsDirEnsured) {
+      return chatsDir;
+    }
     try {
       fs.mkdirSync(chatsDir, { recursive: true });
+      // Only cache success — keep transient mkdir failures self-healing.
+      this.chatsDirEnsured = true;
     } catch {
-      // Ignore errors - directory will be created if it doesn't exist
+      // ignored
     }
-
     return chatsDir;
   }
 
   /**
    * Ensures the conversation file exists, creating it if it doesn't exist.
-   * Uses atomic file creation to avoid race conditions.
+   * Uses atomic file creation to avoid race conditions. Result is cached so
+   * subsequent appendRecord calls skip the wx-create entirely.
    * @returns The path to the conversation file.
    * @throws Error if the file cannot be created or accessed.
    */
   private ensureConversationFile(): string {
+    if (this.cachedConversationFile) {
+      return this.cachedConversationFile;
+    }
     const chatsDir = this.ensureChatsDir();
     const sessionId = this.getSessionId();
     const safeFilename = `${sessionId}.jsonl`;
     const conversationFile = path.join(chatsDir, safeFilename);
 
-    if (fs.existsSync(conversationFile)) {
-      return conversationFile;
-    }
-
     try {
-      // Use 'wx' flag for exclusive creation - atomic operation that fails if file exists
-      // This avoids the TOCTOU race condition of existsSync + writeFileSync
+      // Use 'wx' flag for exclusive creation - atomic operation that fails if
+      // the file already exists. EEXIST is the expected steady-state path on
+      // resume; we treat it as success.
       fs.writeFileSync(conversationFile, '', { flag: 'wx', encoding: 'utf8' });
     } catch (error) {
       const nodeError = error as NodeJS.ErrnoException;
-      // EEXIST means file already exists, which is expected and fine
       if (nodeError.code !== 'EEXIST') {
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(
@@ -394,6 +412,7 @@ export class ChatRecordingService {
       }
     }
 
+    this.cachedConversationFile = conversationFile;
     return conversationFile;
   }
 
@@ -417,17 +436,45 @@ export class ChatRecordingService {
 
   /**
    * Appends a record to the session file and updates lastRecordUuid.
+   *
+   * lastRecordUuid is updated synchronously so the next createBaseRecord sees
+   * the correct parentUuid without waiting for the previous write. The actual
+   * fs write is enqueued on {@link writeChain} and runs async; per-file
+   * mutex inside {@link jsonl.writeLine} preserves on-disk ordering.
+   *
+   * **Known tradeoff (parentUuid chain integrity on write failure):** if the
+   * enqueued write rejects (e.g., disk full, permission dropped), the error
+   * is logged but subsequent records still claim the failed record's uuid
+   * as their parent. On resume, readers that walk parentUuid (e.g.
+   * sessionService.reconstructHistory) will silently drop records whose
+   * ancestor is missing on disk. This matches the sync version's behavior
+   * when its own throw was caught and logged by the caller — under normal
+   * local-disk writes failures are rare enough to accept the fire-and-forget
+   * simplification.
    */
   private appendRecord(record: ChatRecord): void {
+    let conversationFile: string;
     try {
-      const conversationFile = this.ensureConversationFile();
-
-      jsonl.writeLineSync(conversationFile, record);
-      this.lastRecordUuid = record.uuid;
+      conversationFile = this.ensureConversationFile();
     } catch (error) {
       debugLogger.error('Error appending record:', error);
       throw error;
     }
+    this.lastRecordUuid = record.uuid;
+    this.writeChain = this.writeChain
+      .catch(() => {})
+      .then(() => jsonl.writeLine(conversationFile, record))
+      .catch((err) => {
+        debugLogger.error('Error appending record (async):', err);
+      });
+  }
+
+  /**
+   * Awaits all queued async writes. Call before process exit / session
+   * teardown to ensure no records are dropped.
+   */
+  async flush(): Promise<void> {
+    await this.writeChain;
   }
 
   /**

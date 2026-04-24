@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useMemo } from 'react';
 import type { HistoryItem } from '../types.js';
 
 // Type for the updater function passed to updateHistoryItem
@@ -110,12 +110,15 @@ export function useHistory(): UseHistoryManagerReturn {
     });
   }, []);
 
-  return {
-    history,
-    addItem,
-    updateItem,
-    clearItems,
-    loadHistory,
-    truncateToItem,
-  };
+  return useMemo(
+    () => ({
+      history,
+      addItem,
+      updateItem,
+      clearItems,
+      loadHistory,
+      truncateToItem,
+    }),
+    [history, addItem, updateItem, clearItems, loadHistory, truncateToItem],
+  );
 }
