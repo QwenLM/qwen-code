@@ -533,42 +533,40 @@ Claude Code 的自研 Ink 内核提供了五层防闪烁保护：
 | 优先级 | 方案                        | 周次  | 风险 | 预期收益                  |
 | ------ | --------------------------- | ----- | ---- | ------------------------- |
 | P0     | 输出层 instrumentation      | 1     | 低   | 指标口径可信              |
-| P0     | 同步输出 DECSET 2026        | 2     | 中低 | 消除帧撕裂，tmux 效果显著 |
 | P0     | 流式更新节流 60ms           | 2     | 低   | stdout.write -60%+        |
-| P0     | 渲染模式分层                | 2-3   | 中   | 为滚动和 fullscreen 优化铺路 |
-| P1     | 现有渐进提升增强             | 7     | 中   | 降低长输出全屏闪烁        |
-| P1     | 智能 refreshStatic()        | 8-9   | 中   | resize 不再全屏闪烁       |
+| P0     | `refreshStatic()` 语义拆分  | 2-3   | 中   | 主屏整屏闪烁显著下降      |
+| P0     | 大输出 pre-slicing + detail stability | 3-5 | 中 | 大结果与展开场景不再引发 layout 风暴 |
+| P1     | 窄屏 / interactive shell 专项 | 5-7 | 中高 | 重复输出与无限滚动可收敛  |
+| P1     | 渲染模式分层                | 6-8   | 中   | 为滚动和 fullscreen 优化铺路 |
+| P1     | 同步输出 DECSET 2026（按终端家族灰度） | 7-9 | 中低 | 消除已支持终端中的残余帧撕裂 |
 | P2     | alternate/fullscreen 虚拟滚动 | 9-12 | 高   | 长会话稳定性显著提升      |
 | P2     | 双缓冲 + diff patch         | 11-13 | 高   | stdout 字节/帧 -80%       |
 | P2     | DECSTBM 滚动区域            | 13+   | 高   | 滚动性能接近原生          |
 
-### 4.1 按用户 Issue 组织的 PR 编排
+### 4.1 压缩后的 4 条主 PR
 
-从用户角度看，当前“闪屏”其实至少包含 5 类不同故障。真正落地时，PR 也应按这 5 类问题来组织，而不是继续沿用某个大 PR 的 patch 边界。
+从执行角度看，原先按问题类细拆成 8 条虽然严谨，但有点过碎了。这一版把它们压成 4 条主 PR，同时保留两个必须单独隔离的高风险区：窄屏 shell 路径、终端协议层。
 
-| PR | 解决的问题类 | 代表 issue | 主要范围 | 代表性验证场景 |
+| 主 PR | 解决的问题类 | 吸收旧拆分 | 代表 issue | 代表性验证场景 |
 | --- | --- | --- | --- | --- |
-| PR-Prep | 观测与回归基线 | 全部 | 输出 counters、回归 harness、固定复现场景 | 长回答、resize、窄屏、tool expand |
-| PR-A1 | 普通流式闪烁 / 滚动条抖动 | `#1184` `#1491` `#3007` `#3144` | `useGeminiStream.ts` 的 content/thought throttle 与强制 flush 语义 | 长 assistant 回答、thought + content、中途 cancel |
-| PR-A2 | 终端帧撕裂 / 残余闪烁 | `#2903` `#3144` | synchronized output、frame write 合并、runtime probe | WezTerm、kitty、JetBrains 终端、tmux/SSH |
-| PR-B1 | `refreshStatic()` 型整屏闪烁 | `#938` `#1861` `#2924` `#2748` | `refreshStatic()` 语义拆分、resize/view-switch 触发源收紧 | `/settings`、compact merge、view switch、resize |
-| PR-C1 | 窄屏重复输出 / 无限滚动 | `#2912` `#2972` `#1591` | shell serializer、live viewport 与 transcript 分离 | 40 列窄终端、tmux 多 pane、`git commit` |
-| PR-D1 | 大输出布局抖动 / 工具结果不可读 | `#2748` `#1479` `#2818` | plain text / ANSI pre-slicing | `npm install`、`git log`、5000 行工具输出 |
-| PR-D2 | 通用 tool budgeting 与摘要/详情分离 | `#2818` `#1008` `#355` | scheduler budgeting、summary/detail 语义 | `grep`、`glob`、`read_file`、MCP 大结果 |
-| PR-E1 | 工具 / 子 agent 展开闪烁 | `#1491` `#1861` `#2424` `#2924` | stable height、bounded detail panel、展开节流 | `ctrl+e`、`ctrl+f`、subagent 执行中展开 |
+| `PR-1` | 主屏闪烁基础修复 | `PR-Prep` + `PR-A1` + `PR-B1` | `#1184` `#1491` `#3007` `#938` `#1861` `#2924`，以及 `#2748` 的 flicker 子问题 | 长回答、thought+content、冷启动样本、`/settings`、compact merge、resize |
+| `PR-2` | 大输出与详情展开稳定性 | `PR-D1` + `PR-E1` | `#1479` `#2424` `#2624`，以及展开相关子问题 | `npm install`、5000 行输出、`ctrl+e`、`ctrl+f`、markdown-heavy 结果不退化 |
+| `PR-3` | 窄屏 / interactive shell 专项 | `PR-C1` | `#2912` `#2972` `#1591` `#1778` | 40 列窄终端、tmux 多 pane、`git commit`、彩色 shell |
+| `PR-4` | 终端协议层残余闪烁收尾 | `PR-A2` | `#3144`；`#2903` 作为必须验证的 JetBrains 环境样本 | WezTerm、kitty、JetBrains 终端、tmux/SSH |
 
 **推荐顺序**：
 
-1. `PR-Prep`
-2. `PR-A1`
-3. `PR-B1`
-4. `PR-D1`
-5. `PR-E1`
-6. `PR-C1`
-7. `PR-A2`
-8. `PR-D2`
+1. `PR-1`
+2. `PR-2`
+3. `PR-3`
+4. `PR-4`
 
-这样排序的原因是：先处理主路径上的高频闪烁和整屏清除，再处理大输出与详情展开，随后再进入最复杂的窄屏 shell 场景；synchronized output 放到更后面，是为了避免在应用层问题尚未收敛前，就把终端协议层的风险一起引进来。
+这样排的原因是：先把主屏高频闪烁和整屏 clear 收住，再处理大输出/详情展开，再去单独攻窄屏 shell，最后才引入终端协议层灰度复杂度。
+
+**边界提醒**：
+
+- `#2818` `#1008` `#355` 属于后续 budgeting workstream，不在当前 4 条 flicker 主 PR 的 closure 范围
+- synchronized output 虽然单项收益高，但在执行顺序上仍应晚于 `PR-1` ~ `PR-3`
 
 完整的文件落点、非目标、借鉴来源和验收矩阵见 [10-issue-oriented-flicker-plan.md](./10-issue-oriented-flicker-plan.md)。
 

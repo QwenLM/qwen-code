@@ -1,25 +1,23 @@
-# 闪屏治理：Issue 驱动的 PR 编排
+# 闪屏治理：Issue 驱动的 4-PR 实施方案
 
-> 目标：把闪屏优化从“围绕某个大 PR 拆补丁”改成“围绕真实用户问题逐类关闭 issue”。
-> 校准时间点：2026-04-23
+> 目标：把闪屏优化从“围绕某个大 PR 拆补丁”改成“围绕真实用户问题逐类关闭 issue”，同时把当前 8 条过细的 PR 计划压缩成 4 条主 PR，并补齐下一步可以直接进入编码的执行边界。
+> 校准时间点：2026-04-24
 > 使用方式：`09-pr-3013-gap-analysis.md` 只用于参考 `#3013` 里哪些 patch 被证明有价值；真正的实施排期、PR 粒度和验证矩阵以本文档为准。
+> 口径约束：如果 [00-overview.md](./00-overview.md)、[02-screen-flickering.md](./02-screen-flickering.md)、[08-execution-plan-and-test-matrix.md](./08-execution-plan-and-test-matrix.md) 中的技术阶段表或切片表与本文档的 PR 粒度看起来不同，以本文档为准；那些文档承担的是“技术演进顺序”和“文件/测试切片”视角。
 
-## 1. 为什么要改成 Issue 驱动
+## 1. 为什么从 8 条收成 4 条
 
-`#3013` 已经证明三件事：
+8 条方案在“研究和拆因”层面是对的，但落到真实开发节奏上会有两个问题：
 
-1. pre-render slicing 能明显降低大工具输出的闪烁
-2. stable height 能缓解详情展开时的高度抖动
-3. assistant pending throttle 能降低普通流式输出的抖动
+1. PR 太碎，review 和回归成本偏高
+2. 太多前后依赖会让排期看起来像 8 次独立发布，执行上反而拖慢
 
-但它也同时说明了一个反面事实：
+但我也不建议再继续压到 2-3 条。原因是下面两类问题必须保持隔离：
 
-- 一条 PR 一旦同时混入 pre-slicing、stable height、synchronized output、stream throttle、resize guard、content budget，review 很难回答“到底哪一类问题被解决了”
+- **窄屏 / interactive shell 问题**：这是 shell serializer 和 viewport 语义问题，不能再混回主 UI PR
+- **终端协议层问题**：synchronized output / frame coalescing 需要按终端家族灰度，也不应和应用层修复绑死
 
-因此，从这一版开始，闪屏治理统一遵循两个原则：
-
-1. **PR 单位是用户可感知的问题类**
-2. **每条 PR 都要有固定复现步骤、明确非目标、独立验收信号**
+因此，这一版把原来的 8 条收成 4 条主 PR，作为执行层的平衡点。
 
 ## 2. 证据边界
 
@@ -30,153 +28,233 @@
 3. **Gemini CLI / Claude Code 的可借鉴实现**
 4. **`#3013` 中已被证明有价值的 patch**
 
-其中第 4 类只做交叉印证，不作为拆 PR 的主轴。
+其中第 4 类只做交叉印证，不作为拆 PR 的主轴。按 2026-04-24 复核，`#3013` 仍是 `OPEN + CHANGES_REQUESTED`，最近更新时间仍为 2026-04-22T11:28:48Z。
 
-## 3. 问题类与 PR 总览
+## 3. 4 条主 PR 总览
 
-| PR | 问题类 | 代表 issue | 主要范围 | `#3013` 可借鉴内容 | 不带什么 |
+| 主 PR | 关闭的问题类 | 覆盖旧拆分 | 代表 issue | 主要范围 | 明确不带 |
 | --- | --- | --- | --- | --- | --- |
-| `PR-Prep` | 观测与回归基线 | 全部 | counters、回归 harness、固定复现场景 | 无需依赖 | 不改用户可见行为 |
-| `PR-A1` | 动态流式闪烁 / 滚动条抖动 | `#1184` `#1491` `#3007` `#3144` | content/thought throttle、强制 flush 语义 | pending render throttle | 不带 sync output、不带 tool/detail 高度补丁 |
-| `PR-A2` | 终端帧撕裂 / 残余闪烁 | `#2903` `#3144` | synchronized output、frame write 合并、runtime probe | synchronized output 原型 | 不带 `refreshStatic()` 改造、不带 narrow-shell 修复 |
-| `PR-B1` | `refreshStatic()` 型整屏闪烁 | `#938` `#1861` `#2924` `#2748` | 语义拆分、resize/view switch/compact merge 触发源收紧 | `AppContainer` 中的 resize 微抖动 guard 仅作思路参考 | 不带 shell serializer、不带 sync output |
-| `PR-C1` | 窄屏重复输出 / 无限滚动 | `#2912` `#2972` `#1591` `#1778` | shell serializer、live viewport vs transcript、interactive prompt 回归 | 无直接 patch，可参考 `#1778` 的历史分析但不能照抄结论 | 不带 tool budgeting、不带 detail panel |
-| `PR-D1` | 大输出布局抖动 / 工具结果不可读 | `#2748` `#1479` `#2818` | plain text/ANSI pre-render slicing | `SlicingMaxSizedBox` | 不带统一 scheduler budgeting、不带 markdown 降级 |
-| `PR-D2` | 通用 tool budgeting 与摘要/详情分离 | `#2818` `#1008` `#355` | scheduler budgeting、summary/detail 语义 | `MAX_TOOL_OUTPUT_LINES` 的“预算”思路 | 不带 synchronized output、不带 narrow-shell 修复 |
-| `PR-E1` | 工具 / 子 agent 展开闪烁 | `#1491` `#1861` `#2424` `#2624` `#2924` | stable height、bounded detail panel、展开时钟解耦 | `useStableHeight`、content budget 思路 | 不带全局渲染模式改造、不带 shell serializer |
+| `PR-1` | 主屏闪烁基础修复 | `PR-Prep` + `PR-A1` + `PR-B1` | `#1184` `#1491` `#3007` `#938` `#1861` `#2924`，以及 `#2748` 的 flicker 子问题 | counters、回归 harness、content/thought throttle、`refreshStatic()` 语义拆分 | 不带 narrow-shell、不带 synchronized output、不带大输出详情重构 |
+| `PR-2` | 大输出与详情展开稳定性 | `PR-D1` + `PR-E1` | `#1479` `#2424` `#2624`，以及 `#1491` `#1861` `#2924` 的展开子问题 | pre-slicing、stable height、bounded detail panel、update cadence decoupling | 不带 synchronized output、不带 shell serializer、不带 `refreshStatic()` 主链改造、不带 core budgeting |
+| `PR-3` | 窄屏 / interactive shell 专项 | `PR-C1` | `#2912` `#2972` `#1591` `#1778` | shell serializer、live viewport vs transcript、interactive prompt 回归 | 不带 tool budgeting、不带 detail panel、不带终端协议层优化 |
+| `PR-4` | 终端协议层残余闪烁收尾 | `PR-A2` | `#3144`，以及主屏闪烁在特定终端中的残余问题 | synchronized output、frame write 合并、runtime probe、allowlist | 不带主 UI 语义改造、不带 shell serializer、不带大输出重构 |
+
+**非 flicker 主线 follow-up**：
+
+- `Follow-up-F1`：通用 tool budgeting 与 summary/detail 语义，主要对应 `#2818` `#1008` `#355`
+- `Follow-up-F2`：markdown-heavy 大输出的 parser/block 级降峰，属于渲染层 follow-up，不纳入当前 4 条 flicker 主 PR
 
 ## 4. 推荐顺序
 
-推荐按下面的顺序推进，而不是按某个大 PR 的 diff 顺序推进：
+推荐按下面顺序推进：
 
-1. `PR-Prep`
-2. `PR-A1`
-3. `PR-B1`
-4. `PR-D1`
-5. `PR-E1`
-6. `PR-C1`
-7. `PR-A2`
-8. `PR-D2`
+1. `PR-1`
+2. `PR-2`
+3. `PR-3`
+4. `PR-4`
 
 排序理由：
 
-- `PR-A1` 和 `PR-B1` 先解决主路径上最常见的“普通流式闪烁”和“整屏闪”
-- `PR-D1` 先把大输出导致的 layout 风暴压下来，避免后续验证全被大工具结果噪声淹没
-- `PR-E1` 单独收 subagent/tool detail 展开问题，不和 `refreshStatic()` 或大输出混在一起
-- `PR-C1` 最复杂，等主屏普通链路收敛后再单独处理
-- `PR-A2` 放后面，因为终端协议层 rollout 必须建立在应用层已经够稳定的前提上
-- `PR-D2` 最后做，是因为它涉及 UI 语义和模型预算双重约束，产品面更广
+- `PR-1` 先解决主路径上的“普通流式闪烁 + 整屏 clear”
+- `PR-2` 再解决“大输出 / 展开详情导致的布局风暴和不可读”
+- `PR-3` 继续单独收敛最复杂的窄屏 shell 问题
+- `PR-4` 最后上终端协议层，是为了避免应用层问题没收敛前就引入终端家族灰度复杂度
 
-## 5. `PR-Prep`：观测与回归基线
+## 5. `PR-1`：主屏闪烁基础修复
 
-### 5.1 目标
+### 5.1 关闭的问题类
 
-建立所有闪屏修复共享的观测口径和复现场景。
+主屏路径上最常见的两类闪烁：
 
-### 5.2 范围
+1. 普通 assistant 流式输出时的高频抖动
+2. `refreshStatic()` 导致的整屏 clear + redraw
 
-- `terminalRedrawOptimizer.ts`
-- `startupProfiler.ts`
-- CLI / interactive regression harness
+**Issue 边界**：
 
-### 5.3 必备产物
+- `#2748` 在这条 PR 中只作为 startup/view-switch flicker 样本，不代表这条 PR 会关闭其 slow startup 或 verbose output 全部诉求
 
-- `stdout_write_count`
-- `stdout_bytes`
-- `clear_terminal_count`
-- `erase_lines_optimized_count`
-- `bsu_frame_count`
-- `esu_frame_count`
-- 固定复现场景脚本或手册：
-  - 长 assistant 回答
-  - tool detail expand
-  - resize / view switch
-  - 40 列窄终端
-  - interactive shell（`git commit`）
+### 5.2 合并后的范围
 
-### 5.4 Done 定义
+- 输出层 counters 与固定回归场景
+- `useGeminiStream.ts` 的 content/thought throttle
+- 强制 flush 语义
+- `refreshStatic()` 拆成：
+  - `remountStaticHistory()`
+  - `clearTerminalAndRemount()`
+- resize / compact merge / active view switch 触发源收紧
 
-- 不改变用户可见行为
-- 所有后续 PR 都能复用同一组统计项
-- 至少每个问题类有一个稳定回归入口
+### 5.3 为什么这几块适合并在一起
 
-## 6. `PR-A1`：动态流式闪烁 / 滚动条抖动
+它们都属于**主屏主路径的基础修复**：
+
+- 验证场景高度重合
+- 同一组 counters 能同时衡量收益
+- 都不依赖 shell serializer 或终端协议层 rollout
+
+### 5.4 明确不带
+
+- synchronized output
+- narrow-shell / interactive shell 修复
+- 大工具输出 pre-slicing
+- stable height / bounded detail panel
+
+### 5.5 固定验证场景
+
+1. 长 assistant 回答（至少 500 token）
+2. thought + content 混合流
+3. 冷启动（无 MCP）
+4. 冷启动（含 1 个慢 MCP server）
+5. `/settings` 上下切换
+6. compact mode merge
+7. active view switch
+8. 终端宽高 resize
+9. `/clear`
+
+### 5.6 Done 定义
+
+- `stdout.write` 频率显著下降
+- `clear_terminal_count` 明显下降
+- 结束 / cancel 不丢尾部内容
+- 非致命布局变化不再默认清屏
+
+## 6. `PR-2`：大输出与详情展开稳定性
 
 ### 6.1 关闭的问题类
 
-主路径上的普通流式闪烁：回答过程中持续抖动、滚动条轻微抽动、thought/content 高频更新导致的密集重绘。
+这一条主 PR 负责解决“只要输出很大、或者一展开详情，界面就开始抖和变得不可读”的 UI 问题簇，包括：
 
-### 6.2 主要范围
+1. 大工具输出导致的全量 layout
+2. 工具 / 子 agent 展开导致的高度暴涨
+3. detail surface 缺乏边界，导致主流式区域和详情区域互相拖累
 
-- `packages/cli/src/ui/hooks/useGeminiStream.ts`
-- 如需抽 hook：`useRenderThrottledStateAndRef.ts`
+### 6.2 合并后的范围
 
-### 6.3 应包含的改动
+- plain text / ANSI pre-render slicing
+- `MaxSizedBox` 降级成 safety net
+- `useStableHeight`
+- bounded detail panel
+- assistant / tool progress / subagent progress 的刷新节奏解耦
 
-- content stream buffer + timer flush
-- thought stream 共用同一 flush 模型
-- 在以下场景强制 flush：
-  - stream end
-  - cancel
-  - tool call start
-  - confirm dialog render 前
+### 6.3 为什么这几块适合并在一起
+
+从用户视角，它们其实是同一个问题类：
+
+- “大结果一出来就闪”
+- “展开详情就抖”
+- “结果太长时既难读又浪费上下文”
+
+这些问题共用同一组回归样例，也都围绕 tool/subagent detail surface。
 
 ### 6.4 明确不带
 
 - synchronized output
-- `refreshStatic()` 语义拆分
-- tool/subagent stable height
-- tool output pre-slicing
+- shell serializer 改造
+- `refreshStatic()` 主链改造
+- 全量虚拟滚动
+- scheduler 层统一 budgeting
+- `llmContent` / 模型可见预算语义变更
+- 以 markdown 降级替代真正的 parser/block 降峰
 
-### 6.5 借鉴来源
+**Issue 边界**：
 
-- `#3013` 中 `pendingHistoryItem` 的 render throttle 思路
-- Gemini CLI 中“缩小动态区、降低更新频率”的中层治理思路
+- `#2818` `#1008` `#355` 不在这条 flicker 主 PR 的 closure 范围内，它们属于 `Follow-up-F1`
+- markdown-heavy 大输出不应被这条 PR 宣称“已彻底解决”；它只需要保证不因本 PR 退化，并为后续 parser/block 降峰留下接口
 
-### 6.6 固定验证场景
+### 6.5 固定验证场景
 
-1. 长 assistant 回答（至少 500 token）
-2. thought + content 混合流
-3. 中途取消
-4. split point 密集命中
+1. `npm install`
+2. `git log --oneline`
+3. 5000 行纯文本
+4. ANSI 彩色输出
+5. `ctrl+e`
+6. `ctrl+f`
+7. subagent 执行中展开
+8. markdown-heavy 工具结果（仅验证“不退化”和“不会错误 claim 已解决”）
 
-### 6.7 Done 定义
+### 6.6 Done 定义
 
-- `stdout.write` 频率显著下降
-- 结束和取消不丢尾部内容
-- 不引入 split/promote 双重渲染
+- 大工具输出不再每次 layout 全量内容
+- 展开详情不再造成明显闪屏
+- hidden lines 统计可解释
+- 不引入 `llmContent` 语义变化
 
-## 7. `PR-A2`：终端帧撕裂 / 残余闪烁
+## 7. `PR-3`：窄屏 / interactive shell 专项
 
 ### 7.1 关闭的问题类
 
-在应用层节流之后仍然存在的可见帧撕裂，尤其是 JetBrains 终端、tmux/SSH、长回答滚动阶段的“画面还在抖”问题。
+窄终端、多 pane tmux、interactive shell 场景下的：
 
-### 7.2 主要范围
+- 重复打印
+- 顶部 / 底部来回跳
+- 无限滚动
 
-- synchronized output wrapper
-- output frame coalescing
-- runtime probe / allowlist
+### 7.2 范围
 
-### 7.3 应包含的改动
+- `shellExecutionService.ts`
+- `terminalSerializer.ts`
+- live viewport / transcript archival 语义拆分
+- interactive / integration 回归
 
-- allowlist + runtime probe
-- 必要时对单帧多次 `stdout.write()` 做 frame 内合并
-- `bsu_frame_count === esu_frame_count` 守护
-- screen reader / unknown terminal fallback
+### 7.3 为什么必须单独保留
+
+这不是普通的“主屏闪烁”问题，而是 shell viewport 序列化和滚动语义问题。继续把它混进主 UI PR，会同时拖慢验证和误伤其他路径。
 
 ### 7.4 明确不带
 
-- `refreshStatic()` 改造
-- narrow-shell 修复
+- synchronized output
 - tool budgeting
+- bounded detail panel
+- `refreshStatic()` 语义改造
 
-### 7.5 借鉴来源
+### 7.5 固定验证场景
 
-- `#3013` 的 synchronized output 原型
-- Claude Code 的 runtime gating 经验
+1. 40 列以下窄终端
+2. tmux 多 pane
+3. 宽度缩小后继续输出
+4. `git commit`
+5. interactive shell prompt / pager
+6. `showColor=true` 的彩色 shell 输出
+7. `showColor=true` + tmux / 窄终端 组合路径
 
-### 7.6 固定验证场景
+### 7.6 Done 定义
+
+- 不再重复刷旧 viewport
+- 顶 / 底往返滚动停止
+- 文档与实现中不再把 `#1778` 的 one-line fix 当作现状根因
+
+## 8. `PR-4`：终端协议层残余闪烁收尾
+
+### 8.1 关闭的问题类
+
+在主 UI 路径已经收敛后，特定终端中仍残留的帧撕裂和可见中间帧问题。
+
+**Issue 边界**：
+
+- `#2903` 在这条 PR 中是必须显式验证的 JetBrains 环境样本，不是默认的 closure target
+- 只有当 JetBrains 被明确纳入 support matrix / allowlist / probe 成功路径时，才应把它提升为“修复目标”
+
+### 8.2 范围
+
+- synchronized output wrapper
+- frame 内 write 合并
+- runtime probe / allowlist
+- fallback / rollback
+
+### 8.3 为什么必须最后做
+
+这条 PR 的收益很大，但风险也最高：
+
+- 依赖终端家族差异
+- 涉及 stdout monkeypatch 和 callback / Buffer 语义
+- 如果应用层问题没先收敛，协议层 patch 的收益很难验证
+
+### 8.4 明确不带
+
+- 主屏语义改造
+- shell serializer
+- 大输出和 detail panel 重构
+
+### 8.5 固定验证场景
 
 1. WezTerm
 2. kitty
@@ -184,239 +262,27 @@
 4. tmux / SSH
 5. Terminal.app 或未命中 allowlist 的终端
 
-### 7.7 Done 定义
+### 8.6 Done 定义
 
 - 已支持终端的可见帧撕裂下降
 - 未纳入 allowlist 的终端不出现退化
 - Buffer / callback 语义不变
+- JetBrains 若未进入 allowlist/probe 成功路径，则至少验证“不退化”，不宣称已修复
 
-## 8. `PR-B1`：`refreshStatic()` 型整屏闪烁
+## 9. 为什么不再继续往下合
 
-### 8.1 关闭的问题类
+压到 4 条以后，我不建议再继续合并：
 
-`/settings` 上下切换、compact merge、active view 切换、resize 等场景的一整屏 clear + redraw。
+1. **不要把 `PR-3` 合进其他 PR**
+   窄屏 / shell 问题的验证方法完全不同。
+2. **不要把 `PR-4` 合进其他 PR**
+   终端协议层需要单独灰度和单独回滚。
+3. **不要把 `PR-1` 和 `PR-2` 合并**
+   合起来就会重新变成一个“主屏语义 + 大输出表面 + detail panel + budgeting”的超大 PR，review 会再次失焦。
 
-### 8.2 主要范围
+## 10. 统一 PR 模板
 
-- `AppContainer.tsx`
-- `MainContent.tsx`
-- `DefaultAppLayout.tsx`
-- 相关触发源
-
-### 8.3 应包含的改动
-
-- `remountStaticHistory()`
-- `clearTerminalAndRemount()`
-- compact merge / active view / resize 触发源改道
-- `clear_terminal_count` 与 `history_remount_count` 分开统计
-
-### 8.4 明确不带
-
-- shell serializer 改造
-- synchronized output
-- stable height
-
-### 8.5 借鉴来源
-
-- `#3013` 里对 width micro-oscillation 的 guard，只能作为“不要过度清屏”的参考
-- Gemini CLI / Claude Code 都说明“减少全屏 reset 次数”比“试图让所有 reset 不可见”更重要
-
-### 8.6 固定验证场景
-
-1. `/settings` 上下切换
-2. compact mode merge
-3. active view switch
-4. 终端宽高 resize
-5. `/clear`
-
-### 8.7 Done 定义
-
-- 非致命布局变化不再默认清屏
-- `/clear` 语义保留
-- `clear_terminal_count` 明显下降
-
-## 9. `PR-C1`：窄屏重复输出 / 无限滚动
-
-### 9.1 关闭的问题类
-
-窄终端、多 pane tmux、interactive shell 场景下的重复打印、顶部/底部来回跳、无限滚动。
-
-### 9.2 主要范围
-
-- `packages/core/src/services/shellExecutionService.ts`
-- `packages/core/src/utils/terminalSerializer.ts`
-- interactive/integration tests
-
-### 9.3 应包含的改动
-
-- 固定窄屏回归场景
-- 审查 `serializeTerminalToObject(headlessTerminal)` 的触发频率
-- 分离：
-  - live viewport
-  - transcript archival
-- 收紧 `onScroll()` 与 transcript 更新的耦合
-
-### 9.4 明确不带
-
-- tool budgeting
-- detail panel
-- synchronized output
-
-### 9.5 借鉴来源
-
-- `#1778` 的历史分析只能作为排查线索，不能直接照抄结论
-- Gemini CLI / Claude Code 的滚动容器设计说明“实时 viewport”不应直接回灌主 transcript
-
-### 9.6 固定验证场景
-
-1. 40 列以下窄终端
-2. tmux 多 pane
-3. 宽度缩小后继续输出
-4. `git commit`
-5. interactive shell prompt / pager
-
-### 9.7 Done 定义
-
-- 不再重复刷旧 viewport
-- 顶/底往返滚动停止
-- 文档与实现中不再把 `#1778` 的 one-line fix 当作现状根因
-
-## 10. `PR-D1`：大输出布局抖动 / 工具结果不可读
-
-### 10.1 关闭的问题类
-
-长工具输出导致的 Ink 全量 layout、输出一多就闪、工具结果读不全。
-
-### 10.2 主要范围
-
-- `ToolMessage.tsx`
-- `AnsiOutput.tsx`
-- shared slicing component
-
-### 10.3 应包含的改动
-
-- plain text pre-render slicing
-- ANSI logical line slicing
-- `MaxSizedBox` 退回到 safety net 角色
-- 明确 hidden lines 统计规则
-
-### 10.4 明确不带
-
-- scheduler 层统一 budgeting
-- markdown path 粗暴降级
-- synchronized output
-
-### 10.5 借鉴来源
-
-- `#3013` 的 `SlicingMaxSizedBox`
-- Gemini CLI 的 plain-text slicing 路线
-
-### 10.6 固定验证场景
-
-1. `npm install`
-2. `git log --oneline`
-3. 5000 行纯文本
-4. ANSI 彩色输出
-
-### 10.7 Done 定义
-
-- 大工具输出不再每次 layout 全量内容
-- 短输出行为不变
-- hidden lines 统计可解释
-
-## 11. `PR-D2`：通用 Tool Budgeting 与摘要/详情分离
-
-### 11.1 关闭的问题类
-
-只有少数工具有 budget，导致模型上下文和 UI 都被大结果拖垮；同时主 transcript 和完整详情没有明确边界。
-
-### 11.2 主要范围
-
-- `coreToolScheduler.ts`
-- truncation / preview utils
-- tool summary/detail UI 语义
-
-### 11.3 应包含的改动
-
-- scheduler 层统一 string budget
-- 区分：
-  - 模型可见预算
-  - 用户界面可见预算
-- main transcript 显示 summary
-- detail 容器显示 full output 引用或完整结果
-
-### 11.4 明确不带
-
-- synchronized output
-- shell serializer
-- 全量虚拟滚动
-
-### 11.5 借鉴来源
-
-- `#3013` 中 `MAX_TOOL_OUTPUT_LINES` 的预算意识
-- 现有 shell/MCP 截断路径
-
-### 11.6 固定验证场景
-
-1. `grep`
-2. `glob`
-3. `read_file`
-4. `edit`
-5. MCP / declarative tool 大输出
-
-### 11.7 Done 定义
-
-- 通用工具结果都受统一 budget 保护
-- 主 transcript 更短、更稳定
-- full output 仍可访问
-
-## 12. `PR-E1`：工具 / 子 agent 展开闪烁
-
-### 12.1 关闭的问题类
-
-`ctrl+e` / `ctrl+f` 展开详情时高度暴涨、布局抖动、整块动态区跟着闪。
-
-### 12.2 主要范围
-
-- `AgentExecutionDisplay.tsx`
-- `ToolMessage.tsx`
-- `ToolGroupMessage.tsx`
-- `useStableHeight.ts` 或等价 hook
-
-### 12.3 应包含的改动
-
-- stable height 吸收层
-- bounded detail panel
-- assistant / tool progress / subagent progress 的刷新节奏解耦
-- 保留 force expand、pending confirmation、focus lock
-
-### 12.4 明确不带
-
-- `refreshStatic()` 清屏语义改造
-- shell serializer
-- global render mode overhaul
-
-### 12.5 借鉴来源
-
-- `#3013` 的 `useStableHeight`
-- Claude Code / Gemini CLI 的滚动详情容器思路
-
-### 12.6 固定验证场景
-
-1. `ctrl+e`
-2. `ctrl+f`
-3. subagent 执行中展开
-4. confirmation 出现时展开 / 收起
-
-### 12.7 Done 定义
-
-- 展开详情不再造成明显闪屏
-- 键盘交互和 focus 语义不退化
-- 不把主流式区域整体撑爆
-
-## 13. 统一 PR 模板
-
-每条 issue PR 都建议强制使用同一模板：
+每条主 PR 都建议强制使用同一模板：
 
 1. **Problem Class**
    - 本 PR 关闭哪一类用户问题
@@ -433,12 +299,20 @@
 7. **Rollback**
    - 开关或失败信号
 
-## 14. 最终建议
+## 11. 最终建议
 
-如果要马上开始实施，我建议第一轮就按下面三条开工：
+如果现在就要进入真实实施，我建议按下面的 4 条主 PR 推进：
 
-1. `PR-Prep`
-2. `PR-A1`
-3. `PR-B1`
+1. `PR-1`：主屏闪烁基础修复
+2. `PR-2`：大输出与详情展开稳定性
+3. `PR-3`：窄屏 / interactive shell 专项
+4. `PR-4`：终端协议层残余闪烁收尾
 
-这三条做完之后，再推进 `PR-D1` 和 `PR-E1`，闪屏问题的主路径就会先被压住；此时再看 `PR-C1` 和 `PR-A2`，验证噪声也会小很多。
+在这 4 条之后，再进入两个 follow-up：
+
+5. `Follow-up-F1`：通用 tool budgeting
+6. `Follow-up-F2`：markdown-heavy 输出降峰与 parser/block 层优化
+
+这样数量比 8 条明显更可执行，但还没有退回到“一个巨大 PR 试图一口吃掉所有闪屏问题”的老路。
+
+如果下一步准备直接进入实现，请先按 [11-pr1-implementation-checklist.md](./11-pr1-implementation-checklist.md) 开始 `PR-1`。

@@ -105,7 +105,9 @@ Entry (gemini.tsx)
 
 **执行顺序**：观测基线 -> issue-backed P0 问题治理（动态闪烁、`refreshStatic()`、大输出预裁剪、窄屏回归 harness） -> 启动/MCP 渐进可用 -> 渲染缓存与扩展。MCP 与渲染可并行推进，但必须共享同一套指标口径。
 
-**PR 编排原则**：从这一版开始，闪屏优化不再以 `#3013` 这类“大杂烩 PR”作为实施基线，而是按用户 issue 归纳出的故障类来组织 PR。`#3013` 只保留为参考样本，用来印证哪些 patch 确实有收益、哪些边界条件需要补齐；真正的实施顺序和 PR 粒度以 [10-issue-oriented-flicker-plan.md](./10-issue-oriented-flicker-plan.md) 为准。
+**PR 编排原则**：从这一版开始，闪屏优化不再以 `#3013` 这类“大杂烩 PR”作为实施基线，而是按用户 issue 归纳出的故障类来组织 PR。`#3013` 只保留为参考样本，用来印证哪些 patch 确实有收益、哪些边界条件需要补齐；执行层当前建议压成 4 条主 PR，另把 tool budgeting 和 markdown-heavy 降峰保留为后续 follow-up，具体顺序和边界以 [10-issue-oriented-flicker-plan.md](./10-issue-oriented-flicker-plan.md) 为准。
+
+**视角说明**：本文档中的 Phase / 周次表负责表达技术演进顺序，不等于实际开 PR 的粒度。凡是涉及 flicker 主线的 issue 归属、PR 边界、非目标和关闭口径，统一以 [10-issue-oriented-flicker-plan.md](./10-issue-oriented-flicker-plan.md) 为准；真正准备开工时，再落到 [11-pr1-implementation-checklist.md](./11-pr1-implementation-checklist.md)。
 
 **实施约束**：从这一版开始，所有落地工作默认都应同时参考 [06-implementation-rollout-checklist.md](./06-implementation-rollout-checklist.md)。如果某项优化没有满足对应的验收清单、灰度顺序和回滚条件，就不应直接进入默认开启阶段。
 
@@ -122,8 +124,9 @@ Entry (gemini.tsx)
 
 | 周次 | 变更                                                        | 工作流 | 风险 | 预期收益                          |
 | ---- | ----------------------------------------------------------- | ------ | ---- | --------------------------------- |
-| 2    | 同步输出 DECSET 2026（先 instrumentation，再默认开启或特性开关） | 闪烁   | 中   | 消除大部分可见帧撕裂              |
 | 2    | 流式更新节流（content + thought；结束/取消/工具调用时立即 flush） | 闪烁   | 低   | stdout.write 从 50+/秒降至 <20/秒 |
+| 2-3  | `refreshStatic()` 语义拆分与主屏触发源收紧                   | 闪烁   | 中   | 主屏整屏闪烁显著下降              |
+| 3-5  | 大输出 pre-slicing + detail stability                       | 闪烁   | 中   | 大结果与展开场景不再引发 layout 风暴 |
 | 3    | Markdown token/block 缓存（不缓存 ReactNode）               | 渲染   | 低   | 缓存命中时解析耗时显著下降        |
 | 3    | 代码高亮缓存 + `highlightAuto` 限制/预热策略                | 渲染   | 中   | 重复渲染消除，降低大块代码成本    |
 | 4    | `loadSettingsAsync` 渐进引入，保留同步 wrapper              | 性能   | 中   | 配置加载耗时降低，避免大范围破坏  |
@@ -136,6 +139,7 @@ Entry (gemini.tsx)
 | ---- | ------------------------------------ | ------ | ---- |
 | 6-7  | 渐进式 MCP 可用性 + Gemini tools debounce 刷新 | 性能   | 中   |
 | 6-7  | 运行期 MCP refresh/reload 路径增量化（避免 `restartMcpServers()` 全量重启） | 性能   | 中   |
+| 7-9  | 同步输出 DECSET 2026（按终端家族灰度） | 闪烁   | 中低 |
 | 7    | 动态内容高度阈值优化 + 现有渐进提升增强 | 闪烁   | 中   |
 | 7-8  | 切换到 marked 解析器（特性开关）     | 渲染   | 中   |
 | 8-9  | 智能 refreshStatic()（定向更新）     | 闪烁   | 中   |
@@ -196,4 +200,5 @@ Entry (gemini.tsx)
 | [07-issue-backed-failure-taxonomy.md](./07-issue-backed-failure-taxonomy.md) | 基于 issue 与当前源码的故障分类和修复路线 |
 | [08-execution-plan-and-test-matrix.md](./08-execution-plan-and-test-matrix.md) | 按文件落点、阶段拆解和测试矩阵整理的执行稿 |
 | [09-pr-3013-gap-analysis.md](./09-pr-3013-gap-analysis.md) | 专门分析 `#3013` 已修复范围、剩余缺口与可复用 patch；仅作为参考样本 |
-| [10-issue-oriented-flicker-plan.md](./10-issue-oriented-flicker-plan.md) | 按用户 issue 类别组织的闪屏实施路线、PR 粒度、验证场景与推荐顺序 |
+| [10-issue-oriented-flicker-plan.md](./10-issue-oriented-flicker-plan.md) | 按用户 issue 类别组织的闪屏 4-PR 实施路线、边界、验证场景与推荐顺序 |
+| [11-pr1-implementation-checklist.md](./11-pr1-implementation-checklist.md) | `PR-1` 的可执行开发清单、测试顺序、commit 切分与验收步骤 |

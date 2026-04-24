@@ -125,6 +125,8 @@ export const QwenDark: Theme = {
 
 更完整的问题分类见 [07-issue-backed-failure-taxonomy.md](./07-issue-backed-failure-taxonomy.md)。本文件只展开这些问题在**渲染层**的修复方式。
 
+**执行边界提醒**：从当前 4-PR flicker 方案开始，`#2818` `#1008` `#355` 这类通用 budgeting 问题不再混入 flicker 主线 PR，而是作为后续渲染/workflow follow-up 单独推进；本文件继续保留它们的完整设计，供 `Follow-up-F1` 使用。
+
 ## 2. 解决方案
 
 ### 2.1 [P0] Markdown token/block 缓存

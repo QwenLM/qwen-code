@@ -4,6 +4,7 @@
 
 如果需要把设计进一步落成开发排期，请与 [08-execution-plan-and-test-matrix.md](./08-execution-plan-and-test-matrix.md) 配套阅读：本清单负责“能不能上线”，`08` 负责“先改哪里、先测什么、先拆哪几条 PR”。
 如果要把闪屏治理真正拆成可 review、可复现、可关闭 issue 的一组小 PR，请再配合 [10-issue-oriented-flicker-plan.md](./10-issue-oriented-flicker-plan.md) 使用：`10` 负责“按用户问题类拆 PR、每条 PR 故意不带什么、应该先验证哪些场景”。
+如果下一步要直接开始实施，请默认先按 [11-pr1-implementation-checklist.md](./11-pr1-implementation-checklist.md) 启动 `PR-1`，再回到 `10` 检查后续 `PR-2` ~ `PR-4` 的顺序与边界。
 
 ## 1. 使用方式
 
@@ -44,6 +45,9 @@
 - [ ] PR 有独立的验证场景，而不是复用“大而全”视频证明
 - [ ] PR 没有同时引入两层以上 stdout monkeypatch / render hook 变化
 - [ ] 若借鉴 `#3013`、Gemini CLI、Claude Code 的 patch 或思路，PR 描述明确写出“借鉴了什么、故意没带什么”
+- [ ] 如果 PR 触及 core 层 `llmContent` / truncation / budgeting 语义，除非目标就是预算类 issue，否则应与 flicker UI PR 拆开
+
+当前推荐的执行粒度是 4 条主 PR，而不是更细的 8 条子 PR。对应关系见 [10-issue-oriented-flicker-plan.md](./10-issue-oriented-flicker-plan.md)。
 
 ## 3. 启动与 MCP 验收清单
 

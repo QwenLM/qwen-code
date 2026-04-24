@@ -1,7 +1,9 @@
 # TUI 优化执行计划与测试矩阵
 
 > 本文档把 `00-10` 的设计与调研进一步压缩成“可以直接排期和拆任务”的执行稿。
-> 校准时间点：2026-04-22。若 issue / PR / 上游源码继续变化，需要重新核对后再执行。
+> 校准时间点：2026-04-24。若 issue / PR / 上游源码继续变化，需要重新核对后再执行。
+
+**使用提醒**：本文档负责按文件落点和测试切片组织任务，不单独定义 flicker 主线 PR 的关闭口径。当前 4 条主 PR 的 authoritative 边界以 [10-issue-oriented-flicker-plan.md](./10-issue-oriented-flicker-plan.md) 为准；实际开始编码时，先从 [11-pr1-implementation-checklist.md](./11-pr1-implementation-checklist.md) 的 `PR-1` 起步。`S5` 保留在执行稿中，仅用于 follow-up 排期，不阻塞当前 4 条 flicker 主 PR。
 
 ## 1. 目标
 
@@ -37,21 +39,19 @@
 | S6 | 窄屏 / interactive shell 专项回归与修复 | `shellExecutionService.ts`, `terminalSerializer.ts`, CLI tests | 中高 | 3-5 天 |
 | S7 | bounded detail panel + stable height | tool/subagent 相关组件 | 中高 | 3-5 天 |
 
-### 2A. 与用户 Issue 类别的对应关系
+### 2A. 与 4 条主 PR 的对应关系
 
-从这一版开始，切片和 PR 的对应关系不再围绕 `#3013` 组织，而是围绕用户问题类组织：
+这一版把原来的细粒度 issue PR 进一步收成 4 条主 PR：
 
-| Slice | 对应 PR | 说明 |
+| Slice | 对应主 PR | 说明 |
 | --- | --- | --- |
-| S1 | `PR-Prep` | 闪屏观测与回归基线；所有后续 issue PR 的前置 |
-| S2 | `PR-A1` | 动态流式闪烁的主路径修复：content/thought throttle |
-| S3 | `PR-B1` | `refreshStatic()` 整屏闪烁 |
-| S4 | `PR-D1` | 大输出 pre-render slicing |
-| S5 | `PR-D2` | 通用 tool budgeting 与摘要/详情分离 |
-| S6 | `PR-C1` | 窄屏 / interactive shell 重复输出与无限滚动 |
-| S7 | `PR-E1` | tool/subagent 展开闪烁与 bounded detail panel |
+| S1 + S2 + S3 | `PR-1` | 主屏闪烁基础修复：观测、流式节流、`refreshStatic()` 语义拆分 |
+| S4 + S7 | `PR-2` | 大输出与详情展开稳定性：pre-slicing、bounded detail panel、stable height |
+| S6 | `PR-3` | 窄屏 / interactive shell 专项 |
+| 终端协议层 rollout | `PR-4` | synchronized output、frame write 合并、runtime probe |
+| S5 | `Follow-up-F1` | 通用 tool budgeting；不属于当前 4 条 flicker 主 PR |
 
-而 synchronized output 的灰度接入单独作为 `PR-A2`，属于“动态流式闪烁”这一大类的终端层补强，不建议和上面的任一 slice 混成一条 PR。完整说明见 [10-issue-oriented-flicker-plan.md](./10-issue-oriented-flicker-plan.md)。
+完整说明见 [10-issue-oriented-flicker-plan.md](./10-issue-oriented-flicker-plan.md)。
 
 ## 3. Slice S1：建立可观测性
 
@@ -250,6 +250,7 @@
    - tmux 多 pane 等效宽度
    - interactive shell（如 `git commit`）
    - 宽度缩小后继续输出
+   - `showColor=true` 的彩色 shell 输出
 2. 审查当前彩色 shell 路径
    - `serializeTerminalToObject(headlessTerminal)` 的更新频率
    - `headlessTerminal.onScroll()` 与 render 的耦合
@@ -262,6 +263,7 @@
 - 验收：
   - 窄屏不再重复刷旧行
   - interactive prompt 不再顶/底来回跳
+  - `showColor=true` 的彩色 serializer 路径也通过相同回归
   - 文档中不再把 `#1778` 的历史猜测误写成现状根因
 
 ## 9. Slice S7：bounded detail panel + stable height
@@ -296,22 +298,20 @@
 
 ## 10. 建议的提交顺序
 
-建议不要把这些 slice 混成一个超大 PR。更稳的顺序是：
+建议不要把这些 slice 一把并成“全部闪屏修复”的超大 PR。更稳的顺序是：
 
-1. `PR-Prep`：S1 观测与回归基线
-2. `PR-A1`：S2 动态流式闪烁主路径修复
-3. `PR-B1`：S3 `refreshStatic()` 整屏闪烁修复
-4. `PR-D1`：S4 大输出 pre-slicing
-5. `PR-E1`：S7 bounded detail panel / stable height
-6. `PR-C1`：S6 窄屏专项
-7. `PR-A2`：synchronized output 灰度接入
-8. `PR-D2`：S5 通用 tool budgeting
+1. `PR-1`：S1 + S2 + S3
+2. `PR-2`：S4 + S7
+3. `PR-3`：S6
+4. `PR-4`：终端协议层灰度接入
+5. `Follow-up-F1`：S5 通用 tool budgeting
 
 这样做的好处是：
 
-- 每个 PR 都有独立收益
-- 回滚粒度更小
-- 便于把 issue 与 PR 一一对应
+- 每条主 PR 都仍然对应一个清晰的问题类
+- 数量比 8 条更利于执行和 review
+- 高风险的窄屏 shell 和终端协议层仍保持隔离
+- core 层 `llmContent` 语义变更不会混入 flicker 主线 PR
 
 ## 11. 代码审查重点
 
@@ -332,4 +332,4 @@
 - 大工具输出不会再让 Ink 每次 layout 全量内容
 - 窄屏与 interactive shell 有稳定回归样例
 - `ctrl+e` / `ctrl+f` 展开不再造成明显闪屏
-- tool budgeting 同时保护模型上下文和 UI 渲染
+- tool budgeting follow-up 已单独排期，不阻塞 flicker 主线默认开启

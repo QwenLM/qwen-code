@@ -238,7 +238,7 @@
 
 ### 6.4 当前维护者方向信号（仅作为参考样本）
 
-`qwen-code#2748` 的维护者评论指向 PR `#3013`。按 **2026-04-23** 重新核对后，PR 状态仍与 **2026-04-22** 的最近更新时间一致：
+`qwen-code#2748` 的维护者评论指向 PR `#3013`。按 **2026-04-24** 重新核对后，PR 状态仍与 **2026-04-22** 的最近更新时间一致：
 
 - `#3013` 仍是 **OPEN**
 - reviewDecision 为 **CHANGES_REQUESTED**
@@ -349,19 +349,18 @@
    - output diff / cursor-home
    - 更深的终端协议/scroll region 优化
 
-### 8.1 Issue 驱动的 PR 组织方式
+### 8.1 压缩成 4 条主 PR 的组织方式
 
-为了保证每条 PR 都能单独复现、单独验证、单独关闭一类用户问题，推荐把分类 A-E 直接映射到实施 PR，而不是继续沿用 `#3013` 的 patch 边界：
+为了兼顾“按用户问题类组织”与“执行上不要过碎”，当前推荐把分类 A-E 压成 4 条主 PR：
 
-| 问题类 | 推荐 PR | 说明 |
+| 问题类 | 推荐主 PR | 说明 |
 | --- | --- | --- |
-| A. 动态区重绘闪烁 | `PR-A1` `PR-A2` | 先降更新频率，再视终端家族灰度 synchronized output |
-| B. `refreshStatic()` 整屏闪烁 | `PR-B1` | 单独拆语义，不和其他 patch 混入一条 PR |
-| C. 窄屏重复输出 / 无限滚动 | `PR-C1` | 先建稳定回归，再改 shell serializer 语义 |
-| D. 大输出不可读 / 长会话预算不足 | `PR-D1` `PR-D2` | 先做 pre-slicing，再补统一 budgeting 与 summary/detail |
-| E. 工具 / 子 agent 详情展开闪烁 | `PR-E1` | 把 stable height 与 bounded detail panel 一起收口 |
+| A. 动态区重绘闪烁 + B. `refreshStatic()` 整屏闪烁 | `PR-1` | 同属主屏主路径，适合共用一组 counters 与主屏回归场景 |
+| D. 大输出 UI 稳定性 + E. 工具 / 子 agent 详情展开闪烁 | `PR-2` | 同属大结果 surface，但只收 UI stability，不包含 core budgeting 语义 |
+| C. 窄屏重复输出 / 无限滚动 | `PR-3` | 继续单独保留，不与主 UI PR 混合 |
+| A 类在特定终端中的残余帧撕裂 | `PR-4` | 终端协议层收尾，单独灰度 synchronized output |
 
-其中 `PR-Prep` 是所有闪屏修复的共用前置，不负责关闭具体 issue，但负责为后续每条 issue PR 提供统一的观测和回归口径。
+其中 `PR-1` 内部会自带观测与回归基线，不再单独保留 `PR-Prep`。而 `#2818` `#1008` `#355` 则进入 flicker 主线之后的 budgeting follow-up，不应混入 `PR-2`。
 
 ## 9. 三轮无方向自审结论
 
@@ -369,7 +368,7 @@
 
 - 已把 `#1778` 的 one-line fix 降级为历史信号
 - 已把 `refreshStatic()` 与 Ink `eraseLines` 明确拆开
-- 已把 `#3013` 标注为 2026-04-22 时仍未合入，且仅作为参考样本
+- 已把 `#3013` 标注为截至 2026-04-24 仍未合入，且仅作为参考样本
 
 ### Pass 2：边界条件核对
 
