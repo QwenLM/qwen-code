@@ -1145,8 +1145,11 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
           },
         },
       },
-      false,
-      false,
+      false, // isOutputMarkdown
+      false, // canUpdateOutput
+      true, // shouldDefer — loaded on demand via ToolSearch
+      false, // alwaysLoad
+      'lsp language server definition references hover symbol diagnostics code actions',
     );
   }
 

@@ -198,6 +198,92 @@ describe('ToolRegistry', () => {
     });
   });
 
+  describe('deferred tool filtering', () => {
+    it('excludes shouldDefer tools from getFunctionDeclarations by default', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'visible' }));
+      toolRegistry.registerTool(
+        new MockTool({ name: 'hidden', shouldDefer: true }),
+      );
+
+      const names = toolRegistry.getFunctionDeclarations().map((d) => d.name);
+      expect(names).toEqual(['visible']);
+    });
+
+    it('includes deferred tools when includeDeferred is true', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'visible' }));
+      toolRegistry.registerTool(
+        new MockTool({ name: 'hidden', shouldDefer: true }),
+      );
+
+      const names = toolRegistry
+        .getFunctionDeclarations({ includeDeferred: true })
+        .map((d) => d.name);
+      expect(names).toEqual(expect.arrayContaining(['visible', 'hidden']));
+      expect(names).toHaveLength(2);
+    });
+
+    it('always keeps alwaysLoad tools visible even when shouldDefer is true', () => {
+      toolRegistry.registerTool(
+        new MockTool({
+          name: 'always-visible',
+          shouldDefer: true,
+          alwaysLoad: true,
+        }),
+      );
+
+      const names = toolRegistry.getFunctionDeclarations().map((d) => d.name);
+      expect(names).toEqual(['always-visible']);
+    });
+
+    it('includes revealed deferred tools in getFunctionDeclarations', () => {
+      toolRegistry.registerTool(
+        new MockTool({ name: 'hidden', shouldDefer: true }),
+      );
+      toolRegistry.registerTool(
+        new MockTool({ name: 'other-hidden', shouldDefer: true }),
+      );
+
+      toolRegistry.revealDeferredTool('hidden');
+
+      const names = toolRegistry.getFunctionDeclarations().map((d) => d.name);
+      expect(names).toEqual(['hidden']);
+      expect(toolRegistry.isDeferredToolRevealed('hidden')).toBe(true);
+      expect(toolRegistry.isDeferredToolRevealed('other-hidden')).toBe(false);
+    });
+
+    it('getDeferredToolSummary lists deferred tools sorted by name', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'zebra' }));
+      toolRegistry.registerTool(
+        new MockTool({
+          name: 'bravo',
+          description: 'bravo desc',
+          shouldDefer: true,
+        }),
+      );
+      toolRegistry.registerTool(
+        new MockTool({
+          name: 'alpha',
+          description: 'alpha desc',
+          shouldDefer: true,
+        }),
+      );
+      toolRegistry.registerTool(
+        new MockTool({
+          name: 'charlie',
+          description: 'charlie desc',
+          shouldDefer: true,
+          alwaysLoad: true, // excluded from summary
+        }),
+      );
+
+      const summary = toolRegistry.getDeferredToolSummary();
+      expect(summary).toEqual([
+        { name: 'alpha', description: 'alpha desc' },
+        { name: 'bravo', description: 'bravo desc' },
+      ]);
+    });
+  });
+
   describe('getToolsByServer', () => {
     it('should return an empty array if no tools match the server name', () => {
       toolRegistry.registerTool(new MockTool({ name: 'mock-tool' }));

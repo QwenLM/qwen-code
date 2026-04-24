@@ -2599,6 +2599,10 @@ export class Config {
     }
 
     // --- Core tools (always registered) ---
+    await registerLazy(ToolNames.TOOL_SEARCH, async () => {
+      const { ToolSearchTool } = await import('../tools/tool-search.js');
+      return new ToolSearchTool(this);
+    });
     await registerLazy(ToolNames.AGENT, async () => {
       const { AgentTool } = await import('../tools/agent/agent.js');
       return new AgentTool(this);
