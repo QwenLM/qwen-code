@@ -79,6 +79,7 @@ class Query:
         self._initialize_task: asyncio.Task[None] | None = None
         self._first_result_event = asyncio.Event()
         self._terminal_event_sent = False
+        self._exhausted = False
 
         self._pending_control_requests: dict[str, _PendingControlRequest] = {}
         self._incoming_control_requests: dict[str, _IncomingControlRequest] = {}
@@ -114,7 +115,6 @@ class Query:
             await self._send_control_request("initialize", payload)
         except Exception as exc:
             await self._finish_with_error(exc)
-            raise
 
     async def _send_single_turn_prompt(self) -> None:
         try:
@@ -562,10 +562,13 @@ class Query:
         return self
 
     async def __anext__(self) -> SDKMessage:
+        if self._exhausted:
+            raise StopAsyncIteration
         await self._ensure_started()
         item = await self._message_queue.get()
 
         if item is _DONE:
+            self._exhausted = True
             raise StopAsyncIteration
 
         if isinstance(item, Exception):

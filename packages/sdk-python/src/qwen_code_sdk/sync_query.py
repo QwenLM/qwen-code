@@ -27,6 +27,7 @@ class SyncQuery:
         self._ready = threading.Event()
         self._shutdown = threading.Event()
         self._stop_sent = threading.Event()
+        self._exhausted = False
         self._query: Query | None = None
         self._consumer_task: asyncio.Task[None] | None = None
 
@@ -88,9 +89,12 @@ class SyncQuery:
         return self
 
     def __next__(self) -> SDKMessage:
+        if self._exhausted:
+            raise StopIteration
         item = self._queue.get()
 
         if item is _STOP:
+            self._exhausted = True
             raise StopIteration
 
         if isinstance(item, Exception):
