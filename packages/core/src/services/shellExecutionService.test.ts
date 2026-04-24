@@ -167,6 +167,21 @@ const expectNormalizedWindowsPathEnv = (env: NodeJS.ProcessEnv) => {
   expect(env['Path']).toBeUndefined();
 };
 
+const waitForDataEventCount = async (
+  onOutputEventMock: Mock<(event: ShellOutputEvent) => void>,
+  expectedCount: number,
+) => {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const dataEvents = onOutputEventMock.mock.calls.filter(
+      ([event]) => event.type === 'data',
+    );
+    if (dataEvents.length >= expectedCount) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+};
+
 describe('ShellExecutionService', () => {
   let mockPtyProcess: EventEmitter & {
     pid: number;
@@ -833,6 +848,47 @@ describe('ShellExecutionService', () => {
           chunk: expected,
         }),
       );
+    });
+
+    it('does not re-emit default plain live output when only soft-wrap segmentation changes', async () => {
+      const abortController = new AbortController();
+      const handle = await ShellExecutionService.execute(
+        'narrow-output',
+        '/test/dir',
+        onOutputEventMock,
+        abortController.signal,
+        true,
+        {
+          ...shellExecutionConfig,
+          terminalWidth: 4,
+          terminalHeight: 4,
+          showColor: false,
+          disableDynamicLineTrimming: false,
+        },
+      );
+
+      await new Promise((resolve) => process.nextTick(resolve));
+      mockPtyProcess.onData.mock.calls[0][0]('abcdefgh');
+      await waitForDataEventCount(onOutputEventMock, 1);
+
+      ShellExecutionService.resizePty(handle.pid!, 2, 4);
+      mockPtyProcess.onData.mock.calls[0][0]('\r');
+      mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      await handle.result;
+
+      const dataEvents = onOutputEventMock.mock.calls.filter(
+        ([event]) => event.type === 'data',
+      );
+      expect(dataEvents).toHaveLength(1);
+      const firstDataEvent = dataEvents[0][0];
+      if (firstDataEvent.type !== 'data') {
+        throw new Error('Expected a shell data event.');
+      }
+      const chunk = firstDataEvent.chunk as AnsiOutput;
+      expect(chunk.map((line) => line[0]?.text).filter(Boolean)).toEqual([
+        'abcd',
+        'efgh',
+      ]);
     });
 
     it('should handle multi-line output correctly when showColor is false', async () => {

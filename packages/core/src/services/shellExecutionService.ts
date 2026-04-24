@@ -205,6 +205,40 @@ const areAnsiOutputsEqual = (
   });
 };
 
+const createPlainAnsiLine = (text: string) => [
+  {
+    text,
+    bold: false,
+    italic: false,
+    underline: false,
+    dim: false,
+    inverse: false,
+    fg: '',
+    bg: '',
+  },
+];
+
+const serializePlainViewportToAnsiOutput = (
+  terminal: pkg.Terminal,
+  unwrapWrappedLines = false,
+): AnsiOutput => {
+  const buffer = terminal.buffer.active;
+  const lines: AnsiOutput = [];
+
+  for (let y = 0; y < terminal.rows; y++) {
+    const line = buffer.getLine(buffer.viewportY + y);
+    const lineContent = line ? line.translateToString(true) : '';
+
+    if (unwrapWrappedLines && line?.isWrapped && lines.length > 0) {
+      lines[lines.length - 1][0].text += lineContent;
+    } else {
+      lines.push(createPlainAnsiLine(lineContent));
+    }
+  }
+
+  return lines;
+};
+
 interface ProcessCleanupStrategy {
   killPty(pid: number, pty: ActivePty): void;
   killChildProcesses(pids: Set<number>): void;
@@ -615,26 +649,11 @@ export class ShellExecutionService {
               { unwrapWrappedLines: true },
             );
           } else {
-            const buffer = headlessTerminal.buffer.active;
-            const lines: AnsiOutput = [];
-            for (let y = 0; y < headlessTerminal.rows; y++) {
-              const line = buffer.getLine(buffer.viewportY + y);
-              const lineContent = line ? line.translateToString(true) : '';
-              lines.push([
-                {
-                  text: lineContent,
-                  bold: false,
-                  italic: false,
-                  underline: false,
-                  dim: false,
-                  inverse: false,
-                  fg: '',
-                  bg: '',
-                },
-              ]);
-            }
-            newOutput = lines;
-            newOutputComparison = lines;
+            newOutput = serializePlainViewportToAnsiOutput(headlessTerminal);
+            newOutputComparison = serializePlainViewportToAnsiOutput(
+              headlessTerminal,
+              true,
+            );
           }
 
           const trimmedOutput = trimTrailingEmptyAnsiLines(newOutput);
