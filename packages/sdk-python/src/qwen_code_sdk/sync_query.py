@@ -189,13 +189,16 @@ class SyncQuery:
             self._loop.close()
 
     def __del__(self) -> None:
-        if not self._shutdown.is_set():
-            warnings.warn(
-                "SyncQuery was not closed. "
-                "Use 'with SyncQuery(...) as q:' or call q.close() explicitly.",
-                ResourceWarning,
-                stacklevel=1,
-            )
+        try:
+            if not self._shutdown.is_set():
+                warnings.warn(
+                    "SyncQuery was not closed. "
+                    "Use 'with SyncQuery(...) as q:' or call q.close() explicitly.",
+                    ResourceWarning,
+                    stacklevel=1,
+                )
+        except AttributeError:
+            pass
 
 
 async def _iterable_to_async(
