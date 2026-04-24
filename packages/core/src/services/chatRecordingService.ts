@@ -250,6 +250,18 @@ export class ChatRecordingService {
   /** UUID of the last written record in the chain */
   private lastRecordUuid: string | null = null;
   private readonly config: Config;
+  /**
+   * Tracks the `lastRecordUuid` value just before each user turn was recorded.
+   * Used by {@link rewindRecording} to re-root the parentUuid chain so that
+   * rewound messages end up on a dead branch in the tree, making
+   * `reconstructHistory()` skip them automatically on resume.
+   *
+   * Index `i` holds the UUID of the last record written before the (i+1)th
+   * user message was appended. For example, `turnParentUuids[0]` is the UUID
+   * right before the very first user message (often `null` or the startup
+   * context record).
+   */
+  private turnParentUuids: Array<string | null> = [];
   /** In-memory cache of the current session's custom title (for re-append on exit) */
   private currentCustomTitle: string | undefined;
   /**
@@ -426,6 +438,7 @@ export class ChatRecordingService {
    */
   recordUserMessage(message: PartListUnion): void {
     try {
+      this.turnParentUuids.push(this.lastRecordUuid);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
         message: createUserContent(message),
@@ -703,10 +716,25 @@ export class ChatRecordingService {
   }
 
   /**
-   * Records a conversation rewind event as a system record.
+   * Records a conversation rewind and re-roots the parentUuid chain.
+   *
+   * Sets `lastRecordUuid` back to the UUID that was current just before the
+   * target user turn was recorded, then appends a rewind system record.
+   * This makes all messages after that point sit on a dead branch in the
+   * UUID tree, so `reconstructHistory()` will skip them on resume.
+   *
+   * @param targetTurnIndex 0-based index of the user turn to rewind to.
+   *   For example, 0 means rewind to the very first user message (keeping
+   *   nothing before it), 1 means keep the first user turn, etc.
+   * @param payload Additional metadata to persist with the rewind record.
    */
-  recordRewind(payload: RewindRecordPayload): void {
+  rewindRecording(targetTurnIndex: number, payload: RewindRecordPayload): void {
     try {
+      // Re-root: point back to the record just before the target user turn.
+      this.lastRecordUuid = this.turnParentUuids[targetTurnIndex] ?? null;
+      // Trim future boundaries — they no longer exist in the active branch.
+      this.turnParentUuids = this.turnParentUuids.slice(0, targetTurnIndex);
+
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
         type: 'system',
@@ -717,6 +745,37 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving rewind record:', error);
+    }
+  }
+
+  /**
+   * Rebuilds `turnParentUuids` from a reconstructed message list.
+   *
+   * Call this after resuming a session so that subsequent rewinds within
+   * the resumed session have correct boundary data. Also updates
+   * `lastRecordUuid` to the last record in the chain.
+   */
+  rebuildTurnBoundaries(messages: ChatRecord[]): void {
+    this.turnParentUuids = [];
+    let prevUuid: string | null =
+      this.config.getResumedSessionData()?.lastCompletedUuid !== undefined
+        ? null
+        : this.lastRecordUuid;
+
+    for (let i = 0; i < messages.length; i++) {
+      const record = messages[i];
+      if (
+        record.type === 'user' &&
+        record.subtype !== 'notification' &&
+        record.subtype !== 'cron'
+      ) {
+        this.turnParentUuids.push(prevUuid);
+      }
+      prevUuid = record.uuid;
+    }
+    // Ensure lastRecordUuid points to the end of the reconstructed chain.
+    if (messages.length > 0) {
+      this.lastRecordUuid = messages[messages.length - 1].uuid;
     }
   }
 

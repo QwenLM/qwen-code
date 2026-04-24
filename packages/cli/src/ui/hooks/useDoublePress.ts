@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2026 Qwen Team
+ * Copyright 2025 Qwen Code
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -27,12 +27,15 @@ export function useDoublePress(
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Clean up timer on unmount
-  useEffect(() => () => {
+  useEffect(
+    () => () => {
       if (timeoutRef.current !== null) {
         clearTimeout(timeoutRef.current);
         timeoutRef.current = null;
       }
-    }, []);
+    },
+    [],
+  );
 
   return useCallback(() => {
     if (timeoutRef.current !== null) {

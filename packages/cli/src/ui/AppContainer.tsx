@@ -1572,11 +1572,12 @@ export const AppContainer = (props: AppContainerProps) => {
   // --- Rewind selector callbacks ---
   const openRewindSelector = useCallback(() => {
     if (streamingState !== StreamingState.Idle) return;
+    if (config.getIdeMode()) return;
     if (dialogsVisibleRef.current) return;
     const hasUserTurns = historyManager.history.some((h) => h.type === 'user');
     if (!hasUserTurns) return;
     setIsRewindSelectorOpen(true);
-  }, [streamingState, historyManager.history]);
+  }, [streamingState, config, historyManager.history]);
 
   const closeRewindSelector = useCallback(() => {
     setIsRewindSelectorOpen(false);
@@ -1587,33 +1588,41 @@ export const AppContainer = (props: AppContainerProps) => {
       const geminiClient = config.getGeminiClient();
       if (!geminiClient) return;
 
-      // 1. Compute API truncation point
+      // 1. Compute values from current history BEFORE truncation
+      const originalHistory = historyManager.history;
+      const originalLength = originalHistory.length;
+
+      let targetTurnIndex = 0;
+      for (const h of originalHistory) {
+        if (h.id === userItem.id) break;
+        if (h.type === 'user') targetTurnIndex++;
+      }
+
+      // 2. Compute API truncation point
       const apiHistory = geminiClient.getHistory();
       const apiTruncateIndex = computeApiTruncationIndex(
-        historyManager.history,
+        originalHistory,
         userItem.id,
         apiHistory,
       );
 
-      // 2. Truncate API history and strip stale thinking blocks
+      // 3. Truncate API history and strip stale thinking blocks
       geminiClient.truncateHistory(apiTruncateIndex);
       geminiClient.stripThoughtsFromHistory();
 
-      // 3. Truncate UI history (keep everything before the target item)
-      const truncatedUi = historyManager.history.filter(
-        (h) => h.id < userItem.id,
-      );
+      // 4. Truncate UI history (keep everything before the target item)
+      const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);
       historyManager.loadHistory(truncatedUi);
 
-      // 4. Re-render the terminal
+      // 5. Re-render the terminal
       refreshStatic();
 
-      // 5. Pre-populate input with the original user text
+      // 6. Pre-populate input with the original user text
       if (userItem.type === 'user' && userItem.text) {
         buffer.setText(userItem.text);
       }
 
-      // 6. Add info message
+      // 7. Add info message
       historyManager.addItem(
         {
           type: 'info',
@@ -1622,12 +1631,13 @@ export const AppContainer = (props: AppContainerProps) => {
         Date.now(),
       );
 
-      // 7. Record the rewind event for session replay
-      config.getChatRecordingService()?.recordRewind({
-        truncatedCount: historyManager.history.length - truncatedUi.length,
+      // 8. Record the rewind event — re-roots the parentUuid chain so
+      //    rewound messages end up on a dead branch during resume.
+      config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
+        truncatedCount: originalLength - truncatedUi.length,
       });
 
-      // 8. Close the selector
+      // 9. Close the selector
       setIsRewindSelectorOpen(false);
     },
     [config, historyManager, refreshStatic, buffer],

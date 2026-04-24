@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2026 Qwen Team
+ * Copyright 2025 Qwen Code
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -60,8 +60,9 @@ function hasStartupContext(apiHistory: Content[]): boolean {
  * to the target UI user turn.
  *
  * Note: In IDE mode, additional user Content entries may be injected for
- * IDE context. This function does not account for those and may produce
- * incorrect results in IDE mode with context injections.
+ * IDE context. This function does not account for those and will produce
+ * incorrect results. Rewind is therefore disabled in IDE mode (guarded
+ * in openRewindSelector).
  *
  * @param uiHistory The full UI history array
  * @param targetUserItemId The ID of the user HistoryItem to rewind to
