@@ -8,6 +8,7 @@ import type {
   ListSessionsResponse,
   LoadSessionResponse,
   NewSessionResponse,
+  PromptResponse,
 } from '@agentclientprotocol/sdk';
 import { DesktopHttpError } from '../http/errors.js';
 
@@ -21,6 +22,8 @@ export interface AcpSessionClient {
   }): Promise<ListSessionsResponse>;
   newSession(cwd: string): Promise<NewSessionResponse>;
   loadSession(sessionId: string, cwd: string): Promise<LoadSessionResponse>;
+  prompt(sessionId: string, prompt: string): Promise<PromptResponse>;
+  cancel(sessionId: string): Promise<void>;
   extMethod<T extends Record<string, unknown>>(
     method: string,
     params: Record<string, unknown>,

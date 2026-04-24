@@ -107,7 +107,7 @@ order, verification, decisions, and remaining work.
 
 ### Slice 5: WebSocket Chat Loop
 
-- Status: pending
+- Status: in progress
 - Goal: add per-session WS connections and send user prompts through ACP.
 - Files:
   - `packages/desktop/src/server/ws/SessionSocketHub.ts`
@@ -118,6 +118,12 @@ order, verification, decisions, and remaining work.
   - WS handshake validates session id and token.
   - One active prompt per session is enforced.
   - Renderer receives normalized assistant/tool/usage events.
+- Progress:
+  - 2026-04-25: authenticated `/ws/:sessionId` handshake, `ping`/`pong`,
+    `user_message` to ACP `prompt`, `stop_generation` to ACP `cancel`, and
+    one-active-prompt guard are implemented on the server.
+  - Remaining: ACP `sessionUpdate` normalization, renderer WebSocket client,
+    and chat store integration.
 - Verification:
   - `npm run test --workspace=packages/desktop`
   - fake ACP integration test for prompt and stream completion
@@ -236,6 +242,18 @@ order, verification, decisions, and remaining work.
   - `npm run typecheck` passed across workspaces.
   - `npm run build` passed across the configured build order. Existing VS Code
     companion lint warnings were reported by its build script, with no errors.
+- 2026-04-25 Slice 5a:
+  - `npm install --ignore-scripts --workspace=@qwen-code/desktop` passed.
+  - `npx prettier --check design/qwen-code-electron-desktop-implementation-plan.md scripts/build.js packages/desktop` passed.
+  - `npm run test --workspace=packages/desktop` passed: 2 files, 21 tests.
+  - `npm run lint --workspace=packages/desktop` passed.
+  - `npm run typecheck --workspace=packages/desktop` passed.
+  - `npm run build --workspace=packages/desktop` passed.
+  - `npm exec --workspace=packages/desktop -- electron --version` passed:
+    `v41.3.0`.
+  - `npm run typecheck` passed across workspaces.
+  - `npm run build` passed across the configured build order. Existing VS Code
+    companion lint warnings were reported by its build script, with no errors.
 
 ## Self Review Notes
 
@@ -272,10 +290,18 @@ order, verification, decisions, and remaining work.
   - Electron main intentionally does not auto-start real ACP yet; CLI path
     resolution and packaged `ELECTRON_RUN_AS_NODE=1` behavior remain for the
     packaging/runtime integration slices.
+- 2026-04-25 Slice 5a:
+  - WebSocket upgrade uses the same local-origin policy and random token as the
+    REST API.
+  - The hub defaults to an `acp_unavailable` error when no ACP client is
+    injected, rather than silently dropping user messages.
+  - Session update broadcasting is intentionally a follow-up; this keeps the
+    prompt/cancel transport independently testable before event normalization.
 
 ## Remaining Work
 
-- Commit Slice 4.
-- Continue with Slice 5 WebSocket chat loop.
+- Commit Slice 5a.
+- Continue with ACP event normalization and renderer WebSocket client for the
+  rest of Slice 5.
 - Continue through the ACP, session, WebSocket, permission, settings, and
   packaging slices until the architecture MVP is fully verified.

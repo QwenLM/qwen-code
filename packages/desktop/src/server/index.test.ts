@@ -5,6 +5,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { WebSocket } from 'ws';
 import { startDesktopServer } from './index.js';
 import type { DesktopServer } from './types.js';
 import type { AcpSessionClient } from './services/sessionService.js';
@@ -221,6 +222,62 @@ describe('DesktopServer', () => {
     });
   });
 
+  it('accepts authenticated session WebSocket connections', async () => {
+    const server = await createTestServer(createAcpClient());
+    const testSocket = await connectSocket(server, '/ws/session-1');
+
+    expect(await testSocket.readMessage()).toMatchObject({
+      type: 'connected',
+      sessionId: 'session-1',
+    });
+
+    testSocket.socket.send(JSON.stringify({ type: 'ping' }));
+    expect(await testSocket.readMessage()).toMatchObject({ type: 'pong' });
+    testSocket.socket.close();
+  });
+
+  it('sends user messages to ACP prompt over WebSocket', async () => {
+    const acpClient = createAcpClient();
+    const server = await createTestServer(acpClient);
+    const testSocket = await connectSocket(server, '/ws/session-1');
+    await testSocket.readMessage();
+
+    testSocket.socket.send(
+      JSON.stringify({ type: 'user_message', content: 'hello' }),
+    );
+
+    expect(await testSocket.readMessage()).toMatchObject({
+      type: 'message_complete',
+      stopReason: 'end_turn',
+    });
+    expect(acpClient.prompt).toHaveBeenCalledWith('session-1', 'hello');
+    testSocket.socket.close();
+  });
+
+  it('cancels generation over WebSocket', async () => {
+    const acpClient = createAcpClient();
+    const server = await createTestServer(acpClient);
+    const testSocket = await connectSocket(server, '/ws/session-1');
+    await testSocket.readMessage();
+
+    testSocket.socket.send(JSON.stringify({ type: 'stop_generation' }));
+
+    expect(await testSocket.readMessage()).toMatchObject({
+      type: 'message_complete',
+      stopReason: 'cancelled',
+    });
+    expect(acpClient.cancel).toHaveBeenCalledWith('session-1');
+    testSocket.socket.close();
+  });
+
+  it('rejects WebSocket connections without the desktop token', async () => {
+    const server = await createTestServer(createAcpClient());
+
+    await expect(
+      connectSocket(server, '/ws/session-1', 'wrong-token'),
+    ).rejects.toThrow();
+  });
+
   it('returns a typed error for unknown authenticated routes', async () => {
     const server = await createTestServer();
 
@@ -321,6 +378,52 @@ function createAcpClient(): AcpSessionClient {
     }),
     newSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
     loadSession: vi.fn().mockResolvedValue({ models: [] }),
+    prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
+    cancel: vi.fn().mockResolvedValue(undefined),
     extMethod: vi.fn().mockResolvedValue({ success: true }),
+  };
+}
+
+async function connectSocket(
+  server: DesktopServer,
+  path: string,
+  token = server.info.token,
+): Promise<{
+  socket: WebSocket;
+  readMessage(): Promise<unknown>;
+}> {
+  const url = new URL(path, server.info.url.replace('http:', 'ws:'));
+  url.searchParams.set('token', token);
+  const socket = new WebSocket(url);
+  const messages: unknown[] = [];
+  const messageWaiters: Array<(message: unknown) => void> = [];
+
+  socket.on('message', (data) => {
+    const parsed = JSON.parse(data.toString()) as unknown;
+    const waiter = messageWaiters.shift();
+    if (waiter) {
+      waiter(parsed);
+    } else {
+      messages.push(parsed);
+    }
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    socket.once('open', () => resolve());
+    socket.once('error', reject);
+  });
+
+  return {
+    socket,
+    readMessage: () => {
+      const message = messages.shift();
+      if (message) {
+        return Promise.resolve(message);
+      }
+
+      return new Promise((resolve) => {
+        messageWaiters.push(resolve);
+      });
+    },
   };
 }

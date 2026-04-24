@@ -20,6 +20,7 @@ import {
 import { isDesktopHttpError, DesktopHttpError } from './http/errors.js';
 import { getRuntimeInfo } from './services/runtimeService.js';
 import { DesktopSessionService } from './services/sessionService.js';
+import { SessionSocketHub } from './ws/SessionSocketHub.js';
 import type {
   DesktopJsonResponse,
   DesktopServer,
@@ -40,6 +41,10 @@ export async function startDesktopServer(
   const now = options.now ?? (() => new Date());
   const startedAt = now().getTime();
   const sessionService = new DesktopSessionService(options.acpClient);
+  const socketHub = new SessionSocketHub({
+    token,
+    acpClient: options.acpClient,
+  });
   const server = createServer((request, response) => {
     void handleRequest(request, response, {
       token,
@@ -66,6 +71,9 @@ export async function startDesktopServer(
             : 'Desktop server request failed.',
       });
     });
+  });
+  server.on('upgrade', (request, socket, head) => {
+    socketHub.handleUpgrade(request, socket, head);
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -94,7 +102,10 @@ export async function startDesktopServer(
       url: `http://127.0.0.1:${address.port}`,
       token,
     },
-    close: () => closeHttpServer(server),
+    close: async () => {
+      socketHub.close();
+      await closeHttpServer(server);
+    },
   };
 }
 

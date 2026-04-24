@@ -20,12 +20,14 @@
     "@agentclientprotocol/sdk": "^0.14.1",
     "@qwen-code/webui": "file:../webui",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.24",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
+    "@types/ws": "^8.5.10",
     "@vitejs/plugin-react": "^4.2.0",
     "electron": "^41.3.0",
     "esbuild": "^0.25.0",
