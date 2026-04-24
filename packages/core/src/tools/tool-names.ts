@@ -29,6 +29,7 @@ export const ToolNames = {
   CRON_LIST: 'cron_list',
   CRON_DELETE: 'cron_delete',
   TOOL_SEARCH: 'tool_search',
+  STRUCTURED_OUTPUT: 'structured_output',
 } as const;
 
 /**
@@ -56,6 +57,7 @@ export const ToolDisplayNames = {
   CRON_LIST: 'CronList',
   CRON_DELETE: 'CronDelete',
   TOOL_SEARCH: 'ToolSearch',
+  STRUCTURED_OUTPUT: 'StructuredOutput',
 } as const;
 
 // Migration from old tool names to new tool names
