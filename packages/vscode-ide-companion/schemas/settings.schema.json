@@ -402,11 +402,6 @@
           "description": "Settings for clearing stale context after idle periods. Use -1 to disable a threshold.",
           "type": "object",
           "properties": {
-            "thinkingThresholdMinutes": {
-              "description": "Minutes of inactivity before clearing old thinking blocks. Use -1 to disable.",
-              "type": "number",
-              "default": 5
-            },
             "toolResultsThresholdMinutes": {
               "description": "Minutes of inactivity before clearing old tool result content. Use -1 to disable.",
               "type": "number",
