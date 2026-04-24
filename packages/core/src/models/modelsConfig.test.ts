@@ -705,9 +705,10 @@ describe('ModelsConfig', () => {
     }
   });
 
-  it('should NOT preserve programmatic apiKey when registry model envKey is absent', () => {
-    // When apiKey was set via updateCredentials (programmatic source),
-    // applyResolvedModelDefaults should NOT preserve it — provider atomicity.
+  it('should preserve programmatic apiKey when authType and modelId unchanged (restart scenario)', () => {
+    // When apiKey was set via updateCredentials (programmatic source) and
+    // syncAfterAuthRefresh is called with the same authType+modelId,
+    // the short-circuit should preserve the existing key.
     const envKey = 'CODING_PLAN_KEY_TEST_3417_PROG';
     delete process.env[envKey];
 
@@ -738,8 +739,8 @@ describe('ModelsConfig', () => {
     modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'provider-model');
 
     const gc = currentGenerationConfig(modelsConfig);
-    // Programmatic apiKey should NOT be preserved
-    expect(gc.apiKey).toBeUndefined();
+    // Same authType + same modelId → short-circuit preserves existing key
+    expect(gc.apiKey).toBe('programmatic-key');
   });
 
   it('should NOT preserve env apiKey with via.modelProviders during model switch', () => {
@@ -802,6 +803,103 @@ describe('ModelsConfig', () => {
     // model-a's key should NOT be reused for model-b
     expect(gc.apiKey).toBeUndefined();
     expect(gc.model).toBe('model-b');
+  });
+
+  it('should NOT preserve settings-sourced apiKey when switching to a different provider within same authType', () => {
+    // Cross-provider switch: provider-A (settings-sourced key) → provider-B
+    // Settings key must NOT leak to provider-B which may have a different baseUrl.
+    const envKeyA = 'PROVIDER_KEY_A_SETTINGS_TEST';
+    const envKeyB = 'PROVIDER_KEY_B_SETTINGS_TEST';
+    delete process.env[envKeyA];
+    delete process.env[envKeyB];
+
+    const modelProvidersConfig: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'provider-a',
+          name: 'Provider A',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          envKey: envKeyA,
+        },
+        {
+          id: 'provider-b',
+          name: 'Provider B',
+          baseUrl: 'https://api.openai.com/v1',
+          envKey: envKeyB,
+        },
+      ],
+    };
+
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig,
+      generationConfig: {
+        model: 'provider-a',
+        apiKey: 'settings-api-key',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      },
+      generationConfigSources: {
+        model: { kind: 'settings', detail: 'settings.model.name' },
+        apiKey: { kind: 'settings', detail: 'security.auth.apiKey' },
+        baseUrl: { kind: 'settings', detail: 'security.auth.baseUrl' },
+      },
+    });
+
+    // Switch to provider-b (different model, same authType)
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'provider-b');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    // settings-sourced key for provider-a must NOT be sent to provider-b
+    expect(gc.apiKey).toBeUndefined();
+    expect(gc.model).toBe('provider-b');
+    expect(gc.baseUrl).toBe('https://api.openai.com/v1');
+  });
+
+  it('should NOT preserve CLI-sourced apiKey when switching to a different provider within same authType', () => {
+    // Cross-provider switch: provider-A (CLI-sourced key) → provider-B
+    const envKeyA = 'PROVIDER_KEY_A_CLI_TEST';
+    const envKeyB = 'PROVIDER_KEY_B_CLI_TEST';
+    delete process.env[envKeyA];
+    delete process.env[envKeyB];
+
+    const modelProvidersConfig: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'cli-provider-a',
+          name: 'CLI Provider A',
+          baseUrl: 'https://api-a.example.com/v1',
+          envKey: envKeyA,
+        },
+        {
+          id: 'cli-provider-b',
+          name: 'CLI Provider B',
+          baseUrl: 'https://api-b.example.com/v1',
+          envKey: envKeyB,
+        },
+      ],
+    };
+
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig,
+      generationConfig: {
+        model: 'cli-provider-a',
+        apiKey: 'cli-provided-key',
+      },
+      generationConfigSources: {
+        model: { kind: 'cli', detail: '--model' },
+        apiKey: { kind: 'cli', detail: '--openaiApiKey' },
+      },
+    });
+
+    // Switch to cli-provider-b (different model, same authType)
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'cli-provider-b');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    // CLI key for provider-a must NOT be sent to provider-b
+    expect(gc.apiKey).toBeUndefined();
+    expect(gc.model).toBe('cli-provider-b');
+    expect(gc.baseUrl).toBe('https://api-b.example.com/v1');
   });
 
   it('should preserve general env var apiKey (e.g. OPENAI_API_KEY) when provider envKey is absent', () => {

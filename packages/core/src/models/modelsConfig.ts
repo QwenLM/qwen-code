@@ -708,13 +708,6 @@ export class ModelsConfig {
 
     // Clear credentials to avoid reusing previous model's API key
 
-    // Capture the previously-resolved apiKey before clearing.
-    // On restart, resolveCliGenerationConfig may have resolved the key from
-    // settings.security.auth.apiKey (layer 4 fallback). We preserve it here
-    // so it can serve as a fallback when process.env[model.envKey] is absent.
-    const previousApiKey = this._generationConfig.apiKey;
-    const previousApiKeySource = this.generationConfigSources['apiKey'];
-
     // For Qwen OAuth, apiKey must always be a placeholder. It will be dynamically
     // replaced when building requests. Do not preserve any previous key or read
     // from envKey.
@@ -749,24 +742,6 @@ export class ModelsConfig {
             detail: 'envKey',
           },
         };
-      } else if (
-        previousApiKey &&
-        this.currentAuthType !== AuthType.QWEN_OAUTH &&
-        (previousApiKeySource?.kind === 'cli' ||
-          previousApiKeySource?.kind === 'settings' ||
-          (previousApiKeySource?.kind === 'env' && !previousApiKeySource.via))
-      ) {
-        // Fall back to the previously-resolved key from CLI flags, settings,
-        // or a general environment variable (e.g., --openaiApiKey,
-        // settings.security.auth.apiKey, or OPENAI_API_KEY).
-        //
-        // Sources that are NOT preserved:
-        //  - 'programmatic' (from updateCredentials) — provider atomicity
-        //  - 'env' with via.modelProviders — key from a different provider's
-        //    envKey; reusing it for another model may send wrong credentials
-        //    to the wrong service.
-        this._generationConfig.apiKey = previousApiKey;
-        this.generationConfigSources['apiKey'] = previousApiKeySource!;
       }
       this._generationConfig.apiKeyEnvKey = model.envKey;
       this.generationConfigSources['apiKeyEnvKey'] = {
@@ -902,7 +877,32 @@ export class ModelsConfig {
     if (modelId && this.modelRegistry.hasModel(authType, modelId)) {
       const resolved = this.modelRegistry.getModel(authType, modelId);
       if (resolved) {
+        // When authType and modelId haven't changed (startup/restart scenario),
+        // the current apiKey was already correctly resolved by
+        // resolveCliGenerationConfig. Save it so we can restore it if
+        // applyResolvedModelDefaults clears it (i.e. process.env[envKey] is
+        // absent). For cross-provider switches (different modelId), we must
+        // NOT preserve the previous key — it may belong to a different
+        // service. (See #3417)
+        const isUnchanged =
+          previousAuthType === authType &&
+          this._generationConfig.model === modelId;
+        const savedApiKey = isUnchanged
+          ? this._generationConfig.apiKey
+          : undefined;
+        const savedApiKeySource = isUnchanged
+          ? this.generationConfigSources['apiKey']
+          : undefined;
+
         this.applyResolvedModelDefaults(resolved);
+
+        // Restore the previously-resolved apiKey if applyResolvedModelDefaults
+        // cleared it (env var not found) and this is the same model.
+        if (isUnchanged && !this._generationConfig.apiKey && savedApiKey) {
+          this._generationConfig.apiKey = savedApiKey;
+          this.generationConfigSources['apiKey'] = savedApiKeySource!;
+        }
+
         this.strictModelProviderSelection = true;
         // Clear active runtime model snapshot since we're now using a registry model
         this.activeRuntimeModelSnapshotId = undefined;
