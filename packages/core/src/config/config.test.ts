@@ -888,6 +888,38 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('GitCoAuthor Settings', () => {
+    it('defaults both commit and pr to true when not specified', () => {
+      const config = new Config({ ...baseParams, gitCoAuthor: undefined });
+      const settings = config.getGitCoAuthor();
+      expect(settings.commit).toBe(true);
+      expect(settings.pr).toBe(true);
+    });
+
+    it('accepts an object with independent commit and pr toggles', () => {
+      const config = new Config({
+        ...baseParams,
+        gitCoAuthor: { commit: true, pr: false },
+      });
+      const settings = config.getGitCoAuthor();
+      expect(settings.commit).toBe(true);
+      expect(settings.pr).toBe(false);
+    });
+
+    // Legacy shape: before commit and PR attribution were split, this
+    // setting was a single boolean. Treat it as governing both toggles so
+    // existing users' preferences carry over.
+    it.each([true, false])(
+      'coerces legacy boolean %s to { commit, pr } with the same value',
+      (value) => {
+        const config = new Config({ ...baseParams, gitCoAuthor: value });
+        const settings = config.getGitCoAuthor();
+        expect(settings.commit).toBe(value);
+        expect(settings.pr).toBe(value);
+      },
+    );
+  });
+
   describe('Telemetry Settings', () => {
     it('should return default telemetry target if not provided', () => {
       const params: ConfigParameters = {

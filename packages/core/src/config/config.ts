@@ -226,9 +226,33 @@ export interface OutputSettings {
 }
 
 export interface GitCoAuthorSettings {
-  enabled?: boolean;
+  commit: boolean;
+  pr: boolean;
   name?: string;
   email?: string;
+}
+
+/**
+ * Shape accepted by the Config constructor for the `gitCoAuthor` param.
+ *
+ * A plain `boolean` is accepted for backward compatibility: older settings
+ * (shipped before commit and PR attribution were split) stored this field as
+ * a single boolean, and we treat that as applying to both sub-toggles so
+ * nobody's stored preference silently flips.
+ */
+export type GitCoAuthorParam = boolean | { commit?: boolean; pr?: boolean };
+
+function normalizeGitCoAuthor(value: GitCoAuthorParam | undefined): {
+  commit: boolean;
+  pr: boolean;
+} {
+  if (typeof value === 'boolean') {
+    return { commit: value, pr: value };
+  }
+  return {
+    commit: value?.commit ?? true,
+    pr: value?.pr ?? true,
+  };
 }
 
 export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
@@ -364,7 +388,7 @@ export interface ConfigParameters {
   contextFileName?: string | string[];
   accessibility?: AccessibilitySettings;
   telemetry?: TelemetrySettings;
-  gitCoAuthor?: boolean;
+  gitCoAuthor?: GitCoAuthorParam;
   usageStatisticsEnabled?: boolean;
   fileFiltering?: {
     respectGitIgnore?: boolean;
@@ -745,7 +769,7 @@ export class Config {
       useCollector: params.telemetry?.useCollector,
     };
     this.gitCoAuthor = {
-      enabled: params.gitCoAuthor ?? true,
+      ...normalizeGitCoAuthor(params.gitCoAuthor),
       name: 'Qwen-Coder',
       email: 'qwen-coder@alibabacloud.com',
     };

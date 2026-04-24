@@ -524,8 +524,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * as git notes. Analyzes staged files via `git diff` to calculate real
    * AI vs human contribution percentages.
    *
-   * Respects the gitCoAuthor setting: if the user disables co-author,
-   * attribution notes are also skipped.
+   * Respects the gitCoAuthor.commit setting: if the user disables commit
+   * attribution, the per-file note is skipped too (same toggle governs
+   * the Co-authored-by trailer and the git-notes payload).
    */
   private async attachCommitAttribution(
     command: string,
@@ -548,7 +549,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     }
 
     const gitCoAuthorSettings = this.config.getGitCoAuthor();
-    if (!gitCoAuthorSettings.enabled) {
+    if (!gitCoAuthorSettings.commit) {
       // Commit succeeded but attribution disabled — still reset prompt counters
       attributionService.clearAttributions(true);
       return;
@@ -719,10 +720,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
   }
 
   private addCoAuthorToGitCommit(command: string): string {
-    // Check if co-author feature is enabled
+    // Check if commit co-author feature is enabled
     const gitCoAuthorSettings = this.config.getGitCoAuthor();
 
-    if (!gitCoAuthorSettings.enabled) {
+    if (!gitCoAuthorSettings.commit) {
       return command;
     }
 
@@ -788,7 +789,7 @@ Co-authored-by: ${gitCoAuthorSettings.name} <${gitCoAuthorSettings.email}>`;
     }
 
     const gitCoAuthorSettings = this.config.getGitCoAuthor();
-    if (!gitCoAuthorSettings.enabled) {
+    if (!gitCoAuthorSettings.pr) {
       return command;
     }
 

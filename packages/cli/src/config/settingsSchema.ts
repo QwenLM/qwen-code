@@ -349,14 +349,36 @@ const SETTINGS_SCHEMA = {
         showInDialog: true,
       },
       gitCoAuthor: {
-        type: 'boolean',
-        label: 'Attribution: commit',
+        type: 'object',
+        label: 'Attribution',
         category: 'General',
         requiresRestart: false,
-        default: true,
+        default: {},
         description:
-          'Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.',
-        showInDialog: true,
+          'Attribution added to git commits and pull requests created through Qwen Code.',
+        showInDialog: false,
+        properties: {
+          commit: {
+            type: 'boolean',
+            label: 'Attribution: commit',
+            category: 'General',
+            requiresRestart: false,
+            default: true,
+            description:
+              'Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.',
+            showInDialog: true,
+          },
+          pr: {
+            type: 'boolean',
+            label: 'Attribution: PR',
+            category: 'General',
+            requiresRestart: false,
+            default: true,
+            description:
+              'Append a Qwen Code attribution line to PR descriptions when running `gh pr create`.',
+            showInDialog: true,
+          },
+        },
       },
       checkpointing: {
         type: 'object',

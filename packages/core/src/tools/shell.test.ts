@@ -68,7 +68,8 @@ describe('ShellTool', () => {
       getPermissionManager: vi.fn().mockReturnValue(undefined),
       getGeminiClient: vi.fn(),
       getGitCoAuthor: vi.fn().mockReturnValue({
-        enabled: true,
+        commit: true,
+        pr: true,
         name: 'Qwen-Coder',
         email: 'qwen-coder@alibabacloud.com',
       }),
@@ -767,10 +768,49 @@ describe('ShellTool', () => {
         );
       });
 
-      it('should not add co-author when disabled in config', async () => {
-        // Mock config with disabled co-author
+      it('should not add co-author when only pr is enabled (commit off)', async () => {
+        // Commit attribution must be independent from PR attribution:
+        // disabling commit should skip the Co-authored-by trailer even if
+        // pr remains enabled.
         (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
-          enabled: false,
+          commit: false,
+          pr: true,
+          name: 'Qwen-Coder',
+          email: 'qwen-coder@alibabacloud.com',
+        });
+
+        const command = 'git commit -m "Initial commit"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.not.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      it('should not add co-author when disabled in config', async () => {
+        // Mock config with commit co-author disabled
+        (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
+          commit: false,
+          pr: false,
           name: 'Qwen-Coder',
           email: 'qwen-coder@alibabacloud.com',
         });
@@ -805,7 +845,8 @@ describe('ShellTool', () => {
       it('should use custom name and email from config', async () => {
         // Mock config with custom co-author details
         (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
-          enabled: true,
+          commit: true,
+          pr: true,
           name: 'Custom Bot',
           email: 'custom@example.com',
         });
@@ -894,6 +935,72 @@ describe('ShellTool', () => {
           expect.stringContaining(
             'Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>',
           ),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+    });
+
+    describe('addAttributionToPR', () => {
+      it('should append attribution to gh pr create --body when pr enabled', async () => {
+        const command = 'gh pr create --title "x" --body "Summary"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Generated with Qwen Code'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      it('should skip PR attribution when pr is off even if commit is on', async () => {
+        // Commit and PR toggles must be independent.
+        (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
+          commit: true,
+          pr: false,
+          name: 'Qwen-Coder',
+          email: 'qwen-coder@alibabacloud.com',
+        });
+
+        const command = 'gh pr create --title "x" --body "Summary"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.not.stringContaining('Generated with Qwen Code'),
           expect.any(String),
           expect.any(Function),
           expect.any(AbortSignal),
