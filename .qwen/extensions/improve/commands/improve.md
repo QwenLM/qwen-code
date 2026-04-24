@@ -164,8 +164,25 @@ run that happens after scheduling.
 ### 1. Create an isolated worktree
 
 - Discover the repo root with git.
-- Create a unique temporary worktree from `HEAD`.
-- Use a branch name like `improve/<slug>-<timestamp>`.
+- Create a unique temporary worktree from `HEAD` on a real local branch.
+- Use this branch naming format:
+  `improve/<kind>-<task-slug>-YYYY-MM-DD-<hash>`.
+  - `task-slug`: short lowercase kebab-case description, no spaces.
+  - `kind`: use `feature` by default; use `fix`, `test`, `refactor`, or `docs`
+    when that better matches the selected task.
+  - `YYYY-MM-DD`: the current local date.
+  - `hash`: a short unique lowercase hex suffix, such as the current HEAD short
+    hash; if that branch already exists, append or replace with a random short
+    hex suffix.
+  - Example: `improve/feature-todo-display-header-2026-04-24-57692188`.
+- Create the worktree with a command equivalent to:
+  `git worktree add -b <branch-name> <worktree-path> HEAD`.
+  Do not use `git worktree add <worktree-path> HEAD`, because that creates a
+  detached HEAD worktree with no branch.
+- After creating the worktree, verify it is on the expected branch with
+  `git -C <worktree-path> symbolic-ref --short HEAD`. If the branch does not
+  match, remove the worktree, delete any partial branch if needed, report that
+  setup failed, and stop.
 - Use a temp directory under `${TMPDIR:-/tmp}`.
 - Do not rely on shell cwd persistence. Every shell command must explicitly use
   the worktree path.
