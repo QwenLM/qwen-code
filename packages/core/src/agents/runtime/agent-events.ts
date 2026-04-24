@@ -133,6 +133,13 @@ export interface AgentToolOutputUpdateEvent {
   outputChunk: ToolResultDisplay;
   /** PTY process PID — present when the tool runs in an interactive shell. */
   pid?: number;
+  /**
+   * Wall-clock timestamp (ms since epoch) when the tool transitioned into
+   * `executing` in the scheduler. Emitted once per call, from the first
+   * scheduler update that sees the transition. Consumers should keep the
+   * first value they see and ignore later events that re-carry it.
+   */
+  executionStartTime?: number;
   timestamp: number;
 }
 

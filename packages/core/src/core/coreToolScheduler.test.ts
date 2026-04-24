@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import type {
+  AnyDeclarativeTool,
   Config,
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
@@ -43,6 +44,7 @@ import type { HookExecutionResponse } from '../confirmation-bus/types.js';
 import { type NotificationType } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { IdeClient } from '../ide/ide-client.js';
+import { WriteFileTool } from '../tools/write-file.js';
 
 vi.mock('fs/promises', () => ({
   writeFile: vi.fn(),
@@ -1822,7 +1824,7 @@ describe('CoreToolScheduler request queueing', () => {
 
 describe('CoreToolScheduler truncated output protection', () => {
   function createTruncationTestScheduler(
-    tool: TestApprovalTool | MockTool,
+    tool: AnyDeclarativeTool,
     toolNames: string[],
   ) {
     const onAllToolCallsComplete = vi.fn();
@@ -1989,6 +1991,59 @@ describe('CoreToolScheduler truncated output protection', () => {
     expect(completedCalls).toHaveLength(1);
     // Non-Edit tools should still execute even when output was truncated
     expect(completedCalls[0].status).toBe('success');
+  });
+
+  it('should prefer truncation rejection over validation errors for truncated write_file calls', async () => {
+    const writeFileConfig = {
+      getProjectRoot: () => '/tmp',
+      getTargetDir: () => '/tmp',
+      getFileSystemService: () => ({
+        readTextFile: vi.fn(),
+        writeTextFile: vi.fn(),
+      }),
+      getDefaultFileEncoding: () => undefined,
+      setApprovalMode: vi.fn(),
+    } as unknown as Config;
+    const writeFileTool = new WriteFileTool(writeFileConfig);
+    const { scheduler, onAllToolCallsComplete } = createTruncationTestScheduler(
+      writeFileTool,
+      [WriteFileTool.Name],
+    );
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: WriteFileTool.Name,
+          args: { file_path: '/tmp/test.txt' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-write-file-truncated',
+          wasOutputTruncated: true,
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls).toHaveLength(1);
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+
+    if (completedCall.status === 'error') {
+      const errorMessage = completedCall.response.error?.message;
+      expect(errorMessage).toContain('truncated due to max_tokens limit');
+      expect(errorMessage).toContain(
+        'rejected to prevent writing truncated content',
+      );
+      expect(errorMessage).not.toContain(
+        "params must have required property 'content'",
+      );
+    }
   });
 });
 
@@ -4106,6 +4161,152 @@ describe('CoreToolScheduler validation retry loop detection', () => {
       new AbortController().signal,
     );
 
+    const msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toBeDefined();
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('should isolate retry counters per-tool across batches', async () => {
+    // Regression: the batch-level continues-loop check used to keep *all*
+    // retry state whenever any current request matched a previously failing
+    // tool. That let stale counts for an unrelated tool survive long enough
+    // to fire RETRY LOOP DETECTED prematurely the next time that tool was
+    // called. The correct behaviour prunes counters per-tool: keep only
+    // counters whose tool name actually appears in the current batch.
+    class StrictToolAlt extends BaseDeclarativeTool<
+      { other: string },
+      ToolResult
+    > {
+      static readonly Name = 'strictStringToolAlt';
+      constructor() {
+        super(
+          StrictToolAlt.Name,
+          'StrictStringToolAlt',
+          'Alt tool requiring string other param.',
+          Kind.Other,
+          {
+            type: 'object',
+            properties: { other: { type: 'string' } },
+            required: ['other'],
+          },
+        );
+      }
+      protected createInvocation(params: {
+        other: string;
+      }): ToolInvocation<{ other: string }, ToolResult> {
+        return new (class extends BaseToolInvocation<
+          { other: string },
+          ToolResult
+        > {
+          constructor(p: { other: string }) {
+            super(p);
+          }
+          getDescription() {
+            return 'strictStringToolAlt invocation';
+          }
+          async execute(): Promise<ToolResult> {
+            return { llmContent: 'ok', returnDisplay: 'ok' };
+          }
+        })(params);
+      }
+    }
+
+    const toolA = new StrictStringTool();
+    const toolB = new StrictToolAlt();
+    const mockToolRegistry = {
+      ensureTool: async (name: string) =>
+        name === StrictStringTool.Name
+          ? toolA
+          : name === StrictToolAlt.Name
+            ? toolB
+            : undefined,
+      getTool: (name: string) =>
+        name === StrictStringTool.Name
+          ? toolA
+          : name === StrictToolAlt.Name
+            ? toolB
+            : undefined,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: (name: string) =>
+        name === StrictStringTool.Name
+          ? toolA
+          : name === StrictToolAlt.Name
+            ? toolB
+            : undefined,
+      getToolByDisplayName: () => undefined,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getAllToolNames: () => [StrictStringTool.Name, StrictToolAlt.Name],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () => 100,
+      getTruncateToolOutputLines: () => 10,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      setApprovalMode: vi.fn(),
+    } as unknown as Config;
+
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    // Tool A fails twice, accumulating a retry count of 2.
+    await scheduler.schedule(
+      [makeRequest('a1', StrictStringTool.Name, { value: 123 })],
+      new AbortController().signal,
+    );
+    await scheduler.schedule(
+      [makeRequest('a2', StrictStringTool.Name, { value: 123 })],
+      new AbortController().signal,
+    );
+
+    // Now a batch for tool B only — tool A's counter must be pruned because
+    // A is not present in this batch.
+    await scheduler.schedule(
+      [makeRequest('b1', StrictToolAlt.Name, { other: 456 })],
+      new AbortController().signal,
+    );
+
+    // Tool A fails once more. Under the old wholesale-keep behaviour this
+    // would be the third consecutive A failure and would trip the directive.
+    // Under per-tool pruning the counter starts fresh at 1 and no directive
+    // should be emitted.
+    await scheduler.schedule(
+      [makeRequest('a3', StrictStringTool.Name, { value: 123 })],
+      new AbortController().signal,
+    );
     const msg = getLastErrorMessage(onToolCallsUpdate);
     expect(msg).toBeDefined();
     expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);

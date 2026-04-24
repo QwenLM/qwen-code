@@ -47,6 +47,44 @@ function buildBtwPrompt(question: string): string {
   ].join('\n');
 }
 
+function getBtwCacheSafeParams(
+  context: CommandContext,
+): ReturnType<typeof getCacheSafeParams> {
+  const geminiClient = context.services.config?.getGeminiClient();
+  if (
+    geminiClient &&
+    typeof geminiClient === 'object' &&
+    typeof geminiClient.getChat === 'function' &&
+    typeof geminiClient.getHistory === 'function'
+  ) {
+    const chat = geminiClient.getChat();
+    if (
+      chat &&
+      typeof chat === 'object' &&
+      typeof chat.getGenerationConfig === 'function'
+    ) {
+      const generationConfig = chat.getGenerationConfig();
+      if (generationConfig) {
+        const fullHistory = geminiClient.getHistory(true);
+        const maxHistoryEntries = 40;
+        const history =
+          fullHistory.length > maxHistoryEntries
+            ? fullHistory.slice(-maxHistoryEntries)
+            : fullHistory;
+
+        return {
+          generationConfig,
+          history,
+          model: context.services.config?.getModel() ?? '',
+          version: 0,
+        };
+      }
+    }
+  }
+
+  return getCacheSafeParams();
+}
+
 /**
  * Run a side question using runForkedAgent (cache path).
  *
@@ -63,7 +101,7 @@ async function askBtw(
   const { config } = context.services;
   if (!config) throw new Error('Config not loaded');
 
-  const cacheSafeParams = getCacheSafeParams();
+  const cacheSafeParams = getBtwCacheSafeParams(context);
   if (!cacheSafeParams)
     throw new Error(t('No conversation context available for /btw'));
 
@@ -85,13 +123,12 @@ export const btwCommand: SlashCommand = {
     );
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive'] as const,
   action: async (
     context: CommandContext,
     args: string,
   ): Promise<void | SlashCommandActionReturn> => {
     const question = args.trim();
-    const executionMode = context.executionMode ?? 'interactive';
-    const abortSignal = context.abortSignal ?? new AbortController().signal;
 
     if (!question) {
       return {
@@ -112,53 +149,17 @@ export const btwCommand: SlashCommand = {
       };
     }
 
-    // ACP mode: return a stream_messages async generator
-    if (executionMode === 'acp') {
-      const messages = async function* () {
-        try {
-          yield {
-            messageType: 'info' as const,
-            content: t('Thinking...'),
-          };
-
-          const answer = await askBtw(context, question, abortSignal);
-
-          yield {
-            messageType: 'info' as const,
-            content: `btw> ${question}\n${answer}`,
-          };
-        } catch (error) {
-          yield {
-            messageType: 'error' as const,
-            content: formatBtwError(error),
-          };
-        }
+    const model = config.getModel();
+    if (!model) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('No model configured.'),
       };
-
-      return { type: 'stream_messages', messages: messages() };
-    }
-
-    // Non-interactive mode: return a simple message result
-    if (executionMode === 'non_interactive') {
-      try {
-        const answer = await askBtw(context, question, abortSignal);
-        return {
-          type: 'message',
-          messageType: 'info',
-          content: `btw> ${question}\n${answer}`,
-        };
-      } catch (error) {
-        return {
-          type: 'message',
-          messageType: 'error',
-          content: formatBtwError(error),
-        };
-      }
     }
 
     // Interactive mode: use dedicated btwItem state for the fixed bottom area.
     // This does NOT occupy pendingItem, so the main conversation is never blocked.
-
     // Cancel any previous in-flight btw before starting a new one.
     ui.cancelBtw();
 

@@ -815,12 +815,16 @@ export class MCPOAuthProvider {
     displayMessage({
       key: 'If the browser does not open, copy and paste this URL into your browser:',
     });
-    displayMessage(`\n${authUrl.toString()}\n`);
     displayMessage({
       key: 'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.',
     });
     if (events) {
+      // UI consumers render the URL from this event (as a clickable OSC 8
+      // hyperlink). Avoid also pushing the raw URL through displayMessage —
+      // hard-wrapping it inside the message list breaks link detection.
       events.emit(OAUTH_AUTH_URL_EVENT, authUrl.toString());
+    } else {
+      displayMessage(`\n${authUrl.toString()}\n`);
     }
 
     // Start callback server

@@ -82,7 +82,9 @@ let stdinErrorHandler: ((err: Error) => void) | undefined;
 let mockKill: ReturnType<typeof vi.fn>;
 
 function setStatusLineConfig(
-  config: { type: string; command: string } | undefined,
+  config:
+    | { type: string; command: string; refreshInterval?: number }
+    | undefined,
 ) {
   mockSettings.merged = config ? { ui: { statusLine: config } } : {};
 }
@@ -777,6 +779,256 @@ describe('useStatusLine', () => {
         execCallback(null, 'recovered\n', '');
       });
       expect(result.current.lines).toEqual(['recovered']);
+    });
+  });
+
+  // --- Output deduplication (cuts unnecessary Footer re-renders) ---
+
+  describe('output deduplication', () => {
+    it('preserves the same lines array reference when output is unchanged', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo same' });
+      const { result, rerender } = renderHook(() => useStatusLine());
+
+      await act(async () => {
+        execCallback(null, 'same output\n', '');
+      });
+      const firstRef = result.current.lines;
+      expect(firstRef).toEqual(['same output']);
+
+      // Trigger another exec with identical output (e.g. via state change).
+      mockUIState.currentModel = 'new-model';
+      rerender();
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      await act(async () => {
+        execCallback(null, 'same output\n', '');
+      });
+
+      // Reference preserved → React can skip the Footer re-render.
+      expect(result.current.lines).toBe(firstRef);
+    });
+
+    it('produces a new reference when output changes', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo tick' });
+      const { result, rerender } = renderHook(() => useStatusLine());
+
+      await act(async () => {
+        execCallback(null, 'first\n', '');
+      });
+      const firstRef = result.current.lines;
+      expect(firstRef).toEqual(['first']);
+
+      mockUIState.currentModel = 'new-model';
+      rerender();
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      await act(async () => {
+        execCallback(null, 'second\n', '');
+      });
+
+      expect(result.current.lines).not.toBe(firstRef);
+      expect(result.current.lines).toEqual(['second']);
+    });
+  });
+
+  // --- refreshInterval (periodic refresh) ---
+
+  describe('refreshInterval', () => {
+    it('re-executes the command every N seconds', async () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: 2,
+      });
+      renderHook(() => useStatusLine());
+
+      // Mount executes once immediately
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        execCallback(null, 'tick 1\n', '');
+      });
+
+      // First interval tick after 2s — previous exec has completed, so
+      // the tick is free to spawn a new one.
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        execCallback(null, 'tick 2\n', '');
+      });
+
+      // Second interval tick after another 2s
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(3);
+    });
+
+    it('does not start an interval when refreshInterval is omitted', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo static' });
+      renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      // Still only the mount exec — no periodic refresh
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects refreshInterval < 1 (no interval scheduled)', async () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: 0.5,
+      });
+      renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects non-finite refreshInterval (no interval scheduled)', async () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: Number.POSITIVE_INFINITY,
+      });
+      renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears the interval when config is removed', async () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: 1,
+      });
+      const { rerender } = renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      // Remove the config — the interval should be torn down.
+      setStatusLineConfig(undefined);
+      rerender();
+
+      const callsAfterRemoval = vi.mocked(child_process.exec).mock.calls.length;
+
+      await act(async () => {
+        vi.advanceTimersByTime(10_000);
+      });
+      expect(vi.mocked(child_process.exec).mock.calls.length).toBe(
+        callsAfterRemoval,
+      );
+    });
+
+    it('reschedules when refreshInterval changes', async () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: 5,
+      });
+      const { rerender } = renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        execCallback(null, 'tick\n', '');
+      });
+
+      // 2s passes — not yet a tick on the 5s schedule.
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      // Swap to a 1s interval — the old 5s timer must be cleared, not kept.
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: 1,
+      });
+      rerender();
+
+      // 1s later — fires on the new schedule.
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
+    });
+
+    it('clears the interval on unmount', async () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: 1,
+      });
+      const { unmount } = renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      unmount();
+
+      const callsAfterUnmount = vi.mocked(child_process.exec).mock.calls.length;
+      await act(async () => {
+        vi.advanceTimersByTime(10_000);
+      });
+      expect(vi.mocked(child_process.exec).mock.calls.length).toBe(
+        callsAfterUnmount,
+      );
+    });
+
+    it('skips periodic ticks while a previous exec is still running', async () => {
+      // Starvation regression (#3383 review): with refreshInterval < command
+      // latency, if every tick called doUpdate() it would kill the in-flight
+      // child, generation++ would stale the eventual callback, and the user
+      // would never see any output. This test asserts BOTH the guard (exec
+      // call count) AND the user-visible result (rendered lines).
+      setStatusLineConfig({
+        type: 'command',
+        command: 'slow-command',
+        refreshInterval: 1,
+      });
+      const { result } = renderHook(() => useStatusLine());
+
+      // Mount exec: child is spawned, callback NOT yet resolved — child is
+      // still "running" from the hook's perspective.
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+      const pendingCallback = execCallback;
+
+      // Several interval ticks pass while the first exec is in flight.
+      // Each tick must detect the running child and skip doUpdate().
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      // First exec finally completes — activeChildRef clears. Without the
+      // guard, generationRef would have bumped 3 times above and the next
+      // line would be ignored as stale, leaving `lines` permanently empty.
+      await act(async () => {
+        pendingCallback(null, 'done\n', '');
+      });
+      expect(result.current.lines).toEqual(['done']);
+
+      // Next tick is now free to spawn a new exec.
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
     });
   });
 });

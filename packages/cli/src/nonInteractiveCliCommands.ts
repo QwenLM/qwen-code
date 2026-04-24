@@ -16,11 +16,12 @@ import { CommandService } from './services/CommandService.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from './services/BundledSkillLoader.js';
 import { FileCommandLoader } from './services/FileCommandLoader.js';
+import { SkillCommandLoader } from './services/SkillCommandLoader.js';
 import {
-  CommandKind,
   type CommandContext,
   type SlashCommand,
   type SlashCommandActionReturn,
+  type ExecutionMode,
 } from './ui/commands/types.js';
 import { createNonInteractiveUI } from './ui/noninteractive/nonInteractiveUi.js';
 import type { LoadedSettings } from './config/settings.js';
@@ -28,25 +29,6 @@ import type { SessionStatsState } from './ui/contexts/SessionContext.js';
 import { t } from './i18n/index.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_COMMANDS');
-
-/**
- * Built-in commands that are allowed in non-interactive modes (CLI and ACP).
- * Only safe, read-only commands that don't require interactive UI.
- *
- * These commands are:
- * - init: Initialize project configuration
- * - summary: Generate session summary
- * - compress: Compress conversation history
- * - context: Show context window usage (read-only diagnostic)
- */
-export const ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE = [
-  'init',
-  'summary',
-  'compress',
-  'btw',
-  'bug',
-  'context',
-] as const;
 
 /**
  * Result of handling a slash command in non-interactive mode.
@@ -186,45 +168,12 @@ function handleCommandResult(
 }
 
 /**
- * Filters commands based on the allowed built-in command names.
- *
- * - Always includes FILE commands
- * - Only includes BUILT_IN commands if their name is in the allowed set
- * - Excludes other command types (e.g., MCP_PROMPT) in non-interactive mode
- *
- * @param commands All loaded commands
- * @param allowedBuiltinCommandNames Set of allowed built-in command names (empty = none allowed)
- * @returns Filtered commands
- */
-function filterCommandsForNonInteractive(
-  commands: readonly SlashCommand[],
-  allowedBuiltinCommandNames: Set<string>,
-): SlashCommand[] {
-  return commands.filter((cmd) => {
-    if (cmd.kind === CommandKind.FILE || cmd.kind === CommandKind.SKILL) {
-      return true;
-    }
-
-    // Built-in commands: only include if in the allowed list
-    if (cmd.kind === CommandKind.BUILT_IN) {
-      return allowedBuiltinCommandNames.has(cmd.name);
-    }
-
-    // Exclude other types (e.g., MCP_PROMPT) in non-interactive mode
-    return false;
-  });
-}
-
-/**
  * Processes a slash command in a non-interactive environment.
  *
  * @param rawQuery The raw query string (should start with '/')
  * @param abortController Controller to cancel the operation
  * @param config The configuration object
  * @param settings The loaded settings
- * @param allowedBuiltinCommandNames Optional array of built-in command names that are
- *   allowed. Defaults to ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE (init, summary, compress).
- *   Pass an empty array to only allow file commands.
  * @returns A Promise that resolves to a `NonInteractiveSlashCommandResult` describing
  *   the outcome of the command execution.
  */
@@ -233,9 +182,6 @@ export const handleSlashCommand = async (
   abortController: AbortController,
   config: Config,
   settings: LoadedSettings,
-  allowedBuiltinCommandNames: string[] = [
-    ...ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE,
-  ],
 ): Promise<NonInteractiveSlashCommandResult> => {
   const trimmed = rawQuery.trim();
   if (!trimmed.startsWith('/')) {
@@ -245,30 +191,82 @@ export const handleSlashCommand = async (
   const isAcpMode = config.getExperimentalZedIntegration();
   const isInteractive = config.isInteractive();
 
-  const executionMode = isAcpMode
+  const executionMode: ExecutionMode = isAcpMode
     ? 'acp'
     : isInteractive
       ? 'interactive'
       : 'non_interactive';
 
-  const allowedBuiltinSet = new Set(allowedBuiltinCommandNames ?? []);
-
   // Load all commands to check if the command exists but is not allowed
   const allLoaders = [
     new BuiltinCommandLoader(config),
     new BundledSkillLoader(config),
+    new SkillCommandLoader(config),
     new FileCommandLoader(config),
   ];
 
+  // Build the disabled-command set (case-insensitive).
+  const disabledSlashCommandsRaw = config.getDisabledSlashCommands();
+  const disabledNameSet = new Set<string>();
+  for (const name of disabledSlashCommandsRaw) {
+    const trimmed = name.trim();
+    if (trimmed) disabledNameSet.add(trimmed.toLowerCase());
+  }
+  const isDisabled = (cmd: { name: string; altNames?: readonly string[] }) =>
+    disabledNameSet.has(cmd.name.toLowerCase()) ||
+    (cmd.altNames ?? []).some((a) => disabledNameSet.has(a.toLowerCase()));
+
+  // Load the full command set (unfiltered by the denylist) so that the
+  // fallback existence check below can distinguish a disabled command from a
+  // truly unknown one. Without this, a disabled command would fall through to
+  // `no_command` and be forwarded to the model as plain prompt text.
   const commandService = await CommandService.create(
     allLoaders,
     abortController.signal,
   );
-  const allCommands = commandService.getCommands();
-  const filteredCommands = filterCommandsForNonInteractive(
-    allCommands,
-    allowedBuiltinSet,
+  // Register model-invocable commands provider so SkillTool description stays
+  // up-to-date in non-interactive / ACP mode.
+  config.setModelInvocableCommandsProvider(() =>
+    commandService.getModelInvocableCommands().map((cmd) => ({
+      name: cmd.name,
+      description:
+        typeof cmd.description === 'string' ? cmd.description : cmd.description,
+    })),
   );
+  // Register executor so SkillTool can invoke model-invocable commands
+  // (e.g. MCP prompts) that are not file-based skills.
+  config.setModelInvocableCommandsExecutor(
+    async (name: string, args: string = '') => {
+      const commands = commandService.getModelInvocableCommands();
+      const cmd = commands.find((c) => c.name === name);
+      if (!cmd?.action) return null;
+      const minimalContext = {
+        executionMode,
+        invocation: {
+          raw: args ? `/${name} ${args}` : `/${name}`,
+          name,
+          args,
+        },
+        services: { config, settings, git: undefined, logger: null },
+      } as unknown as CommandContext;
+      const result = await cmd.action(minimalContext, args);
+      if (!result || result.type !== 'submit_prompt') return null;
+      const content = result.content;
+      if (typeof content === 'string') return content;
+      if (Array.isArray(content)) {
+        return content
+          .map((p) =>
+            typeof p === 'string' ? p : ((p as { text?: string }).text ?? ''),
+          )
+          .join('');
+      }
+      return null;
+    },
+  );
+  const allCommands = commandService.getCommands();
+  const filteredCommands = commandService
+    .getCommandsForMode(executionMode)
+    .filter((cmd) => !isDisabled(cmd));
 
   // First, try to parse with filtered commands
   const { commandToExecute, args } = parseSlashCommand(
@@ -284,13 +282,27 @@ export const handleSlashCommand = async (
     );
 
     if (knownCommand) {
-      // Command exists but is not allowed in non-interactive mode
+      // Derive the token the user actually typed (e.g. "about" when the
+      // primary name is "status") to surface a helpful error message.
+      const typedToken =
+        rawQuery.trim().substring(1).trim().split(/\s+/)[0] ??
+        knownCommand.name;
+      if (isDisabled(knownCommand)) {
+        return {
+          type: 'unsupported',
+          reason: t(
+            'The command "/{{command}}" is disabled by the current configuration.',
+            { command: typedToken },
+          ),
+          originalType: 'filtered_command',
+        };
+      }
+      // Command exists but is not allowed in this mode
       return {
         type: 'unsupported',
-        reason: t(
-          'The command "/{{command}}" is not supported in non-interactive mode.',
-          { command: knownCommand.name },
-        ),
+        reason: t('The command "/{{command}}" is not supported in this mode.', {
+          command: typedToken,
+        }),
         originalType: 'filtered_command',
       };
     }
@@ -349,44 +361,35 @@ export const handleSlashCommand = async (
 };
 
 /**
- * Retrieves all available slash commands for the current configuration.
+ * Retrieves all available slash commands for the given execution mode.
  *
  * @param config The configuration object
  * @param abortSignal Signal to cancel the loading process
- * @param allowedBuiltinCommandNames Optional array of built-in command names that are
- *   allowed. Defaults to ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE (init, summary, compress).
- *   Pass an empty array to only include file commands.
+ * @param mode The execution mode to filter commands for. Defaults to 'acp'.
  * @returns A Promise that resolves to an array of SlashCommand objects
  */
 export const getAvailableCommands = async (
   config: Config,
   abortSignal: AbortSignal,
-  allowedBuiltinCommandNames: string[] = [
-    ...ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE,
-  ],
+  mode: ExecutionMode = 'acp',
 ): Promise<SlashCommand[]> => {
   try {
-    const allowedBuiltinSet = new Set(allowedBuiltinCommandNames ?? []);
+    const loaders = [
+      new BuiltinCommandLoader(config),
+      new BundledSkillLoader(config),
+      new SkillCommandLoader(config),
+      new FileCommandLoader(config),
+    ];
 
-    // Only load BuiltinCommandLoader if there are allowed built-in commands
-    const loaders =
-      allowedBuiltinSet.size > 0
-        ? [
-            new BuiltinCommandLoader(config),
-            new BundledSkillLoader(config),
-            new FileCommandLoader(config),
-          ]
-        : [new BundledSkillLoader(config), new FileCommandLoader(config)];
-
-    const commandService = await CommandService.create(loaders, abortSignal);
-    const commands = commandService.getCommands();
-    const filteredCommands = filterCommandsForNonInteractive(
-      commands,
-      allowedBuiltinSet,
+    const disabledSlashCommands = config.getDisabledSlashCommands();
+    const commandService = await CommandService.create(
+      loaders,
+      abortSignal,
+      disabledSlashCommands.length > 0
+        ? new Set(disabledSlashCommands)
+        : undefined,
     );
-
-    // Filter out hidden commands
-    return filteredCommands.filter((cmd) => !cmd.hidden);
+    return commandService.getCommandsForMode(mode) as SlashCommand[];
   } catch (error) {
     // Handle errors gracefully - log and return empty array
     debugLogger.error('Error loading available commands:', error);

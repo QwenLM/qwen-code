@@ -21,6 +21,7 @@ export const bugCommand: SlashCommand = {
     return t('submit a bug report');
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context: CommandContext, args?: string): Promise<void> => {
     const bugDescription = (args || '').trim();
     const systemInfo = await getExtendedSystemInfo(context);

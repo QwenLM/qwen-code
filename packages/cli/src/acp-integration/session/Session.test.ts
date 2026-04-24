@@ -20,6 +20,12 @@ import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 
 vi.mock('../../nonInteractiveCliCommands.js', () => ({
+  ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE: [
+    'init',
+    'summary',
+    'compress',
+    'bug',
+  ],
   getAvailableCommands: vi.fn(),
   handleSlashCommand: vi.fn(),
 }));
@@ -50,8 +56,10 @@ describe('Session', () => {
   let currentAuthType: AuthType;
   let switchModelSpy: ReturnType<typeof vi.fn>;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
-  let mockToolRegistry: { getTool: ReturnType<typeof vi.fn> };
-
+  let mockToolRegistry: {
+    getTool: ReturnType<typeof vi.fn>;
+    ensureTool: ReturnType<typeof vi.fn>;
+  };
   beforeEach(() => {
     currentModel = 'qwen3-code-plus';
     currentAuthType = AuthType.USE_OPENAI;
@@ -68,11 +76,21 @@ describe('Session', () => {
       getHistory: vi.fn().mockReturnValue([]),
     } as unknown as GeminiChat;
 
-    mockToolRegistry = { getTool: vi.fn() };
+    mockToolRegistry = {
+      getTool: vi.fn(),
+      // #executePrompt → #buildInitialSystemReminders calls
+      // getToolRegistry().ensureTool(ToolNames.AGENT) on every session.prompt(),
+      // so the default mock must provide it (#1151 / #3479).
+      ensureTool: vi.fn().mockResolvedValue(true),
+    };
     const fileService = { shouldGitIgnoreFile: vi.fn().mockReturnValue(false) };
 
     mockConfig = {
       setApprovalMode: vi.fn(),
+      // #buildInitialSystemReminders branches on ApprovalMode.PLAN on every
+      // session.prompt(), so the default must be defined. Individual tests
+      // that care override via `mockConfig.getApprovalMode = vi.fn()...`.
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       switchModel: switchModelSpy,
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
@@ -86,6 +104,12 @@ describe('Session', () => {
         recordToolResult: vi.fn(),
       }),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
+      // #buildInitialSystemReminders iterates listSubagents() on every
+      // session.prompt(). Default to an empty list so tests that don't
+      // exercise subagent reminders don't need to stub it (#1151 / #3479).
+      getSubagentManager: vi.fn().mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([]),
+      }),
       getFileService: vi.fn().mockReturnValue(fileService),
       getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
       getEnableRecursiveFileSearch: vi.fn().mockReturnValue(false),
@@ -93,6 +117,9 @@ describe('Session', () => {
       getDebugMode: vi.fn().mockReturnValue(false),
       getAuthType: vi.fn().mockImplementation(() => currentAuthType),
       isCronEnabled: vi.fn().mockReturnValue(false),
+      getGeminiClient: vi
+        .fn()
+        .mockReturnValue({ getChat: vi.fn().mockReturnValue(mockChat) }),
     } as unknown as Config;
 
     mockClient = {
@@ -113,7 +140,6 @@ describe('Session', () => {
 
     session = new Session(
       'test-session-id',
-      mockChat,
       mockConfig,
       mockClient,
       mockSettings,
@@ -129,9 +155,7 @@ describe('Session', () => {
     mockConfig = undefined as unknown as Config;
     mockClient = undefined as unknown as AgentSideConnection;
     mockSettings = undefined as unknown as LoadedSettings;
-    mockToolRegistry = undefined as unknown as {
-      getTool: ReturnType<typeof vi.fn>;
-    };
+    mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
   });
@@ -205,6 +229,7 @@ describe('Session', () => {
       expect(getAvailableCommandsSpy).toHaveBeenCalledWith(
         mockConfig,
         expect.any(AbortSignal),
+        'acp',
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -285,7 +310,6 @@ describe('Session', () => {
       core.Storage.setRuntimeBaseDir(runtimeDir);
       session = new Session(
         'test-session-id',
-        mockChat,
         mockConfig,
         mockClient,
         mockSettings,
@@ -1055,6 +1079,227 @@ describe('Session', () => {
 
           expect(mockFireStopFailureEvent).not.toHaveBeenCalled();
         });
+      });
+    });
+
+    describe('tool call concurrency', () => {
+      it('runs multiple Agent tool calls concurrently (issue #2516)', async () => {
+        // Each Agent call has two controllable async boundaries:
+        //   - `called`  — resolves *when* the test code reaches `execute()`
+        //   - `result`  — the promise `execute()` returns, resolved by the
+        //                 test after observing both `called` signals.
+        //
+        // Under the old sequential for-loop, call-b's `execute()` would
+        // only run after call-a's `execute()` promise resolved — so the
+        // `await Promise.all([called-a, called-b])` below deadlocks and
+        // the test hits vitest's default per-test timeout. Under the
+        // concurrent implementation both `called` signals fire before
+        // either `result` is resolved.
+        type Deferred<T> = {
+          promise: Promise<T>;
+          resolve: (v: T) => void;
+        };
+        const makeDeferred = <T>(): Deferred<T> => {
+          let resolve!: (v: T) => void;
+          const promise = new Promise<T>((r) => {
+            resolve = r;
+          });
+          return { promise, resolve };
+        };
+
+        const called: Record<string, Deferred<void>> = {
+          'call-a': makeDeferred<void>(),
+          'call-b': makeDeferred<void>(),
+        };
+        const result: Record<string, Deferred<core.ToolResult>> = {
+          'call-a': makeDeferred<core.ToolResult>(),
+          'call-b': makeDeferred<core.ToolResult>(),
+        };
+
+        const agentTool = {
+          name: core.ToolNames.AGENT,
+          kind: core.Kind.Think,
+          build: vi.fn().mockImplementation((args: Record<string, unknown>) => {
+            const id = args['_test_id'] as string;
+            return {
+              params: args,
+              eventEmitter: undefined,
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue(`agent ${id}`),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute: vi.fn().mockImplementation(() => {
+                called[id].resolve();
+                return result[id].promise;
+              }),
+            };
+          }),
+        };
+
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === core.ToolNames.AGENT ? agentTool : undefined,
+        );
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(ApprovalMode.DEFAULT);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+
+        // Model returns two Agent calls, then an empty stream once results
+        // are fed back (to terminate the prompt loop).
+        const sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-a',
+                      name: core.ToolNames.AGENT,
+                      args: { _test_id: 'call-a', subagent_type: 'explore' },
+                    },
+                    {
+                      id: 'call-b',
+                      name: core.ToolNames.AGENT,
+                      args: { _test_id: 'call-b', subagent_type: 'explore' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+        mockChat.sendMessageStream = sendMessageStream;
+
+        const promptPromise = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'spawn two agents' }],
+        });
+
+        // Wait until both `execute()` bodies have been entered. Sequential
+        // behaviour deadlocks here → vitest times out the test → failure.
+        await Promise.all([called['call-a'].promise, called['call-b'].promise]);
+
+        // Resolve out of order to also verify that final part ordering
+        // follows the original functionCalls order, not resolution order.
+        result['call-b'].resolve({ llmContent: 'B-done', returnDisplay: 'B' });
+        result['call-a'].resolve({ llmContent: 'A-done', returnDisplay: 'A' });
+
+        await promptPromise;
+
+        // The second sendMessageStream invocation carries the tool responses
+        // that will be fed back to the model — assert their order matches
+        // the original function-call order (A before B).
+        expect(sendMessageStream).toHaveBeenCalledTimes(2);
+        const followUp = sendMessageStream.mock.calls[1][1] as {
+          message: Array<{ functionResponse?: { id?: string } }>;
+        };
+        const ids = followUp.message
+          .filter((p) => p.functionResponse)
+          .map((p) => p.functionResponse?.id);
+        expect(ids).toEqual(['call-a', 'call-b']);
+      });
+    });
+
+    describe('system reminders', () => {
+      // Captures the `message` parts fed into chat.sendMessageStream on the
+      // first turn so individual tests can assert what the model saw.
+      const captureFirstTurnMessage = () => {
+        const capture: { parts: Array<{ text?: string }> } = { parts: [] };
+        (mockChat.sendMessageStream as ReturnType<typeof vi.fn>) = vi
+          .fn()
+          .mockImplementation(async (_model, req) => {
+            capture.parts = req.message ?? [];
+            return createEmptyStream();
+          });
+        return capture;
+      };
+
+      const stubEmptySubagents = () => {
+        (mockConfig as unknown as Record<string, unknown>)[
+          'getSubagentManager'
+        ] = vi.fn().mockReturnValue({
+          listSubagents: vi.fn().mockResolvedValue([]),
+        });
+        // ensureTool is called on the result of getToolRegistry(); add it.
+        (
+          mockToolRegistry as unknown as { ensureTool: () => Promise<boolean> }
+        ).ensureTool = vi.fn().mockResolvedValue(true);
+      };
+
+      it('prepends plan-mode reminder when approval mode is PLAN (#1151)', async () => {
+        stubEmptySubagents();
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+        const capture = captureFirstTurnMessage();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'research this' }],
+        });
+
+        const reminderPart = capture.parts.find(
+          (p) => p.text && p.text.includes('Plan mode is active'),
+        );
+        expect(reminderPart).toBeTruthy();
+        expect(reminderPart!.text).toContain('exit_plan_mode');
+        // Reminder comes before the user text, matching client.ts ordering.
+        const reminderIdx = capture.parts.indexOf(reminderPart!);
+        const userIdx = capture.parts.findIndex(
+          (p) => p.text === 'research this',
+        );
+        expect(reminderIdx).toBeLessThan(userIdx);
+      });
+
+      it('does not prepend plan-mode reminder in default approval mode', async () => {
+        stubEmptySubagents();
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(ApprovalMode.DEFAULT);
+        const capture = captureFirstTurnMessage();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hi' }],
+        });
+
+        const hasPlanReminder = capture.parts.some(
+          (p) => p.text && p.text.includes('Plan mode is active'),
+        );
+        expect(hasPlanReminder).toBe(false);
+      });
+
+      it('prepends subagent reminder when user-level subagents exist', async () => {
+        (mockConfig as unknown as Record<string, unknown>)[
+          'getSubagentManager'
+        ] = vi.fn().mockReturnValue({
+          listSubagents: vi.fn().mockResolvedValue([
+            { name: 'researcher', level: 'user' },
+            { name: 'planner', level: 'project' },
+            // builtin entries are filtered out, matching client.ts:853.
+            { name: 'builtin-helper', level: 'builtin' },
+          ]),
+        });
+        (
+          mockToolRegistry as unknown as { ensureTool: () => Promise<boolean> }
+        ).ensureTool = vi.fn().mockResolvedValue(true);
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(ApprovalMode.DEFAULT);
+        const capture = captureFirstTurnMessage();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hi' }],
+        });
+
+        const reminder = capture.parts.find(
+          (p) =>
+            p.text &&
+            p.text.includes('researcher') &&
+            p.text.includes('planner'),
+        );
+        expect(reminder).toBeTruthy();
+        expect(reminder!.text).not.toContain('builtin-helper');
       });
     });
   });

@@ -17,7 +17,7 @@ import {
   isCodingPlanConfig,
   CodingPlanRegion,
   CODING_PLAN_ENV_KEY,
-} from '../../constants/codingPlan.js';
+} from '@qwen-code/qwen-code-core';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { backupSettingsFile } from '../../utils/settingsUtils.js';
 import { loadSettings, type LoadedSettings } from '../../config/settings.js';
@@ -69,6 +69,7 @@ export async function handleQwenAuth(
       prompt: undefined,
       promptInteractive: undefined,
       yolo: undefined,
+      bare: undefined,
       approvalMode: undefined,
       telemetry: undefined,
       checkpointing: undefined,
@@ -90,10 +91,6 @@ export async function handleQwenAuth(
       openaiLoggingDir: undefined,
       proxy: undefined,
       includeDirectories: undefined,
-      tavilyApiKey: undefined,
-      googleApiKey: undefined,
-      googleSearchEngineId: undefined,
-      webSearchDefault: undefined,
       screenReader: undefined,
       inputFormat: undefined,
       outputFormat: undefined,
@@ -105,6 +102,7 @@ export async function handleQwenAuth(
       maxSessionTurns: undefined,
       coreTools: undefined,
       excludeTools: undefined,
+      disabledSlashCommands: undefined,
       authType: undefined,
       channel: undefined,
       systemPrompt: undefined,

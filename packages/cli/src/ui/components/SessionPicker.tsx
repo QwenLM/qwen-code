@@ -26,10 +26,21 @@ export interface SessionPickerProps {
   currentBranch?: string;
 
   /**
+   * Custom title for the picker header. Defaults to "Resume Session".
+   */
+  title?: string;
+
+  /**
    * Scroll mode. When true, keep selection centered (fullscreen-style).
    * Defaults to true so dialog + standalone behave identically.
    */
   centerSelection?: boolean;
+
+  /**
+   * Pre-filtered sessions to display instead of loading all sessions.
+   * When provided, skips initial load and disables pagination.
+   */
+  initialSessions?: SessionData[];
 }
 
 const PREFIX_CHARS = {
@@ -81,8 +92,13 @@ function SessionListItemView({
         ? prefixChars.scrollDown
         : prefixChars.normal;
 
-  const promptText = session.prompt || '(empty prompt)';
+  const promptText = session.customTitle || session.prompt || '(empty prompt)';
   const truncatedPrompt = truncateText(promptText, maxPromptWidth);
+  // Dim auto-generated titles so users can distinguish a model guess from
+  // a title they chose themselves with `/rename`. Selected row keeps the
+  // accent color — legibility of the focused row wins over source hinting.
+  const isAutoTitle =
+    session.titleSource === 'auto' && Boolean(session.customTitle);
 
   return (
     <Box flexDirection="column" marginBottom={isLast ? 0 : 1}>
@@ -100,7 +116,13 @@ function SessionListItemView({
           {prefix}
         </Text>
         <Text
-          color={isSelected ? theme.text.accent : theme.text.primary}
+          color={
+            isSelected
+              ? theme.text.accent
+              : isAutoTitle
+                ? theme.text.secondary
+                : theme.text.primary
+          }
           bold={isSelected}
         >
           {truncatedPrompt}
@@ -122,7 +144,9 @@ export function SessionPicker(props: SessionPickerProps) {
     onSelect,
     onCancel,
     currentBranch,
+    title,
     centerSelection = true,
+    initialSessions,
   } = props;
 
   const { columns: width, rows: height } = useTerminalSize();
@@ -146,6 +170,7 @@ export function SessionPicker(props: SessionPickerProps) {
     onCancel,
     maxVisibleItems,
     centerSelection,
+    initialSessions,
     isActive: true,
   });
 
@@ -167,7 +192,7 @@ export function SessionPicker(props: SessionPickerProps) {
         {/* Header row */}
         <Box paddingX={1}>
           <Text bold color={theme.text.primary}>
-            {t('Resume Session')}
+            {title ?? t('Resume Session')}
           </Text>
           {picker.filterByBranch && currentBranch && (
             <Text color={theme.text.secondary}>

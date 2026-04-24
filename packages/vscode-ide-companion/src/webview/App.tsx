@@ -39,6 +39,7 @@ import {
   FileIcon,
   PermissionDrawer,
   AskUserQuestionDialog,
+  InsightProgressCard,
   ImageMessageRenderer,
   ImagePreview,
   // Layout components imported directly from webui
@@ -199,6 +200,14 @@ export const App: React.FC = () => {
     AvailableCommand[]
   >([]);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
+  const [insightProgress, setInsightProgress] = useState<{
+    stage: string;
+    progress: number;
+    detail?: string;
+  } | null>(null);
+  const [insightReportPath, setInsightReportPath] = useState<string | null>(
+    null,
+  );
   const [showModelSelector, setShowModelSelector] = useState(false);
   const [accountInfo, setAccountInfo] = useState<AccountInfo | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -272,9 +281,9 @@ export const App: React.FC = () => {
         // Account group
         const accountGroupItems: CompletionItem[] = [
           {
-            id: 'login',
-            label: 'Login',
-            description: 'Login to Qwen Code',
+            id: 'auth',
+            label: '/auth',
+            description: 'Configure Coding Plan or API Key',
             type: 'command',
             group: 'Account',
           },
@@ -440,6 +449,8 @@ export const App: React.FC = () => {
     setAccountInfo: (info) => {
       setAccountInfo(info);
     },
+    setInsightReportPath,
+    setInsightProgress,
   });
 
   // Auto-scroll handling: keep the view pinned to bottom when new content arrives,
@@ -686,9 +697,9 @@ export const App: React.FC = () => {
           }
         };
 
-        if (itemId === 'login') {
+        if (itemId === 'auth') {
           clearTriggerText();
-          vscode.postMessage({ type: 'login', data: {} });
+          vscode.postMessage({ type: 'auth', data: {} });
           completion.closeCompletion();
           return;
         }
@@ -838,12 +849,21 @@ export const App: React.FC = () => {
     });
   }, [vscode]);
 
+  const handleOpenInsightReport = useCallback(() => {
+    if (!insightReportPath) {
+      return;
+    }
+    vscode.postMessage({
+      type: 'openInsightReport',
+      data: { path: insightReportPath },
+    });
+  }, [insightReportPath, vscode]);
+
   // Handle toggle edit mode (Default -> Auto-edit -> YOLO -> Default)
   const handleToggleEditMode = useCallback(() => {
     setEditMode((prev) => {
       const next: ApprovalModeValue = NEXT_APPROVAL_MODE[prev];
 
-      // Notify extension to set approval mode via ACP
       try {
         vscode.postMessage({
           type: 'setApprovalMode',
@@ -855,6 +875,22 @@ export const App: React.FC = () => {
       return next;
     });
   }, [vscode]);
+
+  // Handle Tab key to cycle approval modes when input is focused
+  const handleInputKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (
+        e.key === 'Tab' &&
+        !e.shiftKey &&
+        !isComposing &&
+        !completion.isOpen
+      ) {
+        e.preventDefault();
+        handleToggleEditMode();
+      }
+    },
+    [completion.isOpen, handleToggleEditMode, isComposing],
+  );
 
   const handleToggleThinking = useCallback(() => {
     setThinkingEnabled((prev) => !prev);
@@ -934,12 +970,14 @@ export const App: React.FC = () => {
   return (
     <div className="chat-container relative">
       {/* Top-level loading overlay */}
-      {isLoading && (
+      {(isLoading || sessionManagement.isSwitchingSession) && (
         <div className="bg-background/80 absolute inset-0 z-50 flex items-center justify-center backdrop-blur-sm">
           <div className="text-center">
             <div className="border-primary mx-auto mb-2 h-8 w-8 animate-spin rounded-full border-b-2"></div>
             <p className="text-muted-foreground text-sm">
-              Preparing Qwen Code...
+              {sessionManagement.isSwitchingSession
+                ? 'Loading conversation...'
+                : 'Preparing Qwen Code...'}
             </p>
           </div>
         </div>
@@ -955,6 +993,8 @@ export const App: React.FC = () => {
           sessionManagement.handleSwitchSession(sessionId);
           sessionManagement.setSessionSearchQuery('');
         }}
+        onRenameSession={sessionManagement.handleRenameSession}
+        onDeleteSession={sessionManagement.handleDeleteSession}
         onClose={() => sessionManagement.setShowSessionSelector(false)}
         hasMore={sessionManagement.hasMore}
         isLoading={sessionManagement.isLoading}
@@ -973,18 +1013,25 @@ export const App: React.FC = () => {
         ref={messagesContainerRef}
         className="chat-messages messages-container flex-1 overflow-y-auto overflow-x-hidden pt-5 pr-5 pl-5 pb-[140px] flex flex-col relative min-w-0 focus:outline-none [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-white/20 [&::-webkit-scrollbar-thumb]:rounded-sm [&::-webkit-scrollbar-thumb]:hover:bg-white/30 [&>*]:flex [&>*]:gap-0 [&>*]:items-start [&>*]:text-left [&>*]:py-2 [&>*:not(:last-child)]:pb-[8px] [&>*]:flex-col [&>*]:relative [&>*]:animate-[fadeIn_0.2s_ease-in]"
       >
-        {!hasContent && !isLoading ? (
+        {!hasContent && !isLoading && !sessionManagement.isSwitchingSession ? (
           isAuthenticated === false ? (
-            <Onboarding
-              onLogin={() => {
-                vscode.postMessage({ type: 'login', data: {} });
-                messageHandling.setWaitingForResponse(
-                  'Logging in to Qwen Code...',
-                );
-              }}
-            />
+            <Onboarding />
           ) : isAuthenticated === null ? (
-            <EmptyState loadingMessage="Checking login status…" />
+            <div className="flex flex-col items-center justify-center h-full gap-3">
+              <span
+                className="inline-block w-6 h-6 animate-spin rounded-full border-2"
+                style={{
+                  borderColor: 'var(--app-secondary-foreground)',
+                  borderTopColor: 'transparent',
+                }}
+              />
+              <span
+                className="text-sm"
+                style={{ color: 'var(--app-secondary-foreground)' }}
+              >
+                Preparing Qwen Code...
+              </span>
+            </div>
           ) : (
             <EmptyState isAuthenticated />
           )
@@ -995,6 +1042,32 @@ export const App: React.FC = () => {
               allMessages={allMessages}
               onFileClick={handleFileClick}
             />
+
+            {insightProgress && (
+              <InsightProgressCard
+                stage={insightProgress.stage}
+                progress={insightProgress.progress}
+                detail={insightProgress.detail}
+              />
+            )}
+
+            {insightReportPath && (
+              <div className="px-[30px] py-2">
+                <div className="text-sm text-[var(--vscode-descriptionForeground)]">
+                  Insight report generated at:
+                </div>
+                <a
+                  href="#"
+                  className="mt-1 inline-block break-all text-sm text-[var(--vscode-textLink-foreground)] underline decoration-[color-mix(in_srgb,var(--vscode-textLink-foreground)_55%,transparent)] underline-offset-2 hover:text-[var(--vscode-textLink-activeForeground)]"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    handleOpenInsightReport();
+                  }}
+                >
+                  {insightReportPath}
+                </a>
+              </div>
+            )}
 
             {/* Waiting message positioned fixed above the input form to avoid layout shifts */}
             {messageHandling.isWaitingForResponse &&
@@ -1026,7 +1099,7 @@ export const App: React.FC = () => {
           onInputChange={setInputText}
           onCompositionStart={() => setIsComposing(true)}
           onCompositionEnd={() => setIsComposing(false)}
-          onKeyDown={() => {}}
+          onKeyDown={handleInputKeyDown}
           onSubmit={handleSubmitWithScroll}
           onCancel={handleCancel}
           onToggleEditMode={handleToggleEditMode}

@@ -72,6 +72,7 @@ import { useModelCommand } from './hooks/useModelCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
+import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useVimMode } from './contexts/VimModeContext.js';
 import { CompactModeProvider } from './contexts/CompactModeContext.js';
@@ -91,10 +92,12 @@ import { isBtwCommand } from './utils/commandUtils.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
 import { useFocus } from './hooks/useFocus.js';
+import { useAwaySummary } from './hooks/useAwaySummary.js';
 import { useBracketedPaste } from './hooks/useBracketedPaste.js';
 import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { keyMatchers, Command } from './keyMatchers.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
+import { useTerminalProgress } from './hooks/useTerminalProgress.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
 import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
 import { type IdeIntegrationNudgeResult } from './IdeIntegrationNudge.js';
@@ -149,6 +152,20 @@ function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
     }
     return false;
   });
+}
+
+// Exported for tests. Given a newest-first list of messages, return a list
+// with duplicates removed, keeping the first (newest) occurrence of each.
+export function dedupeNewestFirst(messages: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const msg of messages) {
+    if (!seen.has(msg)) {
+      seen.add(msg);
+      result.push(msg);
+    }
+  }
+  return result;
 }
 
 interface AppContainerProps {
@@ -318,6 +335,14 @@ export const AppContainer = (props: AppContainerProps) => {
           config,
         );
         historyManager.loadHistory(historyItems);
+
+        // Restore session name tag from custom title
+        const title = config
+          .getSessionService()
+          .getSessionTitle(config.getSessionId());
+        if (title) {
+          setSessionName(title);
+        }
       }
 
       // Fire SessionStart event after config is initialized
@@ -440,20 +465,15 @@ export const AppContainer = (props: AppContainerProps) => {
         )
         .map((item) => item.text)
         .reverse();
+      // Current-session messages are already newest-first; combining with past
+      // messages gives a newest-first list. dedupeNewestFirst keeps the first
+      // (newest) occurrence so resubmitting an old prompt promotes it to
+      // "most recent" rather than leaving a stale copy at an older position.
       const combinedMessages = [
         ...currentSessionUserMessages,
         ...pastMessagesRaw,
       ];
-      const deduplicatedMessages: string[] = [];
-      if (combinedMessages.length > 0) {
-        deduplicatedMessages.push(combinedMessages[0]);
-        for (let i = 1; i < combinedMessages.length; i++) {
-          if (combinedMessages[i] !== combinedMessages[i - 1]) {
-            deduplicatedMessages.push(combinedMessages[i]);
-          }
-        }
-      }
-      setUserMessages(deduplicatedMessages.reverse());
+      setUserMessages(dedupeNewestFirst(combinedMessages).reverse());
     };
     fetchUserMessages();
   }, [historyManager.history, logger]);
@@ -564,8 +584,12 @@ export const AppContainer = (props: AppContainerProps) => {
   const { activeArenaDialog, openArenaDialog, closeArenaDialog } =
     useArenaCommand();
 
+  // Session name state (set via /rename, restored on /resume)
+  const [sessionName, setSessionName] = useState<string | null>(null);
+
   const {
     isResumeDialogOpen,
+    resumeMatchedSessions,
     openResumeDialog,
     closeResumeDialog,
     handleResume,
@@ -573,7 +597,18 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     historyManager,
     startNewSession,
+    setSessionName,
     remount: refreshStatic,
+  });
+
+  const {
+    isDeleteDialogOpen,
+    openDeleteDialog,
+    closeDeleteDialog,
+    handleDelete,
+  } = useDeleteCommand({
+    config,
+    addItem: historyManager.addItem,
   });
 
   const { toggleVimEnabled } = useVimMode();
@@ -625,6 +660,8 @@ export const AppContainer = (props: AppContainerProps) => {
       openMcpDialog,
       openHooksDialog,
       openResumeDialog,
+      handleResume,
+      openDeleteDialog,
     }),
     [
       openAuthDialog,
@@ -646,6 +683,8 @@ export const AppContainer = (props: AppContainerProps) => {
       openMcpDialog,
       openHooksDialog,
       openResumeDialog,
+      handleResume,
+      openDeleteDialog,
     ],
   );
 
@@ -669,11 +708,13 @@ export const AppContainer = (props: AppContainerProps) => {
     toggleVimEnabled,
     isProcessing,
     setIsProcessing,
+    isIdleRef,
     setGeminiMdFileCount,
     slashCommandActions,
     extensionsUpdateStateInternal,
     isConfigInitialized,
     logger,
+    setSessionName,
   );
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage
@@ -758,6 +799,8 @@ export const AppContainer = (props: AppContainerProps) => {
     activePtyId,
     loopDetectionConfirmationRequest,
     pendingToolCalls,
+    streamingResponseLengthRef,
+    isReceivingContent,
   } = useGeminiStream(
     config.getGeminiClient(),
     historyManager.history,
@@ -1161,6 +1204,9 @@ export const AppContainer = (props: AppContainerProps) => {
     [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
   );
 
+  // Terminal tab progress bar (OSC 9;4) for iTerm2/Ghostty
+  useTerminalProgress(streamingState, isToolExecuting(pendingHistoryItems));
+
   cancelHandlerRef.current = useCallback(() => {
     const pendingHistoryItems = [
       ...pendingSlashCommandHistoryItems,
@@ -1224,7 +1270,7 @@ export const AppContainer = (props: AppContainerProps) => {
         setControlsHeight(fullFooterMeasurement.height);
       }
     }
-  }, [buffer, terminalWidth, terminalHeight]);
+  }, [buffer, terminalWidth, terminalHeight, btwItem]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
   // is available for input routing. Referenced here for layout computation.
@@ -1251,6 +1297,17 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const isFocused = useFocus();
   useBracketedPaste();
+
+  useAwaySummary({
+    enabled: settings.merged.general?.showSessionRecap ?? false,
+    config,
+    isFocused,
+    isIdle: streamingState === StreamingState.Idle,
+    addItem: historyManager.addItem,
+    history: historyManager.history,
+    awayThresholdMinutes:
+      settings.merged.general?.sessionRecapAwayThresholdMinutes,
+  });
 
   // Context file names computation
   const contextFileNames = useMemo(() => {
@@ -1977,6 +2034,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isHooksDialogOpen ||
     isApprovalModeDialogOpen ||
     isResumeDialogOpen ||
+    isDeleteDialogOpen ||
     isExtensionsManagerDialogOpen;
   dialogsVisibleRef.current = dialogsVisible;
 
@@ -2020,6 +2078,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isResumeDialogOpen,
+      resumeMatchedSessions,
+      isDeleteDialogOpen,
       slashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
@@ -2100,6 +2160,12 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      // Real-time token display
+      streamingResponseLengthRef,
+      isReceivingContent,
+      // Session name
+      sessionName,
+      setSessionName,
       // Prompt suggestion
       promptSuggestion,
       dismissPromptSuggestion,
@@ -2127,6 +2193,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isResumeDialogOpen,
+      resumeMatchedSessions,
+      isDeleteDialogOpen,
       slashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
@@ -2208,6 +2276,12 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      // Real-time token display
+      streamingResponseLengthRef,
+      isReceivingContent,
+      // Session name
+      sessionName,
+      setSessionName,
       // Prompt suggestion
       promptSuggestion,
       dismissPromptSuggestion,
@@ -2271,6 +2345,10 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       closeResumeDialog,
       handleResume,
+      // Delete session dialog
+      openDeleteDialog,
+      closeDeleteDialog,
+      handleDelete,
       // Feedback dialog
       openFeedbackDialog,
       closeFeedbackDialog,
@@ -2331,6 +2409,10 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       closeResumeDialog,
       handleResume,
+      // Delete session dialog
+      openDeleteDialog,
+      closeDeleteDialog,
+      handleDelete,
       // Feedback dialog
       openFeedbackDialog,
       closeFeedbackDialog,

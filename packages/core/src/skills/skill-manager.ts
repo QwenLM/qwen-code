@@ -293,6 +293,14 @@ export class SkillManager {
       return;
     }
 
+    if (this.config.getBareMode()) {
+      debugLogger.info(
+        'Bare mode enabled; refreshing skill cache without starting watchers',
+      );
+      await this.refreshCache();
+      return;
+    }
+
     debugLogger.info('Starting skill directory watchers...');
     this.watchStarted = true;
     await this.ensureUserSkillsDir();
@@ -442,6 +450,18 @@ export class SkillManager {
       // Extract optional model field
       const model = parseModelField(frontmatter);
 
+      // Extract when_to_use and disable-model-invocation
+      const whenToUse =
+        typeof frontmatter['when_to_use'] === 'string'
+          ? frontmatter['when_to_use']
+          : undefined;
+      const disableModelInvocationRaw = frontmatter['disable-model-invocation'];
+      const disableModelInvocation =
+        disableModelInvocationRaw === true ||
+        disableModelInvocationRaw === 'true'
+          ? true
+          : undefined;
+
       const config: SkillConfig = {
         name,
         description,
@@ -452,6 +472,8 @@ export class SkillManager {
         level,
         filePath,
         body: body.trim(),
+        whenToUse,
+        disableModelInvocation,
       };
 
       // Validate the parsed configuration
@@ -618,6 +640,11 @@ export class SkillManager {
    * @returns Array of skill configurations
    */
   private async listSkillsAtLevel(level: SkillLevel): Promise<SkillConfig[]> {
+    if (this.config.getBareMode()) {
+      debugLogger.debug(`Skipping ${level} level skills in bare mode`);
+      return [];
+    }
+
     const projectRoot = this.config.getProjectRoot();
     const homeDir = os.homedir();
     const isHomeDirectory = path.resolve(projectRoot) === path.resolve(homeDir);
@@ -636,7 +663,7 @@ export class SkillManager {
       const skills: SkillConfig[] = [];
       for (const extension of extensions) {
         extension.skills?.forEach((skill) => {
-          skills.push(skill);
+          skills.push({ ...skill, extensionName: extension.name });
         });
       }
       debugLogger.debug(
@@ -799,6 +826,10 @@ export class SkillManager {
   // Bundled skills are immutable (shipped with the package) and extension
   // skills are managed by the extension system, so neither needs watching.
   private updateWatchersFromCache(): void {
+    if (this.config.getBareMode()) {
+      return;
+    }
+
     const watchTargets = new Set<string>(
       (['project', 'user'] as const)
         .map((level) => this.getSkillsBaseDirs(level))

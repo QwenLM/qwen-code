@@ -488,9 +488,10 @@ describe('InProcessBackend', () => {
 
       expect(agentContext.getContentGenerator()).toBe(agentGenerator);
       expect(agentContext.getAuthType()).toBe('anthropic');
+      expect(backend.getAgentContentGenerator('agent-1')).toBe(agentGenerator);
     });
 
-    it('should not create per-agent ContentGenerator without authOverrides', async () => {
+    it('should expose inherited ContentGenerator without authOverrides', async () => {
       const mockCreate = createContentGenerator as ReturnType<typeof vi.fn>;
       mockCreate.mockClear();
 
@@ -498,6 +499,9 @@ describe('InProcessBackend', () => {
       await backend.spawnAgent(createSpawnConfig('agent-1'));
 
       expect(mockCreate).not.toHaveBeenCalled();
+      expect(backend.getAgentContentGenerator('agent-1')).toBe(
+        mockContentGenerator,
+      );
     });
 
     it('should fall back to parent ContentGenerator if per-agent creation fails', async () => {
@@ -523,6 +527,7 @@ describe('InProcessBackend', () => {
 
       // Falls back to parent's content generator
       expect(agentContext.getContentGenerator()).toBe(mockContentGenerator);
+      expect(backend.getAgentContentGenerator('agent-1')).toBeUndefined();
     });
 
     it('should give different agents different ContentGenerators', async () => {

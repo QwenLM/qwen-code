@@ -38,6 +38,14 @@ export interface FileReadInfo {
   content: PartListUnion;
   /** Whether this is a directory listing rather than file content */
   isDirectory: boolean;
+  /**
+   * Error message when the read failed (e.g. missing pdftotext,
+   * password-protected PDF, file too large). When present, `content`
+   * holds the user-facing guidance string that was surfaced to the LLM,
+   * and callers should render this entry as a failed read rather than a
+   * successful one.
+   */
+  error?: string;
 }
 
 /**
@@ -168,11 +176,28 @@ async function readFileContent(
 ): Promise<{ contentParts: Part[]; info: FileReadInfo } | null> {
   try {
     const fileReadResult = await processSingleFileContent(filePath, config);
-    if (fileReadResult.error) {
-      return null;
-    }
 
     const prefixText: Part = { text: `\nContent from ${filePath}:\n` };
+
+    // Surface any error produced by processSingleFileContent instead of
+    // silently skipping the file. This preserves actionable guidance
+    // (e.g. "pdftotext is not installed, install poppler-utils...",
+    // password-protected PDFs, file-too-large) across batch reads.
+    if (fileReadResult.error) {
+      const errorText =
+        typeof fileReadResult.llmContent === 'string'
+          ? fileReadResult.llmContent
+          : `Failed to read ${filePath}: ${fileReadResult.error}`;
+      return {
+        contentParts: [prefixText, { text: errorText }],
+        info: {
+          filePath,
+          content: errorText,
+          isDirectory: false,
+          error: fileReadResult.error,
+        },
+      };
+    }
 
     if (typeof fileReadResult.llmContent === 'string') {
       let fileContentForLlm = '';

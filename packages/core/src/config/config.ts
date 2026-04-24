@@ -336,6 +336,14 @@ export interface ConfigParameters {
   coreTools?: string[];
   allowedTools?: string[];
   excludeTools?: string[];
+  /**
+   * Pre-merged list of slash command names that should be hidden from the
+   * CLI surface. Matched case-insensitively on the final (post-rename)
+   * command name. Sourced from settings (`slashCommands.disabled`, UNION
+   * merged across scopes), the `--disabled-slash-commands` CLI flag, and
+   * the `QWEN_DISABLED_SLASH_COMMANDS` environment variable.
+   */
+  disabledSlashCommands?: string[];
   /** Merged permission rules from all sources (settings + CLI args). */
   permissions?: {
     allow?: string[];
@@ -396,15 +404,6 @@ export interface ConfigParameters {
   loadMemoryFromIncludeDirectories?: boolean;
   importFormat?: 'tree' | 'flat';
   chatRecording?: boolean;
-  // Web search providers
-  webSearch?: {
-    provider: Array<{
-      type: 'tavily' | 'google' | 'dashscope';
-      apiKey?: string;
-      searchEngineId?: string;
-    }>;
-    default: string;
-  };
   chatCompression?: ChatCompressionSettings;
   interactive?: boolean;
   trustedFolder?: boolean;
@@ -422,6 +421,7 @@ export interface ConfigParameters {
   inputFormat?: InputFormat;
   outputFormat?: OutputFormat;
   skipStartupContext?: boolean;
+  bareMode?: boolean;
   sdkMode?: boolean;
   sessionSubagents?: SubagentConfig[];
   channel?: string;
@@ -532,6 +532,12 @@ export interface ConfigInitializeOptions {
   sendSdkMcpMessage?: SendSdkMcpMessage;
 }
 
+const DEFAULT_BARE_CORE_TOOLS = [
+  ToolNames.READ_FILE,
+  ToolNames.EDIT,
+  ToolNames.SHELL,
+];
+
 export class Config {
   private sessionId: string;
   private sessionData?: ResumedSessionData;
@@ -543,6 +549,12 @@ export class Config {
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
+  private modelInvocableCommandsProvider:
+    | (() => ReadonlyArray<{ name: string; description: string }>)
+    | null = null;
+  private modelInvocableCommandsExecutor:
+    | ((name: string, args?: string) => Promise<string | null>)
+    | null = null;
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
@@ -564,6 +576,7 @@ export class Config {
   private readonly coreTools: string[] | undefined;
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
+  private readonly disabledSlashCommands: readonly string[];
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -603,6 +616,7 @@ export class Config {
   private readonly checkpointing: boolean;
   private readonly proxy: string | undefined;
   private readonly cwd: string;
+  private readonly explicitIncludeDirectories: string[];
   private readonly bugCommand: BugCommandSettings | undefined;
   private readonly outputLanguageFilePath?: string;
   private readonly noBrowser: boolean;
@@ -622,14 +636,6 @@ export class Config {
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly importFormat: 'tree' | 'flat';
-  private readonly webSearch?: {
-    provider: Array<{
-      type: 'tavily' | 'google' | 'dashscope';
-      apiKey?: string;
-      searchEngineId?: string;
-    }>;
-    default: string;
-  };
   private readonly chatCompression: ChatCompressionSettings | undefined;
   private readonly interactive: boolean;
   private readonly trustedFolder: boolean | undefined;
@@ -646,6 +652,7 @@ export class Config {
   private readonly agentsSettings: AgentsCollabSettings;
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
+  private readonly bareMode: boolean;
   private readonly warnings: string[];
   private readonly allowedHttpHookUrls: string[];
   private readonly onPersistPermissionRuleCallback?: (
@@ -687,9 +694,12 @@ export class Config {
     this.fileSystemService = new StandardFileSystemService();
     this.sandbox = params.sandbox;
     this.targetDir = path.resolve(params.targetDir);
+    this.explicitIncludeDirectories = Array.from(
+      new Set(params.includeDirectories ?? []),
+    );
     this.workspaceContext = new WorkspaceContext(
       this.targetDir,
-      params.includeDirectories ?? [],
+      this.explicitIncludeDirectories,
     );
     this.debugMode = params.debugMode;
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
@@ -704,6 +714,9 @@ export class Config {
     this.coreTools = params.coreTools;
     this.allowedTools = params.allowedTools;
     this.excludeTools = params.excludeTools;
+    this.disabledSlashCommands = Object.freeze([
+      ...(params.disabledSlashCommands ?? []),
+    ]);
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
@@ -783,12 +796,12 @@ export class Config {
     this.trustedFolder = params.trustedFolder;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     this.skipStartupContext = params.skipStartupContext ?? false;
+    this.bareMode = params.bareMode ?? false;
     this.warnings = params.warnings ?? [];
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
 
-    // Web search
-    this.webSearch = params.webSearch;
+    // (web search removed)
     this.useRipgrep = params.useRipgrep ?? true;
     this.useBuiltinRipgrep = params.useBuiltinRipgrep ?? true;
     this.shouldUseNodePtyShell =
@@ -883,11 +896,18 @@ export class Config {
     }
     this.promptRegistry = new PromptRegistry();
     this.extensionManager.setConfig(this);
-    await this.extensionManager.refreshCache();
+    const explicitExtensionNames = this.getExplicitExtensionNames();
+    if (!this.getBareMode()) {
+      await this.extensionManager.refreshCache();
+    } else if (explicitExtensionNames.length > 0) {
+      await this.extensionManager.refreshCache({
+        names: explicitExtensionNames,
+      });
+    }
     this.debugLogger.debug('Extension manager initialized');
 
-    // Initialize hook system if enabled
-    if (!this.disableAllHooks) {
+    // Bare mode skips all hook loading and execution.
+    if (!this.getDisableAllHooks()) {
       this.hookSystem = new HookSystem(this);
       await this.hookSystem.initialize();
       this.debugLogger.debug('Hook system initialized');
@@ -1055,7 +1075,11 @@ export class Config {
 
     this.subagentManager = new SubagentManager(this);
     this.skillManager = new SkillManager(this);
-    await this.skillManager.startWatching();
+    if (this.getBareMode()) {
+      await this.skillManager.refreshCache();
+    } else {
+      await this.skillManager.startWatching();
+    }
     this.debugLogger.debug('Skill manager initialized');
 
     this.permissionManager = new PermissionManager(this);
@@ -1067,13 +1091,16 @@ export class Config {
       this.subagentManager.loadSessionSubagents(this.sessionSubagents);
     }
 
-    await this.extensionManager.refreshCache();
+    if (!this.getBareMode()) {
+      await this.extensionManager.refreshCache();
+    }
 
     await this.refreshHierarchicalMemory();
     this.debugLogger.debug('Hierarchical memory loaded');
 
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
+      this.getBareMode() ? { skipDiscovery: true } : undefined,
     );
     this.debugLogger.info(
       `Tool registry initialized with ${this.toolRegistry.getAllToolNames().length} tools`,
@@ -1097,14 +1124,13 @@ export class Config {
     const { memoryContent, fileCount, conditionalRules, projectRoot } =
       await loadServerHierarchicalMemory(
         this.getWorkingDir(),
-        this.shouldLoadMemoryFromIncludeDirectories()
-          ? this.getWorkspaceContext().getDirectories()
-          : [],
+        this.getMemoryDiscoveryDirectories(),
         this.getFileService(),
         this.getExtensionContextFilePaths(),
         this.isTrustedFolder(),
         this.getImportFormat(),
         this.contextRuleExcludes,
+        { explicitOnly: this.getBareMode() },
       );
     if (this.getManagedAutoMemoryEnabled()) {
       const managedAutoMemoryIndex = await readAutoMemoryIndex(
@@ -1125,6 +1151,18 @@ export class Config {
       conditionalRules,
       projectRoot,
     );
+  }
+
+  private getMemoryDiscoveryDirectories(): string[] {
+    if (!this.shouldLoadMemoryFromIncludeDirectories()) {
+      return [];
+    }
+
+    if (this.getBareMode()) {
+      return this.explicitIncludeDirectories;
+    }
+
+    return [...this.getWorkspaceContext().getDirectories()];
   }
 
   getConditionalRulesRegistry(): ConditionalRulesRegistry | undefined {
@@ -1281,6 +1319,13 @@ export class Config {
     sessionId?: string,
     sessionData?: ResumedSessionData,
   ): string {
+    // Finalize the outgoing session before switching.
+    try {
+      this.chatRecordingService?.finalize();
+    } catch {
+      // Best-effort — don't block session switch
+    }
+
     this.sessionId = sessionId ?? randomUUID();
     this.sessionData = sessionData;
     setDebugLogSession(this);
@@ -1547,6 +1592,13 @@ export class Config {
       return;
     }
     try {
+      // Finalize the current session's metadata before cleanup.
+      try {
+        this.chatRecordingService?.finalize();
+      } catch {
+        // Best-effort — don't block shutdown
+      }
+
       this.skillManager?.stopWatching();
 
       if (this.toolRegistry) {
@@ -1584,6 +1636,9 @@ export class Config {
 
   /** @deprecated Use getPermissionsAllow() instead. */
   getCoreTools(): string[] | undefined {
+    if (this.getBareMode()) {
+      return DEFAULT_BARE_CORE_TOOLS;
+    }
     return this.coreTools;
   }
 
@@ -1640,6 +1695,15 @@ export class Config {
 
   getToolDiscoveryCommand(): string | undefined {
     return this.toolDiscoveryCommand;
+  }
+
+  /**
+   * Returns the pre-merged list of slash command names that should be hidden
+   * from the CLI surface. Callers should treat this as a case-insensitive
+   * denylist; `CommandService.create` handles the normalization.
+   */
+  getDisabledSlashCommands(): readonly string[] {
+    return this.disabledSlashCommands;
   }
 
   getToolCallCommand(): string | undefined {
@@ -1700,7 +1764,7 @@ export class Config {
   }
 
   isLspEnabled(): boolean {
-    return this.lspEnabled;
+    return this.lspEnabled && !this.getBareMode();
   }
 
   getLspClient(): LspClient | undefined {
@@ -2035,15 +2099,15 @@ export class Config {
    * Check if all hooks are disabled.
    */
   getDisableAllHooks(): boolean {
-    return this.disableAllHooks;
+    return this.disableAllHooks || this.getBareMode();
   }
 
   getManagedAutoMemoryEnabled(): boolean {
-    return this.enableManagedAutoMemory;
+    return this.enableManagedAutoMemory && !this.getBareMode();
   }
 
   getManagedAutoDreamEnabled(): boolean {
-    return this.enableManagedAutoDream;
+    return this.enableManagedAutoDream && !this.getBareMode();
   }
 
   /**
@@ -2078,6 +2142,9 @@ export class Config {
    * Used by HookRegistry to load project-specific hooks with proper source attribution.
    */
   getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    if (this.getBareMode()) {
+      return undefined;
+    }
     // Only return project hooks if workspace is trusted
     if (!this.isTrustedFolder()) {
       return undefined;
@@ -2093,6 +2160,9 @@ export class Config {
    * Used by HookRegistry to load user-specific hooks with proper source attribution.
    */
   getUserHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    if (this.getBareMode()) {
+      return undefined;
+    }
     // Prefer new userHooks field, fall back to hooks for backward compatibility
     const hooks = this.userHooks ?? this.hooks;
     return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
@@ -2101,12 +2171,21 @@ export class Config {
   getExtensions(): Extension[] {
     const extensions = this.extensionManager.getLoadedExtensions();
     if (this.overrideExtensions) {
+      const overrideExtensionNames = new Set(
+        this.overrideExtensions.map((name) => name.toLowerCase()),
+      );
       return extensions.filter((e) =>
-        this.overrideExtensions?.includes(e.name),
+        overrideExtensionNames.has(e.name.toLowerCase()),
       );
     } else {
       return extensions;
     }
+  }
+
+  private getExplicitExtensionNames(): string[] {
+    return (this.overrideExtensions ?? []).filter(
+      (name) => name.trim() !== '' && name.toLowerCase() !== 'none',
+    );
   }
 
   getActiveExtensions(): Extension[] {
@@ -2152,11 +2231,6 @@ export class Config {
     return this.getNoBrowser() || !shouldAttemptBrowserLaunch();
   }
 
-  // Web search provider configuration
-  getWebSearchConfig() {
-    return this.webSearch;
-  }
-
   getIdeMode(): boolean {
     return this.ideMode;
   }
@@ -2178,7 +2252,7 @@ export class Config {
    * If empty, all URLs are allowed (subject to SSRF protection).
    */
   getAllowedHttpHookUrls(): string[] {
-    return this.allowedHttpHookUrls;
+    return this.getBareMode() ? [] : this.allowedHttpHookUrls;
   }
 
   isTrustedFolder(): boolean {
@@ -2313,6 +2387,10 @@ export class Config {
     return this.skipStartupContext;
   }
 
+  getBareMode(): boolean {
+    return this.bareMode;
+  }
+
   getTruncateToolOutputThreshold(): number {
     if (this.truncateToolOutputThreshold <= 0) {
       return Number.POSITIVE_INFINITY;
@@ -2404,6 +2482,49 @@ export class Config {
     return this.skillManager;
   }
 
+  /**
+   * Registers a provider that returns model-invocable commands (e.g., bundled
+   * skills, user/project file commands, MCP prompts). Called by the CLI's
+   * CommandService after initialisation so that SkillTool can merge these into
+   * its tool description.
+   */
+  setModelInvocableCommandsProvider(
+    provider: () => ReadonlyArray<{ name: string; description: string }>,
+  ): void {
+    this.modelInvocableCommandsProvider = provider;
+  }
+
+  /**
+   * Returns the registered model-invocable commands provider, or null if none
+   * has been registered (e.g., in SDK mode).
+   */
+  getModelInvocableCommandsProvider():
+    | (() => ReadonlyArray<{ name: string; description: string }>)
+    | null {
+    return this.modelInvocableCommandsProvider;
+  }
+
+  /**
+   * Registers an executor that can invoke a model-invocable command by name
+   * (e.g., MCP prompts). Returns the prompt content as a string, or null if
+   * the command cannot be found or executed. Called by the CLI layer.
+   */
+  setModelInvocableCommandsExecutor(
+    executor: (name: string, args?: string) => Promise<string | null>,
+  ): void {
+    this.modelInvocableCommandsExecutor = executor;
+  }
+
+  /**
+   * Returns the registered model-invocable commands executor, or null if none
+   * has been registered (e.g., in SDK mode).
+   */
+  getModelInvocableCommandsExecutor():
+    | ((name: string, args?: string) => Promise<string | null>)
+    | null {
+    return this.modelInvocableCommandsExecutor;
+  }
+
   getPermissionManager(): PermissionManager | null {
     return this.permissionManager;
   }
@@ -2457,6 +2578,25 @@ export class Config {
         registry.registerFactory(toolName, factory);
       }
     };
+
+    if (this.getBareMode()) {
+      await registerLazy(ToolNames.READ_FILE, async () => {
+        const { ReadFileTool } = await import('../tools/read-file.js');
+        return new ReadFileTool(this);
+      });
+      await registerLazy(ToolNames.EDIT, async () => {
+        const { EditTool } = await import('../tools/edit.js');
+        return new EditTool(this);
+      });
+      await registerLazy(ToolNames.SHELL, async () => {
+        const { ShellTool } = await import('../tools/shell.js');
+        return new ShellTool(this);
+      });
+      this.debugLogger.debug(
+        `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
+      );
+      return registry;
+    }
 
     // --- Core tools (always registered) ---
     await registerLazy(ToolNames.AGENT, async () => {
@@ -2547,13 +2687,6 @@ export class Config {
       const { WebFetchTool } = await import('../tools/web-fetch.js');
       return new WebFetchTool(this);
     });
-    // Conditionally register web search tool if web search provider is configured
-    if (this.getWebSearchConfig()) {
-      await registerLazy(ToolNames.WEB_SEARCH, async () => {
-        const { WebSearchTool } = await import('../tools/web-search/index.js');
-        return new WebSearchTool(this);
-      });
-    }
     if (this.isLspEnabled() && this.getLspClient()) {
       await registerLazy(ToolNames.LSP, async () => {
         const { LspTool } = await import('../tools/lsp.js');

@@ -16,6 +16,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.lang.ProcessBuilder.Redirect;
+import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -102,6 +103,13 @@ public class ProcessTransport implements Transport {
                 .redirectError(Redirect.PIPE)
                 .redirectErrorStream(false)
                 .directory(new File(transportOptionsAdapter.getCwd()));
+
+        Map<String, String> env = transportOptionsAdapter.getHandledTransportOptions().getEnv();
+        if (env != null) {
+            Map<String, String> processEnv = processBuilder.environment();
+            processEnv.clear();
+            processEnv.putAll(env);
+        }
 
         process = processBuilder.start();
         processInput = new BufferedWriter(new OutputStreamWriter(process.getOutputStream()));

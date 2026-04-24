@@ -348,6 +348,8 @@ export default {
   'Tool Schema Compliance': 'Werkzeug-Schema-Konformität',
   // Settings enum options
   'Auto (detect from system)': 'Automatisch (vom System erkennen)',
+  'Auto (detect terminal theme)': 'Automatisch (Terminal-Theme erkennen)',
+  Auto: 'Automatisch',
   Text: 'Text',
   JSON: 'JSON',
   Plan: 'Plan',
@@ -1897,6 +1899,11 @@ export default {
   // Context Usage Component
   // ============================================================================
   'Context Usage': 'Kontextnutzung',
+  '% used': '% verwendet',
+  '% context used': '% Kontext verwendet',
+  'Context exceeds limit! Use /compress or /clear to reduce.':
+    'Kontext überschreitet Limit! Verwenden Sie /compress oder /clear zum Reduzieren.',
+  'Use /compress or /clear': 'Verwenden Sie /compress oder /clear',
   'No API response yet. Send a message to see actual usage.':
     'Noch keine API-Antwort. Senden Sie eine Nachricht, um die tatsächliche Nutzung anzuzeigen.',
   'Estimated pre-conversation overhead':

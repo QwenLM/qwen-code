@@ -42,7 +42,10 @@ export const MetadataSidebar = ({ metadata }: MetadataSidebarProps) => (
         metadata.contextWindowSize !== undefined && (
           <MetadataItem
             label="Context"
-            value={`${metadata.contextUsagePercent}% of ${formatTokenLimit(metadata.contextWindowSize)}`}
+            value={`${metadata.contextUsagePercent > 100 ? '>100' : metadata.contextUsagePercent}% of ${formatTokenLimit(metadata.contextWindowSize)}`}
+            valueClass={
+              metadata.contextUsagePercent > 100 ? 'text-red' : undefined
+            }
           />
         )}
       {metadata.totalTokens !== undefined && (
