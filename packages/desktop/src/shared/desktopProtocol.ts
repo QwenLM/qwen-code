@@ -7,7 +7,14 @@
 export type DesktopClientMessage =
   | { type: 'ping' }
   | { type: 'stop_generation' }
-  | { type: 'user_message'; content: string };
+  | { type: 'user_message'; content: string }
+  | { type: 'permission_response'; requestId: string; optionId: string }
+  | {
+      type: 'ask_user_question_response';
+      requestId: string;
+      optionId: string;
+      answers?: Record<string, string>;
+    };
 
 export interface DesktopPlanEntry {
   content: string;
@@ -51,6 +58,36 @@ export interface DesktopAvailableCommand {
   input?: unknown;
 }
 
+export interface DesktopPermissionOption {
+  optionId: string;
+  name: string;
+  kind: 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always';
+}
+
+export interface DesktopPermissionRequest {
+  sessionId: string;
+  options: DesktopPermissionOption[];
+  toolCall: DesktopToolCallUpdate;
+}
+
+export interface DesktopAskUserQuestionOption {
+  label: string;
+  description: string;
+}
+
+export interface DesktopAskUserQuestion {
+  question: string;
+  header: string;
+  options: DesktopAskUserQuestionOption[];
+  multiSelect: boolean;
+}
+
+export interface DesktopAskUserQuestionRequest {
+  sessionId: string;
+  questions: DesktopAskUserQuestion[];
+  metadata?: Record<string, unknown>;
+}
+
 export type DesktopServerMessage =
   | { type: 'connected'; sessionId: string }
   | { type: 'pong' }
@@ -67,6 +104,16 @@ export type DesktopServerMessage =
       type: 'available_commands';
       commands: DesktopAvailableCommand[];
       skills: string[];
+    }
+  | {
+      type: 'permission_request';
+      requestId: string;
+      request: DesktopPermissionRequest;
+    }
+  | {
+      type: 'ask_user_question';
+      requestId: string;
+      request: DesktopAskUserQuestionRequest;
     }
   | { type: 'message_complete'; stopReason?: string }
   | { type: 'error'; code: string; message: string; retryable?: boolean };

@@ -18,6 +18,7 @@ import {
   isAuthorized,
 } from './http/auth.js';
 import { AcpEventRouter } from './acp/AcpEventRouter.js';
+import { PermissionBridge } from './acp/permissionBridge.js';
 import { isDesktopHttpError, DesktopHttpError } from './http/errors.js';
 import { getRuntimeInfo } from './services/runtimeService.js';
 import { DesktopSessionService } from './services/sessionService.js';
@@ -42,10 +43,19 @@ export async function startDesktopServer(
   const now = options.now ?? (() => new Date());
   const startedAt = now().getTime();
   const sessionService = new DesktopSessionService(options.acpClient);
+  const socketHubRef: { current: SessionSocketHub | null } = { current: null };
+  const permissionBridge = new PermissionBridge({
+    timeoutMs: options.permissionRequestTimeoutMs,
+    broadcast: (sessionId, message) => {
+      socketHubRef.current?.broadcast(sessionId, message);
+    },
+  });
   const socketHub = new SessionSocketHub({
     token,
     acpClient: options.acpClient,
+    permissionBridge,
   });
+  socketHubRef.current = socketHub;
   const acpEventRouter = new AcpEventRouter({
     broadcast: (sessionId, message) => socketHub.broadcast(sessionId, message),
   });
@@ -55,6 +65,8 @@ export async function startDesktopServer(
       previousSessionUpdateHandler?.(notification);
       acpEventRouter.handleSessionUpdate(notification);
     };
+    options.acpClient.onPermissionRequest = (request) =>
+      permissionBridge.requestPermission(request);
   }
   const server = createServer((request, response) => {
     void handleRequest(request, response, {
@@ -114,6 +126,7 @@ export async function startDesktopServer(
       token,
     },
     close: async () => {
+      permissionBridge.close();
       socketHub.close();
       await closeHttpServer(server);
     },

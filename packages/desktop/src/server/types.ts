@@ -18,6 +18,7 @@ export interface DesktopServerOptions {
   token?: string;
   now?: () => Date;
   acpClient?: AcpSessionClient;
+  permissionRequestTimeoutMs?: number;
 }
 
 export interface DesktopHealthResponse {

@@ -6,7 +6,10 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
-import type { SessionNotification } from '@agentclientprotocol/sdk';
+import type {
+  RequestPermissionRequest,
+  SessionNotification,
+} from '@agentclientprotocol/sdk';
 import { startDesktopServer } from './index.js';
 import type { DesktopServer } from './types.js';
 import type { AcpSessionClient } from './services/sessionService.js';
@@ -344,6 +347,96 @@ describe('DesktopServer', () => {
     otherSocket.socket.close();
   });
 
+  it('routes ACP permission requests through the session WebSocket', async () => {
+    const acpClient = createAcpClient();
+    const server = await createTestServer(acpClient);
+    const testSocket = await connectSocket(server, '/ws/session-1');
+    await testSocket.readMessage();
+
+    const permission = acpClient.requestPermissionFromBridge(
+      createPermissionRequest(),
+    );
+    const requestMessage = await testSocket.readMessage();
+    expect(requestMessage).toMatchObject({
+      type: 'permission_request',
+      request: {
+        sessionId: 'session-1',
+        options: [{ optionId: 'proceed_once' }, { optionId: 'cancel' }],
+        toolCall: {
+          toolCallId: 'tool-1',
+          title: 'Run command',
+        },
+      },
+    });
+
+    testSocket.socket.send(
+      JSON.stringify({
+        type: 'permission_response',
+        requestId: getPermissionRequestId(requestMessage),
+        optionId: 'proceed_once',
+      }),
+    );
+
+    await expect(permission).resolves.toEqual({
+      outcome: {
+        outcome: 'selected',
+        optionId: 'proceed_once',
+      },
+    });
+    testSocket.socket.close();
+  });
+
+  it('routes ask-user-question permission requests through the session WebSocket', async () => {
+    const acpClient = createAcpClient();
+    const server = await createTestServer(acpClient);
+    const testSocket = await connectSocket(server, '/ws/session-1');
+    await testSocket.readMessage();
+
+    const permission = acpClient.requestPermissionFromBridge({
+      ...createPermissionRequest(),
+      toolCall: {
+        toolCallId: 'tool-question',
+        title: 'Ask question',
+        rawInput: {
+          questions: [
+            {
+              header: 'Choice',
+              question: 'Pick one',
+              multiSelect: false,
+              options: [{ label: 'A', description: 'Option A' }],
+            },
+          ],
+        },
+      },
+    });
+    const requestMessage = await testSocket.readMessage();
+    expect(requestMessage).toMatchObject({
+      type: 'ask_user_question',
+      request: {
+        sessionId: 'session-1',
+        questions: [{ header: 'Choice', question: 'Pick one' }],
+      },
+    });
+
+    testSocket.socket.send(
+      JSON.stringify({
+        type: 'ask_user_question_response',
+        requestId: getPermissionRequestId(requestMessage),
+        optionId: 'proceed_once',
+        answers: { Choice: 'A' },
+      }),
+    );
+
+    await expect(permission).resolves.toEqual({
+      outcome: {
+        outcome: 'selected',
+        optionId: 'proceed_once',
+      },
+      answers: { Choice: 'A' },
+    });
+    testSocket.socket.close();
+  });
+
   it('cancels generation over WebSocket', async () => {
     const acpClient = createAcpClient();
     const server = await createTestServer(acpClient);
@@ -461,6 +554,9 @@ async function writeJson(
 
 interface TestAcpClient extends AcpSessionClient {
   emitSessionUpdate(notification: SessionNotification): void;
+  requestPermissionFromBridge(
+    request: RequestPermissionRequest,
+  ): Promise<unknown>;
 }
 
 function createAcpClient(): TestAcpClient {
@@ -469,6 +565,13 @@ function createAcpClient(): TestAcpClient {
     onSessionUpdate: undefined,
     emitSessionUpdate(notification: SessionNotification): void {
       client.onSessionUpdate?.(notification);
+    },
+    requestPermissionFromBridge(request: RequestPermissionRequest) {
+      if (!client.onPermissionRequest) {
+        return Promise.reject(new Error('Permission bridge is not attached.'));
+      }
+
+      return client.onPermissionRequest(request);
     },
     listSessions: vi.fn().mockResolvedValue({
       sessions: [{ sessionId: 'session-1', title: 'Test session' }],
@@ -481,6 +584,35 @@ function createAcpClient(): TestAcpClient {
     extMethod: vi.fn().mockResolvedValue({ success: true }),
   };
   return client;
+}
+
+function createPermissionRequest(): RequestPermissionRequest {
+  return {
+    sessionId: 'session-1',
+    options: [
+      { optionId: 'proceed_once', name: 'Allow', kind: 'allow_once' },
+      { optionId: 'cancel', name: 'Reject', kind: 'reject_once' },
+    ],
+    toolCall: {
+      toolCallId: 'tool-1',
+      title: 'Run command',
+      kind: 'execute',
+      status: 'pending',
+    },
+  };
+}
+
+function getPermissionRequestId(message: unknown): string {
+  if (
+    !message ||
+    typeof message !== 'object' ||
+    !('requestId' in message) ||
+    typeof message.requestId !== 'string'
+  ) {
+    throw new Error('Expected permission request id.');
+  }
+
+  return message.requestId;
 }
 
 async function connectSocket(

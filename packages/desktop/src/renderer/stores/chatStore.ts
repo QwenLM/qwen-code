@@ -6,7 +6,9 @@
 
 import type {
   DesktopAvailableCommand,
+  DesktopAskUserQuestionRequest,
   DesktopPlanEntry,
+  DesktopPermissionRequest,
   DesktopServerMessage,
   DesktopToolCallUpdate,
   DesktopUsageStats,
@@ -49,6 +51,14 @@ export interface ChatState {
   latestUsage: DesktopUsageStats | null;
   availableCommands: DesktopAvailableCommand[];
   availableSkills: string[];
+  pendingPermission: {
+    requestId: string;
+    request: DesktopPermissionRequest;
+  } | null;
+  pendingAskUserQuestion: {
+    requestId: string;
+    request: DesktopAskUserQuestionRequest;
+  } | null;
   mode: string | null;
   error: string | null;
 }
@@ -57,6 +67,8 @@ export type ChatAction =
   | { type: 'connect' }
   | { type: 'disconnect' }
   | { type: 'append_user_message'; content: string }
+  | { type: 'clear_permission_request'; requestId: string }
+  | { type: 'clear_ask_user_question'; requestId: string }
   | { type: 'server_message'; message: DesktopServerMessage };
 
 export function createInitialChatState(): ChatState {
@@ -67,6 +79,8 @@ export function createInitialChatState(): ChatState {
     latestUsage: null,
     availableCommands: [],
     availableSkills: [],
+    pendingPermission: null,
+    pendingAskUserQuestion: null,
     mode: null,
     error: null,
   };
@@ -98,6 +112,16 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           createMessageItem('user', action.content, false),
         ],
       };
+
+    case 'clear_permission_request':
+      return state.pendingPermission?.requestId === action.requestId
+        ? { ...state, pendingPermission: null }
+        : state;
+
+    case 'clear_ask_user_question':
+      return state.pendingAskUserQuestion?.requestId === action.requestId
+        ? { ...state, pendingAskUserQuestion: null }
+        : state;
 
     case 'server_message':
       return applyServerMessage(state, action.message);
@@ -162,6 +186,34 @@ function applyServerMessage(
         ...state,
         availableCommands: message.commands,
         availableSkills: message.skills,
+      };
+
+    case 'permission_request':
+      return {
+        ...state,
+        pendingPermission: {
+          requestId: message.requestId,
+          request: message.request,
+        },
+        items: [
+          ...state.items,
+          createEventItem(
+            `Permission requested: ${
+              message.request.toolCall.title ||
+              message.request.toolCall.toolCallId
+            }`,
+          ),
+        ],
+      };
+
+    case 'ask_user_question':
+      return {
+        ...state,
+        pendingAskUserQuestion: {
+          requestId: message.requestId,
+          request: message.request,
+        },
+        items: [...state.items, createEventItem('Question requested')],
       };
 
     case 'message_complete':

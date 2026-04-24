@@ -183,6 +183,22 @@ export function App() {
     socketRef.current?.stopGeneration();
   }, []);
 
+  const respondToPermission = useCallback(
+    (requestId: string, optionId: string) => {
+      socketRef.current?.respondToPermission(requestId, optionId);
+      dispatchChat({ type: 'clear_permission_request', requestId });
+    },
+    [],
+  );
+
+  const respondToAskUserQuestion = useCallback(
+    (requestId: string, optionId: string) => {
+      socketRef.current?.respondToAskUserQuestion(requestId, optionId, {});
+      dispatchChat({ type: 'clear_ask_user_question', requestId });
+    },
+    [],
+  );
+
   const statusLabel = useMemo(() => {
     if (loadState.state === 'ready') {
       return 'Connected';
@@ -253,6 +269,11 @@ export function App() {
               </span>
             </div>
             <ChatTimeline state={chatState} activeSessionId={activeSessionId} />
+            <PermissionPrompts
+              state={chatState}
+              onAskUserQuestionResponse={respondToAskUserQuestion}
+              onPermissionResponse={respondToPermission}
+            />
             <form className="composer" onSubmit={sendMessage}>
               <textarea
                 aria-label="Message"
@@ -393,6 +414,97 @@ function TimelineItem({ item }: { item: ChatTimelineItem }) {
   }
 
   return <div className="chat-event">{item.label}</div>;
+}
+
+function PermissionPrompts({
+  onAskUserQuestionResponse,
+  onPermissionResponse,
+  state,
+}: {
+  onAskUserQuestionResponse: (requestId: string, optionId: string) => void;
+  onPermissionResponse: (requestId: string, optionId: string) => void;
+  state: ChatState;
+}) {
+  const permission = state.pendingPermission;
+  const question = state.pendingAskUserQuestion;
+  if (!permission && !question) {
+    return null;
+  }
+
+  return (
+    <div className="permission-strip">
+      {permission ? (
+        <section className="permission-panel">
+          <div>
+            <span className="message-role">
+              {permission.request.toolCall.kind || 'permission'}
+            </span>
+            <strong>
+              {permission.request.toolCall.title ||
+                permission.request.toolCall.toolCallId}
+            </strong>
+          </div>
+          <div className="permission-actions">
+            {permission.request.options.map((option) => (
+              <button
+                className={
+                  option.kind.startsWith('reject')
+                    ? 'secondary-button'
+                    : 'primary-button'
+                }
+                key={option.optionId}
+                onClick={() =>
+                  onPermissionResponse(permission.requestId, option.optionId)
+                }
+                type="button"
+              >
+                {option.name}
+              </button>
+            ))}
+          </div>
+        </section>
+      ) : null}
+      {question ? (
+        <section className="permission-panel">
+          {question.request.questions.map((item) => (
+            <div key={`${item.header}-${item.question}`}>
+              <span className="message-role">{item.header}</span>
+              <strong>{item.question}</strong>
+              {item.options.length > 0 ? (
+                <ul className="question-options">
+                  {item.options.map((option) => (
+                    <li key={`${option.label}-${option.description}`}>
+                      {option.label}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ))}
+          <div className="permission-actions">
+            <button
+              className="secondary-button"
+              onClick={() =>
+                onAskUserQuestionResponse(question.requestId, 'cancel')
+              }
+              type="button"
+            >
+              Cancel
+            </button>
+            <button
+              className="primary-button"
+              onClick={() =>
+                onAskUserQuestionResponse(question.requestId, 'proceed_once')
+              }
+              type="button"
+            >
+              Submit
+            </button>
+          </div>
+        </section>
+      ) : null}
+    </div>
+  );
 }
 
 function StatusPill({ state }: { state: LoadState['state'] }) {

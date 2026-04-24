@@ -133,7 +133,7 @@ order, verification, decisions, and remaining work.
 
 ### Slice 6: Permission Bridge
 
-- Status: pending
+- Status: complete
 - Goal: route ACP permission and ask-user-question callbacks to renderer and
   resolve responses with timeout cancellation.
 - Files:
@@ -144,6 +144,12 @@ order, verification, decisions, and remaining work.
   - Permission requests are visible to the active session.
   - Closing a WS connection cancels pending requests.
   - Timeout defaults to deny/cancel.
+- Progress:
+  - 2026-04-25: added `PermissionBridge` for ACP `requestPermission`, including
+    `ask_user_question` detection from tool raw input, typed WS request/response
+    messages, timeout cancellation, and session-disconnect cancellation.
+  - 2026-04-25: renderer chat state now tracks pending permission/question
+    prompts and sends selected options back over the active session socket.
 - Verification:
   - `npm run test --workspace=packages/desktop`
   - renderer store tests for allow, deny, and timeout state
@@ -201,6 +207,10 @@ order, verification, decisions, and remaining work.
   needs WebSocket message shapes, while the VS Code handler is callback/UI
   oriented; shared extraction can happen after permission and settings slices
   stabilize the common surface.
+- 2026-04-25: Treat `ask_user_question` as a specialized ACP permission request
+  in desktop, matching the VS Code companion behavior. The bridge returns
+  `cancelled` for cancel/reject option ids and passes answer payloads through
+  for submit responses.
 
 ## Verification Log
 
@@ -267,6 +277,15 @@ order, verification, decisions, and remaining work.
   - `npm run lint --workspace=packages/desktop` passed.
   - `npm run typecheck --workspace=packages/desktop` passed.
   - `npm run build --workspace=packages/desktop` passed.
+- 2026-04-25 Slice 6:
+  - `npx prettier --check design/qwen-code-electron-desktop-implementation-plan.md packages/desktop` passed.
+  - `npm run test --workspace=packages/desktop` passed: 4 files, 31 tests.
+  - `npm run lint --workspace=packages/desktop` passed.
+  - `npm run typecheck --workspace=packages/desktop` passed.
+  - `npm run build --workspace=packages/desktop` passed.
+  - `npm run typecheck` passed across workspaces.
+  - `npm run build` passed across the configured build order. Existing VS Code
+    companion lint warnings were reported by its build script, with no errors.
 
 ## Self Review Notes
 
@@ -319,12 +338,20 @@ order, verification, decisions, and remaining work.
   - Main still does not auto-start a real ACP child process; the chat loop is
     verified with an injected fake ACP client and remains ready for the runtime
     integration slice.
+- 2026-04-25 Slice 6:
+  - Permission responses are accepted only for pending request ids; stale or
+    unknown responses produce a typed socket error instead of resolving any ACP
+    callback.
+  - Pending permission and ask-user-question callbacks are cancelled when a
+    session loses its last socket or the bridge closes, preventing ACP hangs.
+  - The renderer prompt UI is intentionally minimal for this slice; richer
+    answer collection can reuse `@qwen-code/webui` dialogs once the shared
+    desktop state surface is stable.
 
 ## Remaining Work
 
-- Commit Slice 5b.
-- Start Slice 6 permission bridge: route ACP permission and ask-user-question
-  callbacks through the existing per-session WebSocket channel with timeout
-  cancellation.
-- Continue through permission, settings/auth/model/mode, real ACP runtime
-  startup, and packaging slices until the architecture MVP is fully verified.
+- Commit Slice 6.
+- Start Slice 7 settings/auth/model/mode UI and supporting services while
+  preserving existing Qwen settings/auth semantics.
+- Continue through settings/auth/model/mode, real ACP runtime startup, and
+  packaging slices until the architecture MVP is fully verified.

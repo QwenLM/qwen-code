@@ -386,6 +386,53 @@ textarea:disabled {
   font-size: 12px;
 }
 
+.permission-strip {
+  display: grid;
+  gap: 10px;
+  padding: 0 14px 14px;
+}
+
+.permission-panel {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid rgba(231, 189, 115, 0.42);
+  background: rgba(231, 189, 115, 0.08);
+}
+
+.permission-panel > div {
+  display: grid;
+  gap: 6px;
+}
+
+.permission-panel strong {
+  color: #eef0ed;
+  font-size: 14px;
+}
+
+.permission-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.question-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.question-options li {
+  padding: 4px 7px;
+  border: 1px solid rgba(238, 240, 237, 0.1);
+  color: #d8dcd6;
+  font-size: 12px;
+}
+
 .composer {
   display: grid;
   gap: 10px;

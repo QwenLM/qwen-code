@@ -13,10 +13,12 @@ import type {
   DesktopClientMessage,
   DesktopServerMessage,
 } from '../../shared/desktopProtocol.js';
+import type { PermissionBridge } from '../acp/permissionBridge.js';
 
 interface SessionSocketHubOptions {
   token: string;
   acpClient?: AcpSessionClient;
+  permissionBridge?: PermissionBridge;
 }
 
 export class SessionSocketHub {
@@ -104,6 +106,7 @@ export class SessionSocketHub {
       sockets.delete(socket);
       if (sockets.size === 0) {
         this.socketsBySession.delete(sessionId);
+        this.options.permissionBridge?.cancelSession(sessionId);
       }
     });
   }
@@ -124,6 +127,16 @@ export class SessionSocketHub {
     }
 
     switch (message.type) {
+      case 'permission_response':
+      case 'ask_user_question_response':
+        if (!this.options.permissionBridge?.handleClientMessage(message)) {
+          sendMessage(socket, {
+            type: 'error',
+            code: 'permission_request_not_found',
+            message: 'Permission request is no longer pending.',
+          });
+        }
+        return;
       case 'ping':
         sendMessage(socket, { type: 'pong' });
         return;
@@ -236,6 +249,32 @@ function parseClientMessage(
   }
 
   if (
+    candidate.type === 'permission_response' &&
+    typeof candidate.requestId === 'string' &&
+    typeof candidate.optionId === 'string'
+  ) {
+    return {
+      type: 'permission_response',
+      requestId: candidate.requestId,
+      optionId: candidate.optionId,
+    };
+  }
+
+  if (
+    candidate.type === 'ask_user_question_response' &&
+    typeof candidate.requestId === 'string' &&
+    typeof candidate.optionId === 'string' &&
+    (candidate.answers === undefined || isStringRecord(candidate.answers))
+  ) {
+    return {
+      type: 'ask_user_question_response',
+      requestId: candidate.requestId,
+      optionId: candidate.optionId,
+      answers: candidate.answers,
+    };
+  }
+
+  if (
     candidate.type === 'user_message' &&
     typeof candidate.content === 'string'
   ) {
@@ -243,6 +282,14 @@ function parseClientMessage(
   }
 
   return null;
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+
+  return Object.values(value).every((item) => typeof item === 'string');
 }
 
 function sendMessage(socket: WebSocket, message: DesktopServerMessage): void {

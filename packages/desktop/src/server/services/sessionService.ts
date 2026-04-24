@@ -9,6 +9,8 @@ import type {
   LoadSessionResponse,
   NewSessionResponse,
   PromptResponse,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
   SessionNotification,
 } from '@agentclientprotocol/sdk';
 import { DesktopHttpError } from '../http/errors.js';
@@ -16,6 +18,9 @@ import { DesktopHttpError } from '../http/errors.js';
 export interface AcpSessionClient {
   readonly isConnected?: boolean;
   onSessionUpdate?: (notification: SessionNotification) => void;
+  onPermissionRequest?: (
+    request: RequestPermissionRequest,
+  ) => Promise<RequestPermissionResponse>;
   connect?(): Promise<unknown>;
   listSessions(options?: {
     cwd?: string;

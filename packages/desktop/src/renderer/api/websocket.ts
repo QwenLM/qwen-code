@@ -19,6 +19,12 @@ export interface SessionSocketHandlers {
 
 export interface SessionSocketClient {
   sendUserMessage(content: string): void;
+  respondToPermission(requestId: string, optionId: string): void;
+  respondToAskUserQuestion(
+    requestId: string,
+    optionId: string,
+    answers?: Record<string, string>,
+  ): void;
   stopGeneration(): void;
   ping(): void;
   close(): void;
@@ -44,6 +50,25 @@ export function connectSessionSocket(
   return {
     sendUserMessage(content: string): void {
       sendClientMessage(socket, { type: 'user_message', content });
+    },
+    respondToPermission(requestId: string, optionId: string): void {
+      sendClientMessage(socket, {
+        type: 'permission_response',
+        requestId,
+        optionId,
+      });
+    },
+    respondToAskUserQuestion(
+      requestId: string,
+      optionId: string,
+      answers?: Record<string, string>,
+    ): void {
+      sendClientMessage(socket, {
+        type: 'ask_user_question_response',
+        requestId,
+        optionId,
+        answers,
+      });
     },
     stopGeneration(): void {
       sendClientMessage(socket, { type: 'stop_generation' });
