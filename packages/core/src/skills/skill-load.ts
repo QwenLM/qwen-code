@@ -115,6 +115,20 @@ export function parseSkillContent(
   // Extract optional model field
   const model = parseModelField(frontmatter);
 
+  // Optional `paths` frontmatter: glob patterns that gate when this skill
+  // is offered to the model (conditional skill).
+  const pathsRaw = frontmatter['paths'];
+  let paths: string[] | undefined;
+  if (pathsRaw !== undefined) {
+    if (!Array.isArray(pathsRaw)) {
+      throw new Error('"paths" must be an array of glob patterns');
+    }
+    const cleaned = pathsRaw
+      .map((p) => String(p).trim())
+      .filter((p) => p.length > 0);
+    paths = cleaned.length > 0 ? cleaned : undefined;
+  }
+
   const config: SkillConfig = {
     name,
     description,
@@ -123,6 +137,7 @@ export function parseSkillContent(
     filePath,
     body: body.trim(),
     level: 'extension',
+    paths,
   };
 
   // Validate the parsed configuration

@@ -82,6 +82,29 @@ describe('SkillManager', () => {
           allowedTools: ['read_file', 'write_file'],
         };
       }
+      if (yamlString.includes('paths:')) {
+        // Branch handles all three paths-related tests by reading the literal
+        // YAML so the parser-behavior nuance (array vs scalar vs empty) is
+        // preserved.
+        const name = yamlString.includes('name: tsx-helper')
+          ? 'tsx-helper'
+          : 'test-skill';
+        const description = yamlString.includes('React skill')
+          ? 'React skill'
+          : 'A test skill';
+        let paths: unknown = undefined;
+        if (yamlString.includes('paths: []')) {
+          paths = [];
+        } else if (yamlString.includes('paths: "src/**/*.tsx"')) {
+          // Invalid (scalar) — surface as string so our validator rejects it.
+          paths = 'src/**/*.tsx';
+        } else if (yamlString.includes('src/**/*.tsx')) {
+          paths = yamlString.includes('test/**/*.tsx')
+            ? ['src/**/*.tsx', 'test/**/*.tsx']
+            : ['src/**/*.tsx'];
+        }
+        return { name, description, paths };
+      }
       if (yamlString.includes('name: skill1')) {
         return { name: 'skill1', description: 'First skill' };
       }
@@ -237,6 +260,76 @@ You are a helpful assistant with this skill.
       );
 
       expect(config.allowedTools).toEqual(['read_file', 'write_file']);
+    });
+
+    it('should parse content with paths (conditional skill)', () => {
+      const markdown = `---
+name: tsx-helper
+description: React skill
+paths:
+  - "src/**/*.tsx"
+  - "test/**/*.tsx"
+---
+
+Body.
+`;
+      const config = manager.parseSkillContent(
+        markdown,
+        validSkillConfig.filePath,
+        'project',
+      );
+      expect(config.paths).toEqual(['src/**/*.tsx', 'test/**/*.tsx']);
+    });
+
+    it('should leave paths undefined when frontmatter omits it', () => {
+      const markdown = `---
+name: test-skill
+description: A test skill
+---
+
+Body.
+`;
+      const config = manager.parseSkillContent(
+        markdown,
+        validSkillConfig.filePath,
+        'project',
+      );
+      expect(config.paths).toBeUndefined();
+    });
+
+    it('should treat an empty paths array as undefined (unconditional)', () => {
+      const markdown = `---
+name: test-skill
+description: A test skill
+paths: []
+---
+
+Body.
+`;
+      const config = manager.parseSkillContent(
+        markdown,
+        validSkillConfig.filePath,
+        'project',
+      );
+      expect(config.paths).toBeUndefined();
+    });
+
+    it('should throw when paths is not an array', () => {
+      const markdown = `---
+name: test-skill
+description: A test skill
+paths: "src/**/*.tsx"
+---
+
+Body.
+`;
+      expect(() =>
+        manager.parseSkillContent(
+          markdown,
+          validSkillConfig.filePath,
+          'project',
+        ),
+      ).toThrow(/"paths" must be an array/);
     });
 
     it('should determine level from file path', () => {
@@ -790,6 +883,81 @@ Review content`);
       await manager.refreshCache();
 
       expect(listener).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('conditional skill activation', () => {
+    // Minimal setup: a project dir containing one conditional skill whose
+    // paths glob matches `src/**/*.tsx`. After refreshCache() loads it,
+    // matchAndActivateByPath() should activate it and fire listeners.
+    async function loadConditionalFixture() {
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'tsx-helper',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: tsx-helper
+description: React skill
+paths:
+  - "src/**/*.tsx"
+---
+
+Body.
+`);
+      await manager.refreshCache();
+    }
+
+    it('keeps conditional skills inactive until a matching path is touched', async () => {
+      await loadConditionalFixture();
+
+      const all = await manager.listSkills();
+      const tsx = all.find((s) => s.name === 'tsx-helper');
+      expect(tsx).toBeDefined();
+      expect(manager.isSkillActive(tsx!)).toBe(false);
+    });
+
+    it('activates a conditional skill when a matching file path is touched', async () => {
+      await loadConditionalFixture();
+
+      const newly = manager.matchAndActivateByPath('/test/project/src/App.tsx');
+      expect(newly).toEqual(['tsx-helper']);
+      expect(manager.getActivatedSkillNames().has('tsx-helper')).toBe(true);
+
+      const all = await manager.listSkills();
+      const tsx = all.find((s) => s.name === 'tsx-helper')!;
+      expect(manager.isSkillActive(tsx)).toBe(true);
+    });
+
+    it('does not re-notify listeners on subsequent matches of the same skill', async () => {
+      await loadConditionalFixture();
+
+      const listener = vi.fn();
+      manager.addChangeListener(listener);
+
+      expect(manager.matchAndActivateByPath('/test/project/src/A.tsx')).toEqual(
+        ['tsx-helper'],
+      );
+      expect(listener).toHaveBeenCalledTimes(1);
+
+      // Same pattern touched again — skill already active, no new
+      // notification.
+      expect(manager.matchAndActivateByPath('/test/project/src/B.tsx')).toEqual(
+        [],
+      );
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+
+    it('does nothing for paths outside the project root', async () => {
+      await loadConditionalFixture();
+      expect(manager.matchAndActivateByPath('/other/place/foo.tsx')).toEqual(
+        [],
+      );
+      expect(manager.getActivatedSkillNames().size).toBe(0);
     });
   });
 

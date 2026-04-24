@@ -95,6 +95,16 @@ export interface SkillConfig {
    * field in SKILL.md.
    */
   disableModelInvocation?: boolean;
+
+  /**
+   * Optional glob patterns that gate when this skill is offered to the model.
+   * When present and non-empty, the skill is a "conditional skill": it stays
+   * out of the SkillTool listing until a tool invocation touches a file path
+   * matching one of these patterns, at which point the skill is activated for
+   * the rest of the session. Patterns are resolved relative to the project
+   * root and matched via picomatch. Parsed from the `paths` frontmatter field.
+   */
+  paths?: string[];
 }
 
 /**

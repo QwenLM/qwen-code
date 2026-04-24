@@ -22,6 +22,10 @@ import type {
 import { SkillError, SkillErrorCode, parseModelField } from './types.js';
 import type { Config } from '../config/config.js';
 import { validateConfig } from './skill-load.js';
+import {
+  SkillActivationRegistry,
+  splitConditionalSkills,
+} from './skill-activation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import { SKILL_PROVIDER_CONFIG_DIRS } from '../config/storage.js';
@@ -66,6 +70,7 @@ export class SkillManager {
   private watchStarted = false;
   private refreshTimer: NodeJS.Timeout | null = null;
   private readonly bundledSkillsDir: string;
+  private activationRegistry: SkillActivationRegistry | null = null;
 
   constructor(private readonly config: Config) {
     this.bundledSkillsDir = path.join(
@@ -278,16 +283,59 @@ export class SkillManager {
     );
 
     let totalSkills = 0;
+    const allSkills: SkillConfig[] = [];
     for (const [level, levelSkills] of loaded) {
       skillsCache.set(level, levelSkills);
       totalSkills += levelSkills.length;
+      allSkills.push(...levelSkills);
     }
 
     this.skillsCache = skillsCache;
+
+    // Rebuild the activation registry so that newly added/removed `paths:`
+    // frontmatter takes effect. Prior activations do not carry across reloads.
+    const { conditional } = splitConditionalSkills(allSkills);
+    this.activationRegistry = new SkillActivationRegistry(
+      conditional,
+      this.config.getProjectRoot(),
+    );
+
     debugLogger.info(
-      `Skills cache refreshed: ${totalSkills} total skills loaded`,
+      `Skills cache refreshed: ${totalSkills} total skills loaded ` +
+        `(${conditional.length} conditional)`,
     );
     this.notifyChangeListeners();
+  }
+
+  /**
+   * Whether the given skill is currently eligible to appear in the SkillTool
+   * listing. Unconditional skills are always eligible; conditional skills
+   * become eligible only after a tool invocation touches a file matching
+   * their `paths:` globs.
+   */
+  isSkillActive(skill: SkillConfig): boolean {
+    if (!skill.paths || skill.paths.length === 0) return true;
+    return this.activationRegistry?.isActivated(skill.name) ?? false;
+  }
+
+  /**
+   * Activate any conditional skills whose `paths:` globs match `filePath`.
+   * Returns the names of skills newly activated by this call. When at least
+   * one skill activates, change listeners are notified so the SkillTool
+   * description picks up the new entry on the next refresh.
+   */
+  matchAndActivateByPath(filePath: string): string[] {
+    if (!this.activationRegistry) return [];
+    const newly = this.activationRegistry.matchAndConsume(filePath);
+    if (newly.length > 0) {
+      this.notifyChangeListeners();
+    }
+    return newly;
+  }
+
+  /** Names of all conditional skills activated so far (read-only snapshot). */
+  getActivatedSkillNames(): ReadonlySet<string> {
+    return this.activationRegistry?.getActivatedNames() ?? new Set();
   }
 
   /**
@@ -468,6 +516,20 @@ export class SkillManager {
           ? true
           : undefined;
 
+      // Optional `paths` frontmatter: glob patterns that gate when this skill
+      // is offered to the model (conditional skill).
+      const pathsRaw = frontmatter['paths'];
+      let paths: string[] | undefined;
+      if (pathsRaw !== undefined) {
+        if (!Array.isArray(pathsRaw)) {
+          throw new Error('"paths" must be an array of glob patterns');
+        }
+        const cleaned = pathsRaw
+          .map((p) => String(p).trim())
+          .filter((p) => p.length > 0);
+        paths = cleaned.length > 0 ? cleaned : undefined;
+      }
+
       const config: SkillConfig = {
         name,
         description,
@@ -480,6 +542,7 @@ export class SkillManager {
         body: body.trim(),
         whenToUse,
         disableModelInvocation,
+        paths,
       };
 
       // Validate the parsed configuration

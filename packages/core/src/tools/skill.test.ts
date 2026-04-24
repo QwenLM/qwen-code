@@ -97,6 +97,10 @@ describe('SkillTool', () => {
         };
       }),
       getParseErrors: vi.fn().mockReturnValue(new Map()),
+      // Default to "all skills active" so existing tests that use
+      // unconditional skills are unaffected by the conditional-skill gating
+      // added alongside `paths:` frontmatter.
+      isSkillActive: vi.fn().mockReturnValue(true),
     } as unknown as SkillManager;
 
     MockedSkillManager.mockImplementation(() => mockSkillManager);
@@ -242,6 +246,64 @@ describe('SkillTool', () => {
       expect(result).toBe(
         'Skill "non-existent" not found. No skills are currently available.',
       );
+    });
+
+    it('returns a path-activation error for a registered but not-yet-activated conditional skill', async () => {
+      const conditionalSkill: SkillConfig = {
+        name: 'tsx-helper',
+        description: 'React TSX helper',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/tsx-helper/SKILL.md',
+        body: 'Body.',
+        paths: ['src/**/*.tsx'],
+      };
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue([
+        conditionalSkill,
+      ]);
+      // Simulate the skill being registered on disk but not yet activated.
+      vi.mocked(mockSkillManager.isSkillActive).mockImplementation(
+        (s: SkillConfig) => !s.paths || s.paths.length === 0,
+      );
+
+      const gatedTool = new SkillTool(config);
+      await vi.runAllTimersAsync();
+
+      const result = gatedTool.validateToolParams({ skill: 'tsx-helper' });
+      expect(result).toMatch(/gated by path-based activation/);
+      expect(result).toMatch(/paths: frontmatter/);
+    });
+
+    it('does not allow a pending conditional skill to be invoked via the model-invocable command path', async () => {
+      // Regression for /review finding: SkillCommandLoader exposes every
+      // user/project skill as a model-invocable command. Without dropping
+      // file-based names from modelInvocableCommands, validateToolParams
+      // would accept a path-gated skill via the command branch and bypass
+      // the activation contract entirely.
+      const conditionalSkill: SkillConfig = {
+        name: 'tsx-helper',
+        description: 'React TSX helper',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/tsx-helper/SKILL.md',
+        body: 'Body.',
+        paths: ['src/**/*.tsx'],
+      };
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue([
+        conditionalSkill,
+      ]);
+      vi.mocked(mockSkillManager.isSkillActive).mockImplementation(
+        (s: SkillConfig) => !s.paths || s.paths.length === 0,
+      );
+      // SkillCommandLoader would surface tsx-helper here even though it is
+      // a path-gated file-based skill.
+      vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
+        () => [{ name: 'tsx-helper', description: 'React TSX helper' }],
+      );
+
+      const gatedTool = new SkillTool(config);
+      await vi.runAllTimersAsync();
+
+      const result = gatedTool.validateToolParams({ skill: 'tsx-helper' });
+      expect(result).toMatch(/gated by path-based activation/);
     });
   });
 
