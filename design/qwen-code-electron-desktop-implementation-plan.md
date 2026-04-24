@@ -53,7 +53,7 @@ order, verification, decisions, and remaining work.
 
 ### Slice 2: Desktop Server Runtime Surface
 
-- Status: pending
+- Status: complete
 - Goal: add `/api/runtime` and typed error responses that expose CLI path,
   platform, desktop version, and auth/account placeholders without spawning ACP.
 - Files:
@@ -202,6 +202,17 @@ order, verification, decisions, and remaining work.
   - `npm run typecheck` passed across workspaces.
   - `npm run build` passed across the configured build order. Existing VS Code
     companion lint warnings were reported by its build script, with no errors.
+- 2026-04-25 Slice 2:
+  - `npx prettier --check design/qwen-code-electron-desktop-implementation-plan.md scripts/build.js packages/desktop` passed.
+  - `npm run test --workspace=packages/desktop` passed: 1 file, 6 tests.
+  - `npm run lint --workspace=packages/desktop` passed.
+  - `npm run typecheck --workspace=packages/desktop` passed.
+  - `npm run build --workspace=packages/desktop` passed.
+  - `npm exec --workspace=packages/desktop -- electron --version` passed:
+    `v41.3.0`.
+  - `npm run typecheck` passed across workspaces.
+  - `npm run build` passed across the configured build order. Existing VS Code
+    companion lint warnings were reported by its build script, with no errors.
 
 ## Self Review Notes
 
@@ -217,10 +228,16 @@ order, verification, decisions, and remaining work.
   - Fixed self-review issues before completion: guarded app startup behind the
     Electron single-instance lock, tightened bearer parsing, and removed unused
     direct WebSocket dependencies until the WS slice.
+- 2026-04-25 Slice 2:
+  - Runtime route remains behind the same token and origin checks as `/health`.
+  - Runtime payload does not expose secrets; auth/account are explicit
+    placeholders until ACP is connected.
+  - Renderer displays runtime summary from REST only and still obtains the
+    server token only through preload.
 
 ## Remaining Work
 
-- Commit Slice 1.
-- Continue with Slice 2 runtime route and typed server error surface.
+- Commit Slice 2.
+- Continue with Slice 3 ACP process client wrapper.
 - Continue through the ACP, session, WebSocket, permission, settings, and
   packaging slices until the architecture MVP is fully verified.

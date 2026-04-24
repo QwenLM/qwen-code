@@ -25,6 +25,29 @@ export interface DesktopHealthResponse {
   timestamp: string;
 }
 
+export interface DesktopRuntimeResponse {
+  ok: true;
+  desktop: {
+    version: string;
+    electronVersion: string | null;
+    nodeVersion: string;
+  };
+  cli: {
+    path: string | null;
+    channel: 'Desktop';
+    acpReady: false;
+  };
+  platform: {
+    type: NodeJS.Platform;
+    arch: string;
+    release: string;
+  };
+  auth: {
+    status: 'unknown';
+    account: null;
+  };
+}
+
 export interface DesktopErrorResponse {
   ok: false;
   code: string;

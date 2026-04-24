@@ -73,6 +73,44 @@ describe('DesktopServer', () => {
     );
   });
 
+  it('serves authenticated runtime information without ACP', async () => {
+    const server = await createTestServer();
+
+    const response = await getJson(server, '/api/runtime', {
+      Authorization: 'Bearer test-token',
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      ok: true,
+      desktop: {
+        version: '0.15.2',
+        nodeVersion: process.versions.node,
+      },
+      cli: {
+        path: null,
+        channel: 'Desktop',
+        acpReady: false,
+      },
+      auth: {
+        status: 'unknown',
+        account: null,
+      },
+    });
+  });
+
+  it('protects runtime information with the desktop token', async () => {
+    const server = await createTestServer();
+
+    const response = await getJson(server, '/api/runtime');
+
+    expect(response.status).toBe(401);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: 'unauthorized',
+    });
+  });
+
   it('returns a typed error for unknown authenticated routes', async () => {
     const server = await createTestServer();
 

@@ -133,11 +133,28 @@ function RuntimeDetails({ loadState }: { loadState: LoadState }) {
         <dd>{loadState.status.serverUrl}</dd>
       </div>
       <div>
-        <dt>Health</dt>
-        <dd>{loadState.status.health.service}</dd>
+        <dt>Desktop</dt>
+        <dd>{loadState.status.runtime.desktop.version}</dd>
       </div>
       <div>
-        <dt>Uptime</dt>
+        <dt>Platform</dt>
+        <dd>
+          {loadState.status.runtime.platform.type}-
+          {loadState.status.runtime.platform.arch}
+        </dd>
+      </div>
+      <div>
+        <dt>Node</dt>
+        <dd>{loadState.status.runtime.desktop.nodeVersion}</dd>
+      </div>
+      <div>
+        <dt>ACP</dt>
+        <dd>
+          {loadState.status.runtime.cli.acpReady ? 'Ready' : 'Not started'}
+        </dd>
+      </div>
+      <div>
+        <dt>Health</dt>
         <dd>{loadState.status.health.uptimeMs} ms</dd>
       </div>
     </dl>

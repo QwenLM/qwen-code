@@ -17,9 +17,11 @@ import {
   isAllowedOrigin,
   isAuthorized,
 } from './http/auth.js';
+import { getRuntimeInfo } from './services/runtimeService.js';
 import type {
   DesktopErrorResponse,
   DesktopHealthResponse,
+  DesktopRuntimeResponse,
   DesktopServer,
   DesktopServerOptions,
 } from './types.js';
@@ -37,7 +39,18 @@ export async function startDesktopServer(
   const now = options.now ?? (() => new Date());
   const startedAt = now().getTime();
   const server = createServer((request, response) => {
-    handleRequest(request, response, { token, startedAt, now });
+    void handleRequest(request, response, { token, startedAt, now }).catch(
+      (error: unknown) => {
+        sendJson(response, getSingleHeader(request.headers.origin), 500, {
+          ok: false,
+          code: 'internal_error',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Desktop server request failed.',
+        });
+      },
+    );
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -70,11 +83,11 @@ export async function startDesktopServer(
   };
 }
 
-function handleRequest(
+async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
   context: HandlerContext,
-) {
+): Promise<void> {
   const origin = getSingleHeader(request.headers.origin);
   if (!isAllowedOrigin(origin)) {
     sendJson(response, origin, 403, {
@@ -120,6 +133,11 @@ function handleRequest(
     return;
   }
 
+  if (request.method === 'GET' && requestUrl.pathname === '/api/runtime') {
+    sendJson(response, origin, 200, await getRuntimeInfo());
+    return;
+  }
+
   sendJson(response, origin, 404, {
     ok: false,
     code: 'not_found',
@@ -139,8 +157,16 @@ function sendJson(
   response: ServerResponse,
   origin: string | undefined,
   statusCode: number,
-  payload: DesktopHealthResponse | DesktopErrorResponse,
+  payload:
+    | DesktopHealthResponse
+    | DesktopRuntimeResponse
+    | DesktopErrorResponse,
 ) {
+  if (response.headersSent) {
+    response.end();
+    return;
+  }
+
   response.writeHead(statusCode, {
     ...createCorsHeaders(origin),
     'Content-Type': 'application/json; charset=utf-8',
