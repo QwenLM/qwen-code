@@ -698,9 +698,9 @@ describe('AppContainer State Management', () => {
         expect.stringContaining('the previous prompt'),
       );
       expect(mockPopAllMessages).toHaveBeenCalled();
-      // Option C: cancel restores the first segment and drops the rest of
-      // the queue so forgotten follow-ups never auto-submit later.
-      expect(mockClearQueue).toHaveBeenCalled();
+      // popAllForEdit drains the queue internally, so the cancel handler
+      // does not need to call clearQueue separately on this path.
+      expect(mockClearQueue).not.toHaveBeenCalled();
     });
 
     it('drops the queue when cancelling during tool execution', async () => {

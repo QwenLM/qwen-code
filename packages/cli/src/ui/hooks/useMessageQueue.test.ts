@@ -7,13 +7,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useMessageQueue } from './useMessageQueue.js';
-import { StreamingState } from '../types.js';
 
 describe('useMessageQueue', () => {
-  let mockSubmitQuery: ReturnType<typeof vi.fn>;
-
   beforeEach(() => {
-    mockSubmitQuery = vi.fn();
     vi.useFakeTimers();
   });
 
@@ -23,26 +19,14 @@ describe('useMessageQueue', () => {
   });
 
   it('should initialize with empty queue', () => {
-    const { result } = renderHook(() =>
-      useMessageQueue({
-        isConfigInitialized: true,
-        streamingState: StreamingState.Idle,
-        submitQuery: mockSubmitQuery,
-      }),
-    );
+    const { result } = renderHook(() => useMessageQueue());
 
     expect(result.current.messageQueue).toEqual([]);
     expect(result.current.getQueuedMessagesText()).toBe('');
   });
 
   it('should add messages to queue', () => {
-    const { result } = renderHook(() =>
-      useMessageQueue({
-        isConfigInitialized: true,
-        streamingState: StreamingState.Responding,
-        submitQuery: mockSubmitQuery,
-      }),
-    );
+    const { result } = renderHook(() => useMessageQueue());
 
     act(() => {
       result.current.addMessage('Test message 1');
@@ -56,13 +40,7 @@ describe('useMessageQueue', () => {
   });
 
   it('should filter out empty messages', () => {
-    const { result } = renderHook(() =>
-      useMessageQueue({
-        isConfigInitialized: true,
-        streamingState: StreamingState.Responding,
-        submitQuery: mockSubmitQuery,
-      }),
-    );
+    const { result } = renderHook(() => useMessageQueue());
 
     act(() => {
       result.current.addMessage('Valid message');
@@ -78,13 +56,7 @@ describe('useMessageQueue', () => {
   });
 
   it('should clear queue', () => {
-    const { result } = renderHook(() =>
-      useMessageQueue({
-        isConfigInitialized: true,
-        streamingState: StreamingState.Responding,
-        submitQuery: mockSubmitQuery,
-      }),
-    );
+    const { result } = renderHook(() => useMessageQueue());
 
     act(() => {
       result.current.addMessage('Test message');
@@ -100,13 +72,7 @@ describe('useMessageQueue', () => {
   });
 
   it('should return queued messages as text with double newlines', () => {
-    const { result } = renderHook(() =>
-      useMessageQueue({
-        isConfigInitialized: true,
-        streamingState: StreamingState.Responding,
-        submitQuery: mockSubmitQuery,
-      }),
-    );
+    const { result } = renderHook(() => useMessageQueue());
 
     act(() => {
       result.current.addMessage('Message 1');
@@ -119,79 +85,78 @@ describe('useMessageQueue', () => {
     );
   });
 
-  it('should pop all messages from queue', () => {
-    const { result } = renderHook(() =>
-      useMessageQueue({
-        isConfigInitialized: true,
-        streamingState: StreamingState.Responding,
-        submitQuery: mockSubmitQuery,
-      }),
-    );
+  describe('popAllMessages (cancel and ESC/Up restore)', () => {
+    it('returns null when the queue is empty', () => {
+      const { result } = renderHook(() => useMessageQueue());
 
-    act(() => {
-      result.current.addMessage('Message 1');
-      result.current.addMessage('Message 2');
-      result.current.addMessage('Message 3');
+      let popped: string | null = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      expect(popped).toBeNull();
+      expect(result.current.messageQueue).toEqual([]);
     });
 
-    let popped: string | null = null;
-    act(() => {
-      popped = result.current.popAllMessages();
+    it('joins all queued messages with double newlines and clears the queue', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('Message 1');
+        result.current.addMessage('Message 2');
+        result.current.addMessage('Message 3');
+      });
+
+      let popped: string | null = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      expect(popped).toBe('Message 1\n\nMessage 2\n\nMessage 3');
+      expect(result.current.messageQueue).toEqual([]);
     });
 
-    expect(popped).toBe('Message 1\n\nMessage 2\n\nMessage 3');
-    expect(result.current.messageQueue).toEqual([]);
-  });
+    it('returns a single message without separator', () => {
+      const { result } = renderHook(() => useMessageQueue());
 
-  it('should pop single message without separator', () => {
-    const { result } = renderHook(() =>
-      useMessageQueue({
-        isConfigInitialized: true,
-        streamingState: StreamingState.Responding,
-        submitQuery: mockSubmitQuery,
-      }),
-    );
+      act(() => {
+        result.current.addMessage('Only message');
+      });
 
-    act(() => {
-      result.current.addMessage('Only message');
+      let popped: string | null = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      expect(popped).toBe('Only message');
+      expect(result.current.messageQueue).toEqual([]);
     });
 
-    let popped: string | null = null;
-    act(() => {
-      popped = result.current.popAllMessages();
+    it('joins mixed slash commands and prompts in original order', () => {
+      // Edit-restore intentionally collapses segment boundaries: the user is
+      // recovering input into the buffer to edit before resubmitting, so
+      // typing order matters more than slash-vs-prompt routing boundaries.
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('/model');
+        result.current.addMessage('hello');
+        result.current.addMessage('world');
+      });
+
+      let popped: string | null = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      expect(popped).toBe('/model\n\nhello\n\nworld');
+      expect(result.current.messageQueue).toEqual([]);
     });
-
-    expect(popped).toBe('Only message');
-    expect(result.current.messageQueue).toEqual([]);
-  });
-
-  it('should return null when popping from empty queue', () => {
-    const { result } = renderHook(() =>
-      useMessageQueue({
-        isConfigInitialized: true,
-        streamingState: StreamingState.Responding,
-        submitQuery: mockSubmitQuery,
-      }),
-    );
-
-    let popped: string | null = null;
-    act(() => {
-      popped = result.current.popAllMessages();
-    });
-
-    expect(popped).toBeNull();
-    expect(result.current.messageQueue).toEqual([]);
   });
 
   describe('drainQueue (mid-turn drain for tool-result injection)', () => {
     it('returns an empty array when the queue is empty', () => {
-      const { result } = renderHook(() =>
-        useMessageQueue({
-          isConfigInitialized: true,
-          streamingState: StreamingState.Responding,
-          submitQuery: mockSubmitQuery,
-        }),
-      );
+      const { result } = renderHook(() => useMessageQueue());
 
       let drained: string[] = [];
       act(() => {
@@ -201,13 +166,7 @@ describe('useMessageQueue', () => {
     });
 
     it('drains all plain-text messages and leaves slash commands queued', () => {
-      const { result } = renderHook(() =>
-        useMessageQueue({
-          isConfigInitialized: true,
-          streamingState: StreamingState.Responding,
-          submitQuery: mockSubmitQuery,
-        }),
-      );
+      const { result } = renderHook(() => useMessageQueue());
 
       act(() => {
         result.current.addMessage('one');
@@ -225,18 +184,12 @@ describe('useMessageQueue', () => {
       expect(result.current.messageQueue).toEqual(['/model']);
     });
 
-    it('still drains later plain-text messages when a slash command leads the queue', () => {
-      const { result } = renderHook(() =>
-        useMessageQueue({
-          isConfigInitialized: true,
-          streamingState: StreamingState.Responding,
-          submitQuery: mockSubmitQuery,
-        }),
-      );
+    it('returns an empty array when the queue contains only slash commands', () => {
+      const { result } = renderHook(() => useMessageQueue());
 
       act(() => {
         result.current.addMessage('/model');
-        result.current.addMessage('hello');
+        result.current.addMessage('/help');
       });
 
       let drained: string[] = [];
@@ -244,18 +197,12 @@ describe('useMessageQueue', () => {
         drained = result.current.drainQueue();
       });
 
-      expect(drained).toEqual(['hello']);
-      expect(result.current.messageQueue).toEqual(['/model']);
+      expect(drained).toEqual([]);
+      expect(result.current.messageQueue).toEqual(['/model', '/help']);
     });
 
     it('drains the whole queue when it contains no slash commands', () => {
-      const { result } = renderHook(() =>
-        useMessageQueue({
-          isConfigInitialized: true,
-          streamingState: StreamingState.Responding,
-          submitQuery: mockSubmitQuery,
-        }),
-      );
+      const { result } = renderHook(() => useMessageQueue());
 
       act(() => {
         result.current.addMessage('a');
@@ -275,13 +222,7 @@ describe('useMessageQueue', () => {
 
   describe('popNextSegment', () => {
     it('returns null when the queue is empty', () => {
-      const { result } = renderHook(() =>
-        useMessageQueue({
-          isConfigInitialized: true,
-          streamingState: StreamingState.Idle,
-          submitQuery: mockSubmitQuery,
-        }),
-      );
+      const { result } = renderHook(() => useMessageQueue());
 
       let segment: string | null = null;
       act(() => {
@@ -290,64 +231,12 @@ describe('useMessageQueue', () => {
       expect(segment).toBeNull();
     });
 
-    it('batches leading plain-text messages into one segment', () => {
-      const { result } = renderHook(() =>
-        useMessageQueue({
-          isConfigInitialized: true,
-          streamingState: StreamingState.Responding,
-          submitQuery: mockSubmitQuery,
-        }),
-      );
-
-      act(() => {
-        result.current.addMessage('hello');
-        result.current.addMessage('world');
-      });
-
-      let segment: string | null = null;
-      act(() => {
-        segment = result.current.popNextSegment();
-      });
-      expect(segment).toBe('hello\n\nworld');
-      expect(result.current.messageQueue).toEqual([]);
-    });
-
-    it('stops batching at the first slash command and leaves it queued', () => {
-      const { result } = renderHook(() =>
-        useMessageQueue({
-          isConfigInitialized: true,
-          streamingState: StreamingState.Responding,
-          submitQuery: mockSubmitQuery,
-        }),
-      );
-
-      act(() => {
-        result.current.addMessage('hello');
-        result.current.addMessage('world');
-        result.current.addMessage('/model');
-        result.current.addMessage('after');
-      });
-
-      let segment: string | null = null;
-      act(() => {
-        segment = result.current.popNextSegment();
-      });
-      expect(segment).toBe('hello\n\nworld');
-      expect(result.current.messageQueue).toEqual(['/model', 'after']);
-    });
-
-    it('returns a slash command alone when it leads the queue', () => {
-      const { result } = renderHook(() =>
-        useMessageQueue({
-          isConfigInitialized: true,
-          streamingState: StreamingState.Responding,
-          submitQuery: mockSubmitQuery,
-        }),
-      );
+    it('pops the first item and leaves the rest queued', () => {
+      const { result } = renderHook(() => useMessageQueue());
 
       act(() => {
         result.current.addMessage('/model');
-        result.current.addMessage('hello');
+        result.current.addMessage('/help');
       });
 
       let segment: string | null = null;
@@ -355,22 +244,16 @@ describe('useMessageQueue', () => {
         segment = result.current.popNextSegment();
       });
       expect(segment).toBe('/model');
-      expect(result.current.messageQueue).toEqual(['hello']);
+      expect(result.current.messageQueue).toEqual(['/help']);
     });
 
-    it('drains segments one at a time across repeated calls', () => {
-      const { result } = renderHook(() =>
-        useMessageQueue({
-          isConfigInitialized: true,
-          streamingState: StreamingState.Responding,
-          submitQuery: mockSubmitQuery,
-        }),
-      );
+    it('drains the queue one item at a time across repeated calls', () => {
+      const { result } = renderHook(() => useMessageQueue());
 
       act(() => {
-        result.current.addMessage('hello');
         result.current.addMessage('/model');
-        result.current.addMessage('world');
+        result.current.addMessage('/theme');
+        result.current.addMessage('/help');
       });
 
       const segments: Array<string | null> = [];
@@ -387,36 +270,8 @@ describe('useMessageQueue', () => {
         segments.push(result.current.popNextSegment());
       });
 
-      expect(segments).toEqual(['hello', '/model', 'world', null]);
+      expect(segments).toEqual(['/model', '/theme', '/help', null]);
       expect(result.current.messageQueue).toEqual([]);
-    });
-
-    it('preserves remaining messages so popAllMessages can restore them after a cancel', () => {
-      const { result } = renderHook(() =>
-        useMessageQueue({
-          isConfigInitialized: true,
-          streamingState: StreamingState.Responding,
-          submitQuery: mockSubmitQuery,
-        }),
-      );
-
-      act(() => {
-        result.current.addMessage('hello');
-        result.current.addMessage('/model');
-        result.current.addMessage('after');
-      });
-
-      act(() => {
-        result.current.popNextSegment();
-      });
-      expect(result.current.messageQueue).toEqual(['/model', 'after']);
-
-      let popped: string | null = null;
-      act(() => {
-        popped = result.current.popAllMessages();
-      });
-      expect(popped).toBe('/model');
-      expect(result.current.messageQueue).toEqual(['after']);
     });
   });
 });

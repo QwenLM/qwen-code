@@ -880,15 +880,11 @@ export const AppContainer = (props: AppContainerProps) => {
     popAllMessages,
     drainQueue,
     popNextSegment,
-  } = useMessageQueue({
-    isConfigInitialized,
-    streamingState,
-    submitQuery,
-  });
+  } = useMessageQueue();
 
   // Bridge message queue to mid-turn drain via ref.
   // drainQueue reads the synchronous queueRef inside the hook, so it
-  // stays consistent with popAllMessages even before React re-renders.
+  // stays consistent with popNextSegment even before React re-renders.
   midTurnDrainRef.current = drainQueue;
 
   // Connect remote input watcher to submitQuery for bidirectional sync.
@@ -1218,28 +1214,16 @@ export const AppContainer = (props: AppContainerProps) => {
       ...pendingGeminiHistoryItems,
     ];
     if (isToolExecuting(pendingHistoryItems)) {
-      // Cancel during tool execution: clear the buffer AND drop any
-      // queued follow-ups. The cancel contract is the same as the
-      // non-tool path — abort and redirect — so queued segments must
-      // not auto-fire once the tool settles and the app returns to idle.
+      // Tool-cancel: drop both buffer and queue so nothing auto-fires later.
       buffer.setText('');
       clearQueue();
       return;
     }
 
-    // Cancel is "abort and redirect": restore the most recent queued
-    // segment into the buffer for editing, and discard the rest of the
-    // queue so the user is not surprised later by auto-submission of
-    // forgotten follow-ups. Segment boundaries still matter for the
-    // normal idle drain, which is the primary consumer of the queue;
-    // on cancel, the user's intent is a clean slate.
+    // Restore queued input joined into the buffer for editing.
     const popped = popAllMessages();
     if (popped) {
-      clearQueue();
       const currentText = buffer.text;
-      // Preserve any in-progress draft the user typed since submitting (this
-      // is reachable via Ctrl+C cancel, which fires regardless of buffer
-      // content). Mirrors the popQueueIntoInput convention in InputPrompt.
       buffer.setText(currentText ? `${popped}\n${currentText}` : popped);
     }
   }, [
@@ -2049,16 +2033,8 @@ export const AppContainer = (props: AppContainerProps) => {
     isExtensionsManagerDialogOpen;
   dialogsVisibleRef.current = dialogsVisible;
 
-  // Drain the queued-messages queue when we're idle and not blocked by a
-  // dialog. One segment per effect run: consecutive plain-text messages are
-  // batched into a single submission, while queued slash commands are
-  // submitted alone once the app is idle again. Mid-turn drain still keeps
-  // slash commands out of tool-result injection.
-  //
-  // `queueDrainingRef` blocks re-entry while an in-flight submission is
-  // still settling. `queueDrainNonce` is bumped once the submission
-  // settles so the effect re-fires for any remaining segments even when
-  // `streamingState` / `messageQueue` did not change.
+  // Drain queued messages when idle. `queueDrainNonce` re-fires the effect
+  // after each submission settles so multi-step queues drain end-to-end.
   const queueDrainingRef = useRef(false);
   const [queueDrainNonce, setQueueDrainNonce] = useState(0);
   useEffect(() => {
@@ -2067,10 +2043,15 @@ export const AppContainer = (props: AppContainerProps) => {
     if (streamingState !== StreamingState.Idle) return;
     if (dialogsVisible) return;
     if (messageQueue.length === 0) return;
-    const segment = popNextSegment();
-    if (segment === null) return;
+
+    // Two-phase: batch plain prompts as one turn, else pop next slash command.
+    const plainPrompts = drainQueue();
+    const submission =
+      plainPrompts.length > 0 ? plainPrompts.join('\n\n') : popNextSegment();
+    if (submission === null) return;
+
     queueDrainingRef.current = true;
-    Promise.resolve(submitQuery(segment)).finally(() => {
+    Promise.resolve(submitQuery(submission)).finally(() => {
       queueDrainingRef.current = false;
       setQueueDrainNonce((n) => n + 1);
     });
@@ -2079,6 +2060,7 @@ export const AppContainer = (props: AppContainerProps) => {
     streamingState,
     dialogsVisible,
     messageQueue,
+    drainQueue,
     popNextSegment,
     submitQuery,
     queueDrainNonce,
