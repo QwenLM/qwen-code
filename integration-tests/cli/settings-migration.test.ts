@@ -95,7 +95,7 @@ describe('settings-migration', () => {
       const migratedSettings = readSettingsFile(rig);
 
       // Verify migration to V3
-      expect(migratedSettings['$version']).toBe(3);
+      expect(migratedSettings['$version']).toBe(4);
       expect(migratedSettings['ui']).toEqual({
         theme: 'dark',
         hideTips: false,
@@ -137,7 +137,7 @@ describe('settings-migration', () => {
       const migratedSettings = readSettingsFile(rig);
 
       // Expected output based on stable test output
-      expect(migratedSettings['$version']).toBe(3);
+      expect(migratedSettings['$version']).toBe(4);
       expect(migratedSettings['tools']).toEqual({ autoAccept: false });
       expect(migratedSettings['context']).toEqual({ includeDirectories: [] });
       expect(migratedSettings['model']).toEqual({ name: ['gemini', 'claude'] });
@@ -162,7 +162,7 @@ describe('settings-migration', () => {
       const migratedSettings = readSettingsFile(rig);
 
       // Should be migrated to V3
-      expect(migratedSettings['$version']).toBe(3);
+      expect(migratedSettings['$version']).toBe(4);
       // Legacy string values for ui/general should be preserved as-is (user data)
       expect(migratedSettings['ui']).toBe('legacy-ui-string');
       expect(migratedSettings['general']).toBe('legacy-general-string');
@@ -189,7 +189,7 @@ describe('settings-migration', () => {
       const migratedSettings = readSettingsFile(rig);
 
       // Expected output based on stable test output
-      expect(migratedSettings['$version']).toBe(3);
+      expect(migratedSettings['$version']).toBe(4);
       expect(migratedSettings['model']).toEqual({ name: 'qwen-plus' });
       expect(migratedSettings['ui']).toEqual({
         hideWindowTitle: true,
@@ -226,7 +226,7 @@ describe('settings-migration', () => {
       const migratedSettings = readSettingsFile(rig);
 
       // Verify migration to V3
-      expect(migratedSettings['$version']).toBe(3);
+      expect(migratedSettings['$version']).toBe(4);
 
       // Verify disable* -> enable* conversion with inversion
       expect(
@@ -303,7 +303,7 @@ describe('settings-migration', () => {
       const migratedSettings = readSettingsFile(rig);
 
       // Should be updated to V3 version
-      expect(migratedSettings['$version']).toBe(3);
+      expect(migratedSettings['$version']).toBe(4);
       // Other settings should remain unchanged
       expect(migratedSettings['ui']).toEqual({ theme: 'dark' });
       expect(migratedSettings['model']).toEqual({ name: 'gemini' });
@@ -330,7 +330,7 @@ describe('settings-migration', () => {
       const migratedSettings = readSettingsFile(rig);
 
       // Version metadata should still be normalized to current version
-      expect(migratedSettings['$version']).toBe(3);
+      expect(migratedSettings['$version']).toBe(4);
       // Existing user content should be preserved
       expect(migratedSettings['customOnlyKey']).toBe('value');
     });
@@ -372,7 +372,7 @@ describe('settings-migration', () => {
       const migratedSettings = readSettingsFile(rig);
 
       // Coercible strings are migrated; invalid disable* values are removed.
-      expect(migratedSettings['$version']).toBe(3);
+      expect(migratedSettings['$version']).toBe(4);
       expect(migratedSettings['general']).toEqual({
         enableAutoUpdate: false,
       });
@@ -437,7 +437,7 @@ describe('settings-migration', () => {
       const migratedSettings = readSettingsFile(rig);
 
       // Expected output based on stable test output
-      expect(migratedSettings['$version']).toBe(3);
+      expect(migratedSettings['$version']).toBe(4);
       // Migration converts disable* to enable* by inverting the value
       // disableAutoUpdate: false -> enableAutoUpdate: true (inverted)
       // But disableUpdateNag: true may affect the consolidation
@@ -501,11 +501,10 @@ describe('settings-migration', () => {
       // Read settings
       const finalSettings = readSettingsFile(rig);
 
-      // Should remain V3
-      expect(finalSettings['$version']).toBe(3);
-      // Note: V3 settings with legacy disable* keys are left as-is
-      // Migration only runs when version < current version
-      // Since this is already V3, no migration logic is applied
+      // V3 → V4 migration bumps the version; V3→V4 only touches
+      // general.gitCoAuthor, so unrelated legacy disable* keys remain as-is
+      // (V2→V3 ran on original V3 load, not re-applied here).
+      expect(finalSettings['$version']).toBe(4);
       expect(
         (finalSettings['general'] as Record<string, unknown>)?.[
           'disableAutoUpdate'

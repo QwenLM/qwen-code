@@ -62,9 +62,20 @@
           "default": 5
         },
         "gitCoAuthor": {
-          "description": "Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.",
-          "type": "boolean",
-          "default": true
+          "description": "Attribution added to git commits and pull requests created through Qwen Code.",
+          "type": "object",
+          "properties": {
+            "commit": {
+              "description": "Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.",
+              "type": "boolean",
+              "default": true
+            },
+            "pr": {
+              "description": "Append a Qwen Code attribution line to PR descriptions when running `gh pr create`.",
+              "type": "boolean",
+              "default": true
+            }
+          }
         },
         "checkpointing": {
           "description": "Session checkpointing settings.",
