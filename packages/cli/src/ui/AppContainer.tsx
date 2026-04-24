@@ -469,10 +469,14 @@ export const AppContainer = (props: AppContainerProps) => {
     fetchUserMessages();
   }, [historyManager.history, logger]);
 
+  const remountStaticHistory = useCallback(() => {
+    setHistoryRemountKey((prev) => prev + 1);
+  }, []);
+
   const refreshStatic = useCallback(() => {
     stdout.write(ansiEscapes.clearTerminal);
-    setHistoryRemountKey((prev) => prev + 1);
-  }, [setHistoryRemountKey, stdout]);
+    remountStaticHistory();
+  }, [remountStaticHistory, stdout]);
 
   const {
     isThemeDialogOpen,
@@ -695,7 +699,7 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.addItem,
     historyManager.clearItems,
     historyManager.loadHistory,
-    refreshStatic,
+    remountStaticHistory,
     toggleVimEnabled,
     isProcessing,
     setIsProcessing,
@@ -1233,8 +1237,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const handleClearScreen = useCallback(() => {
     historyManager.clearItems();
     clearScreen();
-    refreshStatic();
-  }, [historyManager, refreshStatic]);
+    remountStaticHistory();
+  }, [historyManager, remountStaticHistory]);
 
   const { handleInput: vimHandleInput } = useVim(buffer, handleFinalSubmit);
 
