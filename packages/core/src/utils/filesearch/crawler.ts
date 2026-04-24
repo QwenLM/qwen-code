@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import { execSync } from 'node:child_process';
 import { fdir } from 'fdir';
 import type { Ignore } from './ignore.js';
 import * as cache from './crawlCache.js';
@@ -27,6 +28,100 @@ export interface CrawlOptions {
 
 function toPosixPath(p: string) {
   return p.split(path.sep).join(path.posix.sep);
+}
+
+/**
+ * Detects git submodules (gitlinks) in the given directory.
+ * Returns an array of submodule paths relative to the directory.
+ */
+function detectSubmodules(dirPath: string): string[] {
+  try {
+    // git ls-files --stage outputs lines like:
+    // 160000 <object> 0 <path> (for submodules)
+    const output = execSync('git ls-files --stage', {
+      cwd: dirPath,
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'ignore'], // Ignore stderr
+    });
+
+    const submodules: string[] = [];
+    for (const line of output.split('\n')) {
+      if (!line) continue;
+      const parts = line.split(/\s+/);
+      if (parts[0] === '160000') {
+        // Format: mode hash stage path
+        // We need to extract the path (everything after the first 3 space-separated parts)
+        const pathPart = line.split(/\s+/).slice(3).join(' ').trim();
+        if (pathPart) {
+          submodules.push(pathPart);
+        }
+      }
+    }
+
+    return submodules;
+  } catch {
+    // Not a git repository or command failed
+    return [];
+  }
+}
+
+/**
+ * Recursively crawls a submodule directory and returns relative paths.
+ */
+async function crawlSubmodule(
+  submodulePath: string,
+  crawlDirectory: string,
+  posixCwd: string,
+  dirFilter: (path: string) => boolean,
+  fileFilter: (path: string) => boolean,
+  maxDepth: number | undefined,
+  maxFiles: number | undefined,
+): Promise<string[]> {
+  try {
+    const fullSubmodulePath = path.join(crawlDirectory, submodulePath);
+    const api = new fdir()
+      .withRelativePaths()
+      .withDirs()
+      .withPathSeparator('/') // Always use unix style paths
+      .exclude((_, dirPath) => {
+        const relativePath = path.posix.relative(
+          toPosixPath(fullSubmodulePath),
+          dirPath,
+        );
+        return dirFilter(`${relativePath}/`);
+      })
+      .filter((filePath, isDirectory) => {
+        if (isDirectory) return true;
+        // Apply file-level ignore patterns
+        const relativeToSubmodule = path.posix.join(
+          toPosixPath(submodulePath),
+          filePath,
+        );
+        const cwdRelative = path.posix.relative(
+          posixCwd,
+          path.posix.join(toPosixPath(crawlDirectory), relativeToSubmodule),
+        );
+        return !fileFilter(cwdRelative);
+      });
+
+    if (maxDepth !== undefined) {
+      api.withMaxDepth(maxDepth);
+    }
+
+    if (maxFiles !== undefined) {
+      api.withMaxFiles(maxFiles);
+    }
+
+    const submoduleResults = await api.crawl(fullSubmodulePath).withPromise();
+
+    // Prefix submodule results with the submodule path
+    return submoduleResults.map((p) =>
+      path.posix.join(toPosixPath(submodulePath), p),
+    );
+  } catch {
+    // Submodule doesn't exist or can't be crawled
+    return [];
+  }
 }
 
 export async function crawl(options: CrawlOptions): Promise<string[]> {
@@ -86,6 +181,21 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
   const relativeToCwdResults = results.map((p) =>
     path.posix.join(relativeToCrawlDir, p),
   );
+
+  // Detect and crawl git submodules
+  const submodules = detectSubmodules(options.crawlDirectory);
+  for (const submodule of submodules) {
+    const submoduleResults = await crawlSubmodule(
+      submodule,
+      options.crawlDirectory,
+      posixCwd,
+      options.ignore.getDirectoryFilter(),
+      options.ignore.getFileFilter(),
+      options.maxDepth,
+      options.maxFiles,
+    );
+    relativeToCwdResults.push(...submoduleResults);
+  }
 
   if (options.cache) {
     const cacheKey = cache.getCacheKey(

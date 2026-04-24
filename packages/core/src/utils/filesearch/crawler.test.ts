@@ -7,6 +7,7 @@
 import { describe, it, expect, afterEach, vi, beforeEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { execSync } from 'node:child_process';
 import * as cache from './crawlCache.js';
 import { crawl } from './crawler.js';
 import {
@@ -676,6 +677,85 @@ describe('crawler', () => {
 
       expect(results.length).toBeLessThanOrEqual(1000);
       expect(results).toEqual(expect.arrayContaining(['.', 'a.txt', 'b.txt']));
+    });
+  });
+
+  describe('git submodules', () => {
+    it('should include files from git submodules in crawl results', async () => {
+      tmpDir = await createTmpDir({
+        'root-file.txt': '',
+        src: ['main.ts'],
+      });
+
+      // Initialize main repo
+      execSync('git init', { cwd: tmpDir });
+      execSync('git config user.email "test@test.com"', { cwd: tmpDir });
+      execSync('git config user.name "Test"', { cwd: tmpDir });
+
+      // Create a submodule directory structure
+      const subDir = path.join(tmpDir, 'sub');
+      await fs.mkdir(subDir, { recursive: true });
+      await fs.writeFile(path.join(subDir, 'sub-file.ts'), '');
+      const nestedDir = path.join(subDir, 'nested');
+      await fs.mkdir(nestedDir, { recursive: true });
+      await fs.writeFile(path.join(nestedDir, 'deep-file.txt'), '');
+
+      // Initialize the submodule as a git repo
+      execSync('git init', { cwd: subDir });
+      execSync('git config user.email "test@test.com"', { cwd: subDir });
+      execSync('git config user.name "Test"', { cwd: subDir });
+      execSync('git add .', { cwd: subDir });
+      execSync('git commit -m "initial"', { cwd: subDir });
+
+      // Manually set up gitlink by modifying .gitmodules and git index
+      // Add as a submodule using git config
+      execSync('git config --file .gitmodules submodule.sub.path sub', {
+        cwd: tmpDir,
+      });
+      execSync('git config --file .gitmodules submodule.sub.url ./sub', {
+        cwd: tmpDir,
+      });
+
+      // Add gitlink to the main repo's index (mode 160000 indicates submodule)
+      const submoduleCommit = execSync('git rev-parse HEAD', {
+        cwd: subDir,
+        encoding: 'utf8',
+      }).trim();
+      execSync(
+        `git update-index --add --cacheinfo 160000,${submoduleCommit},sub`,
+        {
+          cwd: tmpDir,
+        },
+      );
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      // Verify that files from both main repo and submodule are included
+      expect(results).toEqual(
+        expect.arrayContaining([
+          '.',
+          'src/',
+          'src/main.ts',
+          'root-file.txt',
+          'sub/',
+          'sub/sub-file.ts',
+          'sub/nested/',
+          'sub/nested/deep-file.txt',
+        ]),
+      );
     });
   });
 });
