@@ -140,7 +140,6 @@ export const diffCommand: SlashCommand = {
     return t('Show working-tree change stats versus HEAD');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local',
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: diffAction,
 };

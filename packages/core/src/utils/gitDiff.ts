@@ -34,11 +34,6 @@ export interface GitDiffResult {
   perFileStats: Map<string, PerFileStats>;
 }
 
-export interface NumstatResult {
-  stats: GitDiffStats;
-  perFileStats: Map<string, PerFileStats>;
-}
-
 const GIT_TIMEOUT_MS = 5000;
 /** Maximum files retained in per-file results. Matches issue #2997 "50 files" cap. */
 export const MAX_FILES = 50;
@@ -137,7 +132,7 @@ export async function fetchGitDiffHunks(
  * counts. Only the first `MAX_FILES` entries are kept in `perFileStats`, but
  * total stats account for every line.
  */
-export function parseGitNumstat(stdout: string): NumstatResult {
+export function parseGitNumstat(stdout: string): GitDiffResult {
   const lines = stdout.split('\n').filter(Boolean);
   let added = 0;
   let removed = 0;
