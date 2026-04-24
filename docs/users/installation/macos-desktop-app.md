@@ -45,6 +45,13 @@ EOF
 osacompile -o "/Applications/Qwen Code.app" /tmp/QwenCode.applescript
 ```
 
+If `/Applications` is not writable on your machine, install to your user Applications directory instead:
+
+```bash
+mkdir -p "$HOME/Applications"
+osacompile -o "$HOME/Applications/Qwen Code.app" /tmp/QwenCode.applescript
+```
+
 3. **(Optional) Replace the icon:**
 
 Download the official Qwen icon and convert it to ICNS format, then replace:
@@ -61,6 +68,8 @@ After installation, you can launch Qwen Code in three ways:
 - **Launchpad:** Find the "Qwen Code" icon in Launchpad
 - **Applications:** Open `/Applications/Qwen Code.app` directly
 
+If `/Applications` is not writable, the installer falls back to `~/Applications`.
+
 The app will:
 1. Open the Terminal application
 2. Automatically run the `qwen` command
@@ -72,21 +81,18 @@ To remove the desktop app:
 
 ```bash
 rm -rf "/Applications/Qwen Code.app"
+# or, if installed without admin write access:
+rm -rf "$HOME/Applications/Qwen Code.app"
 ```
 
 ## Troubleshooting
 
 ### Icon not showing after installation
 
-macOS caches application icons. To force a refresh:
-
-1. Log out and log back in, OR
-2. Run these commands:
+macOS caches application icons. If the icon does not appear immediately, wait a moment or restart Dock manually:
 
 ```bash
-rm ~/Library/Application\ Support/Dock/*.db 2>/dev/null
 killall Dock
-killall Finder
 ```
 
 ### "qwen: command not found" when opening the app
