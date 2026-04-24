@@ -847,6 +847,58 @@ describe('ModelsConfig', () => {
     expect(sources['apiKey']?.envKey).toBe('OPENAI_API_KEY');
   });
 
+  it('should preserve CLI-sourced apiKey (--openaiApiKey) when registry model envKey is absent', () => {
+    // Regression: CLI-passed keys (source kind 'cli') must not be discarded
+    // during syncAfterAuthRefresh when the provider's envKey is unset.
+    const envKey = 'CODING_PLAN_KEY_TEST_3417_CLI';
+    delete process.env[envKey];
+
+    const modelProvidersConfig: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'cli-test-model',
+          name: 'CLI Test Model',
+          baseUrl: 'https://api.example.com/v1',
+          envKey,
+          generationConfig: {
+            samplingParams: { temperature: 0.5 },
+          },
+        },
+      ],
+    };
+
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig,
+      generationConfig: {
+        model: 'cli-test-model',
+        apiKey: 'cli-provided-key',
+      },
+      generationConfigSources: {
+        model: { kind: 'cli', detail: '--model' },
+        apiKey: { kind: 'cli', detail: '--openaiApiKey' },
+      },
+    });
+
+    // Verify initial state
+    expect(currentGenerationConfig(modelsConfig).apiKey).toBe(
+      'cli-provided-key',
+    );
+
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'cli-test-model');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    // CLI-sourced apiKey should be preserved as fallback
+    expect(gc.apiKey).toBe('cli-provided-key');
+    expect(gc.apiKeyEnvKey).toBe(envKey);
+    expect(gc.model).toBe('cli-test-model');
+    expect(gc.samplingParams?.temperature).toBe(0.5);
+
+    const sources = modelsConfig.getGenerationConfigSources();
+    expect(sources['apiKey']?.kind).toBe('cli');
+    expect(sources['apiKey']?.detail).toBe('--openaiApiKey');
+  });
+
   it('should maintain consistency between currentModelId and _generationConfig.model after initialization', () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [

@@ -752,12 +752,13 @@ export class ModelsConfig {
       } else if (
         previousApiKey &&
         this.currentAuthType !== AuthType.QWEN_OAUTH &&
-        (previousApiKeySource?.kind === 'settings' ||
+        (previousApiKeySource?.kind === 'cli' ||
+          previousApiKeySource?.kind === 'settings' ||
           (previousApiKeySource?.kind === 'env' && !previousApiKeySource.via))
       ) {
-        // Fall back to the previously-resolved key from settings or a general
-        // environment variable (e.g., settings.security.auth.apiKey or
-        // OPENAI_API_KEY).
+        // Fall back to the previously-resolved key from CLI flags, settings,
+        // or a general environment variable (e.g., --openaiApiKey,
+        // settings.security.auth.apiKey, or OPENAI_API_KEY).
         //
         // Sources that are NOT preserved:
         //  - 'programmatic' (from updateCredentials) — provider atomicity
