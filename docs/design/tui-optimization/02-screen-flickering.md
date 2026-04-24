@@ -528,7 +528,7 @@ Claude Code 的自研 Ink 内核提供了五层防闪烁保护：
 
 ## 4. 实施优先级与里程碑
 
-如果目标是把 `#3013` 拆成更小、可验证的 PR 再逐步合入，建议不要直接按原 PR 的 patch 混合推进，而是遵循 [10-pr-3013-split-plan.md](./10-pr-3013-split-plan.md) 中的拆分路线。下面这张里程碑表给的是**技术演进顺序**，`10` 给的是**真正开 PR 时的切分粒度**。
+如果目标是彻底解决闪屏，而不是继续维护一条“大而全”的 patch 集合，那么实施顺序就不应再建立在 `#3013` 的 diff 结构上。`#3013` 只保留为参考样本：它证明了 pre-slicing、stable height、stream throttle 这些方向有收益，但真正开 PR 时应按用户 issue 归纳出的故障类来组织，详见 [10-issue-oriented-flicker-plan.md](./10-issue-oriented-flicker-plan.md)。下面这张里程碑表给的是**技术演进顺序**，`10` 给的是**真正开 PR 时的切分粒度**。
 
 | 优先级 | 方案                        | 周次  | 风险 | 预期收益                  |
 | ------ | --------------------------- | ----- | ---- | ------------------------- |
@@ -542,30 +542,35 @@ Claude Code 的自研 Ink 内核提供了五层防闪烁保护：
 | P2     | 双缓冲 + diff patch         | 11-13 | 高   | stdout 字节/帧 -80%       |
 | P2     | DECSTBM 滚动区域            | 13+   | 高   | 滚动性能接近原生          |
 
-### 4.1 针对 `#3013` 的 PR 拆分建议
+### 4.1 按用户 Issue 组织的 PR 编排
 
-`#3013` 当前混合了：
+从用户角度看，当前“闪屏”其实至少包含 5 类不同故障。真正落地时，PR 也应按这 5 类问题来组织，而不是继续沿用某个大 PR 的 patch 边界。
 
-- pre-render slicing
-- stable height
-- assistant stream throttle
-- synchronized output
-- resize 微抖动 guard
-- tool/subagent content budget
+| PR | 解决的问题类 | 代表 issue | 主要范围 | 代表性验证场景 |
+| --- | --- | --- | --- | --- |
+| PR-Prep | 观测与回归基线 | 全部 | 输出 counters、回归 harness、固定复现场景 | 长回答、resize、窄屏、tool expand |
+| PR-A1 | 普通流式闪烁 / 滚动条抖动 | `#1184` `#1491` `#3007` `#3144` | `useGeminiStream.ts` 的 content/thought throttle 与强制 flush 语义 | 长 assistant 回答、thought + content、中途 cancel |
+| PR-A2 | 终端帧撕裂 / 残余闪烁 | `#2903` `#3144` | synchronized output、frame write 合并、runtime probe | WezTerm、kitty、JetBrains 终端、tmux/SSH |
+| PR-B1 | `refreshStatic()` 型整屏闪烁 | `#938` `#1861` `#2924` `#2748` | `refreshStatic()` 语义拆分、resize/view-switch 触发源收紧 | `/settings`、compact merge、view switch、resize |
+| PR-C1 | 窄屏重复输出 / 无限滚动 | `#2912` `#2972` `#1591` | shell serializer、live viewport 与 transcript 分离 | 40 列窄终端、tmux 多 pane、`git commit` |
+| PR-D1 | 大输出布局抖动 / 工具结果不可读 | `#2748` `#1479` `#2818` | plain text / ANSI pre-slicing | `npm install`、`git log`、5000 行工具输出 |
+| PR-D2 | 通用 tool budgeting 与摘要/详情分离 | `#2818` `#1008` `#355` | scheduler budgeting、summary/detail 语义 | `grep`、`glob`、`read_file`、MCP 大结果 |
+| PR-E1 | 工具 / 子 agent 展开闪烁 | `#1491` `#1861` `#2424` `#2924` | stable height、bounded detail panel、展开节流 | `ctrl+e`、`ctrl+f`、subagent 执行中展开 |
 
-这类 patch 如果继续放在一条 PR 里，会让 review 很难回答“到底是哪一部分带来了收益”。因此，闪屏相关落地建议以以下顺序拆分：
+**推荐顺序**：
 
-| PR | 目标 | 是否直接来自 `#3013` | 说明 |
-| --- | --- | --- | --- |
-| PR-0 | 观测基线 | 否 | 先补 counters，给后面每条 PR 建立统一验证口径 |
-| PR-1 | 大 plain-text 工具输出 pre-slicing | 是 | 最容易视频和基准验证 |
-| PR-2 | assistant pending render throttle | 是 | 聚焦普通流式输出抖动 |
-| PR-3 | tool/subagent stable height 与 content budget | 是 | 聚焦 `ctrl+e` / `ctrl+f` 展开闪烁 |
-| PR-5 | `refreshStatic()` 语义拆分 | 否 | 是所有闪屏修复的补漏地基 |
-| PR-4 | synchronized output 灰度接入 | 是 | 放在更后面，避免和现有 stdout 优化层打架 |
-| PR-6 | 窄屏 / interactive shell 专项 | 否 | 完全独立推进，不拖慢前面主 UI patch |
+1. `PR-Prep`
+2. `PR-A1`
+3. `PR-B1`
+4. `PR-D1`
+5. `PR-E1`
+6. `PR-C1`
+7. `PR-A2`
+8. `PR-D2`
 
-完整的文件落点、非目标和测试矩阵见 [10-pr-3013-split-plan.md](./10-pr-3013-split-plan.md)。
+这样排序的原因是：先处理主路径上的高频闪烁和整屏清除，再处理大输出与详情展开，随后再进入最复杂的窄屏 shell 场景；synchronized output 放到更后面，是为了避免在应用层问题尚未收敛前，就把终端协议层的风险一起引进来。
+
+完整的文件落点、非目标、借鉴来源和验收矩阵见 [10-issue-oriented-flicker-plan.md](./10-issue-oriented-flicker-plan.md)。
 
 ## 5. 验证方案
 

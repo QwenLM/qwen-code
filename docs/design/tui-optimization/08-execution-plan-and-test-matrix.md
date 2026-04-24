@@ -1,6 +1,6 @@
 # TUI 优化执行计划与测试矩阵
 
-> 本文档把 `00-09` 的设计与调研进一步压缩成“可以直接排期和拆任务”的执行稿。
+> 本文档把 `00-10` 的设计与调研进一步压缩成“可以直接排期和拆任务”的执行稿。
 > 校准时间点：2026-04-22。若 issue / PR / 上游源码继续变化，需要重新核对后再执行。
 
 ## 1. 目标
@@ -37,21 +37,21 @@
 | S6 | 窄屏 / interactive shell 专项回归与修复 | `shellExecutionService.ts`, `terminalSerializer.ts`, CLI tests | 中高 | 3-5 天 |
 | S7 | bounded detail panel + stable height | tool/subagent 相关组件 | 中高 | 3-5 天 |
 
-### 2A. 与 `#3013` 的对应关系
+### 2A. 与用户 Issue 类别的对应关系
 
-为了方便把 `#3013` 拆成若干小 PR，建议把这些 slice 和真正的 PR 切分对应起来：
+从这一版开始，切片和 PR 的对应关系不再围绕 `#3013` 组织，而是围绕用户问题类组织：
 
 | Slice | 对应 PR | 说明 |
 | --- | --- | --- |
-| S1 | PR-0 | 观测基线，不直接来自 `#3013`，但建议所有后续 PR 先依赖它 |
-| S2 | PR-2 | assistant pending render throttle |
-| S3 | PR-5 | `refreshStatic()` 语义拆分，是 `#3013` 外的关键补漏 |
-| S4 | PR-1 | 大 plain-text 工具输出 pre-slicing |
-| S5 | 后续独立 PR | 不在 `#3013` 当前 patch 中，建议后移 |
-| S6 | PR-6 | 窄屏 / interactive shell 专项，不建议混入主 UI patch |
-| S7 | PR-3 | tool/subagent stable height 与 content budget |
+| S1 | `PR-Prep` | 闪屏观测与回归基线；所有后续 issue PR 的前置 |
+| S2 | `PR-A1` | 动态流式闪烁的主路径修复：content/thought throttle |
+| S3 | `PR-B1` | `refreshStatic()` 整屏闪烁 |
+| S4 | `PR-D1` | 大输出 pre-render slicing |
+| S5 | `PR-D2` | 通用 tool budgeting 与摘要/详情分离 |
+| S6 | `PR-C1` | 窄屏 / interactive shell 重复输出与无限滚动 |
+| S7 | `PR-E1` | tool/subagent 展开闪烁与 bounded detail panel |
 
-而 `PR-4` synchronized output 灰度接入横跨 S1 之后的输出层验证与 rollout，不单独落在某一个 slice 上，需结合 [10-pr-3013-split-plan.md](./10-pr-3013-split-plan.md) 的约束执行。
+而 synchronized output 的灰度接入单独作为 `PR-A2`，属于“动态流式闪烁”这一大类的终端层补强，不建议和上面的任一 slice 混成一条 PR。完整说明见 [10-issue-oriented-flicker-plan.md](./10-issue-oriented-flicker-plan.md)。
 
 ## 3. Slice S1：建立可观测性
 
@@ -298,14 +298,14 @@
 
 建议不要把这些 slice 混成一个超大 PR。更稳的顺序是：
 
-1. PR-0：S1 观测
-2. PR-1：S4 大工具输出 pre-slicing
-3. PR-2：S2 assistant pending render throttle
-4. PR-3：S7 bounded detail panel / stable height
-5. PR-5：S3 `refreshStatic()` 语义拆分
-6. PR-4：synchronized output 灰度接入
-7. PR-6：S6 窄屏专项
-8. 通用 tool budgeting 另开独立 PR
+1. `PR-Prep`：S1 观测与回归基线
+2. `PR-A1`：S2 动态流式闪烁主路径修复
+3. `PR-B1`：S3 `refreshStatic()` 整屏闪烁修复
+4. `PR-D1`：S4 大输出 pre-slicing
+5. `PR-E1`：S7 bounded detail panel / stable height
+6. `PR-C1`：S6 窄屏专项
+7. `PR-A2`：synchronized output 灰度接入
+8. `PR-D2`：S5 通用 tool budgeting
 
 这样做的好处是：
 
