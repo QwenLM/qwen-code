@@ -107,7 +107,7 @@
 
 ### 4.1 前置判断
 
-- [ ] 团队已明确区分 Ink 的 `eraseLines` 重绘问题和 `refreshStatic() -> clearTerminal` 问题
+- [ ] 团队已明确区分 Ink 的 `eraseLines` 重绘问题、已清屏路径重复 clear、替换型 `refreshStatic() -> clearTerminal` 问题
 - [ ] 已有基础 flicker 指标或可替代观测数据
 - [ ] 已有 main-screen、alternate/fullscreen、tmux、SSH 四类场景的最小回归样例
 
@@ -130,9 +130,9 @@
 ### 4.4 `refreshStatic()` 与渲染模式分层
 
 - [ ] `refreshStatic()` 的触发来源已梳理清楚
-- [ ] `refreshStatic()` 已拆分为“仅 remount static”与“clear terminal + remount”两类语义
+- [ ] 已清屏路径已拆分为“仅 remount static”，替换旧 static output 的路径仍保留 clear 或已有新的 renderer 策略
 - [ ] main-screen 路径与 alternate/fullscreen 路径的目标分离
-- [ ] resize 导致的重排不会默认演变为整屏 `clearTerminal`
+- [ ] resize 导致的重排有明确策略；在没有 static replacement 能力前不直接 remount-only
 - [ ] active view / compact toggle / manual clear 三类路径分别有回归样例
 
 ### 4.5 窄屏 / 无限滚动回归

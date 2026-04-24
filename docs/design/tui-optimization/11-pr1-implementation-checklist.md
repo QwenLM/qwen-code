@@ -11,6 +11,16 @@
 
 这条 PR 允许顺带加入观测与回归基线，因为它们与主屏主路径共用同一组验证场景。
 
+### 1.1 实施校准
+
+`fix/main-screen-flicker` 实施后需要把本文的原始设想校准成源码事实：
+
+- 已安全落地：stdout redraw counters、content/thought stream throttle、`/clear` 与 slash clear 的重复清屏削减。
+- 未在 `PR-1` 中落地：compact merge、active view switch、settings toggle、resize 的 remount-only 改道。
+- 原因：Ink `<Static>` 是永久追加输出模型，remount 本身不会删除旧 static output。对这些已经打印过历史内容的路径，如果不先 clear 就 remount，可能引入重复历史或旧 view 残留。
+
+因此，`PR-1` 的 closure 口径应是“主屏流式高频闪烁 + 已清屏路径的重复 clear”，而不是“彻底拆完所有 `refreshStatic()` 触发源”。后续 PR 不应继续在当前 `<Static>` 架构下把这些路径简单替换成 remount-only。
+
 ## 2. 非目标
 
 以下内容**不在 `PR-1` 中实现**：
@@ -101,7 +111,8 @@
 要求：
 
 - `/clear` 仍保留旧语义
-- 非致命布局变化默认不清屏
+- 仅已先执行清屏的路径可以直接改成 remount-only
+- compact merge、active view switch、settings toggle、resize 需要新的 static replacement 策略后再改，不能在当前 `<Static>` 追加模型下直接移除 clear
 
 ### Step 4：把回归场景补齐
 
@@ -142,7 +153,7 @@
 - `stdout.write` 频率下降
 - `clear_terminal_count` 下降
 - 结束 / cancel 不丢尾部内容
-- resize / settings / compact merge 不再默认整屏 clear
+- `/clear` / slash clear 不再出现 `console.clear()` 后紧接额外 `clearTerminal` 的重复清屏
 - `/clear` 保持当前用户语义
 
 ## 7. issue 归属提醒

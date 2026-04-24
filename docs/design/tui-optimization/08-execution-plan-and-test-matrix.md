@@ -33,7 +33,7 @@
 | --- | --- | --- | --- | --- |
 | S1 | 建立可观测性 | `terminalRedrawOptimizer.ts`, `startupProfiler.ts` | 低 | 1-2 天 |
 | S2 | 降低内容流重绘频率 | `useGeminiStream.ts` | 低 | 1-2 天 |
-| S3 | 拆分 `refreshStatic()` 语义 | `AppContainer.tsx`, `MainContent.tsx`, `DefaultAppLayout.tsx` | 中 | 2-3 天 |
+| S3 | 安全拆分 `refreshStatic()` 语义 | `AppContainer.tsx`, slash clear 路径 | 中 | 1-2 天 |
 | S4 | 大工具输出 pre-render slicing | `ToolMessage.tsx`, `AnsiOutput.tsx`, shared slicing component | 中 | 2-4 天 |
 | S5 | 通用 tool budgeting | `coreToolScheduler.ts`, truncation util 相关路径 | 中 | 2-3 天 |
 | S6 | 窄屏 / interactive shell 专项回归与修复 | `shellExecutionService.ts`, `terminalSerializer.ts`, CLI tests | 中高 | 3-5 天 |
@@ -45,7 +45,7 @@
 
 | Slice | 对应主 PR | 说明 |
 | --- | --- | --- |
-| S1 + S2 + S3 | `PR-1` | 主屏闪烁基础修复：观测、流式节流、`refreshStatic()` 语义拆分 |
+| S1 + S2 + S3 | `PR-1` | 主屏闪烁基础修复：观测、流式节流、已清屏路径的重复 clear 削减 |
 | S4 + S7 | `PR-2` | 大输出与详情展开稳定性：pre-slicing、bounded detail panel、stable height |
 | S6 | `PR-3` | 窄屏 / interactive shell 专项 |
 | 终端协议层 rollout | `PR-4` | synchronized output、frame write 合并、runtime probe |
@@ -128,15 +128,12 @@
 
 ### 5.1 目标
 
-把“静态区 remount”和“整屏 clear + remount”彻底拆开，避免大量非致命变化也整屏闪。
+把“静态区 remount”和“整屏 clear + remount”安全拆开，先避免已清屏路径再次整屏 clear。替换旧 `<Static>` 输出的路径暂不直接 remount-only。
 
 ### 5.2 文件落点
 
 - `packages/cli/src/ui/AppContainer.tsx`
-- `packages/cli/src/ui/components/MainContent.tsx`
-- `packages/cli/src/ui/layouts/DefaultAppLayout.tsx`
 - 可能波及：
-  - `packages/cli/src/ui/components/SettingsDialog.tsx`
   - `/clear` 所在命令处理路径
 
 ### 5.3 具体任务
@@ -145,14 +142,10 @@
    - `remountStaticHistory()`
    - `clearTerminalAndRemount()`
 2. 检查当前触发源并逐个改道
-   - compact merge
-   - settings toggle
-   - active view switch
-   - resize
    - manual clear
+   - slash command clear
 3. resize 策略收紧
-   - 高度变化默认不整屏 clear
-   - 宽度变化仅在必须重排历史时升级为清屏
+   - 仅记录风险与后续策略；当前不直接改成 remount-only
 
 ### 5.4 测试与验收
 
@@ -162,7 +155,7 @@
 - 验收：
   - `clear_terminal_count` 显著下降
   - `/clear` 仍保留旧语义
-  - compact merge 不再默认整屏闪
+  - slash clear 不再出现重复 `clearTerminal`
 
 ## 6. Slice S4：大工具输出 pre-render slicing
 
@@ -300,7 +293,7 @@
 
 建议不要把这些 slice 一把并成“全部闪屏修复”的超大 PR。更稳的顺序是：
 
-1. `PR-1`：S1 + S2 + S3
+1. `PR-1`：S1 + S2 + S3 的安全子集
 2. `PR-2`：S4 + S7
 3. `PR-3`：S6
 4. `PR-4`：终端协议层灰度接入

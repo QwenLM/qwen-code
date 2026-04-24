@@ -125,7 +125,7 @@ Entry (gemini.tsx)
 | 周次 | 变更                                                        | 工作流 | 风险 | 预期收益                          |
 | ---- | ----------------------------------------------------------- | ------ | ---- | --------------------------------- |
 | 2    | 流式更新节流（content + thought；结束/取消/工具调用时立即 flush） | 闪烁   | 低   | stdout.write 从 50+/秒降至 <20/秒 |
-| 2-3  | `refreshStatic()` 语义拆分与主屏触发源收紧                   | 闪烁   | 中   | 主屏整屏闪烁显著下降              |
+| 2-3  | `refreshStatic()` 安全语义拆分                              | 闪烁   | 中   | 已清屏路径不再重复 clear          |
 | 3-5  | 大输出 pre-slicing + detail stability                       | 闪烁   | 中   | 大结果与展开场景不再引发 layout 风暴 |
 | 3    | Markdown token/block 缓存（不缓存 ReactNode）               | 渲染   | 低   | 缓存命中时解析耗时显著下降        |
 | 3    | 代码高亮缓存 + `highlightAuto` 限制/预热策略                | 渲染   | 中   | 重复渲染消除，降低大块代码成本    |
@@ -202,3 +202,6 @@ Entry (gemini.tsx)
 | [09-pr-3013-gap-analysis.md](./09-pr-3013-gap-analysis.md) | 专门分析 `#3013` 已修复范围、剩余缺口与可复用 patch；仅作为参考样本 |
 | [10-issue-oriented-flicker-plan.md](./10-issue-oriented-flicker-plan.md) | 按用户 issue 类别组织的闪屏 4-PR 实施路线、边界、验证场景与推荐顺序 |
 | [11-pr1-implementation-checklist.md](./11-pr1-implementation-checklist.md) | `PR-1` 的可执行开发清单、测试顺序、commit 切分与验收步骤 |
+| [12-pr2-implementation-checklist.md](./12-pr2-implementation-checklist.md) | `PR-2` 的大输出与详情展开稳定性实操清单 |
+| [13-pr3-implementation-checklist.md](./13-pr3-implementation-checklist.md) | `PR-3` 的窄屏 / interactive shell 专项实操清单 |
+| [14-pr4-implementation-checklist.md](./14-pr4-implementation-checklist.md) | `PR-4` 的 synchronized output 灰度实操清单 |

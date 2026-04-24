@@ -128,15 +128,17 @@
 
 应拆成两个动作：
 
-- `remountStaticHistory()`：只让静态区重新计算
+- `remountStaticHistory()`：只让静态区重新计算；当前只适合已经由外部完成清屏的路径
 - `clearTerminalAndRemount()`：仅保留给 `/clear`、明确的全屏重置场景
 
 **P0.2 main-screen 不再默认用 `clearTerminal` 处理非致命变化**
 
-优先改掉这些路径：
+已确认能安全先改的是重复清屏路径：
 
-- compact merge
-- settings / active view 切换
+- `/clear`
+- slash command clear
+
+compact merge、settings / active view 切换、resize 仍属于“替换已打印 static output”的场景，需要新的 static replacement / renderer 策略，不能在当前 `<Static>` 追加模型下直接改成 remount-only。
 - 宽度稳定但内容结构变化不大的局部刷新
 
 **P1.3 用有边界的详情面板替代“整块高度暴涨”**
@@ -150,7 +152,7 @@
 ### 4.5 验收
 
 - `clear_terminal_count` 显著下降
-- resize、compact toggle、subagent expand 不再默认整屏清空
+- `/clear` / slash clear 不再重复整屏清空；resize、compact toggle、subagent expand 保留为后续 renderer 策略验收
 - `/clear` 仍保持当前语义
 
 ## 5. 分类 C：窄屏重复输出 / 无限滚动
@@ -355,7 +357,7 @@
 
 | 问题类 | 推荐主 PR | 说明 |
 | --- | --- | --- |
-| A. 动态区重绘闪烁 + B. `refreshStatic()` 整屏闪烁 | `PR-1` | 同属主屏主路径，适合共用一组 counters 与主屏回归场景 |
+| A. 动态区重绘闪烁 + B. 已清屏路径重复 clear | `PR-1` | 同属主屏主路径，适合共用一组 counters 与主屏回归场景；替换型 `refreshStatic()` 仍需后续 renderer 策略 |
 | D. 大输出 UI 稳定性 + E. 工具 / 子 agent 详情展开闪烁 | `PR-2` | 同属大结果 surface，但只收 UI stability，不包含 core budgeting 语义 |
 | C. 窄屏重复输出 / 无限滚动 | `PR-3` | 继续单独保留，不与主 UI PR 混合 |
 | A 类在特定终端中的残余帧撕裂 | `PR-4` | 终端协议层收尾，单独灰度 synchronized output |

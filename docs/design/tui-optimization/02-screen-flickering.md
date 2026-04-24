@@ -269,13 +269,16 @@ function clearTerminalAndRemount(): void {
 
 **使用约束**：
 
-- `remountStaticHistory()`：用于 compact merge、局部布局变化、需要重算 `<Static>` 但不需要清空终端的场景
-- `clearTerminalAndRemount()`：仅保留给 `/clear`、显式全屏重置、或某些无法避免的严重错位恢复
+- `remountStaticHistory()`：仅用于已经由外部路径完成清屏的场景，例如 `/clear` / slash clear 中避免第二次 `clearTerminal`
+- `clearTerminalAndRemount()`：保留给 compact merge、active view switch、明显宽度重排、显式全屏重置、或某些无法避免的严重错位恢复
+
+**源码校准**：Ink `<Static>` 是永久追加输出模型，remount 不会删除已经写入终端 scrollback 的旧 static output。compact merge、active view switch、settings toggle、resize 这类“替换旧 static 内容”的场景，不能在当前架构下简单改成 remount-only，否则会有重复历史或旧 view 残留风险。它们需要新的 static replacement / renderer 策略后再继续收紧。
 
 **验收要求**：
 
 - `clear_terminal_count` 与 `history_remount_count` 分开统计
-- resize、compact toggle、subagent expand 三类场景默认不再触发 `clearTerminal`
+- `/clear` / slash clear 不再出现先 `console.clear()` 后额外 `clearTerminal` 的重复清屏
+- compact / view switch / resize 的剩余 clear 路径有明确注释和后续 workstream
 
 ### 2.2A [P0] 渲染模式分层（alternate / terminal buffer）
 
@@ -387,7 +390,7 @@ function clearTerminalAndRemount(): void {
 
 ### 2.4 [P1] 智能 refreshStatic()
 
-**承接关系**：本节建立在 **2.2B 的“语义拆分”已经完成** 之上。也就是说，先把“仅 remount static”与“clear terminal + remount”拆开，再谈后续按 resize / compact / view switch 做更细粒度的选择。
+**承接关系**：本节建立在 **2.2B 的“安全语义拆分”已经完成** 之上。也就是说，先把已清屏路径的 remount-only 与“clear terminal + remount”拆开，再谈后续按 resize / compact / view switch 做更细粒度的选择。
 
 **现状**：当前 `refreshStatic()` 在 `AppContainer.tsx` 中通过 `clearTerminal`（完整的 `ESC[2J ESC[3J ESC[H`）实现全屏清除后重新挂载：
 
@@ -410,14 +413,13 @@ const refreshStatic = useCallback(() => {
 
 **方案**：
 
-1. **Resize 优化**：优先走 `remountStaticHistory()`，仅在宽度变化且确实需要时才升级到 `clearTerminalAndRemount()`
+1. **Resize 优化**：高度变化不应触发静态区重排；宽度变化仍需要保守处理，除非后续实现了可替换旧 static output 的 renderer
 
    ```typescript
    const handleResize = useCallback(
      debounce(() => {
-       // 不再 clearTerminal，仅更新布局尺寸
        updateTerminalDimensions();
-       // 只在宽度变化时才需要重新渲染（高度变化不影响已渲染内容换行）
+       // 高度变化不影响已渲染内容换行；宽度变化仍可能需要全量重绘。
        if (widthChanged) {
          refreshStatic(); // 宽度变化时仍需全量重绘（行包装会变）
        }
@@ -534,7 +536,7 @@ Claude Code 的自研 Ink 内核提供了五层防闪烁保护：
 | ------ | --------------------------- | ----- | ---- | ------------------------- |
 | P0     | 输出层 instrumentation      | 1     | 低   | 指标口径可信              |
 | P0     | 流式更新节流 60ms           | 2     | 低   | stdout.write -60%+        |
-| P0     | `refreshStatic()` 语义拆分  | 2-3   | 中   | 主屏整屏闪烁显著下降      |
+| P0     | `refreshStatic()` 安全语义拆分 | 2-3 | 中 | 已清屏路径不再重复 clear；剩余替换型 clear 有边界 |
 | P0     | 大输出 pre-slicing + detail stability | 3-5 | 中 | 大结果与展开场景不再引发 layout 风暴 |
 | P1     | 窄屏 / interactive shell 专项 | 5-7 | 中高 | 重复输出与无限滚动可收敛  |
 | P1     | 渲染模式分层                | 6-8   | 中   | 为滚动和 fullscreen 优化铺路 |
@@ -549,7 +551,7 @@ Claude Code 的自研 Ink 内核提供了五层防闪烁保护：
 
 | 主 PR | 解决的问题类 | 吸收旧拆分 | 代表 issue | 代表性验证场景 |
 | --- | --- | --- | --- | --- |
-| `PR-1` | 主屏闪烁基础修复 | `PR-Prep` + `PR-A1` + `PR-B1` | `#1184` `#1491` `#3007` `#938` `#1861` `#2924`，以及 `#2748` 的 flicker 子问题 | 长回答、thought+content、冷启动样本、`/settings`、compact merge、resize |
+| `PR-1` | 主屏闪烁基础修复 | `PR-Prep` + `PR-A1` + `PR-B1` | `#1184` `#1491` `#3007` `#938` `#1861` `#2924`，以及 `#2748` 的 flicker 子问题 | 长回答、thought+content、冷启动样本、`/clear` 重复清屏 |
 | `PR-2` | 大输出与详情展开稳定性 | `PR-D1` + `PR-E1` | `#1479` `#2424` `#2624`，以及展开相关子问题 | `npm install`、5000 行输出、`ctrl+e`、`ctrl+f`、markdown-heavy 结果不退化 |
 | `PR-3` | 窄屏 / interactive shell 专项 | `PR-C1` | `#2912` `#2972` `#1591` `#1778` | 40 列窄终端、tmux 多 pane、`git commit`、彩色 shell |
 | `PR-4` | 终端协议层残余闪烁收尾 | `PR-A2` | `#3144`；`#2903` 作为必须验证的 JetBrains 环境样本 | WezTerm、kitty、JetBrains 终端、tmux/SSH |
@@ -561,7 +563,7 @@ Claude Code 的自研 Ink 内核提供了五层防闪烁保护：
 3. `PR-3`
 4. `PR-4`
 
-这样排的原因是：先把主屏高频闪烁和整屏 clear 收住，再处理大输出/详情展开，再去单独攻窄屏 shell，最后才引入终端协议层灰度复杂度。
+这样排的原因是：先把主屏高频闪烁和已清屏路径的重复 clear 收住，再处理大输出/详情展开，再去单独攻窄屏 shell，最后才引入终端协议层灰度复杂度。
 
 **边界提醒**：
 

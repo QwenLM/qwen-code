@@ -34,7 +34,7 @@
 
 | 主 PR | 关闭的问题类 | 覆盖旧拆分 | 代表 issue | 主要范围 | 明确不带 |
 | --- | --- | --- | --- | --- | --- |
-| `PR-1` | 主屏闪烁基础修复 | `PR-Prep` + `PR-A1` + `PR-B1` | `#1184` `#1491` `#3007` `#938` `#1861` `#2924`，以及 `#2748` 的 flicker 子问题 | counters、回归 harness、content/thought throttle、`refreshStatic()` 语义拆分 | 不带 narrow-shell、不带 synchronized output、不带大输出详情重构 |
+| `PR-1` | 主屏闪烁基础修复 | `PR-Prep` + `PR-A1` + `PR-B1` 的安全子集 | `#1184` `#1491` `#3007` `#938` `#1861` `#2924`，以及 `#2748` 的 flicker 子问题 | counters、回归 harness、content/thought throttle、已清屏路径重复 clear 削减 | 不带 narrow-shell、不带 synchronized output、不带大输出详情重构 |
 | `PR-2` | 大输出与详情展开稳定性 | `PR-D1` + `PR-E1` | `#1479` `#2424` `#2624`，以及 `#1491` `#1861` `#2924` 的展开子问题 | pre-slicing、stable height、bounded detail panel、update cadence decoupling | 不带 synchronized output、不带 shell serializer、不带 `refreshStatic()` 主链改造、不带 core budgeting |
 | `PR-3` | 窄屏 / interactive shell 专项 | `PR-C1` | `#2912` `#2972` `#1591` `#1778` | shell serializer、live viewport vs transcript、interactive prompt 回归 | 不带 tool budgeting、不带 detail panel、不带终端协议层优化 |
 | `PR-4` | 终端协议层残余闪烁收尾 | `PR-A2` | `#3144`，以及主屏闪烁在特定终端中的残余问题 | synchronized output、frame write 合并、runtime probe、allowlist | 不带主 UI 语义改造、不带 shell serializer、不带大输出重构 |
@@ -78,10 +78,10 @@
 - 输出层 counters 与固定回归场景
 - `useGeminiStream.ts` 的 content/thought throttle
 - 强制 flush 语义
-- `refreshStatic()` 拆成：
-  - `remountStaticHistory()`
-  - `clearTerminalAndRemount()`
-- resize / compact merge / active view switch 触发源收紧
+- `refreshStatic()` 的安全子集拆分：
+  - 已清屏路径使用 `remountStaticHistory()`
+  - 替换旧 static output 的路径继续保留 clear，等待后续 renderer 策略
+- slash clear / `/clear` 重复清屏削减
 
 ### 5.3 为什么这几块适合并在一起
 
@@ -315,4 +315,9 @@
 
 这样数量比 8 条明显更可执行，但还没有退回到“一个巨大 PR 试图一口吃掉所有闪屏问题”的老路。
 
-如果下一步准备直接进入实现，请先按 [11-pr1-implementation-checklist.md](./11-pr1-implementation-checklist.md) 开始 `PR-1`。
+如果下一步准备直接进入实现，请按顺序使用：
+
+1. [11-pr1-implementation-checklist.md](./11-pr1-implementation-checklist.md)
+2. [12-pr2-implementation-checklist.md](./12-pr2-implementation-checklist.md)
+3. [13-pr3-implementation-checklist.md](./13-pr3-implementation-checklist.md)
+4. [14-pr4-implementation-checklist.md](./14-pr4-implementation-checklist.md)
