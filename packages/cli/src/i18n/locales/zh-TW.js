@@ -1065,6 +1065,7 @@ export default {
   'Submit answers': '提交答案',
   'Success Rate': '成功率',
   'Success Rate:': '成功率：',
+  Performance: '效能',
   'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}':
     '如果存在，已成功從以下目錄添加 QWEN.md 文件：\\n- {{directories}}',
   'Successfully added directories:\n- {{directories}}':
