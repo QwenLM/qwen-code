@@ -36,7 +36,10 @@ direction and select one meaningful repository improvement yourself.
 - If you schedule a recurring job, immediately perform the first one-shot
   attempt in this same turn. Do not wait for the next cron fire.
 - If recurring mode is unavailable because cron tools are not available, say
-  that recurring `/improve` is unavailable in the current session and stop.
+  that recurring `/improve` is unavailable in the current session because cron
+  is disabled. Tell the user to enable it with `experimental.cron: true` in
+  settings or `QWEN_CODE_ENABLE_CRON=1`, then stop. Do not continue into a
+  one-shot improvement unless the user explicitly asks for one.
 - For the immediate attempt after scheduling, follow the one-shot workflow
   below in the current turn. Do not try to invoke `/improve:once` from inside
   this same turn.
@@ -68,7 +71,8 @@ Recurring jobs encode their session-scoped context profile in the stored
   - `github-issues`
   - `repo-specs`
   - `codebase-signals`
-  - `user-context`
+  - `user-context` only when the user supplies free-form context through the
+    tool's automatic free-form option
 - `--scope <text>`: the concrete product/code area selected by the user after
   initial exploration.
 - `--user-context <text>`: free-form context supplied by the user.
@@ -106,11 +110,13 @@ If the invocation is recurring:
 2. Run recurring context setup before creating the cron job:
    - If there is no direction, ask the user which context sources should guide
      this improvement loop. Use `ask_user_question` with `multiSelect: true` and
-     offer these choices:
+     offer exactly these choices:
      - GitHub issues
      - Repository specs, PRDs, plans, and design docs
      - Codebase signals such as TODOs, brittle tests, complex modules, recent
        churn, and missing coverage
+       Do not include a separate `User context` option; the tool's automatic
+       free-form option already covers that case.
    - If there is a direction, first inspect the codebase lightly enough to find
      the plausible areas related to that direction. Then ask the user one
      targeted `ask_user_question` question to pick the scope that future loop
@@ -123,6 +129,10 @@ If the invocation is recurring:
      ambiguous. Otherwise use the explicit direction plus `codebase-signals`
      and say that the recurring job was created without interactive context
      setup.
+   - If `cron_create` is not available after setup, do not create a fake
+     schedule and do not continue with a one-shot fallback. Explain that cron is
+     disabled and must be enabled with `experimental.cron: true` or
+     `QWEN_CODE_ENABLE_CRON=1`.
 3. Build the stored prompt beginning with `/improve:once` and include the
    resolved profile, for example:
    - `/improve:once --context-sources github-issues,repo-specs`

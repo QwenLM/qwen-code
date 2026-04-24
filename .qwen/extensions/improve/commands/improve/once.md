@@ -21,6 +21,7 @@ Parse the arguments like this:
   - `--direction <text>`: the original high-level direction
   - `--context-sources <csv>`: comma-separated values such as
     `github-issues`, `repo-specs`, `codebase-signals`, and `user-context`
+    when free-form user context was supplied
   - `--scope <text>`: the concrete product/code area selected during
     recurring setup
   - `--user-context <text>`: free-form context supplied by the user
