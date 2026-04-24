@@ -18,6 +18,7 @@ import {
 } from '../utils/sessionPickerUtils.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { t } from '../../i18n/index.js';
+import { SessionPreview } from './SessionPreview.js';
 
 export interface SessionPickerProps {
   sessionService: SessionService | null;
@@ -163,6 +164,28 @@ export function SessionPicker(props: SessionPickerProps) {
     isActive: true,
   });
 
+  if (
+    picker.viewMode === 'preview' &&
+    picker.previewSessionId &&
+    sessionService
+  ) {
+    const previewed = picker.filteredSessions.find(
+      (s) => s.sessionId === picker.previewSessionId,
+    );
+    return (
+      <SessionPreview
+        sessionService={sessionService}
+        sessionId={picker.previewSessionId}
+        sessionTitle={previewed?.customTitle ?? previewed?.prompt ?? undefined}
+        messageCount={previewed?.messageCount}
+        mtime={previewed?.mtime}
+        gitBranch={previewed?.gitBranch}
+        onExit={picker.exitPreview}
+        onResume={onSelect}
+      />
+    );
+  }
+
   return (
     <Box
       flexDirection="column"
@@ -251,9 +274,10 @@ export function SessionPicker(props: SessionPickerProps) {
                 >
                   B
                 </Text>
-                {t(' to toggle branch')} ·
+                {t(' to toggle branch · ')}
               </Text>
             )}
+            <Text color={theme.text.secondary}>{t('Space to preview · ')}</Text>
             <Text color={theme.text.secondary}>
               {t('↑↓ to navigate · Esc to cancel')}
             </Text>

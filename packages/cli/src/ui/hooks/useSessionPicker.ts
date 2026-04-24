@@ -61,6 +61,9 @@ export interface UseSessionPickerResult {
   showScrollUp: boolean;
   showScrollDown: boolean;
   loadMoreSessions: () => Promise<void>;
+  viewMode: 'list' | 'preview';
+  previewSessionId: string | null;
+  exitPreview: () => void;
 }
 
 export function useSessionPicker({
@@ -85,6 +88,15 @@ export function useSessionPicker({
 
   // For follow mode (non-centered)
   const [followScrollOffset, setFollowScrollOffset] = useState(0);
+
+  // Preview view state.
+  const [viewMode, setViewMode] = useState<'list' | 'preview'>('list');
+  const [previewSessionId, setPreviewSessionId] = useState<string | null>(null);
+
+  const exitPreview = useCallback(() => {
+    setViewMode('list');
+    setPreviewSessionId(null);
+  }, []);
 
   const isLoadingMoreRef = useRef(false);
 
@@ -213,6 +225,12 @@ export function useSessionPicker({
   // Key handling (KeypressContext)
   useKeypress(
     (key) => {
+      // Preview owns the keyboard while active; suppress list-mode
+      // handlers so we don't double-handle Escape / Enter / navigation.
+      if (viewMode !== 'list') {
+        return;
+      }
+
       const { name, sequence, ctrl } = key;
 
       if (name === 'escape' || (ctrl && name === 'c')) {
@@ -264,13 +282,22 @@ export function useSessionPicker({
         return;
       }
 
+      if (name === 'space') {
+        const session = filteredSessions[selectedIndex];
+        if (session) {
+          setPreviewSessionId(session.sessionId);
+          setViewMode('preview');
+        }
+        return;
+      }
+
       if (sequence === 'b' || sequence === 'B') {
         if (currentBranch) {
           setFilterByBranch((prev) => !prev);
         }
       }
     },
-    { isActive },
+    { isActive: isActive && viewMode === 'list' },
   );
 
   return {
@@ -284,5 +311,8 @@ export function useSessionPicker({
     showScrollUp,
     showScrollDown,
     loadMoreSessions,
+    viewMode,
+    previewSessionId,
+    exitPreview,
   };
 }
