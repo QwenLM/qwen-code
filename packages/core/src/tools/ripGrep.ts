@@ -22,6 +22,28 @@ import type { PermissionDecision } from '../permissions/types.js';
 const debugLogger = createDebugLogger('RIPGREP');
 
 /**
+ * Per-process cache for `.qwenignore` discovery. The same directories show
+ * up across many Grep invocations in a typical session — without caching,
+ * each invocation pays 2-3 sync syscalls per searchPath. Bounded so a
+ * pathologically long session can't grow without limit.
+ *
+ * `dirIsDir`: searchPath → boolean (is the path itself a directory?)
+ * `qwenIgnore`: dir → string | null (cached `.qwenignore` path or null)
+ *
+ * Filesystem-state cache: a `.qwenignore` created mid-session won't be
+ * picked up until the cache rolls. That's an acceptable tradeoff; users
+ * rarely add ignore files between Grep calls.
+ */
+const dirIsDirCache = new Map<string, boolean>();
+const qwenIgnoreCache = new Map<string, string | null>();
+const RIPGREP_CACHE_MAX = 256;
+function trimCache<K, V>(m: Map<K, V>): void {
+  if (m.size <= RIPGREP_CACHE_MAX) return;
+  const oldest = m.keys().next().value;
+  if (oldest !== undefined) m.delete(oldest as K);
+}
+
+/**
  * Parameters for the GrepTool (Simplified)
  */
 export interface RipGrepToolParams {
@@ -253,15 +275,25 @@ class GrepToolInvocation extends BaseToolInvocation<
       // Load .qwenignore from each workspace directory, not just the primary one
       const seenIgnoreFiles = new Set<string>();
       for (const searchPath of paths) {
-        const dir =
-          fs.existsSync(searchPath) && fs.statSync(searchPath).isDirectory()
-            ? searchPath
-            : path.dirname(searchPath);
-        const qwenIgnorePath = path.join(dir, '.qwenignore');
-        if (
-          !seenIgnoreFiles.has(qwenIgnorePath) &&
-          fs.existsSync(qwenIgnorePath)
-        ) {
+        let isDir = dirIsDirCache.get(searchPath);
+        if (isDir === undefined) {
+          try {
+            isDir = fs.statSync(searchPath).isDirectory();
+          } catch {
+            isDir = false;
+          }
+          dirIsDirCache.set(searchPath, isDir);
+          trimCache(dirIsDirCache);
+        }
+        const dir = isDir ? searchPath : path.dirname(searchPath);
+        let qwenIgnorePath = qwenIgnoreCache.get(dir);
+        if (qwenIgnorePath === undefined) {
+          const candidate = path.join(dir, '.qwenignore');
+          qwenIgnorePath = fs.existsSync(candidate) ? candidate : null;
+          qwenIgnoreCache.set(dir, qwenIgnorePath);
+          trimCache(qwenIgnoreCache);
+        }
+        if (qwenIgnorePath && !seenIgnoreFiles.has(qwenIgnorePath)) {
           rgArgs.push('--ignore-file', qwenIgnorePath);
           seenIgnoreFiles.add(qwenIgnorePath);
         }

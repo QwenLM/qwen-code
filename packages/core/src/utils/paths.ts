@@ -15,6 +15,16 @@ export const QWEN_DIR = '.qwen';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
 
 /**
+ * Cache for `validatePath`'s isDirectory check. Only positive results are
+ * cached — ENOENT and other errors fall through every time so a freshly
+ * created file is picked up immediately. Same path validated by back-to-back
+ * tool calls (very common: model reads several files in one dir) used to
+ * cost one syscall each.
+ */
+const isDirectoryCache = new Map<string, boolean>();
+const VALIDATE_PATH_CACHE_MAX = 1024;
+
+/**
  * Special characters that need to be escaped in file paths for shell compatibility.
  * Includes: spaces, parentheses, brackets, braces, semicolons, ampersands, pipes,
  * asterisks, question marks, dollar signs, backticks, quotes, hash, and other shell metacharacters.
@@ -314,16 +324,24 @@ export function validatePath(
     return;
   }
 
-  try {
-    const stats = fs.statSync(resolvedPath);
-    if (!allowFiles && !stats.isDirectory()) {
-      throw new Error(`Path is not a directory: ${resolvedPath}`);
+  let isDirectory = isDirectoryCache.get(resolvedPath);
+  if (isDirectory === undefined) {
+    try {
+      isDirectory = fs.statSync(resolvedPath).isDirectory();
+    } catch (error: unknown) {
+      if (isNodeError(error) && error.code === 'ENOENT') {
+        throw new Error(`Path does not exist: ${resolvedPath}`);
+      }
+      throw error;
     }
-  } catch (error: unknown) {
-    if (isNodeError(error) && error.code === 'ENOENT') {
-      throw new Error(`Path does not exist: ${resolvedPath}`);
+    if (isDirectoryCache.size >= VALIDATE_PATH_CACHE_MAX) {
+      const oldest = isDirectoryCache.keys().next().value;
+      if (oldest !== undefined) isDirectoryCache.delete(oldest);
     }
-    throw error;
+    isDirectoryCache.set(resolvedPath, isDirectory);
+  }
+  if (!allowFiles && !isDirectory) {
+    throw new Error(`Path is not a directory: ${resolvedPath}`);
   }
 }
 
