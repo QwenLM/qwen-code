@@ -172,6 +172,28 @@ describe('terminalSerializer', () => {
       expect(result[0][0].bg).toBe('#008000');
       expect(result[0][0].text).toBe('Styled text');
     });
+
+    it('can unwrap soft-wrapped ANSI rows for live output comparison', async () => {
+      const terminal = new Terminal({
+        cols: 8,
+        rows: 4,
+        allowProposedApi: true,
+        scrollback: 100,
+        convertEol: true,
+      });
+
+      await writeToTerminal(terminal, 'abcdefghijkl\nshort\n');
+
+      const result = serializeTerminalToObject(terminal, 0, {
+        unwrapWrappedLines: true,
+      });
+      const visibleText = result
+        .map((line) => line.map((token) => token.text).join('').trimEnd())
+        .filter(Boolean);
+
+      expect(visibleText).toEqual(['abcdefghijkl', 'short']);
+      expect(result[0]).toHaveLength(1);
+    });
   });
 
   describe('serializeTerminalToText', () => {
