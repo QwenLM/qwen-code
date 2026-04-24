@@ -5,6 +5,7 @@
  */
 
 import type { DesktopServerInfo } from '../shared/desktopApi.js';
+import type { AcpSessionClient } from './services/sessionService.js';
 
 export type { DesktopServerInfo };
 
@@ -16,6 +17,7 @@ export interface DesktopServer {
 export interface DesktopServerOptions {
   token?: string;
   now?: () => Date;
+  acpClient?: AcpSessionClient;
 }
 
 export interface DesktopHealthResponse {
@@ -53,3 +55,9 @@ export interface DesktopErrorResponse {
   code: string;
   message: string;
 }
+
+export type DesktopJsonResponse =
+  | DesktopHealthResponse
+  | DesktopRuntimeResponse
+  | DesktopErrorResponse
+  | (Record<string, unknown> & { ok: true });

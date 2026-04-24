@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startDesktopServer } from './index.js';
 import type { DesktopServer } from './types.js';
+import type { AcpSessionClient } from './services/sessionService.js';
 
 const servers: DesktopServer[] = [];
 
@@ -111,6 +112,115 @@ describe('DesktopServer', () => {
     });
   });
 
+  it('returns a typed error when session routes have no ACP client', async () => {
+    const server = await createTestServer();
+
+    const response = await getJson(server, '/api/sessions', {
+      Authorization: 'Bearer test-token',
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: 'acp_unavailable',
+    });
+  });
+
+  it('lists sessions through the ACP client', async () => {
+    const acpClient = createAcpClient();
+    const server = await createTestServer(acpClient);
+
+    const response = await getJson(
+      server,
+      '/api/sessions?cwd=%2Frepo&cursor=2&size=5',
+      {
+        Authorization: 'Bearer test-token',
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      ok: true,
+      sessions: [{ sessionId: 'session-1', title: 'Test session' }],
+      nextCursor: '3',
+    });
+    expect(acpClient.listSessions).toHaveBeenCalledWith({
+      cwd: '/repo',
+      cursor: 2,
+      size: 5,
+    });
+  });
+
+  it('creates and loads sessions through the ACP client', async () => {
+    const acpClient = createAcpClient();
+    const server = await createTestServer(acpClient);
+
+    const created = await postJson(server, '/api/sessions', { cwd: '/repo' });
+    const loaded = await postJson(server, '/api/sessions/session-1/load', {
+      cwd: '/repo',
+    });
+
+    expect(created.status).toBe(200);
+    expect(created.body).toMatchObject({
+      ok: true,
+      session: { sessionId: 'session-1' },
+    });
+    expect(loaded.status).toBe(200);
+    expect(loaded.body).toMatchObject({
+      ok: true,
+      session: { models: [] },
+    });
+    expect(acpClient.newSession).toHaveBeenCalledWith('/repo');
+    expect(acpClient.loadSession).toHaveBeenCalledWith('session-1', '/repo');
+  });
+
+  it('renames and deletes sessions through ACP extension methods', async () => {
+    const acpClient = createAcpClient();
+    const server = await createTestServer(acpClient);
+
+    const renamed = await patchJson(server, '/api/sessions/session-1', {
+      title: 'Renamed',
+      cwd: '/repo',
+    });
+    const deleted = await deleteJson(
+      server,
+      '/api/sessions/session-1?cwd=%2Frepo',
+    );
+
+    expect(renamed.status).toBe(200);
+    expect(deleted.status).toBe(200);
+    expect(acpClient.extMethod).toHaveBeenCalledWith('renameSession', {
+      sessionId: 'session-1',
+      title: 'Renamed',
+      cwd: '/repo',
+    });
+    expect(acpClient.extMethod).toHaveBeenCalledWith('deleteSession', {
+      sessionId: 'session-1',
+      cwd: '/repo',
+    });
+  });
+
+  it('validates session JSON request bodies', async () => {
+    const acpClient = createAcpClient();
+    const server = await createTestServer(acpClient);
+
+    const response = await fetch(`${server.info.url}/api/sessions`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: 'not-json',
+    });
+    const body = (await response.json()) as unknown;
+
+    expect(response.status).toBe(400);
+    expect(body).toMatchObject({
+      ok: false,
+      code: 'bad_json',
+    });
+  });
+
   it('returns a typed error for unknown authenticated routes', async () => {
     const server = await createTestServer();
 
@@ -126,10 +236,13 @@ describe('DesktopServer', () => {
   });
 });
 
-async function createTestServer(): Promise<DesktopServer> {
+async function createTestServer(
+  acpClient?: AcpSessionClient,
+): Promise<DesktopServer> {
   const server = await startDesktopServer({
     token: 'test-token',
     now: () => new Date('2026-04-25T00:00:00.000Z'),
+    acpClient,
   });
   servers.push(server);
   return server;
@@ -144,5 +257,70 @@ async function getJson(
   return {
     status: response.status,
     body: (await response.json()) as unknown,
+  };
+}
+
+async function postJson(
+  server: DesktopServer,
+  path: string,
+  body: Record<string, unknown>,
+): Promise<{ status: number; body: unknown }> {
+  return writeJson(server, path, 'POST', body);
+}
+
+async function patchJson(
+  server: DesktopServer,
+  path: string,
+  body: Record<string, unknown>,
+): Promise<{ status: number; body: unknown }> {
+  return writeJson(server, path, 'PATCH', body);
+}
+
+async function deleteJson(
+  server: DesktopServer,
+  path: string,
+): Promise<{ status: number; body: unknown }> {
+  const response = await fetch(`${server.info.url}${path}`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: 'Bearer test-token',
+    },
+  });
+  return {
+    status: response.status,
+    body: (await response.json()) as unknown,
+  };
+}
+
+async function writeJson(
+  server: DesktopServer,
+  path: string,
+  method: 'PATCH' | 'POST',
+  body: Record<string, unknown>,
+): Promise<{ status: number; body: unknown }> {
+  const response = await fetch(`${server.info.url}${path}`, {
+    method,
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  return {
+    status: response.status,
+    body: (await response.json()) as unknown,
+  };
+}
+
+function createAcpClient(): AcpSessionClient {
+  return {
+    isConnected: true,
+    listSessions: vi.fn().mockResolvedValue({
+      sessions: [{ sessionId: 'session-1', title: 'Test session' }],
+      nextCursor: '3',
+    }),
+    newSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+    loadSession: vi.fn().mockResolvedValue({ models: [] }),
+    extMethod: vi.fn().mockResolvedValue({ success: true }),
   };
 }

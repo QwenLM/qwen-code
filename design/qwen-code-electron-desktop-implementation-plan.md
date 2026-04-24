@@ -90,7 +90,7 @@ order, verification, decisions, and remaining work.
 
 ### Slice 4: Session REST API
 
-- Status: pending
+- Status: complete
 - Goal: add session create/list/load/delete/rename endpoints backed by ACP.
 - Files:
   - `packages/desktop/src/server/http/router.ts`
@@ -225,6 +225,17 @@ order, verification, decisions, and remaining work.
   - `npm run typecheck` passed across workspaces.
   - `npm run build` passed across the configured build order. Existing VS Code
     companion lint warnings were reported by its build script, with no errors.
+- 2026-04-25 Slice 4:
+  - `npx prettier --check design/qwen-code-electron-desktop-implementation-plan.md scripts/build.js packages/desktop` passed.
+  - `npm run test --workspace=packages/desktop` passed: 2 files, 17 tests.
+  - `npm run lint --workspace=packages/desktop` passed.
+  - `npm run typecheck --workspace=packages/desktop` passed.
+  - `npm run build --workspace=packages/desktop` passed.
+  - `npm exec --workspace=packages/desktop -- electron --version` passed:
+    `v41.3.0`.
+  - `npm run typecheck` passed across workspaces.
+  - `npm run build` passed across the configured build order. Existing VS Code
+    companion lint warnings were reported by its build script, with no errors.
 
 ## Self Review Notes
 
@@ -253,10 +264,18 @@ order, verification, decisions, and remaining work.
     permission bridge slice supplies a UI-backed resolver.
   - Startup failures race initialize against child exit; later process exits
     clear connection state without leaving a rejected startup promise.
+- 2026-04-25 Slice 4:
+  - Session REST routes share the same origin and bearer-token gate as health
+    and runtime routes.
+  - The route layer is ACP-backed through an injected client so tests cover the
+    Qwen ACP method contracts without requiring credentials or a live model.
+  - Electron main intentionally does not auto-start real ACP yet; CLI path
+    resolution and packaged `ELECTRON_RUN_AS_NODE=1` behavior remain for the
+    packaging/runtime integration slices.
 
 ## Remaining Work
 
-- Commit Slice 3.
-- Continue with Slice 4 session REST API.
+- Commit Slice 4.
+- Continue with Slice 5 WebSocket chat loop.
 - Continue through the ACP, session, WebSocket, permission, settings, and
   packaging slices until the architecture MVP is fully verified.
