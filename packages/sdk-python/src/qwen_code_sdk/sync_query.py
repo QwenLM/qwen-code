@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import warnings
 from collections.abc import AsyncIterable, AsyncIterator, Iterable, Mapping
 from queue import Queue
 from typing import Any, cast
@@ -13,8 +14,6 @@ from .query import Query, query
 from .types import QueryOptions, QueryOptionsDict
 
 _STOP = object()
-
-_DEFAULT_CONTROL_TIMEOUT = 30.0
 
 
 class SyncQuery:
@@ -107,13 +106,13 @@ class SyncQuery:
     def interrupt(self) -> None:
         q = self._require_query()
         asyncio.run_coroutine_threadsafe(q.interrupt(), self._loop).result(
-            timeout=_DEFAULT_CONTROL_TIMEOUT
+            timeout=q.control_request_timeout
         )
 
     def set_model(self, model: str) -> None:
         q = self._require_query()
         asyncio.run_coroutine_threadsafe(q.set_model(model), self._loop).result(
-            timeout=_DEFAULT_CONTROL_TIMEOUT
+            timeout=q.control_request_timeout
         )
 
     def set_permission_mode(self, mode: str) -> None:
@@ -121,21 +120,21 @@ class SyncQuery:
         asyncio.run_coroutine_threadsafe(
             q.set_permission_mode(mode),
             self._loop,
-        ).result(timeout=_DEFAULT_CONTROL_TIMEOUT)
+        ).result(timeout=q.control_request_timeout)
 
     def supported_commands(self) -> Any:
         q = self._require_query()
         return asyncio.run_coroutine_threadsafe(
             q.supported_commands(),
             self._loop,
-        ).result(timeout=_DEFAULT_CONTROL_TIMEOUT)
+        ).result(timeout=q.control_request_timeout)
 
     def mcp_server_status(self) -> Any:
         q = self._require_query()
         return asyncio.run_coroutine_threadsafe(
             q.mcp_server_status(),
             self._loop,
-        ).result(timeout=_DEFAULT_CONTROL_TIMEOUT)
+        ).result(timeout=q.control_request_timeout)
 
     def get_session_id(self) -> str:
         q = self._require_query()
@@ -188,6 +187,15 @@ class SyncQuery:
         self._thread.join(timeout=5)
         if not self._loop.is_closed():
             self._loop.close()
+
+    def __del__(self) -> None:
+        if not self._shutdown.is_set():
+            warnings.warn(
+                "SyncQuery was not closed. "
+                "Use 'with SyncQuery(...) as q:' or call q.close() explicitly.",
+                ResourceWarning,
+                stacklevel=1,
+            )
 
 
 async def _iterable_to_async(

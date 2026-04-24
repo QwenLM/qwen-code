@@ -484,6 +484,10 @@ class Query:
         await self._ensure_started()
         return await self._send_control_request("mcp_server_status")
 
+    @property
+    def control_request_timeout(self) -> float:
+        return self._options.timeout.control_request
+
     def get_session_id(self) -> str:
         return self._session_id
 
@@ -596,7 +600,7 @@ def query(
     if session_id is None and not parsed_options.continue_session:
         session_id = str(uuid4())
     if parsed_options.resume is None and not parsed_options.continue_session:
-        parsed_options.session_id = session_id
+        parsed_options = replace(parsed_options, session_id=session_id)
 
     transport = ProcessTransport(parsed_options)
     return Query(transport, parsed_options, prompt, session_id or "")

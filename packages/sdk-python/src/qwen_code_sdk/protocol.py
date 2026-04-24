@@ -342,8 +342,16 @@ def is_control_request(msg: Any) -> bool:
 
 
 def is_control_response(msg: Any) -> bool:
-    return isinstance(msg, dict) and msg.get("type") == "control_response"
+    return (
+        isinstance(msg, dict)
+        and msg.get("type") == "control_response"
+        and "response" in msg
+    )
 
 
 def is_control_cancel(msg: Any) -> bool:
-    return isinstance(msg, dict) and msg.get("type") == "control_cancel_request"
+    return (
+        isinstance(msg, dict)
+        and msg.get("type") == "control_cancel_request"
+        and "request_id" in msg
+    )

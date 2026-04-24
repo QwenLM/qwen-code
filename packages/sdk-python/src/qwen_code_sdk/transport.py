@@ -162,7 +162,8 @@ class ProcessTransport:
 
         if return_code != 0 and self._exit_error is None:
             self._exit_error = ProcessExitError(
-                f"CLI process exited with code {return_code}"
+                f"CLI process exited with code {return_code}",
+                exit_code=return_code,
             )
 
         if self._stderr_task is not None:
