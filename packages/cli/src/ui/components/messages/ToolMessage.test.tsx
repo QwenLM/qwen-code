@@ -547,6 +547,54 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('line 30');
   });
 
+  it('pre-slices large non-shell string output before MaxSizedBox layout', () => {
+    const longString = Array.from(
+      { length: 5000 },
+      (_, i) => `line ${i + 1}`,
+    ).join('\n');
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="some-other-tool"
+        resultDisplay={longString}
+        status={ToolCallStatus.Success}
+        availableTerminalHeight={12}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+
+    expect(output).toContain('... first 4995 lines hidden ...');
+    expect(output).not.toContain('line 4995');
+    expect(output).toContain('line 4996');
+    expect(output).toContain('line 4997');
+    expect(output).toContain('line 4998');
+    expect(output).toContain('line 4999');
+    expect(output).toContain('line 5000');
+  });
+
+  it('does not pre-slice string output that exactly fits available height', () => {
+    const exactFitString = Array.from(
+      { length: 6 },
+      (_, i) => `line ${i + 1}`,
+    ).join('\n');
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="some-other-tool"
+        resultDisplay={exactFitString}
+        status={ToolCallStatus.Success}
+        availableTerminalHeight={12}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+
+    expect(output).not.toContain('lines hidden');
+    expect(output).toContain('line 1');
+    expect(output).toContain('line 6');
+  });
+
   it.each([
     ['negative', -1],
     ['fractional', 1.5],
