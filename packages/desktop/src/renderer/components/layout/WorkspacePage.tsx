@@ -45,12 +45,15 @@ export function WorkspacePage({
   terminal,
   terminalCommand,
   terminalError,
+  terminalInput,
+  terminalNotice,
   onAskUserQuestionResponse,
   onAuthenticate,
   onChooseWorkspace,
   onClearTerminal,
   onCommit,
   onCommitMessageChange,
+  onCopyTerminalOutput,
   onCreateSession,
   onKillTerminal,
   onMessageTextChange,
@@ -62,6 +65,7 @@ export function WorkspacePage({
   onRevertReviewTarget,
   onRunTerminalCommand,
   onSaveSettings,
+  onSendTerminalOutputToAi,
   onSelectProject,
   onSelectSession,
   onSendMessage,
@@ -69,6 +73,8 @@ export function WorkspacePage({
   onStageReviewTarget,
   onStopGeneration,
   onTerminalCommandChange,
+  onTerminalInputChange,
+  onWriteTerminalInput,
 }: {
   activeProject: DesktopProject | null;
   activeProjectId: string | null;
@@ -88,12 +94,15 @@ export function WorkspacePage({
   terminal: DesktopTerminal | null;
   terminalCommand: string;
   terminalError: string | null;
+  terminalInput: string;
+  terminalNotice: string | null;
   onAskUserQuestionResponse: (requestId: string, optionId: string) => void;
   onAuthenticate: (methodId: string) => void;
   onChooseWorkspace: () => void;
   onClearTerminal: () => void;
   onCommit: () => void;
   onCommitMessageChange: (message: string) => void;
+  onCopyTerminalOutput: () => void;
   onCreateSession: () => void;
   onKillTerminal: () => void;
   onMessageTextChange: (message: string) => void;
@@ -105,6 +114,7 @@ export function WorkspacePage({
   onRevertReviewTarget: (target: DesktopGitReviewTarget) => void;
   onRunTerminalCommand: () => void;
   onSaveSettings: () => void;
+  onSendTerminalOutputToAi: () => void;
   onSelectProject: (projectId: string) => void;
   onSelectSession: (sessionId: string) => void;
   onSendMessage: (event: FormEvent<HTMLFormElement>) => void;
@@ -112,6 +122,8 @@ export function WorkspacePage({
   onStageReviewTarget: (target: DesktopGitReviewTarget) => void;
   onStopGeneration: () => void;
   onTerminalCommandChange: (command: string) => void;
+  onTerminalInputChange: (input: string) => void;
+  onWriteTerminalInput: () => void;
 }) {
   return (
     <main className="desktop-shell" data-testid="desktop-workspace">
@@ -174,12 +186,18 @@ export function WorkspacePage({
         <TerminalDrawer
           command={terminalCommand}
           error={terminalError}
+          input={terminalInput}
+          notice={terminalNotice}
           project={activeProject}
           terminal={terminal}
           onClear={onClearTerminal}
           onCommandChange={onTerminalCommandChange}
+          onCopyOutput={onCopyTerminalOutput}
           onKill={onKillTerminal}
+          onInputChange={onTerminalInputChange}
           onRun={onRunTerminalCommand}
+          onSendOutputToAi={onSendTerminalOutputToAi}
+          onWriteInput={onWriteTerminalInput}
         />
       </section>
     </main>

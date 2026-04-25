@@ -371,6 +371,83 @@ hunkId }` and stages only that current hunk.
     `.qwen/e2e-tests/electron-desktop/diff-review-commit.md` and
     `.qwen/e2e-tests/electron-desktop/cdp-renderer-observability.md`.
 
+### Slice 16: Terminal Output to AI and Stdin Write
+
+- Status: complete in iteration 12
+- Goal: close the P0 terminal gap by allowing running terminal processes to
+  receive stdin, making output easy to copy, and sending scoped terminal output
+  back into the active AI thread through the existing session socket.
+- Files:
+  - `packages/desktop/src/server/services/terminalService.ts`
+  - `packages/desktop/src/server/index.ts`
+  - `packages/desktop/src/server/index.test.ts`
+  - `packages/desktop/src/shared/desktopApi.ts`
+  - `packages/desktop/src/shared/ipcChannels.ts`
+  - `packages/desktop/src/main/ipc/registerIpc.ts`
+  - `packages/desktop/src/preload/index.ts`
+  - `packages/desktop/src/renderer/api/client.ts`
+  - `packages/desktop/src/renderer/api/websocket.ts`
+  - `packages/desktop/src/renderer/App.tsx`
+  - `packages/desktop/src/renderer/components/layout/WorkspacePage.tsx`
+  - `packages/desktop/src/renderer/components/layout/TerminalDrawer.tsx`
+  - `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+  - `packages/desktop/src/renderer/styles.css`
+  - `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+  - `.qwen/e2e-tests/electron-desktop/terminal-drawer.md`
+- Acceptance criteria:
+  - `POST /api/terminals/:id/write` writes text to stdin for a running
+    project-scoped terminal and fails closed for completed terminals.
+  - Terminal drawer exposes copy output, clear, kill, stdin input, and
+    send-output-to-AI controls without renderer Node APIs.
+  - Copy output uses a preload-whitelisted Electron clipboard IPC because
+    `file://` Electron renderers cannot rely on browser clipboard permission.
+  - Send-output-to-AI requires an active session and posts a bounded terminal
+    transcript through the existing authenticated WebSocket prompt path.
+  - Electron CDP smoke verifies command output, stdin write output, copy status,
+    and send-output-to-AI fake ACP response without console errors or failed
+    network requests.
+- E2E coverage:
+  - Updated `.qwen/e2e-tests/electron-desktop/terminal-drawer.md` with the new
+    stdin/write, copy, and send-output-to-AI scenario and diagnostics.
+- UI direction:
+  - Called `frontend-design` before modifying the terminal drawer. The adopted
+    direction is a dense developer-tool terminal control strip inside the
+    existing dark workbench: compact action buttons, explicit stdin row,
+    visible success/error feedback, and no decorative card nesting or marketing
+    layout.
+  - User-visible changes are scoped to `TerminalDrawer`, `WorkspacePage`,
+    `App`, and terminal drawer CSS. The CDP harness verifies the top bar,
+    sidebar, chat thread, review panel, terminal drawer, copy status, stdin
+    output, and send-to-AI response in a real Electron renderer.
+- Completed:
+  - Added token-protected `POST /api/terminals/:id/write` to write stdin to a
+    running server-owned terminal process and reject stale writes.
+  - Added renderer terminal controls for copy output, stdin input, and sending
+    a bounded terminal transcript to the active AI thread.
+  - Added a preload-whitelisted `writeClipboardText` IPC backed by Electron
+    clipboard for reliable desktop copy output without enabling renderer Node
+    access.
+  - Kept send-output-to-AI on the existing authenticated WebSocket
+    `user_message` prompt path instead of adding a second prompt transport.
+  - Extended the Electron CDP smoke to verify copy status, stdin output, and
+    fake ACP response after sending terminal output to AI.
+- Verification:
+  - `npm run test --workspace=packages/desktop` passed: 9 files, 55 tests.
+  - `npm run typecheck --workspace=packages/desktop` passed.
+  - `npm run lint --workspace=packages/desktop` passed.
+  - `npm run build --workspace=packages/desktop` passed.
+  - Initial `npm run e2e:cdp --workspace=packages/desktop` failed at copy
+    output because the renderer fallback clipboard path was unavailable in the
+    Electron `file://` page. Diagnostics were written to ignored
+    `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T04-42-48-004Z/`.
+  - After adding the preload clipboard IPC, `npm run e2e:cdp
+--workspace=packages/desktop` passed. Success artifacts were written under
+    ignored
+    `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T04-45-53-738Z/`.
+  - `npm run typecheck` passed across workspaces.
+  - `npm run build` passed across workspaces. Existing VS Code companion lint
+    warnings were reported by its build script, with no errors.
+
 ## Decision Log
 
 - 2026-04-25: Use a main-process hosted `DesktopServer` for MVP, matching the
@@ -412,6 +489,15 @@ hunkId }` and stages only that current hunk.
   server-derived patch application, not renderer-submitted patches. This keeps
   hunk accept/revert scoped to the current registered project state and avoids
   trusting client-provided diff text.
+- 2026-04-25: Implement terminal send-output-to-AI by formatting a bounded
+  transcript in the renderer and submitting it through the existing session
+  WebSocket user-message path. This reuses ACP prompt concurrency, permissions,
+  and chat history instead of introducing a second terminal-specific prompt
+  route.
+- 2026-04-25: Use a narrow preload IPC for terminal transcript copy because the
+  real Electron renderer is loaded from `file://` and browser clipboard
+  permissions are not reliable there. The renderer still has no Node
+  integration and the IPC accepts only a non-empty string.
 
 ## Verification Log
 
@@ -482,6 +568,20 @@ hunkId }` and stages only that current hunk.
   - `npm run build --workspace=packages/desktop` passed.
   - `npm run e2e:cdp --workspace=packages/desktop` passed and reported no
     renderer console errors or failed network requests.
+- 2026-04-25 Slice 16 terminal output-to-AI and stdin write:
+  - `npm run test --workspace=packages/desktop` passed: 9 files, 55 tests.
+  - `npm run typecheck --workspace=packages/desktop` passed.
+  - `npm run lint --workspace=packages/desktop` passed.
+  - `npm run build --workspace=packages/desktop` passed.
+  - Initial `npm run e2e:cdp --workspace=packages/desktop` failed at the copy
+    status assertion, with no console errors or failed network requests; the
+    DOM showed `Clipboard is unavailable.`
+  - After adding the preload clipboard IPC, `npm run e2e:cdp
+--workspace=packages/desktop` passed and reported no renderer console
+    errors or failed network requests.
+  - `npm run typecheck` passed across workspaces.
+  - `npm run build` passed across workspaces. Existing VS Code companion lint
+    warnings were reported by its build script, with no errors.
 
 ## Self Review Notes
 
@@ -525,8 +625,18 @@ hunkId }` and stages only that current hunk.
 - Review comments are currently local renderer notes for the active review
   session. Persisting them into ACP/session artifacts or Git commit metadata is
   deferred.
+- Slice 16 terminal stdin writes only target server-owned running terminal
+  records. Completed/killed terminals and closed stdin streams fail closed with
+  `terminal_not_running`.
+- Terminal output-to-AI does not bypass ACP permissions: it sends a normal user
+  prompt to the active session and therefore inherits the same prompt
+  concurrency, permission bridge, and fake/real ACP behavior as composer sends.
+- The current terminal remains a command runner with stdin pipes. Full PTY
+  resize/write semantics and terminal tabs/history are deferred beyond the P0
+  workflow verified by CDP smoke.
 
 ## Remaining Work
 
-- Implement terminal PTY/write/send-output-to-AI refinements, run final package
-  smoke, and complete any remaining MVP polish before creating the DONE marker.
+- Run final package smoke and complete the final MVP readiness review before
+  creating the DONE marker. PTY resize, terminal tabs/history, and persisted
+  review comments remain deferred beyond P0.

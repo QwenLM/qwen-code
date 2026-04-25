@@ -95,6 +95,47 @@ export class DesktopTerminalService {
     return toPublicTerminal(this.getRecord(terminalId));
   }
 
+  write(terminalId: string, input: string): DesktopTerminal {
+    if (input.length === 0) {
+      throw new DesktopHttpError(
+        400,
+        'bad_request',
+        'Terminal input must be a non-empty string.',
+      );
+    }
+
+    const record = this.getRecord(terminalId);
+    if (record.status !== 'running' || !record.child) {
+      throw new DesktopHttpError(
+        409,
+        'terminal_not_running',
+        'Terminal session is not running.',
+      );
+    }
+
+    const stdin = record.child.stdin;
+    if (stdin.destroyed || stdin.writableEnded || !stdin.writable) {
+      throw new DesktopHttpError(
+        409,
+        'terminal_not_running',
+        'Terminal session is not accepting input.',
+      );
+    }
+
+    try {
+      stdin.write(input);
+    } catch {
+      throw new DesktopHttpError(
+        409,
+        'terminal_not_running',
+        'Terminal session is not accepting input.',
+      );
+    }
+    record.updatedAt = this.now().toISOString();
+
+    return toPublicTerminal(record);
+  }
+
   kill(terminalId: string): DesktopTerminal {
     const record = this.getRecord(terminalId);
     if (record.status === 'running' && record.child) {

@@ -9,22 +9,37 @@ import type { DesktopProject, DesktopTerminal } from '../../api/client.js';
 export function TerminalDrawer({
   command,
   error,
+  input,
+  notice,
   onClear,
   onCommandChange,
+  onCopyOutput,
+  onInputChange,
   onKill,
   onRun,
+  onSendOutputToAi,
+  onWriteInput,
   project,
   terminal,
 }: {
   command: string;
   error: string | null;
+  input: string;
+  notice: string | null;
   onClear: () => void;
   onCommandChange: (command: string) => void;
+  onCopyOutput: () => void;
+  onInputChange: (input: string) => void;
   onKill: () => void;
   onRun: () => void;
+  onSendOutputToAi: () => void;
+  onWriteInput: () => void;
   project: DesktopProject | null;
   terminal: DesktopTerminal | null;
 }) {
+  const hasOutput = (terminal?.output.trim().length ?? 0) > 0;
+  const canWriteInput = terminal?.status === 'running';
+
   return (
     <section
       className="terminal-drawer"
@@ -37,6 +52,22 @@ export function TerminalDrawer({
           <strong>{project?.name || 'No project'}</strong>
         </div>
         <div className="terminal-actions">
+          <button
+            className="secondary-button"
+            disabled={!terminal}
+            type="button"
+            onClick={onCopyOutput}
+          >
+            Copy Output
+          </button>
+          <button
+            className="secondary-button"
+            disabled={!hasOutput}
+            type="button"
+            onClick={onSendOutputToAi}
+          >
+            Send to AI
+          </button>
           <button className="secondary-button" type="button" onClick={onClear}>
             Clear
           </button>
@@ -72,11 +103,34 @@ export function TerminalDrawer({
           Run
         </button>
       </div>
+      <div className="terminal-input-row">
+        <textarea
+          aria-label="Terminal input"
+          disabled={!canWriteInput}
+          placeholder={
+            canWriteInput
+              ? 'Write to running process stdin'
+              : 'Start a running process to send stdin'
+          }
+          rows={2}
+          value={input}
+          onChange={(event) => onInputChange(event.target.value)}
+        />
+        <button
+          className="secondary-button"
+          disabled={!canWriteInput || input.trim().length === 0}
+          type="button"
+          onClick={onWriteInput}
+        >
+          Send Input
+        </button>
+      </div>
       <pre className="terminal-output">
         {terminal
           ? `$ ${terminal.command}\n[${terminal.status}]${terminal.exitCode === null ? '' : ` exit ${terminal.exitCode}`}\n${terminal.output}`
           : 'No terminal output'}
       </pre>
+      {notice ? <p className="success-text">{notice}</p> : null}
       {error ? <p className="error-text">{error}</p> : null}
     </section>
   );

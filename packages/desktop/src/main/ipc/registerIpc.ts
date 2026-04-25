@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ipcMain, type BrowserWindow } from 'electron';
+import { clipboard, ipcMain, type BrowserWindow } from 'electron';
 import type { DesktopServerInfo } from '../../shared/desktopApi.js';
 import { IPC_CHANNELS } from '../../shared/ipcChannels.js';
 import { selectDirectory } from '../native/dialogs.js';
@@ -25,6 +25,9 @@ export function registerIpc(options: RegisterIpcOptions): void {
   });
   ipcMain.handle(IPC_CHANNELS.showItemInFolder, (_event, path: unknown) => {
     showItemInFolder(requireString(path, 'path'));
+  });
+  ipcMain.handle(IPC_CHANNELS.writeClipboardText, (_event, text: unknown) => {
+    clipboard.writeText(requireString(text, 'text'));
   });
   ipcMain.handle(IPC_CHANNELS.windowMinimize, () => {
     options.getMainWindow()?.minimize();

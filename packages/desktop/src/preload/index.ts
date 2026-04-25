@@ -24,6 +24,9 @@ const api: QwenDesktopApi = {
   showItemInFolder: async (path: string) => {
     await ipcRenderer.invoke(IPC_CHANNELS.showItemInFolder, path);
   },
+  writeClipboardText: async (text: string) => {
+    await ipcRenderer.invoke(IPC_CHANNELS.writeClipboardText, text);
+  },
   window: {
     minimize: async () => {
       await ipcRenderer.invoke(IPC_CHANNELS.windowMinimize);

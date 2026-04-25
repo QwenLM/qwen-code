@@ -410,6 +410,56 @@ describe('DesktopServer', () => {
     });
   });
 
+  it('writes stdin to a running terminal command', async () => {
+    const projectPath = await createTempDirectory('qwen-desktop-terminal-');
+    const storePath = join(
+      await createTempDirectory('qwen-desktop-store-'),
+      'desktop-projects.json',
+    );
+    const server = await createTestServer(undefined, undefined, storePath);
+    const opened = await postJson(server, '/api/projects/open', {
+      path: projectPath,
+    });
+    const projectId = getProjectId(opened.body);
+    const command =
+      "node -e \"process.stdin.once('data', d => process.stdout.write('stdin:' + d.toString(), () => process.exit(0)))\"";
+    const created = await postJson(server, '/api/terminals', {
+      projectId,
+      command,
+    });
+    const terminalId = getTerminalId(created.body);
+    const written = await postJson(
+      server,
+      `/api/terminals/${terminalId}/write`,
+      { input: 'terminal-input\n' },
+    );
+    const completed = await waitForTerminal(server, terminalId);
+    const staleWrite = await postJson(
+      server,
+      `/api/terminals/${terminalId}/write`,
+      { input: 'late-input\n' },
+    );
+
+    expect(written.status).toBe(200);
+    expect(written.body).toMatchObject({
+      ok: true,
+      terminal: {
+        id: terminalId,
+        status: 'running',
+      },
+    });
+    expect(completed).toMatchObject({
+      status: 'exited',
+      output: 'stdin:terminal-input\n',
+      exitCode: 0,
+    });
+    expect(staleWrite.status).toBe(409);
+    expect(staleWrite.body).toMatchObject({
+      ok: false,
+      code: 'terminal_not_running',
+    });
+  });
+
   it('can kill a running terminal command', async () => {
     const projectPath = await createTempDirectory('qwen-desktop-terminal-');
     const storePath = join(

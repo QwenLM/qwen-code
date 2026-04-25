@@ -751,7 +751,8 @@ input:focus {
 
 .terminal-header,
 .terminal-actions,
-.terminal-command-row {
+.terminal-command-row,
+.terminal-input-row {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -772,12 +773,23 @@ input:focus {
 }
 
 .terminal-actions {
+  flex-wrap: wrap;
   justify-content: flex-end;
 }
 
 .terminal-command-row input {
   min-width: 0;
   flex: 1;
+}
+
+.terminal-input-row {
+  align-items: stretch;
+}
+
+.terminal-input-row textarea {
+  min-width: 0;
+  flex: 1;
+  resize: vertical;
 }
 
 .terminal-output {
@@ -803,6 +815,10 @@ input:focus {
 
 .error-text {
   color: #ff9a84;
+}
+
+.success-text {
+  color: #9fd8a3;
 }
 
 .session-details {

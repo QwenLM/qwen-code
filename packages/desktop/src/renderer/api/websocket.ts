@@ -20,6 +20,7 @@ export interface SessionSocketHandlers {
 
 export interface SessionSocketClient {
   sendUserMessage(content: string): void;
+  sendTerminalOutput(content: string): void;
   respondToPermission(requestId: string, optionId: string): void;
   respondToAskUserQuestion(
     requestId: string,
@@ -52,6 +53,9 @@ export function connectSessionSocket(
 
   return {
     sendUserMessage(content: string): void {
+      sendClientMessage(socket, { type: 'user_message', content });
+    },
+    sendTerminalOutput(content: string): void {
       sendClientMessage(socket, { type: 'user_message', content });
     },
     respondToPermission(requestId: string, optionId: string): void {

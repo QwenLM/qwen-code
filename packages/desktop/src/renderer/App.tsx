@@ -35,6 +35,7 @@ import {
   setDesktopSessionModel,
   stageDesktopProjectChanges,
   updateDesktopUserSettings,
+  writeDesktopTerminalInput,
   type DesktopGitDiff,
   type DesktopGitReviewTarget,
   type DesktopProject,
@@ -78,8 +79,10 @@ export function App() {
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [commitMessage, setCommitMessage] = useState('');
   const [terminalCommand, setTerminalCommand] = useState('');
+  const [terminalInput, setTerminalInput] = useState('');
   const [terminal, setTerminal] = useState<DesktopTerminal | null>(null);
   const [terminalError, setTerminalError] = useState<string | null>(null);
+  const [terminalNotice, setTerminalNotice] = useState<string | null>(null);
   const [messageText, setMessageText] = useState('');
   const [chatState, dispatchChat] = useReducer(
     chatReducer,
@@ -492,10 +495,37 @@ export function App() {
       setTerminal(nextTerminal);
       setTerminalCommand('');
       setTerminalError(null);
+      setTerminalNotice(null);
     } catch (error) {
       setTerminalError(getErrorMessage(error));
     }
   }, [activeProject, loadState, terminalCommand]);
+
+  const writeTerminalInput = useCallback(async () => {
+    if (
+      loadState.state !== 'ready' ||
+      !terminal ||
+      terminal.status !== 'running' ||
+      terminalInput.trim().length === 0
+    ) {
+      return;
+    }
+
+    try {
+      setTerminal(
+        await writeDesktopTerminalInput(
+          loadState.status.serverInfo,
+          terminal.id,
+          ensureTerminalInputLine(terminalInput),
+        ),
+      );
+      setTerminalInput('');
+      setTerminalError(null);
+      setTerminalNotice('Input sent.');
+    } catch (error) {
+      setTerminalError(getErrorMessage(error));
+    }
+  }, [loadState, terminal, terminalInput]);
 
   const killTerminal = useCallback(async () => {
     if (loadState.state !== 'ready' || !terminal) {
@@ -507,6 +537,7 @@ export function App() {
         await killDesktopTerminal(loadState.status.serverInfo, terminal.id),
       );
       setTerminalError(null);
+      setTerminalNotice('Terminal stopped.');
     } catch (error) {
       setTerminalError(getErrorMessage(error));
     }
@@ -514,8 +545,48 @@ export function App() {
 
   const clearTerminal = useCallback(() => {
     setTerminal(null);
+    setTerminalInput('');
     setTerminalError(null);
+    setTerminalNotice(null);
   }, []);
+
+  const copyTerminalOutput = useCallback(async () => {
+    if (!terminal) {
+      return;
+    }
+
+    try {
+      await writeClipboardText(formatTerminalTranscript(terminal));
+      setTerminalError(null);
+      setTerminalNotice('Copied terminal output.');
+    } catch (error) {
+      setTerminalError(getErrorMessage(error));
+    }
+  }, [terminal]);
+
+  const sendTerminalOutputToAi = useCallback(() => {
+    if (
+      !activeSessionId ||
+      !socketRef.current ||
+      chatState.connection !== 'connected' ||
+      !terminal
+    ) {
+      setTerminalError('Open a thread before sending terminal output to AI.');
+      return;
+    }
+
+    const output = terminal.output.trim();
+    if (!output) {
+      setTerminalError('Terminal output is empty.');
+      return;
+    }
+
+    const content = buildTerminalOutputPrompt(terminal);
+    dispatchChat({ type: 'append_user_message', content });
+    socketRef.current.sendTerminalOutput(content);
+    setTerminalError(null);
+    setTerminalNotice('Sent terminal output to AI.');
+  }, [activeSessionId, chatState.connection, terminal]);
 
   useEffect(() => {
     if (loadState.state !== 'ready' || terminal?.status !== 'running') {
@@ -680,12 +751,15 @@ export function App() {
       terminal={terminal}
       terminalCommand={terminalCommand}
       terminalError={terminalError}
+      terminalInput={terminalInput}
+      terminalNotice={terminalNotice}
       onAskUserQuestionResponse={respondToAskUserQuestion}
       onAuthenticate={authenticate}
       onChooseWorkspace={chooseWorkspace}
       onClearTerminal={clearTerminal}
       onCommit={commitChanges}
       onCommitMessageChange={setCommitMessage}
+      onCopyTerminalOutput={copyTerminalOutput}
       onCreateSession={createSession}
       onKillTerminal={killTerminal}
       onMessageTextChange={setMessageText}
@@ -697,6 +771,7 @@ export function App() {
       onRevertReviewTarget={revertReviewTarget}
       onRunTerminalCommand={runTerminalCommand}
       onSaveSettings={saveSettings}
+      onSendTerminalOutputToAi={sendTerminalOutputToAi}
       onSelectProject={selectProject}
       onSelectSession={setActiveSessionId}
       onSendMessage={sendMessage}
@@ -704,6 +779,8 @@ export function App() {
       onStageReviewTarget={stageReviewTarget}
       onStopGeneration={stopGeneration}
       onTerminalCommandChange={setTerminalCommand}
+      onTerminalInputChange={setTerminalInput}
+      onWriteTerminalInput={writeTerminalInput}
     />
   );
 }
@@ -744,4 +821,55 @@ function joinProjectFilePath(projectPath: string, filePath: string): string {
       ? projectPath.slice(0, -1)
       : projectPath;
   return `${base}${separator}${filePath}`;
+}
+
+function ensureTerminalInputLine(input: string): string {
+  return input.endsWith('\n') ? input : `${input}\n`;
+}
+
+function formatTerminalTranscript(terminal: DesktopTerminal): string {
+  const exitText =
+    terminal.exitCode === null ? '' : ` exit ${String(terminal.exitCode)}`;
+  return `$ ${terminal.command}\n[${terminal.status}]${exitText}\n${terminal.output}`;
+}
+
+function buildTerminalOutputPrompt(terminal: DesktopTerminal): string {
+  const transcript = formatTerminalTranscript(terminal);
+  const boundedTranscript =
+    transcript.length > 12_000
+      ? `...[terminal output truncated]\n${transcript.slice(-12_000)}`
+      : transcript;
+
+  return `Review this terminal output from the current project and use it to continue the task.\n\n${boundedTranscript}`;
+}
+
+async function writeClipboardText(text: string): Promise<void> {
+  if (window.qwenDesktop?.writeClipboardText) {
+    await window.qwenDesktop.writeClipboardText(text);
+    return;
+  }
+
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Fall back to the DOM copy command below when Clipboard API permission
+      // is unavailable in a file:// Electron renderer.
+    }
+  }
+
+  const textArea = document.createElement('textarea');
+  textArea.value = text;
+  textArea.setAttribute('readonly', 'true');
+  textArea.style.position = 'fixed';
+  textArea.style.top = '-1000px';
+  document.body.append(textArea);
+  textArea.select();
+  const copied = document.execCommand('copy');
+  textArea.remove();
+
+  if (!copied) {
+    throw new Error('Clipboard is unavailable.');
+  }
 }

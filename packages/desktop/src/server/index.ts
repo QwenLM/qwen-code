@@ -323,6 +323,21 @@ async function handleRequest(
     return;
   }
 
+  const terminalWriteMatch = matchSessionRoute(
+    requestUrl.pathname,
+    /^\/api\/terminals\/([^/]+)\/write$/u,
+  );
+  if (terminalWriteMatch) {
+    await handleTerminalWriteRoute(
+      request,
+      response,
+      origin,
+      context,
+      terminalWriteMatch,
+    );
+    return;
+  }
+
   const terminalMatch = matchSessionRoute(
     requestUrl.pathname,
     /^\/api\/terminals\/([^/]+)$/u,
@@ -671,6 +686,26 @@ async function handleTerminalKillRoute(
     sendJson(response, origin, 200, {
       ok: true,
       terminal: context.terminalService.kill(terminalId),
+    });
+    return;
+  }
+
+  sendMethodNotAllowed(response, origin);
+}
+
+async function handleTerminalWriteRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  origin: string | undefined,
+  context: HandlerContext,
+  terminalId: string,
+): Promise<void> {
+  if (request.method === 'POST') {
+    const body = await readObjectBody(request);
+    const input = getRequiredString(body, 'input');
+    sendJson(response, origin, 200, {
+      ok: true,
+      terminal: context.terminalService.write(terminalId, input),
     });
     return;
   }

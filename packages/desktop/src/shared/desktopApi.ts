@@ -21,5 +21,6 @@ export interface QwenDesktopApi {
   selectDirectory(): Promise<string | null>;
   openPath(path: string): Promise<void>;
   showItemInFolder(path: string): Promise<void>;
+  writeClipboardText(text: string): Promise<void>;
   window: DesktopWindowApi;
 }

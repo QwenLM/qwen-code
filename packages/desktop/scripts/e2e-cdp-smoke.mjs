@@ -101,6 +101,27 @@ async function main() {
   await setFieldByAriaLabel('Terminal command', 'printf desktop-e2e-terminal');
   await clickButton('Run');
   await waitForText('desktop-e2e-terminal');
+  await waitForText('[exited] exit 0');
+  await clickButton('Copy Output');
+  await waitForText('Copied terminal output.');
+
+  await setFieldByAriaLabel(
+    'Terminal command',
+    'node -e "process.stdin.once(\'data\', d => process.stdout.write(\'stdin:\' + d.toString(), () => process.exit(0)))"',
+  );
+  await clickButton('Run');
+  await waitForText('[running]');
+  await setFieldByAriaLabel('Terminal input', 'desktop-e2e-stdin');
+  await clickButton('Send Input');
+  await waitForText('Input sent.');
+  await waitForText('stdin:desktop-e2e-stdin');
+  await clickButton('Send to AI');
+  await waitForText('Sent terminal output to AI.');
+  await waitForText('Approve Once');
+  await clickButton('Approve Once');
+  await waitForText(
+    'E2E fake ACP response received: Review this terminal output',
+  );
 
   await saveScreenshot('completed-workspace.png');
   await assertNoBrowserErrors();

@@ -348,6 +348,21 @@ export async function killDesktopTerminal(
   return response.terminal;
 }
 
+export async function writeDesktopTerminalInput(
+  serverInfo: DesktopServerInfo,
+  terminalId: string,
+  input: string,
+): Promise<DesktopTerminal> {
+  const response = await writeJson(
+    serverInfo,
+    `/api/terminals/${encodeURIComponent(terminalId)}/write`,
+    'POST',
+    { input },
+    isTerminalResponse,
+  );
+  return response.terminal;
+}
+
 export async function createDesktopSession(
   serverInfo: DesktopServerInfo,
   cwd: string,

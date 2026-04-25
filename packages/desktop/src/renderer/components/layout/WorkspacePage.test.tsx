@@ -66,12 +66,15 @@ describe('WorkspacePage', () => {
           terminal={null}
           terminalCommand=""
           terminalError={null}
+          terminalInput=""
+          terminalNotice={null}
           onAskUserQuestionResponse={vi.fn()}
           onAuthenticate={vi.fn()}
           onChooseWorkspace={vi.fn()}
           onClearTerminal={vi.fn()}
           onCommit={vi.fn()}
           onCommitMessageChange={vi.fn()}
+          onCopyTerminalOutput={vi.fn()}
           onCreateSession={vi.fn()}
           onKillTerminal={vi.fn()}
           onMessageTextChange={vi.fn()}
@@ -83,6 +86,7 @@ describe('WorkspacePage', () => {
           onRevertReviewTarget={vi.fn()}
           onRunTerminalCommand={vi.fn()}
           onSaveSettings={vi.fn()}
+          onSendTerminalOutputToAi={vi.fn()}
           onSelectProject={vi.fn()}
           onSelectSession={vi.fn()}
           onSendMessage={(event) => event.preventDefault()}
@@ -90,6 +94,8 @@ describe('WorkspacePage', () => {
           onStageReviewTarget={vi.fn()}
           onStopGeneration={vi.fn()}
           onTerminalCommandChange={vi.fn()}
+          onTerminalInputChange={vi.fn()}
+          onWriteTerminalInput={vi.fn()}
         />,
       );
     });
