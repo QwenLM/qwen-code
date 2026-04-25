@@ -216,6 +216,22 @@ export function resolveJsonSchemaArg(
     );
   }
 
+  // The schema will be installed as a TOOL PARAMETER schema. All function-
+  // calling APIs (Gemini/OpenAI/Anthropic) require tool arguments to be a
+  // JSON object, so a root type like "array" or "string" registers an
+  // unusable synthetic tool that the model could never satisfy. Reject any
+  // explicit non-object root here. Absent `type`, `type: "object"`, or a
+  // `type` array that includes `"object"` are all acceptable.
+  const rawType = (parsed as Record<string, unknown>)['type'];
+  if (rawType !== undefined) {
+    const types = Array.isArray(rawType) ? rawType : [rawType];
+    if (!types.includes('object')) {
+      throw new FatalConfigError(
+        `--json-schema root "type" must be "object" (tool parameters are object-valued); got ${JSON.stringify(rawType)}.`,
+      );
+    }
+  }
+
   // Ajv compile-time validation. SchemaValidator.validate is deliberately
   // lenient at runtime (falls back to no-op on compile failure to support
   // exotic MCP schemas) — but `--json-schema` is explicit user intent, so

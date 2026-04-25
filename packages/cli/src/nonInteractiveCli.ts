@@ -459,10 +459,17 @@ export async function runNonInteractive(
 
             if (
               finalRequestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
-              !toolResponse.error &&
-              structuredSubmission === undefined
+              !toolResponse.error
             ) {
+              // Honour the "first valid call ends the session" contract:
+              // stop processing the remaining tool calls from this turn so
+              // we don't execute side-effecting tools after the result has
+              // already been accepted. Any trailing tool_use blocks the
+              // model emitted will simply lack a matching tool_result, which
+              // is consistent with how other terminal paths (max-turns,
+              // cancellation) leave the stream.
               structuredSubmission = finalRequestInfo.args;
+              break;
             }
 
             if (toolResponse.responseParts) {

@@ -61,10 +61,11 @@ describe('resolveJsonSchemaArg', () => {
   });
 
   it('throws when schema is syntactically JSON but invalid as a JSON Schema', () => {
-    // `type` must be a string or array, not a number.
-    expect(() => resolveJsonSchemaArg('{"type": 42}')).toThrow(
-      /not a valid JSON Schema/,
-    );
+    // The root-type check fires first for an integer `type`; drop type
+    // entirely to exercise the Ajv compile-path rejection instead.
+    expect(() =>
+      resolveJsonSchemaArg('{"properties":{"foo":{"type":42}}}'),
+    ).toThrow(/not a valid JSON Schema/);
   });
 
   it('accepts a minimal empty-object schema', () => {
@@ -76,6 +77,28 @@ describe('resolveJsonSchemaArg', () => {
     const schema = resolveJsonSchemaArg(
       '{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object"}',
     );
+    expect(schema).toBeDefined();
+  });
+
+  it('rejects a schema whose root type is not object', () => {
+    expect(() => resolveJsonSchemaArg('{"type":"array"}')).toThrow(
+      /root "type" must be "object"/,
+    );
+    expect(() => resolveJsonSchemaArg('{"type":"string"}')).toThrow(
+      /root "type" must be "object"/,
+    );
+  });
+
+  it('accepts a schema whose type array includes "object"', () => {
+    // Rare but valid; don't over-restrict nullable object roots.
+    const schema = resolveJsonSchemaArg('{"type":["object","null"]}');
+    expect(schema).toEqual({ type: ['object', 'null'] });
+  });
+
+  it('accepts a schema without an explicit root type', () => {
+    // Absent type is tolerated — Ajv treats it as "anything" which covers
+    // the object case the model will actually submit.
+    const schema = resolveJsonSchemaArg('{"properties":{"foo":{}}}');
     expect(schema).toBeDefined();
   });
 });
