@@ -22,12 +22,15 @@ import {
   getDesktopProjectGitStatus,
   getDesktopSessionModeState,
   getDesktopSessionModelState,
+  getDesktopTerminal,
   getDesktopUserSettings,
+  killDesktopTerminal,
   listDesktopProjects,
   listDesktopSessions,
   loadDesktopStatus,
   openDesktopProject,
   revertDesktopProjectChanges,
+  runDesktopTerminalCommand,
   setDesktopSessionMode,
   setDesktopSessionModel,
   stageDesktopProjectChanges,
@@ -36,6 +39,7 @@ import {
   type DesktopGitDiff,
   type DesktopProject,
   type DesktopSessionSummary,
+  type DesktopTerminal,
 } from './api/client.js';
 import {
   connectSessionSocket,
@@ -81,6 +85,9 @@ export function App() {
   const [gitDiff, setGitDiff] = useState<DesktopGitDiff | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [commitMessage, setCommitMessage] = useState('');
+  const [terminalCommand, setTerminalCommand] = useState('');
+  const [terminal, setTerminal] = useState<DesktopTerminal | null>(null);
+  const [terminalError, setTerminalError] = useState<string | null>(null);
   const [messageText, setMessageText] = useState('');
   const [chatState, dispatchChat] = useReducer(
     chatReducer,
@@ -449,6 +456,70 @@ export function App() {
     }
   }, [activeProject, applyReviewMutation, commitMessage, loadState]);
 
+  const runTerminalCommand = useCallback(async () => {
+    if (
+      loadState.state !== 'ready' ||
+      !activeProject ||
+      terminalCommand.trim().length === 0
+    ) {
+      return;
+    }
+
+    try {
+      const nextTerminal = await runDesktopTerminalCommand(
+        loadState.status.serverInfo,
+        activeProject.id,
+        terminalCommand,
+      );
+      setTerminal(nextTerminal);
+      setTerminalCommand('');
+      setTerminalError(null);
+    } catch (error) {
+      setTerminalError(getErrorMessage(error));
+    }
+  }, [activeProject, loadState, terminalCommand]);
+
+  const killTerminal = useCallback(async () => {
+    if (loadState.state !== 'ready' || !terminal) {
+      return;
+    }
+
+    try {
+      setTerminal(
+        await killDesktopTerminal(loadState.status.serverInfo, terminal.id),
+      );
+      setTerminalError(null);
+    } catch (error) {
+      setTerminalError(getErrorMessage(error));
+    }
+  }, [loadState, terminal]);
+
+  const clearTerminal = useCallback(() => {
+    setTerminal(null);
+    setTerminalError(null);
+  }, []);
+
+  useEffect(() => {
+    if (loadState.state !== 'ready' || terminal?.status !== 'running') {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      void getDesktopTerminal(loadState.status.serverInfo, terminal.id)
+        .then((nextTerminal) => {
+          setTerminal(nextTerminal);
+          setTerminalError(null);
+        })
+        .catch((error: unknown) => {
+          setTerminalError(getErrorMessage(error));
+        });
+    }, 400);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [loadState, terminal]);
+
   const saveSettings = useCallback(async () => {
     if (loadState.state !== 'ready') {
       return;
@@ -718,6 +789,16 @@ export function App() {
             />
           </section>
         </div>
+        <TerminalDrawer
+          command={terminalCommand}
+          error={terminalError}
+          project={activeProject}
+          terminal={terminal}
+          onClear={clearTerminal}
+          onCommandChange={setTerminalCommand}
+          onKill={killTerminal}
+          onRun={runTerminalCommand}
+        />
       </section>
     </main>
   );
@@ -1060,6 +1141,78 @@ function ReviewSummary({
       </div>
       {reviewError ? <p className="error-text">{reviewError}</p> : null}
     </div>
+  );
+}
+
+function TerminalDrawer({
+  command,
+  error,
+  onClear,
+  onCommandChange,
+  onKill,
+  onRun,
+  project,
+  terminal,
+}: {
+  command: string;
+  error: string | null;
+  onClear: () => void;
+  onCommandChange: (command: string) => void;
+  onKill: () => void;
+  onRun: () => void;
+  project: DesktopProject | null;
+  terminal: DesktopTerminal | null;
+}) {
+  return (
+    <section className="terminal-drawer" aria-label="Terminal">
+      <div className="terminal-header">
+        <div>
+          <span className="message-role">Terminal</span>
+          <strong>{project?.name || 'No project'}</strong>
+        </div>
+        <div className="terminal-actions">
+          <button className="secondary-button" type="button" onClick={onClear}>
+            Clear
+          </button>
+          <button
+            className="secondary-button"
+            disabled={terminal?.status !== 'running'}
+            type="button"
+            onClick={onKill}
+          >
+            Kill
+          </button>
+        </div>
+      </div>
+      <div className="terminal-command-row">
+        <input
+          aria-label="Terminal command"
+          disabled={!project}
+          placeholder={project ? 'Run command in project' : 'Open a project'}
+          value={command}
+          onChange={(event) => onCommandChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              onRun();
+            }
+          }}
+        />
+        <button
+          className="primary-button"
+          disabled={!project || command.trim().length === 0}
+          type="button"
+          onClick={onRun}
+        >
+          Run
+        </button>
+      </div>
+      <pre className="terminal-output">
+        {terminal
+          ? `$ ${terminal.command}\n[${terminal.status}]${terminal.exitCode === null ? '' : ` exit ${terminal.exitCode}`}\n${terminal.output}`
+          : 'No terminal output'}
+      </pre>
+      {error ? <p className="error-text">{error}</p> : null}
+    </section>
   );
 }
 

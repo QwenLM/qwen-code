@@ -88,6 +88,21 @@ export interface DesktopGitCommitMutation extends DesktopGitReviewMutation {
   };
 }
 
+export type DesktopTerminalStatus = 'running' | 'exited' | 'failed' | 'killed';
+
+export interface DesktopTerminal {
+  id: string;
+  projectId: string;
+  cwd: string;
+  command: string;
+  status: DesktopTerminalStatus;
+  output: string;
+  exitCode: number | null;
+  signal: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface DesktopRuntime {
   ok: true;
   desktop: {
@@ -269,6 +284,47 @@ export async function commitDesktopProjectChanges(
     { message },
     isGitCommitMutation,
   );
+}
+
+export async function runDesktopTerminalCommand(
+  serverInfo: DesktopServerInfo,
+  projectId: string,
+  command: string,
+): Promise<DesktopTerminal> {
+  const response = await writeJson(
+    serverInfo,
+    '/api/terminals',
+    'POST',
+    { projectId, command },
+    isTerminalResponse,
+  );
+  return response.terminal;
+}
+
+export async function getDesktopTerminal(
+  serverInfo: DesktopServerInfo,
+  terminalId: string,
+): Promise<DesktopTerminal> {
+  const response = await getJson(
+    serverInfo,
+    `/api/terminals/${encodeURIComponent(terminalId)}`,
+    isTerminalResponse,
+  );
+  return response.terminal;
+}
+
+export async function killDesktopTerminal(
+  serverInfo: DesktopServerInfo,
+  terminalId: string,
+): Promise<DesktopTerminal> {
+  const response = await writeJson(
+    serverInfo,
+    `/api/terminals/${encodeURIComponent(terminalId)}/kill`,
+    'POST',
+    {},
+    isTerminalResponse,
+  );
+  return response.terminal;
 }
 
 export async function createDesktopSession(
@@ -611,6 +667,17 @@ function isGitCommitMutation(
   );
 }
 
+function isTerminalResponse(
+  value: unknown,
+): value is { ok: true; terminal: DesktopTerminal } {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as { ok?: unknown; terminal?: unknown };
+  return candidate.ok === true && isDesktopTerminal(candidate.terminal);
+}
+
 function isCreateSessionResponse(
   value: unknown,
 ): value is { ok: true; session: DesktopSessionSummary } {
@@ -753,6 +820,35 @@ function isGitChangeStatus(value: unknown): value is DesktopGitChangeStatus {
     value === 'renamed' ||
     value === 'untracked' ||
     value === 'unknown'
+  );
+}
+
+function isDesktopTerminal(value: unknown): value is DesktopTerminal {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Partial<DesktopTerminal>;
+  return (
+    typeof candidate.id === 'string' &&
+    typeof candidate.projectId === 'string' &&
+    typeof candidate.cwd === 'string' &&
+    typeof candidate.command === 'string' &&
+    isTerminalStatus(candidate.status) &&
+    typeof candidate.output === 'string' &&
+    (typeof candidate.exitCode === 'number' || candidate.exitCode === null) &&
+    (typeof candidate.signal === 'string' || candidate.signal === null) &&
+    typeof candidate.createdAt === 'string' &&
+    typeof candidate.updatedAt === 'string'
+  );
+}
+
+function isTerminalStatus(value: unknown): value is DesktopTerminalStatus {
+  return (
+    value === 'running' ||
+    value === 'exited' ||
+    value === 'failed' ||
+    value === 'killed'
   );
 }
 

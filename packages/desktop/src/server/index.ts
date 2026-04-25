@@ -32,6 +32,7 @@ import {
 } from './services/sessionService.js';
 import { DesktopSettingsService } from './services/settingsService.js';
 import type { DesktopUpdateUserSettingsRequest } from './services/settingsService.js';
+import { DesktopTerminalService } from './services/terminalService.js';
 import { SessionSocketHub } from './ws/SessionSocketHub.js';
 import type { DesktopServer, DesktopServerOptions } from './types.js';
 
@@ -43,6 +44,7 @@ interface HandlerContext {
   projectService: DesktopProjectService;
   sessionService: DesktopSessionService;
   settingsService: DesktopSettingsService;
+  terminalService: DesktopTerminalService;
   acpClient: DesktopServerOptions['acpClient'];
 }
 
@@ -59,6 +61,7 @@ export async function startDesktopServer(
   const gitReviewService = new DesktopGitReviewService(now);
   const sessionService = new DesktopSessionService(options.acpClient);
   const settingsService = new DesktopSettingsService(options.settingsPath);
+  const terminalService = new DesktopTerminalService(now);
   const socketHubRef: { current: SessionSocketHub | null } = { current: null };
   const permissionBridge = new PermissionBridge({
     timeoutMs: options.permissionRequestTimeoutMs,
@@ -93,6 +96,7 @@ export async function startDesktopServer(
       projectService,
       sessionService,
       settingsService,
+      terminalService,
       acpClient: options.acpClient,
     }).catch((error: unknown) => {
       const origin = getSingleHeader(request.headers.origin);
@@ -148,6 +152,7 @@ export async function startDesktopServer(
     close: async () => {
       permissionBridge.close();
       socketHub.close();
+      terminalService.close();
       await closeHttpServer(server);
     },
   };
@@ -295,6 +300,41 @@ async function handleRequest(
 
   if (requestUrl.pathname === '/api/settings/user') {
     await handleUserSettingsRoute(request, response, origin, context);
+    return;
+  }
+
+  if (requestUrl.pathname === '/api/terminals') {
+    await handleTerminalsRoute(request, response, origin, context);
+    return;
+  }
+
+  const terminalKillMatch = matchSessionRoute(
+    requestUrl.pathname,
+    /^\/api\/terminals\/([^/]+)\/kill$/u,
+  );
+  if (terminalKillMatch) {
+    await handleTerminalKillRoute(
+      request,
+      response,
+      origin,
+      context,
+      terminalKillMatch,
+    );
+    return;
+  }
+
+  const terminalMatch = matchSessionRoute(
+    requestUrl.pathname,
+    /^\/api\/terminals\/([^/]+)$/u,
+  );
+  if (terminalMatch) {
+    await handleTerminalRoute(
+      request,
+      response,
+      origin,
+      context,
+      terminalMatch,
+    );
     return;
   }
 
@@ -575,6 +615,63 @@ async function handleSessionsRoute(
     const cwd = getRequiredString(body, 'cwd');
     const session = await context.sessionService.createSession(cwd);
     sendJson(response, origin, 200, { ok: true, session });
+    return;
+  }
+
+  sendMethodNotAllowed(response, origin);
+}
+
+async function handleTerminalsRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  origin: string | undefined,
+  context: HandlerContext,
+): Promise<void> {
+  if (request.method === 'POST') {
+    const body = await readObjectBody(request);
+    const projectId = getRequiredString(body, 'projectId');
+    const command = getRequiredString(body, 'command');
+    const projectPath = await context.projectService.getProjectPath(projectId);
+    sendJson(response, origin, 200, {
+      ok: true,
+      terminal: context.terminalService.run(projectId, projectPath, command),
+    });
+    return;
+  }
+
+  sendMethodNotAllowed(response, origin);
+}
+
+async function handleTerminalRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  origin: string | undefined,
+  context: HandlerContext,
+  terminalId: string,
+): Promise<void> {
+  if (request.method === 'GET') {
+    sendJson(response, origin, 200, {
+      ok: true,
+      terminal: context.terminalService.get(terminalId),
+    });
+    return;
+  }
+
+  sendMethodNotAllowed(response, origin);
+}
+
+async function handleTerminalKillRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  origin: string | undefined,
+  context: HandlerContext,
+  terminalId: string,
+): Promise<void> {
+  if (request.method === 'POST') {
+    sendJson(response, origin, 200, {
+      ok: true,
+      terminal: context.terminalService.kill(terminalId),
+    });
     return;
   }
 

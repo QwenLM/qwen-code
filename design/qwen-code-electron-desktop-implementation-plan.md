@@ -205,15 +205,33 @@ scope before a DONE marker can be created.
 
 ### Slice 13: Scoped Terminal
 
-- Status: pending
+- Status: partial complete in iteration 7
 - Goal: add a current-project/current-thread terminal drawer with spawn, output,
   clear, kill, and send-output-to-AI plumbing.
+- Files:
+  - `packages/desktop/src/server/services/terminalService.ts`
+  - `packages/desktop/src/server/index.ts`
+  - `packages/desktop/src/server/index.test.ts`
+  - `packages/desktop/src/renderer/api/client.ts`
+  - `packages/desktop/src/renderer/App.tsx`
+  - `packages/desktop/src/renderer/styles.css`
 - Acceptance criteria:
   - Terminal cwd is constrained to the active project.
   - Terminal output is visible and copyable; kill and clear work.
   - Agent command permission remains separate from user terminal execution.
+- Completed:
+  - Token-protected terminal run/get/kill routes resolve cwd from the
+    registered project id.
+  - Bottom drawer runs project-scoped commands, polls output while running,
+    supports Kill and Clear, and does not use renderer Node APIs.
+  - Server tests cover command output and killing a running command.
+- Remaining:
+  - Interactive PTY resize/write, output selection/copy polish, send output to
+    AI, terminal tabs/history, and Electron renderer E2E.
 - E2E coverage:
-  - Run a harmless command in a temporary workspace and assert output appears.
+  - Record in `.qwen/e2e-tests/electron-desktop/terminal-drawer.md`.
+  - Later Electron E2E must run a harmless command in a temporary workspace and
+    assert output appears in the drawer.
 
 ### Slice 14: Desktop E2E Harness
 
@@ -254,6 +272,10 @@ scope before a DONE marker can be created.
   explicit relative path validation. This avoids broad shell execution and
   keeps review operations scoped to projects registered through the desktop
   project service.
+- 2026-04-25: Start the scoped terminal as a project-bound command runner
+  rather than an interactive PTY. This gives the renderer verifiable output and
+  kill behavior now while leaving PTY write/resize and send-output-to-AI as the
+  next terminal refinement.
 
 ## Verification Log
 
@@ -281,6 +303,11 @@ scope before a DONE marker can be created.
   - `npm run typecheck --workspace=packages/desktop` passed.
   - `npm run lint --workspace=packages/desktop` passed.
   - `npm run build --workspace=packages/desktop` passed.
+- 2026-04-25 Slice 13 basic scoped terminal:
+  - `npm run test --workspace=packages/desktop` passed: 8 files, 52 tests.
+  - `npm run typecheck --workspace=packages/desktop` passed.
+  - `npm run lint --workspace=packages/desktop` passed.
+  - `npm run build --workspace=packages/desktop` passed.
 
 ## Self Review Notes
 
@@ -305,9 +332,15 @@ scope before a DONE marker can be created.
 - Revert All uses `git restore` and `git clean -fd`, so it is intentionally
   available only as an explicit user review action and remains scoped to the
   active registered project.
+- Slice 13 terminal commands resolve cwd from the active registered project id
+  on the server. The renderer never sends an arbitrary cwd.
+- The current terminal is a command runner, not a full PTY. It does not bypass
+  agent tool permission because agent shell execution still flows through ACP
+  and core permissions.
 
 ## Remaining Work
 
-- Implement real workspace review shell, diff review, commit flow, scoped
-  terminal, Electron E2E harness, DevTools MCP DOM/console/network/screenshot
-  checks, and final package smoke before creating the DONE marker.
+- Implement explicit componentized workspace shell, hunk-level diff review,
+  terminal PTY/write/send-output-to-AI refinements, Electron E2E harness,
+  DevTools MCP DOM/console/network/screenshot checks, and final package smoke
+  before creating the DONE marker.

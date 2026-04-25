@@ -302,6 +302,72 @@ describe('DesktopServer', () => {
     ).resolves.toBe('initial\n');
   });
 
+  it('runs terminal commands scoped to a registered project', async () => {
+    const projectPath = await createTempDirectory('qwen-desktop-terminal-');
+    const storePath = join(
+      await createTempDirectory('qwen-desktop-store-'),
+      'desktop-projects.json',
+    );
+    const server = await createTestServer(undefined, undefined, storePath);
+    const opened = await postJson(server, '/api/projects/open', {
+      path: projectPath,
+    });
+    const projectId = getProjectId(opened.body);
+    const created = await postJson(server, '/api/terminals', {
+      projectId,
+      command: 'printf terminal-output',
+    });
+    const terminalId = getTerminalId(created.body);
+    const completed = await waitForTerminal(server, terminalId);
+
+    expect(created.status).toBe(200);
+    expect(created.body).toMatchObject({
+      ok: true,
+      terminal: {
+        projectId,
+        cwd: projectPath,
+        command: 'printf terminal-output',
+      },
+    });
+    expect(completed).toMatchObject({
+      status: 'exited',
+      output: 'terminal-output',
+      exitCode: 0,
+    });
+  });
+
+  it('can kill a running terminal command', async () => {
+    const projectPath = await createTempDirectory('qwen-desktop-terminal-');
+    const storePath = join(
+      await createTempDirectory('qwen-desktop-store-'),
+      'desktop-projects.json',
+    );
+    const server = await createTestServer(undefined, undefined, storePath);
+    const opened = await postJson(server, '/api/projects/open', {
+      path: projectPath,
+    });
+    const projectId = getProjectId(opened.body);
+    const created = await postJson(server, '/api/terminals', {
+      projectId,
+      command: 'node -e "setTimeout(() => {}, 5000)"',
+    });
+    const terminalId = getTerminalId(created.body);
+    const killed = await postJson(
+      server,
+      `/api/terminals/${terminalId}/kill`,
+      {},
+    );
+
+    expect(killed.status).toBe(200);
+    expect(killed.body).toMatchObject({
+      ok: true,
+      terminal: {
+        id: terminalId,
+        status: 'killed',
+      },
+    });
+  });
+
   it('reads and writes user settings without returning API key secrets', async () => {
     const settingsPath = await createTempSettingsPath();
     const server = await createTestServer(undefined, settingsPath);
@@ -1079,6 +1145,69 @@ function getProjectId(message: unknown): string {
   }
 
   return message.project.id;
+}
+
+function getTerminalId(message: unknown): string {
+  if (
+    !message ||
+    typeof message !== 'object' ||
+    !('terminal' in message) ||
+    !message.terminal ||
+    typeof message.terminal !== 'object' ||
+    !('id' in message.terminal) ||
+    typeof message.terminal.id !== 'string'
+  ) {
+    throw new Error('Expected terminal id.');
+  }
+
+  return message.terminal.id;
+}
+
+async function waitForTerminal(
+  server: DesktopServer,
+  terminalId: string,
+): Promise<unknown> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const response = await getJson(server, `/api/terminals/${terminalId}`, {
+      Authorization: 'Bearer test-token',
+    });
+    const terminal = getTerminalPayload(response.body);
+    if (terminal.status !== 'running') {
+      return terminal;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  throw new Error('Terminal command did not finish.');
+}
+
+function getTerminalPayload(message: unknown): {
+  status: string;
+  output: string;
+  exitCode: number | null;
+} {
+  if (
+    !message ||
+    typeof message !== 'object' ||
+    !('terminal' in message) ||
+    !message.terminal ||
+    typeof message.terminal !== 'object' ||
+    !('status' in message.terminal) ||
+    typeof message.terminal.status !== 'string' ||
+    !('output' in message.terminal) ||
+    typeof message.terminal.output !== 'string' ||
+    !('exitCode' in message.terminal) ||
+    (typeof message.terminal.exitCode !== 'number' &&
+      message.terminal.exitCode !== null)
+  ) {
+    throw new Error('Expected terminal payload.');
+  }
+
+  return {
+    status: message.terminal.status,
+    output: message.terminal.output,
+    exitCode: message.terminal.exitCode,
+  };
 }
 
 function getAvailableModes(message: unknown): unknown[] {
