@@ -25,6 +25,31 @@ export interface DesktopConnectionStatus {
   runtime: DesktopRuntime;
 }
 
+export interface DesktopGitStatus {
+  branch: string | null;
+  modified: number;
+  staged: number;
+  untracked: number;
+  ahead: number;
+  behind: number;
+  clean: boolean;
+  isRepository: boolean;
+  error?: string;
+}
+
+export interface DesktopProject {
+  id: string;
+  name: string;
+  path: string;
+  gitBranch: string | null;
+  gitStatus: DesktopGitStatus;
+  lastOpenedAt: number;
+}
+
+export interface DesktopProjectList {
+  projects: DesktopProject[];
+}
+
 export interface DesktopRuntime {
   ok: true;
   desktop: {
@@ -123,6 +148,38 @@ export async function listDesktopSessions(
   }
 
   return getJson(serverInfo, `${url.pathname}${url.search}`, isSessionList);
+}
+
+export async function listDesktopProjects(
+  serverInfo: DesktopServerInfo,
+): Promise<DesktopProjectList> {
+  return getJson(serverInfo, '/api/projects', isProjectListResponse);
+}
+
+export async function openDesktopProject(
+  serverInfo: DesktopServerInfo,
+  path: string,
+): Promise<DesktopProject> {
+  const response = await writeJson(
+    serverInfo,
+    '/api/projects/open',
+    'POST',
+    { path },
+    isOpenProjectResponse,
+  );
+  return response.project;
+}
+
+export async function getDesktopProjectGitStatus(
+  serverInfo: DesktopServerInfo,
+  projectId: string,
+): Promise<DesktopGitStatus> {
+  const response = await getJson(
+    serverInfo,
+    `/api/projects/${encodeURIComponent(projectId)}/git/status`,
+    isGitStatusResponse,
+  );
+  return response.status;
 }
 
 export async function createDesktopSession(
@@ -385,6 +442,40 @@ function isSessionList(value: unknown): value is DesktopSessionList {
   );
 }
 
+function isProjectListResponse(value: unknown): value is DesktopProjectList {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as { projects?: unknown };
+  return (
+    Array.isArray(candidate.projects) &&
+    candidate.projects.every(isDesktopProject)
+  );
+}
+
+function isOpenProjectResponse(
+  value: unknown,
+): value is { ok: true; project: DesktopProject } {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as { ok?: unknown; project?: unknown };
+  return candidate.ok === true && isDesktopProject(candidate.project);
+}
+
+function isGitStatusResponse(
+  value: unknown,
+): value is { ok: true; status: DesktopGitStatus } {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as { ok?: unknown; status?: unknown };
+  return candidate.ok === true && isGitStatus(candidate.status);
+}
+
 function isCreateSessionResponse(
   value: unknown,
 ): value is { ok: true; session: DesktopSessionSummary } {
@@ -464,6 +555,41 @@ function isSessionSummary(value: unknown): value is DesktopSessionSummary {
     (typeof candidate.cwd === 'string' || candidate.cwd === undefined) &&
     (candidate.models === undefined || isModelState(candidate.models)) &&
     (candidate.modes === undefined || isModeState(candidate.modes))
+  );
+}
+
+function isDesktopProject(value: unknown): value is DesktopProject {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Partial<DesktopProject>;
+  return (
+    typeof candidate.id === 'string' &&
+    typeof candidate.name === 'string' &&
+    typeof candidate.path === 'string' &&
+    (typeof candidate.gitBranch === 'string' || candidate.gitBranch === null) &&
+    typeof candidate.lastOpenedAt === 'number' &&
+    isGitStatus(candidate.gitStatus)
+  );
+}
+
+function isGitStatus(value: unknown): value is DesktopGitStatus {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Partial<DesktopGitStatus>;
+  return (
+    (typeof candidate.branch === 'string' || candidate.branch === null) &&
+    typeof candidate.modified === 'number' &&
+    typeof candidate.staged === 'number' &&
+    typeof candidate.untracked === 'number' &&
+    typeof candidate.ahead === 'number' &&
+    typeof candidate.behind === 'number' &&
+    typeof candidate.clean === 'boolean' &&
+    typeof candidate.isRepository === 'boolean' &&
+    (typeof candidate.error === 'string' || candidate.error === undefined)
   );
 }
 

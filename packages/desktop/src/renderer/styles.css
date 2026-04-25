@@ -158,11 +158,13 @@ textarea:disabled {
   color: #d8dcd6;
 }
 
+.project-list,
 .session-list {
   display: grid;
   gap: 8px;
 }
 
+.project-row,
 .session-row {
   display: grid;
   gap: 4px;
@@ -175,11 +177,14 @@ textarea:disabled {
   text-align: left;
 }
 
+.project-row-active,
 .session-row-active {
   border-color: rgba(231, 189, 115, 0.55);
   background: rgba(231, 189, 115, 0.1);
 }
 
+.project-row span,
+.project-row small,
 .session-row span,
 .session-row small {
   min-width: 0;
@@ -188,11 +193,13 @@ textarea:disabled {
   white-space: nowrap;
 }
 
+.project-row span,
 .session-row span {
   font-size: 13px;
   font-weight: 700;
 }
 
+.project-row small,
 .session-row small {
   color: #858c84;
   font-size: 11px;
@@ -217,6 +224,25 @@ textarea:disabled {
 .topbar h2 {
   font-size: 28px;
   font-weight: 760;
+}
+
+.topbar-meta,
+.topbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.topbar-meta {
+  margin-top: 8px;
+}
+
+.topbar-meta span {
+  padding: 4px 7px;
+  border: 1px solid rgba(238, 240, 237, 0.1);
+  color: #b7bdb6;
+  font-size: 12px;
 }
 
 .status-pill {
@@ -512,6 +538,35 @@ input:focus {
   overflow-wrap: anywhere;
   color: #eef0ed;
   font-size: 13px;
+}
+
+.runtime-details-compact {
+  padding-top: 12px;
+}
+
+.review-summary {
+  border-bottom: 1px solid rgba(238, 240, 237, 0.08);
+  padding: 14px;
+}
+
+.review-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid rgba(238, 240, 237, 0.1);
+}
+
+.review-tabs span {
+  min-width: 0;
+  padding: 8px 6px;
+  color: #b7bdb6;
+  font-size: 11px;
+  font-weight: 800;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.review-tabs span + span {
+  border-left: 1px solid rgba(238, 240, 237, 0.1);
 }
 
 .muted {

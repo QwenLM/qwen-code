@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -110,6 +111,87 @@ describe('DesktopServer', () => {
         status: 'unknown',
         account: null,
       },
+    });
+  });
+
+  it('opens recent projects and reports Git branch/status metadata', async () => {
+    const projectPath = await createTempDirectory('qwen-desktop-project-');
+    const storePath = join(
+      await createTempDirectory('qwen-desktop-store-'),
+      'desktop-projects.json',
+    );
+    await runGit(projectPath, ['init']);
+    await writeFile(join(projectPath, 'tracked.txt'), 'staged\n', 'utf8');
+    await runGit(projectPath, ['add', 'tracked.txt']);
+    await writeFile(join(projectPath, 'tracked.txt'), 'modified\n', 'utf8');
+    await writeFile(join(projectPath, 'untracked.txt'), 'new\n', 'utf8');
+
+    const server = await createTestServer(undefined, undefined, storePath);
+    const opened = await postJson(server, '/api/projects/open', {
+      path: projectPath,
+    });
+
+    expect(opened.status).toBe(200);
+    expect(opened.body).toMatchObject({
+      ok: true,
+      project: {
+        name: expect.stringContaining('qwen-desktop-project-'),
+        path: projectPath,
+        gitStatus: {
+          isRepository: true,
+          staged: 1,
+          modified: 1,
+          untracked: 1,
+        },
+      },
+    });
+
+    const projectId = getProjectId(opened.body);
+    const listed = await getJson(server, '/api/projects', {
+      Authorization: 'Bearer test-token',
+    });
+    const status = await getJson(
+      server,
+      `/api/projects/${encodeURIComponent(projectId)}/git/status`,
+      {
+        Authorization: 'Bearer test-token',
+      },
+    );
+
+    expect(listed.status).toBe(200);
+    expect(listed.body).toMatchObject({
+      ok: true,
+      projects: [
+        {
+          id: projectId,
+          path: projectPath,
+          gitStatus: { staged: 1, modified: 1, untracked: 1 },
+        },
+      ],
+    });
+    expect(status.status).toBe(200);
+    expect(status.body).toMatchObject({
+      ok: true,
+      status: {
+        isRepository: true,
+        staged: 1,
+        modified: 1,
+        untracked: 1,
+      },
+    });
+  });
+
+  it('rejects project open requests for non-directory paths', async () => {
+    const server = await createTestServer();
+
+    const response = await postJson(server, '/api/projects/open', {
+      path: '/path/that/does/not/exist',
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: 'project_path_invalid',
     });
   });
 
@@ -666,20 +748,28 @@ describe('DesktopServer', () => {
 async function createTestServer(
   acpClient?: AcpSessionClient,
   settingsPath?: string,
+  projectStorePath?: string,
 ): Promise<DesktopServer> {
   const server = await startDesktopServer({
     token: 'test-token',
     now: () => new Date('2026-04-25T00:00:00.000Z'),
     acpClient,
     settingsPath,
+    projectStorePath,
   });
   servers.push(server);
   return server;
 }
 
+async function createTempDirectory(prefix: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
+  const resolvedDirectory = await realpath(directory);
+  tempDirs.push(resolvedDirectory);
+  return resolvedDirectory;
+}
+
 async function createTempSettingsPath(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), 'qwen-desktop-settings-'));
-  tempDirs.push(dir);
+  const dir = await createTempDirectory('qwen-desktop-settings-');
   return join(dir, '.qwen', 'settings.json');
 }
 
@@ -857,6 +947,22 @@ function getPermissionRequestId(message: unknown): string {
   return message.requestId;
 }
 
+function getProjectId(message: unknown): string {
+  if (
+    !message ||
+    typeof message !== 'object' ||
+    !('project' in message) ||
+    !message.project ||
+    typeof message.project !== 'object' ||
+    !('id' in message.project) ||
+    typeof message.project.id !== 'string'
+  ) {
+    throw new Error('Expected project id.');
+  }
+
+  return message.project.id;
+}
+
 function getAvailableModes(message: unknown): unknown[] {
   if (
     !message ||
@@ -871,6 +977,19 @@ function getAvailableModes(message: unknown): unknown[] {
   }
 
   return message.modes.availableModes;
+}
+
+function runGit(cwd: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile('git', args, { cwd }, (error, _stdout, stderr) => {
+      if (error) {
+        reject(new Error(stderr.trim() || error.message));
+        return;
+      }
+
+      resolve();
+    });
+  });
 }
 
 async function connectSocket(

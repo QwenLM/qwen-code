@@ -20,6 +20,7 @@ export interface DesktopServerOptions {
   acpClient?: AcpSessionClient;
   permissionRequestTimeoutMs?: number;
   settingsPath?: string;
+  projectStorePath?: string;
 }
 
 export interface DesktopHealthResponse {

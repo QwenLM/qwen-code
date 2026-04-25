@@ -20,6 +20,7 @@ import {
 import { AcpEventRouter } from './acp/AcpEventRouter.js';
 import { PermissionBridge } from './acp/permissionBridge.js';
 import { isDesktopHttpError, DesktopHttpError } from './http/errors.js';
+import { DesktopProjectService } from './services/projectService.js';
 import { getRuntimeInfo } from './services/runtimeService.js';
 import {
   DesktopSessionService,
@@ -34,6 +35,7 @@ interface HandlerContext {
   token: string;
   startedAt: number;
   now: () => Date;
+  projectService: DesktopProjectService;
   sessionService: DesktopSessionService;
   settingsService: DesktopSettingsService;
   acpClient: DesktopServerOptions['acpClient'];
@@ -45,6 +47,10 @@ export async function startDesktopServer(
   const token = options.token ?? createServerToken();
   const now = options.now ?? (() => new Date());
   const startedAt = now().getTime();
+  const projectService = new DesktopProjectService({
+    storePath: options.projectStorePath,
+    now,
+  });
   const sessionService = new DesktopSessionService(options.acpClient);
   const settingsService = new DesktopSettingsService(options.settingsPath);
   const socketHubRef: { current: SessionSocketHub | null } = { current: null };
@@ -77,6 +83,7 @@ export async function startDesktopServer(
       token,
       startedAt,
       now,
+      projectService,
       sessionService,
       settingsService,
       acpClient: options.acpClient,
@@ -194,6 +201,31 @@ async function handleRequest(
     return;
   }
 
+  if (requestUrl.pathname === '/api/projects') {
+    await handleProjectsRoute(request, response, origin, context);
+    return;
+  }
+
+  if (requestUrl.pathname === '/api/projects/open') {
+    await handleOpenProjectRoute(request, response, origin, context);
+    return;
+  }
+
+  const projectGitStatusMatch = matchSessionRoute(
+    requestUrl.pathname,
+    /^\/api\/projects\/([^/]+)\/git\/status$/u,
+  );
+  if (projectGitStatusMatch) {
+    await handleProjectGitStatusRoute(
+      request,
+      response,
+      origin,
+      context,
+      projectGitStatusMatch,
+    );
+    return;
+  }
+
   if (requestUrl.pathname === '/api/settings/user') {
     await handleUserSettingsRoute(request, response, origin, context);
     return;
@@ -307,6 +339,60 @@ async function handleRequest(
     code: 'not_found',
     message: 'Route not found.',
   });
+}
+
+async function handleProjectsRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  origin: string | undefined,
+  context: HandlerContext,
+): Promise<void> {
+  if (request.method === 'GET') {
+    sendJson(response, origin, 200, {
+      ok: true,
+      projects: await context.projectService.listProjects(),
+    });
+    return;
+  }
+
+  sendMethodNotAllowed(response, origin);
+}
+
+async function handleOpenProjectRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  origin: string | undefined,
+  context: HandlerContext,
+): Promise<void> {
+  if (request.method === 'POST') {
+    const body = await readObjectBody(request);
+    const projectPath = getRequiredString(body, 'path');
+    sendJson(response, origin, 200, {
+      ok: true,
+      project: await context.projectService.openProject(projectPath),
+    });
+    return;
+  }
+
+  sendMethodNotAllowed(response, origin);
+}
+
+async function handleProjectGitStatusRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  origin: string | undefined,
+  context: HandlerContext,
+  projectId: string,
+): Promise<void> {
+  if (request.method === 'GET') {
+    sendJson(response, origin, 200, {
+      ok: true,
+      status: await context.projectService.getProjectGitStatus(projectId),
+    });
+    return;
+  }
+
+  sendMethodNotAllowed(response, origin);
 }
 
 async function handleSessionsRoute(

@@ -17,15 +17,19 @@ import {
 import {
   authenticateDesktop,
   createDesktopSession,
+  getDesktopProjectGitStatus,
   getDesktopSessionModeState,
   getDesktopSessionModelState,
   getDesktopUserSettings,
+  listDesktopProjects,
   listDesktopSessions,
   loadDesktopStatus,
+  openDesktopProject,
   setDesktopSessionMode,
   setDesktopSessionModel,
   updateDesktopUserSettings,
   type DesktopConnectionStatus,
+  type DesktopProject,
   type DesktopSessionSummary,
 } from './api/client.js';
 import {
@@ -64,7 +68,8 @@ type LoadState =
 
 export function App() {
   const [loadState, setLoadState] = useState<LoadState>({ state: 'loading' });
-  const [workspacePath, setWorkspacePath] = useState('');
+  const [projects, setProjects] = useState<DesktopProject[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<DesktopSessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
@@ -85,6 +90,11 @@ export function App() {
     createInitialModelState,
   );
   const socketRef = useRef<SessionSocketClient | null>(null);
+  const activeProject = useMemo(
+    () => projects.find((project) => project.id === activeProjectId) ?? null,
+    [activeProjectId, projects],
+  );
+  const activeProjectPath = activeProject?.path ?? '';
 
   useEffect(() => {
     let disposed = false;
@@ -148,9 +158,37 @@ export function App() {
     }
 
     let disposed = false;
+    void listDesktopProjects(loadState.status.serverInfo)
+      .then((result) => {
+        if (disposed) {
+          return;
+        }
+
+        setProjects(result.projects);
+        setActiveProjectId(
+          (current) => current ?? result.projects[0]?.id ?? null,
+        );
+      })
+      .catch((error: unknown) => {
+        if (!disposed) {
+          setSessionError(getErrorMessage(error));
+        }
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, [loadState]);
+
+  useEffect(() => {
+    if (loadState.state !== 'ready') {
+      return;
+    }
+
+    let disposed = false;
     void listDesktopSessions(
       loadState.status.serverInfo,
-      workspacePath || undefined,
+      activeProjectPath || undefined,
     )
       .then((result) => {
         if (!disposed) {
@@ -167,7 +205,7 @@ export function App() {
     return () => {
       disposed = true;
     };
-  }, [loadState, workspacePath]);
+  }, [activeProjectPath, loadState]);
 
   useEffect(() => {
     socketRef.current?.close();
@@ -226,25 +264,38 @@ export function App() {
   }, [activeSessionId, loadState]);
 
   const chooseWorkspace = useCallback(async () => {
+    if (loadState.state !== 'ready') {
+      return;
+    }
+
     try {
       const selectedPath = await window.qwenDesktop.selectDirectory();
       if (selectedPath) {
-        setWorkspacePath(selectedPath);
+        const project = await openDesktopProject(
+          loadState.status.serverInfo,
+          selectedPath,
+        );
+        setProjects((current) => [
+          project,
+          ...current.filter((entry) => entry.id !== project.id),
+        ]);
+        setActiveProjectId(project.id);
+        setActiveSessionId(null);
       }
     } catch (error) {
       setSessionError(getErrorMessage(error));
     }
-  }, []);
+  }, [loadState]);
 
   const createSession = useCallback(async () => {
-    if (loadState.state !== 'ready' || !workspacePath) {
+    if (loadState.state !== 'ready' || !activeProject) {
       return;
     }
 
     try {
       const session = await createDesktopSession(
         loadState.status.serverInfo,
-        workspacePath,
+        activeProject.path,
       );
       setSessions((current) => [session, ...current]);
       setActiveSessionId(session.sessionId);
@@ -257,7 +308,38 @@ export function App() {
     } catch (error) {
       setSessionError(getErrorMessage(error));
     }
-  }, [loadState, workspacePath]);
+  }, [activeProject, loadState]);
+
+  const selectProject = useCallback((projectId: string) => {
+    setActiveProjectId(projectId);
+    setActiveSessionId(null);
+  }, []);
+
+  const refreshProjectGitStatus = useCallback(async () => {
+    if (loadState.state !== 'ready' || !activeProject) {
+      return;
+    }
+
+    try {
+      const gitStatus = await getDesktopProjectGitStatus(
+        loadState.status.serverInfo,
+        activeProject.id,
+      );
+      setProjects((current) =>
+        current.map((project) =>
+          project.id === activeProject.id
+            ? {
+                ...project,
+                gitBranch: gitStatus.branch,
+                gitStatus,
+              }
+            : project,
+        ),
+      );
+    } catch (error) {
+      setSessionError(getErrorMessage(error));
+    }
+  }, [activeProject, loadState]);
 
   const saveSettings = useCallback(async () => {
     if (loadState.state !== 'ready') {
@@ -395,24 +477,29 @@ export function App() {
         </div>
 
         <section className="sidebar-section">
-          <h2>Workspace</h2>
+          <h2>Projects</h2>
           <div className="workspace-path">
-            {workspacePath || 'No folder selected'}
+            {activeProject?.path || 'No folder selected'}
           </div>
           <button className="secondary-button" onClick={chooseWorkspace}>
-            Select Folder
+            Open Project
           </button>
-          <button
-            className="primary-button"
-            disabled={loadState.state !== 'ready' || !workspacePath}
-            onClick={createSession}
-          >
-            New Session
-          </button>
+          <ProjectList
+            activeProjectId={activeProjectId}
+            projects={projects}
+            onSelect={selectProject}
+          />
         </section>
 
         <section className="sidebar-section sidebar-section-fill">
-          <h2>Sessions</h2>
+          <h2>Threads</h2>
+          <button
+            className="primary-button"
+            disabled={loadState.state !== 'ready' || !activeProject}
+            onClick={createSession}
+          >
+            New Thread
+          </button>
           <SessionList
             activeSessionId={activeSessionId}
             sessions={sessions}
@@ -424,10 +511,29 @@ export function App() {
       <section className="workbench" aria-label="Workbench">
         <header className="topbar">
           <div>
-            <p className="eyebrow">Local service</p>
-            <h2>{statusLabel}</h2>
+            <p className="eyebrow">Local workspace</p>
+            <h2>{activeProject?.name || 'Qwen Code Desktop'}</h2>
+            <div className="topbar-meta">
+              <span>{statusLabel}</span>
+              <span>{activeProject?.gitBranch || 'No Git branch'}</span>
+              <span>
+                {activeProject
+                  ? formatGitStatus(activeProject.gitStatus)
+                  : 'No project'}
+              </span>
+            </div>
           </div>
-          <StatusPill state={loadState.state} />
+          <div className="topbar-actions">
+            <button
+              className="secondary-button"
+              disabled={!activeProject}
+              type="button"
+              onClick={refreshProjectGitStatus}
+            >
+              Refresh Git
+            </button>
+            <StatusPill state={loadState.state} />
+          </div>
         </header>
 
         <div className="workspace-grid">
@@ -475,8 +581,9 @@ export function App() {
 
           <section className="panel panel-side">
             <div className="panel-header">
-              <h3>Runtime</h3>
+              <h3>Review</h3>
             </div>
+            <ReviewSummary project={activeProject} />
             <RuntimeDetails loadState={loadState} />
             <SessionDetails
               activeSessionId={activeSessionId}
@@ -526,6 +633,40 @@ function SessionList({
         >
           <span>{session.title || session.sessionId}</span>
           <small>{session.cwd || session.sessionId}</small>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ProjectList({
+  activeProjectId,
+  projects,
+  onSelect,
+}: {
+  activeProjectId: string | null;
+  projects: DesktopProject[];
+  onSelect: (projectId: string) => void;
+}) {
+  if (projects.length === 0) {
+    return <div className="empty-row">No recent projects</div>;
+  }
+
+  return (
+    <div className="project-list">
+      {projects.map((project) => (
+        <button
+          className={
+            project.id === activeProjectId
+              ? 'project-row project-row-active'
+              : 'project-row'
+          }
+          key={project.id}
+          onClick={() => onSelect(project.id)}
+          type="button"
+        >
+          <span>{project.name}</span>
+          <small>{project.gitBranch || 'No Git branch'}</small>
         </button>
       ))}
     </div>
@@ -682,6 +823,52 @@ function PermissionPrompts({
           </div>
         </section>
       ) : null}
+    </div>
+  );
+}
+
+function ReviewSummary({ project }: { project: DesktopProject | null }) {
+  if (!project) {
+    return (
+      <div className="review-summary">
+        <div className="empty-row">Open a project to inspect Git status.</div>
+      </div>
+    );
+  }
+
+  const status = project.gitStatus;
+  return (
+    <div className="review-summary">
+      <div className="review-tabs" aria-label="Review sections">
+        <span>Changes</span>
+        <span>Files</span>
+        <span>Artifacts</span>
+        <span>Summary</span>
+      </div>
+      <dl className="runtime-details runtime-details-compact">
+        <div>
+          <dt>Branch</dt>
+          <dd>{status.branch || 'Not available'}</dd>
+        </div>
+        <div>
+          <dt>Modified</dt>
+          <dd>{status.modified}</dd>
+        </div>
+        <div>
+          <dt>Staged</dt>
+          <dd>{status.staged}</dd>
+        </div>
+        <div>
+          <dt>Untracked</dt>
+          <dd>{status.untracked}</dd>
+        </div>
+        {status.error ? (
+          <div>
+            <dt>Git</dt>
+            <dd className="error-text">{status.error}</dd>
+          </div>
+        ) : null}
+      </dl>
     </div>
   );
 }
@@ -989,6 +1176,18 @@ function isApprovalMode(value: string): value is DesktopApprovalMode {
     value === 'auto-edit' ||
     value === 'yolo'
   );
+}
+
+function formatGitStatus(status: DesktopProject['gitStatus']): string {
+  if (!status.isRepository) {
+    return 'No Git repository';
+  }
+
+  if (status.clean) {
+    return 'Clean';
+  }
+
+  return `${status.modified} modified · ${status.staged} staged · ${status.untracked} untracked`;
 }
 
 function getErrorMessage(error: unknown): string {
