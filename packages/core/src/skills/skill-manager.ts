@@ -283,18 +283,39 @@ export class SkillManager {
     );
 
     let totalSkills = 0;
-    const allSkills: SkillConfig[] = [];
     for (const [level, levelSkills] of loaded) {
       skillsCache.set(level, levelSkills);
       totalSkills += levelSkills.length;
-      allSkills.push(...levelSkills);
     }
 
     this.skillsCache = skillsCache;
 
     // Rebuild the activation registry so that newly added/removed `paths:`
     // frontmatter takes effect. Prior activations do not carry across reloads.
-    const { conditional } = splitConditionalSkills(allSkills);
+    //
+    // Two filters apply before a skill enters the registry:
+    //
+    // 1. Cross-level dedup with the same precedence as `listSkills()`
+    //    (project > user > extension > bundled). Without this, a shadowed
+    //    copy's `paths` glob can flip the visible (higher-precedence) skill
+    //    of the same name to "active", even when the touched file does not
+    //    match the visible skill's own globs.
+    //
+    // 2. Drop `disable-model-invocation` skills. They are hidden from the
+    //    SkillTool listing entirely, so allowing path activation would only
+    //    emit a misleading "<skill> is now available" reminder for a skill
+    //    the model cannot then invoke.
+    const seenForActivation = new Set<string>();
+    const eligibleForActivation: SkillConfig[] = [];
+    for (const level of levels) {
+      for (const skill of skillsCache.get(level) ?? []) {
+        if (seenForActivation.has(skill.name)) continue;
+        seenForActivation.add(skill.name);
+        if (skill.disableModelInvocation) continue;
+        eligibleForActivation.push(skill);
+      }
+    }
+    const { conditional } = splitConditionalSkills(eligibleForActivation);
     this.activationRegistry = new SkillActivationRegistry(
       conditional,
       this.config.getProjectRoot(),

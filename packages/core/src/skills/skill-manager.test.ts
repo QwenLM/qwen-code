@@ -83,15 +83,17 @@ describe('SkillManager', () => {
         };
       }
       if (yamlString.includes('paths:')) {
-        // Branch handles all three paths-related tests by reading the literal
-        // YAML so the parser-behavior nuance (array vs scalar vs empty) is
-        // preserved.
-        const name = yamlString.includes('name: tsx-helper')
-          ? 'tsx-helper'
-          : 'test-skill';
+        // Branch handles paths-related tests by reading the literal YAML so
+        // the parser-behavior nuance (array vs scalar vs empty) is preserved.
+        // Names are inferred from the literal `name: <x>` line so multiple
+        // fixtures can coexist in the same test (e.g. cross-level shadowing).
+        const nameMatch = yamlString.match(/name:\s*(\S+)/);
+        const name = nameMatch ? nameMatch[1] : 'test-skill';
         const description = yamlString.includes('React skill')
           ? 'React skill'
-          : 'A test skill';
+          : yamlString.includes('Hidden helper')
+            ? 'Hidden helper'
+            : 'A test skill';
         let paths: unknown = undefined;
         if (yamlString.includes('paths: []')) {
           paths = [];
@@ -102,8 +104,18 @@ describe('SkillManager', () => {
           paths = yamlString.includes('test/**/*.tsx')
             ? ['src/**/*.tsx', 'test/**/*.tsx']
             : ['src/**/*.tsx'];
+        } else if (yamlString.includes('"src/**"')) {
+          paths = ['src/**'];
+        } else if (yamlString.includes('"lib/**"')) {
+          paths = ['lib/**'];
+        } else if (yamlString.includes('"src/**/*.ts"')) {
+          paths = ['src/**/*.ts'];
         }
-        return { name, description, paths };
+        const result: Record<string, unknown> = { name, description, paths };
+        if (yamlString.includes('disable-model-invocation: true')) {
+          result['disable-model-invocation'] = true;
+        }
+        return result;
       }
       if (yamlString.includes('name: skill1')) {
         return { name: 'skill1', description: 'First skill' };
@@ -958,6 +970,112 @@ Body.
         [],
       );
       expect(manager.getActivatedSkillNames().size).toBe(0);
+    });
+
+    it('does not activate a conditional skill that is also disable-model-invocation', async () => {
+      // Regression for ultrareview bug_004: a SKILL.md with both `paths:`
+      // and `disable-model-invocation: true` would enter the activation
+      // registry, fire a "now available" system-reminder on path match, and
+      // then SkillTool would refuse to invoke it because the disabled flag
+      // hides it everywhere else.
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'secret-helper',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: secret-helper
+description: Hidden helper
+paths:
+  - "src/**/*.ts"
+disable-model-invocation: true
+---
+
+Body.
+`);
+      await manager.refreshCache();
+
+      const newly = manager.matchAndActivateByPath('/test/project/src/foo.ts');
+      expect(newly).toEqual([]);
+      expect(manager.getActivatedSkillNames().size).toBe(0);
+    });
+
+    it('does not activate a visible skill from a shadowed copy paths', async () => {
+      // Regression for ultrareview bug_001: cross-level skills with the
+      // same name but different `paths:` globs. listSkills() dedupes by
+      // precedence (project wins), so the model only sees the project
+      // copy. The activation registry must use the same precedence —
+      // otherwise the user copy's globs activate the visible (project)
+      // skill, even when the touched file is outside the project skill's
+      // declared paths.
+      const projectQwenSkillsDir = path.join(
+        '/test/project',
+        '.qwen',
+        'skills',
+      );
+      const userQwenSkillsDir = path.join('/home/user', '.qwen', 'skills');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockImplementation((dirPath: any) => {
+        const pathStr = String(dirPath);
+        if (pathStr === projectQwenSkillsDir || pathStr === userQwenSkillsDir) {
+          return Promise.resolve([
+            {
+              name: 'foo',
+              isDirectory: () => true,
+              isFile: () => false,
+              isSymbolicLink: () => false,
+            },
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+        return Promise.resolve(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+      });
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockImplementation((filePath) => {
+        const pathStr = String(filePath);
+        if (pathStr.startsWith(projectQwenSkillsDir)) {
+          return Promise.resolve(`---
+name: foo
+description: A test skill
+paths:
+  - "src/**"
+---
+
+Project body.
+`);
+        }
+        if (pathStr.startsWith(userQwenSkillsDir)) {
+          return Promise.resolve(`---
+name: foo
+description: A test skill
+paths:
+  - "lib/**"
+---
+
+User body.
+`);
+        }
+        return Promise.reject(new Error('File not found'));
+      });
+      await manager.refreshCache();
+
+      // Touching `lib/x.ts` (matches user-foo's paths but project-foo wins
+      // in listSkills) must NOT activate the visible project-foo.
+      expect(manager.matchAndActivateByPath('/test/project/lib/x.ts')).toEqual(
+        [],
+      );
+      expect(manager.getActivatedSkillNames().has('foo')).toBe(false);
+
+      // Touching `src/x.ts` (matches the visible project-foo's paths) does
+      // activate it.
+      expect(manager.matchAndActivateByPath('/test/project/src/x.ts')).toEqual([
+        'foo',
+      ]);
     });
   });
 
