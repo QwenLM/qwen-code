@@ -320,8 +320,13 @@ export function useCompletionTrigger(
       // Check if trigger is at word boundary (start of line or after space)
       if (triggerPos >= 0 && triggerChar) {
         const charBefore = triggerPos > 0 ? text[triggerPos - 1] : ' ';
+        // Include zero-width space (\u200B) as a valid word boundary because
+        // the input field uses it as a height placeholder after clearing
         const isValidTrigger =
-          charBefore === ' ' || charBefore === '\n' || triggerPos === 0;
+          charBefore === ' ' ||
+          charBefore === '\n' ||
+          charBefore === '\u200B' ||
+          triggerPos === 0;
 
         if (isValidTrigger) {
           const query = text.substring(triggerPos + 1, effectiveCursorPosition);
