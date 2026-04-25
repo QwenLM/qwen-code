@@ -141,6 +141,12 @@ export function getCoreSystemPrompt(
     }
   }
 
+  if (options?.lspEnabled) {
+    debugLogger.info(
+      'LSP is enabled — injecting LSP priority instruction into system prompt',
+    );
+  }
+
   const basePrompt = systemMdEnabled
     ? fs.readFileSync(systemMdPath, 'utf8')
     : `

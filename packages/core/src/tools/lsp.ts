@@ -56,6 +56,12 @@ export interface LspToolParams {
   line?: number;
   /** 1-based character/column number when targeting a specific file location. */
   character?: number;
+  /**
+   * Symbol name to search for. When provided without line/character for
+   * location-required operations, the tool automatically resolves the
+   * symbol's position via workspaceSymbol before executing the operation.
+   */
+  symbolName?: string;
   /** End line for range-based operations (1-based). */
   endLine?: number;
   /** End character for range-based operations (1-based). */
@@ -148,6 +154,25 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
     if (!client || !this.config.isLspEnabled()) {
       const message = `LSP ${this.getOperationLabel()} is unavailable (LSP disabled or not initialized).`;
       return { llmContent: message, returnDisplay: message };
+    }
+
+    // Auto-resolve symbol position: when symbolName is provided but
+    // line/character are missing for location-required operations,
+    // use workspaceSymbol to find the symbol's location first.
+    if (
+      this.params.symbolName &&
+      typeof this.params.line !== 'number' &&
+      LOCATION_REQUIRED_OPERATIONS.has(this.params.operation)
+    ) {
+      const resolved = await this.resolveSymbolName(client);
+      if (resolved) {
+        this.params.filePath = resolved.filePath;
+        this.params.line = resolved.line;
+        this.params.character = resolved.character;
+      } else {
+        const message = `Could not resolve symbol "${this.params.symbolName}" via workspace symbol search.`;
+        return { llmContent: message, returnDisplay: message };
+      }
     }
 
     switch (this.params.operation) {
@@ -805,6 +830,47 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
     };
   }
 
+  /**
+   * Resolve a symbol name to a file location by searching workspace symbols.
+   * Used when the model provides symbolName instead of exact line/character.
+   */
+  private async resolveSymbolName(
+    client: LspClient,
+  ): Promise<{ filePath: string; line: number; character: number } | null> {
+    const symbolName = this.params.symbolName ?? '';
+    if (!symbolName) {
+      return null;
+    }
+
+    try {
+      const symbols = await client.workspaceSymbols(symbolName, 5);
+      if (!symbols || symbols.length === 0) {
+        return null;
+      }
+
+      // Find the best match: prefer exact name match, then prefix match
+      const exact = symbols.find(
+        (s) => s.name === symbolName || s.name.endsWith(symbolName),
+      );
+      const match = exact ?? symbols[0]!;
+
+      const loc = match.location;
+      let filePath = loc.uri;
+      if (filePath.startsWith('file://')) {
+        filePath = fileURLToPath(filePath);
+      }
+
+      // Convert from 0-based (LSP) to 1-based (tool params)
+      return {
+        filePath,
+        line: (loc.range.start.line ?? 0) + 1,
+        character: (loc.range.start.character ?? 0) + 1,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   private resolveLocationTarget(): ResolvedTarget {
     const filePath = this.params.filePath;
     if (!filePath) {
@@ -1018,7 +1084,7 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
     super(
       LspTool.Name,
       ToolDisplayNames.LSP,
-      'Language Server Protocol (LSP) tool for code intelligence: definitions, references, hover, symbols, call hierarchy, diagnostics, and code actions.\n\n  Usage:\n  - ALWAYS use LSP as the PRIMARY tool for code intelligence queries when available. Do NOT use grep_search or glob first.\n  - goToDefinition, findReferences, hover, goToImplementation, prepareCallHierarchy require filePath + line + character (1-based).\n  - documentSymbol and diagnostics require filePath.\n  - workspaceSymbol requires query (use when user asks "where is X defined?" without specifying a file).\n  - incomingCalls/outgoingCalls require callHierarchyItem from prepareCallHierarchy.\n  - workspaceDiagnostics needs no parameters.\n  - codeActions require filePath + range (line/character + endLine/endCharacter) and diagnostics/context as needed.',
+      'Language Server Protocol (LSP) tool for code intelligence: definitions, references, hover, symbols, call hierarchy, diagnostics, and code actions.\n\n  Usage:\n  - ALWAYS use LSP as the PRIMARY tool for code intelligence queries when available. Do NOT use grep_search or glob first.\n  - For goToDefinition, findReferences, hover, goToImplementation, prepareCallHierarchy: provide EITHER filePath + line + character (1-based), OR just symbolName (the tool will auto-resolve the position via workspace symbol search).\n  - documentSymbol and diagnostics require filePath.\n  - workspaceSymbol requires query.\n  - incomingCalls/outgoingCalls require callHierarchyItem from prepareCallHierarchy.\n  - workspaceDiagnostics needs no parameters.\n  - codeActions require filePath + range (line/character + endLine/endCharacter).\n\n  Examples:\n  - Find references by symbol name: {operation: "findReferences", symbolName: "Calculator"}\n  - Find definition with position: {operation: "goToDefinition", filePath: "src/main.cpp", line: 10, character: 5}\n  - Hover by symbol name: {operation: "hover", symbolName: "addShape"}\n  - Search workspace symbols: {operation: "workspaceSymbol", query: "Calculator"}\n  - File diagnostics: {operation: "diagnostics", filePath: "src/main.cpp"}',
       Kind.Other,
       {
         type: 'object',
@@ -1040,6 +1106,11 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
               'workspaceDiagnostics',
               'codeActions',
             ],
+          },
+          symbolName: {
+            type: 'string',
+            description:
+              'Symbol name to look up (e.g. "Calculator", "addShape"). When provided without filePath/line/character, the tool auto-resolves the position via workspace symbol search. Use this for convenient lookups without needing exact positions.',
           },
           filePath: {
             type: 'string',
@@ -1156,11 +1227,17 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
     const operation = params.operation;
 
     if (LOCATION_REQUIRED_OPERATIONS.has(operation)) {
-      if (!params.filePath || params.filePath.trim() === '') {
-        return `filePath is required for ${operation}.`;
-      }
-      if (typeof params.line !== 'number') {
-        return `line is required for ${operation}.`;
+      // Allow symbolName as an alternative to filePath + line/character.
+      // The execute method will resolve it via workspaceSymbol.
+      const hasSymbolName =
+        params.symbolName && params.symbolName.trim() !== '';
+      if (!hasSymbolName) {
+        if (!params.filePath || params.filePath.trim() === '') {
+          return `filePath is required for ${operation} (or provide symbolName).`;
+        }
+        if (typeof params.line !== 'number') {
+          return `line is required for ${operation} (or provide symbolName).`;
+        }
       }
     }
 

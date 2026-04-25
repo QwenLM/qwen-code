@@ -105,7 +105,9 @@ describe('LspTool', () => {
           const result = tool.validateToolParams({
             operation,
           } as LspToolParams);
-          expect(result).toBe(`filePath is required for ${operation}.`);
+          expect(result).toBe(
+            `filePath is required for ${operation} (or provide symbolName).`,
+          );
         },
       );
 
@@ -116,7 +118,9 @@ describe('LspTool', () => {
             operation,
             filePath: 'src/app.ts',
           } as LspToolParams);
-          expect(result).toBe(`line is required for ${operation}.`);
+          expect(result).toBe(
+            `line is required for ${operation} (or provide symbolName).`,
+          );
         },
       );
 
@@ -258,7 +262,9 @@ describe('LspTool', () => {
           filePath: '',
           line: 1,
         } as LspToolParams);
-        expect(result).toBe('filePath is required for goToDefinition.');
+        expect(result).toBe(
+          'filePath is required for goToDefinition (or provide symbolName).',
+        );
       });
 
       it('rejects whitespace-only filePath', () => {
@@ -267,7 +273,9 @@ describe('LspTool', () => {
           filePath: '   ',
           line: 1,
         } as LspToolParams);
-        expect(result).toBe('filePath is required for goToDefinition.');
+        expect(result).toBe(
+          'filePath is required for goToDefinition (or provide symbolName).',
+        );
       });
 
       it('rejects whitespace-only query', () => {
@@ -1001,6 +1009,7 @@ describe('LspTool', () => {
       // All properties should be either core or documented extensions
       const knownProperties = [
         'operation',
+        'symbolName',
         'filePath',
         'line',
         'character',
