@@ -2,7 +2,7 @@
 name: simplify
 description: Review recent code changes for reuse, code quality, and efficiency, then directly apply straightforward cleanup improvements. Use when the user wants a post-implementation cleanup pass, pre-PR polish, or asks to simplify/refine recent changes. Invoke with `/simplify` or `/simplify <focus>`.
 allowedTools:
-  - task
+  - agent
   - run_shell_command
   - grep_search
   - read_file
@@ -39,7 +39,7 @@ Use `git diff HEAD` whenever staged changes exist. Otherwise use `git diff`.
 
 ## Step 2: Launch three review passes in parallel
 
-Use the `task` tool and launch all review passes in a single response so they run concurrently. Each pass must receive the same review scope and diff command.
+Use the `agent` tool and launch all review passes in a single response so they run concurrently. Each pass must receive the same review scope and diff command.
 
 Keep each review prompt short and focused. Do not paste the full diff into the prompt. Tell each pass to read the diff itself and inspect only files relevant to its findings.
 
