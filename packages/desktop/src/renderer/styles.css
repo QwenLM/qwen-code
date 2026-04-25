@@ -425,7 +425,7 @@ summary:focus-visible {
 
 .workbench {
   display: grid;
-  grid-template-rows: 58px minmax(0, 1fr) 236px;
+  grid-template-rows: 58px minmax(0, 1fr) auto;
   min-width: 0;
   height: 100vh;
   min-height: 0;
@@ -1226,18 +1226,104 @@ textarea:focus {
 
 .terminal-drawer {
   display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
   min-height: 0;
-  gap: 8px;
   overflow: hidden;
-  padding: 12px 22px;
   border-top: 1px solid var(--line);
   background:
     linear-gradient(180deg, rgba(19, 22, 23, 0.96), rgba(10, 12, 13, 0.96)),
     #0b0d0e;
 }
 
-.terminal-header,
+.terminal-drawer-collapsed {
+  height: 54px;
+  padding: 7px 18px;
+}
+
+.terminal-drawer-expanded {
+  height: 252px;
+  grid-template-rows: auto minmax(0, 1fr);
+  padding: 8px 18px 12px;
+}
+
+.terminal-strip {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  grid-template-columns: auto minmax(124px, 0.34fr) auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: rgba(238, 244, 239, 0.03);
+  color: var(--text-soft);
+  text-align: left;
+}
+
+.terminal-strip:not(:disabled):hover {
+  border-color: rgba(85, 166, 255, 0.25);
+  background: rgba(238, 244, 239, 0.055);
+}
+
+.terminal-strip-icon,
+.terminal-strip-chevron {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  color: rgba(225, 232, 228, 0.62);
+}
+
+.terminal-strip-copy {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.terminal-strip-copy strong,
+.terminal-strip-status,
+.terminal-strip-preview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-strip-copy strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 760;
+  line-height: 1.1;
+}
+
+.terminal-strip-status {
+  min-height: 22px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 820;
+  text-transform: uppercase;
+}
+
+.terminal-strip-preview {
+  color: rgba(225, 232, 228, 0.58);
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+    monospace;
+  font-size: 11px;
+}
+
+.terminal-body {
+  display: grid;
+  min-height: 0;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  gap: 8px;
+  padding-top: 8px;
+}
+
 .terminal-actions,
 .terminal-command-row,
 .terminal-input-row {
@@ -1246,27 +1332,45 @@ textarea:focus {
   gap: 8px;
 }
 
-.terminal-header {
-  justify-content: space-between;
-}
-
-.terminal-header > div:first-child {
-  display: grid;
-  gap: 2px;
-}
-
-.terminal-header strong {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text);
-  font-size: 13px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .terminal-actions {
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   justify-content: flex-end;
+}
+
+.terminal-icon-button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(238, 244, 239, 0.04);
+  color: var(--text-soft);
+}
+
+.terminal-icon-button:not(:disabled):hover {
+  border-color: rgba(85, 166, 255, 0.28);
+  background: var(--accent-soft);
+  color: #c7e2ff;
+}
+
+.terminal-icon-button-muted {
+  color: rgba(225, 232, 228, 0.56);
+}
+
+.terminal-icon-button-danger {
+  color: #ffad9f;
+}
+
+.terminal-icon-button-danger:not(:disabled):hover {
+  border-color: rgba(255, 127, 105, 0.35);
+  background: rgba(255, 127, 105, 0.1);
+  color: #ffc0b6;
+}
+
+.terminal-icon-button svg {
+  width: 16px;
+  height: 16px;
 }
 
 .terminal-command-row input {
@@ -1481,7 +1585,22 @@ textarea:focus {
     border-radius: 0;
   }
 
-  .terminal-drawer {
+  .terminal-drawer-collapsed {
+    height: auto;
+    min-height: 54px;
+  }
+
+  .terminal-drawer-expanded {
+    height: auto;
     min-height: 280px;
+  }
+
+  .terminal-strip {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .terminal-strip-status,
+  .terminal-strip-preview {
+    display: none;
   }
 }

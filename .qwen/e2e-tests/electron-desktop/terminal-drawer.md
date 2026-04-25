@@ -67,7 +67,48 @@ Slice 16 adds server and Electron CDP coverage:
   reliable from the built `file://` renderer; Slice 16 now covers the
   preload-backed Electron clipboard path.
 
+## Automated Coverage Added In Codex Alignment Iteration 4
+
+Iteration 4 makes Terminal a collapsed status strip by default and updates the
+real Electron CDP smoke to cover the expand/collapse user path:
+
+1. Launch real Electron with isolated HOME/runtime/user-data and fake ACP.
+2. Assert the initial workbench has a 54px collapsed terminal strip, no
+   expanded terminal body, no document overflow, and a conversation-dominant
+   grid.
+3. Open the fake Git project, create a thread from the composer, approve the
+   fake command, review and commit changes, and open Settings.
+4. Return to Conversation, expand Terminal, assert the expanded panel remains a
+   supporting 252px region docked below the workspace grid, then run terminal
+   commands with stdout and stdin.
+5. Copy output, send output to the fake ACP session, approve the follow-up
+   command, collapse Terminal again, and assert the completed workbench returns
+   to the compact strip.
+
+Executable harness:
+
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+
+Additional artifacts collected:
+
+- `initial-layout.json`
+- `terminal-expanded-layout.json`
+- `terminal-expanded.png`
+- `completed-layout.json`
+- `completed-workspace.png`
+
 ## Execution Results
+
+Codex alignment iteration 4:
+
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed: 4 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed.
+- Success artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T17-00-08-461Z/`.
 
 Slice 16:
 

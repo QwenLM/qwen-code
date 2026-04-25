@@ -114,6 +114,11 @@ async function main() {
   await waitForText('qwen-e2e-cdp');
 
   await clickButton('Conversation');
+  await waitForSelector('[data-testid="terminal-drawer"]');
+  await clickButton('Expand Terminal');
+  await waitForSelector('[data-testid="terminal-body"]');
+  await assertTerminalExpandedLayout('terminal-expanded-layout.json');
+  await saveScreenshot('terminal-expanded.png');
   await setFieldByAriaLabel('Terminal command', 'printf desktop-e2e-terminal');
   await clickButton('Run');
   await waitForText('desktop-e2e-terminal');
@@ -137,6 +142,22 @@ async function main() {
   await clickButton('Approve Once');
   await waitForText(
     'E2E fake ACP response received: Review this terminal output',
+  );
+  await clickButton('Collapse Terminal');
+  await waitFor(
+    'collapsed terminal strip',
+    async () =>
+      evaluate(`(() => {
+        const toggle = document.querySelector('[data-testid="terminal-toggle"]');
+        const terminal = document.querySelector('[data-testid="terminal-drawer"]');
+        return Boolean(
+          toggle &&
+          terminal &&
+          toggle.getAttribute('aria-expanded') === 'false' &&
+          !document.querySelector('[data-testid="terminal-body"]')
+        );
+      })()`),
+    10_000,
   );
 
   await saveScreenshot('completed-workspace.png');
@@ -398,6 +419,12 @@ async function assertRalphWorkspaceLayout(fileName) {
       settings: rectFor('[data-testid="settings-page"]'),
       composer: rectFor('[data-testid="message-composer"]'),
       terminal: rectFor('[data-testid="terminal-drawer"]'),
+      terminalBody: rectFor('[data-testid="terminal-body"]'),
+      terminalToggle: rectFor('[data-testid="terminal-toggle"]'),
+      terminalExpanded:
+        document
+          .querySelector('[data-testid="terminal-toggle"]')
+          ?.getAttribute('aria-expanded') ?? null,
       listRows: [...document.querySelectorAll('.project-row, .session-row')]
         .map((element) => {
           const rect = element.getBoundingClientRect();
@@ -449,9 +476,19 @@ async function assertRalphWorkspaceLayout(fileName) {
     throw new Error('Initial layout should not render secondary pages.');
   }
 
-  if (metrics.terminal.height < 190 || metrics.terminal.height > 280) {
+  if (metrics.terminalBody !== null || metrics.terminalExpanded !== 'false') {
+    throw new Error('Initial layout should render a collapsed terminal strip.');
+  }
+
+  if (metrics.terminal.height < 44 || metrics.terminal.height > 82) {
     throw new Error(
-      `Unexpected terminal drawer height: ${metrics.terminal.height}`,
+      `Unexpected collapsed terminal height: ${metrics.terminal.height}`,
+    );
+  }
+
+  if (metrics.chat.height < metrics.terminal.height * 6) {
+    throw new Error(
+      `Conversation should dominate the collapsed terminal; chat=${metrics.chat.height}, terminal=${metrics.terminal.height}`,
     );
   }
 
@@ -516,6 +553,11 @@ async function assertReviewDrawerLayout(fileName) {
       settings: rectFor('[data-testid="settings-page"]'),
       composer: rectFor('[data-testid="message-composer"]'),
       terminal: rectFor('[data-testid="terminal-drawer"]'),
+      terminalBody: rectFor('[data-testid="terminal-body"]'),
+      terminalExpanded:
+        document
+          .querySelector('[data-testid="terminal-toggle"]')
+          ?.getAttribute('aria-expanded') ?? null,
       topbarActions: Array.from(
         document.querySelectorAll(
           '[data-testid="workspace-topbar"] .topbar-icon-button'
@@ -539,7 +581,9 @@ async function assertReviewDrawerLayout(fileName) {
     (key) => metrics[key] === null,
   );
   if (missing.length > 0) {
-    throw new Error(`Missing review drawer layout rects: ${missing.join(', ')}`);
+    throw new Error(
+      `Missing review drawer layout rects: ${missing.join(', ')}`,
+    );
   }
 
   if (metrics.settings !== null) {
@@ -571,14 +615,24 @@ async function assertReviewDrawerLayout(fileName) {
   );
   if (oversizedActions.length > 0) {
     throw new Error(
-      `Topbar actions should stay compact: ${JSON.stringify(
-        oversizedActions,
-      )}`,
+      `Topbar actions should stay compact: ${JSON.stringify(oversizedActions)}`,
     );
   }
 
   if (metrics.review.width < 300 || metrics.review.width > 430) {
     throw new Error(`Unexpected review drawer width: ${metrics.review.width}`);
+  }
+
+  if (metrics.terminalBody !== null || metrics.terminalExpanded !== 'false') {
+    throw new Error(
+      'Review drawer should keep Terminal collapsed unless explicitly opened.',
+    );
+  }
+
+  if (metrics.terminal.height < 44 || metrics.terminal.height > 82) {
+    throw new Error(
+      `Review layout has unexpected terminal strip height: ${metrics.terminal.height}`,
+    );
   }
 
   if (metrics.chat.width <= metrics.review.width) {
@@ -604,6 +658,91 @@ async function assertReviewDrawerLayout(fileName) {
   if (metrics.document.bodyScrollHeight > metrics.viewport.height + 4) {
     throw new Error(
       `Review drawer document should fit one viewport; body scrollHeight=${metrics.document.bodyScrollHeight}, viewport=${metrics.viewport.height}`,
+    );
+  }
+}
+
+async function assertTerminalExpandedLayout(fileName) {
+  const metrics = await evaluate(`(() => {
+    const rectFor = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+
+    return {
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight
+      },
+      document: {
+        bodyScrollWidth: document.body.scrollWidth,
+        bodyScrollHeight: document.body.scrollHeight
+      },
+      grid: rectFor('[data-testid="workspace-grid"]'),
+      chat: rectFor('[data-testid="chat-thread"]'),
+      composer: rectFor('[data-testid="message-composer"]'),
+      terminal: rectFor('[data-testid="terminal-drawer"]'),
+      terminalBody: rectFor('[data-testid="terminal-body"]'),
+      terminalExpanded:
+        document
+          .querySelector('[data-testid="terminal-toggle"]')
+          ?.getAttribute('aria-expanded') ?? null
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(metrics, null, 2)}\n`,
+    'utf8',
+  );
+
+  const missing = [
+    'grid',
+    'chat',
+    'composer',
+    'terminal',
+    'terminalBody',
+  ].filter((key) => metrics[key] === null);
+  if (missing.length > 0) {
+    throw new Error(`Missing expanded terminal rects: ${missing.join(', ')}`);
+  }
+
+  if (metrics.terminalExpanded !== 'true') {
+    throw new Error('Terminal should be expanded after clicking the strip.');
+  }
+
+  if (metrics.terminal.height < 210 || metrics.terminal.height > 300) {
+    throw new Error(
+      `Unexpected expanded terminal height: ${metrics.terminal.height}`,
+    );
+  }
+
+  if (metrics.chat.height <= metrics.terminal.height) {
+    throw new Error(
+      `Expanded terminal should remain supporting: chat=${metrics.chat.height}, terminal=${metrics.terminal.height}`,
+    );
+  }
+
+  if (Math.abs(metrics.grid.bottom - metrics.terminal.top) > 1) {
+    throw new Error(
+      'Expanded terminal is not docked below the workspace grid.',
+    );
+  }
+
+  if (metrics.document.bodyScrollHeight > metrics.viewport.height + 4) {
+    throw new Error(
+      `Expanded terminal document should fit one viewport; body scrollHeight=${metrics.document.bodyScrollHeight}, viewport=${metrics.viewport.height}`,
     );
   }
 }

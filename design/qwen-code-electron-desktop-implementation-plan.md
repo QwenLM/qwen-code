@@ -22,7 +22,103 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
-### Active Slice: Review Drawer and Compact Topbar Alignment
+### Active Slice: Collapsed Terminal Status Strip Alignment
+
+Status: completed in iteration 4.
+
+Goal: collapse the terminal into a compact bottom status strip by default, so
+the first viewport keeps the conversation as the dominant surface while still
+making terminal access discoverable.
+
+User-visible value: users see the active project, conversation, composer, and
+Git/review controls without the terminal permanently consuming a large block of
+height. Terminal commands remain available through an explicit expand/collapse
+control.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.tsx`
+- `packages/desktop/src/renderer/components/layout/TerminalDrawer.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/terminal-drawer.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The default workbench renders a compact terminal strip rather than a full
+  terminal drawer.
+- The strip shows project/status context and an accessible Expand Terminal
+  control.
+- Expanding the terminal reveals command, stdin, output, copy, send, clear, and
+  kill controls without replacing the conversation.
+- Collapsing the terminal after use hides the large output region and restores
+  first-viewport conversation dominance.
+- Settings still replaces chat/review/terminal as before.
+- Existing terminal run, stdin, copy, kill, clear, and send-to-AI behavior keeps
+  working.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, assert the first viewport terminal strip is collapsed, open the
+  fake Git project, send from the composer, approve the fake command, review
+  and commit changes, open settings, return to conversation, expand Terminal,
+  run commands including stdin, send output to the fake ACP session, collapse
+  Terminal again, and assert the final layout returns to a compact strip.
+- E2E assertions: initial and completed terminal heights stay compact; expanded
+  terminal height stays supporting and docked; conversation remains wider and
+  taller than terminal by default; console errors and failed local requests are
+  absent.
+- Diagnostic artifacts: CDP screenshots, collapsed/expanded layout JSON,
+  Electron log, summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained bottom
+  strip hierarchy, compact controls, and conversation-first density;
+  `electron-desktop-dev` for renderer changes and real Electron CDP
+  verification.
+
+Notes and decisions:
+
+- This slice follows `home.jpg` over the older always-visible terminal panel:
+  terminal remains a supporting workbench tool, not a permanent third major
+  viewport region.
+- The terminal strip remains in the workbench rather than moving into settings
+  or review, because running commands in the active project is part of the
+  coding-agent loop.
+- The existing Send to AI behavior is preserved for this slice; changing that
+  to attach output to the composer is still the next terminal workflow
+  refinement.
+
+Verification results:
+
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 4 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed after launch through real
+  Electron over CDP.
+- Passing artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T17-00-08-461Z/`.
+
+Next work:
+
+- Rename terminal Send to AI into an attach-to-composer flow so command output
+  does not unexpectedly trigger another agent turn.
+- Continue review safety work by replacing Accept/Revert terminology with
+  Stage/Unstage/Discard and adding confirmations for destructive discard
+  paths.
+
+### Completed Slice: Review Drawer and Compact Topbar Alignment
 
 Status: completed in iteration 3.
 

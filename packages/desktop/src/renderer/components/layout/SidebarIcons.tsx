@@ -216,3 +216,165 @@ export function CloseIcon(props: SidebarIconProps) {
     </svg>
   );
 }
+
+export function TerminalIcon(props: SidebarIconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="20"
+      viewBox="0 0 24 24"
+      width="20"
+      {...props}
+    >
+      <path
+        d="M4.6 6.5c0-1.1.9-2 2-2h10.8c1.1 0 2 .9 2 2v11c0 1.1-.9 2-2 2H6.6c-1.1 0-2-.9-2-2v-11Z"
+        stroke="currentColor"
+        strokeLinejoin="round"
+        strokeWidth="1.7"
+      />
+      <path
+        d="m8 9 2.6 2.6L8 14.2M12.4 14.3h3.5"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.7"
+      />
+    </svg>
+  );
+}
+
+export function ChevronUpIcon(props: SidebarIconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="20"
+      viewBox="0 0 24 24"
+      width="20"
+      {...props}
+    >
+      <path
+        d="m7.2 14.2 4.8-4.8 4.8 4.8"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.9"
+      />
+    </svg>
+  );
+}
+
+export function ChevronDownIcon(props: SidebarIconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="20"
+      viewBox="0 0 24 24"
+      width="20"
+      {...props}
+    >
+      <path
+        d="m7.2 9.8 4.8 4.8 4.8-4.8"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.9"
+      />
+    </svg>
+  );
+}
+
+export function CopyIcon(props: SidebarIconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="20"
+      viewBox="0 0 24 24"
+      width="20"
+      {...props}
+    >
+      <path
+        d="M8.2 8.2h8.1c.9 0 1.6.7 1.6 1.6v8.1c0 .9-.7 1.6-1.6 1.6H8.2c-.9 0-1.6-.7-1.6-1.6V9.8c0-.9.7-1.6 1.6-1.6Z"
+        stroke="currentColor"
+        strokeLinejoin="round"
+        strokeWidth="1.7"
+      />
+      <path
+        d="M10.2 4.5h5.6c.9 0 1.7.8 1.7 1.7M4.5 15.8V8.2c0-.9.8-1.7 1.7-1.7"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.7"
+      />
+    </svg>
+  );
+}
+
+export function SendIcon(props: SidebarIconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="20"
+      viewBox="0 0 24 24"
+      width="20"
+      {...props}
+    >
+      <path
+        d="m5 12 14-7-5.1 14-2.7-5.8L5 12Z"
+        stroke="currentColor"
+        strokeLinejoin="round"
+        strokeWidth="1.7"
+      />
+      <path
+        d="m11.2 13.2 3.5-3.5"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.7"
+      />
+    </svg>
+  );
+}
+
+export function TrashIcon(props: SidebarIconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="20"
+      viewBox="0 0 24 24"
+      width="20"
+      {...props}
+    >
+      <path
+        d="M7.3 8.4h9.4l-.7 9.1c-.1 1.1-.9 1.9-2 1.9h-4c-1.1 0-1.9-.8-2-1.9l-.7-9.1ZM9.3 5.8h5.4M10.3 5.8l.4-1.2h2.6l.4 1.2M6.2 8.4h11.6"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.7"
+      />
+    </svg>
+  );
+}
+
+export function StopIcon(props: SidebarIconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="20"
+      viewBox="0 0 24 24"
+      width="20"
+      {...props}
+    >
+      <path
+        d="M8 8h8v8H8z"
+        stroke="currentColor"
+        strokeLinejoin="round"
+        strokeWidth="1.8"
+      />
+    </svg>
+  );
+}

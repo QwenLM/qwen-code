@@ -132,6 +132,7 @@ export function WorkspacePage({
 }) {
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('chat');
   const [isReviewOpen, setIsReviewOpen] = useState(false);
+  const [isTerminalExpanded, setIsTerminalExpanded] = useState(false);
   const activeSession =
     sessions.find((session) => session.sessionId === activeSessionId) ?? null;
   const showSettingsPage = () => {
@@ -247,6 +248,7 @@ export function WorkspacePage({
           <TerminalDrawer
             command={terminalCommand}
             error={terminalError}
+            isExpanded={isTerminalExpanded}
             input={terminalInput}
             notice={terminalNotice}
             project={activeProject}
@@ -258,6 +260,9 @@ export function WorkspacePage({
             onInputChange={onTerminalInputChange}
             onRun={onRunTerminalCommand}
             onSendOutputToAi={onSendTerminalOutputToAi}
+            onToggleExpanded={() =>
+              setIsTerminalExpanded((current) => !current)
+            }
             onWriteInput={onWriteTerminalInput}
           />
         )}

@@ -67,10 +67,33 @@ describe('WorkspacePage', () => {
     expect(renderedContainer.textContent).toContain('example-workspace');
     expect(renderedContainer.textContent).toContain('main');
     expect(renderedContainer.textContent).not.toContain('src/index.ts');
-    expect(renderedContainer.textContent).toContain('No terminal output');
+    expect(renderedContainer.textContent).toContain('Terminal');
+    expect(renderedContainer.textContent).toContain('Idle');
+    expect(renderedContainer.textContent).toContain('No recent command');
+    expect(renderedContainer.textContent).not.toContain('No terminal output');
+    expect(
+      renderedContainer.querySelector('[data-testid="terminal-body"]'),
+    ).toBeNull();
+    expect(
+      renderedContainer
+        .querySelector('button[aria-label="Expand Terminal"]')
+        ?.getAttribute('aria-expanded'),
+    ).toBe('false');
     expect(renderedContainer.querySelector('.topbar-nav')).toBeNull();
     expect(
       renderedContainer.querySelector('button[aria-label="Open Changes"]'),
+    ).toBeTruthy();
+
+    act(() => {
+      clickButton(renderedContainer, 'Expand Terminal');
+    });
+
+    expect(
+      renderedContainer.querySelector('[data-testid="terminal-body"]'),
+    ).toBeTruthy();
+    expect(renderedContainer.textContent).toContain('No terminal output');
+    expect(
+      renderedContainer.querySelector('button[aria-label="Copy Output"]'),
     ).toBeTruthy();
 
     act(() => {
