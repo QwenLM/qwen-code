@@ -15,6 +15,7 @@ import {
 } from 'vitest';
 import { render, cleanup } from 'ink-testing-library';
 import { AppContainer, dedupeNewestFirst } from './AppContainer.js';
+import ansiEscapes from 'ansi-escapes';
 import {
   type Config,
   makeFakeConfig,
@@ -426,6 +427,83 @@ describe('AppContainer State Management', () => {
           />,
         );
       }).not.toThrow();
+    });
+
+    it('refreshStatic clears the terminal before remounting history', () => {
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.refreshStatic();
+
+      expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
+    });
+
+    it('handleClearScreen avoids a second clearTerminal write', () => {
+      const clearSpy = vi.spyOn(console, 'clear').mockImplementation(() => {});
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleClearScreen();
+
+      expect(clearSpy).toHaveBeenCalledTimes(1);
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearTerminal,
+      );
+
+      clearSpy.mockRestore();
+    });
+
+    it('passes a remount-only refresh callback to slash commands', () => {
+      let slashRefreshStatic: (() => void) | undefined;
+      mockedUseSlashCommandProcessor.mockImplementation(
+        (
+          _config,
+          _settings,
+          _addItem,
+          _clearItems,
+          _loadHistory,
+          refreshStatic,
+        ) => {
+          slashRefreshStatic = refreshStatic;
+          return {
+            handleSlashCommand: vi.fn(),
+            slashCommands: [],
+            pendingHistoryItems: [],
+            commandContext: {},
+            shellConfirmationRequest: null,
+            confirmationRequest: null,
+          };
+        },
+      );
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      slashRefreshStatic?.();
+
+      expect(slashRefreshStatic).toBeDefined();
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearTerminal,
+      );
     });
 
     it('provides ConfigContext with config object', () => {
