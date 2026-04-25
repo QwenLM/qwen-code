@@ -22,7 +22,98 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
-### Active Slice: Composer-First Thread Creation Alignment
+### Active Slice: Review Drawer and Compact Topbar Alignment
+
+Status: completed in iteration 3.
+
+Goal: make review a supporting drawer that opens beside the conversation, and
+replace the heavy topbar tabs with compact icon-led workbench actions.
+
+User-visible value: the first viewport keeps the conversation as the main
+workspace while still exposing changed files, settings, Git refresh, and status
+from a slim topbar that better matches `home.jpg`.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.tsx`
+- `packages/desktop/src/renderer/components/layout/TopBar.tsx`
+- `packages/desktop/src/renderer/components/layout/ReviewPanel.tsx`
+- `packages/desktop/src/renderer/components/layout/SidebarIcons.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/review-drawer-topbar.md`
+
+Acceptance criteria:
+
+- Opening Changes renders `ChatThread` and `ReviewPanel` together; review no
+  longer replaces the conversation.
+- The default first viewport has no review drawer, and the conversation spans
+  the workbench.
+- Topbar action controls are compact icon buttons with accessible labels and
+  tooltips; the previous Chat/Changes/Settings segmented text tabs are removed.
+- The topbar title remains the active thread/project identity instead of
+  changing to `Changes` when review opens.
+- Settings still opens as a full workbench page and hides the terminal.
+- Existing review actions, comments, staging, and commit workflow keep working.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, send from the project composer,
+  approve the fake command, open Changes from the compact topbar action, review
+  and comment on the README diff while chat remains mounted, stage all changes,
+  commit, return to chat, open settings, and run terminal paths.
+- E2E assertions: default layout has no review drawer; opening Changes creates
+  a drawer without unmounting chat; drawer width stays supporting rather than
+  dominant; topbar has compact action buttons; console errors and failed local
+  requests are absent.
+- Diagnostic artifacts: CDP screenshots, layout JSON, DOM text, Electron log,
+  summary JSON under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained topbar
+  density and drawer hierarchy; `electron-desktop-dev` for renderer changes and
+  real Electron CDP verification.
+
+Notes and decisions:
+
+- This slice deliberately keeps Settings as a full page because that behavior
+  was already implemented and verified; only review moves into the supporting
+  drawer pattern.
+- The review drawer remains closed by default to preserve the first viewport
+  emphasis from `home.jpg`; Git dirty count and the Changes action are the
+  visible entry points.
+- `frontend-design` guidance is applied with the project prompt constraint that
+  the prototype wins: compact utility controls, restrained borders, and no new
+  decorative art direction.
+
+Verification results:
+
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 4 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed after launch through real
+  Electron over CDP.
+- Passing artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T16-51-33-353Z/`.
+
+Next work:
+
+- Improve review terminology and safety by replacing `Accept`/`Revert` with
+  Stage/Unstage/Discard language and adding confirmations for destructive
+  discard paths.
+- Collapse the terminal into a status strip by default so the first viewport
+  gets closer to `home.jpg`.
+
+### Completed Slice: Composer-First Thread Creation Alignment
 
 Status: completed in iteration 2.
 

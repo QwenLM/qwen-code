@@ -425,7 +425,7 @@ summary:focus-visible {
 
 .workbench {
   display: grid;
-  grid-template-rows: 68px minmax(0, 1fr) 236px;
+  grid-template-rows: 58px minmax(0, 1fr) 236px;
   min-width: 0;
   height: 100vh;
   min-height: 0;
@@ -433,18 +433,24 @@ summary:focus-visible {
 }
 
 .workbench-settings-open {
-  grid-template-rows: 68px minmax(0, 1fr);
+  grid-template-rows: 58px minmax(0, 1fr);
 }
 
 .topbar {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(220px, auto) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 16px;
+  gap: 14px;
   min-height: 0;
-  padding: 0 22px 0 24px;
+  padding: 0 18px 0 20px;
   border-bottom: 1px solid var(--line);
   background: rgba(14, 16, 17, 0.7);
+}
+
+.topbar-title-stack {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
 }
 
 .topbar-title {
@@ -457,7 +463,7 @@ summary:focus-visible {
 .topbar-title h2 {
   min-width: 0;
   overflow: hidden;
-  font-size: 18px;
+  font-size: 15px;
   font-weight: 780;
   line-height: 1.15;
   text-overflow: ellipsis;
@@ -468,14 +474,10 @@ summary:focus-visible {
   min-width: 0;
   overflow: hidden;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.topbar-center {
-  min-width: 0;
 }
 
 .topbar-meta,
@@ -486,7 +488,7 @@ summary:focus-visible {
 }
 
 .topbar-meta {
-  justify-content: flex-end;
+  justify-content: flex-start;
   min-width: 0;
 }
 
@@ -494,45 +496,68 @@ summary:focus-visible {
   min-width: 0;
   max-width: 180px;
   overflow: hidden;
-  padding: 5px 8px;
+  min-height: 22px;
+  padding: 4px 8px;
   border: 1px solid var(--line);
   border-radius: 999px;
   color: var(--text-soft);
-  font-size: 12px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .topbar-actions {
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   justify-content: flex-end;
 }
 
-.topbar-nav {
-  display: flex;
-  overflow: hidden;
+.topbar-icon-button {
+  position: relative;
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: 7px;
   background: rgba(238, 244, 239, 0.035);
+  color: rgba(225, 232, 228, 0.68);
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
 }
 
-.topbar-nav-button {
-  min-width: 74px;
-  min-height: 32px;
-  padding: 0 10px;
-  background: transparent;
-  color: var(--text-soft);
-  font-size: 12px;
-  font-weight: 780;
+.topbar-icon-button:not(:disabled):hover,
+.topbar-icon-button-active {
+  border-color: rgba(85, 166, 255, 0.34);
+  background: var(--accent-soft);
+  color: #c7e2ff;
 }
 
-.topbar-nav-button + .topbar-nav-button {
-  border-left: 1px solid var(--line);
+.topbar-icon-button svg {
+  width: 17px;
+  height: 17px;
 }
 
-.topbar-nav-button-active {
-  background: rgba(85, 166, 255, 0.14);
-  color: var(--text);
+.topbar-action-badge {
+  position: absolute;
+  top: -6px;
+  right: -5px;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border: 1px solid rgba(12, 14, 15, 0.92);
+  border-radius: 999px;
+  background: rgba(85, 166, 255, 0.96);
+  color: #071017;
+  font-size: 10px;
+  font-weight: 840;
+  line-height: 15px;
+  text-align: center;
+}
+
+.topbar-action-badge:empty {
+  display: none;
 }
 
 .status-pill {
@@ -566,6 +591,10 @@ summary:focus-visible {
   overflow: hidden;
 }
 
+.workspace-grid-review-open {
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 400px);
+}
+
 .panel {
   min-width: 0;
   min-height: 0;
@@ -584,6 +613,7 @@ summary:focus-visible {
   min-height: 0;
   flex-direction: column;
   overflow: auto;
+  border-left: 1px solid var(--line);
   background: rgba(15, 18, 19, 0.9);
 }
 
@@ -592,8 +622,8 @@ summary:focus-visible {
 }
 
 .panel-review .review-summary {
-  width: min(1120px, calc(100% - 36px));
-  margin: 18px auto;
+  width: auto;
+  margin: 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: rgba(238, 244, 239, 0.035);
@@ -1375,12 +1405,8 @@ textarea:focus {
     grid-template-columns: 236px minmax(0, 1fr);
   }
 
-  .topbar {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .topbar-center {
-    display: none;
+  .topbar-meta span {
+    max-width: 128px;
   }
 
   .settings-page-content {
@@ -1430,6 +1456,10 @@ textarea:focus {
     overflow: visible;
   }
 
+  .workspace-grid-review-open {
+    grid-template-columns: 1fr;
+  }
+
   .panel-main {
     min-height: 620px;
     border-bottom: 1px solid var(--line);
@@ -1438,6 +1468,8 @@ textarea:focus {
   .panel-review {
     max-height: none;
     overflow: visible;
+    border-left: 0;
+    border-top: 1px solid var(--line);
   }
 
   .panel-review .review-summary,

@@ -68,9 +68,13 @@ describe('WorkspacePage', () => {
     expect(renderedContainer.textContent).toContain('main');
     expect(renderedContainer.textContent).not.toContain('src/index.ts');
     expect(renderedContainer.textContent).toContain('No terminal output');
+    expect(renderedContainer.querySelector('.topbar-nav')).toBeNull();
+    expect(
+      renderedContainer.querySelector('button[aria-label="Open Changes"]'),
+    ).toBeTruthy();
 
     act(() => {
-      clickButton(renderedContainer, 'Changes');
+      clickButton(renderedContainer, 'Open Changes');
     });
 
     expect(
@@ -78,8 +82,12 @@ describe('WorkspacePage', () => {
     ).toBeTruthy();
     expect(
       renderedContainer.querySelector('[data-testid="chat-thread"]'),
-    ).toBeNull();
+    ).toBeTruthy();
+    expect(
+      renderedContainer.querySelector('button[aria-label="Close Changes"]'),
+    ).toBeTruthy();
     expect(renderedContainer.textContent).toContain('src/index.ts');
+    expect(renderedContainer.textContent).toContain('Fix parser test');
 
     act(() => {
       clickButton(renderedContainer, 'Settings');
@@ -277,9 +285,15 @@ function getMessageTextArea(
 }
 
 function clickButton(container: HTMLElement, text: string): void {
-  const button = [...container.querySelectorAll('button')].find(
-    (candidate) => candidate.textContent?.trim() === text,
-  );
+  const button = [...container.querySelectorAll('button')].find((candidate) => {
+    const accessibleLabel =
+      candidate.getAttribute('aria-label') || candidate.getAttribute('title');
+    return (
+      accessibleLabel === text ||
+      candidate.textContent?.trim() === text ||
+      candidate.textContent?.trim().includes(text)
+    );
+  });
   if (!button) {
     throw new Error(`Button not found: ${text}`);
   }

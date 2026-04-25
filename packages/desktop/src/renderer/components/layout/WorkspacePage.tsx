@@ -27,7 +27,7 @@ import { TerminalDrawer } from './TerminalDrawer.js';
 import { TopBar } from './TopBar.js';
 import type { LoadState } from './types.js';
 
-type WorkspaceView = 'chat' | 'changes' | 'settings';
+type WorkspaceView = 'chat' | 'settings';
 
 export function WorkspacePage({
   activeProject,
@@ -131,22 +131,21 @@ export function WorkspacePage({
   onWriteTerminalInput: () => void;
 }) {
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('chat');
-  const [previousWorkspaceView, setPreviousWorkspaceView] =
-    useState<WorkspaceView>('chat');
+  const [isReviewOpen, setIsReviewOpen] = useState(false);
   const activeSession =
     sessions.find((session) => session.sessionId === activeSessionId) ?? null;
   const showSettingsPage = () => {
-    setPreviousWorkspaceView((currentPrevious) =>
-      workspaceView === 'settings' ? currentPrevious : workspaceView,
-    );
     setWorkspaceView('settings');
   };
-  const showWorkspaceView = (view: WorkspaceView) => {
-    setWorkspaceView(view);
-    if (view !== 'settings') {
-      setPreviousWorkspaceView(view);
-    }
+  const showConversation = () => {
+    setWorkspaceView('chat');
+    setIsReviewOpen(false);
   };
+  const toggleReview = () => {
+    setWorkspaceView('chat');
+    setIsReviewOpen((current) => !current);
+  };
+  const isSettingsOpen = workspaceView === 'settings';
 
   return (
     <main className="desktop-shell" data-testid="desktop-workspace">
@@ -177,16 +176,24 @@ export function WorkspacePage({
           activeProject={activeProject}
           activeSessionTitle={activeSession?.title || null}
           activeView={workspaceView}
+          isReviewOpen={!isSettingsOpen && isReviewOpen}
           loadState={loadState}
           statusLabel={statusLabel}
           onRefreshGitStatus={onRefreshProjectGitStatus}
-          onShowChanges={() => showWorkspaceView('changes')}
-          onShowChat={() => showWorkspaceView('chat')}
+          onShowReview={toggleReview}
+          onShowChat={showConversation}
           onShowSettings={showSettingsPage}
         />
 
-        <div className="workspace-grid" data-testid="workspace-grid">
-          {workspaceView === 'chat' ? (
+        <div
+          className={
+            !isSettingsOpen && isReviewOpen
+              ? 'workspace-grid workspace-grid-review-open'
+              : 'workspace-grid'
+          }
+          data-testid="workspace-grid"
+        >
+          {!isSettingsOpen ? (
             <ChatThread
               activeProject={activeProject}
               activeSessionId={activeSessionId}
@@ -204,12 +211,13 @@ export function WorkspacePage({
             />
           ) : null}
 
-          {workspaceView === 'changes' ? (
+          {!isSettingsOpen && isReviewOpen ? (
             <ReviewPanel
               activeProject={activeProject}
               commitMessage={commitMessage}
               gitDiff={gitDiff}
               reviewError={reviewError}
+              onClose={() => setIsReviewOpen(false)}
               onCommit={onCommit}
               onCommitMessageChange={onCommitMessageChange}
               onOpenFile={onOpenReviewFile}
@@ -218,7 +226,7 @@ export function WorkspacePage({
             />
           ) : null}
 
-          {workspaceView === 'settings' ? (
+          {isSettingsOpen ? (
             <SettingsPage
               activeSessionId={activeSessionId}
               chatState={chatState}
@@ -227,7 +235,7 @@ export function WorkspacePage({
               sessionError={sessionError}
               settingsState={settingsState}
               onAuthenticate={onAuthenticate}
-              onBack={() => showWorkspaceView(previousWorkspaceView)}
+              onBack={() => setWorkspaceView('chat')}
               onModeChange={onModeChange}
               onModelChange={onModelChange}
               onSaveSettings={onSaveSettings}
@@ -235,7 +243,7 @@ export function WorkspacePage({
             />
           ) : null}
         </div>
-        {workspaceView === 'settings' ? null : (
+        {isSettingsOpen ? null : (
           <TerminalDrawer
             command={terminalCommand}
             error={terminalError}

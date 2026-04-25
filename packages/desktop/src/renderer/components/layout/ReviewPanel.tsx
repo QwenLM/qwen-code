@@ -12,12 +12,14 @@ import type {
   DesktopGitReviewTarget,
   DesktopProject,
 } from '../../api/client.js';
+import { CloseIcon } from './SidebarIcons.js';
 
 export function ReviewPanel({
   activeProject,
   commitMessage,
   gitDiff,
   reviewError,
+  onClose,
   onCommit,
   onCommitMessageChange,
   onOpenFile,
@@ -28,6 +30,7 @@ export function ReviewPanel({
   commitMessage: string;
   gitDiff: DesktopGitDiff | null;
   reviewError: string | null;
+  onClose?: () => void;
   onCommit: () => void;
   onCommitMessageChange: (message: string) => void;
   onOpenFile: (filePath: string) => void;
@@ -42,6 +45,18 @@ export function ReviewPanel({
     >
       <div className="panel-header">
         <h3>Changes</h3>
+        {onClose ? (
+          <button
+            aria-label="Close Changes"
+            className="topbar-icon-button"
+            title="Close Changes"
+            type="button"
+            onClick={onClose}
+          >
+            <CloseIcon />
+            <span className="sr-only">Close Changes</span>
+          </button>
+        ) : null}
       </div>
       <ReviewSummary
         commitMessage={commitMessage}

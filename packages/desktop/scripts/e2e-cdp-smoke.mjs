@@ -80,8 +80,10 @@ async function main() {
   await waitForText('Turn complete: end_turn');
   await waitForSelector('[data-testid="thread-list"]');
 
-  await clickButton('Changes');
+  await clickButton('Open Changes');
   await waitForText('README.md');
+  await assertReviewDrawerLayout('review-drawer-layout.json');
+  await saveScreenshot('review-drawer.png');
   await waitForText('Accept Hunk');
   await setFieldByAriaLabel(
     'Review comment for README.md',
@@ -98,7 +100,7 @@ async function main() {
   await assertWorkspaceCommit('desktop e2e commit');
   await waitForSelector('[data-testid="project-list"]');
 
-  await clickButton('Chat');
+  await clickButton('Conversation');
   await waitForSelector('[data-testid="thread-list"]');
 
   await clickButton('Settings');
@@ -111,7 +113,7 @@ async function main() {
   await clickButton('Save');
   await waitForText('qwen-e2e-cdp');
 
-  await clickButton('Chat');
+  await clickButton('Conversation');
   await setFieldByAriaLabel('Terminal command', 'printf desktop-e2e-terminal');
   await clickButton('Run');
   await waitForText('desktop-e2e-terminal');
@@ -439,7 +441,7 @@ async function assertRalphWorkspaceLayout(fileName) {
     throw new Error(`Unexpected sidebar width: ${metrics.sidebar.width}`);
   }
 
-  if (metrics.topbar.height < 56 || metrics.topbar.height > 82) {
+  if (metrics.topbar.height < 50 || metrics.topbar.height > 70) {
     throw new Error(`Unexpected topbar height: ${metrics.topbar.height}`);
   }
 
@@ -477,6 +479,131 @@ async function assertRalphWorkspaceLayout(fileName) {
       `Sidebar list rows should not stretch vertically: ${JSON.stringify(
         oversizedRows,
       )}`,
+    );
+  }
+}
+
+async function assertReviewDrawerLayout(fileName) {
+  const metrics = await evaluate(`(() => {
+    const rectFor = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+
+    return {
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight
+      },
+      document: {
+        bodyScrollWidth: document.body.scrollWidth,
+        bodyScrollHeight: document.body.scrollHeight
+      },
+      grid: rectFor('[data-testid="workspace-grid"]'),
+      chat: rectFor('[data-testid="chat-thread"]'),
+      review: rectFor('[data-testid="review-panel"]'),
+      settings: rectFor('[data-testid="settings-page"]'),
+      composer: rectFor('[data-testid="message-composer"]'),
+      terminal: rectFor('[data-testid="terminal-drawer"]'),
+      topbarActions: Array.from(
+        document.querySelectorAll(
+          '[data-testid="workspace-topbar"] .topbar-icon-button'
+        )
+      ).map((button) => ({
+        label: button.getAttribute('aria-label') || '',
+        width: button.getBoundingClientRect().width,
+        height: button.getBoundingClientRect().height
+      })),
+      hasSegmentedTabs: document.querySelector('.topbar-nav') !== null
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(metrics, null, 2)}\n`,
+    'utf8',
+  );
+
+  const missing = ['grid', 'chat', 'review', 'composer', 'terminal'].filter(
+    (key) => metrics[key] === null,
+  );
+  if (missing.length > 0) {
+    throw new Error(`Missing review drawer layout rects: ${missing.join(', ')}`);
+  }
+
+  if (metrics.settings !== null) {
+    throw new Error('Review drawer should not render the settings page.');
+  }
+
+  if (metrics.hasSegmentedTabs) {
+    throw new Error('Topbar should use compact actions, not segmented tabs.');
+  }
+
+  const labels = metrics.topbarActions.map((action) => action.label);
+  for (const expectedLabel of [
+    'Conversation',
+    'Close Changes',
+    'Refresh Git',
+    'Settings',
+  ]) {
+    if (!labels.includes(expectedLabel)) {
+      throw new Error(
+        `Missing compact topbar action ${expectedLabel}; labels=${labels.join(
+          ', ',
+        )}`,
+      );
+    }
+  }
+
+  const oversizedActions = metrics.topbarActions.filter(
+    (action) => action.width > 40 || action.height > 40,
+  );
+  if (oversizedActions.length > 0) {
+    throw new Error(
+      `Topbar actions should stay compact: ${JSON.stringify(
+        oversizedActions,
+      )}`,
+    );
+  }
+
+  if (metrics.review.width < 300 || metrics.review.width > 430) {
+    throw new Error(`Unexpected review drawer width: ${metrics.review.width}`);
+  }
+
+  if (metrics.chat.width <= metrics.review.width) {
+    throw new Error(
+      `Conversation should remain wider than review: chat=${metrics.chat.width}, review=${metrics.review.width}`,
+    );
+  }
+
+  if (Math.abs(metrics.chat.top - metrics.review.top) > 1) {
+    throw new Error('Review drawer should align with the conversation top.');
+  }
+
+  if (Math.abs(metrics.chat.bottom - metrics.review.bottom) > 1) {
+    throw new Error('Review drawer should share the conversation height.');
+  }
+
+  if (metrics.composer.right > metrics.chat.right + 1) {
+    throw new Error(
+      'Composer should stay contained inside chat with review open.',
+    );
+  }
+
+  if (metrics.document.bodyScrollHeight > metrics.viewport.height + 4) {
+    throw new Error(
+      `Review drawer document should fit one viewport; body scrollHeight=${metrics.document.bodyScrollHeight}, viewport=${metrics.viewport.height}`,
     );
   }
 }
@@ -579,11 +706,18 @@ async function waitForSelector(selector, timeoutMs = 15_000) {
 async function clickButton(text) {
   const clicked = await evaluate(`(() => {
     const button = [...document.querySelectorAll('button')]
-      .find((candidate) =>
-        !candidate.disabled &&
-        candidate.textContent &&
-        candidate.textContent.trim().includes(${JSON.stringify(text)})
-      );
+      .find((candidate) => {
+        if (candidate.disabled) {
+          return false;
+        }
+        const label = candidate.getAttribute('aria-label') || candidate.getAttribute('title') || '';
+        const copy = candidate.textContent ? candidate.textContent.trim() : '';
+        return (
+          label === ${JSON.stringify(text)} ||
+          label.includes(${JSON.stringify(text)}) ||
+          copy.includes(${JSON.stringify(text)})
+        );
+      });
     if (!button) {
       return false;
     }
