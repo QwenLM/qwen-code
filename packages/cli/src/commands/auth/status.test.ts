@@ -144,6 +144,39 @@ describe('showAuthStatus', () => {
     );
   });
 
+  it('should show Coding Plan when env key is set but codingPlan.region is missing', async () => {
+    process.env[CODING_PLAN_ENV_KEY] = 'test-api-key';
+
+    vi.mocked(loadSettings).mockReturnValue(
+      createMockSettings({
+        security: {
+          auth: {
+            selectedType: AuthType.USE_OPENAI,
+          },
+        },
+        model: {
+          name: 'qwen3.5-plus',
+        },
+      }),
+    );
+
+    await showAuthStatus();
+
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('Alibaba Cloud Coding Plan'),
+    );
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('API key configured'),
+    );
+    expect(writeStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('OpenAI-compatible Provider'),
+    );
+    expect(writeStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Region:'),
+    );
+    expect(process.exit).toHaveBeenCalledWith(0);
+  });
+
   it('should show Coding Plan region for china', async () => {
     process.env[CODING_PLAN_ENV_KEY] = 'test-api-key';
 
@@ -261,5 +294,177 @@ describe('showAuthStatus', () => {
       expect.stringContaining('Failed to check authentication status'),
     );
     expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  describe('OpenAI-compatible provider (no Coding Plan)', () => {
+    afterEach(() => {
+      delete process.env['OPENAI_API_KEY'];
+      delete process.env['CUSTOM_API_KEY'];
+    });
+
+    it('should show OpenAI-compatible status with OPENAI_API_KEY', async () => {
+      process.env['OPENAI_API_KEY'] = 'test-key';
+
+      vi.mocked(loadSettings).mockReturnValue(
+        createMockSettings({
+          security: {
+            auth: {
+              selectedType: AuthType.USE_OPENAI,
+            },
+          },
+          model: {
+            name: 'gpt-4o',
+          },
+        }),
+      );
+
+      await showAuthStatus();
+
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('OpenAI-compatible Provider'),
+      );
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('gpt-4o'),
+      );
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('API key configured'),
+      );
+      expect(writeStdoutLine).not.toHaveBeenCalledWith(
+        expect.stringContaining('Alibaba Cloud Coding Plan'),
+      );
+      expect(process.exit).toHaveBeenCalledWith(0);
+    });
+
+    it('should show OpenAI-compatible status with custom envKey from modelProviders', async () => {
+      process.env['CUSTOM_API_KEY'] = 'test-key';
+
+      vi.mocked(loadSettings).mockReturnValue(
+        createMockSettings({
+          security: {
+            auth: {
+              selectedType: AuthType.USE_OPENAI,
+            },
+          },
+          model: {
+            name: 'custom-model',
+          },
+          modelProviders: {
+            openai: [
+              {
+                id: 'custom-model',
+                envKey: 'CUSTOM_API_KEY',
+                baseUrl: 'https://custom-api.example.com/v1',
+              },
+            ],
+          },
+        }),
+      );
+
+      await showAuthStatus();
+
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('OpenAI-compatible Provider'),
+      );
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('custom-model'),
+      );
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('https://custom-api.example.com/v1'),
+      );
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('API key configured'),
+      );
+      expect(process.exit).toHaveBeenCalledWith(0);
+    });
+
+    it('should show OpenAI-compatible status with settings.security.auth.apiKey', async () => {
+      vi.mocked(loadSettings).mockReturnValue(
+        createMockSettings({
+          security: {
+            auth: {
+              selectedType: AuthType.USE_OPENAI,
+              apiKey: 'settings-api-key',
+              baseUrl: 'https://my-provider.example.com/v1',
+            },
+          },
+          model: {
+            name: 'my-model',
+          },
+        }),
+      );
+
+      await showAuthStatus();
+
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('OpenAI-compatible Provider'),
+      );
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('https://my-provider.example.com/v1'),
+      );
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('API key configured'),
+      );
+      expect(process.exit).toHaveBeenCalledWith(0);
+    });
+
+    it('should show incomplete when no API key is found for OpenAI-compatible provider', async () => {
+      vi.mocked(loadSettings).mockReturnValue(
+        createMockSettings({
+          security: {
+            auth: {
+              selectedType: AuthType.USE_OPENAI,
+            },
+          },
+        }),
+      );
+
+      await showAuthStatus();
+
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('OpenAI-compatible Provider (Incomplete)'),
+      );
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('API key not found'),
+      );
+      expect(writeStdoutLine).not.toHaveBeenCalledWith(
+        expect.stringContaining('Alibaba Cloud Coding Plan'),
+      );
+    });
+
+    it('should detect API key via default model when model.name is unset', async () => {
+      process.env['CUSTOM_API_KEY'] = 'test-key';
+
+      vi.mocked(loadSettings).mockReturnValue(
+        createMockSettings({
+          security: {
+            auth: {
+              selectedType: AuthType.USE_OPENAI,
+            },
+          },
+          modelProviders: {
+            openai: [
+              {
+                id: 'default-model',
+                envKey: 'CUSTOM_API_KEY',
+                baseUrl: 'https://default-api.example.com/v1',
+              },
+            ],
+          },
+        }),
+      );
+
+      await showAuthStatus();
+
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('OpenAI-compatible Provider'),
+      );
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('https://default-api.example.com/v1'),
+      );
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('API key configured'),
+      );
+      expect(process.exit).toHaveBeenCalledWith(0);
+    });
   });
 });
