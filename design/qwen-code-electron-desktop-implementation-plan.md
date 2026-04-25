@@ -22,10 +22,11 @@ execution order, verification, decisions, and remaining work.
 
 ## Current Status
 
-Slices 1-8 established the desktop package, Electron main/preload/renderer
+Slices 1-11 established the desktop package, Electron main/preload/renderer
 startup, authenticated health/runtime/settings/session APIs, ACP process
 wrapper, WebSocket chat loop, permission bridge, settings/model/mode controls,
-packaging configuration, and package smoke verification.
+packaging configuration, package smoke verification, project/Git status,
+renderer asset/CDP startup support, and the componentized workspace shell.
 
 Important correction from iteration 7: the previous plan text called the MVP
 complete after packaging smoke, but the architecture P0 also requires project
@@ -158,17 +159,50 @@ scope before a DONE marker can be created.
 
 ### Slice 11: Workspace Review Shell
 
-- Status: pending
+- Status: complete in iteration 8
 - Goal: split the renderer into explicit TopBar, ProjectSidebar, ThreadList,
   ChatThread, ReviewPanel, and TerminalDrawer components while preserving the
   current server-backed project/session/chat/settings behavior.
+- Files:
+  - `packages/desktop/src/renderer/App.tsx`
+  - `packages/desktop/src/renderer/components/layout/WorkspacePage.tsx`
+  - `packages/desktop/src/renderer/components/layout/TopBar.tsx`
+  - `packages/desktop/src/renderer/components/layout/ProjectSidebar.tsx`
+  - `packages/desktop/src/renderer/components/layout/ThreadList.tsx`
+  - `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+  - `packages/desktop/src/renderer/components/layout/ReviewPanel.tsx`
+  - `packages/desktop/src/renderer/components/layout/TerminalDrawer.tsx`
+  - `packages/desktop/src/renderer/components/layout/StatusPill.tsx`
+  - `packages/desktop/src/renderer/components/layout/formatters.ts`
+  - `packages/desktop/src/renderer/components/layout/types.ts`
+  - `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+  - `packages/desktop/vitest.config.ts`
 - Acceptance criteria:
   - First workspace viewport visibly contains top bar, project/thread sidebar,
     central thread, right review tabs, and bottom terminal drawer structure.
   - No renderer Node access or IPC broadening.
   - Existing desktop tests and typecheck still pass.
+- Completed:
+  - Kept `App.tsx` as the server/state coordinator and moved visible shell
+    regions into explicit renderer layout components.
+  - Added stable `data-testid` landmarks for future Electron E2E and DevTools
+    MCP assertions.
+  - Added a jsdom renderer smoke test that renders fake project/session/diff
+    data and asserts the workbench landmarks.
+- Verification:
+  - `npm run test --workspace=packages/desktop` passed: 9 files, 53 tests.
+  - `npm run typecheck --workspace=packages/desktop` passed.
+  - `npm run lint --workspace=packages/desktop` passed.
+  - `npm run build --workspace=packages/desktop` passed.
+  - `npm run build` passed. Existing VS Code companion lint warnings remain
+    warnings only and unrelated to desktop.
+  - `npm run typecheck` passed.
 - E2E coverage:
-  - Launch renderer with fake server/preload data and assert layout landmarks.
+  - Recorded in
+    `.qwen/e2e-tests/electron-desktop/workspace-review-shell.md`.
+  - Current coverage is a jsdom renderer landmark smoke test; Slice 14 must
+    launch Electron and assert the same landmarks through CDP with screenshot,
+    console, and network diagnostics.
 
 ### Slice 12: Diff Review and Commit
 
@@ -276,6 +310,10 @@ scope before a DONE marker can be created.
   rather than an interactive PTY. This gives the renderer verifiable output and
   kill behavior now while leaving PTY write/resize and send-output-to-AI as the
   next terminal refinement.
+- 2026-04-25: Keep `App.tsx` as the renderer state/effects coordinator and
+  extract the visible workspace regions into layout components. This preserves
+  server-backed behavior while making the workbench structure testable through
+  stable DOM landmarks.
 
 ## Verification Log
 
@@ -312,6 +350,14 @@ scope before a DONE marker can be created.
   - `npm run typecheck` passed across workspaces.
   - `npm run build` passed across the configured build order. Existing VS Code
     companion lint warnings were reported by its build script, with no errors.
+- 2026-04-25 Slice 11 workspace shell:
+  - `npm run test --workspace=packages/desktop` passed: 9 files, 53 tests.
+  - `npm run typecheck --workspace=packages/desktop` passed.
+  - `npm run lint --workspace=packages/desktop` passed.
+  - `npm run build --workspace=packages/desktop` passed.
+  - `npm run build` passed across the configured build order. Existing VS Code
+    companion lint warnings were reported by its build script, with no errors.
+  - `npm run typecheck` passed across workspaces.
 
 ## Self Review Notes
 
@@ -341,10 +387,13 @@ scope before a DONE marker can be created.
 - The current terminal is a command runner, not a full PTY. It does not bypass
   agent tool permission because agent shell execution still flows through ACP
   and core permissions.
+- Slice 11 did not broaden preload or IPC. The renderer shell split is a pure
+  component refactor with stable DOM landmarks for the future Electron/CDP
+  harness.
 
 ## Remaining Work
 
-- Implement explicit componentized workspace shell, hunk-level diff review,
-  terminal PTY/write/send-output-to-AI refinements, Electron E2E harness,
-  DevTools MCP DOM/console/network/screenshot checks, and final package smoke
-  before creating the DONE marker.
+- Implement hunk-level diff review, terminal PTY/write/send-output-to-AI
+  refinements, Electron E2E harness, DevTools MCP
+  DOM/console/network/screenshot checks, and final package smoke before
+  creating the DONE marker.
