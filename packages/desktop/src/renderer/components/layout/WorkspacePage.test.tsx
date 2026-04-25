@@ -164,11 +164,50 @@ describe('WorkspacePage', () => {
       renderedContainer.querySelector('[data-testid="model-config"]'),
     ).toBeTruthy();
     expect(
+      renderedContainer.querySelector('[data-testid="permissions-config"]'),
+    ).toBeTruthy();
+    expect(
       renderedContainer.querySelector('[data-testid="review-panel"]'),
     ).toBeNull();
     expect(
       renderedContainer.querySelector('[data-testid="terminal-drawer"]'),
     ).toBeNull();
+    const settingsText =
+      renderedContainer.querySelector('[data-testid="settings-page"]')
+        ?.textContent ?? '';
+    for (const section of [
+      'Account',
+      'Model Providers',
+      'Permissions',
+      'Tools & MCP',
+      'Terminal',
+      'Appearance',
+      'Advanced',
+    ]) {
+      expect(settingsText).toContain(section);
+    }
+    expect(settingsText).not.toContain(readyStatus.serverUrl);
+    expect(settingsText).not.toContain(readyStatus.runtime.desktop.nodeVersion);
+    expect(settingsText).not.toContain('ACP');
+    expect(settingsText).not.toContain(session.sessionId);
+    expect(
+      renderedContainer.querySelector('[data-testid="runtime-diagnostics"]'),
+    ).toBeNull();
+
+    act(() => {
+      clickButton(renderedContainer, 'Advanced Diagnostics');
+    });
+
+    const advancedDiagnostics = renderedContainer.querySelector(
+      '[data-testid="advanced-diagnostics"]',
+    );
+    expect(advancedDiagnostics).toBeTruthy();
+    expect(advancedDiagnostics?.textContent).toContain(readyStatus.serverUrl);
+    expect(advancedDiagnostics?.textContent).toContain(
+      readyStatus.runtime.desktop.nodeVersion,
+    );
+    expect(advancedDiagnostics?.textContent).toContain('ACP');
+    expect(advancedDiagnostics?.textContent).toContain(session.sessionId);
   });
 
   it('keeps the composer enabled for an active project with no thread', () => {

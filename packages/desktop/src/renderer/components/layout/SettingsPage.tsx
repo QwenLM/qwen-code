@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Dispatch } from 'react';
+import { useState, type Dispatch } from 'react';
 import type { ChatState } from '../../stores/chatStore.js';
 import type { ModelState } from '../../stores/modelStore.js';
 import type {
   SettingsAction,
+  SettingsFormState,
   SettingsState,
 } from '../../stores/settingsStore.js';
 import type { DesktopApprovalMode } from '../../../shared/desktopProtocol.js';
@@ -41,6 +42,8 @@ export function SettingsPage({
   onSaveSettings: () => void;
   onSettingsDispatch: Dispatch<SettingsAction>;
 }) {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+
   return (
     <section
       className="panel settings-page"
@@ -48,20 +51,23 @@ export function SettingsPage({
       data-testid="settings-page"
     >
       <div className="panel-header settings-page-header">
-        <h3>Settings</h3>
+        <div>
+          <h3>Settings</h3>
+          <span>Account, model, permissions, and local tools</span>
+        </div>
         <button className="secondary-button" type="button" onClick={onBack}>
           Back
         </button>
       </div>
       <div className="settings-page-content">
-        <SettingsPanel
-          state={settingsState}
-          onAuthenticate={onAuthenticate}
-          onDispatch={onSettingsDispatch}
-          onSave={onSaveSettings}
-        />
-        <div className="settings-page-meta">
-          <SessionDetails
+        <div className="settings-page-main">
+          <AccountPanel state={settingsState} onAuthenticate={onAuthenticate} />
+          <ModelProvidersPanel
+            state={settingsState}
+            onDispatch={onSettingsDispatch}
+            onSave={onSaveSettings}
+          />
+          <PermissionsPanel
             activeSessionId={activeSessionId}
             chatState={chatState}
             modelState={modelState}
@@ -69,20 +75,80 @@ export function SettingsPage({
             onModeChange={onModeChange}
             onModelChange={onModelChange}
           />
-          <RuntimeDetails loadState={loadState} />
+        </div>
+        <div className="settings-page-meta">
+          <ToolsPanel chatState={chatState} />
+          <TerminalSettingsPanel />
+          <AppearancePanel />
+          <AdvancedDiagnosticsPanel
+            activeSessionId={activeSessionId}
+            chatState={chatState}
+            isOpen={advancedOpen}
+            loadState={loadState}
+            modelState={modelState}
+            sessionError={sessionError}
+            settingsState={settingsState}
+            onToggle={() => setAdvancedOpen((current) => !current)}
+          />
         </div>
       </div>
     </section>
   );
 }
 
-function SettingsPanel({
+function AccountPanel({
   onAuthenticate,
+  state,
+}: {
+  onAuthenticate: (methodId: string) => void;
+  state: SettingsState;
+}) {
+  const authType = formatAuthType(state.settings?.selectedAuthType);
+  const openAiKeyStatus = formatSecretStatus(state.settings?.openai.hasApiKey);
+  const codingPlanKeyStatus = formatSecretStatus(
+    state.settings?.codingPlan.hasApiKey,
+  );
+
+  return (
+    <section className="settings-section settings-account">
+      <div className="panel-header panel-header-inline">
+        <div>
+          <h3>Account</h3>
+          <span>{authType}</span>
+        </div>
+      </div>
+      <dl className="settings-kv">
+        <div>
+          <dt>Auth</dt>
+          <dd>{authType}</dd>
+        </div>
+        <div>
+          <dt>API key</dt>
+          <dd>{openAiKeyStatus}</dd>
+        </div>
+        <div>
+          <dt>Coding Plan key</dt>
+          <dd>{codingPlanKeyStatus}</dd>
+        </div>
+      </dl>
+      <div className="settings-card-actions">
+        <button
+          className="secondary-button"
+          type="button"
+          onClick={() => onAuthenticate('qwen-oauth')}
+        >
+          OAuth
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function ModelProvidersPanel({
   onDispatch,
   onSave,
   state,
 }: {
-  onAuthenticate: (methodId: string) => void;
   onDispatch: Dispatch<SettingsAction>;
   onSave: () => void;
   state: SettingsState;
@@ -95,7 +161,10 @@ function SettingsPanel({
       data-testid="model-config"
     >
       <div className="panel-header panel-header-inline">
-        <h3>Auth & Model</h3>
+        <div>
+          <h3>Model Providers</h3>
+          <span>{formatProviderLabel(provider)}</span>
+        </div>
       </div>
       <div className="settings-form">
         <label>
@@ -182,13 +251,6 @@ function SettingsPanel({
 
         <div className="settings-actions">
           <button
-            className="secondary-button"
-            type="button"
-            onClick={() => onAuthenticate('qwen-oauth')}
-          >
-            OAuth
-          </button>
-          <button
             className="primary-button"
             disabled={state.loading || state.saving}
             type="button"
@@ -200,8 +262,13 @@ function SettingsPanel({
 
         {state.settings ? (
           <p className="settings-summary">
-            {state.settings.selectedAuthType || 'No auth'} ·{' '}
-            {state.settings.model.name || 'No model'}
+            {formatAuthType(state.settings.selectedAuthType)} ·{' '}
+            {state.settings.model.name || 'No model'} · API key{' '}
+            {formatSecretStatus(
+              provider === 'coding-plan'
+                ? state.settings.codingPlan.hasApiKey
+                : state.settings.openai.hasApiKey,
+            ).toLowerCase()}
           </p>
         ) : null}
         {state.error ? <p className="error-text">{state.error}</p> : null}
@@ -210,7 +277,7 @@ function SettingsPanel({
   );
 }
 
-function SessionDetails({
+function PermissionsPanel({
   activeSessionId,
   chatState,
   modelState,
@@ -231,56 +298,212 @@ function SessionDetails({
     modelState.models?.currentModelId || chatState.currentModelId || '';
 
   return (
-    <section className="settings-section session-details">
+    <section
+      className="settings-section permissions-panel"
+      data-testid="permissions-config"
+    >
       <div className="panel-header panel-header-inline">
-        <h3>Session</h3>
+        <div>
+          <h3>Permissions</h3>
+          <span>{activeSessionId ? 'Active thread' : 'No active thread'}</span>
+        </div>
+      </div>
+      <div className="settings-form">
+        <label>
+          <span>Permission mode</span>
+          {modelState.modes ? (
+            <select
+              disabled={!activeSessionId || modelState.savingMode}
+              value={currentMode}
+              onChange={(event) =>
+                onModeChange(event.target.value as DesktopApprovalMode)
+              }
+            >
+              {modelState.modes.availableModes.map((mode) => (
+                <option key={mode.id} value={mode.id}>
+                  {mode.name}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input disabled readOnly value={currentMode || 'Unknown'} />
+          )}
+        </label>
+        <label>
+          <span>Thread model</span>
+          {modelState.models ? (
+            <select
+              disabled={!activeSessionId || modelState.savingModel}
+              value={currentModel}
+              onChange={(event) => onModelChange(event.target.value)}
+            >
+              {modelState.models.availableModels.map((model) => (
+                <option key={model.modelId} value={model.modelId}>
+                  {model.name}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input disabled readOnly value={currentModel || 'Unknown'} />
+          )}
+        </label>
+        {sessionError || chatState.error ? (
+          <p className="error-text">{sessionError || chatState.error}</p>
+        ) : null}
+        {modelState.error ? (
+          <p className="error-text">{modelState.error}</p>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function ToolsPanel({ chatState }: { chatState: ChatState }) {
+  return (
+    <section className="settings-section">
+      <div className="panel-header panel-header-inline">
+        <div>
+          <h3>Tools & MCP</h3>
+          <span>{chatState.availableCommands.length} commands</span>
+        </div>
+      </div>
+      <dl className="settings-kv">
+        <div>
+          <dt>Commands</dt>
+          <dd>{chatState.availableCommands.length}</dd>
+        </div>
+        <div>
+          <dt>Skills</dt>
+          <dd>{chatState.availableSkills.length}</dd>
+        </div>
+      </dl>
+    </section>
+  );
+}
+
+function TerminalSettingsPanel() {
+  return (
+    <section className="settings-section">
+      <div className="panel-header panel-header-inline">
+        <div>
+          <h3>Terminal</h3>
+          <span>Project scoped</span>
+        </div>
+      </div>
+      <dl className="settings-kv">
+        <div>
+          <dt>Shell</dt>
+          <dd>Default</dd>
+        </div>
+        <div>
+          <dt>Output</dt>
+          <dd>Attach to composer</dd>
+        </div>
+      </dl>
+    </section>
+  );
+}
+
+function AppearancePanel() {
+  return (
+    <section className="settings-section">
+      <div className="panel-header panel-header-inline">
+        <div>
+          <h3>Appearance</h3>
+          <span>Desktop dark</span>
+        </div>
+      </div>
+      <dl className="settings-kv">
+        <div>
+          <dt>Theme</dt>
+          <dd>Dark</dd>
+        </div>
+        <div>
+          <dt>Density</dt>
+          <dd>Compact</dd>
+        </div>
+      </dl>
+    </section>
+  );
+}
+
+function AdvancedDiagnosticsPanel({
+  activeSessionId,
+  chatState,
+  isOpen,
+  loadState,
+  modelState,
+  onToggle,
+  sessionError,
+  settingsState,
+}: {
+  activeSessionId: string | null;
+  chatState: ChatState;
+  isOpen: boolean;
+  loadState: LoadState;
+  modelState: ModelState;
+  onToggle: () => void;
+  sessionError: string | null;
+  settingsState: SettingsState;
+}) {
+  return (
+    <section className="settings-section settings-advanced">
+      <div className="panel-header panel-header-inline">
+        <div>
+          <h3>Advanced</h3>
+          <span>Diagnostics</span>
+        </div>
+        <button
+          aria-expanded={isOpen}
+          className="secondary-button"
+          data-testid="settings-advanced-toggle"
+          type="button"
+          onClick={onToggle}
+        >
+          Advanced Diagnostics
+        </button>
+      </div>
+      {isOpen ? (
+        <div
+          className="settings-advanced-content"
+          data-testid="advanced-diagnostics"
+        >
+          <SessionDiagnostics
+            activeSessionId={activeSessionId}
+            chatState={chatState}
+            modelState={modelState}
+            sessionError={sessionError}
+            settingsState={settingsState}
+          />
+          <RuntimeDetails loadState={loadState} />
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function SessionDiagnostics({
+  activeSessionId,
+  chatState,
+  modelState,
+  sessionError,
+  settingsState,
+}: {
+  activeSessionId: string | null;
+  chatState: ChatState;
+  modelState: ModelState;
+  sessionError: string | null;
+  settingsState: SettingsState;
+}) {
+  return (
+    <section className="settings-diagnostics-block">
+      <div className="panel-header panel-header-inline">
+        <h3>Session Diagnostics</h3>
       </div>
       <dl className="runtime-details">
         <div>
           <dt>Active</dt>
           <dd>{activeSessionId || 'None'}</dd>
-        </div>
-        <div>
-          <dt>Mode</dt>
-          <dd>
-            {modelState.modes ? (
-              <select
-                disabled={!activeSessionId || modelState.savingMode}
-                value={currentMode}
-                onChange={(event) =>
-                  onModeChange(event.target.value as DesktopApprovalMode)
-                }
-              >
-                {modelState.modes.availableModes.map((mode) => (
-                  <option key={mode.id} value={mode.id}>
-                    {mode.name}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              currentMode || 'Unknown'
-            )}
-          </dd>
-        </div>
-        <div>
-          <dt>Model</dt>
-          <dd>
-            {modelState.models ? (
-              <select
-                disabled={!activeSessionId || modelState.savingModel}
-                value={currentModel}
-                onChange={(event) => onModelChange(event.target.value)}
-              >
-                {modelState.models.availableModels.map((model) => (
-                  <option key={model.modelId} value={model.modelId}>
-                    {model.name}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              currentModel || 'Unknown'
-            )}
-          </dd>
         </div>
         <div>
           <dt>Commands</dt>
@@ -293,6 +516,10 @@ function SessionDetails({
         <div>
           <dt>Tokens</dt>
           <dd>{chatState.latestUsage?.usage?.totalTokens ?? 'Unknown'}</dd>
+        </div>
+        <div>
+          <dt>Settings path</dt>
+          <dd>{settingsState.settings?.settingsPath ?? 'Unknown'}</dd>
         </div>
         {sessionError || chatState.error ? (
           <div>
@@ -314,9 +541,12 @@ function SessionDetails({
 function RuntimeDetails({ loadState }: { loadState: LoadState }) {
   if (loadState.state === 'loading') {
     return (
-      <section className="settings-section">
+      <section
+        className="settings-diagnostics-block"
+        data-testid="runtime-diagnostics"
+      >
         <div className="panel-header panel-header-inline">
-          <h3>Runtime</h3>
+          <h3>Runtime Diagnostics</h3>
         </div>
         <div className="runtime-row muted">Checking service</div>
       </section>
@@ -325,9 +555,12 @@ function RuntimeDetails({ loadState }: { loadState: LoadState }) {
 
   if (loadState.state === 'error') {
     return (
-      <section className="settings-section">
+      <section
+        className="settings-diagnostics-block"
+        data-testid="runtime-diagnostics"
+      >
         <div className="panel-header panel-header-inline">
-          <h3>Runtime</h3>
+          <h3>Runtime Diagnostics</h3>
         </div>
         <div className="runtime-row error-text">{loadState.message}</div>
       </section>
@@ -335,9 +568,12 @@ function RuntimeDetails({ loadState }: { loadState: LoadState }) {
   }
 
   return (
-    <section className="settings-section">
+    <section
+      className="settings-diagnostics-block"
+      data-testid="runtime-diagnostics"
+    >
       <div className="panel-header panel-header-inline">
-        <h3>Runtime</h3>
+        <h3>Runtime Diagnostics</h3>
       </div>
       <dl className="runtime-details">
         <div>
@@ -372,4 +608,37 @@ function RuntimeDetails({ loadState }: { loadState: LoadState }) {
       </dl>
     </section>
   );
+}
+
+function formatAuthType(value: string | null | undefined): string {
+  if (!value) {
+    return 'Not configured';
+  }
+
+  const normalized = value.toLowerCase();
+  if (normalized === 'openai' || normalized === 'use_openai') {
+    return 'OpenAI';
+  }
+
+  if (normalized.includes('oauth')) {
+    return 'OAuth';
+  }
+
+  return value
+    .split(/[-_]/u)
+    .filter(Boolean)
+    .map((part) => `${part[0]?.toUpperCase() ?? ''}${part.slice(1)}`)
+    .join(' ');
+}
+
+function formatProviderLabel(provider: SettingsFormState['provider']): string {
+  return provider === 'coding-plan' ? 'Coding Plan' : 'API key';
+}
+
+function formatSecretStatus(value: boolean | undefined): string {
+  if (value === undefined) {
+    return 'Unknown';
+  }
+
+  return value ? 'Configured' : 'Missing';
 }

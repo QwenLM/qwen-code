@@ -1608,17 +1608,24 @@ textarea:focus {
   display: grid;
   width: min(1120px, 100%);
   min-height: 0;
-  grid-template-columns: minmax(320px, 1.08fr) minmax(280px, 0.92fr);
+  grid-template-columns: minmax(340px, 1.08fr) minmax(280px, 0.92fr);
   gap: 16px;
   margin: 0 auto;
   overflow: auto;
   padding: 18px;
 }
 
-.settings-page-meta {
+.settings-page-main {
   display: grid;
   align-content: start;
   gap: 16px;
+  min-width: 0;
+}
+
+.settings-page-meta {
+  display: grid;
+  align-content: start;
+  gap: 12px;
   min-width: 0;
 }
 
@@ -1632,6 +1639,74 @@ textarea:focus {
 
 .panel-header-inline {
   border-bottom: 0;
+}
+
+.settings-account,
+.settings-panel,
+.permissions-panel {
+  background:
+    linear-gradient(180deg, rgba(85, 166, 255, 0.045), transparent 54%),
+    rgba(238, 244, 239, 0.035);
+}
+
+.settings-kv {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0 14px 14px;
+}
+
+.settings-kv div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.settings-kv dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 820;
+  text-transform: uppercase;
+}
+
+.settings-kv dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 720;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 14px 14px;
+}
+
+.settings-advanced .panel-header-inline {
+  gap: 10px;
+}
+
+.settings-advanced .secondary-button {
+  flex: 0 0 auto;
+}
+
+.settings-advanced-content {
+  display: grid;
+  gap: 10px;
+  padding: 0 12px 12px;
+}
+
+.settings-diagnostics-block {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(8, 10, 11, 0.28);
 }
 
 ::-webkit-scrollbar {

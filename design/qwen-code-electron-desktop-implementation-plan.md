@@ -22,6 +22,100 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Settings Information Architecture
+
+Status: completed in iteration 8.
+
+Goal: make Settings read like product settings instead of a runtime debug
+panel by grouping account, model provider, permission, tools, terminal,
+appearance, and diagnostics controls.
+
+User-visible value: users can find model/API key and permission controls
+without seeing server URLs, Node versions, ACP state, active session IDs, or
+other diagnostics in the default settings view. Advanced diagnostics remain
+available when needed.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/SettingsPage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/settings-information-architecture.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Settings defaults to product sections: Account, Model Providers,
+  Permissions, Tools & MCP, Terminal, Appearance, and Advanced Diagnostics.
+- The default settings view does not visibly expose server URL, Node version,
+  ACP status, health milliseconds, settings path, or active session IDs.
+- Model, Base URL, API key, OAuth, Save, and permission-mode controls remain
+  reachable from the settings page.
+- API key state is shown as configured/missing without rendering saved secret
+  values in the DOM.
+- Advanced Diagnostics can be opened explicitly and then shows runtime,
+  session, and config diagnostic fields.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx src/renderer/stores/settingsStore.test.ts`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, complete the existing composer,
+  review, and commit path, open Settings, assert product sections are visible
+  while diagnostics are hidden, edit model/Base URL/API key, save, assert the
+  saved model appears without secret leakage, open Advanced Diagnostics, and
+  assert runtime diagnostics are available only there.
+- E2E assertions: settings replaces chat/review/terminal, default settings text
+  excludes server URL, Node, ACP, active session ID, health ms, settings path,
+  and the fake API key; Advanced Diagnostics renders the runtime diagnostics
+  after an explicit click; console errors and failed local requests are absent.
+- Diagnostic artifacts: CDP screenshots, settings layout JSON, advanced
+  diagnostics JSON, Electron log, summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained product
+  settings hierarchy and lower-noise surfaces; `electron-desktop-dev` for
+  renderer changes and real Electron CDP verification.
+
+Notes and decisions:
+
+- The prototype treats Settings as supporting product chrome rather than a main
+  debug dashboard, so diagnostics move behind an explicit Advanced action.
+- This slice does not change settings persistence contracts; it reorganizes the
+  renderer around the existing server/settings store APIs and keeps secrets out
+  of rendered text.
+- Settings remains a full workbench page for now, consistent with the previous
+  verified behavior; this slice focuses on information architecture inside the
+  page rather than converting Settings to a modal or drawer.
+- The first CDP run reached Advanced Diagnostics but failed on a harness-only
+  case-sensitive label assertion because diagnostic labels are rendered
+  uppercase by CSS. The harness now asserts diagnostics case-insensitively.
+
+Verification results:
+
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx src/renderer/stores/settingsStore.test.ts`
+  passed with 8 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed after launch through real
+  Electron over CDP.
+- Passing artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T17-40-11-622Z/`.
+
+Next work:
+
+- Continue rich conversation primitives by rendering command approvals and tool
+  activity inline in the timeline rather than only in the permission strip.
+- Tighten settings density and responsive behavior further after the next
+  conversation-first fidelity pass.
+
 ### Completed Slice: Conversation Changed-Files Summary and Protocol Noise Cleanup
 
 Status: completed in iteration 7.

@@ -129,6 +129,10 @@ async function main() {
   await setFieldByLabel('API key', 'sk-desktop-e2e');
   await clickButton('Save');
   await waitForText('qwen-e2e-cdp');
+  await assertSettingsProductState('settings-product-state.json');
+  await clickButton('Advanced Diagnostics');
+  await waitForSelector('[data-testid="runtime-diagnostics"]');
+  await assertSettingsAdvancedDiagnostics('settings-advanced-diagnostics.json');
 
   await clickButton('Conversation');
   await waitForSelector('[data-testid="terminal-drawer"]');
@@ -1082,7 +1086,20 @@ async function assertSettingsPageLayout(fileName) {
       review: rectFor('[data-testid="review-panel"]'),
       settings: rectFor('[data-testid="settings-page"]'),
       modelConfig: rectFor('[data-testid="model-config"]'),
-      terminal: rectFor('[data-testid="terminal-drawer"]')
+      permissionsConfig: rectFor('[data-testid="permissions-config"]'),
+      runtimeDiagnostics: rectFor('[data-testid="runtime-diagnostics"]'),
+      terminal: rectFor('[data-testid="terminal-drawer"]'),
+      settingsText:
+        document.querySelector('[data-testid="settings-page"]')?.innerText ?? '',
+      buttons: [
+        ...document.querySelectorAll(
+          '[data-testid="settings-page"] button',
+        ),
+      ].map((button) =>
+          button.getAttribute('aria-label') ||
+          button.getAttribute('title') ||
+          button.textContent.trim()
+        )
     };
   })()`);
 
@@ -1092,9 +1109,12 @@ async function assertSettingsPageLayout(fileName) {
     'utf8',
   );
 
-  const missing = ['grid', 'settings', 'modelConfig'].filter(
-    (key) => metrics[key] === null,
-  );
+  const missing = [
+    'grid',
+    'settings',
+    'modelConfig',
+    'permissionsConfig',
+  ].filter((key) => metrics[key] === null);
   if (missing.length > 0) {
     throw new Error(`Missing settings layout rects: ${missing.join(', ')}`);
   }
@@ -1124,6 +1144,164 @@ async function assertSettingsPageLayout(fileName) {
     throw new Error(
       `Settings form is too narrow: ${metrics.modelConfig.width}`,
     );
+  }
+
+  for (const expectedSection of [
+    'Account',
+    'Model Providers',
+    'Permissions',
+    'Tools & MCP',
+    'Terminal',
+    'Appearance',
+    'Advanced',
+  ]) {
+    if (!metrics.settingsText.includes(expectedSection)) {
+      throw new Error(
+        `Settings page is missing section ${expectedSection}: ${metrics.settingsText}`,
+      );
+    }
+  }
+
+  for (const hiddenDiagnostic of [
+    'Server',
+    'Node',
+    'ACP',
+    'Health',
+    'session-e2e-1',
+    'Settings path',
+  ]) {
+    if (metrics.settingsText.includes(hiddenDiagnostic)) {
+      throw new Error(
+        `Settings default view exposed diagnostic ${hiddenDiagnostic}: ${metrics.settingsText}`,
+      );
+    }
+  }
+
+  if (/http:\/\/127\.0\.0\.1:/u.test(metrics.settingsText)) {
+    throw new Error(
+      `Settings default view exposed the local server URL: ${metrics.settingsText}`,
+    );
+  }
+
+  if (metrics.runtimeDiagnostics !== null) {
+    throw new Error(
+      'Runtime diagnostics should render only after Advanced Diagnostics opens.',
+    );
+  }
+
+  if (!metrics.buttons.includes('Advanced Diagnostics')) {
+    throw new Error(
+      `Settings page is missing Advanced Diagnostics action; buttons=${metrics.buttons.join(
+        ', ',
+      )}`,
+    );
+  }
+}
+
+async function assertSettingsProductState(fileName) {
+  const snapshot = await evaluate(`(() => {
+    const settings = document.querySelector('[data-testid="settings-page"]');
+    const apiKey = [...document.querySelectorAll('label')]
+      .find((candidate) =>
+        candidate.innerText.trim().toLowerCase().startsWith('api key')
+      )
+      ?.querySelector('input');
+    return {
+      text: settings?.innerText ?? '',
+      apiKeyValue: apiKey?.value ?? '',
+      apiKeyType: apiKey?.getAttribute('type') ?? null,
+      hasSecretText:
+        (settings?.innerText ?? '').includes('sk-desktop-e2e') ||
+        (apiKey?.value ?? '').includes('sk-desktop-e2e'),
+      hasSavedModel: (settings?.innerText ?? '').includes('qwen-e2e-cdp'),
+      hasAdvancedDiagnostics:
+        document.querySelector('[data-testid="runtime-diagnostics"]') !== null
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (!snapshot.hasSavedModel) {
+    throw new Error(
+      `Saved model is not visible in settings state: ${snapshot.text}`,
+    );
+  }
+
+  if (snapshot.apiKeyType !== 'password') {
+    throw new Error('API key input should remain a password field.');
+  }
+
+  if (snapshot.apiKeyValue !== '' || snapshot.hasSecretText) {
+    throw new Error('Settings page exposed a saved API key value.');
+  }
+
+  if (snapshot.hasAdvancedDiagnostics) {
+    throw new Error('Advanced diagnostics opened before the user requested it.');
+  }
+}
+
+async function assertSettingsAdvancedDiagnostics(fileName) {
+  const snapshot = await evaluate(`(() => {
+    const advanced = document.querySelector(
+      '[data-testid="advanced-diagnostics"]'
+    );
+    const runtime = document.querySelector(
+      '[data-testid="runtime-diagnostics"]'
+    );
+    const toggle = document.querySelector(
+      '[data-testid="settings-advanced-toggle"]'
+    );
+    return {
+      text: advanced?.innerText ?? '',
+      runtimeText: runtime?.innerText ?? '',
+      expanded: toggle?.getAttribute('aria-expanded') ?? null,
+      hasSecret:
+        (advanced?.innerText ?? '').includes('sk-desktop-e2e') ||
+        [...document.querySelectorAll('input')].some((input) =>
+          input.value.includes('sk-desktop-e2e')
+        )
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (snapshot.expanded !== 'true') {
+    throw new Error('Advanced Diagnostics toggle should be expanded.');
+  }
+
+  const diagnosticText = snapshot.text.toLowerCase();
+  for (const expectedDiagnostic of [
+    'Runtime Diagnostics',
+    'Server',
+    'Node',
+    'ACP',
+    'Health',
+    'session-e2e-1',
+    'Settings path',
+  ]) {
+    if (!diagnosticText.includes(expectedDiagnostic.toLowerCase())) {
+      throw new Error(
+        `Advanced diagnostics missing ${expectedDiagnostic}: ${snapshot.text}`,
+      );
+    }
+  }
+
+  if (!/http:\/\/127\.0\.0\.1:/u.test(snapshot.runtimeText)) {
+    throw new Error(
+      `Advanced diagnostics did not show the local server URL: ${snapshot.runtimeText}`,
+    );
+  }
+
+  if (snapshot.hasSecret) {
+    throw new Error('Advanced diagnostics exposed the fake API key.');
   }
 }
 
