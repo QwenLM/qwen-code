@@ -1,40 +1,17 @@
 # chat-delete.md — Remove a Session Name from Index
-
 ## Step 0: MUST Ask for Confirmation (DO NOT SKIP)
-
 **⚠️ CRITICAL: Before ANY deletion, you MUST:**
+1. Use the `confirm_action` built-in command to get user confirmation
+2. Only proceed if user confirms with "yes"
+3. If user cancels or responds with anything else, stop and show: `❌ Deletion cancelled`
 
-1. **STOP and output this exact question:**
-   ```
-   ⚠️ Delete session "{{name}}"?
-   Type "yes" to confirm, or anything else to cancel:
-   ```
-2. **WAIT for user's response.** DO NOT proceed until user responds.
-3. **Check the response:**
-   - If response = `"yes"` → Continue to Step 1
-   - If response ≠ `"yes"` → Output `"Delete cancelled."` and STOP immediately
+## Step 1: Validate Name
+1. Validate `{{name}}`: `^[a-zA-Z0-9_.-]+$`, ≤128, ≠ `.`/`..`/`__proto__`/`constructor`/`prototype`. Invalid → error, stop.
 
-**DO NOT skip this step. DO NOT proceed with deletion until the user explicitly types "yes".**
-
----
-
-## Step 1: Validate name
-
-Validate `{{name}}` (Common rules): `^[a-zA-Z0-9_.-]+$`, ≤128, ≠ `.`/`..`/`__proto__`/`constructor`/`prototype`.
-
-## Step 2: Look up and delete
-
-1. Read `.qwen/chat-index.json` (project root, NOT `~/.qwen/`).
-2. If `{{name}}` not found → show list + "Session not in index", STOP.
-3. Remove `{{name}}` from index, write back.
-
-## Step 3: Confirm result
-
-Output: `Session "{{name}}" removed from index.` + note: "Session file NOT deleted."
-
-**Why file NOT deleted?**
-
-- **Safety**: Deletion is irreversible; removing a name reference is low-risk.
-- **Shared reference**: Multiple names can point to the same session. Deleting one name should not destroy data others reference.
-
-**Important**: The index is stored in the **current project's root directory**, NOT the user's home directory.
+## Step 2: Read Index & Delete
+1. Read `.qwen/chat-index.json` (project root).
+2. If `{{name}}` NOT found in index: show `❌ Session "{{name}}" not found`, stop.
+3. Remove `{{name}}` entry from index.
+4. Delete file `sessions/{{name}}.jsonl` (if exists).
+5. Write `.qwen/chat-index.json`.
+6. Done. Show: `✅ Session "{{name}}" deleted`.
