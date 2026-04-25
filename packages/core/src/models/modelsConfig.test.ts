@@ -972,7 +972,12 @@ describe('ModelsConfig', () => {
       generationConfigSources: {
         model: { kind: 'settings', detail: 'settings.model.name' },
         apiKey: { kind: 'settings', detail: 'security.auth.apiKey' },
-        baseUrl: { kind: 'settings', detail: 'security.auth.baseUrl' },
+        baseUrl: {
+          kind: 'modelProviders',
+          authType: 'openai',
+          modelId: 'hot-reload-model',
+          detail: 'baseUrl',
+        },
         apiKeyEnvKey: {
           kind: 'modelProviders',
           authType: 'openai',
@@ -1033,7 +1038,12 @@ describe('ModelsConfig', () => {
       generationConfigSources: {
         model: { kind: 'settings', detail: 'settings.model.name' },
         apiKey: { kind: 'settings', detail: 'security.auth.apiKey' },
-        baseUrl: { kind: 'settings', detail: 'security.auth.baseUrl' },
+        baseUrl: {
+          kind: 'modelProviders',
+          authType: 'openai',
+          modelId: 'url-reload-model',
+          detail: 'baseUrl',
+        },
         apiKeyEnvKey: {
           kind: 'modelProviders',
           authType: 'openai',
@@ -1063,6 +1073,66 @@ describe('ModelsConfig', () => {
     expect(gc.apiKey).toBeUndefined();
     expect(gc.baseUrl).toBe('https://new-api.example.com/v1');
     expect(gc.model).toBe('url-reload-model');
+  });
+
+  it('should NOT preserve apiKey when no-envKey model has baseUrl changed (hot-reload)', () => {
+    // Hot-reload scenario for a model without envKey: baseUrl changes but
+    // modelId stays the same. The old apiKey must NOT be restored.
+    const modelProvidersConfig: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'no-envkey-model',
+          name: 'No EnvKey Model',
+          baseUrl: 'https://old-api.example.com/v1',
+          // no envKey
+        },
+      ],
+    };
+
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig,
+      generationConfig: {
+        model: 'no-envkey-model',
+        apiKey: 'old-settings-key',
+        baseUrl: 'https://old-api.example.com/v1',
+      },
+      // Simulate post-apply state: baseUrl source is modelProviders
+      generationConfigSources: {
+        model: {
+          kind: 'modelProviders',
+          authType: 'openai',
+          modelId: 'no-envkey-model',
+          detail: 'model.id',
+        },
+        apiKey: { kind: 'settings', detail: 'security.auth.apiKey' },
+        baseUrl: {
+          kind: 'modelProviders',
+          authType: 'openai',
+          modelId: 'no-envkey-model',
+          detail: 'baseUrl',
+        },
+      },
+    });
+
+    // Simulate hot-reload: update registry with new baseUrl
+    modelsConfig.reloadModelProvidersConfig({
+      openai: [
+        {
+          id: 'no-envkey-model',
+          name: 'No EnvKey Model',
+          baseUrl: 'https://new-api.example.com/v1',
+        },
+      ],
+    });
+
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'no-envkey-model');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    // baseUrl changed → isProviderChanged is true even without envKey
+    expect(gc.apiKey).toBeUndefined();
+    expect(gc.baseUrl).toBe('https://new-api.example.com/v1');
+    expect(gc.model).toBe('no-envkey-model');
   });
 
   it('should preserve general env var apiKey (e.g. OPENAI_API_KEY) when provider envKey is absent', () => {

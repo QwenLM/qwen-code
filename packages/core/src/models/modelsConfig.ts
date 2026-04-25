@@ -885,12 +885,15 @@ export class ModelsConfig {
         // NOT preserve the previous key — it may belong to a different
         // service. Also detect hot-reload scenarios where the provider
         // config changed in place (same modelId, different envKey/baseUrl)
-        // by comparing fields that applyResolvedModelDefaults sets. On the
-        // very first call (startup), apiKeyEnvKey is still undefined —
-        // treat that as "never applied" and skip the provider check.
-        // (See #3417)
+        // by comparing fields that applyResolvedModelDefaults sets. Use
+        // baseUrl source === 'modelProviders' as the "has been applied"
+        // signal — it covers both envKey and no-envKey models, and avoids
+        // false positives when startup baseUrl differs from registry
+        // default. (See #3417)
+        const hasBeenApplied =
+          this.generationConfigSources['baseUrl']?.kind === 'modelProviders';
         const isProviderChanged =
-          this._generationConfig.apiKeyEnvKey !== undefined &&
+          hasBeenApplied &&
           (this._generationConfig.apiKeyEnvKey !== resolved.envKey ||
             this._generationConfig.baseUrl !== resolved.baseUrl);
         const isUnchanged =
