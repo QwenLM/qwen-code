@@ -1941,6 +1941,10 @@ textarea:focus {
     grid-template-columns: 236px minmax(0, 1fr);
   }
 
+  .workspace-grid-review-open {
+    grid-template-columns: minmax(0, 1fr) minmax(296px, 304px);
+  }
+
   .topbar-meta span {
     max-width: 128px;
   }
@@ -1998,6 +2002,158 @@ textarea:focus {
   .composer-actions .secondary-button {
     min-height: 30px;
     padding: 0 10px;
+  }
+
+  .workspace-grid-review-open .panel-main {
+    grid-template-rows: 42px minmax(0, 1fr) auto auto;
+  }
+
+  .workspace-grid-review-open .chat-header {
+    width: min(100%, calc(100% - 24px));
+  }
+
+  .workspace-grid-review-open .chat-timeline {
+    gap: 10px;
+    padding: 8px 10px 12px;
+  }
+
+  .workspace-grid-review-open .chat-message,
+  .workspace-grid-review-open .chat-plan,
+  .workspace-grid-review-open .conversation-tool-card,
+  .workspace-grid-review-open .conversation-changes-card,
+  .workspace-grid-review-open .conversation-approval-card {
+    padding: 10px;
+  }
+
+  .workspace-grid-review-open .composer {
+    width: calc(100% - 20px);
+    gap: 6px;
+    margin-bottom: 10px;
+    padding: 8px;
+  }
+
+  .workspace-grid-review-open .composer textarea {
+    height: 44px;
+    min-height: 44px;
+    overflow: auto;
+    padding: 5px 7px;
+  }
+
+  .workspace-grid-review-open .composer-control-row,
+  .workspace-grid-review-open .composer-context,
+  .workspace-grid-review-open .composer-actions {
+    gap: 5px;
+  }
+
+  .workspace-grid-review-open .composer-control-row {
+    align-items: flex-start;
+  }
+
+  .workspace-grid-review-open .composer-icon-button {
+    width: 26px;
+    height: 26px;
+  }
+
+  .workspace-grid-review-open .composer-chip,
+  .workspace-grid-review-open .composer-context-note,
+  .workspace-grid-review-open .composer-disabled-reason {
+    max-width: 100px;
+    min-height: 26px;
+  }
+
+  .workspace-grid-review-open .composer-chip,
+  .workspace-grid-review-open .composer-context-note {
+    padding: 0 7px;
+  }
+
+  .workspace-grid-review-open .composer-chip-project {
+    max-width: 128px;
+  }
+
+  .workspace-grid-review-open .composer-select-label select {
+    min-width: 92px;
+    max-width: 116px;
+    min-height: 26px;
+    padding: 0 22px 0 7px;
+  }
+
+  .workspace-grid-review-open .composer-actions .primary-button,
+  .workspace-grid-review-open .composer-actions .secondary-button {
+    min-height: 28px;
+    padding: 0 8px;
+  }
+
+  .workspace-grid-review-open .panel-review .review-summary {
+    margin: 8px;
+  }
+
+  .workspace-grid-review-open .review-summary {
+    padding: 10px;
+  }
+
+  .workspace-grid-review-open .runtime-details {
+    gap: 8px;
+  }
+
+  .workspace-grid-review-open .runtime-details-compact {
+    padding-top: 8px;
+  }
+
+  .workspace-grid-review-open .review-tabs button {
+    min-height: 30px;
+  }
+
+  .workspace-grid-review-open .review-actions,
+  .workspace-grid-review-open .commit-box {
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .workspace-grid-review-open .review-actions .secondary-button,
+  .workspace-grid-review-open .commit-box .primary-button,
+  .workspace-grid-review-open .file-review-actions .secondary-button,
+  .workspace-grid-review-open .diff-hunk-actions .secondary-button,
+  .workspace-grid-review-open .review-comment-box .secondary-button {
+    min-height: 28px;
+    padding: 0 8px;
+  }
+
+  .workspace-grid-review-open .changed-files {
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .workspace-grid-review-open .changed-files summary {
+    min-height: 32px;
+    padding: 7px 8px;
+  }
+
+  .workspace-grid-review-open .file-review-actions,
+  .workspace-grid-review-open .diff-hunk-actions {
+    gap: 5px;
+    padding: 6px 8px;
+  }
+
+  .workspace-grid-review-open .diff-hunks {
+    gap: 6px;
+    padding: 6px;
+  }
+
+  .workspace-grid-review-open .diff-hunk-header {
+    min-height: 30px;
+    padding: 7px 8px;
+  }
+
+  .workspace-grid-review-open .changed-files pre,
+  .workspace-grid-review-open .diff-hunk pre {
+    max-height: 140px;
+    padding: 8px;
+  }
+
+  .workspace-grid-review-open .review-comment-box {
+    gap: 6px;
+    padding: 8px;
   }
 
   .settings-page-content {

@@ -104,6 +104,10 @@ async function main() {
   await waitForText('README.md');
   await assertReviewDrawerLayout('review-drawer-layout.json');
   await saveScreenshot('review-drawer.png');
+  await setElectronWindowBounds(target.id, compactWindowBounds);
+  await assertCompactReviewDrawerLayout('compact-review-drawer.json');
+  await saveScreenshot('compact-review-drawer.png');
+  await setElectronWindowBounds(target.id, defaultWindowBounds);
   await waitForText('Stage Hunk');
   await assertReviewSafetyTerminology('review-safety-initial.json');
   await clickButton('Discard All');
@@ -1647,6 +1651,379 @@ async function assertReviewDrawerLayout(fileName) {
     throw new Error(
       `Review drawer document should fit one viewport; body scrollHeight=${metrics.document.bodyScrollHeight}, viewport=${metrics.viewport.height}`,
     );
+  }
+}
+
+async function assertCompactReviewDrawerLayout(fileName) {
+  await waitFor(
+    'compact review drawer viewport',
+    async () => {
+      const viewport = await evaluate(`({
+        width: window.innerWidth,
+        height: window.innerHeight
+      })`);
+      return (
+        viewport.width >= 940 &&
+        viewport.width <= 1000 &&
+        viewport.height >= 600 &&
+        viewport.height <= 680
+      );
+    },
+    10_000,
+  );
+
+  const metrics = await evaluate(`(() => {
+    const rectFor = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const overflows = (selector) => {
+      const element = document.querySelector(selector);
+      return element ? element.scrollWidth > element.clientWidth + 4 : false;
+    };
+    const isHorizontallyContained = (child, parent, tolerance = 1) =>
+      Boolean(
+        child &&
+        parent &&
+        child.left >= parent.left - tolerance &&
+        child.right <= parent.right + tolerance
+      );
+    const review = document.querySelector('[data-testid="review-panel"]');
+    const changedFileRows = [
+      ...document.querySelectorAll('.changed-files details')
+    ].map((element) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        text: element.querySelector('summary')?.textContent.trim() ?? '',
+        left: rect.left,
+        right: rect.right,
+        width: rect.width,
+        scrollWidth: element.scrollWidth,
+        clientWidth: element.clientWidth
+      };
+    });
+    const reviewButtons = [
+      ...document.querySelectorAll(
+        '[data-testid="review-panel"] button'
+      )
+    ].map((button) => ({
+      label:
+        button.getAttribute('aria-label') ||
+        button.getAttribute('title') ||
+        button.textContent.trim(),
+      width: button.getBoundingClientRect().width,
+      height: button.getBoundingClientRect().height
+    }));
+
+    return {
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight
+      },
+      document: {
+        bodyScrollWidth: document.body.scrollWidth,
+        bodyScrollHeight: document.body.scrollHeight
+      },
+      shell: rectFor('[data-testid="desktop-workspace"]'),
+      sidebar: rectFor('[data-testid="project-sidebar"]'),
+      topbar: rectFor('[data-testid="workspace-topbar"]'),
+      grid: rectFor('[data-testid="workspace-grid"]'),
+      chat: rectFor('[data-testid="chat-thread"]'),
+      timeline: rectFor('.chat-timeline'),
+      review: rectFor('[data-testid="review-panel"]'),
+      reviewSummary: rectFor('.panel-review .review-summary'),
+      reviewActions: rectFor('.review-actions'),
+      changedFiles: rectFor('.changed-files'),
+      firstChangedFile: rectFor('.changed-files details'),
+      firstDiffHunk: rectFor('.diff-hunk'),
+      firstDiffPre: rectFor('.diff-hunk pre'),
+      commitBox: rectFor('.commit-box'),
+      settings: rectFor('[data-testid="settings-page"]'),
+      composer: rectFor('[data-testid="message-composer"]'),
+      terminal: rectFor('[data-testid="terminal-drawer"]'),
+      terminalBody: rectFor('[data-testid="terminal-body"]'),
+      terminalExpanded:
+        document
+          .querySelector('[data-testid="terminal-toggle"]')
+          ?.getAttribute('aria-expanded') ?? null,
+      reviewScroll: review
+        ? {
+            clientHeight: review.clientHeight,
+            scrollHeight: review.scrollHeight,
+            scrollTop: review.scrollTop
+          }
+        : null,
+      topbarActions: Array.from(
+        document.querySelectorAll(
+          '[data-testid="workspace-topbar"] .topbar-icon-button'
+        )
+      ).map((button) => ({
+        label: button.getAttribute('aria-label') || '',
+        width: button.getBoundingClientRect().width,
+        height: button.getBoundingClientRect().height
+      })),
+      reviewButtons,
+      changedFileRows,
+      composerTextareaHeight:
+        document
+          .querySelector('[aria-label="Message"]')
+          ?.getBoundingClientRect().height ?? null,
+      overflow: {
+        shell: overflows('[data-testid="desktop-workspace"]'),
+        topbar: overflows('[data-testid="workspace-topbar"]'),
+        grid: overflows('[data-testid="workspace-grid"]'),
+        chat: overflows('[data-testid="chat-thread"]'),
+        timeline: overflows('.chat-timeline'),
+        review: overflows('[data-testid="review-panel"]'),
+        reviewSummary: overflows('.panel-review .review-summary'),
+        reviewActions: overflows('.review-actions'),
+        changedFiles: overflows('.changed-files'),
+        firstChangedFile: overflows('.changed-files details'),
+        firstDiffHunk: overflows('.diff-hunk'),
+        firstDiffPre: overflows('.diff-hunk pre'),
+        commitBox: overflows('.commit-box'),
+        composer: overflows('[data-testid="message-composer"]'),
+        composerContext: overflows('.composer-context'),
+        composerActions: overflows('.composer-actions')
+      },
+      containment: {
+        reviewWidthInGrid: isHorizontallyContained(
+          rectFor('[data-testid="review-panel"]'),
+          rectFor('[data-testid="workspace-grid"]')
+        ),
+        chatWidthInGrid: isHorizontallyContained(
+          rectFor('[data-testid="chat-thread"]'),
+          rectFor('[data-testid="workspace-grid"]')
+        ),
+        composerWidthInChat: isHorizontallyContained(
+          rectFor('[data-testid="message-composer"]'),
+          rectFor('[data-testid="chat-thread"]')
+        ),
+        summaryWidthInReview: isHorizontallyContained(
+          rectFor('.panel-review .review-summary'),
+          rectFor('[data-testid="review-panel"]')
+        ),
+        commitBoxWidthInReview: isHorizontallyContained(
+          rectFor('.commit-box'),
+          rectFor('[data-testid="review-panel"]')
+        )
+      },
+      hasSegmentedTabs: document.querySelector('.topbar-nav') !== null,
+      bodyText: document.body.innerText
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(metrics, null, 2)}\n`,
+    'utf8',
+  );
+
+  const requiredRects = [
+    'shell',
+    'sidebar',
+    'topbar',
+    'grid',
+    'chat',
+    'timeline',
+    'review',
+    'reviewSummary',
+    'reviewActions',
+    'changedFiles',
+    'firstChangedFile',
+    'firstDiffHunk',
+    'firstDiffPre',
+    'commitBox',
+    'composer',
+    'terminal',
+  ];
+  const missing = requiredRects.filter((key) => metrics[key] === null);
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing compact review drawer rects: ${missing.join(', ')}`,
+    );
+  }
+
+  if (metrics.viewport.width < 940 || metrics.viewport.width > 1000) {
+    throw new Error(
+      `Compact review viewport width is unexpected: ${metrics.viewport.width}`,
+    );
+  }
+
+  if (metrics.viewport.height < 600 || metrics.viewport.height > 680) {
+    throw new Error(
+      `Compact review viewport height is unexpected: ${metrics.viewport.height}`,
+    );
+  }
+
+  if (metrics.document.bodyScrollWidth > metrics.viewport.width + 4) {
+    throw new Error(
+      `Compact review caused horizontal body overflow: ${JSON.stringify(
+        metrics.document,
+      )}`,
+    );
+  }
+
+  if (metrics.document.bodyScrollHeight > metrics.viewport.height + 4) {
+    throw new Error(
+      `Compact review document should fit one viewport: ${JSON.stringify(
+        metrics.document,
+      )}`,
+    );
+  }
+
+  if (metrics.settings !== null || metrics.hasSegmentedTabs) {
+    throw new Error('Compact review should not render settings or tab chrome.');
+  }
+
+  if (metrics.sidebar.width < 232 || metrics.sidebar.width > 264) {
+    throw new Error(
+      `Compact review sidebar width should stay narrow: ${metrics.sidebar.width}`,
+    );
+  }
+
+  if (metrics.topbar.height < 50 || metrics.topbar.height > 76) {
+    throw new Error(
+      `Compact review topbar height should stay slim: ${metrics.topbar.height}`,
+    );
+  }
+
+  const topbarLabels = metrics.topbarActions.map((action) => action.label);
+  for (const expectedLabel of [
+    'Conversation',
+    'Close Changes',
+    'Refresh Git',
+    'Settings',
+  ]) {
+    if (!topbarLabels.includes(expectedLabel)) {
+      throw new Error(
+        `Compact review missing topbar action ${expectedLabel}: ${topbarLabels.join(
+          ', ',
+        )}`,
+      );
+    }
+  }
+
+  const oversizedTopbarActions = metrics.topbarActions.filter(
+    (action) => action.width > 40 || action.height > 40,
+  );
+  if (oversizedTopbarActions.length > 0) {
+    throw new Error(
+      `Compact review topbar actions are too large: ${JSON.stringify(
+        oversizedTopbarActions,
+      )}`,
+    );
+  }
+
+  if (metrics.review.width < 292 || metrics.review.width > 332) {
+    throw new Error(
+      `Compact review drawer width is unexpected: ${metrics.review.width}`,
+    );
+  }
+
+  if (metrics.chat.width <= metrics.review.width) {
+    throw new Error(
+      `Compact conversation should remain wider than review: chat=${metrics.chat.width}, review=${metrics.review.width}`,
+    );
+  }
+
+  if (Math.abs(metrics.chat.top - metrics.review.top) > 1) {
+    throw new Error('Compact review should align with conversation top.');
+  }
+
+  if (Math.abs(metrics.chat.bottom - metrics.review.bottom) > 1) {
+    throw new Error('Compact review should share conversation height.');
+  }
+
+  if (metrics.terminalExpanded !== 'false' || metrics.terminalBody !== null) {
+    throw new Error('Compact review should keep Terminal collapsed.');
+  }
+
+  if (metrics.terminal.height < 44 || metrics.terminal.height > 82) {
+    throw new Error(
+      `Compact review terminal strip height is unexpected: ${metrics.terminal.height}`,
+    );
+  }
+
+  if (metrics.composer.height > 176) {
+    throw new Error(
+      `Compact review composer should stay bounded: ${metrics.composer.height}`,
+    );
+  }
+
+  if (
+    metrics.composerTextareaHeight === null ||
+    metrics.composerTextareaHeight > 62
+  ) {
+    throw new Error(
+      `Compact review textarea should stay short: ${metrics.composerTextareaHeight}`,
+    );
+  }
+
+  for (const [key, contained] of Object.entries(metrics.containment)) {
+    if (!contained) {
+      throw new Error(`Compact review containment failed: ${key}`);
+    }
+  }
+
+  for (const [key, hasOverflow] of Object.entries(metrics.overflow)) {
+    if (hasOverflow) {
+      throw new Error(`Compact review element overflowed: ${key}`);
+    }
+  }
+
+  for (const row of metrics.changedFileRows) {
+    if (row.scrollWidth > row.clientWidth + 4) {
+      throw new Error(
+        `Compact review changed-file row overflowed: ${JSON.stringify(row)}`,
+      );
+    }
+    if (
+      row.left < metrics.review.left - 1 ||
+      row.right > metrics.review.right + 1
+    ) {
+      throw new Error(
+        `Compact review changed-file row escaped drawer: ${JSON.stringify(
+          row,
+        )}`,
+      );
+    }
+  }
+
+  const labels = metrics.reviewButtons.map((button) => button.label);
+  for (const expectedLabel of [
+    'Discard All',
+    'Stage All',
+    'Open',
+    'Discard File',
+    'Stage File',
+    'Discard Hunk',
+    'Stage Hunk',
+    'Add Comment',
+    'Commit',
+  ]) {
+    if (!labels.includes(expectedLabel)) {
+      throw new Error(
+        `Compact review missing action ${expectedLabel}: ${labels.join(
+          ', ',
+        )}`,
+      );
+    }
+  }
+
+  if (!metrics.bodyText.includes('README.md')) {
+    throw new Error('Compact review should show the changed README.md row.');
   }
 }
 

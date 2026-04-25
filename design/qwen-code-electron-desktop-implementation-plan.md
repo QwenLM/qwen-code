@@ -22,6 +22,112 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Compact Review Drawer CDP Coverage
+
+Status: completed in iteration 14.
+
+Goal: extend the real Electron CDP harness so opening the review drawer at the
+compact desktop width still leaves the conversation, composer, topbar, and
+collapsed terminal usable.
+
+User-visible value: users on smaller desktop windows can inspect changed files
+without the review drawer turning the first viewport into a cramped diff
+dashboard or hiding the task composer.
+
+Expected files:
+
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `packages/desktop/src/renderer/styles.css`
+- `.qwen/e2e-tests/electron-desktop/compact-review-drawer.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The CDP harness opens Changes, resizes the real Electron window to the
+  compact desktop bounds near 960x640, and asserts review-drawer geometry.
+- The compact review drawer remains a supporting surface, with the
+  conversation still wider than the drawer and the composer contained inside
+  the chat panel.
+- The collapsed terminal strip remains docked and closed while review is open.
+- Topbar action buttons remain compact icon controls with accessible labels.
+- The review drawer, changed-file rows, diff hunks, review actions, and commit
+  controls do not cause horizontal document or panel overflow.
+- The window is restored to the default desktop size before the rest of the
+  smoke path continues.
+
+Verification:
+
+- Unit/component test command: no renderer unit changes expected unless CSS
+  fixes require component hooks.
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, send a prompt, approve the fake
+  command request, wait for the dense assistant response and changed-files
+  summary, open Changes, assert the default review drawer, resize the window to
+  compact bounds, assert compact review/diff/composer geometry and overflow
+  constraints, capture screenshot and JSON artifacts, restore the default
+  window size, then continue the existing review/commit/settings/terminal path.
+- E2E assertions: viewport is near 960 px, sidebar stays compact, review width
+  is bounded, chat remains wider than review, composer height stays bounded,
+  review rows and diff hunks stay inside the drawer, commit controls remain
+  reachable, terminal is collapsed, and console errors/failed local requests are
+  absent.
+- Diagnostic artifacts: compact review drawer screenshot and JSON metrics,
+  plus existing CDP screenshots, Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained compact
+  drawer density and conversation-first hierarchy; `electron-desktop-dev` for
+  renderer/CDP real Electron verification; `brainstorming` applied by selecting
+  the smallest continuation from the recorded compact review gap and prototype
+  evidence rather than adding new product scope.
+
+Notes and decisions:
+
+- The prototype keeps review as a supporting surface, so compact review uses a
+  304 px drawer at the 960 px desktop breakpoint instead of replacing the
+  conversation or stacking into a dashboard.
+- The first CDP run exposed a real compact issue: with the review drawer open,
+  the composer textarea still honored the three-row intrinsic height and
+  measured about 71 px. The review-open compact CSS now pins the textarea to
+  44 px with internal scrolling, reducing the composer from about 152 px to
+  125 px in the passing artifact.
+- Review content can scroll inside the drawer at compact height. The
+  first-viewport contract is that the drawer, changed-file rows, diff hunks,
+  actions, and commit controls remain width-bounded without forcing document
+  scroll or collapsing the conversation.
+- A self-review cleanup briefly broke the existing compact conversation harness
+  by renaming a shared helper in the wrong scope; the helper name was restored
+  before the final CDP pass.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` first failed with
+  `Compact review textarea should stay short: 70.890625`, producing diagnostic
+  artifacts at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T20-04-36-025Z/`.
+- After the scoped compact textarea fix,
+  `cd packages/desktop && npm run e2e:cdp` passed after launch through real
+  Electron over CDP, including the compact review drawer resize path.
+- Passing artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T22-35-19-250Z/`.
+
+Next work:
+
+- Continue prototype fidelity by reducing remaining card heaviness in the
+  conversation and review drawer, especially the strong boxed message/activity
+  surfaces visible in compact screenshots.
+- Add a focused visual/layout assertion for long branch names and long model
+  names with review open, since compact review now relies on aggressive chip
+  truncation.
+
 ### Completed Slice: Compact Dense Conversation CDP Coverage
 
 Status: completed in iteration 13.
