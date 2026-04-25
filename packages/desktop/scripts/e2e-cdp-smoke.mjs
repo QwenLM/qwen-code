@@ -25,11 +25,14 @@ const artifactRoot = join(
   'electron-desktop',
   'artifacts',
 );
+const defaultWindowBounds = { width: 1240, height: 820 };
+const compactWindowBounds = { width: 960, height: 640 };
 
 const consoleErrors = [];
 const failedRequests = [];
 
 let appProcess;
+let browserCdp;
 let cdp;
 let artifactDir;
 let workspaceDir;
@@ -54,6 +57,8 @@ async function main() {
   });
 
   const target = await waitForCdpTarget(cdpPort);
+  const browserTarget = await waitForBrowserCdp(cdpPort);
+  browserCdp = await CdpClient.connect(browserTarget.webSocketDebuggerUrl);
   cdp = await CdpClient.connect(target.webSocketDebuggerUrl);
   cdp.onEvent((event) => collectBrowserEvent(event));
 
@@ -81,6 +86,12 @@ async function main() {
   await saveScreenshot('resolved-tool-activity.png');
   await assertAssistantMessageActions('assistant-message-actions.json');
   await saveScreenshot('assistant-message-actions.png');
+  await setElectronWindowBounds(target.id, compactWindowBounds);
+  await assertCompactDenseConversationLayout(
+    'compact-dense-conversation.json',
+  );
+  await saveScreenshot('compact-dense-conversation.png');
+  await setElectronWindowBounds(target.id, defaultWindowBounds);
   await clickButton('Copy Response');
   await waitForText('Copied response.');
   await clickButton('Retry Last Prompt');
@@ -367,6 +378,31 @@ async function waitForCdpTarget(port) {
 
   throw new Error(
     `Timed out waiting for Electron CDP target on port ${port}: ${
+      lastError instanceof Error ? lastError.message : 'no response'
+    }`,
+  );
+}
+
+async function waitForBrowserCdp(port) {
+  const deadline = Date.now() + 20_000;
+  let lastError;
+
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json/version`);
+      const target = await response.json();
+      if (typeof target.webSocketDebuggerUrl === 'string') {
+        return target;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+
+    await delay(250);
+  }
+
+  throw new Error(
+    `Timed out waiting for Electron browser CDP target on port ${port}: ${
       lastError instanceof Error ? lastError.message : 'no response'
     }`,
   );
@@ -1088,6 +1124,349 @@ async function assertAssistantMessageActions(fileName) {
     ) {
       throw new Error(
         `Assistant file chip escaped the message: ${JSON.stringify(chipRect)}`,
+      );
+    }
+  }
+}
+
+async function assertCompactDenseConversationLayout(fileName) {
+  await waitFor(
+    'compact dense conversation viewport',
+    async () => {
+      const viewport = await evaluate(`({
+        width: window.innerWidth,
+        height: window.innerHeight
+      })`);
+      return (
+        viewport.width >= 940 &&
+        viewport.width <= 1000 &&
+        viewport.height >= 600 &&
+        viewport.height <= 680
+      );
+    },
+    10_000,
+  );
+
+  await waitForSelector('[data-testid="assistant-file-references"]');
+  const snapshot = await evaluate(`(() => {
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const isContained = (child, parent, tolerance = 1) =>
+      Boolean(
+        child &&
+        parent &&
+        child.left >= parent.left - tolerance &&
+        child.right <= parent.right + tolerance
+      );
+    const overflows = (element) =>
+      element ? element.scrollWidth > element.clientWidth + 4 : false;
+    const message = [...document.querySelectorAll('[data-testid="assistant-message"]')]
+      .find((candidate) =>
+        candidate.innerText.includes('E2E fake ACP response received')
+      );
+    const timeline = document.querySelector('.chat-timeline');
+    const summary = document.querySelector(
+      '[data-testid="conversation-changes-summary"]'
+    );
+    const composer = document.querySelector('[data-testid="message-composer"]');
+    const terminal = document.querySelector('[data-testid="terminal-drawer"]');
+    const terminalBody = document.querySelector('[data-testid="terminal-body"]');
+    const terminalToggle = document.querySelector(
+      '[data-testid="terminal-toggle"]'
+    );
+
+    const preScroll = {
+      summaryRect: rectFor(summary),
+      timelineRect: rectFor(timeline),
+      composerRect: rectFor(composer),
+      terminalRect: rectFor(terminal)
+    };
+
+    message?.scrollIntoView({ block: 'center', inline: 'nearest' });
+
+    const fileReferences = message?.querySelector(
+      '[data-testid="assistant-file-references"]'
+    );
+    const actions = message?.querySelector(
+      '[data-testid="assistant-message-actions"]'
+    );
+    const messageRect = rectFor(message);
+    const timelineRect = rectFor(timeline);
+    const composerRect = rectFor(composer);
+    const chipRects = fileReferences
+      ? [
+          ...fileReferences.querySelectorAll(
+            'button, .message-file-reference-overflow'
+          )
+        ].map((chip) => rectFor(chip))
+      : [];
+    const actionRects = actions
+      ? [...actions.querySelectorAll('button')].map((button) =>
+          rectFor(button)
+        )
+      : [];
+
+    return {
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight
+      },
+      document: {
+        scrollWidth: document.documentElement.scrollWidth,
+        bodyScrollWidth: document.body.scrollWidth,
+        bodyScrollHeight: document.body.scrollHeight
+      },
+      shell: rectFor(document.querySelector('[data-testid="desktop-workspace"]')),
+      sidebar: rectFor(document.querySelector('[data-testid="project-sidebar"]')),
+      topbar: rectFor(document.querySelector('[data-testid="workspace-topbar"]')),
+      grid: rectFor(document.querySelector('[data-testid="workspace-grid"]')),
+      chat: rectFor(document.querySelector('[data-testid="chat-thread"]')),
+      timeline: timelineRect,
+      message: messageRect,
+      fileReferences: rectFor(fileReferences),
+      actions: rectFor(actions),
+      summary: rectFor(summary),
+      composer: composerRect,
+      terminal: rectFor(terminal),
+      terminalExpanded: terminalToggle?.getAttribute('aria-expanded') ?? null,
+      terminalBodyPresent: terminalBody !== null,
+      preScroll,
+      fileReferenceLabels: fileReferences
+        ? [...fileReferences.querySelectorAll('button')].map(
+            (button) => button.getAttribute('aria-label') || ''
+          )
+        : [],
+      actionLabels: actions
+        ? [...actions.querySelectorAll('button')].map(
+            (button) => button.getAttribute('aria-label') || ''
+          )
+        : [],
+      chipRects,
+      actionRects,
+      summaryVisibleBeforeAssistantScroll: Boolean(
+        preScroll.summaryRect &&
+        preScroll.timelineRect &&
+        preScroll.composerRect &&
+        preScroll.summaryRect.top >= preScroll.timelineRect.top - 1 &&
+        preScroll.summaryRect.bottom <= preScroll.composerRect.top + 1
+      ),
+      summaryContainedBeforeAssistantScroll: isContained(
+        preScroll.summaryRect,
+        preScroll.timelineRect
+      ),
+      messageContained: isContained(messageRect, timelineRect),
+      actionsContained: isContained(rectFor(actions), messageRect),
+      composerContained: isContained(composerRect, timelineRect),
+      terminalDocked: Boolean(
+        rectFor(terminal) &&
+        preScroll.composerRect &&
+        rectFor(terminal).top >= preScroll.composerRect.bottom - 1
+      ),
+      overflow: {
+        shell: overflows(document.querySelector('[data-testid="desktop-workspace"]')),
+        topbar: overflows(document.querySelector('[data-testid="workspace-topbar"]')),
+        timeline: overflows(timeline),
+        message: overflows(message),
+        fileReferences: overflows(fileReferences),
+        composer: overflows(composer),
+        composerContext: overflows(document.querySelector('.composer-context')),
+        composerActions: overflows(document.querySelector('.composer-actions'))
+      }
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (snapshot.viewport.width < 940 || snapshot.viewport.width > 1000) {
+    throw new Error(
+      `Compact viewport width is unexpected: ${snapshot.viewport.width}`,
+    );
+  }
+
+  if (snapshot.viewport.height < 600 || snapshot.viewport.height > 680) {
+    throw new Error(
+      `Compact viewport height is unexpected: ${snapshot.viewport.height}`,
+    );
+  }
+
+  const missing = [
+    'shell',
+    'sidebar',
+    'topbar',
+    'grid',
+    'chat',
+    'timeline',
+    'message',
+    'fileReferences',
+    'actions',
+    'composer',
+    'terminal',
+  ].filter((key) => snapshot[key] === null);
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing compact dense conversation rects: ${missing.join(', ')}`,
+    );
+  }
+
+  if (snapshot.document.bodyScrollWidth > snapshot.viewport.width + 4) {
+    throw new Error(
+      `Compact layout caused horizontal body overflow: ${JSON.stringify(
+        snapshot.document,
+      )}`,
+    );
+  }
+
+  if (snapshot.sidebar.width < 232 || snapshot.sidebar.width > 264) {
+    throw new Error(
+      `Compact sidebar width should stay narrow: ${snapshot.sidebar.width}`,
+    );
+  }
+
+  if (snapshot.topbar.height < 50 || snapshot.topbar.height > 76) {
+    throw new Error(
+      `Compact topbar height should stay slim: ${snapshot.topbar.height}`,
+    );
+  }
+
+  if (snapshot.terminalExpanded !== 'false' || snapshot.terminalBodyPresent) {
+    throw new Error(
+      'Compact dense conversation should keep Terminal collapsed.',
+    );
+  }
+
+  if (snapshot.terminal.height < 44 || snapshot.terminal.height > 82) {
+    throw new Error(
+      `Compact terminal strip height is unexpected: ${snapshot.terminal.height}`,
+    );
+  }
+
+  if (!snapshot.summaryVisibleBeforeAssistantScroll) {
+    await writeFile(
+      join(artifactDir, 'compact-summary-visibility-note.json'),
+      `${JSON.stringify(
+        {
+          note: 'Compact height can require timeline scrolling; summary must remain bounded and scrollable.',
+          preScroll: snapshot.preScroll,
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
+  }
+
+  if (!snapshot.summaryContainedBeforeAssistantScroll) {
+    throw new Error('Changed-files summary escaped the compact timeline.');
+  }
+
+  if (snapshot.composer.height > 154) {
+    throw new Error(
+      `Compact composer should not crowd the conversation: ${snapshot.composer.height}`,
+    );
+  }
+
+  if (!snapshot.messageContained) {
+    throw new Error('Dense assistant message escaped the compact timeline.');
+  }
+
+  if (!snapshot.actionsContained) {
+    throw new Error('Assistant action row escaped the compact message.');
+  }
+
+  if (!snapshot.composerContained) {
+    throw new Error('Composer escaped the compact timeline width.');
+  }
+
+  if (!snapshot.terminalDocked) {
+    throw new Error('Collapsed terminal strip is not docked below composer.');
+  }
+
+  for (const expectedLabel of [
+    'Open README.md:1',
+    'Open packages/desktop/src/renderer/App.tsx:12:5',
+    'Open .env.example',
+    'Open Dockerfile',
+    'Open docs/guide.mdx',
+    'Open src/App.vue',
+  ]) {
+    if (!snapshot.fileReferenceLabels.includes(expectedLabel)) {
+      throw new Error(
+        `Compact dense assistant chips missing ${expectedLabel}: ${snapshot.fileReferenceLabels.join(
+          ', ',
+        )}`,
+      );
+    }
+  }
+
+  for (const expectedAction of [
+    'Copy Response',
+    'Retry Last Prompt',
+    'Open Changes',
+  ]) {
+    if (!snapshot.actionLabels.includes(expectedAction)) {
+      throw new Error(
+        `Compact assistant actions missing ${expectedAction}: ${snapshot.actionLabels.join(
+          ', ',
+        )}`,
+      );
+    }
+  }
+
+  for (const [key, hasOverflow] of Object.entries(snapshot.overflow)) {
+    if (hasOverflow) {
+      throw new Error(`Compact layout element overflowed: ${key}`);
+    }
+  }
+
+  for (const chipRect of snapshot.chipRects) {
+    if (!chipRect) {
+      throw new Error('Compact assistant chip geometry is missing.');
+    }
+
+    if (chipRect.width > 282) {
+      throw new Error(
+        `Compact assistant chip is too wide: ${JSON.stringify(chipRect)}`,
+      );
+    }
+
+    if (
+      chipRect.left < snapshot.message.left ||
+      chipRect.right > snapshot.message.right + 1 ||
+      chipRect.left < snapshot.timeline.left ||
+      chipRect.right > snapshot.timeline.right + 1
+    ) {
+      throw new Error(
+        `Compact assistant chip escaped the message: ${JSON.stringify(
+          chipRect,
+        )}`,
+      );
+    }
+  }
+
+  for (const actionRect of snapshot.actionRects) {
+    if (!actionRect) {
+      throw new Error('Compact assistant action geometry is missing.');
+    }
+
+    if (actionRect.width > 40 || actionRect.height > 40) {
+      throw new Error(
+        `Compact assistant action is too large: ${JSON.stringify(actionRect)}`,
       );
     }
   }
@@ -1909,6 +2288,68 @@ async function setFieldByLabel(label, value) {
   }
 }
 
+async function setElectronWindowBounds(targetId, bounds) {
+  const windowCdp = browserCdp ?? cdp;
+  let fallbackError = null;
+  try {
+    const { windowId } = await windowCdp.send('Browser.getWindowForTarget', {
+      targetId,
+    });
+    await windowCdp.send('Browser.setWindowBounds', {
+      windowId,
+      bounds: { windowState: 'normal' },
+    });
+    await windowCdp.send('Browser.setWindowBounds', {
+      windowId,
+      bounds,
+    });
+  } catch (error) {
+    fallbackError = error instanceof Error ? error.message : String(error);
+    await evaluate(`(() => {
+      window.resizeTo(${bounds.width}, ${bounds.height});
+      return true;
+    })()`);
+  }
+  await waitFor(
+    `Electron window bounds ${bounds.width}x${bounds.height}`,
+    async () => {
+      const viewport = await evaluate(`({
+        width: window.innerWidth,
+        height: window.innerHeight
+      })`);
+      return (
+        viewport.width >= bounds.width - 24 &&
+        viewport.width <= bounds.width + 24 &&
+        viewport.height >= bounds.height - 40 &&
+        viewport.height <= bounds.height + 40
+      );
+    },
+    10_000,
+  );
+  if (fallbackError) {
+    const viewport = await evaluate(`({
+      width: window.innerWidth,
+      height: window.innerHeight
+    })`);
+    await writeFile(
+      join(
+        artifactDir,
+        `window-resize-fallback-${bounds.width}x${bounds.height}.json`,
+      ),
+      `${JSON.stringify(
+        {
+          requested: bounds,
+          viewport,
+          error: fallbackError,
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
+  }
+}
+
 async function saveScreenshot(fileName) {
   const screenshot = await cdp.send('Page.captureScreenshot', {
     format: 'png',
@@ -2188,6 +2629,7 @@ try {
   throw error;
 } finally {
   cdp?.close();
+  browserCdp?.close();
   if (appProcess && !appProcess.killed) {
     appProcess.kill();
   }

@@ -50,6 +50,6 @@
 
 ## Known Uncovered Risk
 
-This harness verifies the default 1240 px Electron window. A follow-up compact
-viewport pass should assert the same dense message state near the lower
-supported desktop width.
+The default 1240 px window is covered here. The compact desktop width follow-up
+is now covered by
+`.qwen/e2e-tests/electron-desktop/compact-dense-conversation.md`.

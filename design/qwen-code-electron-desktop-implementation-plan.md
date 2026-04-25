@@ -22,6 +22,108 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Compact Dense Conversation CDP Coverage
+
+Status: completed in iteration 13.
+
+Goal: extend the real Electron CDP harness so the dense assistant message state
+is asserted at the lower supported desktop width, not only at the default
+1240 px window size.
+
+User-visible value: long assistant prose, file reference chips, action rows,
+changed-file summaries, composer controls, sidebar rows, and the collapsed
+terminal remain usable in compact desktop windows without horizontal overflow
+or composer overlap.
+
+Expected files:
+
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `packages/desktop/src/renderer/styles.css`
+- `.qwen/e2e-tests/electron-desktop/compact-dense-conversation.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The CDP harness resizes the real Electron window to the app minimum
+  960x640-ish compact desktop size after the dense fake ACP assistant response
+  is visible.
+- The compact viewport still shows the workbench landmarks, compact sidebar,
+  slim topbar, conversation, assistant message, file chips, message actions,
+  changed-files summary, composer, and collapsed terminal strip.
+- Assistant file chips and action buttons stay inside the assistant message and
+  timeline; document width does not exceed the viewport.
+- Composer controls wrap inside the composer instead of overflowing, and the
+  composer remains contained above the terminal strip.
+- The inline changed-files summary remains bounded in the timeline without
+  horizontal overflow; at compact height it may require normal timeline
+  scrolling rather than simultaneous visibility with the assistant card.
+- The window is restored to the default desktop size before the rest of the
+  smoke path continues.
+
+Verification:
+
+- Unit/component test command: no renderer unit changes expected.
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, send a prompt, approve the fake
+  command request, wait for the dense assistant response, assert the default
+  dense assistant layout, resize the Electron window to the compact desktop
+  bounds, assert compact geometry and overflow constraints, capture screenshot
+  and JSON artifacts, restore the default window size, then continue the
+  existing review/settings/terminal workflow.
+- E2E assertions: compact viewport width is near 960 px; sidebar stays compact;
+  topbar remains slim enough for the viewport; dense assistant chips,
+  assistant actions, changed-files summary, composer, and terminal strip remain
+  bounded; compact composer height stays below 154 px; console errors/failed
+  local requests are absent.
+- Diagnostic artifacts: compact dense conversation screenshot and JSON metrics,
+  plus existing CDP screenshots, Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained compact
+  density and overflow expectations; `electron-desktop-dev` for real Electron
+  CDP window resizing and verification; `brainstorming` applied by selecting
+  the smallest continuation from the recorded next-work item rather than
+  introducing new product scope.
+
+Notes and decisions:
+
+- Electron 41 in this test environment does not expose
+  `Browser.getWindowForTarget` through the remote debugger. The harness first
+  attempts the browser-level CDP API and then falls back to `window.resizeTo`,
+  recording a `window-resize-fallback-*.json` artifact when the fallback is
+  used.
+- The first compact run exposed a real density issue: the composer grew to
+  about 176 px high at the compact viewport. The CSS now shortens the compact
+  textarea and chips/selectors at the 960 px breakpoint, bringing the compact
+  composer to about 127 px in the passing CDP artifact.
+- At the compact height, the dense assistant card and changed-files summary can
+  require normal timeline scrolling. The contract is that both remain bounded,
+  discoverable, and free of horizontal overflow while the composer and terminal
+  stay docked.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed after launch through real
+  Electron over CDP, including the compact dense conversation resize path.
+- Passing artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T18-31-38-896Z/`.
+
+Next work:
+
+- Continue prototype fidelity by reducing remaining card heaviness in the
+  conversation and changed-files summary so the compact viewport reads closer
+  to `home.jpg`.
+- Add a compact review-drawer CDP assertion so the 960 px width also proves the
+  conversation and review drawer remain usable together.
+
 ### Completed Slice: Dense Assistant File Reference Overflow
 
 Status: completed in iteration 12.

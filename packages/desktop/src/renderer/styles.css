@@ -1945,6 +1945,61 @@ textarea:focus {
     max-width: 128px;
   }
 
+  .composer {
+    width: min(900px, calc(100% - 28px));
+    gap: 6px;
+    margin-bottom: 12px;
+    padding: 8px;
+  }
+
+  .composer textarea {
+    min-height: 54px;
+    padding: 6px 8px;
+  }
+
+  .composer-control-row,
+  .composer-context,
+  .composer-actions {
+    gap: 6px;
+  }
+
+  .composer-icon-button {
+    width: 28px;
+    height: 28px;
+    font-size: 16px;
+  }
+
+  .composer-chip,
+  .composer-context-note,
+  .composer-disabled-reason {
+    max-width: 138px;
+    min-height: 28px;
+    font-size: 11px;
+  }
+
+  .composer-chip,
+  .composer-context-note {
+    padding: 0 8px;
+  }
+
+  .composer-chip-project {
+    max-width: 176px;
+  }
+
+  .composer-select-label select {
+    min-width: 104px;
+    max-width: 148px;
+    min-height: 28px;
+    padding: 0 24px 0 8px;
+    font-size: 11px;
+  }
+
+  .composer-actions .primary-button,
+  .composer-actions .secondary-button {
+    min-height: 30px;
+    padding: 0 10px;
+  }
+
   .settings-page-content {
     grid-template-columns: 1fr;
   }
