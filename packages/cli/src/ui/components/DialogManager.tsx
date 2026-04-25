@@ -382,6 +382,7 @@ export const DialogManager = ({
         onSelect={uiActions.handleResume}
         onCancel={uiActions.closeResumeDialog}
         initialSessions={uiState.resumeMatchedSessions}
+        enablePreview
       />
     );
   }
