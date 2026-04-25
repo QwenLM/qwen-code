@@ -28,6 +28,7 @@ import type {
   LspReference,
   LspSymbolInformation,
   LspWorkspaceEdit,
+  LspServerStatusInfo,
 } from './types.js';
 
 import type { NativeLspService } from './NativeLspService.js';
@@ -50,6 +51,28 @@ export class NativeLspClient implements LspClient {
    * @param service - The NativeLspService instance to delegate calls to
    */
   constructor(private readonly service: NativeLspService) {}
+
+  /**
+   * Get the status of all configured LSP servers.
+   */
+  getServerStatus(): LspServerStatusInfo[] {
+    const statusMap = this.service.getStatus();
+    const handles = this.service.getServerHandles();
+    const result: LspServerStatusInfo[] = [];
+
+    for (const [name, status] of statusMap) {
+      const handle = handles.get(name);
+      result.push({
+        name,
+        status,
+        command: handle?.config.command,
+        languages: handle?.config.languages ?? [],
+        error: handle?.error?.message,
+      });
+    }
+
+    return result;
+  }
 
   /**
    * Search for symbols across the workspace.
