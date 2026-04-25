@@ -825,6 +825,7 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalWidth,
     terminalHeight,
     midTurnDrainRef,
+    historyManager.removeItemsById,
   );
 
   // Now that streamingState is available, keep isIdleRef in sync and

@@ -139,6 +139,35 @@ describe('useHistoryManager', () => {
     expect(result.current.history).toEqual([]);
   });
 
+  it('should remove items by ID', () => {
+    const { result } = renderHook(() => useHistory());
+    const timestamp = Date.now();
+    const itemData1: Omit<HistoryItem, 'id'> = {
+      type: 'user',
+      text: 'Keep me',
+    };
+    const itemData2: Omit<HistoryItem, 'id'> = {
+      type: 'gemini',
+      text: 'Remove me',
+    };
+
+    let id1!: number;
+    let id2!: number;
+    act(() => {
+      id1 = result.current.addItem(itemData1, timestamp);
+      id2 = result.current.addItem(itemData2, timestamp + 1);
+    });
+
+    expect(result.current.history).toHaveLength(2);
+
+    act(() => {
+      result.current.removeItemsById([id2]);
+    });
+
+    expect(result.current.history).toHaveLength(1);
+    expect(result.current.history[0]).toEqual({ ...itemData1, id: id1 });
+  });
+
   it('should not add consecutive duplicate user messages', () => {
     const { result } = renderHook(() => useHistory());
     const timestamp = Date.now();

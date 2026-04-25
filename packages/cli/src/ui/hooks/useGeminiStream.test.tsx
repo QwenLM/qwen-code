@@ -10,6 +10,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { useGeminiStream, classifyApiError } from './useGeminiStream.js';
 import * as atCommandProcessor from './atCommandProcessor.js';
+import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
 import type {
   TrackedToolCall,
   TrackedCompletedToolCall,
@@ -2268,6 +2269,445 @@ describe('useGeminiStream', () => {
       expect.any(String), // Argument 3: The prompt_id string
       { type: SendMessageType.UserQuery }, // Argument 4: The options
     );
+  });
+
+  describe('Retry Handling', () => {
+    it('should discard streamed content on Retry to avoid duplicates', async () => {
+      let idCounter = 0;
+      mockAddItem.mockImplementation(() => {
+        idCounter += 1;
+        return idCounter;
+      });
+
+      const mockOnEditorClose = vi.fn();
+      const mockRemoveHistoryItemsById = vi.fn();
+      let continueRetry!: () => void;
+      const retryBlocker = new Promise<void>((resolve) => {
+        continueRetry = resolve;
+      });
+
+      (findLastSafeSplitPoint as unknown as Mock).mockImplementationOnce(
+        () => 3,
+      );
+
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'abcdef',
+          };
+          await retryBlocker;
+          yield {
+            type: ServerGeminiEventType.Retry,
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'abcdef',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          mockOnEditorClose,
+          () => {},
+          () => {},
+          80,
+          24,
+          undefined,
+          mockRemoveHistoryItemsById,
+        ),
+      );
+
+      let request!: Promise<void>;
+      await act(async () => {
+        request = result.current.submitQuery('test query');
+      });
+
+      try {
+        await waitFor(() => {
+          expect(mockAddItem).toHaveBeenCalledWith(
+            expect.objectContaining({ type: 'gemini', text: 'abc' }),
+            expect.any(Number),
+          );
+        });
+
+        await act(async () => {
+          continueRetry();
+          await request;
+        });
+
+        expect(mockRemoveHistoryItemsById).toHaveBeenCalledWith([2]);
+        expect(mockOnEditorClose).toHaveBeenCalledTimes(1);
+
+        const fullResponses = mockAddItem.mock.calls.filter(
+          (call) => call[0].type === 'gemini' && call[0].text === 'abcdef',
+        );
+        expect(fullResponses).toHaveLength(1);
+      } finally {
+        continueRetry();
+        await request;
+      }
+    });
+
+    it('should discard content finalized by citation before Retry', async () => {
+      let idCounter = 0;
+      mockAddItem.mockImplementation(() => {
+        idCounter += 1;
+        return idCounter;
+      });
+
+      const mockOnEditorClose = vi.fn();
+      const mockRemoveHistoryItemsById = vi.fn();
+
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'truncated response',
+          };
+          yield {
+            type: ServerGeminiEventType.Citation,
+            value: 'Citations:\n(Source) https://example.com',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'MAX_TOKENS', usageMetadata: undefined },
+          };
+          yield {
+            type: ServerGeminiEventType.Retry,
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'expanded response',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          mockOnEditorClose,
+          () => {},
+          () => {},
+          80,
+          24,
+          undefined,
+          mockRemoveHistoryItemsById,
+        ),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery('test query');
+      });
+
+      expect(mockRemoveHistoryItemsById).toHaveBeenCalledWith([2, 3, 4]);
+      expect(mockOnEditorClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('should only discard static chunks from the current retry attempt', async () => {
+      let idCounter = 0;
+      mockAddItem.mockImplementation(() => {
+        idCounter += 1;
+        return idCounter;
+      });
+
+      const mockOnEditorClose = vi.fn();
+      const mockRemoveHistoryItemsById = vi.fn();
+      let continueRetry!: () => void;
+      const retryBlocker = new Promise<void>((resolve) => {
+        continueRetry = resolve;
+      });
+
+      (findLastSafeSplitPoint as unknown as Mock)
+        .mockImplementationOnce(() => 3)
+        .mockImplementationOnce(() => 3);
+
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'abcdef',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'ghijkl',
+          };
+          await retryBlocker;
+          yield {
+            type: ServerGeminiEventType.Retry,
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'mnopqr',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          mockOnEditorClose,
+          () => {},
+          () => {},
+          80,
+          24,
+          undefined,
+          mockRemoveHistoryItemsById,
+        ),
+      );
+
+      let request!: Promise<void>;
+      await act(async () => {
+        request = result.current.submitQuery('test query');
+      });
+
+      try {
+        await waitFor(() => {
+          expect(mockAddItem).toHaveBeenCalledWith(
+            expect.objectContaining({ type: 'gemini', text: 'ghi' }),
+            expect.any(Number),
+          );
+        });
+
+        await act(async () => {
+          continueRetry();
+          await request;
+        });
+
+        expect(mockRemoveHistoryItemsById).toHaveBeenCalledTimes(1);
+        expect(mockRemoveHistoryItemsById).toHaveBeenCalledWith([4]);
+        expect(mockOnEditorClose).toHaveBeenCalledTimes(1);
+      } finally {
+        continueRetry();
+        await request;
+      }
+    });
+
+    it('should discard content finalized by Finished before production-path Retry', async () => {
+      let idCounter = 0;
+      mockAddItem.mockImplementation(() => {
+        idCounter += 1;
+        return idCounter;
+      });
+
+      const mockOnEditorClose = vi.fn();
+      const mockRemoveHistoryItemsById = vi.fn();
+
+      (findLastSafeSplitPoint as unknown as Mock).mockImplementationOnce(
+        () => 3,
+      );
+
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'abcdef',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+          yield {
+            type: ServerGeminiEventType.Retry,
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'abcdef',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          mockOnEditorClose,
+          () => {},
+          () => {},
+          80,
+          24,
+          undefined,
+          mockRemoveHistoryItemsById,
+        ),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery('test query');
+      });
+
+      expect(mockRemoveHistoryItemsById).toHaveBeenCalledTimes(1);
+      expect(mockRemoveHistoryItemsById).toHaveBeenCalledWith([2, 3]);
+      expect(mockOnEditorClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('should preserve retry discard IDs across concurrent /btw commands', async () => {
+      let idCounter = 0;
+      mockAddItem.mockImplementation(() => {
+        idCounter += 1;
+        return idCounter;
+      });
+
+      const mockOnEditorClose = vi.fn();
+      const mockRemoveHistoryItemsById = vi.fn();
+      let continueMainStream!: () => void;
+      const mainStreamBlocker = new Promise<void>((resolve) => {
+        continueMainStream = resolve;
+      });
+
+      (findLastSafeSplitPoint as unknown as Mock).mockImplementationOnce(
+        () => 3,
+      );
+
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'abcdef',
+          };
+          await mainStreamBlocker;
+          yield {
+            type: ServerGeminiEventType.Retry,
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'abcdef',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+      mockHandleSlashCommand.mockImplementation(async (command) => {
+        if (command === '/btw quick side question') {
+          return { type: 'handled' };
+        }
+        return false;
+      });
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          mockOnEditorClose,
+          () => {},
+          () => {},
+          80,
+          24,
+          undefined,
+          mockRemoveHistoryItemsById,
+        ),
+      );
+
+      let mainRequest!: Promise<void>;
+      await act(async () => {
+        mainRequest = result.current.submitQuery('test query');
+      });
+
+      try {
+        await waitFor(() => {
+          expect(mockAddItem).toHaveBeenCalledWith(
+            expect.objectContaining({ type: 'gemini', text: 'abc' }),
+            expect.any(Number),
+          );
+        });
+
+        await act(async () => {
+          await result.current.submitQuery('/btw quick side question');
+        });
+
+        await act(async () => {
+          continueMainStream();
+          await mainRequest;
+        });
+
+        expect(mockRemoveHistoryItemsById).toHaveBeenCalledWith([2]);
+        expect(mockOnEditorClose).toHaveBeenCalledTimes(1);
+      } finally {
+        continueMainStream();
+        await mainRequest;
+      }
+    });
   });
 
   describe('Thought Reset', () => {

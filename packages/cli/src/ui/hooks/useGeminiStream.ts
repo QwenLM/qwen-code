@@ -179,6 +179,12 @@ enum StreamProcessingStatus {
 
 const EDIT_TOOL_NAMES = new Set(['replace', 'write_file']);
 const STREAM_UPDATE_THROTTLE_MS = 60;
+const RETRY_DISCARD_HISTORY_ITEM_TYPES = new Set<HistoryItemWithoutId['type']>([
+  'gemini',
+  'gemini_content',
+  'gemini_thought',
+  'gemini_thought_content',
+]);
 
 type BufferedStreamEvent =
   | { kind: 'content'; value: string }
@@ -218,6 +224,7 @@ export const useGeminiStream = (
   terminalWidth: number,
   terminalHeight: number,
   midTurnDrainRef?: React.RefObject<(() => string[]) | null>,
+  removeHistoryItemsById?: UseHistoryManagerReturn['removeItemsById'],
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -681,6 +688,7 @@ export const useGeminiStream = (
       eventValue: ContentEvent['value'],
       currentGeminiMessageBuffer: string,
       userMessageTimestamp: number,
+      retryDiscardHistoryItemIds: Set<number>,
     ): string => {
       if (turnCancelledRef.current) {
         // Prevents additional output after a user initiated cancel.
@@ -695,7 +703,17 @@ export const useGeminiStream = (
         pendingHistoryItemRef.current?.type !== 'gemini_content'
       ) {
         if (pendingHistoryItemRef.current) {
-          addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+          const id = addItem(
+            pendingHistoryItemRef.current,
+            userMessageTimestamp,
+          );
+          if (
+            RETRY_DISCARD_HISTORY_ITEM_TYPES.has(
+              pendingHistoryItemRef.current.type,
+            )
+          ) {
+            retryDiscardHistoryItemIds.add(id);
+          }
         }
         setPendingHistoryItem({ type: 'gemini', text: '' });
         newGeminiMessageBuffer = eventValue;
@@ -720,7 +738,7 @@ export const useGeminiStream = (
         // broken up so that there are more "statically" rendered.
         const beforeText = newGeminiMessageBuffer.substring(0, splitPoint);
         const afterText = newGeminiMessageBuffer.substring(splitPoint);
-        addItem(
+        const id = addItem(
           {
             type: pendingHistoryItemRef.current?.type as
               | 'gemini'
@@ -729,6 +747,7 @@ export const useGeminiStream = (
           },
           userMessageTimestamp,
         );
+        retryDiscardHistoryItemIds.add(id);
         setPendingHistoryItem({ type: 'gemini_content', text: afterText });
         newGeminiMessageBuffer = afterText;
       }
@@ -756,6 +775,7 @@ export const useGeminiStream = (
       eventValue: ThoughtSummary,
       currentThoughtBuffer: string,
       userMessageTimestamp: number,
+      retryDiscardHistoryItemIds: Set<number>,
     ): string => {
       if (turnCancelledRef.current) {
         return '';
@@ -778,7 +798,17 @@ export const useGeminiStream = (
       if (!isPendingThought) {
         // If there's a pending non-thought item, finalize it first
         if (pendingHistoryItemRef.current) {
-          addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+          const id = addItem(
+            pendingHistoryItemRef.current,
+            userMessageTimestamp,
+          );
+          if (
+            RETRY_DISCARD_HISTORY_ITEM_TYPES.has(
+              pendingHistoryItemRef.current.type,
+            )
+          ) {
+            retryDiscardHistoryItemIds.add(id);
+          }
         }
         setPendingHistoryItem({ type: 'gemini_thought', text: '' });
       }
@@ -801,13 +831,14 @@ export const useGeminiStream = (
       } else {
         const beforeText = newThoughtBuffer.substring(0, splitPoint);
         const afterText = newThoughtBuffer.substring(splitPoint);
-        addItem(
+        const id = addItem(
           {
             type: nextPendingType,
             text: beforeText,
           },
           userMessageTimestamp,
         );
+        retryDiscardHistoryItemIds.add(id);
         setPendingHistoryItem({
           type: 'gemini_thought_content',
           text: afterText,
@@ -922,25 +953,59 @@ export const useGeminiStream = (
   );
 
   const handleCitationEvent = useCallback(
-    (text: string, userMessageTimestamp: number) => {
+    (
+      text: string,
+      userMessageTimestamp: number,
+      retryDiscardHistoryItemIds: Set<number>,
+    ) => {
       if (!showCitations(settings)) {
         return;
       }
 
       if (pendingHistoryItemRef.current) {
-        addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        const id = addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        if (
+          RETRY_DISCARD_HISTORY_ITEM_TYPES.has(
+            pendingHistoryItemRef.current.type,
+          )
+        ) {
+          retryDiscardHistoryItemIds.add(id);
+        }
         setPendingHistoryItem(null);
       }
-      addItem({ type: MessageType.INFO, text }, userMessageTimestamp);
+      const id = addItem(
+        { type: MessageType.INFO, text },
+        userMessageTimestamp,
+      );
+      retryDiscardHistoryItemIds.add(id);
     },
     [addItem, pendingHistoryItemRef, setPendingHistoryItem, settings],
   );
 
   const handleFinishedEvent = useCallback(
-    (event: ServerGeminiFinishedEvent, userMessageTimestamp: number) => {
+    (
+      event: ServerGeminiFinishedEvent,
+      userMessageTimestamp: number,
+      retryDiscardHistoryItemIds: Set<number>,
+    ) => {
       const finishReason = event.value.reason;
       if (!finishReason) {
         return;
+      }
+
+      if (
+        finishReason !== FinishReason.MAX_TOKENS &&
+        pendingHistoryItemRef.current
+      ) {
+        const id = addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        if (
+          RETRY_DISCARD_HISTORY_ITEM_TYPES.has(
+            pendingHistoryItemRef.current.type,
+          )
+        ) {
+          retryDiscardHistoryItemIds.add(id);
+        }
+        setPendingHistoryItem(null);
       }
 
       const finishReasonMessages: Record<FinishReason, string | undefined> = {
@@ -970,20 +1035,26 @@ export const useGeminiStream = (
 
       const message = finishReasonMessages[finishReason];
       if (message) {
-        addItem(
+        const id = addItem(
           {
             type: 'info',
             text: `⚠️  ${message}`,
           },
           userMessageTimestamp,
         );
+        retryDiscardHistoryItemIds.add(id);
       }
       // Only clear auto-retry countdown errors (those with active timer)
       if (retryCountdownTimerRef.current) {
         clearRetryCountdown();
       }
     },
-    [addItem, clearRetryCountdown],
+    [
+      addItem,
+      clearRetryCountdown,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+    ],
   );
 
   const handleChatCompressionEvent = useCallback(
@@ -1130,6 +1201,8 @@ export const useGeminiStream = (
       let geminiMessageBuffer = '';
       let thoughtBuffer = '';
       const toolCallRequests: ToolCallRequestInfo[] = [];
+      const retryDiscardHistoryItemIds = new Set<number>();
+      let waitingForRetryAfterFinished = false;
       const bufferedEvents: BufferedStreamEvent[] = [];
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -1169,6 +1242,7 @@ export const useGeminiStream = (
               mergedContent,
               geminiMessageBuffer,
               userMessageTimestamp,
+              retryDiscardHistoryItemIds,
             );
             continue;
           }
@@ -1192,6 +1266,7 @@ export const useGeminiStream = (
             mergedThought,
             thoughtBuffer,
             userMessageTimestamp,
+            retryDiscardHistoryItemIds,
           );
         }
       };
@@ -1211,6 +1286,13 @@ export const useGeminiStream = (
       try {
         for await (const event of stream) {
           dualOutput?.processEvent(event);
+          if (
+            waitingForRetryAfterFinished &&
+            event.type !== ServerGeminiEventType.Retry
+          ) {
+            retryDiscardHistoryItemIds.clear();
+            waitingForRetryAfterFinished = false;
+          }
           switch (event.type) {
             case ServerGeminiEventType.Thought:
               // If the thought has a subject, it's a discrete status update rather than
@@ -1268,11 +1350,19 @@ export const useGeminiStream = (
               handleFinishedEvent(
                 event as ServerGeminiFinishedEvent,
                 userMessageTimestamp,
+                retryDiscardHistoryItemIds,
               );
+              waitingForRetryAfterFinished = true;
+              geminiMessageBuffer = '';
+              thoughtBuffer = '';
               break;
             case ServerGeminiEventType.Citation:
               flushBufferedStreamEvents();
-              handleCitationEvent(event.value, userMessageTimestamp);
+              handleCitationEvent(
+                event.value,
+                userMessageTimestamp,
+                retryDiscardHistoryItemIds,
+              );
               break;
             case ServerGeminiEventType.LoopDetected:
               flushBufferedStreamEvents();
@@ -1281,6 +1371,7 @@ export const useGeminiStream = (
               loopDetectedRef.current = true;
               break;
             case ServerGeminiEventType.Retry:
+              waitingForRetryAfterFinished = false;
               // On fresh restart (escalation / rate-limit / invalid stream),
               // clear pending content and buffers to discard the failed attempt.
               // On continuation (recovery), keep the pending gemini item AND
@@ -1293,10 +1384,20 @@ export const useGeminiStream = (
                 if (pendingHistoryItemRef.current) {
                   setPendingHistoryItem(null);
                 }
+                setThought(null);
+                if (
+                  removeHistoryItemsById &&
+                  retryDiscardHistoryItemIds.size > 0
+                ) {
+                  removeHistoryItemsById([...retryDiscardHistoryItemIds]);
+                  onEditorClose();
+                }
+                retryDiscardHistoryItemIds.clear();
                 geminiMessageBuffer = '';
                 thoughtBuffer = '';
               } else {
                 flushBufferedStreamEvents();
+                retryDiscardHistoryItemIds.clear();
               }
               // Always discard tool call requests from the truncated/failed
               // attempt to prevent duplicate execution after escalation or
@@ -1377,6 +1478,8 @@ export const useGeminiStream = (
       handleStopHookLoopEvent,
       addItem,
       dualOutput,
+      onEditorClose,
+      removeHistoryItemsById,
     ],
   );
 
