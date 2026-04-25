@@ -760,7 +760,7 @@ describe('AuthDialog Custom API Key Wizard', () => {
 
     await vi.waitFor(() => {
       const frame = lastFrame();
-      expect(frame).toContain('Custom API Key · Protocol');
+      expect(frame).toContain('Step 1/6 · Protocol');
       expect(frame).toContain('OpenAI-compatible');
       expect(frame).toContain('Anthropic-compatible');
       expect(frame).toContain('Gemini-compatible');
@@ -821,8 +821,7 @@ describe('AuthDialog Custom API Key Wizard', () => {
 
     await vi.waitFor(() => {
       const frame = lastFrame();
-      expect(frame).toContain('Custom API Key · Base URL');
-      expect(frame).toContain('OpenAI-compatible');
+      expect(frame).toContain('Step 2/6 · Base URL');
       expect(frame).toContain('Enter the API endpoint');
     });
 
@@ -894,11 +893,15 @@ describe('AuthDialog Custom API Key Wizard', () => {
     stdin.write('qwen/qwen3-coder,gpt-4.1');
     await wait();
     stdin.write('\r');
+    await wait(); // -> advanced config
+
+    // Press Enter to skip advanced config (use defaults)
+    stdin.write('\r');
     await wait(); // -> review
 
     await vi.waitFor(() => {
       const frame = lastFrame();
-      expect(frame).toContain('Custom API Key · Review');
+      expect(frame).toContain('Step 6/6 · Review');
       expect(frame).toContain('The following JSON will be saved');
       expect(frame).toContain('QWEN_CUSTOM_API_KEY_OPENAI');
       expect(frame).toContain('qwen/qwen3-coder');
@@ -967,7 +970,11 @@ describe('AuthDialog Custom API Key Wizard', () => {
     stdin.write('model-1,model-2');
     await wait();
     stdin.write('\r');
-    await wait(); // model IDs
+    await wait(); // model IDs -> advanced config
+
+    // Press Enter to skip advanced config (use defaults)
+    stdin.write('\r');
+    await wait(); // advanced config -> review
 
     // We're now at review screen. Verify and press Enter
     await vi.waitFor(() => {
@@ -984,6 +991,192 @@ describe('AuthDialog Custom API Key Wizard', () => {
         'https://api.openai.com/v1',
         'sk-test',
         'model-1,model-2',
+        undefined,
+      );
+    });
+
+    unmount();
+  });
+
+  it('shows advanced config screen after entering model IDs', async () => {
+    const settings = createStandardSettings();
+    const handleCustomApiKeySubmit = vi.fn();
+
+    const mockUIState = {
+      authError: null,
+      pendingAuthType: undefined,
+    } as UIState;
+
+    const mockUIActions = {
+      handleAuthSelect: vi.fn(),
+      handleCodingPlanSubmit: vi.fn(),
+      handleAlibabaStandardSubmit: vi.fn(),
+      handleOpenRouterSubmit: vi.fn(),
+      handleCustomApiKeySubmit,
+      onAuthError: vi.fn(),
+      handleRetryLastPrompt: vi.fn(),
+    } as unknown as UIActions;
+
+    const mockConfig = {
+      getAuthType: vi.fn(() => undefined),
+      getContentGeneratorConfig: vi.fn(() => ({})),
+    } as unknown as Config;
+
+    const { stdin, lastFrame, unmount } = renderWithProviders(
+      <UIStateContext.Provider value={mockUIState}>
+        <UIActionsContext.Provider value={mockUIActions}>
+          <AuthDialog />
+        </UIActionsContext.Provider>
+      </UIStateContext.Provider>,
+      { settings, config: mockConfig },
+    );
+    await wait();
+
+    // Quick nav: main -> api-key-type-select -> custom -> protocol -> base-url -> api-key -> model-id -> advanced
+    stdin.write('\u001b[B');
+    await wait();
+    stdin.write('\u001b[B');
+    await wait();
+    stdin.write('\r');
+    await wait();
+    stdin.write('\u001b[B');
+    await wait();
+    stdin.write('\r');
+    await wait();
+    stdin.write('\r');
+    await wait();
+    stdin.write('\r');
+    await wait();
+    stdin.write('sk-test');
+    await wait();
+    stdin.write('\r');
+    await wait();
+    stdin.write('model-1,model-2');
+    await wait();
+    stdin.write('\r');
+    await wait();
+
+    // Should be at advanced config
+    await vi.waitFor(() => {
+      const frame = lastFrame();
+      expect(frame).toContain('Step 5/6 · Advanced Config');
+      expect(frame).toContain(
+        'Optional: configure advanced generation settings',
+      );
+      expect(frame).toContain('Enable thinking');
+      expect(frame).toContain('Enable modality');
+      expect(frame).toContain('Enter to continue');
+    });
+
+    unmount();
+  });
+
+  it('passes generationConfig when advanced options are toggled', async () => {
+    const settings = createStandardSettings();
+    const handleCustomApiKeySubmit = vi.fn().mockResolvedValue(undefined);
+
+    const mockUIState = {
+      authError: null,
+      pendingAuthType: undefined,
+    } as UIState;
+
+    const mockUIActions = {
+      handleAuthSelect: vi.fn(),
+      handleCodingPlanSubmit: vi.fn(),
+      handleAlibabaStandardSubmit: vi.fn(),
+      handleOpenRouterSubmit: vi.fn(),
+      handleCustomApiKeySubmit,
+      onAuthError: vi.fn(),
+      handleRetryLastPrompt: vi.fn(),
+    } as unknown as UIActions;
+
+    const mockConfig = {
+      getAuthType: vi.fn(() => undefined),
+      getContentGeneratorConfig: vi.fn(() => ({})),
+    } as unknown as Config;
+
+    const { stdin, lastFrame, unmount } = renderWithProviders(
+      <UIStateContext.Provider value={mockUIState}>
+        <UIActionsContext.Provider value={mockUIActions}>
+          <AuthDialog />
+        </UIActionsContext.Provider>
+      </UIStateContext.Provider>,
+      { settings, config: mockConfig },
+    );
+    await wait();
+
+    // Quick nav to advanced config
+    stdin.write('\u001b[B');
+    await wait();
+    stdin.write('\u001b[B');
+    await wait();
+    stdin.write('\r');
+    await wait();
+    stdin.write('\u001b[B');
+    await wait();
+    stdin.write('\r');
+    await wait();
+    stdin.write('\r');
+    await wait();
+    stdin.write('\r');
+    await wait();
+    stdin.write('sk-test');
+    await wait();
+    stdin.write('\r');
+    await wait();
+    stdin.write('model-1');
+    await wait();
+    stdin.write('\r');
+    await wait();
+
+    // At advanced config screen
+    await vi.waitFor(() => {
+      const frame = lastFrame();
+      expect(frame).toContain('Step 5/6 · Advanced Config');
+    });
+
+    // Toggle thinking (press Space — thinking is initially focused)
+    stdin.write(' ');
+    await wait();
+
+    // Navigate down to modality, toggle (press ↓ then Space)
+    stdin.write('\u001b[B');
+    await wait();
+    stdin.write(' ');
+    await wait();
+
+    // Press Enter to continue to review
+    stdin.write('\r');
+    await wait();
+
+    // Verify review includes generationConfig
+    await vi.waitFor(() => {
+      const frame = lastFrame();
+      expect(frame).toContain('"generationConfig"');
+      expect(frame).toContain('"enable_thinking"');
+      expect(frame).toContain('"image": true');
+      expect(frame).toContain('"video": true');
+      expect(frame).toContain('"audio": true');
+    });
+
+    // Press Enter to save
+    stdin.write('\r');
+    await wait();
+
+    await vi.waitFor(() => {
+      expect(handleCustomApiKeySubmit).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'https://api.openai.com/v1',
+        'sk-test',
+        'model-1',
+        {
+          enableThinking: true,
+          multimodal: {
+            image: true,
+            video: true,
+            audio: true,
+          },
+        },
       );
     });
 

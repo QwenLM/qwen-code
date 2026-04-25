@@ -61,6 +61,15 @@ export interface UIActions {
     baseUrl: string,
     apiKey: string,
     modelIdsInput: string,
+    generationConfig?: {
+      enableThinking?: boolean;
+      multimodal?: {
+        image?: boolean;
+        video?: boolean;
+        audio?: boolean;
+      };
+      maxTokens?: number;
+    },
   ) => Promise<void>;
   setAuthState: (state: AuthState) => void;
   onAuthError: (error: string | null) => void;

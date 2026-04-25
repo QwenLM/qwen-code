@@ -738,6 +738,15 @@ export const useAuthCommand = (
       baseUrl: string,
       apiKey: string,
       modelIdsInput: string,
+      generationConfig?: {
+        enableThinking?: boolean;
+        multimodal?: {
+          image?: boolean;
+          video?: boolean;
+          audio?: boolean;
+        };
+        maxTokens?: number;
+      },
     ) => {
       try {
         setIsAuthenticating(true);
@@ -777,12 +786,46 @@ export const useAuthCommand = (
         );
         process.env[generatedEnvKey] = trimmedApiKey;
 
+        // Build generationConfig if any option is set
+        let genConfig: ProviderModelConfig['generationConfig'] | undefined;
+        if (generationConfig) {
+          const hasThinking = generationConfig.enableThinking === true;
+          const hasMultimodal =
+            generationConfig.multimodal &&
+            (generationConfig.multimodal.image === true ||
+              generationConfig.multimodal.video === true ||
+              generationConfig.multimodal.audio === true);
+          const hasMaxTokens =
+            generationConfig.maxTokens !== undefined &&
+            generationConfig.maxTokens > 0;
+
+          if (hasThinking || hasMultimodal || hasMaxTokens) {
+            genConfig = {};
+            if (hasMultimodal) {
+              genConfig.modalities = {
+                image: generationConfig.multimodal!.image ?? false,
+                video: generationConfig.multimodal!.video ?? false,
+                audio: generationConfig.multimodal!.audio ?? false,
+              };
+            }
+            if (hasThinking) {
+              genConfig.extra_body = { enable_thinking: true };
+            }
+            if (hasMaxTokens) {
+              genConfig.samplingParams = {
+                max_tokens: generationConfig.maxTokens,
+              };
+            }
+          }
+        }
+
         // Build new model configs
         const newConfigs: ProviderModelConfig[] = modelIds.map((modelId) => ({
           id: modelId,
           name: modelId,
           baseUrl: trimmedBaseUrl,
           envKey: generatedEnvKey,
+          ...(genConfig ? { generationConfig: genConfig } : {}),
         }));
 
         // Merge with existing configs: replace same generatedEnvKey, preserve rest

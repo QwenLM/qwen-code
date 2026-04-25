@@ -71,6 +71,7 @@ type ViewLevel =
   | 'custom-base-url-input'
   | 'custom-api-key-input'
   | 'custom-model-id-input'
+  | 'custom-advanced-config'
   | 'custom-review-json'
   | 'oauth-provider-select';
 
@@ -137,6 +138,12 @@ export function AuthDialog(): React.JSX.Element {
   const [customModelIdsError, setCustomModelIdsError] = useState<string | null>(
     null,
   );
+
+  // Advanced generation config state
+  const [advancedThinkingEnabled, setAdvancedThinkingEnabled] = useState(false);
+  const [advancedModalityEnabled, setAdvancedModalityEnabled] = useState(false);
+  const [focusedConfigIndex, setFocusedConfigIndex] = useState(0);
+  // 0 = thinking, 1 = modality
 
   // Main authentication entries (flat three-option layout)
   const mainItems = [
@@ -564,6 +571,10 @@ export function AuthDialog(): React.JSX.Element {
       return;
     }
     setCustomModelIdsError(null);
+    setViewLevel('custom-advanced-config');
+  };
+
+  const handleAdvancedConfigSubmit = () => {
     setViewLevel('custom-review-json');
   };
 
@@ -571,6 +582,21 @@ export function AuthDialog(): React.JSX.Element {
     const trimmedBaseUrl = customBaseUrl.trim();
     const trimmedApiKey = customApiKey.trim();
     const trimmedModelIds = customModelIds;
+
+    // Build generationConfig only if any advanced option is set
+    const hasThinking = advancedThinkingEnabled;
+    const hasModality = advancedModalityEnabled;
+
+    const generationConfig =
+      hasThinking || hasModality
+        ? {
+            enableThinking: hasThinking ? true : undefined,
+            multimodal: hasModality
+              ? { image: true, video: true, audio: true }
+              : undefined,
+          }
+        : undefined;
+
     void handleCustomApiKeySubmit(
       customProtocol as
         | AuthType.USE_OPENAI
@@ -579,6 +605,7 @@ export function AuthDialog(): React.JSX.Element {
       trimmedBaseUrl,
       trimmedApiKey,
       trimmedModelIds,
+      generationConfig,
     );
   };
 
@@ -600,8 +627,10 @@ export function AuthDialog(): React.JSX.Element {
       setViewLevel('custom-base-url-input');
     } else if (viewLevel === 'custom-model-id-input') {
       setViewLevel('custom-api-key-input');
-    } else if (viewLevel === 'custom-review-json') {
+    } else if (viewLevel === 'custom-advanced-config') {
       setViewLevel('custom-model-id-input');
+    } else if (viewLevel === 'custom-review-json') {
+      setViewLevel('custom-advanced-config');
     } else if (viewLevel === 'alibaba-standard-region-select') {
       setViewLevel('api-key-type-select');
     } else if (viewLevel === 'alibaba-standard-api-key-input') {
@@ -631,6 +660,7 @@ export function AuthDialog(): React.JSX.Element {
           viewLevel === 'custom-base-url-input' ||
           viewLevel === 'custom-api-key-input' ||
           viewLevel === 'custom-model-id-input' ||
+          viewLevel === 'custom-advanced-config' ||
           viewLevel === 'custom-review-json'
         ) {
           handleGoBack();
@@ -670,6 +700,40 @@ export function AuthDialog(): React.JSX.Element {
     (key) => {
       if (key.name === 'return' && viewLevel === 'custom-review-json') {
         handleCustomReviewSubmit();
+      }
+    },
+    { isActive: true },
+  );
+
+  // Advanced config keypress: ↑↓ to navigate, Space to toggle, Enter to submit
+  useKeypress(
+    (key) => {
+      if (viewLevel !== 'custom-advanced-config') return;
+
+      const { name } = key;
+
+      if (name === 'up') {
+        setFocusedConfigIndex((v) => (v <= 0 ? 1 : v - 1));
+        return;
+      }
+
+      if (name === 'down') {
+        setFocusedConfigIndex((v) => (v >= 1 ? 0 : v + 1));
+        return;
+      }
+
+      if (name === 'space') {
+        if (focusedConfigIndex === 0) {
+          setAdvancedThinkingEnabled((v) => !v);
+        } else {
+          setAdvancedModalityEnabled((v) => !v);
+        }
+        return;
+      }
+
+      if (name === 'return') {
+        handleAdvancedConfigSubmit();
+        return;
       }
     },
     { isActive: true },
@@ -887,15 +951,6 @@ export function AuthDialog(): React.JSX.Element {
     <Box marginTop={1} flexDirection="column">
       <Box marginTop={1}>
         <Text color={theme.text.primary}>
-          {t('Protocol: {{protocol}}', {
-            protocol:
-              protocolItems.find((p) => p.value === customProtocol)?.title ??
-              customProtocol,
-          })}
-        </Text>
-      </Box>
-      <Box marginTop={1}>
-        <Text color={theme.text.primary}>
           {t('Enter the API endpoint for this protocol.')}
         </Text>
       </Box>
@@ -939,20 +994,6 @@ export function AuthDialog(): React.JSX.Element {
     <Box marginTop={1} flexDirection="column">
       <Box marginTop={1}>
         <Text color={theme.text.primary}>
-          {t('Protocol: {{protocol}}', {
-            protocol:
-              protocolItems.find((p) => p.value === customProtocol)?.title ??
-              customProtocol,
-          })}
-        </Text>
-      </Box>
-      <Box marginTop={1}>
-        <Text color={theme.text.primary}>
-          {t('Endpoint: {{baseUrl}}', { baseUrl: customBaseUrl })}
-        </Text>
-      </Box>
-      <Box marginTop={1}>
-        <Text color={theme.text.primary}>
           {t('Enter the API key for this endpoint.')}
         </Text>
       </Box>
@@ -987,20 +1028,6 @@ export function AuthDialog(): React.JSX.Element {
     <Box marginTop={1} flexDirection="column">
       <Box marginTop={1}>
         <Text color={theme.text.primary}>
-          {t('Protocol: {{protocol}}', {
-            protocol:
-              protocolItems.find((p) => p.value === customProtocol)?.title ??
-              customProtocol,
-          })}
-        </Text>
-      </Box>
-      <Box marginTop={1}>
-        <Text color={theme.text.primary}>
-          {t('Endpoint: {{baseUrl}}', { baseUrl: customBaseUrl })}
-        </Text>
-      </Box>
-      <Box marginTop={1}>
-        <Text color={theme.text.primary}>
           {t('Enter one or more model IDs, separated by commas.')}
         </Text>
       </Box>
@@ -1030,6 +1057,58 @@ export function AuthDialog(): React.JSX.Element {
     </Box>
   );
 
+  // Render custom advanced config
+  const renderCustomAdvancedConfigView = () => {
+    const checkmark = (v: boolean) => (v ? '◉' : '○');
+    const cursor = (index: number) =>
+      focusedConfigIndex === index ? '›' : ' ';
+
+    return (
+      <Box marginTop={1} flexDirection="column">
+        <Box marginTop={1}>
+          <Text color={theme.text.primary}>
+            {t('Optional: configure advanced generation settings.')}
+          </Text>
+        </Box>
+        <Box marginTop={1} marginLeft={2}>
+          <Text
+            color={focusedConfigIndex === 0 ? theme.status.success : undefined}
+          >
+            {cursor(0)} {checkmark(advancedThinkingEnabled)}{' '}
+            {t('Enable thinking')}
+          </Text>
+        </Box>
+        <Box marginTop={0} marginLeft={4}>
+          <Text color={theme.text.secondary}>
+            {t(
+              'Allows the model to perform extended reasoning before responding.',
+            )}
+          </Text>
+        </Box>
+        <Box marginTop={1} marginLeft={2}>
+          <Text
+            color={focusedConfigIndex === 1 ? theme.status.success : undefined}
+          >
+            {cursor(1)} {checkmark(advancedModalityEnabled)}{' '}
+            {t('Enable modality')}
+          </Text>
+        </Box>
+        <Box marginTop={0} marginLeft={4}>
+          <Text color={theme.text.secondary}>
+            {t('Enables image, video, and audio input/output capabilities.')}
+          </Text>
+        </Box>
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary}>
+            {t(
+              '\u2191\u2193 to navigate, Space to toggle, Enter to continue, Esc to go back',
+            )}
+          </Text>
+        </Box>
+      </Box>
+    );
+  };
+
   // Render custom review JSON
   const renderCustomReviewJsonView = () => {
     const generatedEnvKey = generateCustomApiKeyEnvKey(
@@ -1038,14 +1117,43 @@ export function AuthDialog(): React.JSX.Element {
     );
     const normalizedIds = normalizeCustomModelIds(customModelIds);
     const maskedKey = maskApiKey(customApiKey);
-    const protocolLabel = protocolItems.find(
-      (p) => p.value === customProtocol,
-    )?.title;
+
+    // Build generationConfig preview lines
+    const hasThinking = advancedThinkingEnabled;
+    const hasModality = advancedModalityEnabled;
+    const hasGenConfig = hasThinking || hasModality;
+
+    const genConfigLines: string[] = [];
+    if (hasGenConfig) {
+      genConfigLines.push('        "generationConfig": {');
+      if (hasModality) {
+        genConfigLines.push('          "modalities": {');
+        genConfigLines.push('            "image": true,');
+        genConfigLines.push('            "video": true,');
+        genConfigLines.push('            "audio": true');
+        genConfigLines.push('          },');
+      }
+      if (hasThinking) {
+        genConfigLines.push('          "extra_body": {');
+        genConfigLines.push('            "enable_thinking": true');
+        genConfigLines.push('          },');
+      }
+      // Remove trailing comma from last genConfig line
+      const lastLine = genConfigLines[genConfigLines.length - 1];
+      if (lastLine?.endsWith(',')) {
+        genConfigLines[genConfigLines.length - 1] = lastLine.slice(0, -1);
+      }
+      genConfigLines.push('        },');
+    }
 
     const modelEntries = normalizedIds
       .map(
         (id) =>
-          `      {\n        "id": "${id}",\n        "name": "${id}",\n        "baseUrl": "${customBaseUrl.trim()}",\n        "envKey": "${generatedEnvKey}"\n      }`,
+          `      {\n        "id": "${id}",\n        "name": "${id}",\n        "baseUrl": "${customBaseUrl.trim()}",\n        "envKey": "${generatedEnvKey}"${
+            genConfigLines.length > 0
+              ? ',\n' + genConfigLines.join('\n') + '\n      '
+              : ''
+          }\n      }`,
       )
       .join(',\n');
 
@@ -1072,13 +1180,6 @@ export function AuthDialog(): React.JSX.Element {
 
     return (
       <Box marginTop={1} flexDirection="column">
-        <Box marginTop={1}>
-          <Text color={theme.text.primary}>
-            {t('Protocol: {{protocol}}', {
-              protocol: protocolLabel ?? customProtocol,
-            })}
-          </Text>
-        </Box>
         <Box marginTop={1}>
           <Text color={theme.text.primary}>
             {t('The following JSON will be saved to settings.json:')}
@@ -1131,15 +1232,17 @@ export function AuthDialog(): React.JSX.Element {
       case 'api-key-type-select':
         return t('Select API Key Type');
       case 'custom-protocol-select':
-        return t('Custom API Key · Protocol');
+        return t('Step 1/6 \u00B7 Protocol');
       case 'custom-base-url-input':
-        return t('Custom API Key · Base URL');
+        return t('Step 2/6 \u00B7 Base URL');
       case 'custom-api-key-input':
-        return t('Custom API Key · API Key');
+        return t('Step 3/6 \u00B7 API Key');
       case 'custom-model-id-input':
-        return t('Custom API Key · Model IDs');
+        return t('Step 4/6 \u00B7 Model IDs');
+      case 'custom-advanced-config':
+        return t('Step 5/6 \u00B7 Advanced Config');
       case 'custom-review-json':
-        return t('Custom API Key · Review');
+        return t('Step 6/6 \u00B7 Review');
       case 'alibaba-standard-region-select':
         return t(
           'Select Region for Alibaba Cloud ModelStudio Standard API Key',
@@ -1180,6 +1283,8 @@ export function AuthDialog(): React.JSX.Element {
       {viewLevel === 'custom-base-url-input' && renderCustomBaseUrlInputView()}
       {viewLevel === 'custom-api-key-input' && renderCustomApiKeyInputView()}
       {viewLevel === 'custom-model-id-input' && renderCustomModelIdInputView()}
+      {viewLevel === 'custom-advanced-config' &&
+        renderCustomAdvancedConfigView()}
       {viewLevel === 'custom-review-json' && renderCustomReviewJsonView()}
       {viewLevel === 'oauth-provider-select' && renderOAuthProviderSelectView()}
 
