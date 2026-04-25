@@ -96,6 +96,8 @@ macOS caches application icons. If the icon does not appear immediately, wait a 
 killall Dock
 ```
 
+If you use the no-clone installer, the script downloads the icon from the Qwen Code repository at install time. If that download fails, installation still completes with the default AppleScript icon.
+
 ### Reinstall stops because an existing `/Applications` app is not writable
 
 If `/Applications/Qwen Code.app` already exists and your user cannot write to `/Applications`, the installer stops instead of installing a second copy under `~/Applications`. This avoids Spotlight or Launchpad continuing to open the stale system app.

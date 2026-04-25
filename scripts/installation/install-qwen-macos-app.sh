@@ -46,12 +46,16 @@ USER_APP_DIR="${HOME}/Applications"
 SYSTEM_APP_PATH="${SYSTEM_APP_DIR}/${APP_NAME}.app"
 USER_APP_PATH="${USER_APP_DIR}/${APP_NAME}.app"
 INSTALL_URL='https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh'
+ICON_URL='https://raw.githubusercontent.com/QwenLM/qwen-code/main/scripts/installation/qwen-icon.png'
 
 SCRIPT_DIR=""
 if [ -n "${BASH_SOURCE[0]:-}" ]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
-ICON_PATH="${SCRIPT_DIR}/qwen-icon.png"
+LOCAL_ICON_PATH=""
+if [ -n "${SCRIPT_DIR}" ]; then
+  LOCAL_ICON_PATH="${SCRIPT_DIR}/qwen-icon.png"
+fi
 
 echo -e "${CYAN}"
 echo '╔═══════════════════════════════════════════════════════════╗'
@@ -146,8 +150,18 @@ if [ ! -d "${TMP_DIR}/${APP_NAME}.app" ]; then
   exit 1
 fi
 
+ICON_PATH=""
+if [ -n "${LOCAL_ICON_PATH}" ] && [ -f "${LOCAL_ICON_PATH}" ]; then
+  ICON_PATH="${LOCAL_ICON_PATH}"
+else
+  DOWNLOADED_ICON_PATH="${TMP_DIR}/qwen-icon.png"
+  if command -v curl >/dev/null 2>&1 && curl -fsSL "${ICON_URL}" -o "${DOWNLOADED_ICON_PATH}" 2>/dev/null; then
+    ICON_PATH="${DOWNLOADED_ICON_PATH}"
+  fi
+fi
+
 log_info 'Applying Qwen icon...'
-if [ -f "${ICON_PATH}" ]; then
+if [ -n "${ICON_PATH}" ] && [ -f "${ICON_PATH}" ]; then
   ICONSET_DIR="${TMP_DIR}/qwen-icon.iconset"
   mkdir -p "${ICONSET_DIR}"
 
@@ -165,12 +179,12 @@ if [ -f "${ICON_PATH}" ]; then
   iconutil -c icns "${ICONSET_DIR}" -o "${TMP_DIR}/qwen-icon.icns" 2>/dev/null
   if [ -f "${TMP_DIR}/qwen-icon.icns" ]; then
     cp "${TMP_DIR}/qwen-icon.icns" "${TMP_DIR}/${APP_NAME}.app/Contents/Resources/applet.icns"
-    log_success 'Icon applied from bundled qwen-icon.png'
+    log_success 'Icon applied'
   else
     log_warning 'Failed to generate .icns icon, using default AppleScript icon'
   fi
 else
-  log_warning "Icon file not found at ${ICON_PATH}, using default AppleScript icon"
+  log_warning 'Icon file not available, using default AppleScript icon'
 fi
 
 if [ -w "${SYSTEM_APP_DIR}" ]; then
