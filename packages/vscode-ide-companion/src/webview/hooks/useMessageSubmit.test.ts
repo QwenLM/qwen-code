@@ -96,7 +96,16 @@ describe('shouldSendMessage', () => {
       shouldSendMessage({
         ...defaults,
         inputText: '',
-        attachedImages: [{ data: 'base64data', mediaType: 'image/png' }],
+        attachedImages: [
+          {
+            id: '1',
+            name: 'test.png',
+            type: 'image/png',
+            size: 100,
+            data: 'base64data',
+            timestamp: Date.now(),
+          },
+        ],
       }),
     ).toBe(true);
   });
@@ -106,7 +115,16 @@ describe('shouldSendMessage', () => {
       shouldSendMessage({
         ...defaults,
         inputText: '\u200B',
-        attachedImages: [{ data: 'base64data', mediaType: 'image/png' }],
+        attachedImages: [
+          {
+            id: '1',
+            name: 'test.png',
+            type: 'image/png',
+            size: 100,
+            data: 'base64data',
+            timestamp: Date.now(),
+          },
+        ],
       }),
     ).toBe(true);
   });
