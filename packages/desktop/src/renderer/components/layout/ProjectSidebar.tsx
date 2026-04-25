@@ -8,6 +8,12 @@ import type {
   DesktopProject,
   DesktopSessionSummary,
 } from '../../api/client.js';
+import {
+  FolderIcon,
+  FolderPlusIcon,
+  NewThreadIcon,
+  SlidersIcon,
+} from './SidebarIcons.js';
 import { ThreadList } from './ThreadList.js';
 import type { LoadState } from './types.js';
 
@@ -15,6 +21,7 @@ export function ProjectSidebar({
   activeProject,
   activeProjectId,
   activeSessionId,
+  isDraftSession,
   loadState,
   projects,
   sessions,
@@ -27,6 +34,7 @@ export function ProjectSidebar({
   activeProject: DesktopProject | null;
   activeProjectId: string | null;
   activeSessionId: string | null;
+  isDraftSession: boolean;
   loadState: LoadState;
   projects: DesktopProject[];
   sessions: DesktopSessionSummary[];
@@ -42,46 +50,44 @@ export function ProjectSidebar({
       aria-label="Projects and threads"
       data-testid="project-sidebar"
     >
-      <div className="brand-lockup">
-        <div className="brand-mark" aria-hidden="true">
-          Q
-        </div>
-        <div>
-          <h1>Qwen Code</h1>
-          <p>Desktop</p>
+      <div className="sidebar-toolbar">
+        <h1>Projects</h1>
+        <div className="sidebar-toolbar-actions">
+          <button
+            aria-label="Settings"
+            className="sidebar-icon-button"
+            title="Settings"
+            type="button"
+            onClick={onOpenSettings}
+          >
+            <SlidersIcon />
+            <span className="sr-only">Settings</span>
+          </button>
+          <button
+            aria-label="New Thread"
+            className="sidebar-icon-button"
+            disabled={loadState.state !== 'ready' || !activeProject}
+            title="New Thread"
+            type="button"
+            onClick={onCreateSession}
+          >
+            <NewThreadIcon />
+            <span className="sr-only">New Thread</span>
+          </button>
+          <button
+            aria-label="Open Project"
+            className="sidebar-icon-button"
+            title="Open Project"
+            type="button"
+            onClick={onChooseWorkspace}
+          >
+            <FolderPlusIcon />
+            <span className="sr-only">Open Project</span>
+          </button>
         </div>
       </div>
 
-      <section className="sidebar-section quick-actions">
-        <button
-          className="primary-button"
-          disabled={loadState.state !== 'ready' || !activeProject}
-          type="button"
-          onClick={onCreateSession}
-        >
-          New Thread
-        </button>
-        <button
-          className="secondary-button"
-          type="button"
-          onClick={onOpenSettings}
-        >
-          Settings
-        </button>
-      </section>
-
-      <section className="sidebar-section">
-        <h2>Projects</h2>
-        <div className="workspace-path">
-          {activeProject?.path || 'No folder selected'}
-        </div>
-        <button
-          className="secondary-button"
-          type="button"
-          onClick={onChooseWorkspace}
-        >
-          Open Project
-        </button>
+      <section className="sidebar-section project-navigator">
         <ProjectList
           activeProjectId={activeProjectId}
           projects={projects}
@@ -90,9 +96,13 @@ export function ProjectSidebar({
       </section>
 
       <section className="sidebar-section sidebar-section-fill">
-        <h2>Threads</h2>
+        <div className="sidebar-section-heading">
+          <h2>Threads</h2>
+          <span>{isDraftSession ? sessions.length + 1 : sessions.length}</span>
+        </div>
         <ThreadList
           activeSessionId={activeSessionId}
+          isDraftSession={isDraftSession}
           sessions={sessions}
           onSelect={onSelectSession}
         />
@@ -111,7 +121,7 @@ function ProjectList({
   onSelect: (projectId: string) => void;
 }) {
   if (projects.length === 0) {
-    return <div className="empty-row">No recent projects</div>;
+    return <div className="empty-row">No folder selected</div>;
   }
 
   return (
@@ -131,10 +141,29 @@ function ProjectList({
           onClick={() => onSelect(project.id)}
           type="button"
         >
-          <span>{project.name}</span>
-          <small>{project.gitBranch || 'No Git branch'}</small>
+          <FolderIcon className="project-row-icon" />
+          <span className="project-row-copy">
+            <span>{project.name}</span>
+            <small>{formatProjectMeta(project)}</small>
+          </span>
         </button>
       ))}
     </div>
   );
+}
+
+function formatProjectMeta(project: DesktopProject): string {
+  const status = project.gitStatus;
+  const changes = status.modified + status.staged + status.untracked;
+  const branch = project.gitBranch || 'No Git branch';
+
+  if (!status.isRepository) {
+    return 'No Git repository';
+  }
+
+  if (changes > 0) {
+    return `${branch} · ${changes} changes`;
+  }
+
+  return branch;
 }

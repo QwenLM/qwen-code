@@ -7,7 +7,7 @@
 import { execFile } from 'node:child_process';
 import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import type {
@@ -193,6 +193,51 @@ describe('DesktopServer', () => {
       ok: false,
       code: 'project_path_invalid',
     });
+  });
+
+  it('derives recent project names from the project directory', async () => {
+    const projectPath = await createTempDirectory('qwen-desktop-project-');
+    const storePath = join(
+      await createTempDirectory('qwen-desktop-store-'),
+      'desktop-projects.json',
+    );
+    await writeFile(
+      storePath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          projects: [
+            {
+              id: 'stored-project',
+              name: 'Custom Display Name',
+              path: projectPath,
+              lastOpenedAt: 1_774_704_300_000,
+            },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
+
+    const server = await createTestServer(undefined, undefined, storePath);
+    const listed = await getJson(server, '/api/projects', {
+      Authorization: 'Bearer test-token',
+    });
+
+    expect(listed.status).toBe(200);
+    expect(listed.body).toMatchObject({
+      ok: true,
+      projects: [
+        {
+          id: 'stored-project',
+          name: basename(projectPath),
+          path: projectPath,
+        },
+      ],
+    });
+    expect(JSON.stringify(listed.body)).not.toContain('Custom Display Name');
   });
 
   it('returns project diffs and can stage and commit changes', async () => {

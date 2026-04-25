@@ -154,6 +154,7 @@ export function WorkspacePage({
         activeProject={activeProject}
         activeProjectId={activeProjectId}
         activeSessionId={activeSessionId}
+        isDraftSession={isDraftSession}
         loadState={loadState}
         projects={projects}
         sessions={sessions}

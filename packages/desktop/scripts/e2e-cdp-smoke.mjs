@@ -90,6 +90,7 @@ async function main() {
   await clickButton('Chat');
   await clickButton('New Thread');
   await waitForText('New thread ready');
+  await waitForSelector('[data-testid="thread-list"]');
 
   await setFieldByAriaLabel('Message', 'Please exercise command approval.');
   await clickButton('Send');

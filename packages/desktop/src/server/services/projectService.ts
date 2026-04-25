@@ -78,7 +78,7 @@ export class DesktopProjectService {
     const path = await normalizeDirectoryPath(projectPath);
     const storedProject: StoredProject = {
       id: createProjectId(path),
-      name: basename(path) || path,
+      name: getProjectName(path),
       path,
       lastOpenedAt: this.now().getTime(),
     };
@@ -122,6 +122,7 @@ export class DesktopProjectService {
     const gitStatus = await readGitStatus(project.path);
     return {
       ...project,
+      name: getProjectName(project.path),
       gitBranch: gitStatus.branch,
       gitStatus,
     };
@@ -306,6 +307,10 @@ function parseAheadBehind(branchLine: string | undefined): {
 
 function createProjectId(path: string): string {
   return createHash('sha256').update(path).digest('hex').slice(0, 16);
+}
+
+function getProjectName(path: string): string {
+  return basename(path) || path;
 }
 
 function isProjectStoreFile(value: unknown): value is ProjectStoreFile {

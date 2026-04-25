@@ -154,6 +154,7 @@ export interface DesktopSessionSummary {
   sessionId: string;
   title?: string;
   cwd?: string;
+  updatedAt?: string;
   models?: DesktopSessionModelState;
   modes?: DesktopSessionModeState;
 }
@@ -806,6 +807,8 @@ function isSessionSummary(value: unknown): value is DesktopSessionSummary {
     typeof candidate.sessionId === 'string' &&
     (typeof candidate.title === 'string' || candidate.title === undefined) &&
     (typeof candidate.cwd === 'string' || candidate.cwd === undefined) &&
+    (typeof candidate.updatedAt === 'string' ||
+      candidate.updatedAt === undefined) &&
     (candidate.models === undefined || isModelState(candidate.models)) &&
     (candidate.modes === undefined || isModeState(candidate.modes))
   );
