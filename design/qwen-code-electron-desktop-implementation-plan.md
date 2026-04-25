@@ -22,6 +22,95 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Review Safety Terminology and Discard Confirmation
+
+Status: completed in iteration 6.
+
+Goal: make the review drawer use Git-safe language and require explicit
+confirmation before destructive discard operations.
+
+User-visible value: users can review changed files without seeing ambiguous
+`Accept`/`Revert` controls, and high-risk discard actions cannot be triggered
+with one accidental click. This keeps review as a compact supporting surface
+while preserving the conversation-first workbench shown in `home.jpg`.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ReviewPanel.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/review-safety.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Review drawer controls use Stage/Discard terminology instead of
+  Accept/Revert.
+- Staged hunks/files show a staged state, and staging controls are disabled
+  when already staged.
+- Discard all/file/hunk actions open a confirmation UI that names the target,
+  explains the local-change risk, and supports Cancel and confirmed discard.
+- Canceling a discard leaves the Git worktree and review counts unchanged.
+- Committing staged changes remains available from the same compact drawer.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, create a composer-first thread,
+  approve the fake command, open Changes, verify Stage/Discard language,
+  initiate Discard All, cancel it, assert the workspace still has changes,
+  stage all changes, commit, and continue through settings and terminal paths.
+- E2E assertions: `Accept`/`Revert` labels are absent from the main review
+  drawer; discard confirmation appears and can be canceled; modified/untracked
+  counts remain after cancel; staged counts update after Stage All; console
+  errors and failed local requests are absent.
+- Diagnostic artifacts: CDP screenshots, review layout JSON, discard
+  confirmation JSON, Electron log, summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained compact
+  review actions, danger hierarchy, and confirmation wording;
+  `electron-desktop-dev` for renderer changes and real Electron CDP
+  verification.
+
+Notes and decisions:
+
+- The underlying server endpoint remains named `revert` for now; this slice
+  changes product-facing language to `Discard` while keeping the existing
+  reviewed backend contract.
+- Confirmation stays inside the review drawer rather than using a native dialog
+  so the CDP harness can assert the user path deterministically and the first
+  viewport remains desktop-native.
+- The first CDP run exposed a harness-only assertion mismatch: review counts
+  render as definition rows while the topbar renders the combined dirty count.
+  The harness now asserts both surfaces through their actual UI shapes.
+
+Verification results:
+
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 6 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed after launch through real
+  Electron over CDP.
+- Passing artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T17-18-14-754Z/`.
+
+Next work:
+
+- Continue conversation timeline fidelity by hiding session/protocol IDs such
+  as `Connected to session-e2e-1` from the main user flow.
+- Add inline changed-file summary cards in the conversation that open the
+  review drawer without forcing users to start from the topbar.
+
 ### Completed Slice: Terminal Attach-to-Composer Workflow
 
 Status: completed in iteration 5.

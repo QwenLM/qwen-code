@@ -118,6 +118,10 @@ describe('WorkspacePage', () => {
     ).toBeTruthy();
     expect(renderedContainer.textContent).toContain('src/index.ts');
     expect(renderedContainer.textContent).toContain('Fix parser test');
+    expect(renderedContainer.textContent).toContain('Stage Hunk');
+    expect(renderedContainer.textContent).toContain('Discard Hunk');
+    expect(renderedContainer.textContent).not.toContain('Accept');
+    expect(renderedContainer.textContent).not.toContain('Revert');
 
     act(() => {
       clickButton(renderedContainer, 'Settings');
@@ -249,6 +253,45 @@ describe('WorkspacePage', () => {
     });
 
     expect(onAttachTerminalOutput).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires confirmation before discarding review changes', () => {
+    const onRevertReviewTarget = vi.fn();
+    const renderedContainer = renderWorkspace({ onRevertReviewTarget });
+
+    act(() => {
+      clickButton(renderedContainer, 'Open Changes');
+    });
+
+    act(() => {
+      clickButton(renderedContainer, 'Discard All');
+    });
+
+    expect(
+      renderedContainer.querySelector('[data-testid="discard-confirmation"]'),
+    ).toBeTruthy();
+    expect(renderedContainer.textContent).toContain(
+      'Discard all local changes?',
+    );
+    expect(onRevertReviewTarget).not.toHaveBeenCalled();
+
+    act(() => {
+      clickButton(renderedContainer, 'Cancel Discard');
+    });
+
+    expect(
+      renderedContainer.querySelector('[data-testid="discard-confirmation"]'),
+    ).toBeNull();
+    expect(onRevertReviewTarget).not.toHaveBeenCalled();
+
+    act(() => {
+      clickButton(renderedContainer, 'Discard All');
+    });
+    act(() => {
+      clickButton(renderedContainer, 'Confirm Discard');
+    });
+
+    expect(onRevertReviewTarget).toHaveBeenCalledWith({ scope: 'all' });
   });
 });
 

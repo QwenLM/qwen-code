@@ -264,6 +264,11 @@ summary:focus-visible {
   color: var(--text-soft);
 }
 
+.secondary-button-danger {
+  border-color: rgba(255, 127, 105, 0.28);
+  color: #ffb3a5;
+}
+
 .primary-button:not(:disabled):hover,
 .secondary-button:not(:disabled):hover {
   filter: brightness(1.08);
@@ -1060,6 +1065,36 @@ textarea:focus {
 }
 
 .review-actions {
+  justify-content: flex-end;
+}
+
+.review-discard-confirm {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid rgba(255, 127, 105, 0.3);
+  border-radius: var(--radius);
+  background: rgba(255, 127, 105, 0.075);
+}
+
+.review-discard-confirm strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 820;
+}
+
+.review-discard-confirm p {
+  margin: 4px 0 0;
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.review-discard-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   justify-content: flex-end;
 }
 

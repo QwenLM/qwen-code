@@ -14,6 +14,18 @@ import type {
 } from '../../api/client.js';
 import { CloseIcon } from './SidebarIcons.js';
 
+type RequestDiscard = (
+  target: DesktopGitReviewTarget,
+  title: string,
+  description: string,
+) => void;
+
+interface DiscardConfirmation {
+  target: DesktopGitReviewTarget;
+  title: string;
+  description: string;
+}
+
 export function ReviewPanel({
   activeProject,
   commitMessage,
@@ -100,6 +112,8 @@ function ReviewSummary({
   const [reviewComments, setReviewComments] = useState<
     Record<string, string[]>
   >({});
+  const [discardConfirmation, setDiscardConfirmation] =
+    useState<DiscardConfirmation | null>(null);
   const [activeTab, setActiveTab] = useState('changes');
 
   if (!project) {
@@ -113,6 +127,17 @@ function ReviewSummary({
   const status = project.gitStatus;
   const changedFiles = gitDiff?.files ?? [];
   const tabs = ['changes', 'files', 'artifacts', 'summary'];
+  const requestDiscard: RequestDiscard = (target, title, description) => {
+    setDiscardConfirmation({ target, title, description });
+  };
+  const confirmDiscard = () => {
+    if (!discardConfirmation) {
+      return;
+    }
+
+    onRevertTarget(discardConfirmation.target);
+    setDiscardConfirmation(null);
+  };
 
   return (
     <div className="review-summary">
@@ -158,12 +183,18 @@ function ReviewSummary({
       </dl>
       <div className="review-actions">
         <button
-          className="secondary-button"
+          className="secondary-button secondary-button-danger"
           disabled={changedFiles.length === 0}
           type="button"
-          onClick={() => onRevertTarget({ scope: 'all' })}
+          onClick={() =>
+            requestDiscard(
+              { scope: 'all' },
+              'Discard all local changes?',
+              'This removes unstaged edits and untracked files from the active project.',
+            )
+          }
         >
-          Revert All
+          Discard All
         </button>
         <button
           className="secondary-button"
@@ -171,9 +202,39 @@ function ReviewSummary({
           type="button"
           onClick={() => onStageTarget({ scope: 'all' })}
         >
-          Accept All
+          Stage All
         </button>
       </div>
+      {discardConfirmation ? (
+        <div
+          aria-live="polite"
+          className="review-discard-confirm"
+          data-testid="discard-confirmation"
+        >
+          <div>
+            <strong>{discardConfirmation.title}</strong>
+            <p>{discardConfirmation.description}</p>
+          </div>
+          <div className="review-discard-confirm-actions">
+            <button
+              aria-label="Cancel Discard"
+              className="secondary-button"
+              type="button"
+              onClick={() => setDiscardConfirmation(null)}
+            >
+              Cancel
+            </button>
+            <button
+              aria-label="Confirm Discard"
+              className="secondary-button secondary-button-danger"
+              type="button"
+              onClick={confirmDiscard}
+            >
+              Discard Changes
+            </button>
+          </div>
+        </div>
+      ) : null}
       <div className="changed-files">
         {changedFiles.length === 0 ? (
           <div className="empty-row">No changes</div>
@@ -206,7 +267,7 @@ function ReviewSummary({
                 }))
               }
               onOpenFile={onOpenFile}
-              onRevertTarget={onRevertTarget}
+              onRequestDiscard={requestDiscard}
               onStageTarget={onStageTarget}
             />
           ))
@@ -241,7 +302,7 @@ function ChangedFileReview({
   onAddComment,
   onCommentDraftChange,
   onOpenFile,
-  onRevertTarget,
+  onRequestDiscard,
   onStageTarget,
 }: {
   commentDraft: string;
@@ -251,10 +312,11 @@ function ChangedFileReview({
   onAddComment: () => void;
   onCommentDraftChange: (comment: string) => void;
   onOpenFile: (filePath: string) => void;
-  onRevertTarget: (target: DesktopGitReviewTarget) => void;
+  onRequestDiscard: RequestDiscard;
   onStageTarget: (target: DesktopGitReviewTarget) => void;
 }) {
   const fileTarget = { scope: 'file' as const, filePath: file.path };
+  const canStageFile = file.unstaged || file.untracked || !file.staged;
 
   return (
     <details data-testid={`changed-file-${file.path}`} open={isInitiallyOpen}>
@@ -274,18 +336,25 @@ function ChangedFileReview({
           Open
         </button>
         <button
-          className="secondary-button"
+          className="secondary-button secondary-button-danger"
           type="button"
-          onClick={() => onRevertTarget(fileTarget)}
+          onClick={() =>
+            onRequestDiscard(
+              fileTarget,
+              `Discard changes in ${file.path}?`,
+              'This removes local changes for this file from the active project.',
+            )
+          }
         >
-          Revert File
+          Discard File
         </button>
         <button
           className="secondary-button"
+          disabled={!canStageFile}
           type="button"
           onClick={() => onStageTarget(fileTarget)}
         >
-          Accept File
+          {canStageFile ? 'Stage File' : 'Staged File'}
         </button>
       </div>
       {file.hunks.length === 0 ? (
@@ -297,7 +366,7 @@ function ChangedFileReview({
               key={hunk.id}
               file={file}
               hunk={hunk}
-              onRevertTarget={onRevertTarget}
+              onRequestDiscard={onRequestDiscard}
               onStageTarget={onStageTarget}
             />
           ))}
@@ -337,12 +406,12 @@ function ChangedFileReview({
 function DiffHunkReview({
   file,
   hunk,
-  onRevertTarget,
+  onRequestDiscard,
   onStageTarget,
 }: {
   file: DesktopGitChangedFile;
   hunk: DesktopGitDiffHunk;
-  onRevertTarget: (target: DesktopGitReviewTarget) => void;
+  onRequestDiscard: RequestDiscard;
   onStageTarget: (target: DesktopGitReviewTarget) => void;
 }) {
   const hunkTarget = {
@@ -359,11 +428,17 @@ function DiffHunkReview({
       </div>
       <div className="diff-hunk-actions">
         <button
-          className="secondary-button"
+          className="secondary-button secondary-button-danger"
           type="button"
-          onClick={() => onRevertTarget(hunkTarget)}
+          onClick={() =>
+            onRequestDiscard(
+              hunkTarget,
+              `Discard this hunk in ${file.path}?`,
+              'This removes the selected local hunk from the active project.',
+            )
+          }
         >
-          Revert Hunk
+          Discard Hunk
         </button>
         <button
           className="secondary-button"
@@ -371,7 +446,7 @@ function DiffHunkReview({
           type="button"
           onClick={() => onStageTarget(hunkTarget)}
         >
-          {hunk.source === 'staged' ? 'Accepted' : 'Accept Hunk'}
+          {hunk.source === 'staged' ? 'Staged' : 'Stage Hunk'}
         </button>
       </div>
       <pre>{hunk.lines.join('\n') || 'No textual hunk available.'}</pre>
@@ -381,7 +456,7 @@ function DiffHunkReview({
 
 function formatHunkSource(source: DesktopGitDiffHunk['source']): string {
   if (source === 'staged') {
-    return 'Accepted';
+    return 'Staged';
   }
   if (source === 'untracked') {
     return 'New file';

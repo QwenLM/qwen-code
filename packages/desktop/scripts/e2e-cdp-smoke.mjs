@@ -84,14 +84,33 @@ async function main() {
   await waitForText('README.md');
   await assertReviewDrawerLayout('review-drawer-layout.json');
   await saveScreenshot('review-drawer.png');
-  await waitForText('Accept Hunk');
+  await waitForText('Stage Hunk');
+  await assertReviewSafetyTerminology('review-safety-initial.json');
+  await clickButton('Discard All');
+  await waitForText('Discard all local changes?');
+  await assertDiscardConfirmation('discard-confirmation.json');
+  await clickButton('Cancel Discard');
+  await waitFor(
+    'discard confirmation canceled with changes intact',
+    async () =>
+      evaluate(`(() => {
+        return (
+          !document.querySelector('[data-testid="discard-confirmation"]') &&
+          document.body.innerText.includes('1 modified · 0 staged · 1 untracked')
+        );
+      })()`),
+    10_000,
+  );
+  await assertWorkspaceStillDirtyAfterDiscardCancel(
+    'discard-cancel-git-status.txt',
+  );
   await setFieldByAriaLabel(
     'Review comment for README.md',
     'Review note from E2E',
   );
   await clickButton('Add Comment');
   await waitForText('Review note from E2E');
-  await clickButton('Accept All');
+  await clickButton('Stage All');
   await waitForText('0 modified · 2 staged · 0 untracked');
   await waitForText('ADDED · 1 HUNK');
   await setFieldByAriaLabel('Commit message', 'desktop e2e commit');
@@ -246,6 +265,31 @@ async function assertWorkspaceCommit(expectedMessage) {
   ]);
   if (status.trim() !== '') {
     throw new Error(`Workspace is not clean after commit:\n${status}`);
+  }
+}
+
+async function assertWorkspaceStillDirtyAfterDiscardCancel(fileName) {
+  const [{ stdout: status }, { stdout: stagedFiles }] = await Promise.all([
+    execFileP('git', ['-C', workspaceDir, 'status', '--porcelain=v1']),
+    execFileP('git', ['-C', workspaceDir, 'diff', '--cached', '--name-only']),
+  ]);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `status:\n${status}\nstaged:\n${stagedFiles}\n`,
+    'utf8',
+  );
+
+  if (!status.includes(' M README.md') || !status.includes('?? notes.txt')) {
+    throw new Error(
+      `Canceling discard should leave tracked and untracked changes intact:\n${status}`,
+    );
+  }
+
+  if (stagedFiles.trim() !== '') {
+    throw new Error(
+      `Canceling discard should not stage changes:\n${stagedFiles}`,
+    );
   }
 }
 
@@ -660,6 +704,118 @@ async function assertReviewDrawerLayout(fileName) {
   if (metrics.document.bodyScrollHeight > metrics.viewport.height + 4) {
     throw new Error(
       `Review drawer document should fit one viewport; body scrollHeight=${metrics.document.bodyScrollHeight}, viewport=${metrics.viewport.height}`,
+    );
+  }
+}
+
+async function assertReviewSafetyTerminology(fileName) {
+  const snapshot = await evaluate(`(() => {
+    const review = document.querySelector('[data-testid="review-panel"]');
+    const text = review?.innerText ?? '';
+    const buttons = [...(review?.querySelectorAll('button') ?? [])].map(
+      (button) =>
+        button.getAttribute('aria-label') ||
+        button.getAttribute('title') ||
+        button.textContent.trim()
+    );
+
+    return {
+      text,
+      buttons,
+      hasAcceptLabel: /\\bAccept\\b/u.test(text),
+      hasRevertLabel: /\\bRevert\\b/u.test(text),
+      hasDiscardConfirmation:
+        document.querySelector('[data-testid="discard-confirmation"]') !== null
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (snapshot.hasAcceptLabel || snapshot.hasRevertLabel) {
+    throw new Error(
+      `Review drawer should use Stage/Discard language: ${snapshot.text}`,
+    );
+  }
+
+  for (const expectedLabel of [
+    'Discard All',
+    'Stage All',
+    'Discard File',
+    'Stage File',
+    'Discard Hunk',
+    'Stage Hunk',
+  ]) {
+    if (!snapshot.buttons.includes(expectedLabel)) {
+      throw new Error(
+        `Missing review action ${expectedLabel}; buttons=${snapshot.buttons.join(
+          ', ',
+        )}`,
+      );
+    }
+  }
+
+  if (snapshot.hasDiscardConfirmation) {
+    throw new Error('Discard confirmation should not be open by default.');
+  }
+}
+
+async function assertDiscardConfirmation(fileName) {
+  const snapshot = await evaluate(`(() => {
+    const confirmation = document.querySelector(
+      '[data-testid="discard-confirmation"]'
+    );
+    const review = document.querySelector('[data-testid="review-panel"]');
+    return {
+      text: confirmation?.innerText ?? '',
+      buttons: [...(confirmation?.querySelectorAll('button') ?? [])].map(
+        (button) =>
+          button.getAttribute('aria-label') ||
+          button.getAttribute('title') ||
+          button.textContent.trim()
+      ),
+      reviewText: review?.innerText ?? ''
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (!snapshot.text.includes('Discard all local changes?')) {
+    throw new Error(
+      `Discard confirmation did not name the destructive action: ${snapshot.text}`,
+    );
+  }
+
+  if (!snapshot.text.includes('removes unstaged edits and untracked files')) {
+    throw new Error(
+      `Discard confirmation should explain the local-change risk: ${snapshot.text}`,
+    );
+  }
+
+  for (const expectedLabel of ['Cancel Discard', 'Confirm Discard']) {
+    if (!snapshot.buttons.includes(expectedLabel)) {
+      throw new Error(
+        `Missing discard confirmation action ${expectedLabel}; buttons=${snapshot.buttons.join(
+          ', ',
+        )}`,
+      );
+    }
+  }
+
+  if (
+    !/MODIFIED\s+1\s+STAGED\s+0\s+UNTRACKED\s+1/u.test(
+      snapshot.reviewText,
+    )
+  ) {
+    throw new Error(
+      'Discard confirmation opened after the review counts already changed.',
     );
   }
 }
