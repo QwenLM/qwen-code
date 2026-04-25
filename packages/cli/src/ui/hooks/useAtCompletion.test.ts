@@ -6,7 +6,16 @@
 
 /** @vitest-environment jsdom */
 
-import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
 import { useAtCompletion } from './useAtCompletion.js';
 import type {
@@ -15,9 +24,11 @@ import type {
   FileSystemStructure,
 } from '@qwen-code/qwen-code-core';
 import {
+  FileIndexService,
   FileSearchFactory,
   createTmpDir,
   cleanupTmpDir,
+  installInProcessIndexTransport,
 } from '@qwen-code/qwen-code-core';
 import { useState } from 'react';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
@@ -45,6 +56,22 @@ function useTestHarnessForAtCompletion(
 }
 
 describe('useAtCompletion', () => {
+  // The default FileIndexService transport spawns a worker_thread against
+  // the compiled `fileIndexWorker.js`; under vitest that URL resolves to
+  // a TS source the worker can't parse. Opt in to the in-process backend
+  // for this file only — doing so at test-setup level would pull core's
+  // module tree (including `workspaceContext.ts` with real `node:fs`)
+  // into every other test file's graph and clobber their `vi.mock('fs')`
+  // declarations.
+  let restoreTransport: (() => void) | null = null;
+  beforeAll(() => {
+    restoreTransport = installInProcessIndexTransport();
+  });
+  afterAll(() => {
+    restoreTransport?.();
+    restoreTransport = null;
+  });
+
   let testRootDir: string;
   let mockConfig: Config;
 
@@ -61,6 +88,12 @@ describe('useAtCompletion', () => {
   });
 
   afterEach(async () => {
+    // Dispose any live FileIndexService singletons before removing the
+    // temp dir. On Windows, an in-flight ripgrep child launched with
+    // `cwd: testRootDir` keeps a handle on the directory until it exits;
+    // rmdir'ing while that handle is open returns EBUSY. Resetting the
+    // service tears down the transport (and its rg subprocess) first.
+    await FileIndexService.__resetForTests();
     if (testRootDir) {
       await cleanupTmpDir(testRootDir);
     }
@@ -116,12 +149,20 @@ describe('useAtCompletion', () => {
         expect(result.current.suggestions.length).toBeGreaterThan(0);
       });
 
-      expect(result.current.suggestions.map((s) => s.value)).toEqual([
-        'src/',
-        'src/components/',
-        'src/index.js',
-        'src/components/Button.tsx',
-      ]);
+      // fzf ranks matches by score and breaks ties using list position,
+      // which depends on the crawler's emission order. That order is a
+      // ripgrep-vs-fdir implementation detail; asserting on the exact
+      // ranking was coupling this test to fdir's legacy breadth-first
+      // output. Content is what matters — all `src/` entries should be
+      // returned, nothing else.
+      expect(result.current.suggestions.map((s) => s.value).sort()).toEqual(
+        [
+          'src/',
+          'src/components/',
+          'src/components/Button.tsx',
+          'src/index.js',
+        ].sort(),
+      );
     });
 
     it('should append a trailing slash to directory paths in suggestions', async () => {
@@ -139,24 +180,23 @@ describe('useAtCompletion', () => {
         expect(result.current.suggestions.length).toBeGreaterThan(0);
       });
 
-      expect(result.current.suggestions.map((s) => s.value)).toEqual([
-        'dir/',
-        'file.txt',
-      ]);
+      expect(result.current.suggestions.map((s) => s.value).sort()).toEqual(
+        ['dir/', 'file.txt'].sort(),
+      );
     });
   });
 
   describe('UI State and Loading Behavior', () => {
-    it('should be in a loading state during initial file system crawl', async () => {
+    it('settles into non-loading state after initial file system crawl', async () => {
       testRootDir = await createTmpDir({});
       const { result } = renderHook(() =>
         useTestHarnessForAtCompletion(true, '', mockConfig, testRootDir),
       );
 
-      // It's initially true because the effect runs synchronously.
-      expect(result.current.isLoadingSuggestions).toBe(true);
-
-      // Wait for the loading to complete.
+      // The transient INITIALIZING → READY window no longer flashes the
+      // loading indicator synchronously; `isLoading` only flips to true if
+      // initialization stays slow past the 200 ms threshold. Either way, the
+      // steady state after a fast crawl is `false`.
       await waitFor(() => {
         expect(result.current.isLoadingSuggestions).toBe(false);
       });
@@ -396,10 +436,9 @@ describe('useAtCompletion', () => {
         expect(result.current.suggestions.length).toBeGreaterThan(0);
       });
 
-      expect(result.current.suggestions.map((s) => s.value)).toEqual([
-        'src/',
-        '.gitignore',
-      ]);
+      expect(result.current.suggestions.map((s) => s.value).sort()).toEqual(
+        ['src/', '.gitignore'].sort(),
+      );
     });
 
     it('should work correctly when config is undefined', async () => {
@@ -417,10 +456,9 @@ describe('useAtCompletion', () => {
         expect(result.current.suggestions.length).toBeGreaterThan(0);
       });
 
-      expect(result.current.suggestions.map((s) => s.value)).toEqual([
-        'node_modules/',
-        'src/',
-      ]);
+      expect(result.current.suggestions.map((s) => s.value).sort()).toEqual(
+        ['node_modules/', 'src/'].sort(),
+      );
     });
 
     it('should reset and re-initialize when the cwd changes', async () => {
@@ -452,13 +490,9 @@ describe('useAtCompletion', () => {
         rerender({ cwd: rootDir2, pattern: 'file' });
       });
 
-      // After CWD changes, suggestions should be cleared and it should load again.
-      await waitFor(() => {
-        expect(result.current.isLoadingSuggestions).toBe(true);
-        expect(result.current.suggestions).toEqual([]);
-      });
-
-      // Wait for the new suggestions from the second directory
+      // After CWD changes, the RESET clears suggestions; the loading flash
+      // is no longer synchronous (suppressed for <200 ms inits), so we only
+      // assert the end state.
       await waitFor(() => {
         expect(result.current.suggestions.map((s) => s.value)).toEqual([
           'file2.txt',

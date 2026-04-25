@@ -32,21 +32,11 @@ export class FileMessageHandler extends BaseMessageHandler {
   >();
   private readonly fileSearchInstances = new Map<string, FileSearch>();
   private readonly fileSearchInitializing = new Map<string, Promise<void>>();
+  // Per-rootPath generation token. Incremented whenever clearFileSearchCache
+  // fires, so an in-flight initialize() can detect it raced against a cache
+  // invalidation and skip re-caching the stale index.
+  private readonly fileSearchInitTokens = new Map<string, symbol>();
   private readonly fileWatchers = new Map<string, vscode.FileSystemWatcher>();
-  private readonly globSpecialChars = new Set([
-    '\\',
-    '*',
-    '?',
-    '[',
-    ']',
-    '{',
-    '}',
-    '(',
-    ')',
-    '!',
-    '+',
-    '@',
-  ]);
 
   canHandle(messageType: string): boolean {
     return [
@@ -73,6 +63,13 @@ export class FileMessageHandler extends BaseMessageHandler {
       return this.fileSearchInstances.get(rootPath) ?? null;
     }
 
+    // Mint a generation token before kicking off initialize(). Race guard
+    // below compares against this token after the async build completes —
+    // `clearFileSearchCache` deletes the map entry, so a mid-flight
+    // invalidation flips the identity and we dispose rather than cache.
+    const token = Symbol('fileSearchInit');
+    this.fileSearchInitTokens.set(rootPath, token);
+
     const initPromise = (async () => {
       const search = FileSearchFactory.create({
         projectRoot: rootPath,
@@ -85,6 +82,14 @@ export class FileMessageHandler extends BaseMessageHandler {
         enableFuzzySearch: true,
       });
       await search.initialize();
+      if (this.fileSearchInitTokens.get(rootPath) !== token) {
+        // clearFileSearchCache fired while we were crawling; the index we
+        // just built reflects a stale view of the filesystem. Dispose it
+        // rather than re-caching under the same rootPath, which would
+        // masquerade as fresh. Next getOrCreateFileSearch call starts new.
+        void search.dispose?.();
+        return;
+      }
       this.fileSearchInstances.set(rootPath, search);
     })();
 
@@ -104,9 +109,21 @@ export class FileMessageHandler extends BaseMessageHandler {
   }
 
   private clearFileSearchCache(rootPath: string): void {
+    const existing = this.fileSearchInstances.get(rootPath);
     this.fileSearchInstances.delete(rootPath);
     this.fileSearchInitializing.delete(rootPath);
+    // Invalidate any in-flight initialize() so it disposes instead of
+    // writing its (now stale) index into fileSearchInstances when it lands.
+    this.fileSearchInitTokens.delete(rootPath);
+    // Drop the in-process crawl cache and, crucially, dispose the
+    // worker-backed FileIndexService singleton so its in-memory snapshot
+    // and fzf index are rebuilt from disk on the next search. Without
+    // dispose(), the worker keeps serving stale results until the process
+    // exits (FileIndexService.for() memoises by optionsKey).
     crawlCache.clear();
+    void existing?.dispose?.().catch((err) => {
+      console.warn('[FileMessageHandler] FileSearch dispose failed:', err);
+    });
     console.log(
       '[FileMessageHandler] Cleared file search cache, trigger:',
       rootPath,
@@ -189,13 +206,13 @@ export class FileMessageHandler extends BaseMessageHandler {
 
       case 'getWorkspaceFiles':
         await this.handleGetWorkspaceFiles(
-          data?.query as string | undefined,
-          data?.requestId as number | undefined,
+          data?.['query'] as string | undefined,
+          data?.['requestId'] as number | undefined,
         );
         break;
 
       case 'openFile':
-        await this.handleOpenFile(data?.path as string | undefined);
+        await this.handleOpenFile(data?.['path'] as string | undefined);
         break;
 
       case 'openDiff':
@@ -592,9 +609,9 @@ export class FileMessageHandler extends BaseMessageHandler {
 
     try {
       await vscode.commands.executeCommand(showDiffCommand, {
-        path: (data.path as string) || '',
-        oldText: (data.oldText as string) || '',
-        newText: (data.newText as string) || '',
+        path: (data['path'] as string) || '',
+        oldText: (data['oldText'] as string) || '',
+        newText: (data['newText'] as string) || '',
       });
     } catch (error) {
       console.error('[FileMessageHandler] Failed to open diff:', error);
@@ -618,8 +635,8 @@ export class FileMessageHandler extends BaseMessageHandler {
     }
 
     try {
-      const content = (data.content as string) || '';
-      const fileName = (data.fileName as string) || 'temp';
+      const content = (data['content'] as string) || '';
+      const fileName = (data['fileName'] as string) || 'temp';
 
       // Get readonly file system provider from global singleton
       const readonlyProvider = ReadonlyFileSystemProvider.getInstance();
@@ -702,19 +719,5 @@ export class FileMessageHandler extends BaseMessageHandler {
         `Failed to create and open temporary file: ${getErrorMessage(error)}`,
       );
     }
-  }
-
-  private buildCaseInsensitiveGlob(query: string): string {
-    let pattern = '';
-    for (const char of query) {
-      if (/[a-zA-Z]/.test(char)) {
-        pattern += `[${char.toLowerCase()}${char.toUpperCase()}]`;
-      } else if (this.globSpecialChars.has(char)) {
-        pattern += `\\${char}`;
-      } else {
-        pattern += char;
-      }
-    }
-    return pattern;
   }
 }

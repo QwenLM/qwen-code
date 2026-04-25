@@ -72,45 +72,65 @@ const external = [
   '@teddyzhu/clipboard-win32-arm64-msvc',
 ];
 
-esbuild
-  .build({
-    entryPoints: ['packages/cli/index.ts'],
-    bundle: true,
-    outfile: 'dist/cli.js',
-    platform: 'node',
-    format: 'esm',
-    target: 'node20',
-    external,
-    packages: 'bundle',
-    inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
-    banner: {
-      js: `// Force strict mode and setup for ESM
+const commonBundleOptions = {
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  target: 'node20',
+  external,
+  packages: 'bundle',
+  define: {
+    'process.env.CLI_VERSION': JSON.stringify(pkg.version),
+    // Make global available for compatibility
+    global: 'globalThis',
+  },
+  loader: { '.node': 'file' },
+  plugins: [wasmBinaryPlugin, wasmLoader({ mode: 'embedded' })],
+  write: true,
+  keepNames: true,
+};
+
+const mainBuild = esbuild.build({
+  ...commonBundleOptions,
+  entryPoints: ['packages/cli/index.ts'],
+  outfile: 'dist/cli.js',
+  inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
+  banner: {
+    js: `// Force strict mode and setup for ESM
 "use strict";`,
-    },
-    alias: {
-      'is-in-ci': path.resolve(
-        __dirname,
-        'packages/cli/src/patches/is-in-ci.ts',
-      ),
-      '@qwen-code/web-templates': path.resolve(
-        __dirname,
-        'packages/web-templates/src/index.ts',
-      ),
-      // Resolve to userland punycode instead of deprecated node:punycode built-in
-      punycode: require.resolve('punycode/'),
-    },
-    define: {
-      'process.env.CLI_VERSION': JSON.stringify(pkg.version),
-      // Make global available for compatibility
-      global: 'globalThis',
-    },
-    loader: { '.node': 'file' },
-    plugins: [wasmBinaryPlugin, wasmLoader({ mode: 'embedded' })],
-    metafile: true,
-    write: true,
-    keepNames: true,
-  })
-  .then(({ metafile }) => {
+  },
+  alias: {
+    'is-in-ci': path.resolve(__dirname, 'packages/cli/src/patches/is-in-ci.ts'),
+    '@qwen-code/web-templates': path.resolve(
+      __dirname,
+      'packages/web-templates/src/index.ts',
+    ),
+    // Resolve to userland punycode instead of deprecated node:punycode built-in
+    punycode: require.resolve('punycode/'),
+  },
+  metafile: true,
+});
+
+// The file-index worker runs in its own worker_threads process and must exist
+// as a standalone file next to dist/cli.js so that `new URL('./fileIndexWorker.js',
+// import.meta.url)` resolves at runtime (the main bundle's import.meta.url is
+// dist/cli.js). We bundle it self-contained so fzf/fdir get inlined and no
+// node_modules resolution is required from the published tarball.
+const workerBuild = esbuild.build({
+  ...commonBundleOptions,
+  entryPoints: ['packages/core/src/utils/filesearch/fileIndexWorker.ts'],
+  outfile: 'dist/fileIndexWorker.js',
+  // fdir and other transitive CJS deps use require() at runtime, which is
+  // not available in ESM output without this shim. Same pattern as the main
+  // CLI bundle above.
+  inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
+  banner: {
+    js: `"use strict";`,
+  },
+});
+
+Promise.all([mainBuild, workerBuild])
+  .then(([{ metafile }]) => {
     if (process.env.DEV === 'true') {
       writeFileSync('./dist/esbuild.json', JSON.stringify(metafile, null, 2));
     }

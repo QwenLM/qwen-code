@@ -16,3 +16,12 @@ if (process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
 }
 
 import './src/test-utils/customMatchers.js';
+
+// Note on FileIndexService: tests that exercise the worker-backed file
+// search must opt in to the in-process transport via a local `beforeAll`
+// (see e.g. `src/ui/hooks/useAtCompletion.test.ts`). Installing it here
+// would eagerly evaluate `@qwen-code/qwen-code-core`'s module tree —
+// including `workspaceContext.ts` with a real `node:fs` binding — before
+// any `vi.mock('fs', …)` in an individual test file can take effect,
+// breaking tests that rely on those mocks (e.g. `config.test.ts` bare
+// mode). Keep this file free of eager core imports.

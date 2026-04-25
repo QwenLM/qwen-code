@@ -56,8 +56,10 @@ import {
   type PermissionMode,
   ToolConfirmationOutcome,
   type WaitingToolCall,
+  FileIndexService,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
+import { buildFileSearchOptions } from './hooks/useAtCompletion.js';
 import { validateAuthMethod } from '../config/auth.js';
 import { loadHierarchicalGeminiMemory } from '../config/config.js';
 import process from 'node:process';
@@ -327,6 +329,26 @@ export const AppContainer = (props: AppContainerProps) => {
       // handled by the global catch.
       await config.initialize();
       setConfigInitialized(true);
+
+      // Pre-warm the file index so the first `@` keypress usually finds a
+      // ready-or-nearly-ready snapshot instead of kicking off a cold crawl.
+      // The options shape must hash identically to useAtCompletion's for
+      // both sites to hit the same FileIndexService singleton — we share
+      // `buildFileSearchOptions` between them so they can't drift.
+      // Skip the prewarm entirely when recursive file search is disabled;
+      // otherwise users who opted out still pay for a full crawl on startup
+      // and the worker they never use sticks around.
+      // Fire-and-forget: errors surface via the normal search path the next
+      // time the hook is used.
+      if (config.getEnableRecursiveFileSearch() !== false) {
+        try {
+          FileIndexService.for(
+            buildFileSearchOptions(config, config.getTargetDir()),
+          );
+        } catch {
+          // ignore — the hook will spawn on demand if pre-warm throws.
+        }
+      }
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {

@@ -4,16 +4,48 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import { FileSearchFactory, AbortError, filter } from './fileSearch.js';
+import {
+  FileIndexService,
+  installInProcessIndexTransport,
+} from './fileIndexService.js';
 import {
   createTmpDir,
   cleanupTmpDir,
 } from '../../test-utils/file-system-test-helpers.js';
 
 describe('FileSearch', () => {
+  // Recursive (`enableRecursiveFileSearch: true`) searches route through
+  // FileIndexService, whose default transport spawns a worker_thread
+  // against the compiled `fileIndexWorker.js`. Under vitest's
+  // TS-direct-from-source execution that worker URL can't resolve — swap
+  // to the in-process backend for the duration of this suite.
+  let restoreTransport: (() => void) | null = null;
+  beforeAll(() => {
+    restoreTransport = installInProcessIndexTransport();
+  });
+  afterAll(async () => {
+    await FileIndexService.__resetForTests();
+    restoreTransport?.();
+    restoreTransport = null;
+  });
+
   let tmpDir: string;
   afterEach(async () => {
+    // Drop any live singletons that were created during this test so the
+    // next test's tmpDir cleanup doesn't race an open rg child process
+    // (Windows in particular: EBUSY on rmdir while the ripgrep subprocess
+    // still holds a handle).
+    await FileIndexService.__resetForTests();
     if (tmpDir) {
       await cleanupTmpDir(tmpDir);
     }
