@@ -221,7 +221,6 @@ assert(chatSrc.includes('Architecture') || chatSrc.includes('architecture') || c
 // Note: Production file may omit the Architecture section to save tokens
 assert(chatProd.includes('Route') || chatProd.includes('route'), 'chat.md prod has Route section');
 assert(chatSrc.includes('Route') || chatSrc.includes('route'), 'chat.md src has Route section');
-assert(chatProd.includes('Route') || chatProd.includes('route'), 'chat.md prod has Route section');
 
 // Cross-file: tables for routing
 assert(/\|.*Flag.*\|.*Sub-Command.*\|/.test(chatSrc) || chatSrc.includes('-s') && chatSrc.includes('chat-save.md'), 'chat.md src has routing table');
