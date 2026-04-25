@@ -104,9 +104,9 @@ Example:
 
 #### Required Fields
 
-| Option    | Type   | Description                                                                                                                                              |
-| --------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `command` | string | Command to start the LSP server (must be in PATH; absolute paths outside the workspace are not supported — add the binary's directory to `PATH` instead) |
+| Option    | Type   | Description                                                                                                                                       |
+| --------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `command` | string | Command to start the LSP server. Supports bare command names resolved via `PATH` (e.g. `clangd`) and absolute paths (e.g. `/opt/llvm/bin/clangd`) |
 
 #### Optional Fields
 
@@ -340,7 +340,7 @@ You can override trust requirements for specific servers in their configuration:
 
 1. **Verify `--experimental-lsp` flag**: Make sure you're using the flag when starting Qwen Code
 2. **Check if the server is installed**: Run the command manually (e.g. `clangd --version`) to verify
-3. **Check the PATH**: The server binary must be in your system `PATH`. Absolute paths outside the workspace are blocked by the safety check — add the binary's directory to `PATH` instead
+3. **Check the command**: The server binary must be in your system `PATH`, or specified as an absolute path (e.g. `/opt/llvm/bin/clangd`). Relative paths that escape the workspace are blocked
 4. **Check workspace trust**: The workspace must be trusted for LSP (use `/trust`)
 5. **Check logs**: Look for `[LSP]` entries in the debug log (see Debugging section below)
 6. **Check the process**: Run `ps aux | grep <server-name>` to verify the server process is running
@@ -366,7 +366,7 @@ LSP debug logs are automatically written to session log files in `~/.qwen/debug/
 grep '\[LSP\]' ~/.qwen/debug/latest
 
 # Common error messages to look for:
-#   "command path is unsafe"  → absolute path blocked, add to PATH instead
+#   "command path is unsafe"  → relative path escapes workspace, use absolute path or add to PATH
 #   "command not found"       → server binary not installed or not in PATH
 #   "requires trusted workspace" → run /trust first
 ```
