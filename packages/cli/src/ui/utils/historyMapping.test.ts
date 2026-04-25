@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { computeApiTruncationIndex } from './historyMapping.js';
+import { computeApiTruncationIndex, isRealUserTurn } from './historyMapping.js';
 import type { HistoryItem } from '../types.js';
 import type { Content, Part } from '@google/genai';
 
@@ -169,7 +169,7 @@ describe('computeApiTruncationIndex', () => {
   });
 
   describe('compression fallback', () => {
-    it('returns apiHistory.length when not enough user prompts found', () => {
+    it('returns -1 when not enough user prompts found', () => {
       const ui: HistoryItem[] = [
         userItem(1),
         geminiItem(2),
@@ -185,7 +185,28 @@ describe('computeApiTruncationIndex', () => {
         modelContent('response 5'),
       ];
       // Rewind to turn 5 → 2 user turns before it, but API only has 1 user text
-      expect(computeApiTruncationIndex(ui, 5, api)).toBe(api.length);
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+    });
+  });
+
+  describe('with slash-command items in UI history', () => {
+    it('ignores slash-command items when counting user turns', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'hello'),
+        geminiItem(2),
+        userItem(3, '/help'), // slash command — should be skipped
+        userItem(5, 'world'),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        userContent('hello'),
+        modelContent('response 1'),
+        userContent('world'),
+        modelContent('response 2'),
+      ];
+      // Rewind to 'world' (id=5): 1 real user turn before it (id=1)
+      // Slash '/help' (id=3) should not be counted
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(2);
     });
   });
 
@@ -198,5 +219,25 @@ describe('computeApiTruncationIndex', () => {
       ];
       expect(computeApiTruncationIndex(ui, 1, api)).toBe(0);
     });
+  });
+});
+
+describe('isRealUserTurn', () => {
+  it('returns true for normal user prompts', () => {
+    expect(isRealUserTurn(userItem(1, 'hello world'))).toBe(true);
+  });
+
+  it('returns false for slash commands', () => {
+    expect(isRealUserTurn(userItem(1, '/help'))).toBe(false);
+    expect(isRealUserTurn(userItem(1, '/rewind'))).toBe(false);
+    expect(isRealUserTurn(userItem(1, '/stats'))).toBe(false);
+  });
+
+  it('returns false for ? commands', () => {
+    expect(isRealUserTurn(userItem(1, '?help'))).toBe(false);
+  });
+
+  it('returns false for non-user items', () => {
+    expect(isRealUserTurn(geminiItem(1))).toBe(false);
   });
 });

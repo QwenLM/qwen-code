@@ -8,6 +8,17 @@ import type { HistoryItem } from '../types.js';
 import type { Content } from '@google/genai';
 
 /**
+ * Returns true when the history item represents a real user prompt that was
+ * sent to the model, as opposed to a slash-command invocation (`/help`,
+ * `/stats`, …) which is stored with `type: 'user'` in the UI but never
+ * reaches the API history or `turnParentUuids`.
+ */
+export function isRealUserTurn(item: HistoryItem): boolean {
+  if (item.type !== 'user' || !item.text) return false;
+  return !item.text.startsWith('/') && !item.text.startsWith('?');
+}
+
+/**
  * The well-known startup context model acknowledgment.
  * Used to identify the startup context pair in the API history.
  */
@@ -67,7 +78,8 @@ function hasStartupContext(apiHistory: Content[]): boolean {
  * @param uiHistory The full UI history array
  * @param targetUserItemId The ID of the user HistoryItem to rewind to
  * @param apiHistory The current API Content[] array
- * @returns The number of Content entries to keep in the API history
+ * @returns The number of Content entries to keep, or -1 if the target turn
+ *   could not be located (e.g., it was absorbed by chat compression).
  */
 export function computeApiTruncationIndex(
   uiHistory: HistoryItem[],
@@ -80,7 +92,7 @@ export function computeApiTruncationIndex(
     if (item.id === targetUserItemId) {
       break;
     }
-    if (item.type === 'user') {
+    if (isRealUserTurn(item)) {
       uiUserTurnCount++;
     }
   }
@@ -109,6 +121,6 @@ export function computeApiTruncationIndex(
   }
 
   // If we didn't find enough user prompts (e.g., after compression),
-  // return the full API history length
-  return apiHistory.length;
+  // signal that the target turn is unreachable.
+  return -1;
 }

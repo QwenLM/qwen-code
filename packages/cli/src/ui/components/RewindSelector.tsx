@@ -11,6 +11,7 @@ import { theme } from '../semantic-colors.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { truncateText } from '../utils/sessionPickerUtils.js';
+import { isRealUserTurn } from '../utils/historyMapping.js';
 import { t } from '../../i18n/index.js';
 
 export interface RewindSelectorProps {
@@ -25,7 +26,7 @@ const MAX_VISIBLE_ITEMS = 7;
  * Extract user-type items from UI history for the rewind pick list.
  */
 function getUserTurns(history: HistoryItem[]): HistoryItem[] {
-  return history.filter((item) => item.type === 'user');
+  return history.filter(isRealUserTurn);
 }
 
 interface TurnItemViewProps {

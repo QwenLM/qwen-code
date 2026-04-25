@@ -75,7 +75,10 @@ import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useDoublePress } from './hooks/useDoublePress.js';
-import { computeApiTruncationIndex } from './utils/historyMapping.js';
+import {
+  computeApiTruncationIndex,
+  isRealUserTurn,
+} from './utils/historyMapping.js';
 import { useVimMode } from './contexts/VimModeContext.js';
 import { CompactModeProvider } from './contexts/CompactModeContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
@@ -634,6 +637,12 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isHooksDialogOpen, openHooksDialog, closeHooksDialog } =
     useHooksDialog();
 
+  // Ref bridge: the guarded openRewindSelector callback is defined later
+  // (after useDoublePress), but slashCommandActions needs it now. The ref
+  // lets the useMemo capture a stable function pointer whose implementation
+  // is swapped in once the real callback exists.
+  const openRewindSelectorRef = useRef<() => void>(() => {});
+
   const slashCommandActions = useMemo(
     () => ({
       openAuthDialog,
@@ -662,7 +671,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openMcpDialog,
       openHooksDialog,
       openResumeDialog,
-      openRewindSelector: () => setIsRewindSelectorOpen(true),
+      openRewindSelector: () => openRewindSelectorRef.current(),
       handleResume,
       openDeleteDialog,
     }),
@@ -1591,6 +1600,7 @@ export const AppContainer = (props: AppContainerProps) => {
     if (!hasUserTurns) return;
     setIsRewindSelectorOpen(true);
   }, [streamingState, config, historyManager.history]);
+  openRewindSelectorRef.current = openRewindSelector;
 
   const closeRewindSelector = useCallback(() => {
     setIsRewindSelectorOpen(false);
@@ -1608,7 +1618,7 @@ export const AppContainer = (props: AppContainerProps) => {
       let targetTurnIndex = 0;
       for (const h of originalHistory) {
         if (h.id === userItem.id) break;
-        if (h.type === 'user') targetTurnIndex++;
+        if (isRealUserTurn(h)) targetTurnIndex++;
       }
 
       // 2. Compute API truncation point
@@ -1618,6 +1628,19 @@ export const AppContainer = (props: AppContainerProps) => {
         userItem.id,
         apiHistory,
       );
+
+      // Abort if the target turn is unreachable (e.g., absorbed by compression)
+      if (apiTruncateIndex < 0) {
+        historyManager.addItem(
+          {
+            type: 'error',
+            text: 'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+          },
+          Date.now(),
+        );
+        setIsRewindSelectorOpen(false);
+        return;
+      }
 
       // 3. Truncate API history and strip stale thinking blocks
       geminiClient.truncateHistory(apiTruncateIndex);
