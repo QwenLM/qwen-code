@@ -63,11 +63,11 @@ async function main() {
   await cdp.send('Log.enable');
   await cdp.send('Page.bringToFront');
   await waitForText('Qwen Code');
+  await waitForText('Connected');
   await assertWorkbenchLandmarks();
   await saveScreenshot('initial-workspace.png');
 
-  await clickButton('Open Project');
-  await waitForText('desktop-e2e-workspace');
+  await clickButtonUntilText('Open Project', 'desktop-e2e-workspace');
   await waitForText('README.md');
   await waitForText('Accept Hunk');
   await clickButton('Accept Hunk');
@@ -78,6 +78,13 @@ async function main() {
   );
   await clickButton('Add Comment');
   await waitForText('Review note from E2E');
+  await clickButton('Accept All');
+  await waitForText('0 modified · 2 staged · 0 untracked');
+  await waitForText('ADDED · 1 HUNK');
+  await setFieldByAriaLabel('Commit message', 'desktop e2e commit');
+  await clickButton('Commit');
+  await waitForText('No changes');
+  await assertWorkspaceCommit('desktop e2e commit');
   await waitForSelector('[data-testid="project-list"]');
 
   await clickButton('New Thread');
@@ -107,7 +114,7 @@ async function main() {
 
   await setFieldByAriaLabel(
     'Terminal command',
-    'node -e "process.stdin.once(\'data\', d => process.stdout.write(\'stdin:\' + d.toString(), () => process.exit(0)))"',
+    "node -e \"process.stdin.once('data', d => process.stdout.write('stdin:' + d.toString(), () => process.exit(0)))\"",
   );
   await clickButton('Run');
   await waitForText('[running]');
@@ -182,6 +189,31 @@ async function createGitWorkspace() {
   await writeFile(join(dir, 'README.md'), '# Desktop E2E\n\nchanged\n', 'utf8');
   await writeFile(join(dir, 'notes.txt'), 'review me\n', 'utf8');
   return dir;
+}
+
+async function assertWorkspaceCommit(expectedMessage) {
+  const { stdout: latestSubject } = await execFileP('git', [
+    '-C',
+    workspaceDir,
+    'log',
+    '--format=%s',
+    '-1',
+  ]);
+  if (latestSubject.trim() !== expectedMessage) {
+    throw new Error(
+      `Unexpected latest commit subject: ${latestSubject.trim()}`,
+    );
+  }
+
+  const { stdout: status } = await execFileP('git', [
+    '-C',
+    workspaceDir,
+    'status',
+    '--porcelain=v1',
+  ]);
+  if (status.trim() !== '') {
+    throw new Error(`Workspace is not clean after commit:\n${status}`);
+  }
 }
 
 function launchDesktopApp({
@@ -304,6 +336,41 @@ async function clickButton(text) {
   if (!clicked) {
     throw new Error(`Button not found or disabled: ${text}`);
   }
+}
+
+async function clickButtonUntilText(
+  buttonText,
+  expectedText,
+  timeoutMs = 15_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+
+  while (Date.now() < deadline) {
+    if (
+      await evaluate(
+        `document.body.innerText.includes(${JSON.stringify(expectedText)})`,
+      )
+    ) {
+      return;
+    }
+
+    try {
+      await clickButton(buttonText);
+    } catch (error) {
+      lastError = error;
+    }
+
+    await delay(500);
+  }
+
+  throw new Error(
+    `Timed out waiting for text ${JSON.stringify(
+      expectedText,
+    )} after clicking ${JSON.stringify(buttonText)}${
+      lastError instanceof Error ? `: ${lastError.message}` : ''
+    }`,
+  );
 }
 
 async function setFieldByAriaLabel(label, value) {

@@ -98,8 +98,9 @@ under ignored
 - `npm run e2e:cdp --workspace=packages/desktop` passed.
 - `npm run typecheck` passed.
 - `npm run build` passed, with existing VS Code companion warnings only.
-- `npm run bundle && npm run package:dir --workspace=packages/desktop &&
-  npm run smoke:package --workspace=packages/desktop` passed.
+- Bundle/package smoke passed with `npm run bundle`,
+  `npm run package:dir --workspace=packages/desktop`, and
+  `npm run smoke:package --workspace=packages/desktop`.
 - `npm run smoke:package --workspace=packages/desktop -- --launch` passed.
 - Passing run artifacts:
   `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T02-54-48-799Z/`.
@@ -107,10 +108,9 @@ under ignored
 
 ## Remaining Risk
 
-This harness covers renderer/CDP observability and the main P0 workbench paths,
-but it is a development E2E smoke using fake ACP. Final MVP verification still
-needs the remaining terminal polish and final packaging smoke called out in the
-implementation plan.
+This harness covers renderer/CDP observability and the main P0 workbench paths.
+It is still a development E2E smoke using fake ACP, so live-provider behavior
+remains covered by CLI/core verification rather than desktop credentials.
 
 ## Iteration 10 Review Path Extension
 
@@ -130,3 +130,37 @@ Execution result:
   `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T03-08-06-087Z/`.
 - The passing run reported no renderer console errors or failed network
   requests.
+
+## Iteration 12 Final MVP Harness
+
+The CDP harness now drives the final MVP user path:
+
+- first screen and workbench landmarks are visible and screenshot artifacts are
+  saved;
+- Open Project registers a temporary Git workspace through the preload
+  directory selection path;
+- Review panel accepts a hunk, records a local inline note, stages all remaining
+  changes, commits from the UI, and verifies the latest Git subject plus a clean
+  status;
+- New Thread creates a fake ACP session, sends a prompt, displays command
+  approval, and resolves Approve Once;
+- Settings saves model/provider/API key form state;
+- Terminal runs a command, copies output through preload clipboard IPC, writes
+  stdin, sends output to AI, and verifies the fake ACP response;
+- diagnostics still include screenshot PNGs, DOM text on failure, console
+  errors, failed requests, Electron logs, Git status, and Git diff.
+
+Execution result:
+
+- Initial commit-path attempt failed because the harness committed before
+  stage-all state settled. Diagnostics:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T04-50-16-704Z/`.
+- A later attempt had a transient Open Project synthetic click miss with no
+  console or network failures. Diagnostics:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T04-51-49-185Z/`.
+- Final run passed:
+  `npm run e2e:cdp --workspace=packages/desktop`. Success artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T04-52-52-305Z/`.
+- Final package smoke passed:
+  `npm run bundle`, `npm run package:dir --workspace=packages/desktop`, and
+  `npm run smoke:package --workspace=packages/desktop -- --launch`.

@@ -22,18 +22,19 @@ execution order, verification, decisions, and remaining work.
 
 ## Current Status
 
-Slices 1-15 established the desktop package, Electron main/preload/renderer
+Slices 1-17 established the desktop package, Electron main/preload/renderer
 startup, authenticated health/runtime/settings/session APIs, ACP process
 wrapper, WebSocket chat loop, permission bridge, settings/model/mode controls,
 packaging configuration, package smoke verification, project/Git status,
 renderer asset/CDP startup support, the componentized workspace shell, the
-CDP-driven Electron E2E harness, and hunk-aware diff review controls.
+CDP-driven Electron E2E harness, hunk-aware diff review controls, terminal
+stdin/copy/send-to-AI controls, UI-driven commit coverage, and final package
+launch smoke verification.
 
-Important correction from iteration 7: the previous plan text called the MVP
-complete after packaging smoke, but the architecture P0 also requires project
-registry, recent projects, Git status, diff review, terminal, commit flow,
-desktop E2E, and Chrome DevTools renderer observability. Those items remain in
-scope before a DONE marker can be created.
+Iteration 12 closed the remaining P0 verification gap by driving the commit UI
+from the Electron CDP harness and re-running package launch smoke. PTY resize,
+terminal tabs/history, persisted review comments, worktree tasks, and richer
+artifacts remain deferred beyond MVP.
 
 ## Task Breakdown
 
@@ -440,13 +441,65 @@ hunkId }` and stages only that current hunk.
     output because the renderer fallback clipboard path was unavailable in the
     Electron `file://` page. Diagnostics were written to ignored
     `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T04-42-48-004Z/`.
-  - After adding the preload clipboard IPC, `npm run e2e:cdp
---workspace=packages/desktop` passed. Success artifacts were written under
-    ignored
+  - After adding the preload clipboard IPC, the CDP smoke passed. Success
+    artifacts were written under ignored
     `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T04-45-53-738Z/`.
   - `npm run typecheck` passed across workspaces.
   - `npm run build` passed across workspaces. Existing VS Code companion lint
     warnings were reported by its build script, with no errors.
+
+### Slice 17: Final Commit E2E and Package Smoke
+
+- Status: complete in iteration 12
+- Goal: close the final MVP readiness gap by exercising the user-visible Git
+  commit path from the real Electron renderer and re-running packaged launch
+  smoke.
+- Files:
+  - `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+  - `design/qwen-code-electron-desktop-implementation-plan.md`
+  - `.qwen/e2e-tests/electron-desktop/diff-review-commit.md`
+  - `.qwen/e2e-tests/electron-desktop/cdp-renderer-observability.md`
+- Acceptance criteria:
+  - CDP smoke opens a temporary Git project through the preload directory
+    selection path.
+  - Review panel stages a hunk, stages all remaining changes, enters a commit
+    message, clicks Commit, and waits for the UI to report a clean review
+    state.
+  - The harness verifies the latest Git commit subject and clean working tree
+    outside the renderer after the UI commit action.
+  - The same run still covers session creation, permission approval, settings
+    save, terminal copy/stdin/send-to-AI, screenshots, console errors, failed
+    network requests, and Electron logs.
+  - Bundle/package dir/package launch smoke pass.
+- E2E coverage:
+  - Updated `packages/desktop/scripts/e2e-cdp-smoke.mjs` to cover the commit
+    UI path and stabilize the Open Project click by retrying until the
+    temporary project is visible.
+  - Updated `.qwen/e2e-tests/electron-desktop/diff-review-commit.md` and
+    `.qwen/e2e-tests/electron-desktop/cdp-renderer-observability.md` with the
+    executable harness path, command, result, and artifact directory.
+- Completed:
+  - Added UI-driven commit coverage to the existing CDP smoke.
+  - Added post-commit Git assertions for latest subject and clean status.
+  - Re-ran final packaging and launch smoke against the packaged `.app`.
+- Verification:
+  - `npm run e2e:cdp --workspace=packages/desktop` initially failed when the
+    harness clicked Commit before the async stage-all update had stabilized.
+    Diagnostics were written to ignored
+    `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T04-50-16-704Z/`.
+  - `npm run e2e:cdp --workspace=packages/desktop` then had one transient
+    Open Project click miss with no console or network errors. Diagnostics were
+    written to ignored
+    `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T04-51-49-185Z/`.
+  - After waiting for the staged/untracked counts before Commit and retrying
+    Open Project until the project appears, the CDP smoke passed. Success
+    artifacts were written to ignored
+    `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T04-52-52-305Z/`.
+  - `npm run bundle` passed.
+  - `npm run package:dir --workspace=packages/desktop` passed. Electron-builder
+    reported existing non-fatal metadata/dependency/signing/notarization
+    warnings only.
+  - `npm run smoke:package --workspace=packages/desktop -- --launch` passed.
 
 ## Decision Log
 
@@ -498,6 +551,9 @@ hunkId }` and stages only that current hunk.
   real Electron renderer is loaded from `file://` and browser clipboard
   permissions are not reliable there. The renderer still has no Node
   integration and the IPC accepts only a non-empty string.
+- 2026-04-25: Treat UI-driven commit as part of the CDP smoke, not only a
+  server test. The harness now waits for stage-all status to settle before
+  committing and verifies Git state after the renderer action.
 
 ## Verification Log
 
@@ -576,12 +632,17 @@ hunkId }` and stages only that current hunk.
   - Initial `npm run e2e:cdp --workspace=packages/desktop` failed at the copy
     status assertion, with no console errors or failed network requests; the
     DOM showed `Clipboard is unavailable.`
-  - After adding the preload clipboard IPC, `npm run e2e:cdp
---workspace=packages/desktop` passed and reported no renderer console
-    errors or failed network requests.
+  - After adding the preload clipboard IPC, the CDP smoke passed and reported
+    no renderer console errors or failed network requests.
   - `npm run typecheck` passed across workspaces.
   - `npm run build` passed across workspaces. Existing VS Code companion lint
     warnings were reported by its build script, with no errors.
+- 2026-04-25 Slice 17 final commit E2E and package smoke:
+  - `npm run e2e:cdp --workspace=packages/desktop` passed with artifacts at
+    `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T04-52-52-305Z/`.
+  - `npm run bundle` passed.
+  - `npm run package:dir --workspace=packages/desktop` passed.
+  - `npm run smoke:package --workspace=packages/desktop -- --launch` passed.
 
 ## Self Review Notes
 
@@ -634,9 +695,13 @@ hunkId }` and stages only that current hunk.
 - The current terminal remains a command runner with stdin pipes. Full PTY
   resize/write semantics and terminal tabs/history are deferred beyond the P0
   workflow verified by CDP smoke.
+- Slice 17 verifies commit via the renderer action and independent Git checks.
+  It still uses fake ACP for AI traffic, so live-provider model behavior remains
+  covered by the existing CLI/core paths rather than desktop E2E credentials.
 
 ## Remaining Work
 
-- Run final package smoke and complete the final MVP readiness review before
-  creating the DONE marker. PTY resize, terminal tabs/history, and persisted
-  review comments remain deferred beyond P0.
+- MVP P0 is complete for this plan. Deferred non-P0 work: PTY resize, terminal
+  tabs/history, persisted review comments, richer artifact previews, worktree
+  task mode, automation inbox, browser preview, and live-provider desktop E2E
+  credentials.

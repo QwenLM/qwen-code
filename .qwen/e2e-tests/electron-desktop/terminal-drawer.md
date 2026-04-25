@@ -78,9 +78,12 @@ Slice 16:
 - Initial `npm run e2e:cdp --workspace=packages/desktop` failed on the copy
   status assertion. Diagnostics:
   `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T04-42-48-004Z/`.
-- After adding the preload clipboard IPC, `npm run e2e:cdp
-  --workspace=packages/desktop` passed. Success artifacts:
+- After adding the preload clipboard IPC, the CDP smoke passed. Success
+  artifacts:
   `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T04-45-53-738Z/`.
+- Final iteration 12 CDP run also covered terminal copy/stdin/send-to-AI while
+  exercising the commit path. Success artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T04-52-52-305Z/`.
 - `npm run typecheck` passed across workspaces.
 - `npm run build` passed across workspaces. Existing VS Code companion lint
   warnings remained warnings only.

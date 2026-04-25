@@ -56,6 +56,10 @@ Iteration 10 extended the server and Electron E2E coverage:
   opens a temporary Git workspace, clicks Accept Hunk, verifies the accepted
   state, adds an inline review note, and continues through the existing
   permission/settings/terminal smoke.
+- iteration 12 extends the same Electron CDP harness to click Accept All, enter
+  a commit message, click Commit, wait for the Review panel to return to a
+  clean state, and verify the latest Git commit subject plus a clean working
+  tree from the temporary workspace.
 
 ## Execution Results
 
@@ -65,10 +69,15 @@ Iteration 10 extended the server and Electron E2E coverage:
 - `npm run build --workspace=packages/desktop` passed.
 - `npm run e2e:cdp --workspace=packages/desktop` passed with artifacts under
   `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T03-08-06-087Z/`.
+- Iteration 12 initial commit-path run failed because the harness clicked
+  Commit before stage-all state had settled. Diagnostics:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T04-50-16-704Z/`.
+- Iteration 12 final run passed:
+  `npm run e2e:cdp --workspace=packages/desktop`. Success artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T04-52-52-305Z/`.
 
 ## Remaining Risk
 
-Hunk-level accept/revert, inline comments, Open in Editor, and real Electron
-renderer assertions now have initial coverage. Remaining review risk is around
-complex Git states such as renames, binary files, conflicting stale hunks, and
-persisting review comments beyond the local renderer session.
+The P0 commit path now has real Electron renderer coverage. Remaining review
+risk is around complex Git states such as renames, binary files, conflicting
+stale hunks, and persisting review comments beyond the local renderer session.
