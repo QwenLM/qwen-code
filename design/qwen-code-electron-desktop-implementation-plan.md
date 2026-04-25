@@ -22,6 +22,99 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Rich Tool-Call Activity Cards
+
+Status: completed in iteration 10.
+
+Goal: make completed and in-progress tool calls read as useful task activity
+inside the conversation instead of a sparse tool row.
+
+User-visible value: users can see what the agent did, what command/input was
+used, which files were referenced, and whether the tool completed or failed
+without reading ACP IDs or opening diagnostics.
+
+Expected files:
+
+- `packages/desktop/src/main/acp/createE2eAcpClient.ts`
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/stores/chatStore.test.ts`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/rich-tool-call-activity-cards.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Tool calls render as compact inline conversation activity cards with kind,
+  title, status, and stable `data-testid` hooks.
+- Tool cards show a bounded command/input preview when safe user-facing input
+  is present.
+- Completed or failed tool cards show a bounded output/result summary without
+  exposing request/session IDs.
+- File locations render as compact chips with path and optional line number.
+- The previous generic `.chat-tool` row no longer appears for tool activity.
+- Cards stay within the timeline and do not overlap the composer in real
+  Electron.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/chatStore.test.ts src/renderer/components/layout/WorkspacePage.test.tsx`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, send from the composer, approve the
+  fake command request, then assert the resolved tool activity card includes
+  command title, status, command preview, output summary, and file chips before
+  continuing the existing review/settings/terminal smoke path.
+- E2E assertions: activity card is present after approval, uses compact
+  geometry inside the chat timeline, contains `README.md:1`, does not render
+  the raw tool call ID or session ID, no legacy `.chat-tool` node remains, and
+  console errors/failed local requests are absent.
+- Diagnostic artifacts: CDP screenshots, rich tool-call JSON, conversation
+  summary JSON, Electron log, summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained compact
+  activity-card hierarchy and file chip density; `electron-desktop-dev` for
+  renderer changes and real Electron CDP verification; `brainstorming` applied
+  by deriving the slice from the repo plan and immutable prototype instead of
+  asking ordinary product questions during the autonomous loop.
+
+Notes and decisions:
+
+- The prototype keeps agent activity in the reading flow, so this slice
+  replaces the generic tool row with an inline card rather than adding another
+  panel.
+- The card intentionally surfaces title/kind/status, bounded input/output, and
+  file locations only. ACP request IDs, session IDs, and transport details stay
+  out of the main conversation.
+- The fake ACP path will emit deterministic location/output data so the CDP
+  harness can assert a real user-visible resolved tool card.
+
+Verification results:
+
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/chatStore.test.ts src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 13 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed after launch through real
+  Electron over CDP.
+- Passing artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T17-57-31-788Z/`.
+
+Next work:
+
+- Continue rich conversation primitives by adding assistant message action rows
+  for copy/retry/open changed files and by turning file references in assistant
+  prose into compact open/reveal chips.
+- Tighten tool-card density at compact viewport widths after adding a second
+  fake ACP scenario with multiple file references and longer command output.
+
 ### Completed Slice: Inline Command Approval Cards
 
 Status: completed in iteration 9.

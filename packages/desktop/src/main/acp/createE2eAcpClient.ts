@@ -168,7 +168,12 @@ export class E2eAcpClient implements AcpSessionClient {
         permission.outcome.optionId !== 'deny'
           ? 'completed'
           : 'failed',
-      rawOutput: permission.outcome.outcome,
+      rawInput: 'printf desktop-e2e',
+      rawOutput:
+        permission.outcome.outcome === 'selected'
+          ? 'desktop-e2e command completed'
+          : permission.outcome.outcome,
+      locations: [{ path: 'README.md', line: 1 }],
     });
     this.emit(sessionId, {
       sessionUpdate: 'agent_message_chunk',

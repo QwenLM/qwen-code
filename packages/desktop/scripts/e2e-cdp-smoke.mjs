@@ -77,6 +77,8 @@ async function main() {
   await saveScreenshot('inline-command-approval.png');
   await clickButton('Approve Once');
   await waitForText('E2E fake ACP response received');
+  await assertResolvedToolActivity('resolved-tool-activity.json');
+  await saveScreenshot('resolved-tool-activity.png');
   await assertConversationChangesSummary('conversation-changes-summary.json');
   await waitForSelector('[data-testid="thread-list"]');
 
@@ -772,6 +774,106 @@ async function assertInlineCommandApproval(fileName) {
 
   if (snapshot.cardRect.bottom > snapshot.composerRect.top) {
     throw new Error('Inline approval card overlaps the composer.');
+  }
+}
+
+async function assertResolvedToolActivity(fileName) {
+  await waitForSelector('[data-testid="conversation-tool-card"]');
+  const snapshot = await evaluate(`(() => {
+    const card = document.querySelector(
+      '[data-testid="conversation-tool-card"]'
+    );
+    const timeline = document.querySelector('.chat-timeline');
+    const composer = document.querySelector('[data-testid="message-composer"]');
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    return {
+      bodyText: document.body.innerText,
+      cardText: card?.innerText ?? '',
+      cardRect: rectFor(card),
+      timelineRect: rectFor(timeline),
+      composerRect: rectFor(composer),
+      legacyToolRows: document.querySelectorAll('.chat-tool').length,
+      fileChipText:
+        document.querySelector('.conversation-tool-files')?.innerText ?? ''
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  const cardText = snapshot.cardText.toLowerCase();
+  for (const expectedText of [
+    'run desktop e2e command',
+    'completed',
+    'printf desktop-e2e',
+    'desktop-e2e command completed',
+  ]) {
+    if (!cardText.includes(expectedText)) {
+      throw new Error(
+        `Resolved tool activity is missing ${expectedText}: ${snapshot.cardText}`,
+      );
+    }
+  }
+
+  if (!snapshot.fileChipText.includes('README.md:1')) {
+    throw new Error(
+      `Resolved tool activity is missing the file chip: ${snapshot.fileChipText}`,
+    );
+  }
+
+  for (const internalText of ['e2e-terminal-check', 'session-e2e']) {
+    if (snapshot.cardText.includes(internalText)) {
+      throw new Error(
+        `Resolved tool activity leaked internal text ${internalText}: ${snapshot.cardText}`,
+      );
+    }
+  }
+
+  if (snapshot.legacyToolRows !== 0) {
+    throw new Error(
+      `Resolved tool activity should not render legacy rows: ${snapshot.legacyToolRows}`,
+    );
+  }
+
+  if (!snapshot.cardRect || !snapshot.timelineRect || !snapshot.composerRect) {
+    throw new Error(
+      `Resolved tool activity geometry is missing: ${JSON.stringify(snapshot)}`,
+    );
+  }
+
+  if (snapshot.cardRect.width < 360 || snapshot.cardRect.height > 240) {
+    throw new Error(
+      `Resolved tool activity geometry is unexpected: ${JSON.stringify(
+        snapshot.cardRect,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.cardRect.left < snapshot.timelineRect.left ||
+    snapshot.cardRect.right > snapshot.timelineRect.right + 1
+  ) {
+    throw new Error('Resolved tool activity should stay inside the timeline.');
+  }
+
+  if (snapshot.cardRect.bottom > snapshot.composerRect.top) {
+    throw new Error('Resolved tool activity overlaps the composer.');
   }
 }
 

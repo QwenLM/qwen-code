@@ -356,6 +356,44 @@ describe('WorkspacePage', () => {
     );
   });
 
+  it('renders rich tool activity cards with file references', () => {
+    const chatState = chatReducer(createInitialChatState(), {
+      type: 'server_message',
+      message: {
+        type: 'tool_call',
+        data: {
+          toolCallId: 'internal-tool-123',
+          kind: 'execute',
+          title: 'Run focused tests',
+          status: 'completed',
+          rawInput: {
+            command: 'npm test -- WorkspacePage.test.tsx',
+            sessionId: 'session-should-stay-hidden',
+          },
+          rawOutput: 'tests passed',
+          locations: [{ path: 'src/renderer/WorkspacePage.tsx', line: 42 }],
+        },
+      },
+    });
+
+    const renderedContainer = renderWorkspace({ chatState });
+    const toolCard = renderedContainer.querySelector(
+      '[data-testid="conversation-tool-card"]',
+    );
+    const toolText = toolCard?.textContent ?? '';
+
+    expect(toolCard).toBeTruthy();
+    expect(toolText).toContain('execute');
+    expect(toolText).toContain('Run focused tests');
+    expect(toolText).toContain('completed');
+    expect(toolText).toContain('npm test -- WorkspacePage.test.tsx');
+    expect(toolText).toContain('tests passed');
+    expect(toolText).toContain('src/renderer/WorkspacePage.tsx:42');
+    expect(toolText).not.toContain('internal-tool-123');
+    expect(toolText).not.toContain('session-should-stay-hidden');
+    expect(renderedContainer.querySelector('.chat-tool')).toBeNull();
+  });
+
   it('routes terminal output through an attach action', () => {
     const onAttachTerminalOutput = vi.fn();
     const renderedContainer = renderWorkspace({

@@ -294,13 +294,7 @@ function TimelineItem({ item }: { item: ChatTimelineItem }) {
   }
 
   if (item.type === 'tool') {
-    return (
-      <article className="chat-tool">
-        <div className="message-role">{item.toolCall.kind || 'tool'}</div>
-        <strong>{item.toolCall.title || item.toolCall.toolCallId}</strong>
-        {item.toolCall.status ? <span>{item.toolCall.status}</span> : null}
-      </article>
-    );
+    return <ToolActivityCard toolCall={item.toolCall} />;
   }
 
   if (item.type === 'plan') {
@@ -320,6 +314,60 @@ function TimelineItem({ item }: { item: ChatTimelineItem }) {
   }
 
   return <div className="chat-event">{item.label}</div>;
+}
+
+function ToolActivityCard({
+  toolCall,
+}: {
+  toolCall: Extract<ChatTimelineItem, { type: 'tool' }>['toolCall'];
+}) {
+  const title =
+    toolCall.title || formatToolKindTitle(toolCall.kind) || 'Tool activity';
+  const kind = toolCall.kind || 'tool';
+  const status = toolCall.status || 'running';
+  const inputPreview = formatToolInput(toolCall.rawInput);
+  const outputPreview = formatToolOutput(toolCall.rawOutput);
+  const fileReferences = getToolFileReferences(toolCall);
+  const visibleFiles = fileReferences.slice(0, 4);
+  const hiddenFileCount = Math.max(0, fileReferences.length - 4);
+
+  return (
+    <article
+      aria-label="Tool activity"
+      className={`conversation-tool-card ${getToolStatusClass(status)}`}
+      data-testid="conversation-tool-card"
+    >
+      <div className="conversation-tool-heading">
+        <div>
+          <span className="message-role">{kind}</span>
+          <strong>{title}</strong>
+        </div>
+        <span className="conversation-tool-status">{status}</span>
+      </div>
+      {inputPreview ? (
+        <div className="conversation-tool-section">
+          <span className="message-role">Input</span>
+          <pre>{inputPreview}</pre>
+        </div>
+      ) : null}
+      {visibleFiles.length > 0 ? (
+        <ul className="conversation-tool-files" aria-label="Referenced files">
+          {visibleFiles.map((file) => (
+            <li key={`${file.path}:${file.line ?? ''}`} title={file.path}>
+              {formatToolFileReference(file)}
+            </li>
+          ))}
+          {hiddenFileCount > 0 ? <li>{hiddenFileCount} more</li> : null}
+        </ul>
+      ) : null}
+      {outputPreview ? (
+        <div className="conversation-tool-section conversation-tool-output">
+          <span className="message-role">Result</span>
+          <pre>{outputPreview}</pre>
+        </div>
+      ) : null}
+    </article>
+  );
 }
 
 function InlinePendingPrompts({
@@ -471,15 +519,173 @@ function AskUserQuestionCard({
 
 function formatToolInput(input: unknown): string | null {
   if (typeof input === 'string') {
-    return input.length > 0 ? input : null;
+    return boundToolPreview(input);
   }
 
-  if (input && typeof input === 'object' && 'command' in input) {
-    const command = (input as { command?: unknown }).command;
-    return typeof command === 'string' && command.length > 0 ? command : null;
+  const record = getRecord(input);
+  if (!record) {
+    return null;
+  }
+
+  for (const key of ['command', 'path', 'filePath', 'pattern', 'query']) {
+    const value = getStringField(record, key);
+    if (value) {
+      return boundToolPreview(value);
+    }
   }
 
   return null;
+}
+
+function formatToolOutput(output: unknown): string | null {
+  if (typeof output === 'string') {
+    return boundToolPreview(output);
+  }
+
+  if (typeof output === 'number' || typeof output === 'boolean') {
+    return String(output);
+  }
+
+  const record = getRecord(output);
+  if (!record) {
+    return null;
+  }
+
+  for (const key of ['output', 'stdout', 'stderr', 'message', 'result']) {
+    const value = getStringField(record, key);
+    if (value) {
+      return boundToolPreview(value);
+    }
+  }
+
+  const outcome = getStringField(record, 'outcome');
+  return outcome ? boundToolPreview(outcome) : null;
+}
+
+function getToolFileReferences(
+  toolCall: Extract<ChatTimelineItem, { type: 'tool' }>['toolCall'],
+): Array<{ path: string; line?: number | null }> {
+  const references: Array<{ path: string; line?: number | null }> = [];
+
+  for (const location of toolCall.locations ?? []) {
+    if (location.path.trim().length > 0) {
+      references.push({ path: location.path, line: location.line });
+    }
+  }
+
+  const input = getRecord(toolCall.rawInput);
+  if (input) {
+    const line = getNumberField(input, 'line');
+    for (const key of ['path', 'filePath']) {
+      const path = getStringField(input, key);
+      if (path) {
+        references.push({ path, line });
+      }
+    }
+
+    const paths = input['paths'];
+    if (Array.isArray(paths)) {
+      for (const path of paths) {
+        if (typeof path === 'string' && path.trim().length > 0) {
+          references.push({ path });
+        }
+      }
+    }
+  }
+
+  return dedupeToolFileReferences(references);
+}
+
+function dedupeToolFileReferences(
+  references: Array<{ path: string; line?: number | null }>,
+): Array<{ path: string; line?: number | null }> {
+  const seen = new Set<string>();
+  const unique: Array<{ path: string; line?: number | null }> = [];
+
+  for (const reference of references) {
+    const key = `${reference.path}:${reference.line ?? ''}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    unique.push(reference);
+  }
+
+  return unique;
+}
+
+function formatToolFileReference(file: {
+  path: string;
+  line?: number | null;
+}): string {
+  return file.line ? `${file.path}:${file.line}` : file.path;
+}
+
+function formatToolKindTitle(kind: string | undefined): string | null {
+  if (!kind) {
+    return null;
+  }
+
+  const normalized = kind.replace(/[-_]+/gu, ' ').trim();
+  return normalized.length > 0
+    ? `${normalized.slice(0, 1).toUpperCase()}${normalized.slice(1)}`
+    : null;
+}
+
+function getToolStatusClass(status: string): string {
+  const normalized = status.toLowerCase();
+  if (
+    normalized.includes('fail') ||
+    normalized.includes('error') ||
+    normalized.includes('cancel') ||
+    normalized.includes('deny')
+  ) {
+    return 'conversation-tool-card-danger';
+  }
+
+  if (
+    normalized.includes('complete') ||
+    normalized.includes('success') ||
+    normalized.includes('done')
+  ) {
+    return 'conversation-tool-card-complete';
+  }
+
+  return 'conversation-tool-card-running';
+}
+
+function boundToolPreview(value: string): string | null {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  return trimmed.length > 240
+    ? `${trimmed.slice(0, 237).trimEnd()}...`
+    : trimmed;
+}
+
+function getRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function getStringField(
+  record: Record<string, unknown>,
+  key: string,
+): string | null {
+  const value = record[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+
+function getNumberField(
+  record: Record<string, unknown>,
+  key: string,
+): number | null {
+  const value = record[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 function ChangedFilesSummaryCard({

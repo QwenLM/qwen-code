@@ -115,4 +115,45 @@ describe('chatStore', () => {
     expect(state.items).toHaveLength(0);
     expect(JSON.stringify(state.items)).not.toContain('Permission requested');
   });
+
+  it('upserts tool activity without duplicating timeline items', () => {
+    const pending = chatReducer(createInitialChatState(), {
+      type: 'server_message',
+      message: {
+        type: 'tool_call',
+        data: {
+          toolCallId: 'tool-1',
+          kind: 'read',
+          title: 'Read file',
+          status: 'pending',
+          rawInput: { path: 'README.md' },
+          locations: [{ path: 'README.md', line: 1 }],
+        },
+      },
+    });
+    const completed = chatReducer(pending, {
+      type: 'server_message',
+      message: {
+        type: 'tool_call',
+        data: {
+          toolCallId: 'tool-1',
+          status: 'completed',
+          rawOutput: 'read complete',
+        },
+      },
+    });
+
+    expect(completed.items).toHaveLength(1);
+    expect(completed.items[0]).toMatchObject({
+      id: 'tool-tool-1',
+      type: 'tool',
+      toolCall: {
+        title: 'Read file',
+        status: 'completed',
+        rawInput: { path: 'README.md' },
+        rawOutput: 'read complete',
+        locations: [{ path: 'README.md', line: 1 }],
+      },
+    });
+  });
 });
