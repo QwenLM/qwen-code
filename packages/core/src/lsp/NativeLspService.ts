@@ -172,6 +172,13 @@ export class NativeLspService {
   }
 
   /**
+   * Get all server handles for status reporting.
+   */
+  getServerHandles(): ReadonlyMap<string, LspServerHandle> {
+    return this.serverManager.getHandles();
+  }
+
+  /**
    * Get ready server handles filtered by optional server name.
    * Each handle is guaranteed to have a valid connection.
    *

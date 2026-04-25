@@ -246,7 +246,20 @@ export interface LspCodeActionContext {
   triggerKind?: 'invoked' | 'automatic';
 }
 
+export interface LspServerStatusInfo {
+  name: string;
+  status: LspServerStatus;
+  command?: string;
+  languages: string[];
+  error?: string;
+}
+
 export interface LspClient {
+  /**
+   * Get the status of all configured LSP servers.
+   */
+  getServerStatus(): LspServerStatusInfo[];
+
   /**
    * Search for symbols across the workspace.
    */
