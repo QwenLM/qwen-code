@@ -21,12 +21,16 @@ import {
   getOrCreateSharedDispatcher,
 } from '@qwen-code/qwen-code-core';
 
+import { ALIBABA_STANDARD_API_KEY_ENDPOINTS } from '../constants/alibabaStandardApiKey.js';
+
 const debugLogger = createDebugLogger('PRECONNECT');
 
 let preconnectFired = false;
 
 /**
- * Default API base URLs by AuthType
+ * Default API base URLs by AuthType.
+ * DashScope regional endpoints are derived from ALIBABA_STANDARD_API_KEY_ENDPOINTS
+ * so preconnect covers all supported regions (cn-beijing, sg-singapore, us-virginia, cn-hongkong).
  */
 const DEFAULT_BASE_URLS: Record<string, string> = {
   openai: 'https://api.openai.com',
@@ -34,6 +38,15 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
   anthropic: 'https://api.anthropic.com',
   dashscope: 'https://dashscope.aliyuncs.com',
 };
+
+/**
+ * All known default base URLs, including DashScope regional endpoints.
+ * Used by isDefaultBaseUrl() to accept any supported default endpoint.
+ */
+const ALL_DEFAULT_URLS: string[] = [
+  ...Object.values(DEFAULT_BASE_URLS),
+  ...Object.values(ALIBABA_STANDARD_API_KEY_ENDPOINTS),
+];
 
 /**
  * Check if preconnect should be skipped due to environment conditions
@@ -64,7 +77,7 @@ function isDefaultBaseUrl(baseUrl: string): boolean {
     .toLowerCase()
     .replace(/^https?:\/\//, '')
     .replace(/\/+$/, '');
-  return Object.values(DEFAULT_BASE_URLS).some((defaultUrl) => {
+  return ALL_DEFAULT_URLS.some((defaultUrl) => {
     const normalizedDefault = defaultUrl
       .toLowerCase()
       .replace(/^https?:\/\//, '')

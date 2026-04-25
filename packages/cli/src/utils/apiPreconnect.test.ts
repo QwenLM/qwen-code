@@ -95,6 +95,39 @@ describe('apiPreconnect', () => {
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
+    it('should accept DashScope regional endpoint (sg-singapore)', () => {
+      preconnectApi('openai', {
+        resolvedBaseUrl:
+          'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+      });
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+        expect.objectContaining({ method: 'HEAD' }),
+      );
+    });
+
+    it('should accept DashScope regional endpoint (us-virginia)', () => {
+      preconnectApi('openai', {
+        resolvedBaseUrl:
+          'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+      });
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+        expect.objectContaining({ method: 'HEAD' }),
+      );
+    });
+
+    it('should accept DashScope regional endpoint (cn-hongkong)', () => {
+      preconnectApi('openai', {
+        resolvedBaseUrl:
+          'https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1',
+      });
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1',
+        expect.objectContaining({ method: 'HEAD' }),
+      );
+    });
+
     it('should fall back to default URL when resolvedBaseUrl is undefined', () => {
       preconnectApi('qwen-oauth');
       expect(mockFetch).toHaveBeenCalledWith(
