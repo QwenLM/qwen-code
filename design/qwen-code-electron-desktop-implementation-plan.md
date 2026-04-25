@@ -22,6 +22,107 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Dense Assistant File Reference Overflow
+
+Status: completed in iteration 12.
+
+Goal: harden assistant prose file-reference rendering for realistic, dense
+responses with repeated references, line/column suffixes, uncommon source file
+extensions, and more references than can comfortably fit in the message card.
+
+User-visible value: assistant responses stay compact and readable in the
+conversation-first workbench while still exposing useful file chips for opening
+referenced files. Repeated paths do not add visual noise, and overflow is
+explicit instead of silently dropping references.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/src/main/acp/createE2eAcpClient.ts`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/assistant-file-reference-overflow.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Assistant prose deduplicates repeated file references while preserving the
+  first visible label.
+- References with `:line:column` suffixes open the file path without the line
+  suffix and keep the visible line/column label.
+- Common desktop/code references such as `.mdx`, `.mts`, `.cts`, `.vue`,
+  `.svelte`, `.astro`, `Dockerfile`, `Makefile`, `.env`, `.gitignore`, and
+  `.npmrc` can render as chips when they appear in assistant prose.
+- More than six references render the first six chips plus a compact overflow
+  indicator with an accessible label.
+- Long chips wrap/truncate within the assistant message at normal and compact
+  widths without horizontal page overflow or composer overlap.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, send a prompt, approve the fake
+  command request, wait for the dense assistant response, assert deduped chips,
+  line/column chips, overflow count, and contained chip geometry, then continue
+  the existing copy/retry/review/settings/terminal smoke path.
+- E2E assertions: assistant file chips include `README.md:1`,
+  `packages/desktop/src/renderer/App.tsx:12:5`, `.env.example`,
+  `Dockerfile`, and an overflow indicator; duplicate `README.md:1` references
+  render once; every chip stays inside the assistant message/timeline; document
+  scroll width does not exceed the viewport; console errors/failed local
+  requests are absent.
+- Diagnostic artifacts: CDP screenshots, dense assistant reference JSON,
+  assistant action JSON, Electron log, summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained compact
+  chip density and overflow treatment; `electron-desktop-dev` for renderer
+  changes and real Electron CDP verification; `brainstorming` applied by
+  choosing the smallest continuation of the recorded rich-conversation backlog
+  from repo artifacts and `home.jpg` without pausing the autonomous loop.
+
+Notes and decisions:
+
+- The prototype shows file/change context inline with the conversation, so this
+  slice keeps file chips inside assistant messages rather than moving dense
+  references into a separate drawer.
+- Overflow uses a quiet text chip so the message remains readable and does not
+  become a file browser.
+- The fake ACP response includes deterministic dense references so the CDP
+  harness can verify real Electron layout and dedupe behavior.
+- The first focused component test exposed a line/column stripping bug where
+  `path.ts:12:5` opened `path.ts:12`. The final implementation strips the
+  full `:line:column` suffix for open-file callbacks while preserving the
+  visible chip label.
+
+Verification results:
+
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 10 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed after launch through real
+  Electron over CDP.
+- Passing artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T18-17-10-902Z/`.
+
+Next work:
+
+- Add a compact-viewport CDP pass or Browser bounds control for the dense
+  conversation state so long assistant/file chips are also asserted near the
+  lower supported desktop width.
+- Continue rich conversation fidelity by adding clearer assistant action
+  feedback for clipboard/open-file failures and by keeping multiple assistant
+  messages dense at compact widths.
+
 ### Completed Slice: Assistant Message Actions and File Reference Chips
 
 Status: completed in iteration 11.

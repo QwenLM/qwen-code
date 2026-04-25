@@ -927,10 +927,25 @@ async function assertAssistantMessageActions(fileName) {
             (button) => button.getAttribute('aria-label') || ''
           )
         : [],
+      overflowText:
+        fileReferences?.querySelector('.message-file-reference-overflow')
+          ?.innerText ?? '',
+      overflowLabel:
+        fileReferences?.querySelector('.message-file-reference-overflow')
+          ?.getAttribute('aria-label') ?? '',
+      chipRects: fileReferences
+        ? [
+            ...fileReferences.querySelectorAll(
+              'button, .message-file-reference-overflow'
+            )
+          ].map((chip) => rectFor(chip))
+        : [],
       messageRect: rectFor(message),
       actionsRect: rectFor(actions),
       timelineRect: rectFor(timeline),
-      composerRect: rectFor(composer)
+      composerRect: rectFor(composer),
+      viewportWidth: window.innerWidth,
+      documentScrollWidth: document.documentElement.scrollWidth
     };
   })()`);
 
@@ -965,6 +980,45 @@ async function assertAssistantMessageActions(fileName) {
       `Assistant file chip is not accessible: ${snapshot.fileReferenceLabels.join(
         ', ',
       )}`,
+    );
+  }
+
+  for (const expectedLabel of [
+    'Open packages/desktop/src/renderer/App.tsx:12:5',
+    'Open .env.example',
+    'Open Dockerfile',
+    'Open docs/guide.mdx',
+    'Open src/App.vue',
+  ]) {
+    if (!snapshot.fileReferenceLabels.includes(expectedLabel)) {
+      throw new Error(
+        `Dense assistant file chips missing ${expectedLabel}: ${snapshot.fileReferenceLabels.join(
+          ', ',
+        )}`,
+      );
+    }
+  }
+
+  const readmeChipCount = snapshot.fileReferenceLabels.filter(
+    (label) => label === 'Open README.md:1',
+  ).length;
+  if (readmeChipCount !== 1) {
+    throw new Error(
+      `Repeated README.md:1 references should dedupe to one chip: ${snapshot.fileReferenceLabels.join(
+        ', ',
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.overflowText !== '+2 more' ||
+    snapshot.overflowLabel !== '2 more file references'
+  ) {
+    throw new Error(
+      `Dense assistant file overflow is missing: ${JSON.stringify({
+        overflowText: snapshot.overflowText,
+        overflowLabel: snapshot.overflowLabel,
+      })}`,
     );
   }
 
@@ -1004,6 +1058,38 @@ async function assertAssistantMessageActions(fileName) {
 
   if (snapshot.messageRect.bottom > snapshot.composerRect.top) {
     throw new Error('Assistant message overlaps the composer.');
+  }
+
+  if (snapshot.documentScrollWidth > snapshot.viewportWidth + 4) {
+    throw new Error(
+      `Assistant file chips caused horizontal page overflow: ${JSON.stringify({
+        documentScrollWidth: snapshot.documentScrollWidth,
+        viewportWidth: snapshot.viewportWidth,
+      })}`,
+    );
+  }
+
+  for (const chipRect of snapshot.chipRects) {
+    if (!chipRect) {
+      throw new Error('Assistant file chip geometry is missing.');
+    }
+
+    if (chipRect.width > 282) {
+      throw new Error(
+        `Assistant file chip is too wide: ${JSON.stringify(chipRect)}`,
+      );
+    }
+
+    if (
+      chipRect.left < snapshot.messageRect.left ||
+      chipRect.right > snapshot.messageRect.right + 1 ||
+      chipRect.left < snapshot.timelineRect.left ||
+      chipRect.right > snapshot.timelineRect.right + 1
+    ) {
+      throw new Error(
+        `Assistant file chip escaped the message: ${JSON.stringify(chipRect)}`,
+      );
+    }
   }
 }
 

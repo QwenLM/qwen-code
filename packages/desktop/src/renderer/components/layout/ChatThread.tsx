@@ -340,8 +340,11 @@ function TimelineItem({
   previousUserMessage: string | null;
 }) {
   if (item.type === 'message') {
-    const fileReferences =
-      item.role === 'assistant' ? extractFileReferences(item.text) : [];
+    const fileReferenceSet =
+      item.role === 'assistant'
+        ? extractFileReferences(item.text)
+        : { references: [], hiddenCount: 0 };
+    const fileReferences = fileReferenceSet.references;
     const hasChangedFiles = Boolean(gitDiff?.files.length);
 
     return (
@@ -371,6 +374,16 @@ function TimelineItem({
                 </button>
               </li>
             ))}
+            {fileReferenceSet.hiddenCount > 0 ? (
+              <li>
+                <span
+                  aria-label={`${fileReferenceSet.hiddenCount} more file references`}
+                  className="message-file-reference-overflow"
+                >
+                  +{fileReferenceSet.hiddenCount} more
+                </span>
+              </li>
+            ) : null}
           </ul>
         ) : null}
         {item.role === 'assistant' ? (
@@ -472,12 +485,15 @@ function AssistantMessageActions({
   );
 }
 
-const FILE_REFERENCE_PATTERN =
-  /(?:^|[\s([{"'`])((?:[\w@.-]+\/)*[\w@.-]+\.(?:bash|c|cc|cjs|cpp|css|go|h|hpp|html|java|js|jsx|json|kt|lock|md|mjs|py|rs|scss|sh|sql|swift|toml|ts|tsx|txt|xml|ya?ml|zsh)(?::\d+)?)(?=$|[\s)\]},.;:"'`])/giu;
+const MAX_VISIBLE_FILE_REFERENCES = 6;
 
-function extractFileReferences(
-  text: string,
-): Array<{ label: string; path: string }> {
+const FILE_REFERENCE_PATTERN =
+  /(?:^|[\s([{"'`])((?:[\w@.-]+\/)*(?:(?:[\w@.-]+\.(?:astro|bash|c|cc|cjs|cpp|css|cts|go|gradle|h|hpp|html|java|js|jsx|json|kt|lock|md|mdx|mjs|mts|py|rs|scss|sh|sql|svelte|swift|toml|ts|tsx|txt|vue|xml|ya?ml|zsh))|(?:Dockerfile|Makefile)(?:\.[\w.-]+)?|(?:\.(?:env(?:\.[\w.-]+)?|gitignore|npmrc)))(?::\d+(?::\d+)?)?)(?=$|[\s)\]},.;:"'`])/giu;
+
+function extractFileReferences(text: string): {
+  references: Array<{ label: string; path: string }>;
+  hiddenCount: number;
+} {
   const references: Array<{ label: string; path: string }> = [];
   const seen = new Set<string>();
 
@@ -494,12 +510,14 @@ function extractFileReferences(
     });
   }
 
-  return references.slice(0, 6);
+  return {
+    references: references.slice(0, MAX_VISIBLE_FILE_REFERENCES),
+    hiddenCount: Math.max(0, references.length - MAX_VISIBLE_FILE_REFERENCES),
+  };
 }
 
 function stripFileReferenceLine(reference: string): string {
-  const lineMatch = /^(.*):\d+$/u.exec(reference);
-  return lineMatch?.[1] ?? reference;
+  return reference.replace(/:\d+(?::\d+)?$/u, '');
 }
 
 function ToolActivityCard({

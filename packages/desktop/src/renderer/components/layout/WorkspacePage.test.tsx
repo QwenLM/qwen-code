@@ -482,6 +482,70 @@ describe('WorkspacePage', () => {
     ).toBeTruthy();
   });
 
+  it('deduplicates and bounds dense assistant file reference chips', () => {
+    const onOpenFileReference = vi.fn();
+    let chatState = chatReducer(createInitialChatState(), {
+      type: 'append_user_message',
+      content: 'List the touched files',
+    });
+    chatState = chatReducer(chatState, {
+      type: 'server_message',
+      message: {
+        type: 'message_delta',
+        role: 'assistant',
+        text:
+          'Touched README.md:1, README.md:1 again, ' +
+          'packages/desktop/src/renderer/App.tsx:12:5, .env.example, ' +
+          'Dockerfile, docs/guide.mdx, src/App.vue, Makefile, ' +
+          'and config/settings.mts.',
+      },
+    });
+    chatState = chatReducer(chatState, {
+      type: 'server_message',
+      message: { type: 'message_complete' },
+    });
+
+    const renderedContainer = renderWorkspace({
+      chatState,
+      onOpenFileReference,
+    });
+    const fileReferences = renderedContainer.querySelector(
+      '[data-testid="assistant-file-references"]',
+    );
+    const labels = [...(fileReferences?.querySelectorAll('button') ?? [])].map(
+      (button) => button.getAttribute('aria-label'),
+    );
+    const overflow = fileReferences?.querySelector(
+      '.message-file-reference-overflow',
+    );
+
+    expect(labels).toEqual([
+      'Open README.md:1',
+      'Open packages/desktop/src/renderer/App.tsx:12:5',
+      'Open .env.example',
+      'Open Dockerfile',
+      'Open docs/guide.mdx',
+      'Open src/App.vue',
+    ]);
+    expect(labels.filter((label) => label === 'Open README.md:1')).toHaveLength(
+      1,
+    );
+    expect(overflow?.textContent).toBe('+2 more');
+    expect(overflow?.getAttribute('aria-label')).toBe('2 more file references');
+
+    act(() => {
+      (
+        fileReferences?.querySelector(
+          'button[aria-label="Open packages/desktop/src/renderer/App.tsx:12:5"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+
+    expect(onOpenFileReference).toHaveBeenCalledWith(
+      'packages/desktop/src/renderer/App.tsx',
+    );
+  });
+
   it('routes terminal output through an attach action', () => {
     const onAttachTerminalOutput = vi.fn();
     const renderedContainer = renderWorkspace({

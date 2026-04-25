@@ -179,7 +179,12 @@ export class E2eAcpClient implements AcpSessionClient {
       sessionUpdate: 'agent_message_chunk',
       content: {
         type: 'text',
-        text: `E2E fake ACP response received: ${prompt}\n\nUpdated README.md:1 for review.`,
+        text:
+          `E2E fake ACP response received: ${prompt}\n\n` +
+          'Updated README.md:1 for review. Related references: ' +
+          'README.md:1, packages/desktop/src/renderer/App.tsx:12:5, ' +
+          '.env.example, Dockerfile, docs/guide.mdx, src/App.vue, ' +
+          'Makefile, and config/settings.mts.',
       },
     });
 

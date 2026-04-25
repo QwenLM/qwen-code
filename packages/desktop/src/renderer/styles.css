@@ -732,16 +732,25 @@ summary:focus-visible {
   list-style: none;
 }
 
+.message-file-references li {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .message-file-references button,
-.message-action-button {
+.message-action-button,
+.message-file-reference-overflow {
   border: 1px solid var(--line);
   background: rgba(238, 244, 239, 0.035);
   color: var(--text-soft);
 }
 
-.message-file-references button {
-  max-width: 280px;
+.message-file-references button,
+.message-file-reference-overflow {
+  display: inline-flex;
+  max-width: min(280px, 100%);
   min-height: 24px;
+  align-items: center;
   overflow: hidden;
   padding: 3px 8px;
   border-radius: 999px;
@@ -750,6 +759,10 @@ summary:focus-visible {
   font-weight: 760;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.message-file-reference-overflow {
+  color: var(--muted);
 }
 
 .message-file-references button:not(:disabled):hover,
@@ -762,6 +775,7 @@ summary:focus-visible {
 .message-action-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   min-height: 28px;
 }
