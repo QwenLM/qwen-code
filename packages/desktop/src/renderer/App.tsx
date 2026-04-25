@@ -841,7 +841,7 @@ export function App() {
         return;
       }
 
-      if (!activeSessionId && isDraftSession) {
+      if (!activeSessionId && activeProject) {
         if (loadState.state !== 'ready' || !activeProject) {
           return;
         }
@@ -896,7 +896,7 @@ export function App() {
       socketRef.current.sendUserMessage(content);
       setMessageText('');
     },
-    [activeProject, activeSessionId, isDraftSession, loadState, messageText],
+    [activeProject, activeSessionId, loadState, messageText],
   );
 
   const stopGeneration = useCallback(() => {

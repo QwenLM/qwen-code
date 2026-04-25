@@ -4,31 +4,53 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useRef, type FormEvent } from 'react';
+import { useEffect, useRef, type FormEvent, type KeyboardEvent } from 'react';
+import type { DesktopProject } from '../../api/client.js';
 import type { ChatState, ChatTimelineItem } from '../../stores/chatStore.js';
+import type { ModelState } from '../../stores/modelStore.js';
+import type { DesktopApprovalMode } from '../../../shared/desktopProtocol.js';
 
 export function ChatThread({
+  activeProject,
   activeSessionId,
   chatState,
   isDraftSession,
   messageText,
+  modelState,
   onAskUserQuestionResponse,
+  onModeChange,
+  onModelChange,
   onMessageTextChange,
   onPermissionResponse,
   onSendMessage,
   onStopGeneration,
 }: {
+  activeProject: DesktopProject | null;
   activeSessionId: string | null;
   chatState: ChatState;
   isDraftSession: boolean;
   messageText: string;
+  modelState: ModelState;
   onAskUserQuestionResponse: (requestId: string, optionId: string) => void;
+  onModeChange: (mode: DesktopApprovalMode) => void;
+  onModelChange: (modelId: string) => void;
   onMessageTextChange: (message: string) => void;
   onPermissionResponse: (requestId: string, optionId: string) => void;
   onSendMessage: (event: FormEvent<HTMLFormElement>) => void;
   onStopGeneration: () => void;
 }) {
-  const canCompose = Boolean(activeSessionId) || isDraftSession;
+  const canCompose = Boolean(activeProject);
+  const disabledReason = activeProject ? null : 'Open a project to start';
+  const placeholder = activeProject
+    ? `Ask Qwen Code about ${activeProject.name}`
+    : 'Open a project to start';
+  const currentModeId = modelState.modes?.currentModeId ?? 'default';
+  const modeOptions = modelState.modes?.availableModes ?? fallbackModeOptions;
+  const currentModelId =
+    modelState.models?.currentModelId ?? fallbackModelOption.modelId;
+  const modelOptions = modelState.models?.availableModels.length
+    ? modelState.models.availableModels
+    : [fallbackModelOption];
 
   return (
     <section
@@ -41,6 +63,7 @@ export function ChatThread({
         <span>{chatState.streaming ? 'Streaming' : chatState.connection}</span>
       </div>
       <ChatTimeline
+        activeProject={activeProject}
         state={chatState}
         activeSessionId={activeSessionId}
         isDraftSession={isDraftSession}
@@ -51,34 +74,95 @@ export function ChatThread({
         onPermissionResponse={onPermissionResponse}
       />
       <form
-        className="composer"
+        className={canCompose ? 'composer' : 'composer composer-disabled'}
         data-testid="message-composer"
         onSubmit={onSendMessage}
       >
         <textarea
           aria-label="Message"
           disabled={!canCompose}
+          onKeyDown={handleComposerKeyDown}
           onChange={(event) => onMessageTextChange(event.target.value)}
-          placeholder={canCompose ? 'Message Qwen Code' : ''}
+          placeholder={placeholder}
           rows={3}
           value={messageText}
         />
-        <div className="composer-actions">
-          <button
-            className="secondary-button"
-            disabled={!chatState.streaming}
-            type="button"
-            onClick={onStopGeneration}
-          >
-            Stop
-          </button>
-          <button
-            className="primary-button"
-            disabled={!canCompose || messageText.trim().length === 0}
-            type="submit"
-          >
-            Send
-          </button>
+        <div className="composer-control-row">
+          <div className="composer-context" aria-label="Composer context">
+            <button
+              aria-label="Attach files"
+              className="composer-icon-button"
+              disabled
+              title="Attach files"
+              type="button"
+            >
+              +
+            </button>
+            <span
+              className="composer-chip composer-chip-project"
+              title={activeProject?.path ?? disabledReason ?? undefined}
+            >
+              {activeProject?.name ?? 'No project'}
+            </span>
+            <span className="composer-chip">
+              {activeProject?.gitBranch || 'No branch'}
+            </span>
+            <label className="composer-select-label">
+              <span className="sr-only">Permission mode</span>
+              <select
+                aria-label="Permission mode"
+                disabled={!activeSessionId || !modelState.modes}
+                value={currentModeId}
+                onChange={(event) =>
+                  onModeChange(event.target.value as DesktopApprovalMode)
+                }
+              >
+                {modeOptions.map((mode) => (
+                  <option key={mode.id} value={mode.id}>
+                    {mode.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="composer-select-label">
+              <span className="sr-only">Model</span>
+              <select
+                aria-label="Model"
+                disabled={!activeSessionId || !modelState.models}
+                value={currentModelId}
+                onChange={(event) => onModelChange(event.target.value)}
+              >
+                {modelOptions.map((model) => (
+                  <option key={model.modelId} value={model.modelId}>
+                    {model.name || model.modelId}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="composer-actions">
+            {disabledReason ? (
+              <span className="composer-disabled-reason">{disabledReason}</span>
+            ) : null}
+            {!activeSessionId && activeProject ? (
+              <span className="composer-context-note">New thread</span>
+            ) : null}
+            <button
+              className="secondary-button"
+              disabled={!chatState.streaming}
+              type="button"
+              onClick={onStopGeneration}
+            >
+              Stop
+            </button>
+            <button
+              className="primary-button"
+              disabled={!canCompose || messageText.trim().length === 0}
+              type="submit"
+            >
+              Send
+            </button>
+          </div>
         </div>
       </form>
     </section>
@@ -86,10 +170,12 @@ export function ChatThread({
 }
 
 function ChatTimeline({
+  activeProject,
   activeSessionId,
   isDraftSession,
   state,
 }: {
+  activeProject: DesktopProject | null;
   activeSessionId: string | null;
   isDraftSession: boolean;
   state: ChatState;
@@ -112,8 +198,16 @@ function ChatTimeline({
     state.streaming,
   ]);
 
-  if (!activeSessionId && !isDraftSession) {
-    return <div className="conversation-empty">No session selected</div>;
+  if (!activeProject) {
+    return <div className="conversation-empty">Open a project to start</div>;
+  }
+
+  if (!activeSessionId && !isDraftSession && state.items.length === 0) {
+    return (
+      <div className="conversation-empty">
+        Start a task in {activeProject.name}
+      </div>
+    );
   }
 
   if (state.items.length === 0) {
@@ -172,6 +266,28 @@ function TimelineItem({ item }: { item: ChatTimelineItem }) {
 
   return <div className="chat-event">{item.label}</div>;
 }
+
+function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+  if (event.key !== 'Enter' || event.shiftKey) {
+    return;
+  }
+
+  event.preventDefault();
+  event.currentTarget.form?.requestSubmit();
+}
+
+const fallbackModelOption = {
+  modelId: 'default',
+  name: 'Default model',
+};
+
+const fallbackModeOptions = [
+  {
+    id: 'default' as const,
+    name: 'Ask before run',
+    description: 'Ask before running commands.',
+  },
+];
 
 function PermissionPrompts({
   onAskUserQuestionResponse,

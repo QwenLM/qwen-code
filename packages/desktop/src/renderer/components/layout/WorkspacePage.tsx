@@ -188,11 +188,15 @@ export function WorkspacePage({
         <div className="workspace-grid" data-testid="workspace-grid">
           {workspaceView === 'chat' ? (
             <ChatThread
+              activeProject={activeProject}
               activeSessionId={activeSessionId}
               chatState={chatState}
               isDraftSession={isDraftSession}
               messageText={messageText}
+              modelState={modelState}
               onAskUserQuestionResponse={onAskUserQuestionResponse}
+              onModeChange={onModeChange}
+              onModelChange={onModelChange}
               onMessageTextChange={onMessageTextChange}
               onPermissionResponse={onPermissionResponse}
               onSendMessage={onSendMessage}

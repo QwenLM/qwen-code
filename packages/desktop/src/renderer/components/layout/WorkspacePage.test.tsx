@@ -6,7 +6,7 @@
 
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, type FormEvent } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
@@ -25,10 +25,10 @@ import type { LoadState } from './types.js';
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
-describe('WorkspacePage', () => {
-  let root: Root | null = null;
-  let container: HTMLDivElement | null = null;
+let root: Root | null = null;
+let container: HTMLDivElement | null = null;
 
+describe('WorkspacePage', () => {
   afterEach(() => {
     if (root) {
       act(() => {
@@ -41,69 +41,7 @@ describe('WorkspacePage', () => {
   });
 
   it('renders stable workbench landmarks for desktop E2E checks', () => {
-    container = document.createElement('div');
-    document.body.append(container);
-    root = createRoot(container);
-
-    act(() => {
-      root?.render(
-        <WorkspacePage
-          activeProject={project}
-          activeProjectId={project.id}
-          activeSessionId={session.sessionId}
-          chatState={createInitialChatState()}
-          commitMessage=""
-          gitDiff={gitDiff}
-          loadState={readyLoadState}
-          messageText=""
-          modelState={createInitialModelState()}
-          isDraftSession={false}
-          projects={[project]}
-          reviewError={null}
-          sessionError={null}
-          sessions={[session]}
-          settingsState={createInitialSettingsState()}
-          statusLabel="Connected"
-          terminal={null}
-          terminalCommand=""
-          terminalError={null}
-          terminalInput=""
-          terminalNotice={null}
-          onAskUserQuestionResponse={vi.fn()}
-          onAuthenticate={vi.fn()}
-          onChooseWorkspace={vi.fn()}
-          onClearTerminal={vi.fn()}
-          onCommit={vi.fn()}
-          onCommitMessageChange={vi.fn()}
-          onCopyTerminalOutput={vi.fn()}
-          onCreateSession={vi.fn()}
-          onKillTerminal={vi.fn()}
-          onMessageTextChange={vi.fn()}
-          onModeChange={vi.fn()}
-          onModelChange={vi.fn()}
-          onPermissionResponse={vi.fn()}
-          onRefreshProjectGitStatus={vi.fn()}
-          onOpenReviewFile={vi.fn()}
-          onRevertReviewTarget={vi.fn()}
-          onRunTerminalCommand={vi.fn()}
-          onSaveSettings={vi.fn()}
-          onSendTerminalOutputToAi={vi.fn()}
-          onSelectProject={vi.fn()}
-          onSelectSession={vi.fn()}
-          onSendMessage={(event) => event.preventDefault()}
-          onSettingsDispatch={vi.fn()}
-          onStageReviewTarget={vi.fn()}
-          onStopGeneration={vi.fn()}
-          onTerminalCommandChange={vi.fn()}
-          onTerminalInputChange={vi.fn()}
-          onWriteTerminalInput={vi.fn()}
-        />,
-      );
-    });
-    const renderedContainer = container;
-    if (!renderedContainer) {
-      throw new Error('WorkspacePage test container was not created.');
-    }
+    const renderedContainer = renderWorkspace();
 
     for (const testId of [
       'desktop-workspace',
@@ -160,7 +98,183 @@ describe('WorkspacePage', () => {
       renderedContainer.querySelector('[data-testid="terminal-drawer"]'),
     ).toBeNull();
   });
+
+  it('keeps the composer enabled for an active project with no thread', () => {
+    const renderedContainer = renderWorkspace({
+      activeSessionId: null,
+      isDraftSession: false,
+      sessions: [],
+    });
+    const textarea = getMessageTextArea(renderedContainer);
+    const permissionMode = renderedContainer.querySelector(
+      'select[aria-label="Permission mode"]',
+    );
+    const model = renderedContainer.querySelector('select[aria-label="Model"]');
+
+    expect(textarea.disabled).toBe(false);
+    expect(textarea.placeholder).toBe('Ask Qwen Code about example-workspace');
+    expect(renderedContainer.textContent).toContain(
+      'Start a task in example-workspace',
+    );
+    expect(renderedContainer.textContent).toContain('New thread');
+    expect(permissionMode).toBeInstanceOf(HTMLSelectElement);
+    expect((permissionMode as HTMLSelectElement).disabled).toBe(true);
+    expect(model).toBeInstanceOf(HTMLSelectElement);
+    expect((model as HTMLSelectElement).disabled).toBe(true);
+  });
+
+  it('shows a clear disabled composer reason with no active project', () => {
+    const renderedContainer = renderWorkspace({
+      activeProject: null,
+      activeProjectId: null,
+      activeSessionId: null,
+      isDraftSession: false,
+      projects: [],
+      sessions: [],
+    });
+    const textarea = getMessageTextArea(renderedContainer);
+
+    expect(textarea.disabled).toBe(true);
+    expect(textarea.placeholder).toBe('Open a project to start');
+    expect(renderedContainer.textContent).toContain('Open a project to start');
+  });
+
+  it('submits on Enter and keeps Shift+Enter as a newline path', () => {
+    const originalRequestSubmit = HTMLFormElement.prototype.requestSubmit;
+    HTMLFormElement.prototype.requestSubmit = function (this: HTMLFormElement) {
+      this.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+    };
+    const onSendMessage = vi.fn((event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+    });
+
+    try {
+      const renderedContainer = renderWorkspace({
+        activeSessionId: null,
+        isDraftSession: false,
+        messageText: 'hello from keyboard',
+        sessions: [],
+        onSendMessage,
+      });
+      const textarea = getMessageTextArea(renderedContainer);
+
+      act(() => {
+        textarea.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            bubbles: true,
+            cancelable: true,
+            key: 'Enter',
+            shiftKey: true,
+          }),
+        );
+      });
+
+      expect(onSendMessage).not.toHaveBeenCalled();
+
+      act(() => {
+        textarea.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            bubbles: true,
+            cancelable: true,
+            key: 'Enter',
+          }),
+        );
+      });
+
+      expect(onSendMessage).toHaveBeenCalledTimes(1);
+    } finally {
+      HTMLFormElement.prototype.requestSubmit = originalRequestSubmit;
+    }
+  });
 });
+
+type WorkspacePageProps = Parameters<typeof WorkspacePage>[0];
+
+function renderWorkspace(
+  overrides: Partial<WorkspacePageProps> = {},
+): HTMLElement {
+  container = document.createElement('div');
+  document.body.append(container);
+  root = createRoot(container);
+
+  const props: WorkspacePageProps = {
+    activeProject: project,
+    activeProjectId: project.id,
+    activeSessionId: session.sessionId,
+    chatState: createInitialChatState(),
+    commitMessage: '',
+    gitDiff,
+    loadState: readyLoadState,
+    messageText: '',
+    modelState: createInitialModelState(),
+    isDraftSession: false,
+    projects: [project],
+    reviewError: null,
+    sessionError: null,
+    sessions: [session],
+    settingsState: createInitialSettingsState(),
+    statusLabel: 'Connected',
+    terminal: null,
+    terminalCommand: '',
+    terminalError: null,
+    terminalInput: '',
+    terminalNotice: null,
+    onAskUserQuestionResponse: vi.fn(),
+    onAuthenticate: vi.fn(),
+    onChooseWorkspace: vi.fn(),
+    onClearTerminal: vi.fn(),
+    onCommit: vi.fn(),
+    onCommitMessageChange: vi.fn(),
+    onCopyTerminalOutput: vi.fn(),
+    onCreateSession: vi.fn(),
+    onKillTerminal: vi.fn(),
+    onMessageTextChange: vi.fn(),
+    onModeChange: vi.fn(),
+    onModelChange: vi.fn(),
+    onPermissionResponse: vi.fn(),
+    onRefreshProjectGitStatus: vi.fn(),
+    onOpenReviewFile: vi.fn(),
+    onRevertReviewTarget: vi.fn(),
+    onRunTerminalCommand: vi.fn(),
+    onSaveSettings: vi.fn(),
+    onSendTerminalOutputToAi: vi.fn(),
+    onSelectProject: vi.fn(),
+    onSelectSession: vi.fn(),
+    onSendMessage: (event) => event.preventDefault(),
+    onSettingsDispatch: vi.fn(),
+    onStageReviewTarget: vi.fn(),
+    onStopGeneration: vi.fn(),
+    onTerminalCommandChange: vi.fn(),
+    onTerminalInputChange: vi.fn(),
+    onWriteTerminalInput: vi.fn(),
+    ...overrides,
+  };
+
+  act(() => {
+    root?.render(<WorkspacePage {...props} />);
+  });
+
+  if (!container) {
+    throw new Error('WorkspacePage test container was not created.');
+  }
+
+  return container;
+}
+
+function getMessageTextArea(
+  renderedContainer: HTMLElement,
+): HTMLTextAreaElement {
+  const textarea = renderedContainer.querySelector(
+    'textarea[aria-label="Message"]',
+  );
+  if (!(textarea instanceof HTMLTextAreaElement)) {
+    throw new Error('Message textarea was not rendered.');
+  }
+
+  return textarea;
+}
 
 function clickButton(container: HTMLElement, text: string): void {
   const button = [...container.querySelectorAll('button')].find(

@@ -794,9 +794,9 @@ summary:focus-visible {
   display: grid;
   width: min(900px, calc(100% - 36px));
   justify-self: center;
-  gap: 10px;
+  gap: 9px;
   margin: 0 0 16px;
-  padding: 12px;
+  padding: 10px;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   background: var(--surface-glass);
@@ -815,6 +815,109 @@ summary:focus-visible {
 
 .composer textarea:focus {
   outline: 0;
+}
+
+.composer-disabled {
+  background: rgba(24, 29, 30, 0.62);
+}
+
+.composer-control-row,
+.composer-context,
+.composer-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.composer-control-row {
+  justify-content: space-between;
+}
+
+.composer-context {
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+.composer-icon-button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: rgba(238, 244, 239, 0.045);
+  color: var(--text-soft);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.composer-icon-button:not(:disabled):hover {
+  background: rgba(238, 244, 239, 0.08);
+  color: var(--text);
+}
+
+.composer-chip,
+.composer-context-note,
+.composer-disabled-reason {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 180px;
+  min-height: 30px;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-chip,
+.composer-context-note {
+  padding: 0 10px;
+  background: rgba(238, 244, 239, 0.035);
+}
+
+.composer-chip-project {
+  max-width: 220px;
+  color: var(--text);
+}
+
+.composer-context-note {
+  border-color: rgba(85, 166, 255, 0.32);
+  background: var(--accent-soft);
+  color: #b7d9ff;
+}
+
+.composer-disabled-reason {
+  border-color: rgba(240, 182, 110, 0.36);
+  background: var(--warning-soft);
+  color: #f4d095;
+  padding: 0 9px;
+}
+
+.composer-select-label {
+  display: inline-flex;
+  min-width: 0;
+}
+
+.composer-select-label select {
+  width: auto;
+  min-width: 122px;
+  max-width: 178px;
+  min-height: 30px;
+  overflow: hidden;
+  padding: 0 28px 0 10px;
+  border-radius: 999px;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 select,
@@ -841,9 +944,9 @@ textarea:focus {
 }
 
 .composer-actions {
-  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 8px;
 }
 
 .runtime-row,

@@ -69,6 +69,17 @@ async function main() {
   await saveScreenshot('initial-workspace.png');
 
   await clickButtonUntilText('Open Project', 'desktop-e2e-workspace');
+  await assertProjectComposerReady('project-composer.json');
+  await setFieldByAriaLabel('Message', 'Please exercise command approval.');
+  await clickButton('Send');
+  await waitForText('session-e2e-1');
+  await waitForText('Connected to session-e2e-1');
+  await waitForText('Approve Once');
+  await clickButton('Approve Once');
+  await waitForText('E2E fake ACP response received');
+  await waitForText('Turn complete: end_turn');
+  await waitForSelector('[data-testid="thread-list"]');
+
   await clickButton('Changes');
   await waitForText('README.md');
   await waitForText('Accept Hunk');
@@ -88,18 +99,6 @@ async function main() {
   await waitForSelector('[data-testid="project-list"]');
 
   await clickButton('Chat');
-  await clickButton('New Thread');
-  await waitForText('New thread ready');
-  await waitForSelector('[data-testid="thread-list"]');
-
-  await setFieldByAriaLabel('Message', 'Please exercise command approval.');
-  await clickButton('Send');
-  await waitForText('session-e2e-1');
-  await waitForText('Connected to session-e2e-1');
-  await waitForText('Approve Once');
-  await clickButton('Approve Once');
-  await waitForText('E2E fake ACP response received');
-  await waitForText('Turn complete: end_turn');
   await waitForSelector('[data-testid="thread-list"]');
 
   await clickButton('Settings');
@@ -305,6 +304,57 @@ async function assertWorkbenchLandmarks() {
 
   if (landmarks.length > 0) {
     throw new Error(`Missing workbench landmarks: ${landmarks.join(', ')}`);
+  }
+}
+
+async function assertProjectComposerReady(fileName) {
+  await waitFor(
+    'project-scoped composer',
+    async () =>
+      evaluate(`(() => {
+        const textarea = document.querySelector('textarea[aria-label="Message"]');
+        return Boolean(
+          textarea &&
+          !textarea.disabled &&
+          textarea.placeholder.includes('desktop-e2e-workspace') &&
+          document.body.innerText.includes('Start a task in desktop-e2e-workspace') &&
+          document.body.innerText.includes('New thread')
+        );
+      })()`),
+    15_000,
+  );
+
+  const snapshot = await evaluate(`(() => {
+    const textarea = document.querySelector('textarea[aria-label="Message"]');
+    const permission = document.querySelector('select[aria-label="Permission mode"]');
+    const model = document.querySelector('select[aria-label="Model"]');
+    return {
+      composerText: document.querySelector('[data-testid="message-composer"]')?.textContent.trim() ?? '',
+      placeholder: textarea?.placeholder ?? null,
+      textareaDisabled: textarea?.disabled ?? null,
+      permissionDisabled: permission?.disabled ?? null,
+      modelDisabled: model?.disabled ?? null,
+      bodyHasStartTask: document.body.innerText.includes('Start a task in desktop-e2e-workspace'),
+      bodyHasNewThread: document.body.innerText.includes('New thread')
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (snapshot.textareaDisabled !== false) {
+    throw new Error(
+      'Project composer should be enabled before a thread exists.',
+    );
+  }
+
+  if (snapshot.permissionDisabled !== true || snapshot.modelDisabled !== true) {
+    throw new Error(
+      'Project composer runtime selectors should stay disabled before a session exists.',
+    );
   }
 }
 
