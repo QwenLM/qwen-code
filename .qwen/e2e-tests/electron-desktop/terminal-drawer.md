@@ -15,8 +15,9 @@ Slice 13 basic scoped terminal.
 5. Copy the terminal transcript and verify the UI reports copy success.
 6. Start a command that waits for stdin, send input through the drawer, and
    verify the command output includes that stdin.
-7. Send the terminal output to the active AI thread and approve the fake ACP
-   command request.
+7. Attach the terminal output to the composer, verify no AI turn starts until
+   the composer Send action is clicked, then approve the fake ACP command
+   request.
 8. Start a long-running command and click Kill.
 9. Click Clear and verify the drawer output resets.
 
@@ -32,8 +33,9 @@ Slice 13 basic scoped terminal.
   are visible in the bottom drawer and do not use Node integration.
 - Copy output uses the preload-whitelisted Electron clipboard IPC, not renderer
   Node integration or an unbounded IPC channel.
-- Send to AI uses the existing authenticated WebSocket user-message path with
-  a bounded terminal transcript.
+- Attach Output appends a bounded terminal transcript to the composer draft,
+  does not touch the session WebSocket immediately, and requires the normal
+  composer Send action before a new agent turn starts.
 
 ## Diagnostics on Failure
 
@@ -97,6 +99,34 @@ Additional artifacts collected:
 - `completed-layout.json`
 - `completed-workspace.png`
 
+## Automated Coverage Added In Codex Alignment Iteration 5
+
+Iteration 5 changes terminal follow-up from direct AI send to explicit
+attach-to-composer and updates the real Electron CDP smoke to cover the safer
+workflow:
+
+1. Launch real Electron with isolated HOME/runtime/user-data and fake ACP.
+2. Open the fake Git project, create a thread from the project composer, and
+   complete the existing approval/review/commit path.
+3. Expand Terminal, run stdout and stdin commands, then click `Attach Output`.
+4. Assert the composer contains the bounded terminal transcript, the terminal
+   action is labeled `Attach Output`, the legacy `Send to AI` action is absent,
+   and no new `Approve Once` request appears before composer Send.
+5. Click composer `Send`, approve the fake ACP request, and verify the fake ACP
+   response includes the terminal-output prompt.
+
+Executable harness:
+
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+
+Additional artifacts collected:
+
+- `terminal-attachment.json`
+- `terminal-expanded-layout.json`
+- `terminal-expanded.png`
+- `completed-layout.json`
+- `completed-workspace.png`
+
 ## Execution Results
 
 Codex alignment iteration 4:
@@ -109,6 +139,17 @@ Codex alignment iteration 4:
 - `cd packages/desktop && npm run e2e:cdp` passed.
 - Success artifacts:
   `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T17-00-08-461Z/`.
+
+Codex alignment iteration 5:
+
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed: 5 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed.
+- Success artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T17-08-17-022Z/`.
 
 Slice 16:
 

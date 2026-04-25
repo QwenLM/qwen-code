@@ -9,7 +9,7 @@ import {
   ChevronDownIcon,
   ChevronUpIcon,
   CopyIcon,
-  SendIcon,
+  PaperclipIcon,
   StopIcon,
   TerminalIcon,
   TrashIcon,
@@ -21,13 +21,13 @@ export function TerminalDrawer({
   isExpanded,
   input,
   notice,
+  onAttachOutput,
   onClear,
   onCommandChange,
   onCopyOutput,
   onInputChange,
   onKill,
   onRun,
-  onSendOutputToAi,
   onToggleExpanded,
   onWriteInput,
   project,
@@ -38,13 +38,13 @@ export function TerminalDrawer({
   isExpanded: boolean;
   input: string;
   notice: string | null;
+  onAttachOutput: () => void;
   onClear: () => void;
   onCommandChange: (command: string) => void;
   onCopyOutput: () => void;
   onInputChange: (input: string) => void;
   onKill: () => void;
   onRun: () => void;
-  onSendOutputToAi: () => void;
   onToggleExpanded: () => void;
   onWriteInput: () => void;
   project: DesktopProject | null;
@@ -110,15 +110,15 @@ export function TerminalDrawer({
               <span className="sr-only">Copy Output</span>
             </button>
             <button
-              aria-label="Send to AI"
+              aria-label="Attach Output"
               className="terminal-icon-button"
               disabled={!hasOutput}
-              title="Send to AI"
+              title="Attach Output to Composer"
               type="button"
-              onClick={onSendOutputToAi}
+              onClick={onAttachOutput}
             >
-              <SendIcon />
-              <span className="sr-only">Send to AI</span>
+              <PaperclipIcon />
+              <span className="sr-only">Attach Output</span>
             </button>
             <button
               aria-label="Clear Terminal"

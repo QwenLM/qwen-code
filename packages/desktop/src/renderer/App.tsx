@@ -713,14 +713,9 @@ export function App() {
     }
   }, [terminal]);
 
-  const sendTerminalOutputToAi = useCallback(() => {
-    if (
-      !activeSessionId ||
-      !socketRef.current ||
-      chatState.connection !== 'connected' ||
-      !terminal
-    ) {
-      setTerminalError('Open a thread before sending terminal output to AI.');
+  const attachTerminalOutputToComposer = useCallback(() => {
+    if (!terminal) {
+      setTerminalError('Run a terminal command before attaching output.');
       return;
     }
 
@@ -730,12 +725,15 @@ export function App() {
       return;
     }
 
-    const content = buildTerminalOutputPrompt(terminal);
-    dispatchChat({ type: 'append_user_message', content });
-    socketRef.current.sendTerminalOutput(content);
+    const content = buildTerminalAttachmentDraft(terminal);
+    setMessageText((current) =>
+      current.trim().length > 0
+        ? `${current.trimEnd()}\n\n${content}`
+        : content,
+    );
     setTerminalError(null);
-    setTerminalNotice('Sent terminal output to AI.');
-  }, [activeSessionId, chatState.connection, terminal]);
+    setTerminalNotice('Attached terminal output to composer.');
+  }, [terminal]);
 
   useEffect(() => {
     if (loadState.state !== 'ready' || terminal?.status !== 'running') {
@@ -972,7 +970,7 @@ export function App() {
       onRevertReviewTarget={revertReviewTarget}
       onRunTerminalCommand={runTerminalCommand}
       onSaveSettings={saveSettings}
-      onSendTerminalOutputToAi={sendTerminalOutputToAi}
+      onAttachTerminalOutput={attachTerminalOutputToComposer}
       onSelectProject={selectProject}
       onSelectSession={selectSession}
       onSendMessage={sendMessage}
@@ -1041,7 +1039,7 @@ function formatTerminalTranscript(terminal: DesktopTerminal): string {
   return `$ ${terminal.command}\n[${terminal.status}]${exitText}\n${terminal.output}`;
 }
 
-function buildTerminalOutputPrompt(terminal: DesktopTerminal): string {
+function buildTerminalAttachmentDraft(terminal: DesktopTerminal): string {
   const transcript = formatTerminalTranscript(terminal);
   const boundedTranscript =
     transcript.length > 12_000

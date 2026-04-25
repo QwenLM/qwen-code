@@ -136,8 +136,10 @@ async function main() {
   await clickButton('Send Input');
   await waitForText('Input sent.');
   await waitForText('stdin:desktop-e2e-stdin');
-  await clickButton('Send to AI');
-  await waitForText('Sent terminal output to AI.');
+  await clickButton('Attach Output');
+  await waitForText('Attached terminal output to composer.');
+  await assertTerminalOutputAttached('terminal-attachment.json');
+  await clickButton('Send');
   await waitForText('Approve Once');
   await clickButton('Approve Once');
   await waitForText(
@@ -743,6 +745,59 @@ async function assertTerminalExpandedLayout(fileName) {
   if (metrics.document.bodyScrollHeight > metrics.viewport.height + 4) {
     throw new Error(
       `Expanded terminal document should fit one viewport; body scrollHeight=${metrics.document.bodyScrollHeight}, viewport=${metrics.viewport.height}`,
+    );
+  }
+}
+
+async function assertTerminalOutputAttached(fileName) {
+  const snapshot = await evaluate(`(() => {
+    const textarea = document.querySelector('textarea[aria-label="Message"]');
+    const terminalActions = document.querySelector('.terminal-actions');
+    const text = textarea?.value ?? '';
+    return {
+      composerValue: text,
+      hasTerminalPrompt: text.includes('Review this terminal output'),
+      hasCommand: text.includes('$ node -e'),
+      hasStdinOutput: text.includes('stdin:desktop-e2e-stdin'),
+      hasAttachAction: Boolean(
+        document.querySelector('button[aria-label="Attach Output"]')
+      ),
+      hasLegacySendAction: Boolean(
+        document.querySelector('button[aria-label="Send to AI"]')
+      ) || (terminalActions?.textContent ?? '').includes('Send to AI'),
+      hasPendingApproval: document.body.innerText.includes('Approve Once')
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (!snapshot.hasAttachAction) {
+    throw new Error('Terminal attach action was not rendered.');
+  }
+
+  if (snapshot.hasLegacySendAction) {
+    throw new Error('Terminal should attach output, not show Send to AI.');
+  }
+
+  if (
+    !snapshot.hasTerminalPrompt ||
+    !snapshot.hasCommand ||
+    !snapshot.hasStdinOutput
+  ) {
+    throw new Error(
+      `Terminal output was not attached to composer: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (snapshot.hasPendingApproval) {
+    throw new Error(
+      'Attaching terminal output should not create an agent approval request.',
     );
   }
 }

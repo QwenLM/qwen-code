@@ -312,6 +312,33 @@ export function CopyIcon(props: SidebarIconProps) {
   );
 }
 
+export function PaperclipIcon(props: SidebarIconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="20"
+      viewBox="0 0 24 24"
+      width="20"
+      {...props}
+    >
+      <path
+        d="m8.1 12.1 6.2-6.2c1.4-1.4 3.6-1.4 5 0s1.4 3.6 0 5l-8.1 8.1c-1.9 1.9-5 1.9-6.9 0s-1.9-5 0-6.9l7.8-7.8"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.7"
+      />
+      <path
+        d="m8.3 15.8 7.3-7.3"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.7"
+      />
+    </svg>
+  );
+}
+
 export function SendIcon(props: SidebarIconProps) {
   return (
     <svg

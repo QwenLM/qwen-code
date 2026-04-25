@@ -14,6 +14,7 @@ import type {
   DesktopGitDiff,
   DesktopProject,
   DesktopSessionSummary,
+  DesktopTerminal,
 } from '../../api/client.js';
 import { createInitialChatState } from '../../stores/chatStore.js';
 import { createInitialModelState } from '../../stores/modelStore.js';
@@ -95,6 +96,12 @@ describe('WorkspacePage', () => {
     expect(
       renderedContainer.querySelector('button[aria-label="Copy Output"]'),
     ).toBeTruthy();
+    expect(
+      renderedContainer.querySelector('button[aria-label="Attach Output"]'),
+    ).toBeTruthy();
+    expect(
+      renderedContainer.querySelector('button[aria-label="Send to AI"]'),
+    ).toBeNull();
 
     act(() => {
       clickButton(renderedContainer, 'Open Changes');
@@ -219,6 +226,30 @@ describe('WorkspacePage', () => {
       HTMLFormElement.prototype.requestSubmit = originalRequestSubmit;
     }
   });
+
+  it('routes terminal output through an attach action', () => {
+    const onAttachTerminalOutput = vi.fn();
+    const renderedContainer = renderWorkspace({
+      onAttachTerminalOutput,
+      terminal,
+    });
+
+    act(() => {
+      clickButton(renderedContainer, 'Expand Terminal');
+    });
+
+    const attachButton = renderedContainer.querySelector(
+      'button[aria-label="Attach Output"]',
+    );
+    expect(attachButton).toBeInstanceOf(HTMLButtonElement);
+    expect((attachButton as HTMLButtonElement).disabled).toBe(false);
+
+    act(() => {
+      clickButton(renderedContainer, 'Attach Output');
+    });
+
+    expect(onAttachTerminalOutput).toHaveBeenCalledTimes(1);
+  });
 });
 
 type WorkspacePageProps = Parameters<typeof WorkspacePage>[0];
@@ -270,7 +301,7 @@ function renderWorkspace(
     onRevertReviewTarget: vi.fn(),
     onRunTerminalCommand: vi.fn(),
     onSaveSettings: vi.fn(),
-    onSendTerminalOutputToAi: vi.fn(),
+    onAttachTerminalOutput: vi.fn(),
     onSelectProject: vi.fn(),
     onSelectSession: vi.fn(),
     onSendMessage: (event) => event.preventDefault(),
@@ -346,6 +377,19 @@ const session: DesktopSessionSummary = {
   sessionId: 'session-1',
   title: 'Fix parser test',
   cwd: project.path,
+};
+
+const terminal: DesktopTerminal = {
+  id: 'terminal-1',
+  projectId: project.id,
+  cwd: project.path,
+  command: 'printf terminal-output',
+  status: 'exited',
+  output: 'terminal-output',
+  exitCode: 0,
+  signal: null,
+  createdAt: '2026-04-25T00:00:00.000Z',
+  updatedAt: '2026-04-25T00:00:01.000Z',
 };
 
 const gitDiff: DesktopGitDiff = {

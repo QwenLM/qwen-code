@@ -69,7 +69,7 @@ export function WorkspacePage({
   onRevertReviewTarget,
   onRunTerminalCommand,
   onSaveSettings,
-  onSendTerminalOutputToAi,
+  onAttachTerminalOutput,
   onSelectProject,
   onSelectSession,
   onSendMessage,
@@ -119,7 +119,7 @@ export function WorkspacePage({
   onRevertReviewTarget: (target: DesktopGitReviewTarget) => void;
   onRunTerminalCommand: () => void;
   onSaveSettings: () => void;
-  onSendTerminalOutputToAi: () => void;
+  onAttachTerminalOutput: () => void;
   onSelectProject: (projectId: string) => void;
   onSelectSession: (sessionId: string) => void;
   onSendMessage: (event: FormEvent<HTMLFormElement>) => void;
@@ -259,7 +259,7 @@ export function WorkspacePage({
             onKill={onKillTerminal}
             onInputChange={onTerminalInputChange}
             onRun={onRunTerminalCommand}
-            onSendOutputToAi={onSendTerminalOutputToAi}
+            onAttachOutput={onAttachTerminalOutput}
             onToggleExpanded={() =>
               setIsTerminalExpanded((current) => !current)
             }

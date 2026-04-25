@@ -22,7 +22,101 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
-### Active Slice: Collapsed Terminal Status Strip Alignment
+### Completed Slice: Terminal Attach-to-Composer Workflow
+
+Status: completed in iteration 5.
+
+Goal: change terminal output follow-up from an immediate `Send to AI` action
+into an explicit attach-to-composer flow, so users can review and edit command
+output before deciding whether to send it to the agent.
+
+User-visible value: terminal output becomes contextual material in the task
+composer rather than a hidden second send path that can unexpectedly trigger a
+new agent turn. This keeps the conversation-first workbench aligned with
+`home.jpg` while preserving the terminal as a supporting tool.
+
+Expected files:
+
+- `packages/desktop/src/renderer/App.tsx`
+- `packages/desktop/src/renderer/api/websocket.ts`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.tsx`
+- `packages/desktop/src/renderer/components/layout/TerminalDrawer.tsx`
+- `packages/desktop/src/renderer/components/layout/SidebarIcons.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/terminal-drawer.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The expanded Terminal action is labeled as attaching output to the composer,
+  not sending directly to AI.
+- Attaching terminal output appends a bounded terminal transcript to the
+  existing composer text and shows a clear success notice.
+- The attach action works whenever terminal output exists, including before a
+  thread is selected, and does not require or write to the session WebSocket.
+- The user must still click Send from the composer before a new agent turn is
+  created.
+- Copy, clear, kill, run command, stdin, expand, and collapse behavior is
+  unchanged.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, create a composer-first thread,
+  approve the fake command, review and commit changes, expand Terminal, run
+  stdout and stdin commands, attach the resulting output to the composer,
+  assert no fake ACP follow-up happens until Send is clicked, then send the
+  composer text and approve the fake command request.
+- E2E assertions: attach button is present and `Send to AI` is absent; composer
+  contains the terminal transcript after attach; terminal notice confirms the
+  attachment; the output stays editable in the composer; console errors and
+  failed local requests are absent.
+- Diagnostic artifacts: CDP screenshots, terminal layout JSON, composer attach
+  JSON, Electron log, summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained terminal
+  action wording and compact composer-centric hierarchy; `electron-desktop-dev`
+  for renderer changes and real Electron CDP verification.
+
+Notes and decisions:
+
+- The prototype keeps the composer as the task control center, so terminal
+  output should land there for user review rather than bypassing it.
+- This slice intentionally preserves the transcript formatting and bounding
+  logic from the existing send path, but changes the destination from WebSocket
+  send to composer draft text.
+- The WebSocket helper no longer needs a separate terminal-output send method
+  because the final send is the same explicit user-message path as any other
+  composer submit.
+
+Verification results:
+
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 5 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed after launch through real
+  Electron over CDP.
+- Passing artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T17-08-17-022Z/`.
+
+Next work:
+
+- Improve review safety by replacing `Accept`/`Revert` terminology with
+  Stage/Unstage/Discard and confirming destructive discard paths.
+- Continue prototype fidelity work in the conversation timeline by hiding
+  protocol/session noise and adding inline changed-file summaries.
+
+### Completed Slice: Collapsed Terminal Status Strip Alignment
 
 Status: completed in iteration 4.
 
