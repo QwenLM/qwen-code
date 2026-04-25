@@ -441,7 +441,48 @@ function processContent(
         requestContext,
       );
       if (toolMessage) {
+        // OpenAI spec only permits string / text-part content on
+        // `role: "tool"` messages. Strict OpenAI-compatible servers (e.g.
+        // LM Studio) reject tool messages containing image_url / input_audio
+        // / video_url / file parts with HTTP 400 "Invalid 'messages' in
+        // payload". Split any non-text media into a follow-up `role: "user"`
+        // message so the model still sees the media while the tool message
+        // stays spec-compliant. Permissive providers see equivalent content.
+        const mediaParts: OpenAIContentPart[] = [];
+        if (Array.isArray(toolMessage.content)) {
+          const textParts: OpenAI.Chat.ChatCompletionContentPartText[] = [];
+          for (const cp of toolMessage.content as OpenAIContentPart[]) {
+            if (
+              cp &&
+              (cp.type === 'image_url' ||
+                cp.type === 'input_audio' ||
+                cp.type === 'video_url' ||
+                cp.type === 'file')
+            ) {
+              mediaParts.push(cp);
+            } else if (cp && cp.type === 'text') {
+              textParts.push(cp);
+            }
+          }
+          if (mediaParts.length > 0) {
+            const textOnly = textParts.map((p) => p.text).join('\n');
+            toolMessage.content =
+              textOnly || '[media attached in following user message]';
+          }
+        }
         messages.push(toolMessage);
+        if (mediaParts.length > 0) {
+          messages.push({
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: '(attached media from previous tool call)',
+              },
+              ...mediaParts,
+            ] as unknown as OpenAI.Chat.ChatCompletionContentPartText[],
+          });
+        }
       }
     }
   }
