@@ -963,48 +963,44 @@ describe('SettingsDialog', () => {
         </KeypressProvider>,
       );
 
-      // Trigger a restart-required setting change: navigate to "Language: UI" (2nd item) and toggle it.
-      act(() => {
-        stdin.write(TerminalKeys.DOWN_ARROW as string);
-      });
       await waitFor(() => {
-        expect(lastFrame()).toContain('● Language: UI');
-      });
-      act(() => {
-        stdin.write(TerminalKeys.ENTER as string);
+        expect(lastFrame()).toContain('Tool Approval Mode');
       });
 
-      await waitFor(
-        () => {
-          expect(lastFrame()).toContain(
-            'To see changes, Qwen Code must be restarted',
-          );
-        },
-        { timeout: 3000 },
-      );
+      const languageIndex = getDialogSettingKeys().indexOf('general.language');
+      expect(languageIndex).toBeGreaterThanOrEqual(0);
+
+      const press = async (key: string) => {
+        act(() => {
+          stdin.write(key);
+        });
+        await wait();
+      };
+
+      // Trigger a restart-required setting change by toggling the UI language setting.
+      for (let i = 0; i < languageIndex; i++) {
+        await press(TerminalKeys.DOWN_ARROW as string);
+      }
+      await press(TerminalKeys.ENTER as string);
+
+      await waitFor(() => {
+        expect(lastFrame()).toContain(
+          'To see changes, Qwen Code must be restarted',
+        );
+      });
 
       // Switch scopes; restart prompt should remain visible.
-      act(() => {
-        stdin.write(TerminalKeys.TAB as string);
-      });
-      await waitFor(() => {
-        expect(lastFrame()).toContain('Tab to go back');
-      });
-      act(() => {
-        stdin.write('2');
-      });
+      await press(TerminalKeys.TAB as string);
+      await press('2');
 
-      await waitFor(
-        () => {
-          expect(lastFrame()).toContain(
-            'To see changes, Qwen Code must be restarted',
-          );
-        },
-        { timeout: 3000 },
-      );
+      await waitFor(() => {
+        expect(lastFrame()).toContain(
+          'To see changes, Qwen Code must be restarted',
+        );
+      });
 
       unmount();
-    }, 10000);
+    });
   });
 
   describe('Settings Display Values', () => {

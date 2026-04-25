@@ -1,35 +1,44 @@
 ---
 name: terminal-capture
-description: Automates terminal UI screenshot testing for CLI commands. Applies when reviewing PRs that affect CLI output, testing slash commands (/about, /context, /auth, /export), generating visual documentation, or when 'terminal screenshot', 'CLI test', 'visual test', or 'terminal-capture' is mentioned.
+description: Automates terminal UI screenshot testing for CLI commands. Applies
+  when reviewing PRs that affect CLI output, testing slash commands (/about,
+  /context, /auth, /export), generating visual documentation, or when 'terminal
+  screenshot', 'CLI test', 'visual test', or 'terminal-capture' is mentioned.
 ---
 
 # Terminal Capture — CLI Terminal Screenshot Automation
 
-Drive terminal interactions and screenshots via TypeScript configuration, used for visual verification during PR reviews.
+Drive terminal interactions and screenshots via TypeScript configuration, used
+for visual verification during PR reviews.
 
 ## Prerequisites
 
 Ensure the following dependencies are installed before running:
 
 ```bash
-npm install       # Install project dependencies (including node-pty, xterm, playwright, etc.)
+npm install       # Install project dependencies.
 npx playwright install chromium   # Install Playwright browser
 ```
 
 ## Architecture
 
 ```
-node-pty (pseudo-terminal) → ANSI byte stream → xterm.js (Playwright headless) → Screenshot
+node-pty (pseudo-terminal)
+  → ANSI byte stream
+  → xterm.js (Playwright headless)
+  → Screenshot
 ```
 
 Core files:
 
-| File                                                     | Purpose                                                                  |
-| -------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `integration-tests/terminal-capture/terminal-capture.ts` | Low-level engine (PTY + xterm.js + Playwright)                           |
-| `integration-tests/terminal-capture/scenario-runner.ts`  | Scenario executor (parses config, drives interactions, auto-screenshots) |
-| `integration-tests/terminal-capture/run.ts`              | CLI entry point (batch run scenarios)                                    |
-| `integration-tests/terminal-capture/scenarios/*.ts`      | Scenario configuration files                                             |
+- `integration-tests/terminal-capture/terminal-capture.ts`
+  Low-level PTY, xterm.js, and Playwright engine.
+- `integration-tests/terminal-capture/scenario-runner.ts`
+  Scenario executor for config, interactions, and screenshots.
+- `integration-tests/terminal-capture/run.ts`
+  CLI entry point for batch scenario runs.
+- `integration-tests/terminal-capture/scenarios/*.ts`
+  Scenario configuration files.
 
 ## Quick Start
 
@@ -43,7 +52,8 @@ import type { ScenarioConfig } from '../scenario-runner.js';
 export default {
   name: '/about',
   spawn: ['node', 'dist/cli.js', '--yolo'],
-  terminal: { title: 'qwen-code', cwd: '../../..' }, // Relative to this config file's location
+  // cwd is relative to this config file's location.
+  terminal: { title: 'qwen-code', cwd: '../../..' },
   flow: [
     { type: 'Hi, can you help me understand this codebase?' },
     { type: '/about' },
@@ -55,15 +65,18 @@ export default {
 
 ```bash
 # Single scenario
-npx tsx integration-tests/terminal-capture/run.ts integration-tests/terminal-capture/scenarios/about.ts
+npx tsx integration-tests/terminal-capture/run.ts \
+  integration-tests/terminal-capture/scenarios/about.ts
 
 # Batch (entire directory)
-npx tsx integration-tests/terminal-capture/run.ts integration-tests/terminal-capture/scenarios/
+npx tsx integration-tests/terminal-capture/run.ts \
+  integration-tests/terminal-capture/scenarios/
 ```
 
 ### 3. Output
 
-Screenshots are saved to `integration-tests/terminal-capture/scenarios/screenshots/{name}/`:
+Screenshots are saved to
+`integration-tests/terminal-capture/scenarios/screenshots/{name}/`:
 
 | File            | Description                        |
 | --------------- | ---------------------------------- |
@@ -79,7 +92,8 @@ Each flow step can contain the following fields:
 
 ### `type: string` — Input Text
 
-Automatic behavior: Input text → Screenshot (01) → Press Enter → Wait for output to stabilize → Screenshot (02).
+Automatic behavior:
+Input text → Screenshot (01) → Enter → stable output → Screenshot (02).
 
 ```typescript
 {
@@ -90,13 +104,17 @@ Automatic behavior: Input text → Screenshot (01) → Press Enter → Wait for 
 } // Slash command (auto-completion handled automatically)
 ```
 
-**Special rule**: If the next step is `key`, do not auto-press Enter (hand over control to the key sequence).
+**Special rule**: If the next step is `key`, do not auto-press Enter (hand over
+control to the key sequence).
 
 ### `key: string | string[]` — Send Key Press
 
-Used for menu selection, Tab completion, and other interactions. Does not auto-press Enter or auto-screenshot.
+Used for menu selection, Tab completion, and other interactions. Does not
+auto-press Enter or auto-screenshot.
 
-Supported key names: `ArrowUp`, `ArrowDown`, `ArrowLeft`, `ArrowRight`, `Enter`, `Tab`, `Escape`, `Backspace`, `Space`, `Home`, `End`, `PageUp`, `PageDown`, `Delete`
+Supported key names: `ArrowUp`, `ArrowDown`, `ArrowLeft`, `ArrowRight`, `Enter`,
+`Tab`, `Escape`, `Backspace`, `Space`, `Home`, `End`, `PageUp`, `PageDown`,
+`Delete`
 
 ```typescript
 {
@@ -107,11 +125,13 @@ Supported key names: `ArrowUp`, `ArrowDown`, `ArrowLeft`, `ArrowRight`, `Enter`,
 } // Multiple keys
 ```
 
-Auto-screenshot is triggered after the key sequence ends (when the next step is not a `key`).
+Auto-screenshot is triggered after the key sequence ends (when the next step is
+not a `key`).
 
 ### `streaming` — Capture During Execution
 
-Capture multiple screenshots at intervals during long-running output (e.g., progress bars). Optionally generates an animated GIF.
+Capture multiple screenshots at intervals during long-running output (e.g.,
+progress bars). Optionally generates an animated GIF.
 
 ```typescript
 {
@@ -125,11 +145,15 @@ Capture multiple screenshots at intervals during long-running output (e.g., prog
 }
 ```
 
-- `delayMs` (optional): Milliseconds to wait after pressing Enter before starting captures. Useful for skipping model thinking/approval time.
-- Captures stop early if terminal output is unchanged for 3 consecutive intervals.
+- `delayMs` (optional): Milliseconds to wait after pressing Enter before
+  starting captures. Useful for skipping model thinking/approval time.
+- Captures stop early if terminal output is unchanged for 3 consecutive
+  intervals.
 - Duplicate frames (no output change) are automatically skipped.
 
-**GIF prerequisite**: If the scenario uses `streaming` with GIF enabled (default), check if `ffmpeg` is installed before running. If not, ask the user whether they'd like to install it:
+**GIF prerequisite**: If the scenario uses `streaming` with GIF enabled
+(default), check if `ffmpeg` is installed before running. If not, ask the user
+whether they'd like to install it:
 
 ```bash
 # Check
@@ -139,7 +163,8 @@ which ffmpeg
 brew install ffmpeg
 ```
 
-If the user declines, the scenario still runs — GIF generation is skipped with a warning.
+If the user declines, the scenario still runs. GIF generation is skipped with a
+warning.
 
 ### `capture` / `captureFull` — Explicit Screenshot
 
@@ -200,12 +225,18 @@ This tool is commonly used for visual verification during PR reviews.
 
 ## Troubleshooting
 
-| Issue                                | Cause                                 | Solution                                             |
-| ------------------------------------ | ------------------------------------- | ---------------------------------------------------- |
-| Playwright error `browser not found` | Browser not installed                 | `npx playwright install chromium`                    |
-| Blank screenshot                     | Process starts slowly or build failed | Ensure `npm run build` succeeds, check spawn command |
-| PTY-related errors                   | node-pty native module not compiled   | `npm rebuild node-pty`                               |
-| Unstable screenshot output           | Terminal output not fully rendered    | Check if the scenario needs additional wait time     |
+- Playwright error `browser not found`
+  Cause: browser not installed.
+  Solution: `npx playwright install chromium`.
+- Blank screenshot
+  Cause: process starts slowly or build failed.
+  Solution: check build success and the spawn command.
+- PTY-related errors
+  Cause: node-pty native module not compiled.
+  Solution: `npm rebuild node-pty`.
+- Unstable screenshot output
+  Cause: terminal output not fully rendered.
+  Solution: add scenario wait time.
 
 ## Full ScenarioConfig Type
 

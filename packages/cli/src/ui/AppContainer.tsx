@@ -88,7 +88,7 @@ import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useGeminiStream } from './hooks/useGeminiStream.js';
 import { useVim } from './hooks/vim.js';
-import { isBtwCommand } from './utils/commandUtils.js';
+import { isBtwCommand, isSlashCommand } from './utils/commandUtils.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
 import { useFocus } from './hooks/useFocus.js';
@@ -152,6 +152,20 @@ function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
     }
     return false;
   });
+}
+
+// Exported for tests. Given a newest-first list of messages, return a list
+// with duplicates removed, keeping the first (newest) occurrence of each.
+export function dedupeNewestFirst(messages: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const msg of messages) {
+    if (!seen.has(msg)) {
+      seen.add(msg);
+      result.push(msg);
+    }
+  }
+  return result;
 }
 
 interface AppContainerProps {
@@ -451,20 +465,15 @@ export const AppContainer = (props: AppContainerProps) => {
         )
         .map((item) => item.text)
         .reverse();
+      // Current-session messages are already newest-first; combining with past
+      // messages gives a newest-first list. dedupeNewestFirst keeps the first
+      // (newest) occurrence so resubmitting an old prompt promotes it to
+      // "most recent" rather than leaving a stale copy at an older position.
       const combinedMessages = [
         ...currentSessionUserMessages,
         ...pastMessagesRaw,
       ];
-      const deduplicatedMessages: string[] = [];
-      if (combinedMessages.length > 0) {
-        deduplicatedMessages.push(combinedMessages[0]);
-        for (let i = 1; i < combinedMessages.length; i++) {
-          if (combinedMessages[i] !== combinedMessages[i - 1]) {
-            deduplicatedMessages.push(combinedMessages[i]);
-          }
-        }
-      }
-      setUserMessages(deduplicatedMessages.reverse());
+      setUserMessages(dedupeNewestFirst(combinedMessages).reverse());
     };
     fetchUserMessages();
   }, [historyManager.history, logger]);
@@ -873,16 +882,18 @@ export const AppContainer = (props: AppContainerProps) => {
     disabled: agentViewState.activeView !== 'main',
   });
 
-  const { messageQueue, addMessage, popAllMessages, drainQueue } =
-    useMessageQueue({
-      isConfigInitialized,
-      streamingState,
-      submitQuery,
-    });
+  const {
+    messageQueue,
+    addMessage,
+    clearQueue,
+    popAllMessages,
+    drainQueue,
+    popNextSegment,
+  } = useMessageQueue();
 
   // Bridge message queue to mid-turn drain via ref.
   // drainQueue reads the synchronous queueRef inside the hook, so it
-  // stays consistent with popAllMessages even before React re-renders.
+  // stays consistent with popNextSegment even before React re-renders.
   midTurnDrainRef.current = drainQueue;
 
   // Connect remote input watcher to submitQuery for bidirectional sync.
@@ -1158,6 +1169,14 @@ export const AppContainer = (props: AppContainerProps) => {
         speculationRef.current = IDLE_SPECULATION;
       }
 
+      if (
+        streamingState === StreamingState.Idle &&
+        isSlashCommand(submittedValue)
+      ) {
+        void submitQuery(submittedValue);
+        return;
+      }
+
       addMessage(submittedValue);
     },
     [
@@ -1204,28 +1223,22 @@ export const AppContainer = (props: AppContainerProps) => {
       ...pendingGeminiHistoryItems,
     ];
     if (isToolExecuting(pendingHistoryItems)) {
-      buffer.setText(''); // Just clear the prompt
+      // Tool-cancel: drop both buffer and queue so nothing auto-fires later.
+      buffer.setText('');
+      clearQueue();
       return;
     }
 
-    // Move any queued follow-up messages back into the buffer so the user
-    // can edit or resubmit them. Otherwise leave the buffer alone — in
-    // particular, do NOT repopulate it with the previous prompt; the user
-    // can still recall it via history navigation (Up/Ctrl+P).
-    //
-    // popAllMessages is atomic via the queue's synchronous ref, matching
-    // the drain behavior used during tool completion.
+    // Restore queued input joined into the buffer for editing.
     const popped = popAllMessages();
     if (popped) {
       const currentText = buffer.text;
-      // Preserve any in-progress draft the user typed since submitting (this
-      // is reachable via Ctrl+C cancel, which fires regardless of buffer
-      // content). Mirrors the popQueueIntoInput convention in InputPrompt.
       buffer.setText(currentText ? `${popped}\n${currentText}` : popped);
     }
   }, [
     buffer,
     popAllMessages,
+    clearQueue,
     pendingSlashCommandHistoryItems,
     pendingGeminiHistoryItems,
   ]);
@@ -2028,6 +2041,39 @@ export const AppContainer = (props: AppContainerProps) => {
     isDeleteDialogOpen ||
     isExtensionsManagerDialogOpen;
   dialogsVisibleRef.current = dialogsVisible;
+
+  // Drain queued messages when idle. `queueDrainNonce` re-fires the effect
+  // after each submission settles so multi-step queues drain end-to-end.
+  const queueDrainingRef = useRef(false);
+  const [queueDrainNonce, setQueueDrainNonce] = useState(0);
+  useEffect(() => {
+    if (queueDrainingRef.current) return;
+    if (!isConfigInitialized) return;
+    if (streamingState !== StreamingState.Idle) return;
+    if (dialogsVisible) return;
+    if (messageQueue.length === 0) return;
+
+    // Two-phase: batch plain prompts as one turn, else pop next slash command.
+    const plainPrompts = drainQueue();
+    const submission =
+      plainPrompts.length > 0 ? plainPrompts.join('\n\n') : popNextSegment();
+    if (submission === null) return;
+
+    queueDrainingRef.current = true;
+    Promise.resolve(submitQuery(submission)).finally(() => {
+      queueDrainingRef.current = false;
+      setQueueDrainNonce((n) => n + 1);
+    });
+  }, [
+    isConfigInitialized,
+    streamingState,
+    dialogsVisible,
+    messageQueue,
+    drainQueue,
+    popNextSegment,
+    submitQuery,
+    queueDrainNonce,
+  ]);
 
   const {
     isFeedbackDialogOpen,

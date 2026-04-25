@@ -7,6 +7,7 @@
 import type { RefObject } from 'react';
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type { CompletionItem } from '../../types/completionItemTypes.js';
+import { shouldAllowCompletionQuery } from '../utils/slashCommandUtils.js';
 
 interface CompletionTriggerState {
   isOpen: boolean;
@@ -54,11 +55,16 @@ export function useCompletionTrigger(
     position: { top: 0, left: 0 },
     items: [],
   });
+  const stateRef = useRef(state);
 
   // Timer for loading timeout
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Track request order so slower responses can't overwrite newer completions.
   const requestIdRef = useRef(0);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   const closeCompletion = useCallback(() => {
     // Clear pending timeout
@@ -179,12 +185,16 @@ export function useCompletionTrigger(
   };
 
   const refreshCompletion = useCallback(async () => {
-    if (!state.isOpen || !state.triggerChar) {
+    const currentState = stateRef.current;
+    if (!currentState.isOpen || !currentState.triggerChar) {
       return;
     }
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
-    const items = await getCompletionItems(state.triggerChar, state.query);
+    const items = await getCompletionItems(
+      currentState.triggerChar,
+      currentState.query,
+    );
     if (requestIdRef.current !== requestId) {
       return;
     }
@@ -196,7 +206,7 @@ export function useCompletionTrigger(
       }
       return { ...prev, items };
     });
-  }, [state.isOpen, state.triggerChar, state.query, getCompletionItems]);
+  }, [getCompletionItems]);
 
   useEffect(() => {
     const inputElement = inputRef.current;
@@ -325,8 +335,7 @@ export function useCompletionTrigger(
         if (isValidTrigger) {
           const query = text.substring(triggerPos + 1, effectiveCursorPosition);
 
-          // Only show if query doesn't contain spaces (still typing the reference)
-          if (!query.includes(' ') && !query.includes('\n')) {
+          if (shouldAllowCompletionQuery(triggerChar, query)) {
             // Get precise cursor position for menu
             const cursorPos = getCursorPosition();
             if (cursorPos) {

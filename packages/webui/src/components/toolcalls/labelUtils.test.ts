@@ -14,9 +14,8 @@ describe('getToolDisplayLabel', () => {
     expect(getToolDisplayLabel({ kind: 'command' })).toBe('Shell');
   });
 
-  it('uses core names for web fetch and web search', () => {
+  it('uses core names for web fetch', () => {
     expect(getToolDisplayLabel({ kind: 'web_fetch' })).toBe('WebFetch');
-    expect(getToolDisplayLabel({ kind: 'web_search' })).toBe('WebSearch');
   });
 
   it('normalizes todo write labels even when older titles are still present', () => {

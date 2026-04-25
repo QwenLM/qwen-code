@@ -273,6 +273,38 @@ describe('runNonInteractive', () => {
     expect(mockShutdownTelemetry).toHaveBeenCalled();
   });
 
+  it('on EPIPE, destroys stdout and returns normally instead of process.exit', async () => {
+    // Regression: process.exit(0) on EPIPE bypassed runExitCleanup → flush()
+    // and dropped queued JSONL writes for `qwen -p ... | head -1` patterns.
+    // process.exit is mocked to throw in beforeEach, so reaching the
+    // assertion also proves the bypass route is gone.
+    setupMetricsMock();
+    const stdoutDestroySpy = vi
+      .spyOn(process.stdout, 'destroy')
+      .mockReturnValue(process.stdout);
+
+    mockGeminiClient.sendMessageStream.mockImplementation(
+      async function* mockStream(): AsyncGenerator<ServerGeminiStreamEvent> {
+        process.stdout.emit(
+          'error',
+          Object.assign(new Error('EPIPE'), { code: 'EPIPE' }),
+        );
+        yield { type: GeminiEventType.Content, value: 'Hello' };
+        yield {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        };
+      },
+    );
+
+    await runNonInteractive(mockConfig, mockSettings, 'test', 'p1');
+
+    expect(stdoutDestroySpy).toHaveBeenCalled();
+  });
+
   it('should handle a single tool call and respond', async () => {
     setupMetricsMock();
     const toolCallEvent: ServerGeminiStreamEvent = {

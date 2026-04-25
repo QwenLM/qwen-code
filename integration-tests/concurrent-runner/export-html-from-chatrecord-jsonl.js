@@ -530,7 +530,6 @@ const TOOL_DISPLAY_NAME_BY_NAME = {
   skill: 'Skill',
   exit_plan_mode: 'ExitPlanMode',
   web_fetch: 'WebFetch',
-  web_search: 'WebSearch',
   list_directory: 'ListFiles',
 };
 
@@ -546,7 +545,6 @@ const TOOL_KIND_BY_NAME = {
   rename: 'move',
   grep_search: 'search',
   glob: 'search',
-  web_search: 'search',
   list_directory: 'search',
   run_shell_command: 'execute',
   bash: 'execute',
