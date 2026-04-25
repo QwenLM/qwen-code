@@ -308,6 +308,10 @@ scope before a DONE marker can be created.
   - `npm run typecheck --workspace=packages/desktop` passed.
   - `npm run lint --workspace=packages/desktop` passed.
   - `npm run build --workspace=packages/desktop` passed.
+- 2026-04-25 Iteration 7 final verification:
+  - `npm run typecheck` passed across workspaces.
+  - `npm run build` passed across the configured build order. Existing VS Code
+    companion lint warnings were reported by its build script, with no errors.
 
 ## Self Review Notes
 
