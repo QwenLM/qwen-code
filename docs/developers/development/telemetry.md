@@ -7,7 +7,6 @@ Learn how to enable and setup OpenTelemetry for Qwen Code.
   - [OpenTelemetry Integration](#opentelemetry-integration)
   - [Configuration](#configuration)
   - [Aliyun Telemetry](#aliyun-telemetry)
-    - [Prerequisites](#prerequisites)
     - [Manual OTLP Export](#manual-otlp-export)
   - [Local Telemetry](#local-telemetry)
     - [File-based Output (Recommended)](#file-based-output-recommended)
