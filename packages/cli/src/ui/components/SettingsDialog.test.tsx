@@ -964,31 +964,47 @@ describe('SettingsDialog', () => {
       );
 
       // Trigger a restart-required setting change: navigate to "Language: UI" (2nd item) and toggle it.
-      stdin.write(TerminalKeys.DOWN_ARROW as string);
-      await wait();
-      stdin.write(TerminalKeys.ENTER as string);
-      await wait();
-
-      await waitFor(() => {
-        expect(lastFrame()).toContain(
-          'To see changes, Qwen Code must be restarted',
-        );
+      act(() => {
+        stdin.write(TerminalKeys.DOWN_ARROW as string);
       });
+      await waitFor(() => {
+        expect(lastFrame()).toContain('● Language: UI');
+      });
+      act(() => {
+        stdin.write(TerminalKeys.ENTER as string);
+      });
+
+      await waitFor(
+        () => {
+          expect(lastFrame()).toContain(
+            'To see changes, Qwen Code must be restarted',
+          );
+        },
+        { timeout: 3000 },
+      );
 
       // Switch scopes; restart prompt should remain visible.
-      stdin.write(TerminalKeys.TAB as string);
-      await wait();
-      stdin.write('2');
-      await wait();
-
+      act(() => {
+        stdin.write(TerminalKeys.TAB as string);
+      });
       await waitFor(() => {
-        expect(lastFrame()).toContain(
-          'To see changes, Qwen Code must be restarted',
-        );
+        expect(lastFrame()).toContain('Tab to go back');
+      });
+      act(() => {
+        stdin.write('2');
       });
 
+      await waitFor(
+        () => {
+          expect(lastFrame()).toContain(
+            'To see changes, Qwen Code must be restarted',
+          );
+        },
+        { timeout: 3000 },
+      );
+
       unmount();
-    });
+    }, 10000);
   });
 
   describe('Settings Display Values', () => {
