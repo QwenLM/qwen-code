@@ -122,7 +122,41 @@ scope before a DONE marker can be created.
     choose it through the preload dialog hook/fake native bridge, assert recent
     project visibility, branch/status chips, and no black screen.
 
-### Slice 10: Workspace Review Shell
+### Slice 10: Renderer Asset Loading and CDP Port
+
+- Status: complete in iteration 7
+- Goal: make the built renderer load reliably from Electron main and expose a
+  local-only Chrome DevTools Protocol endpoint when explicitly requested for
+  tests/debugging.
+- Files:
+  - `packages/desktop/src/main/main.ts`
+  - `packages/desktop/src/main/lifecycle/remoteDebugging.ts`
+  - `packages/desktop/src/main/lifecycle/remoteDebugging.test.ts`
+  - `packages/desktop/src/main/windows/MainWindow.ts`
+  - `packages/desktop/vite.config.ts`
+- Acceptance criteria:
+  - `QWEN_DESKTOP_CDP_PORT=<port>` appends Electron remote debugging switches
+    for `127.0.0.1` and the requested numeric port only.
+  - Invalid ports do not enable remote debugging.
+  - Built renderer assets use relative URLs so `file://.../dist/renderer` can
+    load CSS/JS.
+  - MainWindow resolves preload and renderer paths correctly from
+    `dist/main/windows`.
+- Verification:
+  - `npm run test --workspace=packages/desktop`
+  - `npm run typecheck --workspace=packages/desktop`
+  - `npm run lint --workspace=packages/desktop`
+  - `npm run build --workspace=packages/desktop`
+  - `QWEN_DESKTOP_CDP_PORT=9339 npm run start --workspace=packages/desktop`
+    exposed `http://127.0.0.1:9339/json/version` and `/json/list`; process was
+    terminated after endpoint verification.
+- E2E coverage:
+  - Record in
+    `.qwen/e2e-tests/electron-desktop/cdp-renderer-observability.md`.
+  - Later Playwright/DevTools MCP coverage must connect to the page websocket,
+    assert DOM text and console/network health, and save a screenshot.
+
+### Slice 11: Workspace Review Shell
 
 - Status: pending
 - Goal: split the renderer into explicit TopBar, ProjectSidebar, ThreadList,
@@ -136,7 +170,7 @@ scope before a DONE marker can be created.
 - E2E coverage:
   - Launch renderer with fake server/preload data and assert layout landmarks.
 
-### Slice 11: Diff Review and Commit
+### Slice 12: Diff Review and Commit
 
 - Status: pending
 - Goal: add Git diff/status review APIs and UI actions for accept/revert and
@@ -150,7 +184,7 @@ scope before a DONE marker can be created.
   - Temporary Git workspace with a fake file change, accept/stage, commit, and
     error diagnostics.
 
-### Slice 12: Scoped Terminal
+### Slice 13: Scoped Terminal
 
 - Status: pending
 - Goal: add a current-project/current-thread terminal drawer with spawn, output,
@@ -162,13 +196,14 @@ scope before a DONE marker can be created.
 - E2E coverage:
   - Run a harmless command in a temporary workspace and assert output appears.
 
-### Slice 13: Desktop E2E and CDP Observability
+### Slice 14: Desktop E2E Harness
 
 - Status: pending
 - Goal: add repeatable Electron E2E harness with fake ACP, temporary HOME and
   workspace, screenshot/console/network diagnostics, and CDP renderer access.
 - Acceptance criteria:
-  - `QWEN_DESKTOP_CDP_PORT` enables renderer inspection on `127.0.0.1`.
+  - `QWEN_DESKTOP_CDP_PORT` is used by the harness to inspect the renderer on
+    `127.0.0.1`.
   - E2E asserts first screen is not black, service is connected, project open
     works, thread creation works, permission response works, settings save
     works, and package smoke still passes.
@@ -193,6 +228,9 @@ scope before a DONE marker can be created.
 - 2026-04-25: Use `git status --porcelain=v1 --branch` for Slice 9 instead of
   introducing a desktop `simple-git` dependency. This keeps the server surface
   small and returns conservative status metadata for both clean and dirty repos.
+- 2026-04-25: Keep the CDP switch opt-in through `QWEN_DESKTOP_CDP_PORT` and
+  always pair it with `remote-debugging-address=127.0.0.1`; production remains
+  closed unless the environment variable is set.
 
 ## Verification Log
 
@@ -205,6 +243,16 @@ scope before a DONE marker can be created.
   - `npm run typecheck --workspace=packages/desktop` passed.
   - `npm run lint --workspace=packages/desktop` passed.
   - `npm run build --workspace=packages/desktop` passed.
+- 2026-04-25 Slice 10:
+  - `npm run test --workspace=packages/desktop` passed: 8 files, 48 tests.
+  - `npm run typecheck --workspace=packages/desktop` passed.
+  - `npm run lint --workspace=packages/desktop` passed.
+  - `npm run build --workspace=packages/desktop` passed.
+  - `curl --fail --silent http://127.0.0.1:9339/json/version` passed while the
+    app was launched with `QWEN_DESKTOP_CDP_PORT=9339`.
+  - `curl --fail --silent http://127.0.0.1:9339/json/list` passed and returned
+    a `Qwen Code` page at
+    `file:///Users/dragon/Documents/qwen-code/packages/desktop/dist/renderer/index.html`.
 
 ## Self Review Notes
 
@@ -216,10 +264,14 @@ scope before a DONE marker can be created.
   avoiding a broken workspace for projects without Git.
 - Renderer still obtains the token only from preload and does not gain Node
   integration.
+- Slice 10 keeps remote debugging off by default, rejects non-numeric/out of
+  range ports, and binds only to loopback when enabled.
+- The CDP smoke verified endpoint discovery but did not yet drive DOM,
+  console, network, or screenshot assertions through MCP; that remains in the
+  E2E harness slice.
 
 ## Remaining Work
 
-- Commit Slice 9.
 - Implement real workspace review shell, diff review, commit flow, scoped
-  terminal, Electron E2E, CDP observability verification, and final package
-  smoke before creating the DONE marker.
+  terminal, Electron E2E harness, DevTools MCP DOM/console/network/screenshot
+  checks, and final package smoke before creating the DONE marker.

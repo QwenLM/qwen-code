@@ -6,6 +6,7 @@
 
 import { app, BrowserWindow, dialog, session } from 'electron';
 import { shouldQuitWhenWindowsClosed } from './lifecycle/AppLifecycle.js';
+import { configureDesktopRemoteDebugging } from './lifecycle/remoteDebugging.js';
 import { registerIpc } from './ipc/registerIpc.js';
 import { createMainWindow } from './windows/MainWindow.js';
 import { resolveDesktopAcpLaunchConfig } from './acp/resolveCli.js';
@@ -16,6 +17,8 @@ import type { DesktopServer } from '../server/types.js';
 let desktopServer: DesktopServer | undefined;
 let acpClient: AcpProcessClient | undefined;
 let mainWindow: BrowserWindow | null = null;
+
+configureDesktopRemoteDebugging(app.commandLine);
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {

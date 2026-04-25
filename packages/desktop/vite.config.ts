@@ -13,6 +13,7 @@ const packageRoot = dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   root: resolve(packageRoot, 'src/renderer'),
+  base: './',
   plugins: [react()],
   build: {
     outDir: resolve(packageRoot, 'dist/renderer'),

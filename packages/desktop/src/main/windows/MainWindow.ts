@@ -10,8 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { openExternalUrl } from '../native/shell.js';
 
 const mainDir = dirname(fileURLToPath(import.meta.url));
-const preloadPath = join(mainDir, '../preload/index.cjs');
-const rendererIndexPath = join(mainDir, '../renderer/index.html');
+const preloadPath = join(mainDir, '../../preload/index.cjs');
+const rendererIndexPath = join(mainDir, '../../renderer/index.html');
 
 export async function createMainWindow(): Promise<BrowserWindow> {
   const mainWindow = new BrowserWindow({
