@@ -12,18 +12,25 @@ import type { LoadState } from './types.js';
 export function TopBar({
   activeProject,
   activeSessionTitle,
+  activeView,
   loadState,
   onRefreshGitStatus,
+  onShowChanges,
+  onShowChat,
+  onShowSettings,
   statusLabel,
 }: {
   activeProject: DesktopProject | null;
   activeSessionTitle: string | null;
+  activeView: 'chat' | 'changes' | 'settings';
   loadState: LoadState;
   onRefreshGitStatus: () => void;
+  onShowChanges: () => void;
+  onShowChat: () => void;
+  onShowSettings: () => void;
   statusLabel: string;
 }) {
-  const title =
-    activeSessionTitle || activeProject?.name || 'Qwen Code Desktop';
+  const title = getTopBarTitle(activeView, activeSessionTitle, activeProject);
   const projectLabel = activeProject?.name ?? 'No project selected';
 
   return (
@@ -35,9 +42,6 @@ export function TopBar({
       <div className="topbar-title">
         <h2>{title}</h2>
         <span>{projectLabel}</span>
-        <button className="topbar-more" type="button" aria-label="More">
-          ...
-        </button>
       </div>
       <div className="topbar-center">
         <div className="topbar-meta">
@@ -51,6 +55,41 @@ export function TopBar({
         </div>
       </div>
       <div className="topbar-actions">
+        <div className="topbar-nav" aria-label="Workbench views">
+          <button
+            className={
+              activeView === 'chat'
+                ? 'topbar-nav-button topbar-nav-button-active'
+                : 'topbar-nav-button'
+            }
+            type="button"
+            onClick={onShowChat}
+          >
+            Chat
+          </button>
+          <button
+            className={
+              activeView === 'changes'
+                ? 'topbar-nav-button topbar-nav-button-active'
+                : 'topbar-nav-button'
+            }
+            type="button"
+            onClick={onShowChanges}
+          >
+            Changes
+          </button>
+          <button
+            className={
+              activeView === 'settings'
+                ? 'topbar-nav-button topbar-nav-button-active'
+                : 'topbar-nav-button'
+            }
+            type="button"
+            onClick={onShowSettings}
+          >
+            Settings
+          </button>
+        </div>
         <button
           className="secondary-button"
           disabled={!activeProject}
@@ -63,4 +102,20 @@ export function TopBar({
       </div>
     </header>
   );
+}
+
+function getTopBarTitle(
+  activeView: 'chat' | 'changes' | 'settings',
+  activeSessionTitle: string | null,
+  activeProject: DesktopProject | null,
+): string {
+  if (activeView === 'settings') {
+    return 'Settings';
+  }
+
+  if (activeView === 'changes') {
+    return 'Changes';
+  }
+
+  return activeSessionTitle || activeProject?.name || 'Qwen Code Desktop';
 }

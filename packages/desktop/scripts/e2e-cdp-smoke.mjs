@@ -69,10 +69,9 @@ async function main() {
   await saveScreenshot('initial-workspace.png');
 
   await clickButtonUntilText('Open Project', 'desktop-e2e-workspace');
+  await clickButton('Changes');
   await waitForText('README.md');
   await waitForText('Accept Hunk');
-  await clickButton('Accept Hunk');
-  await waitForText('Accepted');
   await setFieldByAriaLabel(
     'Review comment for README.md',
     'Review note from E2E',
@@ -88,24 +87,31 @@ async function main() {
   await assertWorkspaceCommit('desktop e2e commit');
   await waitForSelector('[data-testid="project-list"]');
 
+  await clickButton('Chat');
   await clickButton('New Thread');
-  await waitForText('session-e2e-1');
-  await waitForText('Connected to session-e2e-1');
-  await waitForSelector('[data-testid="thread-list"]');
+  await waitForText('New thread ready');
 
   await setFieldByAriaLabel('Message', 'Please exercise command approval.');
   await clickButton('Send');
+  await waitForText('session-e2e-1');
+  await waitForText('Connected to session-e2e-1');
   await waitForText('Approve Once');
   await clickButton('Approve Once');
   await waitForText('E2E fake ACP response received');
   await waitForText('Turn complete: end_turn');
+  await waitForSelector('[data-testid="thread-list"]');
 
+  await clickButton('Settings');
+  await waitForSelector('[data-testid="settings-page"]');
+  await assertSettingsPageLayout('settings-layout.json');
+  await saveScreenshot('settings-page.png');
   await setFieldByLabel('Model', 'qwen-e2e-cdp');
   await setFieldByLabel('Base URL', 'https://example.invalid/v1');
   await setFieldByLabel('API key', 'sk-desktop-e2e');
   await clickButton('Save');
   await waitForText('qwen-e2e-cdp');
 
+  await clickButton('Chat');
   await setFieldByAriaLabel('Terminal command', 'printf desktop-e2e-terminal');
   await clickButton('Run');
   await waitForText('desktop-e2e-terminal');
@@ -292,7 +298,6 @@ async function assertWorkbenchLandmarks() {
       'workspace-topbar',
       'workspace-grid',
       'chat-thread',
-      'review-panel',
       'terminal-drawer'
     ].filter((id) => !document.querySelector('[data-testid="' + id + '"]'));
   })()`);
@@ -337,6 +342,7 @@ async function assertRalphWorkspaceLayout(fileName) {
       grid: rectFor('[data-testid="workspace-grid"]'),
       chat: rectFor('[data-testid="chat-thread"]'),
       review: rectFor('[data-testid="review-panel"]'),
+      settings: rectFor('[data-testid="settings-page"]'),
       composer: rectFor('[data-testid="message-composer"]'),
       terminal: rectFor('[data-testid="terminal-drawer"]'),
       listRows: [...document.querySelectorAll('.project-row, .session-row')]
@@ -363,7 +369,6 @@ async function assertRalphWorkspaceLayout(fileName) {
     'topbar',
     'grid',
     'chat',
-    'review',
     'composer',
     'terminal',
   ];
@@ -387,8 +392,8 @@ async function assertRalphWorkspaceLayout(fileName) {
     throw new Error(`Unexpected topbar height: ${metrics.topbar.height}`);
   }
 
-  if (metrics.review.width < 288 || metrics.review.width > 380) {
-    throw new Error(`Unexpected review panel width: ${metrics.review.width}`);
+  if (metrics.review !== null || metrics.settings !== null) {
+    throw new Error('Initial layout should not render secondary pages.');
   }
 
   if (metrics.terminal.height < 190 || metrics.terminal.height > 280) {
@@ -397,14 +402,10 @@ async function assertRalphWorkspaceLayout(fileName) {
     );
   }
 
-  if (metrics.chat.width <= metrics.review.width + 220) {
+  if (metrics.chat.width < metrics.grid.width - 2) {
     throw new Error(
-      `Conversation canvas should dominate the workbench; chat=${metrics.chat.width}, review=${metrics.review.width}`,
+      `Conversation canvas should span the workbench; chat=${metrics.chat.width}, grid=${metrics.grid.width}`,
     );
-  }
-
-  if (Math.abs(metrics.chat.right - metrics.review.left) > 1) {
-    throw new Error('Chat and review panels are not aligned side by side.');
   }
 
   if (Math.abs(metrics.grid.bottom - metrics.terminal.top) > 1) {
@@ -425,6 +426,83 @@ async function assertRalphWorkspaceLayout(fileName) {
       `Sidebar list rows should not stretch vertically: ${JSON.stringify(
         oversizedRows,
       )}`,
+    );
+  }
+}
+
+async function assertSettingsPageLayout(fileName) {
+  const metrics = await evaluate(`(() => {
+    const rectFor = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+
+    return {
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight
+      },
+      document: {
+        bodyScrollWidth: document.body.scrollWidth,
+        bodyScrollHeight: document.body.scrollHeight
+      },
+      grid: rectFor('[data-testid="workspace-grid"]'),
+      chat: rectFor('[data-testid="chat-thread"]'),
+      review: rectFor('[data-testid="review-panel"]'),
+      settings: rectFor('[data-testid="settings-page"]'),
+      modelConfig: rectFor('[data-testid="model-config"]'),
+      terminal: rectFor('[data-testid="terminal-drawer"]')
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(metrics, null, 2)}\n`,
+    'utf8',
+  );
+
+  const missing = ['grid', 'settings', 'modelConfig'].filter(
+    (key) => metrics[key] === null,
+  );
+  if (missing.length > 0) {
+    throw new Error(`Missing settings layout rects: ${missing.join(', ')}`);
+  }
+
+  if (
+    metrics.chat !== null ||
+    metrics.review !== null ||
+    metrics.terminal !== null
+  ) {
+    throw new Error('Settings page should replace chat, review, and terminal.');
+  }
+
+  if (metrics.document.bodyScrollHeight > metrics.viewport.height + 4) {
+    throw new Error(
+      `Settings document should fit one viewport; body scrollHeight=${metrics.document.bodyScrollHeight}, viewport=${metrics.viewport.height}`,
+    );
+  }
+
+  if (
+    Math.abs(metrics.settings.left - metrics.grid.left) > 1 ||
+    Math.abs(metrics.settings.right - metrics.grid.right) > 1
+  ) {
+    throw new Error('Settings page does not span the workbench grid.');
+  }
+
+  if (metrics.modelConfig.width < 300) {
+    throw new Error(
+      `Settings form is too narrow: ${metrics.modelConfig.width}`,
     );
   }
 }

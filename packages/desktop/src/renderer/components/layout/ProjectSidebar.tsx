@@ -20,7 +20,7 @@ export function ProjectSidebar({
   sessions,
   onChooseWorkspace,
   onCreateSession,
-  onFocusModelConfig,
+  onOpenSettings,
   onSelectProject,
   onSelectSession,
 }: {
@@ -32,7 +32,7 @@ export function ProjectSidebar({
   sessions: DesktopSessionSummary[];
   onChooseWorkspace: () => void;
   onCreateSession: () => void;
-  onFocusModelConfig: () => void;
+  onOpenSettings: () => void;
   onSelectProject: (projectId: string) => void;
   onSelectSession: (sessionId: string) => void;
 }) {
@@ -64,9 +64,9 @@ export function ProjectSidebar({
         <button
           className="secondary-button"
           type="button"
-          onClick={onFocusModelConfig}
+          onClick={onOpenSettings}
         >
-          Model Config
+          Settings
         </button>
       </section>
 

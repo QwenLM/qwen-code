@@ -100,6 +100,10 @@ describe('WorkspacePage', () => {
         />,
       );
     });
+    const renderedContainer = container;
+    if (!renderedContainer) {
+      throw new Error('WorkspacePage test container was not created.');
+    }
 
     for (const testId of [
       'desktop-workspace',
@@ -107,20 +111,67 @@ describe('WorkspacePage', () => {
       'workspace-topbar',
       'workspace-grid',
       'chat-thread',
-      'review-panel',
       'terminal-drawer',
       'project-list',
       'thread-list',
     ]) {
-      expect(container.querySelector(`[data-testid="${testId}"]`)).toBeTruthy();
+      expect(
+        renderedContainer.querySelector(`[data-testid="${testId}"]`),
+      ).toBeTruthy();
     }
+    expect(
+      renderedContainer.querySelector('[data-testid="review-panel"]'),
+    ).toBeNull();
+    expect(
+      renderedContainer.querySelector('[data-testid="settings-page"]'),
+    ).toBeNull();
 
-    expect(container.textContent).toContain('example-workspace');
-    expect(container.textContent).toContain('main');
-    expect(container.textContent).toContain('src/index.ts');
-    expect(container.textContent).toContain('No terminal output');
+    expect(renderedContainer.textContent).toContain('example-workspace');
+    expect(renderedContainer.textContent).toContain('main');
+    expect(renderedContainer.textContent).not.toContain('src/index.ts');
+    expect(renderedContainer.textContent).toContain('No terminal output');
+
+    act(() => {
+      clickButton(renderedContainer, 'Changes');
+    });
+
+    expect(
+      renderedContainer.querySelector('[data-testid="review-panel"]'),
+    ).toBeTruthy();
+    expect(
+      renderedContainer.querySelector('[data-testid="chat-thread"]'),
+    ).toBeNull();
+    expect(renderedContainer.textContent).toContain('src/index.ts');
+
+    act(() => {
+      clickButton(renderedContainer, 'Settings');
+    });
+
+    expect(
+      renderedContainer.querySelector('[data-testid="settings-page"]'),
+    ).toBeTruthy();
+    expect(
+      renderedContainer.querySelector('[data-testid="model-config"]'),
+    ).toBeTruthy();
+    expect(
+      renderedContainer.querySelector('[data-testid="review-panel"]'),
+    ).toBeNull();
+    expect(
+      renderedContainer.querySelector('[data-testid="terminal-drawer"]'),
+    ).toBeNull();
   });
 });
+
+function clickButton(container: HTMLElement, text: string): void {
+  const button = [...container.querySelectorAll('button')].find(
+    (candidate) => candidate.textContent?.trim() === text,
+  );
+  if (!button) {
+    throw new Error(`Button not found: ${text}`);
+  }
+
+  button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+}
 
 const project: DesktopProject = {
   id: 'project-1',

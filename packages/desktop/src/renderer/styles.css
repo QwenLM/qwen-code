@@ -294,6 +294,10 @@ summary:focus-visible {
   overflow: hidden;
 }
 
+.workbench-settings-open {
+  grid-template-rows: 68px minmax(0, 1fr);
+}
+
 .topbar {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) minmax(220px, auto) auto;
@@ -332,19 +336,6 @@ summary:focus-visible {
   white-space: nowrap;
 }
 
-.topbar-more {
-  display: grid;
-  width: 28px;
-  height: 28px;
-  flex: 0 0 auto;
-  place-items: center;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: rgba(238, 244, 239, 0.04);
-  color: var(--muted);
-  line-height: 1;
-}
-
 .topbar-center {
   min-width: 0;
 }
@@ -375,7 +366,35 @@ summary:focus-visible {
 }
 
 .topbar-actions {
+  flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.topbar-nav {
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(238, 244, 239, 0.035);
+}
+
+.topbar-nav-button {
+  min-width: 74px;
+  min-height: 32px;
+  padding: 0 10px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 780;
+}
+
+.topbar-nav-button + .topbar-nav-button {
+  border-left: 1px solid var(--line);
+}
+
+.topbar-nav-button-active {
+  background: rgba(85, 166, 255, 0.14);
+  color: var(--text);
 }
 
 .status-pill {
@@ -404,7 +423,7 @@ summary:focus-visible {
 
 .workspace-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 328px;
+  grid-template-columns: minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
 }
@@ -417,18 +436,29 @@ summary:focus-visible {
 .panel-main {
   display: grid;
   grid-template-rows: 46px minmax(0, 1fr) auto auto;
-  border-right: 1px solid var(--line);
   background:
     linear-gradient(90deg, rgba(42, 71, 64, 0.11), transparent 22%),
     rgba(13, 15, 16, 0.74);
 }
 
-.panel-side {
+.panel-review {
   display: flex;
   min-height: 0;
   flex-direction: column;
   overflow: auto;
   background: rgba(15, 18, 19, 0.9);
+}
+
+.panel-review > .panel-header {
+  flex: 0 0 auto;
+}
+
+.panel-review .review-summary {
+  width: min(1120px, calc(100% - 36px));
+  margin: 18px auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(238, 244, 239, 0.035);
 }
 
 .panel-header {
@@ -1014,11 +1044,6 @@ textarea:focus {
   color: #a9eabd;
 }
 
-.session-details,
-.settings-panel {
-  border-top: 1px solid var(--line);
-}
-
 .settings-form {
   display: grid;
   gap: 12px;
@@ -1042,6 +1067,46 @@ textarea:focus {
   overflow-wrap: anywhere;
   color: var(--muted);
   font-size: 12px;
+}
+
+.settings-page {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  background:
+    linear-gradient(90deg, rgba(42, 71, 64, 0.12), transparent 28%),
+    rgba(13, 15, 16, 0.8);
+}
+
+.settings-page-header {
+  flex: 0 0 auto;
+}
+
+.settings-page-content {
+  display: grid;
+  width: min(1120px, 100%);
+  min-height: 0;
+  grid-template-columns: minmax(320px, 1.08fr) minmax(280px, 0.92fr);
+  gap: 16px;
+  margin: 0 auto;
+  overflow: auto;
+  padding: 18px;
+}
+
+.settings-page-meta {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  min-width: 0;
+}
+
+.settings-section {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(238, 244, 239, 0.035);
 }
 
 .panel-header-inline {
@@ -1069,16 +1134,16 @@ textarea:focus {
     grid-template-columns: 236px minmax(0, 1fr);
   }
 
-  .workspace-grid {
-    grid-template-columns: minmax(0, 1fr) 292px;
-  }
-
   .topbar {
     grid-template-columns: minmax(0, 1fr) auto;
   }
 
   .topbar-center {
     display: none;
+  }
+
+  .settings-page-content {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1126,13 +1191,21 @@ textarea:focus {
 
   .panel-main {
     min-height: 620px;
-    border-right: 0;
     border-bottom: 1px solid var(--line);
   }
 
-  .panel-side {
+  .panel-review {
     max-height: none;
     overflow: visible;
+  }
+
+  .panel-review .review-summary,
+  .settings-page-content {
+    width: 100%;
+    margin: 0;
+    border-right: 0;
+    border-left: 0;
+    border-radius: 0;
   }
 
   .terminal-drawer {

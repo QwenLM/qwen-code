@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Dispatch, FormEvent } from 'react';
+import { useState, type Dispatch, type FormEvent } from 'react';
 import type {
   DesktopGitDiff,
   DesktopGitReviewTarget,
@@ -22,9 +22,12 @@ import type { DesktopApprovalMode } from '../../../shared/desktopProtocol.js';
 import { ChatThread } from './ChatThread.js';
 import { ProjectSidebar } from './ProjectSidebar.js';
 import { ReviewPanel } from './ReviewPanel.js';
+import { SettingsPage } from './SettingsPage.js';
 import { TerminalDrawer } from './TerminalDrawer.js';
 import { TopBar } from './TopBar.js';
 import type { LoadState } from './types.js';
+
+type WorkspaceView = 'chat' | 'changes' | 'settings';
 
 export function WorkspacePage({
   activeProject,
@@ -127,8 +130,23 @@ export function WorkspacePage({
   onTerminalInputChange: (input: string) => void;
   onWriteTerminalInput: () => void;
 }) {
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('chat');
+  const [previousWorkspaceView, setPreviousWorkspaceView] =
+    useState<WorkspaceView>('chat');
   const activeSession =
     sessions.find((session) => session.sessionId === activeSessionId) ?? null;
+  const showSettingsPage = () => {
+    setPreviousWorkspaceView((currentPrevious) =>
+      workspaceView === 'settings' ? currentPrevious : workspaceView,
+    );
+    setWorkspaceView('settings');
+  };
+  const showWorkspaceView = (view: WorkspaceView) => {
+    setWorkspaceView(view);
+    if (view !== 'settings') {
+      setPreviousWorkspaceView(view);
+    }
+  };
 
   return (
     <main className="desktop-shell" data-testid="desktop-workspace">
@@ -141,76 +159,95 @@ export function WorkspacePage({
         sessions={sessions}
         onChooseWorkspace={onChooseWorkspace}
         onCreateSession={onCreateSession}
-        onFocusModelConfig={() => {
-          document
-            .querySelector('[data-testid="model-config"]')
-            ?.scrollIntoView({ block: 'start', behavior: 'smooth' });
-        }}
+        onOpenSettings={showSettingsPage}
         onSelectProject={onSelectProject}
         onSelectSession={onSelectSession}
       />
 
-      <section className="workbench" aria-label="Workbench">
+      <section
+        className={
+          workspaceView === 'settings'
+            ? 'workbench workbench-settings-open'
+            : 'workbench'
+        }
+        aria-label="Workbench"
+      >
         <TopBar
           activeProject={activeProject}
           activeSessionTitle={activeSession?.title || null}
+          activeView={workspaceView}
           loadState={loadState}
           statusLabel={statusLabel}
           onRefreshGitStatus={onRefreshProjectGitStatus}
+          onShowChanges={() => showWorkspaceView('changes')}
+          onShowChat={() => showWorkspaceView('chat')}
+          onShowSettings={showSettingsPage}
         />
 
         <div className="workspace-grid" data-testid="workspace-grid">
-          <ChatThread
-            activeSessionId={activeSessionId}
-            chatState={chatState}
-            isDraftSession={isDraftSession}
-            messageText={messageText}
-            onAskUserQuestionResponse={onAskUserQuestionResponse}
-            onMessageTextChange={onMessageTextChange}
-            onPermissionResponse={onPermissionResponse}
-            onSendMessage={onSendMessage}
-            onStopGeneration={onStopGeneration}
-          />
+          {workspaceView === 'chat' ? (
+            <ChatThread
+              activeSessionId={activeSessionId}
+              chatState={chatState}
+              isDraftSession={isDraftSession}
+              messageText={messageText}
+              onAskUserQuestionResponse={onAskUserQuestionResponse}
+              onMessageTextChange={onMessageTextChange}
+              onPermissionResponse={onPermissionResponse}
+              onSendMessage={onSendMessage}
+              onStopGeneration={onStopGeneration}
+            />
+          ) : null}
 
-          <ReviewPanel
-            activeProject={activeProject}
-            activeSessionId={activeSessionId}
-            chatState={chatState}
-            commitMessage={commitMessage}
-            gitDiff={gitDiff}
-            loadState={loadState}
-            modelState={modelState}
-            reviewError={reviewError}
-            sessionError={sessionError}
-            settingsState={settingsState}
-            onAuthenticate={onAuthenticate}
-            onCommit={onCommit}
-            onCommitMessageChange={onCommitMessageChange}
-            onModeChange={onModeChange}
-            onModelChange={onModelChange}
-            onOpenFile={onOpenReviewFile}
-            onRevertTarget={onRevertReviewTarget}
-            onSaveSettings={onSaveSettings}
-            onSettingsDispatch={onSettingsDispatch}
-            onStageTarget={onStageReviewTarget}
-          />
+          {workspaceView === 'changes' ? (
+            <ReviewPanel
+              activeProject={activeProject}
+              commitMessage={commitMessage}
+              gitDiff={gitDiff}
+              reviewError={reviewError}
+              onCommit={onCommit}
+              onCommitMessageChange={onCommitMessageChange}
+              onOpenFile={onOpenReviewFile}
+              onRevertTarget={onRevertReviewTarget}
+              onStageTarget={onStageReviewTarget}
+            />
+          ) : null}
+
+          {workspaceView === 'settings' ? (
+            <SettingsPage
+              activeSessionId={activeSessionId}
+              chatState={chatState}
+              loadState={loadState}
+              modelState={modelState}
+              sessionError={sessionError}
+              settingsState={settingsState}
+              onAuthenticate={onAuthenticate}
+              onBack={() => showWorkspaceView(previousWorkspaceView)}
+              onModeChange={onModeChange}
+              onModelChange={onModelChange}
+              onSaveSettings={onSaveSettings}
+              onSettingsDispatch={onSettingsDispatch}
+            />
+          ) : null}
         </div>
-        <TerminalDrawer
-          command={terminalCommand}
-          error={terminalError}
-          input={terminalInput}
-          notice={terminalNotice}
-          project={activeProject}
-          terminal={terminal}
-          onClear={onClearTerminal}
-          onCommandChange={onTerminalCommandChange}
-          onCopyOutput={onCopyTerminalOutput}
-          onKill={onKillTerminal}
-          onInputChange={onTerminalInputChange}
-          onRun={onRunTerminalCommand}
-          onSendOutputToAi={onSendTerminalOutputToAi}
-          onWriteInput={onWriteTerminalInput}
-        />
+        {workspaceView === 'settings' ? null : (
+          <TerminalDrawer
+            command={terminalCommand}
+            error={terminalError}
+            input={terminalInput}
+            notice={terminalNotice}
+            project={activeProject}
+            terminal={terminal}
+            onClear={onClearTerminal}
+            onCommandChange={onTerminalCommandChange}
+            onCopyOutput={onCopyTerminalOutput}
+            onKill={onKillTerminal}
+            onInputChange={onTerminalInputChange}
+            onRun={onRunTerminalCommand}
+            onSendOutputToAi={onSendTerminalOutputToAi}
+            onWriteInput={onWriteTerminalInput}
+          />
+        )}
       </section>
     </main>
   );
