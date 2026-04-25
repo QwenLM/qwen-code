@@ -70,6 +70,23 @@ const renderAuthDialog = (
   );
 };
 
+/**
+ * Type text into the terminal one character at a time.
+ * Works around a Node 24.x + ink compatibility issue on Windows
+ * where bulk stdin.write() may not propagate to TextInput correctly.
+ */
+const typeText = async (
+  stdin: { write: (s: string) => void },
+  text: string,
+) => {
+  const delay = (ms = 5) => new Promise((resolve) => setTimeout(resolve, ms));
+  for (const char of text) {
+    stdin.write(char);
+    await delay(5);
+  }
+  await delay(30);
+};
+
 describe('AuthDialog', () => {
   const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -967,8 +984,7 @@ describe('AuthDialog Custom API Key Wizard', () => {
     stdin.write('\r');
     await wait(); // API key
 
-    stdin.write('model-1,model-2');
-    await wait();
+    await typeText(stdin, 'model-1,model-2');
     stdin.write('\r');
     await wait(); // model IDs -> advanced config
 
@@ -1047,12 +1063,10 @@ describe('AuthDialog Custom API Key Wizard', () => {
     await wait();
     stdin.write('\r');
     await wait();
-    stdin.write('sk-test');
-    await wait();
+    await typeText(stdin, 'sk-test');
     stdin.write('\r');
     await wait();
-    stdin.write('model-1,model-2');
-    await wait();
+    await typeText(stdin, 'model-1,model-2');
     stdin.write('\r');
     await wait();
 
@@ -1120,12 +1134,10 @@ describe('AuthDialog Custom API Key Wizard', () => {
     await wait();
     stdin.write('\r');
     await wait();
-    stdin.write('sk-test');
-    await wait();
+    await typeText(stdin, 'sk-test');
     stdin.write('\r');
     await wait();
-    stdin.write('model-1');
-    await wait();
+    await typeText(stdin, 'model-1');
     stdin.write('\r');
     await wait();
 
