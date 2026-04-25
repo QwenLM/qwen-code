@@ -82,10 +82,10 @@ describe('resolveJsonSchemaArg', () => {
 
   it('rejects a schema whose root type is not object', () => {
     expect(() => resolveJsonSchemaArg('{"type":"array"}')).toThrow(
-      /root "type" must be "object"/,
+      /must accept object-typed values/,
     );
     expect(() => resolveJsonSchemaArg('{"type":"string"}')).toThrow(
-      /root "type" must be "object"/,
+      /must accept object-typed values/,
     );
   });
 
@@ -99,6 +99,35 @@ describe('resolveJsonSchemaArg', () => {
     // Absent type is tolerated — Ajv treats it as "anything" which covers
     // the object case the model will actually submit.
     const schema = resolveJsonSchemaArg('{"properties":{"foo":{}}}');
+    expect(schema).toBeDefined();
+  });
+
+  it('rejects root anyOf where no branch accepts object', () => {
+    expect(() =>
+      resolveJsonSchemaArg(
+        '{"anyOf":[{"type":"array"},{"type":"string"}]}',
+      ),
+    ).toThrow(/must accept object-typed values/);
+  });
+
+  it('rejects root oneOf where no branch accepts object', () => {
+    expect(() =>
+      resolveJsonSchemaArg('{"oneOf":[{"type":"number"},{"type":"boolean"}]}'),
+    ).toThrow(/must accept object-typed values/);
+  });
+
+  it('accepts root anyOf when at least one branch accepts object', () => {
+    const schema = resolveJsonSchemaArg(
+      '{"anyOf":[{"type":"object"},{"type":"string"}]}',
+    );
+    expect(schema).toBeDefined();
+  });
+
+  it('accepts nested anyOf/oneOf chains where a deep branch accepts object', () => {
+    // The recursion should see through one level of nesting.
+    const schema = resolveJsonSchemaArg(
+      '{"anyOf":[{"oneOf":[{"type":"object"}]},{"type":"string"}]}',
+    );
     expect(schema).toBeDefined();
   });
 });

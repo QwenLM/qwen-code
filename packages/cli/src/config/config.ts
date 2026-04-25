@@ -166,6 +166,40 @@ export interface CliArgs {
 }
 
 /**
+ * Returns true if the root of the given schema can accept a JSON object.
+ *
+ * Considers:
+ *  - explicit root `type` (string or array)
+ *  - root `anyOf` / `oneOf` branches (at least one branch must accept
+ *    object-typed values)
+ *
+ * Leaves `allOf` alone — tight interactions between `allOf` branches with
+ * contradictory types are rare for `--json-schema` input and we'd rather
+ * let Ajv surface that at runtime than guess wrong here.
+ */
+function schemaRootAcceptsObject(schema: Record<string, unknown>): boolean {
+  const rawType = schema['type'];
+  if (rawType !== undefined) {
+    const types = Array.isArray(rawType) ? rawType : [rawType];
+    return types.includes('object');
+  }
+  for (const key of ['anyOf', 'oneOf'] as const) {
+    const variants = schema[key];
+    if (Array.isArray(variants) && variants.length > 0) {
+      return variants.some(
+        (v) =>
+          typeof v === 'object' &&
+          v !== null &&
+          !Array.isArray(v) &&
+          schemaRootAcceptsObject(v as Record<string, unknown>),
+      );
+    }
+  }
+  // No narrowing at the root — lenient default, treated as object-compatible.
+  return true;
+}
+
+/**
  * Resolves the `--json-schema` argument into a parsed JSON Schema object.
  *
  * Accepts either a JSON literal or `@path/to/schema.json`. Fails fast with a
@@ -218,18 +252,17 @@ export function resolveJsonSchemaArg(
 
   // The schema will be installed as a TOOL PARAMETER schema. All function-
   // calling APIs (Gemini/OpenAI/Anthropic) require tool arguments to be a
-  // JSON object, so a root type like "array" or "string" registers an
-  // unusable synthetic tool that the model could never satisfy. Reject any
-  // explicit non-object root here. Absent `type`, `type: "object"`, or a
-  // `type` array that includes `"object"` are all acceptable.
-  const rawType = (parsed as Record<string, unknown>)['type'];
-  if (rawType !== undefined) {
-    const types = Array.isArray(rawType) ? rawType : [rawType];
-    if (!types.includes('object')) {
-      throw new FatalConfigError(
-        `--json-schema root "type" must be "object" (tool parameters are object-valued); got ${JSON.stringify(rawType)}.`,
-      );
-    }
+  // JSON object, so a schema that cannot accept objects registers an
+  // unusable synthetic tool the model could never satisfy. Check the root
+  // *and* any top-level anyOf/oneOf narrowing — a schema without a root
+  // `type` but whose only anyOf branches are non-object is equally broken.
+  if (!schemaRootAcceptsObject(parsed as Record<string, unknown>)) {
+    throw new FatalConfigError(
+      '--json-schema root must accept object-typed values (tool parameters ' +
+        'are always JSON objects). Every branch of a root anyOf/oneOf must ' +
+        'be satisfiable by an object, or the root must omit `type` / declare ' +
+        '`type: "object"`.',
+    );
   }
 
   // Ajv compile-time validation. SchemaValidator.validate is deliberately
