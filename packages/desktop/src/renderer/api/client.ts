@@ -59,6 +59,19 @@ export type DesktopGitChangeStatus =
   | 'untracked'
   | 'unknown';
 
+export type DesktopGitChangeSource = 'staged' | 'unstaged' | 'untracked';
+
+export interface DesktopGitDiffHunk {
+  id: string;
+  source: DesktopGitChangeSource;
+  header: string;
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: string[];
+}
+
 export interface DesktopGitChangedFile {
   path: string;
   status: DesktopGitChangeStatus;
@@ -66,6 +79,7 @@ export interface DesktopGitChangedFile {
   unstaged: boolean;
   untracked: boolean;
   diff: string;
+  hunks: DesktopGitDiffHunk[];
 }
 
 export interface DesktopGitDiff {
@@ -87,6 +101,11 @@ export interface DesktopGitCommitMutation extends DesktopGitReviewMutation {
     summary: string;
   };
 }
+
+export type DesktopGitReviewTarget =
+  | { scope: 'all' }
+  | { scope: 'file'; filePath: string }
+  | { scope: 'hunk'; filePath: string; hunkId: string };
 
 export type DesktopTerminalStatus = 'running' | 'exited' | 'failed' | 'killed';
 
@@ -249,12 +268,13 @@ export async function getDesktopProjectGitDiff(
 export async function stageDesktopProjectChanges(
   serverInfo: DesktopServerInfo,
   projectId: string,
+  target: DesktopGitReviewTarget = { scope: 'all' },
 ): Promise<DesktopGitReviewMutation> {
   return writeJson(
     serverInfo,
     `/api/projects/${encodeURIComponent(projectId)}/git/stage`,
     'POST',
-    { scope: 'all' },
+    target,
     isGitReviewMutation,
   );
 }
@@ -262,12 +282,13 @@ export async function stageDesktopProjectChanges(
 export async function revertDesktopProjectChanges(
   serverInfo: DesktopServerInfo,
   projectId: string,
+  target: DesktopGitReviewTarget = { scope: 'all' },
 ): Promise<DesktopGitReviewMutation> {
   return writeJson(
     serverInfo,
     `/api/projects/${encodeURIComponent(projectId)}/git/revert`,
     'POST',
-    { scope: 'all' },
+    target,
     isGitReviewMutation,
   );
 }
@@ -807,7 +828,28 @@ function isGitChangedFile(value: unknown): value is DesktopGitChangedFile {
     typeof candidate.staged === 'boolean' &&
     typeof candidate.unstaged === 'boolean' &&
     typeof candidate.untracked === 'boolean' &&
-    typeof candidate.diff === 'string'
+    typeof candidate.diff === 'string' &&
+    Array.isArray(candidate.hunks) &&
+    candidate.hunks.every(isGitDiffHunk)
+  );
+}
+
+function isGitDiffHunk(value: unknown): value is DesktopGitDiffHunk {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Partial<DesktopGitDiffHunk>;
+  return (
+    typeof candidate.id === 'string' &&
+    isGitChangeSource(candidate.source) &&
+    typeof candidate.header === 'string' &&
+    typeof candidate.oldStart === 'number' &&
+    typeof candidate.oldLines === 'number' &&
+    typeof candidate.newStart === 'number' &&
+    typeof candidate.newLines === 'number' &&
+    Array.isArray(candidate.lines) &&
+    candidate.lines.every((line) => typeof line === 'string')
   );
 }
 
@@ -821,6 +863,10 @@ function isGitChangeStatus(value: unknown): value is DesktopGitChangeStatus {
     value === 'untracked' ||
     value === 'unknown'
   );
+}
+
+function isGitChangeSource(value: unknown): value is DesktopGitChangeSource {
+  return value === 'staged' || value === 'unstaged' || value === 'untracked';
 }
 
 function isDesktopTerminal(value: unknown): value is DesktopTerminal {

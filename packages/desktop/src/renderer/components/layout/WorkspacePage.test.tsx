@@ -79,14 +79,15 @@ describe('WorkspacePage', () => {
           onModelChange={vi.fn()}
           onPermissionResponse={vi.fn()}
           onRefreshProjectGitStatus={vi.fn()}
-          onRevertAllChanges={vi.fn()}
+          onOpenReviewFile={vi.fn()}
+          onRevertReviewTarget={vi.fn()}
           onRunTerminalCommand={vi.fn()}
           onSaveSettings={vi.fn()}
           onSelectProject={vi.fn()}
           onSelectSession={vi.fn()}
           onSendMessage={(event) => event.preventDefault()}
           onSettingsDispatch={vi.fn()}
-          onStageAllChanges={vi.fn()}
+          onStageReviewTarget={vi.fn()}
           onStopGeneration={vi.fn()}
           onTerminalCommandChange={vi.fn()}
         />,
@@ -150,6 +151,18 @@ const gitDiff: DesktopGitDiff = {
       unstaged: true,
       untracked: false,
       diff: '@@ -1 +1 @@\n-export const value = 1;\n+export const value = 2;',
+      hunks: [
+        {
+          id: 'hunk-1',
+          source: 'unstaged',
+          header: '@@ -1 +1 @@',
+          oldStart: 1,
+          oldLines: 1,
+          newStart: 1,
+          newLines: 1,
+          lines: ['-export const value = 1;', '+export const value = 2;'],
+        },
+      ],
     },
   ],
 };

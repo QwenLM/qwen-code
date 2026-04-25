@@ -623,7 +623,64 @@ input:focus {
   text-transform: uppercase;
 }
 
-.changed-files pre {
+.file-review-actions,
+.diff-hunk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  padding: 8px 10px;
+  border-top: 1px solid rgba(238, 240, 237, 0.08);
+}
+
+.diff-hunks {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border-top: 1px solid rgba(238, 240, 237, 0.08);
+}
+
+.diff-hunk {
+  border: 1px solid rgba(238, 240, 237, 0.08);
+  background: rgba(8, 10, 11, 0.42);
+}
+
+.diff-hunk-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 32px;
+  padding: 8px 10px;
+  color: #d8dcd6;
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+    monospace;
+  font-size: 11px;
+}
+
+.diff-hunk-header span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-hunk-header small {
+  color: #96e6ba;
+  font-family:
+    ui-sans-serif,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.changed-files pre,
+.diff-hunk pre {
   max-height: 260px;
   margin: 0;
   overflow: auto;
@@ -636,6 +693,51 @@ input:focus {
   font-size: 11px;
   line-height: 1.45;
   white-space: pre-wrap;
+}
+
+.review-comment-box {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border-top: 1px solid rgba(238, 240, 237, 0.08);
+}
+
+.review-comment-box label {
+  display: grid;
+  gap: 6px;
+}
+
+.review-comment-box label span {
+  color: #9ca39b;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.review-comment-box textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid rgba(238, 240, 237, 0.13);
+  background: rgba(238, 240, 237, 0.035);
+  color: #eef0ed;
+  padding: 8px 10px;
+  line-height: 1.45;
+}
+
+.review-comments {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-comments li {
+  border-left: 2px solid rgba(231, 189, 115, 0.65);
+  padding-left: 8px;
+  color: #d8dcd6;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .terminal-drawer {

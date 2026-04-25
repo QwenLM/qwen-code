@@ -22,11 +22,12 @@ execution order, verification, decisions, and remaining work.
 
 ## Current Status
 
-Slices 1-11 established the desktop package, Electron main/preload/renderer
+Slices 1-15 established the desktop package, Electron main/preload/renderer
 startup, authenticated health/runtime/settings/session APIs, ACP process
 wrapper, WebSocket chat loop, permission bridge, settings/model/mode controls,
 packaging configuration, package smoke verification, project/Git status,
-renderer asset/CDP startup support, and the componentized workspace shell.
+renderer asset/CDP startup support, the componentized workspace shell, the
+CDP-driven Electron E2E harness, and hunk-aware diff review controls.
 
 Important correction from iteration 7: the previous plan text called the MVP
 complete after packaging smoke, but the architecture P0 also requires project
@@ -313,6 +314,63 @@ scope before a DONE marker can be created.
   - Recorded in
     `.qwen/e2e-tests/electron-desktop/cdp-renderer-observability.md`.
 
+### Slice 15: Hunk-Level Diff Review Controls
+
+- Status: complete in iteration 10
+- Goal: complete the next review-depth increment with hunk metadata, hunk
+  accept/revert mutations, visible file/hunk review actions, inline review
+  comments, and Open in Editor wiring.
+- Files:
+  - `packages/desktop/src/server/services/gitReviewService.ts`
+  - `packages/desktop/src/server/index.ts`
+  - `packages/desktop/src/server/index.test.ts`
+  - `packages/desktop/src/renderer/api/client.ts`
+  - `packages/desktop/src/renderer/App.tsx`
+  - `packages/desktop/src/renderer/components/layout/WorkspacePage.tsx`
+  - `packages/desktop/src/renderer/components/layout/ReviewPanel.tsx`
+  - `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+  - `packages/desktop/src/renderer/styles.css`
+  - `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+  - `.qwen/e2e-tests/electron-desktop/diff-review-commit.md`
+  - `.qwen/e2e-tests/electron-desktop/cdp-renderer-observability.md`
+- Acceptance criteria:
+  - `GET /api/projects/:id/git/diff` includes per-file hunks with stable ids,
+    source state, range metadata, and visible hunk lines.
+  - `POST /api/projects/:id/git/stage` accepts `{ scope: 'hunk', filePath,
+hunkId }` and stages only that current hunk.
+  - `POST /api/projects/:id/git/revert` accepts the same hunk target and
+    reverts only that current hunk when the patch still applies.
+  - Review panel exposes Accept/Revert All, file-level Accept/Revert, hunk-level
+    Accept/Revert, Open file, and inline file comments.
+  - Electron CDP smoke drives the visible hunk accept and comment path without
+    console errors or failed network requests.
+- Completed:
+  - Added server-side hunk parsing from current Git diffs and recomputed hunk
+    patches on mutation so the renderer does not submit patch contents.
+  - Added hunk-target parsing and token-protected hunk stage/revert routes
+    scoped to registered projects.
+  - Added renderer API target types and response guards for hunk metadata.
+  - Reworked the review panel to show file actions, hunk cards, accepted/pending
+    state, local inline comments, and Open in Editor via the existing preload
+    `openPath` whitelist.
+  - Extended the CDP smoke to accept a hunk and add a review comment after
+    opening the temporary Git workspace.
+- Verification:
+  - `npm run test --workspace=packages/desktop` passed: 9 files, 54 tests.
+  - `npm run typecheck --workspace=packages/desktop` passed.
+  - `npm run lint --workspace=packages/desktop` passed.
+  - `npm run build --workspace=packages/desktop` passed.
+  - `npm run e2e:cdp --workspace=packages/desktop` passed. Success artifacts
+    were written under ignored
+    `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T03-08-06-087Z/`.
+  - `npm run typecheck` passed across workspaces.
+  - `npm run build` passed across workspaces. Existing VS Code companion lint
+    warnings were reported by its build script, with no errors.
+- E2E coverage:
+  - Updated
+    `.qwen/e2e-tests/electron-desktop/diff-review-commit.md` and
+    `.qwen/e2e-tests/electron-desktop/cdp-renderer-observability.md`.
+
 ## Decision Log
 
 - 2026-04-25: Use a main-process hosted `DesktopServer` for MVP, matching the
@@ -350,6 +408,10 @@ scope before a DONE marker can be created.
   `QWEN_DESKTOP_E2E_FAKE_ACP=1` so the Electron E2E harness can cover session,
   prompt, and permission UI without credentials or network calls. Production
   startup still creates the real `AcpProcessClient`.
+- 2026-04-25: Implement hunk-level review by exposing stable hunk ids and
+  server-derived patch application, not renderer-submitted patches. This keeps
+  hunk accept/revert scoped to the current registered project state and avoids
+  trusting client-provided diff text.
 
 ## Verification Log
 
@@ -402,12 +464,24 @@ scope before a DONE marker can be created.
   - `npm run typecheck` passed across workspaces.
   - `npm run build` passed across workspaces. Existing VS Code companion lint
     warnings were reported by its build script, with no errors.
+  - After pre-commit formatting, focused desktop test/typecheck/lint passed
+    again on the committed tree.
+  - `npm run typecheck` passed across workspaces.
+  - `npm run build` passed across workspaces. Existing VS Code companion lint
+    warnings were reported by its build script, with no errors.
   - Bundle/package smoke passed:
     `npm run bundle && npm run package:dir --workspace=packages/desktop && npm run smoke:package --workspace=packages/desktop`.
     Electron builder reported non-fatal metadata/dependency warnings
     consistent with prior package runs.
   - After tightening the E2E fake ACP gate, package dir, package smoke, and
     packaged launch smoke passed again.
+- 2026-04-25 Slice 15 hunk-level diff review:
+  - `npm run test --workspace=packages/desktop` passed: 9 files, 54 tests.
+  - `npm run typecheck --workspace=packages/desktop` passed.
+  - `npm run lint --workspace=packages/desktop` passed.
+  - `npm run build --workspace=packages/desktop` passed.
+  - `npm run e2e:cdp --workspace=packages/desktop` passed and reported no
+    renderer console errors or failed network requests.
 
 ## Self Review Notes
 
@@ -445,9 +519,14 @@ scope before a DONE marker can be created.
   `QWEN_DESKTOP_E2E_USER_DATA_DIR`, and
   `QWEN_DESKTOP_TEST_SELECT_DIRECTORY`. Normal desktop startup still uses the
   native directory picker and real ACP process.
+- Slice 15 hunk review recomputes hunk patches from server-side Git state for
+  each mutation. A stale hunk id fails closed with `git_hunk_not_found` or
+  `git_error` instead of applying renderer-provided patch contents.
+- Review comments are currently local renderer notes for the active review
+  session. Persisting them into ACP/session artifacts or Git commit metadata is
+  deferred.
 
 ## Remaining Work
 
-- Implement hunk-level diff review, terminal PTY/write/send-output-to-AI
-  refinements, final package smoke, and any remaining MVP polish before
-  creating the DONE marker.
+- Implement terminal PTY/write/send-output-to-AI refinements, run final package
+  smoke, and complete any remaining MVP polish before creating the DONE marker.

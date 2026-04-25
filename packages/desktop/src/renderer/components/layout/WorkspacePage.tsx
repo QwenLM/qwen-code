@@ -7,6 +7,7 @@
 import type { Dispatch, FormEvent } from 'react';
 import type {
   DesktopGitDiff,
+  DesktopGitReviewTarget,
   DesktopProject,
   DesktopSessionSummary,
   DesktopTerminal,
@@ -57,14 +58,15 @@ export function WorkspacePage({
   onModelChange,
   onPermissionResponse,
   onRefreshProjectGitStatus,
-  onRevertAllChanges,
+  onOpenReviewFile,
+  onRevertReviewTarget,
   onRunTerminalCommand,
   onSaveSettings,
   onSelectProject,
   onSelectSession,
   onSendMessage,
   onSettingsDispatch,
-  onStageAllChanges,
+  onStageReviewTarget,
   onStopGeneration,
   onTerminalCommandChange,
 }: {
@@ -99,14 +101,15 @@ export function WorkspacePage({
   onModelChange: (modelId: string) => void;
   onPermissionResponse: (requestId: string, optionId: string) => void;
   onRefreshProjectGitStatus: () => void;
-  onRevertAllChanges: () => void;
+  onOpenReviewFile: (filePath: string) => void;
+  onRevertReviewTarget: (target: DesktopGitReviewTarget) => void;
   onRunTerminalCommand: () => void;
   onSaveSettings: () => void;
   onSelectProject: (projectId: string) => void;
   onSelectSession: (sessionId: string) => void;
   onSendMessage: (event: FormEvent<HTMLFormElement>) => void;
   onSettingsDispatch: Dispatch<SettingsAction>;
-  onStageAllChanges: () => void;
+  onStageReviewTarget: (target: DesktopGitReviewTarget) => void;
   onStopGeneration: () => void;
   onTerminalCommandChange: (command: string) => void;
 }) {
@@ -161,10 +164,11 @@ export function WorkspacePage({
             onCommitMessageChange={onCommitMessageChange}
             onModeChange={onModeChange}
             onModelChange={onModelChange}
-            onRevertAll={onRevertAllChanges}
+            onOpenFile={onOpenReviewFile}
+            onRevertTarget={onRevertReviewTarget}
             onSaveSettings={onSaveSettings}
             onSettingsDispatch={onSettingsDispatch}
-            onStageAll={onStageAllChanges}
+            onStageTarget={onStageReviewTarget}
           />
         </div>
         <TerminalDrawer

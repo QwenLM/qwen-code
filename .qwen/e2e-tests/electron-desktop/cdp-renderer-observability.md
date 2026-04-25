@@ -109,5 +109,24 @@ under ignored
 
 This harness covers renderer/CDP observability and the main P0 workbench paths,
 but it is a development E2E smoke using fake ACP. Final MVP verification still
-needs the remaining review/terminal polish called out in the implementation
-plan.
+needs the remaining terminal polish and final packaging smoke called out in the
+implementation plan.
+
+## Iteration 10 Review Path Extension
+
+The CDP harness now also exercises the hunk review surface after opening the
+temporary Git workspace:
+
+- waits for a visible Accept Hunk control in the Review panel;
+- clicks Accept Hunk and verifies the hunk state changes to Accepted;
+- adds an inline review note for `README.md`;
+- continues through session creation, permission approval, settings save, and
+  project-scoped terminal output.
+
+Execution result:
+
+- `npm run e2e:cdp --workspace=packages/desktop` passed.
+- Passing run artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T03-08-06-087Z/`.
+- The passing run reported no renderer console errors or failed network
+  requests.

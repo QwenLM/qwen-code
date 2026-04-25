@@ -1034,7 +1034,19 @@ function parseGitTarget(body: Record<string, unknown>): DesktopGitTarget {
     };
   }
 
-  throw new DesktopHttpError(400, 'bad_request', 'scope must be all or file.');
+  if (scope === 'hunk') {
+    return {
+      scope,
+      filePath: getRequiredString(body, 'filePath'),
+      hunkId: getRequiredString(body, 'hunkId'),
+    };
+  }
+
+  throw new DesktopHttpError(
+    400,
+    'bad_request',
+    'scope must be all, file, or hunk.',
+  );
 }
 
 function getOptionalString(

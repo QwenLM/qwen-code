@@ -69,6 +69,15 @@ async function main() {
   await clickButton('Open Project');
   await waitForText('desktop-e2e-workspace');
   await waitForText('README.md');
+  await waitForText('Accept Hunk');
+  await clickButton('Accept Hunk');
+  await waitForText('Accepted');
+  await setFieldByAriaLabel(
+    'Review comment for README.md',
+    'Review note from E2E',
+  );
+  await clickButton('Add Comment');
+  await waitForText('Review note from E2E');
   await waitForSelector('[data-testid="project-list"]');
 
   await clickButton('New Thread');

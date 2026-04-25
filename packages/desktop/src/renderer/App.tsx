@@ -36,6 +36,7 @@ import {
   stageDesktopProjectChanges,
   updateDesktopUserSettings,
   type DesktopGitDiff,
+  type DesktopGitReviewTarget,
   type DesktopProject,
   type DesktopSessionSummary,
   type DesktopTerminal,
@@ -393,37 +394,63 @@ export function App() {
     [activeProject],
   );
 
-  const stageAllChanges = useCallback(async () => {
-    if (loadState.state !== 'ready' || !activeProject) {
-      return;
-    }
+  const stageReviewTarget = useCallback(
+    async (target: DesktopGitReviewTarget) => {
+      if (loadState.state !== 'ready' || !activeProject) {
+        return;
+      }
 
-    try {
-      const result = await stageDesktopProjectChanges(
-        loadState.status.serverInfo,
-        activeProject.id,
-      );
-      applyReviewMutation(result.status, result.diff);
-    } catch (error) {
-      setReviewError(getErrorMessage(error));
-    }
-  }, [activeProject, applyReviewMutation, loadState]);
+      try {
+        const result = await stageDesktopProjectChanges(
+          loadState.status.serverInfo,
+          activeProject.id,
+          target,
+        );
+        applyReviewMutation(result.status, result.diff);
+      } catch (error) {
+        setReviewError(getErrorMessage(error));
+      }
+    },
+    [activeProject, applyReviewMutation, loadState],
+  );
 
-  const revertAllChanges = useCallback(async () => {
-    if (loadState.state !== 'ready' || !activeProject) {
-      return;
-    }
+  const revertReviewTarget = useCallback(
+    async (target: DesktopGitReviewTarget) => {
+      if (loadState.state !== 'ready' || !activeProject) {
+        return;
+      }
 
-    try {
-      const result = await revertDesktopProjectChanges(
-        loadState.status.serverInfo,
-        activeProject.id,
-      );
-      applyReviewMutation(result.status, result.diff);
-    } catch (error) {
-      setReviewError(getErrorMessage(error));
-    }
-  }, [activeProject, applyReviewMutation, loadState]);
+      try {
+        const result = await revertDesktopProjectChanges(
+          loadState.status.serverInfo,
+          activeProject.id,
+          target,
+        );
+        applyReviewMutation(result.status, result.diff);
+      } catch (error) {
+        setReviewError(getErrorMessage(error));
+      }
+    },
+    [activeProject, applyReviewMutation, loadState],
+  );
+
+  const openReviewFile = useCallback(
+    async (filePath: string) => {
+      if (!activeProject) {
+        return;
+      }
+
+      try {
+        await window.qwenDesktop.openPath(
+          joinProjectFilePath(activeProject.path, filePath),
+        );
+        setReviewError(null);
+      } catch (error) {
+        setReviewError(getErrorMessage(error));
+      }
+    },
+    [activeProject],
+  );
 
   const commitChanges = useCallback(async () => {
     if (
@@ -666,14 +693,15 @@ export function App() {
       onModelChange={changeModel}
       onPermissionResponse={respondToPermission}
       onRefreshProjectGitStatus={refreshProjectGitStatus}
-      onRevertAllChanges={revertAllChanges}
+      onOpenReviewFile={openReviewFile}
+      onRevertReviewTarget={revertReviewTarget}
       onRunTerminalCommand={runTerminalCommand}
       onSaveSettings={saveSettings}
       onSelectProject={selectProject}
       onSelectSession={setActiveSessionId}
       onSendMessage={sendMessage}
       onSettingsDispatch={dispatchSettings}
-      onStageAllChanges={stageAllChanges}
+      onStageReviewTarget={stageReviewTarget}
       onStopGeneration={stopGeneration}
       onTerminalCommandChange={setTerminalCommand}
     />
@@ -707,4 +735,13 @@ function isApprovalMode(value: string): value is DesktopApprovalMode {
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Desktop operation failed.';
+}
+
+function joinProjectFilePath(projectPath: string, filePath: string): string {
+  const separator = projectPath.includes('\\') ? '\\' : '/';
+  const base =
+    projectPath.endsWith('/') || projectPath.endsWith('\\')
+      ? projectPath.slice(0, -1)
+      : projectPath;
+  return `${base}${separator}${filePath}`;
 }

@@ -264,6 +264,80 @@ describe('DesktopServer', () => {
     ).resolves.toBe('test commit');
   });
 
+  it('returns hunk metadata and can stage or revert individual hunks', async () => {
+    const projectPath = await createMultiHunkGitProject();
+    const storePath = join(
+      await createTempDirectory('qwen-desktop-store-'),
+      'desktop-projects.json',
+    );
+    const server = await createTestServer(undefined, undefined, storePath);
+    const opened = await postJson(server, '/api/projects/open', {
+      path: projectPath,
+    });
+    const projectId = getProjectId(opened.body);
+    const diff = await getJson(
+      server,
+      `/api/projects/${encodeURIComponent(projectId)}/git/diff`,
+      {
+        Authorization: 'Bearer test-token',
+      },
+    );
+    const firstHunk = getChangedFileHunks(diff.body, 'tracked.txt')[0];
+
+    const staged = await postJson(
+      server,
+      `/api/projects/${encodeURIComponent(projectId)}/git/stage`,
+      {
+        scope: 'hunk',
+        filePath: 'tracked.txt',
+        hunkId: firstHunk?.id,
+      },
+    );
+    const remainingUnstagedHunk = getChangedFileHunks(
+      staged.body,
+      'tracked.txt',
+    ).find((hunk) => hunk.source === 'unstaged');
+    const reverted = await postJson(
+      server,
+      `/api/projects/${encodeURIComponent(projectId)}/git/revert`,
+      {
+        scope: 'hunk',
+        filePath: 'tracked.txt',
+        hunkId: remainingUnstagedHunk?.id,
+      },
+    );
+
+    expect(diff.status).toBe(200);
+    expect(getChangedFileHunks(diff.body, 'tracked.txt')).toEqual([
+      expect.objectContaining({ source: 'unstaged' }),
+      expect.objectContaining({ source: 'unstaged' }),
+    ]);
+    expect(staged.body).toMatchObject({
+      ok: true,
+      status: {
+        staged: 1,
+        modified: 1,
+      },
+    });
+    expect(getChangedFileHunks(staged.body, 'tracked.txt')).toEqual([
+      expect.objectContaining({ source: 'staged' }),
+      expect.objectContaining({ source: 'unstaged' }),
+    ]);
+    expect(reverted.body).toMatchObject({
+      ok: true,
+      status: {
+        staged: 1,
+        modified: 0,
+      },
+    });
+    await expect(
+      readFile(join(projectPath, 'tracked.txt'), 'utf8'),
+    ).resolves.toContain('line-01 changed');
+    await expect(
+      readFile(join(projectPath, 'tracked.txt'), 'utf8'),
+    ).resolves.toContain('line-12');
+  });
+
   it('can revert all project changes', async () => {
     const projectPath = await createCommittedGitProject();
     const storePath = join(
@@ -957,6 +1031,36 @@ async function createCommittedGitProject(): Promise<string> {
   return projectPath;
 }
 
+async function createMultiHunkGitProject(): Promise<string> {
+  const projectPath = await createTempDirectory('qwen-desktop-git-');
+  await runGit(projectPath, ['init']);
+  await runGit(projectPath, ['config', 'user.email', 'desktop@example.com']);
+  await runGit(projectPath, ['config', 'user.name', 'Desktop Test']);
+  await writeFile(
+    join(projectPath, 'tracked.txt'),
+    `${Array.from(
+      { length: 12 },
+      (_, index) => `line-${String(index + 1).padStart(2, '0')}`,
+    ).join('\n')}\n`,
+    'utf8',
+  );
+  await runGit(projectPath, ['add', '.']);
+  await runGit(projectPath, ['commit', '-m', 'initial']);
+  await writeFile(
+    join(projectPath, 'tracked.txt'),
+    `${[
+      'line-01 changed',
+      ...Array.from(
+        { length: 10 },
+        (_, index) => `line-${String(index + 2).padStart(2, '0')}`,
+      ),
+      'line-12 changed',
+    ].join('\n')}\n`,
+    'utf8',
+  );
+  return projectPath;
+}
+
 async function getJson(
   server: DesktopServer,
   path: string,
@@ -1161,6 +1265,64 @@ function getTerminalId(message: unknown): string {
   }
 
   return message.terminal.id;
+}
+
+function getChangedFileHunks(
+  message: unknown,
+  filePath: string,
+): Array<{ id: string; source: string }> {
+  if (!message || typeof message !== 'object') {
+    throw new Error('Expected Git diff files.');
+  }
+
+  let files: unknown;
+  if ('files' in message) {
+    files = message.files;
+  } else if (
+    'diff' in message &&
+    message.diff &&
+    typeof message.diff === 'object' &&
+    'files' in message.diff
+  ) {
+    files = message.diff.files;
+  }
+  if (!Array.isArray(files)) {
+    throw new Error('Expected Git diff files.');
+  }
+
+  const file = files.find(
+    (candidate) =>
+      !!candidate &&
+      typeof candidate === 'object' &&
+      'path' in candidate &&
+      candidate.path === filePath,
+  );
+  if (!file || typeof file !== 'object' || !('hunks' in file)) {
+    throw new Error(`Expected Git diff hunks for ${filePath}.`);
+  }
+
+  const hunks = file.hunks;
+  if (!Array.isArray(hunks)) {
+    throw new Error(`Expected Git diff hunks for ${filePath}.`);
+  }
+
+  return hunks.map((hunk) => {
+    if (
+      !hunk ||
+      typeof hunk !== 'object' ||
+      !('id' in hunk) ||
+      typeof hunk.id !== 'string' ||
+      !('source' in hunk) ||
+      typeof hunk.source !== 'string'
+    ) {
+      throw new Error(`Expected typed Git hunk for ${filePath}.`);
+    }
+
+    return {
+      id: hunk.id,
+      source: hunk.source,
+    };
+  });
 }
 
 async function waitForTerminal(
