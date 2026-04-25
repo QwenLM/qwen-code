@@ -941,6 +941,130 @@ describe('ModelsConfig', () => {
     expect(gc.model).toBe('cold-start-model');
   });
 
+  it('should NOT preserve apiKey when same modelId but envKey changed (hot-reload)', () => {
+    // Hot-reload scenario: model provider config is reloaded, changing the
+    // envKey for the same model id. The old apiKey must NOT be restored.
+    const oldEnvKey = 'OLD_ENV_KEY_HOT_RELOAD_TEST';
+    const newEnvKey = 'NEW_ENV_KEY_HOT_RELOAD_TEST';
+    delete process.env[oldEnvKey];
+    delete process.env[newEnvKey];
+
+    const modelProvidersConfig: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'hot-reload-model',
+          name: 'Hot Reload Model',
+          baseUrl: 'https://api.example.com/v1',
+          envKey: oldEnvKey,
+        },
+      ],
+    };
+
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig,
+      generationConfig: {
+        model: 'hot-reload-model',
+        apiKey: 'old-api-key',
+        baseUrl: 'https://api.example.com/v1',
+        apiKeyEnvKey: oldEnvKey,
+      },
+      generationConfigSources: {
+        model: { kind: 'settings', detail: 'settings.model.name' },
+        apiKey: { kind: 'settings', detail: 'security.auth.apiKey' },
+        baseUrl: { kind: 'settings', detail: 'security.auth.baseUrl' },
+        apiKeyEnvKey: {
+          kind: 'modelProviders',
+          authType: 'openai',
+          modelId: 'hot-reload-model',
+          detail: 'envKey',
+        },
+      },
+    });
+
+    // Simulate hot-reload: update registry with new envKey
+    modelsConfig.reloadModelProvidersConfig({
+      openai: [
+        {
+          id: 'hot-reload-model',
+          name: 'Hot Reload Model',
+          baseUrl: 'https://api.example.com/v1',
+          envKey: newEnvKey,
+        },
+      ],
+    });
+
+    // syncAfterAuthRefresh with same authType and modelId
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'hot-reload-model');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    // envKey changed → isUnchanged is false → old key must NOT be preserved
+    expect(gc.apiKey).toBeUndefined();
+    expect(gc.apiKeyEnvKey).toBe(newEnvKey);
+    expect(gc.model).toBe('hot-reload-model');
+  });
+
+  it('should NOT preserve apiKey when same modelId but baseUrl changed (hot-reload)', () => {
+    // Hot-reload scenario: model provider config is reloaded, changing the
+    // baseUrl for the same model id. The old apiKey must NOT be restored.
+    const envKey = 'BASE_URL_HOT_RELOAD_TEST';
+    delete process.env[envKey];
+
+    const modelProvidersConfig: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'url-reload-model',
+          name: 'URL Reload Model',
+          baseUrl: 'https://old-api.example.com/v1',
+          envKey,
+        },
+      ],
+    };
+
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig,
+      generationConfig: {
+        model: 'url-reload-model',
+        apiKey: 'old-api-key',
+        baseUrl: 'https://old-api.example.com/v1',
+        apiKeyEnvKey: envKey,
+      },
+      generationConfigSources: {
+        model: { kind: 'settings', detail: 'settings.model.name' },
+        apiKey: { kind: 'settings', detail: 'security.auth.apiKey' },
+        baseUrl: { kind: 'settings', detail: 'security.auth.baseUrl' },
+        apiKeyEnvKey: {
+          kind: 'modelProviders',
+          authType: 'openai',
+          modelId: 'url-reload-model',
+          detail: 'envKey',
+        },
+      },
+    });
+
+    // Simulate hot-reload: update registry with new baseUrl
+    modelsConfig.reloadModelProvidersConfig({
+      openai: [
+        {
+          id: 'url-reload-model',
+          name: 'URL Reload Model',
+          baseUrl: 'https://new-api.example.com/v1',
+          envKey,
+        },
+      ],
+    });
+
+    // syncAfterAuthRefresh with same authType and modelId
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'url-reload-model');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    // baseUrl changed → isUnchanged is false → old key must NOT be preserved
+    expect(gc.apiKey).toBeUndefined();
+    expect(gc.baseUrl).toBe('https://new-api.example.com/v1');
+    expect(gc.model).toBe('url-reload-model');
+  });
+
   it('should preserve general env var apiKey (e.g. OPENAI_API_KEY) when provider envKey is absent', () => {
     // If the user has OPENAI_API_KEY set but NOT the provider-specific envKey,
     // the general env var should be preserved as a fallback.

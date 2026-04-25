@@ -883,10 +883,20 @@ export class ModelsConfig {
         // applyResolvedModelDefaults clears it (i.e. process.env[envKey] is
         // absent). For cross-provider switches (different modelId), we must
         // NOT preserve the previous key — it may belong to a different
-        // service. (See #3417)
+        // service. Also detect hot-reload scenarios where the provider
+        // config changed in place (same modelId, different envKey/baseUrl)
+        // by comparing fields that applyResolvedModelDefaults sets. On the
+        // very first call (startup), apiKeyEnvKey is still undefined —
+        // treat that as "never applied" and skip the provider check.
+        // (See #3417)
+        const isProviderChanged =
+          this._generationConfig.apiKeyEnvKey !== undefined &&
+          (this._generationConfig.apiKeyEnvKey !== resolved.envKey ||
+            this._generationConfig.baseUrl !== resolved.baseUrl);
         const isUnchanged =
           previousAuthType === authType &&
-          this._generationConfig.model === modelId;
+          this._generationConfig.model === modelId &&
+          !isProviderChanged;
         const savedApiKey = isUnchanged
           ? this._generationConfig.apiKey
           : undefined;
