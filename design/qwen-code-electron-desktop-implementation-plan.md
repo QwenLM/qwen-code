@@ -22,6 +22,99 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Conversation Changed-Files Summary and Protocol Noise Cleanup
+
+Status: completed in iteration 7.
+
+Goal: make the main conversation timeline feel like a product task flow by
+hiding ACP/session protocol noise and surfacing Git changes inline.
+
+User-visible value: users should not see internal session IDs or protocol stop
+reasons in the main reading flow, and they can discover changed files from the
+conversation itself instead of starting from the topbar.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/stores/chatStore.ts`
+- `packages/desktop/src/renderer/stores/chatStore.test.ts`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/conversation-changes-summary.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The chat timeline no longer renders `Connected to <session id>` or
+  `Turn complete: <stop reason>` event rows.
+- Connection state remains available in the compact header/topbar rather than
+  as protocol prose in the timeline.
+- When the active project has Git changes, the conversation shows a compact
+  changed-files summary with file names, staged/unstaged/untracked state, and
+  addition/deletion totals.
+- The inline summary opens the review drawer while keeping the conversation
+  mounted.
+- The summary hides itself when there are no changed files.
+
+Verification:
+
+- Unit/component test commands:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/chatStore.test.ts src/renderer/components/layout/WorkspacePage.test.tsx`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, create a composer-first thread,
+  approve the fake command, assert protocol IDs and stop reasons are absent
+  from the body text, assert the conversation changed-files summary is present,
+  open review from that summary, then continue through discard cancel, stage,
+  commit, settings, and terminal paths.
+- E2E assertions: the body text does not contain `Connected to session-e2e`,
+  `session-e2e-1`, or `Turn complete`; the inline summary reports the fake
+  dirty files and opens the review drawer; console errors and failed local
+  requests are absent.
+- Diagnostic artifacts: CDP screenshots, conversation summary JSON, review
+  layout JSON, Electron log, summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained inline
+  cards and conversation density; `electron-desktop-dev` for renderer changes
+  and real Electron CDP verification.
+
+Notes and decisions:
+
+- The renderer still tracks connection state in `ChatState.connection` and the
+  compact header/topbar, but `connected` and `message_complete` protocol
+  messages no longer create timeline rows.
+- The changed-files summary is derived from the active project Git diff instead
+  of fake ACP payloads, so it appears whenever the review drawer would have
+  meaningful content and disappears after commit/clean states.
+- The inline summary opens the existing review drawer rather than introducing a
+  separate review surface, keeping the first viewport conversation-first and
+  consistent with `home.jpg`.
+
+Verification results:
+
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/chatStore.test.ts src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 9 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed after launch through real
+  Electron over CDP.
+- Passing artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T17-28-04-569Z/`.
+
+Next work:
+
+- Continue rich conversation primitives by rendering command approvals and tool
+  activity as inline cards instead of relying mostly on the permission strip.
+- Improve settings information architecture so runtime diagnostics move under
+  Advanced and model/API key controls are reachable as product settings.
+
 ### Completed Slice: Review Safety Terminology and Discard Confirmation
 
 Status: completed in iteration 6.

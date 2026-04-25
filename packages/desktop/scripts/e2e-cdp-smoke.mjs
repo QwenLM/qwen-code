@@ -72,15 +72,13 @@ async function main() {
   await assertProjectComposerReady('project-composer.json');
   await setFieldByAriaLabel('Message', 'Please exercise command approval.');
   await clickButton('Send');
-  await waitForText('session-e2e-1');
-  await waitForText('Connected to session-e2e-1');
   await waitForText('Approve Once');
   await clickButton('Approve Once');
   await waitForText('E2E fake ACP response received');
-  await waitForText('Turn complete: end_turn');
+  await assertConversationChangesSummary('conversation-changes-summary.json');
   await waitForSelector('[data-testid="thread-list"]');
 
-  await clickButton('Open Changes');
+  await clickButton('Review Changes');
   await waitForText('README.md');
   await assertReviewDrawerLayout('review-drawer-layout.json');
   await saveScreenshot('review-drawer.png');
@@ -561,6 +559,100 @@ async function assertRalphWorkspaceLayout(fileName) {
     throw new Error(
       `Sidebar list rows should not stretch vertically: ${JSON.stringify(
         oversizedRows,
+      )}`,
+    );
+  }
+}
+
+async function assertConversationChangesSummary(fileName) {
+  await waitForSelector('[data-testid="conversation-changes-summary"]');
+  const snapshot = await evaluate(`(() => {
+    const bodyText = document.body.innerText;
+    const summary = document.querySelector(
+      '[data-testid="conversation-changes-summary"]'
+    );
+    return {
+      bodyHasSessionId: bodyText.includes('session-e2e-1'),
+      bodyHasConnectedEvent: bodyText.includes('Connected to session-e2e'),
+      bodyHasTurnComplete: bodyText.includes('Turn complete'),
+      summaryText: summary?.innerText ?? '',
+      summaryRect: (() => {
+        if (!summary) {
+          return null;
+        }
+        const rect = summary.getBoundingClientRect();
+        return {
+          top: rect.top,
+          right: rect.right,
+          bottom: rect.bottom,
+          left: rect.left,
+          width: rect.width,
+          height: rect.height
+        };
+      })(),
+      hasReviewAction: Boolean(
+        [...(summary?.querySelectorAll('button') ?? [])].some((button) => {
+          const label =
+            button.getAttribute('aria-label') ||
+            button.getAttribute('title') ||
+            button.textContent.trim();
+          return label === 'Review Changes';
+        })
+      ),
+      reviewOpen: Boolean(document.querySelector('[data-testid="review-panel"]'))
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (snapshot.bodyHasSessionId || snapshot.bodyHasConnectedEvent) {
+    throw new Error(
+      `Conversation leaked a protocol session id: ${JSON.stringify(snapshot)}`,
+    );
+  }
+
+  if (snapshot.bodyHasTurnComplete) {
+    throw new Error(
+      `Conversation leaked a protocol stop reason: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  for (const expectedText of [
+    '2 files changed',
+    'README.md',
+    'notes.txt',
+    '+2',
+    '-1',
+  ]) {
+    if (!snapshot.summaryText.includes(expectedText)) {
+      throw new Error(
+        `Changed-files summary is missing ${expectedText}: ${snapshot.summaryText}`,
+      );
+    }
+  }
+
+  if (!snapshot.hasReviewAction) {
+    throw new Error('Changed-files summary is missing its review action.');
+  }
+
+  if (snapshot.reviewOpen) {
+    throw new Error('Changed-files summary should not open review by default.');
+  }
+
+  if (
+    !snapshot.summaryRect ||
+    snapshot.summaryRect.width < 360 ||
+    snapshot.summaryRect.height > 220
+  ) {
+    throw new Error(
+      `Changed-files summary geometry is unexpected: ${JSON.stringify(
+        snapshot.summaryRect,
       )}`,
     );
   }

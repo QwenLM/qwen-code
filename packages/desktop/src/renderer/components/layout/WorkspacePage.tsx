@@ -142,6 +142,10 @@ export function WorkspacePage({
     setWorkspaceView('chat');
     setIsReviewOpen(false);
   };
+  const showReview = () => {
+    setWorkspaceView('chat');
+    setIsReviewOpen(true);
+  };
   const toggleReview = () => {
     setWorkspaceView('chat');
     setIsReviewOpen((current) => !current);
@@ -199,6 +203,7 @@ export function WorkspacePage({
               activeProject={activeProject}
               activeSessionId={activeSessionId}
               chatState={chatState}
+              gitDiff={gitDiff}
               isDraftSession={isDraftSession}
               messageText={messageText}
               modelState={modelState}
@@ -206,6 +211,7 @@ export function WorkspacePage({
               onModeChange={onModeChange}
               onModelChange={onModelChange}
               onMessageTextChange={onMessageTextChange}
+              onOpenReview={showReview}
               onPermissionResponse={onPermissionResponse}
               onSendMessage={onSendMessage}
               onStopGeneration={onStopGeneration}

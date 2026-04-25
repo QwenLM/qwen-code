@@ -155,10 +155,6 @@ function applyServerMessage(
         ...state,
         connection: 'connected',
         error: null,
-        items: [
-          ...state.items,
-          createEventItem(`Connected to ${message.sessionId}`),
-        ],
       };
 
     case 'pong':
@@ -240,14 +236,7 @@ function applyServerMessage(
       return {
         ...state,
         streaming: false,
-        items: [
-          ...markStreamingMessagesComplete(state.items),
-          createEventItem(
-            message.stopReason
-              ? `Turn complete: ${message.stopReason}`
-              : 'Turn complete',
-          ),
-        ],
+        items: markStreamingMessagesComplete(state.items),
       };
 
     case 'error':

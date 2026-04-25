@@ -39,11 +39,50 @@ describe('chatStore', () => {
     const loaded = chatReducer(replaying, { type: 'history_loaded' });
 
     expect(loaded.streaming).toBe(false);
-    expect(loaded.items).toHaveLength(2);
-    expect(loaded.items[1]).toMatchObject({
+    expect(loaded.items).toHaveLength(1);
+    expect(loaded.items[0]).toMatchObject({
       type: 'message',
       streaming: false,
       text: 'Recovered history',
     });
+  });
+
+  it('keeps protocol connection and stop reasons out of the timeline', () => {
+    const connected = chatReducer(createInitialChatState(), {
+      type: 'server_message',
+      message: {
+        type: 'connected',
+        sessionId: 'session-e2e-1',
+      },
+    });
+
+    expect(connected.connection).toBe('connected');
+    expect(connected.items).toHaveLength(0);
+
+    const streaming = chatReducer(connected, {
+      type: 'server_message',
+      message: {
+        type: 'message_delta',
+        role: 'assistant',
+        text: 'Work finished',
+      },
+    });
+    const complete = chatReducer(streaming, {
+      type: 'server_message',
+      message: {
+        type: 'message_complete',
+        stopReason: 'end_turn',
+      },
+    });
+
+    expect(complete.streaming).toBe(false);
+    expect(complete.items).toHaveLength(1);
+    expect(complete.items[0]).toMatchObject({
+      type: 'message',
+      streaming: false,
+      text: 'Work finished',
+    });
+    expect(JSON.stringify(complete.items)).not.toContain('session-e2e-1');
+    expect(JSON.stringify(complete.items)).not.toContain('end_turn');
   });
 });

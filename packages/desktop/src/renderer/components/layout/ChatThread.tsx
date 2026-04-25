@@ -5,7 +5,11 @@
  */
 
 import { useEffect, useRef, type FormEvent, type KeyboardEvent } from 'react';
-import type { DesktopProject } from '../../api/client.js';
+import type {
+  DesktopGitChangedFile,
+  DesktopGitDiff,
+  DesktopProject,
+} from '../../api/client.js';
 import type { ChatState, ChatTimelineItem } from '../../stores/chatStore.js';
 import type { ModelState } from '../../stores/modelStore.js';
 import type { DesktopApprovalMode } from '../../../shared/desktopProtocol.js';
@@ -14,6 +18,7 @@ export function ChatThread({
   activeProject,
   activeSessionId,
   chatState,
+  gitDiff,
   isDraftSession,
   messageText,
   modelState,
@@ -21,6 +26,7 @@ export function ChatThread({
   onModeChange,
   onModelChange,
   onMessageTextChange,
+  onOpenReview,
   onPermissionResponse,
   onSendMessage,
   onStopGeneration,
@@ -28,6 +34,7 @@ export function ChatThread({
   activeProject: DesktopProject | null;
   activeSessionId: string | null;
   chatState: ChatState;
+  gitDiff: DesktopGitDiff | null;
   isDraftSession: boolean;
   messageText: string;
   modelState: ModelState;
@@ -35,6 +42,7 @@ export function ChatThread({
   onModeChange: (mode: DesktopApprovalMode) => void;
   onModelChange: (modelId: string) => void;
   onMessageTextChange: (message: string) => void;
+  onOpenReview: () => void;
   onPermissionResponse: (requestId: string, optionId: string) => void;
   onSendMessage: (event: FormEvent<HTMLFormElement>) => void;
   onStopGeneration: () => void;
@@ -66,7 +74,9 @@ export function ChatThread({
         activeProject={activeProject}
         state={chatState}
         activeSessionId={activeSessionId}
+        gitDiff={gitDiff}
         isDraftSession={isDraftSession}
+        onOpenReview={onOpenReview}
       />
       <PermissionPrompts
         state={chatState}
@@ -172,12 +182,16 @@ export function ChatThread({
 function ChatTimeline({
   activeProject,
   activeSessionId,
+  gitDiff,
   isDraftSession,
+  onOpenReview,
   state,
 }: {
   activeProject: DesktopProject | null;
   activeSessionId: string | null;
+  gitDiff: DesktopGitDiff | null;
   isDraftSession: boolean;
+  onOpenReview: () => void;
   state: ChatState;
 }) {
   const timelineRef = useRef<HTMLDivElement | null>(null);
@@ -204,17 +218,21 @@ function ChatTimeline({
 
   if (!activeSessionId && !isDraftSession && state.items.length === 0) {
     return (
-      <div className="conversation-empty">
-        Start a task in {activeProject.name}
-      </div>
+      <ConversationEmpty
+        gitDiff={gitDiff}
+        label={`Start a task in ${activeProject.name}`}
+        onOpenReview={onOpenReview}
+      />
     );
   }
 
   if (state.items.length === 0) {
     return (
-      <div className="conversation-empty">
-        {isDraftSession ? 'New thread ready' : 'Session ready'}
-      </div>
+      <ConversationEmpty
+        gitDiff={gitDiff}
+        label={isDraftSession ? 'New thread ready' : 'Session ready'}
+        onOpenReview={onOpenReview}
+      />
     );
   }
 
@@ -223,7 +241,25 @@ function ChatTimeline({
       {state.items.map((item) => (
         <TimelineItem item={item} key={item.id} />
       ))}
+      <ChangedFilesSummaryCard gitDiff={gitDiff} onOpenReview={onOpenReview} />
       <div className="chat-scroll-anchor" aria-hidden="true" />
+    </div>
+  );
+}
+
+function ConversationEmpty({
+  gitDiff,
+  label,
+  onOpenReview,
+}: {
+  gitDiff: DesktopGitDiff | null;
+  label: string;
+  onOpenReview: () => void;
+}) {
+  return (
+    <div className="conversation-empty conversation-empty-stack">
+      <span>{label}</span>
+      <ChangedFilesSummaryCard gitDiff={gitDiff} onOpenReview={onOpenReview} />
     </div>
   );
 }
@@ -265,6 +301,118 @@ function TimelineItem({ item }: { item: ChatTimelineItem }) {
   }
 
   return <div className="chat-event">{item.label}</div>;
+}
+
+function ChangedFilesSummaryCard({
+  gitDiff,
+  onOpenReview,
+}: {
+  gitDiff: DesktopGitDiff | null;
+  onOpenReview: () => void;
+}) {
+  const files = gitDiff?.files ?? [];
+  if (files.length === 0) {
+    return null;
+  }
+
+  const stats = summarizeChangedFiles(files);
+  const visibleFiles = files.slice(0, 4);
+  const hiddenFileCount = Math.max(0, files.length - visibleFiles.length);
+
+  return (
+    <section
+      aria-label="Changed files summary"
+      className="conversation-changes-card"
+      data-testid="conversation-changes-summary"
+    >
+      <div className="conversation-changes-heading">
+        <div>
+          <span className="message-role">Changed files</span>
+          <strong>
+            {files.length} {files.length === 1 ? 'file' : 'files'} changed
+          </strong>
+        </div>
+        <span className="conversation-diff-stat" aria-label="Diff stats">
+          <span className="diff-addition">+{stats.additions}</span>
+          <span className="diff-deletion">-{stats.deletions}</span>
+        </span>
+      </div>
+      <ul className="conversation-changes-list">
+        {visibleFiles.map((file) => (
+          <li key={file.path}>
+            <span title={file.path}>{file.path}</span>
+            <small>{formatChangedFileState(file)}</small>
+          </li>
+        ))}
+        {hiddenFileCount > 0 ? (
+          <li>
+            <span>{hiddenFileCount} more</span>
+            <small>Open review</small>
+          </li>
+        ) : null}
+      </ul>
+      <div className="conversation-changes-actions">
+        <button
+          aria-label="Review Changes"
+          className="secondary-button"
+          type="button"
+          onClick={onOpenReview}
+        >
+          Review Changes
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function summarizeChangedFiles(files: DesktopGitChangedFile[]): {
+  additions: number;
+  deletions: number;
+} {
+  return files.reduce(
+    (totals, file) => {
+      const lines =
+        file.hunks.length > 0
+          ? file.hunks.flatMap((hunk) => hunk.lines)
+          : file.diff.split('\n');
+
+      for (const line of lines) {
+        if (line.startsWith('+++') || line.startsWith('---')) {
+          continue;
+        }
+
+        if (line.startsWith('+')) {
+          totals.additions += 1;
+        } else if (line.startsWith('-')) {
+          totals.deletions += 1;
+        }
+      }
+
+      return totals;
+    },
+    { additions: 0, deletions: 0 },
+  );
+}
+
+function formatChangedFileState(file: DesktopGitChangedFile): string {
+  const states: string[] = [];
+  if (file.staged) {
+    states.push('staged');
+  }
+  if (file.unstaged) {
+    states.push('unstaged');
+  }
+  if (file.untracked) {
+    states.push('untracked');
+  }
+
+  if (states.length === 1 && states[0] === file.status) {
+    return file.status;
+  }
+
+  return states.length > 0
+    ? `${file.status} · ${states.join(' + ')}`
+    : file.status;
 }
 
 function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {

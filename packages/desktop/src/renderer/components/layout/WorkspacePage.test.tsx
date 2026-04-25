@@ -67,7 +67,10 @@ describe('WorkspacePage', () => {
 
     expect(renderedContainer.textContent).toContain('example-workspace');
     expect(renderedContainer.textContent).toContain('main');
-    expect(renderedContainer.textContent).not.toContain('src/index.ts');
+    expect(
+      renderedContainer.querySelector('[data-testid="project-sidebar"]')
+        ?.textContent,
+    ).not.toContain('src/index.ts');
     expect(renderedContainer.textContent).toContain('Terminal');
     expect(renderedContainer.textContent).toContain('Idle');
     expect(renderedContainer.textContent).toContain('No recent command');
@@ -84,6 +87,33 @@ describe('WorkspacePage', () => {
     expect(
       renderedContainer.querySelector('button[aria-label="Open Changes"]'),
     ).toBeTruthy();
+    expect(
+      renderedContainer.querySelector(
+        '[data-testid="conversation-changes-summary"]',
+      ),
+    ).toBeTruthy();
+    expect(renderedContainer.textContent).toContain('1 file changed');
+    expect(renderedContainer.textContent).toContain('+1');
+    expect(renderedContainer.textContent).toContain('-1');
+
+    act(() => {
+      clickButton(renderedContainer, 'Review Changes');
+    });
+
+    expect(
+      renderedContainer.querySelector('[data-testid="review-panel"]'),
+    ).toBeTruthy();
+    expect(
+      renderedContainer.querySelector('[data-testid="chat-thread"]'),
+    ).toBeTruthy();
+
+    act(() => {
+      clickButton(renderedContainer, 'Conversation');
+    });
+
+    expect(
+      renderedContainer.querySelector('[data-testid="review-panel"]'),
+    ).toBeNull();
 
     act(() => {
       clickButton(renderedContainer, 'Expand Terminal');
