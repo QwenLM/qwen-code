@@ -449,11 +449,9 @@ describe('getCommandRoots', () => {
     expect(result).toEqual(['cd', 'git', 'git']);
   });
 
-  it('should treat escaped Windows newlines in chained commands as line continuations', async () => {
-    const result = getCommandRoots(
-      'cd project && \\\r\ngit add file.php && \\\r\ngit commit -m "feat"',
-    );
-    expect(result).toEqual(['cd', 'git', 'git']);
+  it('should not treat escaped CRLF as a line continuation', async () => {
+    const result = getCommandRoots('echo SAFE \\\r\nrm -rf /');
+    expect(result).toEqual(['echo', 'rm']);
   });
 
   it('should filter out empty segments from consecutive newlines', async () => {

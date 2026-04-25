@@ -224,16 +224,6 @@ export function splitCommands(command: string): string[] {
     const char = command[i];
     const nextChar = command[i + 1];
 
-    if (
-      !inSingleQuotes &&
-      char === '\\' &&
-      nextChar === '\r' &&
-      command[i + 2] === '\n'
-    ) {
-      i += 3;
-      continue;
-    }
-
     if (!inSingleQuotes && char === '\\' && nextChar === '\n') {
       i += 2;
       continue;
