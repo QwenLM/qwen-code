@@ -20,6 +20,10 @@ import {
 import { AcpEventRouter } from './acp/AcpEventRouter.js';
 import { PermissionBridge } from './acp/permissionBridge.js';
 import { isDesktopHttpError, DesktopHttpError } from './http/errors.js';
+import {
+  DesktopGitReviewService,
+  type DesktopGitTarget,
+} from './services/gitReviewService.js';
 import { DesktopProjectService } from './services/projectService.js';
 import { getRuntimeInfo } from './services/runtimeService.js';
 import {
@@ -35,6 +39,7 @@ interface HandlerContext {
   token: string;
   startedAt: number;
   now: () => Date;
+  gitReviewService: DesktopGitReviewService;
   projectService: DesktopProjectService;
   sessionService: DesktopSessionService;
   settingsService: DesktopSettingsService;
@@ -51,6 +56,7 @@ export async function startDesktopServer(
     storePath: options.projectStorePath,
     now,
   });
+  const gitReviewService = new DesktopGitReviewService(now);
   const sessionService = new DesktopSessionService(options.acpClient);
   const settingsService = new DesktopSettingsService(options.settingsPath);
   const socketHubRef: { current: SessionSocketHub | null } = { current: null };
@@ -83,6 +89,7 @@ export async function startDesktopServer(
       token,
       startedAt,
       now,
+      gitReviewService,
       projectService,
       sessionService,
       settingsService,
@@ -222,6 +229,66 @@ async function handleRequest(
       origin,
       context,
       projectGitStatusMatch,
+    );
+    return;
+  }
+
+  const projectGitDiffMatch = matchSessionRoute(
+    requestUrl.pathname,
+    /^\/api\/projects\/([^/]+)\/git\/diff$/u,
+  );
+  if (projectGitDiffMatch) {
+    await handleProjectGitDiffRoute(
+      request,
+      response,
+      origin,
+      context,
+      projectGitDiffMatch,
+    );
+    return;
+  }
+
+  const projectGitStageMatch = matchSessionRoute(
+    requestUrl.pathname,
+    /^\/api\/projects\/([^/]+)\/git\/stage$/u,
+  );
+  if (projectGitStageMatch) {
+    await handleProjectGitStageRoute(
+      request,
+      response,
+      origin,
+      context,
+      projectGitStageMatch,
+    );
+    return;
+  }
+
+  const projectGitRevertMatch = matchSessionRoute(
+    requestUrl.pathname,
+    /^\/api\/projects\/([^/]+)\/git\/revert$/u,
+  );
+  if (projectGitRevertMatch) {
+    await handleProjectGitRevertRoute(
+      request,
+      response,
+      origin,
+      context,
+      projectGitRevertMatch,
+    );
+    return;
+  }
+
+  const projectGitCommitMatch = matchSessionRoute(
+    requestUrl.pathname,
+    /^\/api\/projects\/([^/]+)\/git\/commit$/u,
+  );
+  if (projectGitCommitMatch) {
+    await handleProjectGitCommitRoute(
+      request,
+      response,
+      origin,
+      context,
+      projectGitCommitMatch,
     );
     return;
   }
@@ -388,6 +455,97 @@ async function handleProjectGitStatusRoute(
     sendJson(response, origin, 200, {
       ok: true,
       status: await context.projectService.getProjectGitStatus(projectId),
+    });
+    return;
+  }
+
+  sendMethodNotAllowed(response, origin);
+}
+
+async function handleProjectGitDiffRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  origin: string | undefined,
+  context: HandlerContext,
+  projectId: string,
+): Promise<void> {
+  if (request.method === 'GET') {
+    const projectPath = await context.projectService.getProjectPath(projectId);
+    sendJson(
+      response,
+      origin,
+      200,
+      await context.gitReviewService.getDiff(projectPath),
+    );
+    return;
+  }
+
+  sendMethodNotAllowed(response, origin);
+}
+
+async function handleProjectGitStageRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  origin: string | undefined,
+  context: HandlerContext,
+  projectId: string,
+): Promise<void> {
+  if (request.method === 'POST') {
+    const body = await readObjectBody(request);
+    const target = parseGitTarget(body);
+    const projectPath = await context.projectService.getProjectPath(projectId);
+    await context.gitReviewService.stage(projectPath, target);
+    sendJson(response, origin, 200, {
+      ok: true,
+      status: await context.projectService.getProjectGitStatus(projectId),
+      diff: await context.gitReviewService.getDiff(projectPath),
+    });
+    return;
+  }
+
+  sendMethodNotAllowed(response, origin);
+}
+
+async function handleProjectGitRevertRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  origin: string | undefined,
+  context: HandlerContext,
+  projectId: string,
+): Promise<void> {
+  if (request.method === 'POST') {
+    const body = await readObjectBody(request);
+    const target = parseGitTarget(body);
+    const projectPath = await context.projectService.getProjectPath(projectId);
+    await context.gitReviewService.revert(projectPath, target);
+    sendJson(response, origin, 200, {
+      ok: true,
+      status: await context.projectService.getProjectGitStatus(projectId),
+      diff: await context.gitReviewService.getDiff(projectPath),
+    });
+    return;
+  }
+
+  sendMethodNotAllowed(response, origin);
+}
+
+async function handleProjectGitCommitRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  origin: string | undefined,
+  context: HandlerContext,
+  projectId: string,
+): Promise<void> {
+  if (request.method === 'POST') {
+    const body = await readObjectBody(request);
+    const message = getRequiredString(body, 'message');
+    const projectPath = await context.projectService.getProjectPath(projectId);
+    const commit = await context.gitReviewService.commit(projectPath, message);
+    sendJson(response, origin, 200, {
+      ok: true,
+      commit,
+      status: await context.projectService.getProjectGitStatus(projectId),
+      diff: await context.gitReviewService.getDiff(projectPath),
     });
     return;
   }
@@ -764,6 +922,22 @@ function parseUserSettingsUpdate(
     codingPlanRegion,
     modelProviders,
   };
+}
+
+function parseGitTarget(body: Record<string, unknown>): DesktopGitTarget {
+  const scope = body['scope'] ?? 'all';
+  if (scope === 'all') {
+    return { scope };
+  }
+
+  if (scope === 'file') {
+    return {
+      scope,
+      filePath: getRequiredString(body, 'filePath'),
+    };
+  }
+
+  throw new DesktopHttpError(400, 'bad_request', 'scope must be all or file.');
 }
 
 function getOptionalString(

@@ -16,7 +16,9 @@ import {
 } from 'react';
 import {
   authenticateDesktop,
+  commitDesktopProjectChanges,
   createDesktopSession,
+  getDesktopProjectGitDiff,
   getDesktopProjectGitStatus,
   getDesktopSessionModeState,
   getDesktopSessionModelState,
@@ -25,10 +27,13 @@ import {
   listDesktopSessions,
   loadDesktopStatus,
   openDesktopProject,
+  revertDesktopProjectChanges,
   setDesktopSessionMode,
   setDesktopSessionModel,
+  stageDesktopProjectChanges,
   updateDesktopUserSettings,
   type DesktopConnectionStatus,
+  type DesktopGitDiff,
   type DesktopProject,
   type DesktopSessionSummary,
 } from './api/client.js';
@@ -73,6 +78,9 @@ export function App() {
   const [sessions, setSessions] = useState<DesktopSessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
+  const [gitDiff, setGitDiff] = useState<DesktopGitDiff | null>(null);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [commitMessage, setCommitMessage] = useState('');
   const [messageText, setMessageText] = useState('');
   const [chatState, dispatchChat] = useReducer(
     chatReducer,
@@ -341,6 +349,106 @@ export function App() {
     }
   }, [activeProject, loadState]);
 
+  const loadProjectReview = useCallback(async () => {
+    if (loadState.state !== 'ready' || !activeProject) {
+      setGitDiff(null);
+      return;
+    }
+
+    try {
+      const diff = await getDesktopProjectGitDiff(
+        loadState.status.serverInfo,
+        activeProject.id,
+      );
+      setGitDiff(diff);
+      setReviewError(null);
+    } catch (error) {
+      setGitDiff(null);
+      setReviewError(getErrorMessage(error));
+    }
+  }, [activeProject, loadState]);
+
+  useEffect(() => {
+    void loadProjectReview();
+  }, [loadProjectReview]);
+
+  const applyReviewMutation = useCallback(
+    (status: DesktopProject['gitStatus'], diff: DesktopGitDiff) => {
+      if (!activeProject) {
+        return;
+      }
+
+      setProjects((current) =>
+        current.map((project) =>
+          project.id === activeProject.id
+            ? {
+                ...project,
+                gitBranch: status.branch,
+                gitStatus: status,
+              }
+            : project,
+        ),
+      );
+      setGitDiff(diff);
+      setReviewError(null);
+    },
+    [activeProject],
+  );
+
+  const stageAllChanges = useCallback(async () => {
+    if (loadState.state !== 'ready' || !activeProject) {
+      return;
+    }
+
+    try {
+      const result = await stageDesktopProjectChanges(
+        loadState.status.serverInfo,
+        activeProject.id,
+      );
+      applyReviewMutation(result.status, result.diff);
+    } catch (error) {
+      setReviewError(getErrorMessage(error));
+    }
+  }, [activeProject, applyReviewMutation, loadState]);
+
+  const revertAllChanges = useCallback(async () => {
+    if (loadState.state !== 'ready' || !activeProject) {
+      return;
+    }
+
+    try {
+      const result = await revertDesktopProjectChanges(
+        loadState.status.serverInfo,
+        activeProject.id,
+      );
+      applyReviewMutation(result.status, result.diff);
+    } catch (error) {
+      setReviewError(getErrorMessage(error));
+    }
+  }, [activeProject, applyReviewMutation, loadState]);
+
+  const commitChanges = useCallback(async () => {
+    if (
+      loadState.state !== 'ready' ||
+      !activeProject ||
+      commitMessage.trim().length === 0
+    ) {
+      return;
+    }
+
+    try {
+      const result = await commitDesktopProjectChanges(
+        loadState.status.serverInfo,
+        activeProject.id,
+        commitMessage,
+      );
+      applyReviewMutation(result.status, result.diff);
+      setCommitMessage('');
+    } catch (error) {
+      setReviewError(getErrorMessage(error));
+    }
+  }, [activeProject, applyReviewMutation, commitMessage, loadState]);
+
   const saveSettings = useCallback(async () => {
     if (loadState.state !== 'ready') {
       return;
@@ -583,7 +691,16 @@ export function App() {
             <div className="panel-header">
               <h3>Review</h3>
             </div>
-            <ReviewSummary project={activeProject} />
+            <ReviewSummary
+              commitMessage={commitMessage}
+              gitDiff={gitDiff}
+              project={activeProject}
+              reviewError={reviewError}
+              onCommit={commitChanges}
+              onCommitMessageChange={setCommitMessage}
+              onRevertAll={revertAllChanges}
+              onStageAll={stageAllChanges}
+            />
             <RuntimeDetails loadState={loadState} />
             <SessionDetails
               activeSessionId={activeSessionId}
@@ -827,7 +944,25 @@ function PermissionPrompts({
   );
 }
 
-function ReviewSummary({ project }: { project: DesktopProject | null }) {
+function ReviewSummary({
+  commitMessage,
+  gitDiff,
+  onCommit,
+  onCommitMessageChange,
+  onRevertAll,
+  onStageAll,
+  project,
+  reviewError,
+}: {
+  commitMessage: string;
+  gitDiff: DesktopGitDiff | null;
+  onCommit: () => void;
+  onCommitMessageChange: (message: string) => void;
+  onRevertAll: () => void;
+  onStageAll: () => void;
+  project: DesktopProject | null;
+  reviewError: string | null;
+}) {
   if (!project) {
     return (
       <div className="review-summary">
@@ -837,6 +972,7 @@ function ReviewSummary({ project }: { project: DesktopProject | null }) {
   }
 
   const status = project.gitStatus;
+  const changedFiles = gitDiff?.files ?? [];
   return (
     <div className="review-summary">
       <div className="review-tabs" aria-label="Review sections">
@@ -862,6 +998,10 @@ function ReviewSummary({ project }: { project: DesktopProject | null }) {
           <dt>Untracked</dt>
           <dd>{status.untracked}</dd>
         </div>
+        <div>
+          <dt>Files</dt>
+          <dd>{changedFiles.length}</dd>
+        </div>
         {status.error ? (
           <div>
             <dt>Git</dt>
@@ -869,6 +1009,56 @@ function ReviewSummary({ project }: { project: DesktopProject | null }) {
           </div>
         ) : null}
       </dl>
+      <div className="review-actions">
+        <button
+          className="secondary-button"
+          disabled={changedFiles.length === 0}
+          type="button"
+          onClick={onRevertAll}
+        >
+          Revert All
+        </button>
+        <button
+          className="secondary-button"
+          disabled={changedFiles.length === 0}
+          type="button"
+          onClick={onStageAll}
+        >
+          Stage All
+        </button>
+      </div>
+      <div className="changed-files">
+        {changedFiles.length === 0 ? (
+          <div className="empty-row">No changes</div>
+        ) : (
+          changedFiles.map((file) => (
+            <details key={file.path} open={changedFiles.length === 1}>
+              <summary>
+                <span>{file.path}</span>
+                <small>{file.status}</small>
+              </summary>
+              <pre>{file.diff || 'No textual diff available.'}</pre>
+            </details>
+          ))
+        )}
+      </div>
+      <div className="commit-box">
+        <input
+          aria-label="Commit message"
+          placeholder="Commit message"
+          value={commitMessage}
+          onChange={(event) => onCommitMessageChange(event.target.value)}
+        />
+        <button
+          className="primary-button"
+          disabled={commitMessage.trim().length === 0}
+          type="button"
+          onClick={onCommit}
+        >
+          Commit
+        </button>
+      </div>
+      {reviewError ? <p className="error-text">{reviewError}</p> : null}
     </div>
   );
 }

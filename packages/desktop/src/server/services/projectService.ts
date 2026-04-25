@@ -93,6 +93,16 @@ export class DesktopProjectService {
   }
 
   async getProjectGitStatus(projectId: string): Promise<DesktopGitStatus> {
+    const project = await this.getStoredProject(projectId);
+    return readGitStatus(project.path);
+  }
+
+  async getProjectPath(projectId: string): Promise<string> {
+    const project = await this.getStoredProject(projectId);
+    return project.path;
+  }
+
+  private async getStoredProject(projectId: string): Promise<StoredProject> {
     const store = await this.readStore();
     const project = store.projects.find((entry) => entry.id === projectId);
     if (!project) {
@@ -103,7 +113,7 @@ export class DesktopProjectService {
       );
     }
 
-    return readGitStatus(project.path);
+    return project;
   }
 
   private async describeStoredProject(

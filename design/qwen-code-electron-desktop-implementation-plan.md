@@ -172,17 +172,36 @@ scope before a DONE marker can be created.
 
 ### Slice 12: Diff Review and Commit
 
-- Status: pending
+- Status: partial complete in iteration 7
 - Goal: add Git diff/status review APIs and UI actions for accept/revert and
   commit.
+- Files:
+  - `packages/desktop/src/server/services/gitReviewService.ts`
+  - `packages/desktop/src/server/index.ts`
+  - `packages/desktop/src/server/index.test.ts`
+  - `packages/desktop/src/server/services/projectService.ts`
+  - `packages/desktop/src/renderer/api/client.ts`
+  - `packages/desktop/src/renderer/App.tsx`
+  - `packages/desktop/src/renderer/styles.css`
 - Acceptance criteria:
   - Right Changes tab shows changed files and unified diff.
   - Stage/unstage/revert/commit routes are token protected and scoped to a
     registered project.
   - Commit errors are visible in the UI.
+- Completed:
+  - Token-protected diff, stage, revert, and commit routes scoped to registered
+    projects.
+  - Basic right Review panel changed-file list, textual diff preview, Stage
+    All, Revert All, commit message input, and Commit action.
+  - Server tests for diff, stage, commit, revert, invalid project path, and Git
+    status metadata.
+- Remaining:
+  - Hunk-level accept/revert, inline comments, Open in Editor, richer file tree,
+    and renderer E2E coverage.
 - E2E coverage:
-  - Temporary Git workspace with a fake file change, accept/stage, commit, and
-    error diagnostics.
+  - Record in `.qwen/e2e-tests/electron-desktop/diff-review-commit.md`.
+  - Later Electron E2E must use a temporary Git workspace with a fake file
+    change, accept/stage, commit, and error diagnostics.
 
 ### Slice 13: Scoped Terminal
 
@@ -231,6 +250,10 @@ scope before a DONE marker can be created.
 - 2026-04-25: Keep the CDP switch opt-in through `QWEN_DESKTOP_CDP_PORT` and
   always pair it with `remote-debugging-address=127.0.0.1`; production remains
   closed unless the environment variable is set.
+- 2026-04-25: Implement desktop Git review with `git` via `execFile` and
+  explicit relative path validation. This avoids broad shell execution and
+  keeps review operations scoped to projects registered through the desktop
+  project service.
 
 ## Verification Log
 
@@ -253,6 +276,11 @@ scope before a DONE marker can be created.
   - `curl --fail --silent http://127.0.0.1:9339/json/list` passed and returned
     a `Qwen Code` page at
     `file:///Users/dragon/Documents/qwen-code/packages/desktop/dist/renderer/index.html`.
+- 2026-04-25 Slice 12 basic diff review:
+  - `npm run test --workspace=packages/desktop` passed: 8 files, 50 tests.
+  - `npm run typecheck --workspace=packages/desktop` passed.
+  - `npm run lint --workspace=packages/desktop` passed.
+  - `npm run build --workspace=packages/desktop` passed.
 
 ## Self Review Notes
 
@@ -269,6 +297,14 @@ scope before a DONE marker can be created.
 - The CDP smoke verified endpoint discovery but did not yet drive DOM,
   console, network, or screenshot assertions through MCP; that remains in the
   E2E harness slice.
+- Slice 12 review operations resolve the project path from the registered
+  project id server-side; renderer cannot submit arbitrary cwd values.
+- File-scoped Git operations reject absolute paths and parent-directory
+  traversal. The current UI exposes all-scope operations only; file/hunk UI is
+  still pending.
+- Revert All uses `git restore` and `git clean -fd`, so it is intentionally
+  available only as an explicit user review action and remains scoped to the
+  active registered project.
 
 ## Remaining Work
 

@@ -569,6 +569,75 @@ input:focus {
   border-left: 1px solid rgba(238, 240, 237, 0.1);
 }
 
+.review-actions,
+.commit-box {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.review-actions {
+  justify-content: flex-end;
+}
+
+.commit-box input {
+  min-width: 0;
+  flex: 1;
+}
+
+.changed-files {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.changed-files details {
+  border: 1px solid rgba(238, 240, 237, 0.1);
+  background: rgba(238, 240, 237, 0.03);
+}
+
+.changed-files summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 34px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.changed-files summary span {
+  min-width: 0;
+  overflow: hidden;
+  color: #eef0ed;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.changed-files summary small {
+  color: #9ca39b;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.changed-files pre {
+  max-height: 260px;
+  margin: 0;
+  overflow: auto;
+  padding: 10px;
+  border-top: 1px solid rgba(238, 240, 237, 0.08);
+  color: #d8dcd6;
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+    monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
 .muted {
   color: #858c84;
 }

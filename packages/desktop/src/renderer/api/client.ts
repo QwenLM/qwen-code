@@ -50,6 +50,44 @@ export interface DesktopProjectList {
   projects: DesktopProject[];
 }
 
+export type DesktopGitChangeStatus =
+  | 'added'
+  | 'copied'
+  | 'deleted'
+  | 'modified'
+  | 'renamed'
+  | 'untracked'
+  | 'unknown';
+
+export interface DesktopGitChangedFile {
+  path: string;
+  status: DesktopGitChangeStatus;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+  diff: string;
+}
+
+export interface DesktopGitDiff {
+  ok: true;
+  files: DesktopGitChangedFile[];
+  diff: string;
+  generatedAt: string;
+}
+
+export interface DesktopGitReviewMutation {
+  ok: true;
+  status: DesktopGitStatus;
+  diff: DesktopGitDiff;
+}
+
+export interface DesktopGitCommitMutation extends DesktopGitReviewMutation {
+  commit: {
+    commit: string;
+    summary: string;
+  };
+}
+
 export interface DesktopRuntime {
   ok: true;
   desktop: {
@@ -180,6 +218,57 @@ export async function getDesktopProjectGitStatus(
     isGitStatusResponse,
   );
   return response.status;
+}
+
+export async function getDesktopProjectGitDiff(
+  serverInfo: DesktopServerInfo,
+  projectId: string,
+): Promise<DesktopGitDiff> {
+  return getJson(
+    serverInfo,
+    `/api/projects/${encodeURIComponent(projectId)}/git/diff`,
+    isGitDiff,
+  );
+}
+
+export async function stageDesktopProjectChanges(
+  serverInfo: DesktopServerInfo,
+  projectId: string,
+): Promise<DesktopGitReviewMutation> {
+  return writeJson(
+    serverInfo,
+    `/api/projects/${encodeURIComponent(projectId)}/git/stage`,
+    'POST',
+    { scope: 'all' },
+    isGitReviewMutation,
+  );
+}
+
+export async function revertDesktopProjectChanges(
+  serverInfo: DesktopServerInfo,
+  projectId: string,
+): Promise<DesktopGitReviewMutation> {
+  return writeJson(
+    serverInfo,
+    `/api/projects/${encodeURIComponent(projectId)}/git/revert`,
+    'POST',
+    { scope: 'all' },
+    isGitReviewMutation,
+  );
+}
+
+export async function commitDesktopProjectChanges(
+  serverInfo: DesktopServerInfo,
+  projectId: string,
+  message: string,
+): Promise<DesktopGitCommitMutation> {
+  return writeJson(
+    serverInfo,
+    `/api/projects/${encodeURIComponent(projectId)}/git/commit`,
+    'POST',
+    { message },
+    isGitCommitMutation,
+  );
 }
 
 export async function createDesktopSession(
@@ -476,6 +565,52 @@ function isGitStatusResponse(
   return candidate.ok === true && isGitStatus(candidate.status);
 }
 
+function isGitDiff(value: unknown): value is DesktopGitDiff {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Partial<DesktopGitDiff>;
+  return (
+    candidate.ok === true &&
+    Array.isArray(candidate.files) &&
+    candidate.files.every(isGitChangedFile) &&
+    typeof candidate.diff === 'string' &&
+    typeof candidate.generatedAt === 'string'
+  );
+}
+
+function isGitReviewMutation(
+  value: unknown,
+): value is DesktopGitReviewMutation {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Partial<DesktopGitReviewMutation>;
+  return (
+    candidate.ok === true &&
+    isGitStatus(candidate.status) &&
+    isGitDiff(candidate.diff)
+  );
+}
+
+function isGitCommitMutation(
+  value: unknown,
+): value is DesktopGitCommitMutation {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Partial<DesktopGitCommitMutation>;
+  return (
+    isGitReviewMutation(value) &&
+    !!candidate.commit &&
+    typeof candidate.commit.commit === 'string' &&
+    typeof candidate.commit.summary === 'string'
+  );
+}
+
 function isCreateSessionResponse(
   value: unknown,
 ): value is { ok: true; session: DesktopSessionSummary } {
@@ -590,6 +725,34 @@ function isGitStatus(value: unknown): value is DesktopGitStatus {
     typeof candidate.clean === 'boolean' &&
     typeof candidate.isRepository === 'boolean' &&
     (typeof candidate.error === 'string' || candidate.error === undefined)
+  );
+}
+
+function isGitChangedFile(value: unknown): value is DesktopGitChangedFile {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Partial<DesktopGitChangedFile>;
+  return (
+    typeof candidate.path === 'string' &&
+    isGitChangeStatus(candidate.status) &&
+    typeof candidate.staged === 'boolean' &&
+    typeof candidate.unstaged === 'boolean' &&
+    typeof candidate.untracked === 'boolean' &&
+    typeof candidate.diff === 'string'
+  );
+}
+
+function isGitChangeStatus(value: unknown): value is DesktopGitChangeStatus {
+  return (
+    value === 'added' ||
+    value === 'copied' ||
+    value === 'deleted' ||
+    value === 'modified' ||
+    value === 'renamed' ||
+    value === 'untracked' ||
+    value === 'unknown'
   );
 }
 

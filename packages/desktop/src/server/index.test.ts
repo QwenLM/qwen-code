@@ -195,6 +195,113 @@ describe('DesktopServer', () => {
     });
   });
 
+  it('returns project diffs and can stage and commit changes', async () => {
+    const projectPath = await createCommittedGitProject();
+    const storePath = join(
+      await createTempDirectory('qwen-desktop-store-'),
+      'desktop-projects.json',
+    );
+    await writeFile(join(projectPath, 'tracked.txt'), 'changed\n', 'utf8');
+    await writeFile(join(projectPath, 'new.txt'), 'new file\n', 'utf8');
+
+    const server = await createTestServer(undefined, undefined, storePath);
+    const opened = await postJson(server, '/api/projects/open', {
+      path: projectPath,
+    });
+    const projectId = getProjectId(opened.body);
+    const diff = await getJson(
+      server,
+      `/api/projects/${encodeURIComponent(projectId)}/git/diff`,
+      {
+        Authorization: 'Bearer test-token',
+      },
+    );
+    const staged = await postJson(
+      server,
+      `/api/projects/${encodeURIComponent(projectId)}/git/stage`,
+      { scope: 'all' },
+    );
+    const committed = await postJson(
+      server,
+      `/api/projects/${encodeURIComponent(projectId)}/git/commit`,
+      { message: 'test commit' },
+    );
+
+    expect(diff.status).toBe(200);
+    expect(diff.body).toMatchObject({
+      ok: true,
+      files: expect.arrayContaining([
+        expect.objectContaining({ path: 'tracked.txt', status: 'modified' }),
+        expect.objectContaining({ path: 'new.txt', status: 'untracked' }),
+      ]),
+    });
+    expect(JSON.stringify(diff.body)).toContain('+changed');
+    expect(staged.body).toMatchObject({
+      ok: true,
+      status: {
+        staged: 2,
+        modified: 0,
+        untracked: 0,
+      },
+    });
+    expect(committed.body).toMatchObject({
+      ok: true,
+      commit: {
+        commit: expect.any(String),
+      },
+      status: {
+        clean: true,
+        staged: 0,
+        modified: 0,
+        untracked: 0,
+      },
+      diff: {
+        files: [],
+      },
+    });
+    await expect(
+      runGitOutput(projectPath, ['log', '-1', '--pretty=%s']),
+    ).resolves.toBe('test commit');
+  });
+
+  it('can revert all project changes', async () => {
+    const projectPath = await createCommittedGitProject();
+    const storePath = join(
+      await createTempDirectory('qwen-desktop-store-'),
+      'desktop-projects.json',
+    );
+    await writeFile(join(projectPath, 'tracked.txt'), 'changed\n', 'utf8');
+    await writeFile(join(projectPath, 'new.txt'), 'new file\n', 'utf8');
+
+    const server = await createTestServer(undefined, undefined, storePath);
+    const opened = await postJson(server, '/api/projects/open', {
+      path: projectPath,
+    });
+    const projectId = getProjectId(opened.body);
+    const reverted = await postJson(
+      server,
+      `/api/projects/${encodeURIComponent(projectId)}/git/revert`,
+      { scope: 'all' },
+    );
+
+    expect(reverted.status).toBe(200);
+    expect(reverted.body).toMatchObject({
+      ok: true,
+      status: {
+        clean: true,
+        staged: 0,
+        modified: 0,
+        untracked: 0,
+      },
+      diff: {
+        files: [],
+      },
+    });
+    await expect(
+      readFile(join(projectPath, 'tracked.txt'), 'utf8'),
+    ).resolves.toBe('initial\n');
+  });
+
   it('reads and writes user settings without returning API key secrets', async () => {
     const settingsPath = await createTempSettingsPath();
     const server = await createTestServer(undefined, settingsPath);
@@ -773,6 +880,17 @@ async function createTempSettingsPath(): Promise<string> {
   return join(dir, '.qwen', 'settings.json');
 }
 
+async function createCommittedGitProject(): Promise<string> {
+  const projectPath = await createTempDirectory('qwen-desktop-git-');
+  await runGit(projectPath, ['init']);
+  await runGit(projectPath, ['config', 'user.email', 'desktop@example.com']);
+  await runGit(projectPath, ['config', 'user.name', 'Desktop Test']);
+  await writeFile(join(projectPath, 'tracked.txt'), 'initial\n', 'utf8');
+  await runGit(projectPath, ['add', '.']);
+  await runGit(projectPath, ['commit', '-m', 'initial']);
+  return projectPath;
+}
+
 async function getJson(
   server: DesktopServer,
   path: string,
@@ -980,14 +1098,18 @@ function getAvailableModes(message: unknown): unknown[] {
 }
 
 function runGit(cwd: string, args: string[]): Promise<void> {
+  return runGitOutput(cwd, args).then(() => undefined);
+}
+
+function runGitOutput(cwd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile('git', args, { cwd }, (error, _stdout, stderr) => {
+    execFile('git', args, { cwd }, (error, stdout, stderr) => {
       if (error) {
         reject(new Error(stderr.trim() || error.message));
         return;
       }
 
-      resolve();
+      resolve(stdout.trim());
     });
   });
 }
