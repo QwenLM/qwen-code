@@ -79,6 +79,13 @@ async function main() {
   await waitForText('E2E fake ACP response received');
   await assertResolvedToolActivity('resolved-tool-activity.json');
   await saveScreenshot('resolved-tool-activity.png');
+  await assertAssistantMessageActions('assistant-message-actions.json');
+  await saveScreenshot('assistant-message-actions.png');
+  await clickButton('Copy Response');
+  await waitForText('Copied response.');
+  await clickButton('Retry Last Prompt');
+  await assertRetryDrafted('assistant-retry-draft.json');
+  await setFieldByAriaLabel('Message', '');
   await assertConversationChangesSummary('conversation-changes-summary.json');
   await waitForSelector('[data-testid="thread-list"]');
 
@@ -874,6 +881,165 @@ async function assertResolvedToolActivity(fileName) {
 
   if (snapshot.cardRect.bottom > snapshot.composerRect.top) {
     throw new Error('Resolved tool activity overlaps the composer.');
+  }
+}
+
+async function assertAssistantMessageActions(fileName) {
+  await waitForSelector('[data-testid="assistant-message-actions"]');
+  const snapshot = await evaluate(`(() => {
+    const message = [...document.querySelectorAll('[data-testid="assistant-message"]')]
+      .find((candidate) =>
+        candidate.innerText.includes('E2E fake ACP response received')
+      );
+    const actions = message?.querySelector(
+      '[data-testid="assistant-message-actions"]'
+    );
+    const fileReferences = message?.querySelector(
+      '[data-testid="assistant-file-references"]'
+    );
+    const timeline = document.querySelector('.chat-timeline');
+    const composer = document.querySelector('[data-testid="message-composer"]');
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    return {
+      bodyText: document.body.innerText,
+      messageText: message?.innerText ?? '',
+      actionLabels: actions
+        ? [...actions.querySelectorAll('button')].map(
+            (button) => button.getAttribute('aria-label') || ''
+          )
+        : [],
+      fileReferenceText: fileReferences?.innerText ?? '',
+      fileReferenceLabels: fileReferences
+        ? [...fileReferences.querySelectorAll('button')].map(
+            (button) => button.getAttribute('aria-label') || ''
+          )
+        : [],
+      messageRect: rectFor(message),
+      actionsRect: rectFor(actions),
+      timelineRect: rectFor(timeline),
+      composerRect: rectFor(composer)
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  for (const expectedLabel of [
+    'Copy Response',
+    'Retry Last Prompt',
+    'Open Changes',
+  ]) {
+    if (!snapshot.actionLabels.includes(expectedLabel)) {
+      throw new Error(
+        `Assistant action row missing ${expectedLabel}: ${snapshot.actionLabels.join(
+          ', ',
+        )}`,
+      );
+    }
+  }
+
+  if (!snapshot.fileReferenceText.includes('README.md:1')) {
+    throw new Error(
+      `Assistant file chips missing README.md:1: ${snapshot.fileReferenceText}`,
+    );
+  }
+
+  if (!snapshot.fileReferenceLabels.includes('Open README.md:1')) {
+    throw new Error(
+      `Assistant file chip is not accessible: ${snapshot.fileReferenceLabels.join(
+        ', ',
+      )}`,
+    );
+  }
+
+  for (const internalText of ['e2e-terminal-check', 'session-e2e']) {
+    if (snapshot.messageText.includes(internalText)) {
+      throw new Error(
+        `Assistant message leaked internal text ${internalText}: ${snapshot.messageText}`,
+      );
+    }
+  }
+
+  if (
+    !snapshot.messageRect ||
+    !snapshot.actionsRect ||
+    !snapshot.timelineRect ||
+    !snapshot.composerRect
+  ) {
+    throw new Error(
+      `Assistant action geometry is missing: ${JSON.stringify(snapshot)}`,
+    );
+  }
+
+  if (snapshot.actionsRect.height > 40) {
+    throw new Error(
+      `Assistant action row is too tall: ${JSON.stringify(
+        snapshot.actionsRect,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.messageRect.left < snapshot.timelineRect.left ||
+    snapshot.messageRect.right > snapshot.timelineRect.right + 1
+  ) {
+    throw new Error('Assistant message should stay inside the timeline.');
+  }
+
+  if (snapshot.messageRect.bottom > snapshot.composerRect.top) {
+    throw new Error('Assistant message overlaps the composer.');
+  }
+}
+
+async function assertRetryDrafted(fileName) {
+  const snapshot = await evaluate(`(() => {
+    const messageField = document.querySelector('[aria-label="Message"]');
+    return {
+      composerValue: messageField?.value ?? '',
+      bodyText: document.body.innerText,
+      approvalCards: document.querySelectorAll(
+        '[data-testid="conversation-approval-card"]'
+      ).length,
+      assistantMessages: document.querySelectorAll(
+        '[data-testid="assistant-message"]'
+      ).length
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (snapshot.composerValue !== 'Please exercise command approval.') {
+    throw new Error(
+      `Retry should restore the last prompt into the composer: ${snapshot.composerValue}`,
+    );
+  }
+
+  if (!snapshot.bodyText.includes('Restored last prompt to composer.')) {
+    throw new Error('Retry should provide visible composer feedback.');
+  }
+
+  if (snapshot.approvalCards !== 0) {
+    throw new Error('Retry should not auto-send a new approval request.');
   }
 }
 

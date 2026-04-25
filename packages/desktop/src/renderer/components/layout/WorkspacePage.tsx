@@ -57,12 +57,14 @@ export function WorkspacePage({
   onClearTerminal,
   onCommit,
   onCommitMessageChange,
+  onCopyMessage,
   onCopyTerminalOutput,
   onCreateSession,
   onKillTerminal,
   onMessageTextChange,
   onModeChange,
   onModelChange,
+  onOpenFileReference,
   onPermissionResponse,
   onRefreshProjectGitStatus,
   onOpenReviewFile,
@@ -76,9 +78,11 @@ export function WorkspacePage({
   onSettingsDispatch,
   onStageReviewTarget,
   onStopGeneration,
+  onRetryMessage,
   onTerminalCommandChange,
   onTerminalInputChange,
   onWriteTerminalInput,
+  chatNotice,
 }: {
   activeProject: DesktopProject | null;
   activeProjectId: string | null;
@@ -101,18 +105,21 @@ export function WorkspacePage({
   terminalError: string | null;
   terminalInput: string;
   terminalNotice: string | null;
+  chatNotice: string | null;
   onAskUserQuestionResponse: (requestId: string, optionId: string) => void;
   onAuthenticate: (methodId: string) => void;
   onChooseWorkspace: () => void;
   onClearTerminal: () => void;
   onCommit: () => void;
   onCommitMessageChange: (message: string) => void;
+  onCopyMessage: (message: string) => void;
   onCopyTerminalOutput: () => void;
   onCreateSession: () => void;
   onKillTerminal: () => void;
   onMessageTextChange: (message: string) => void;
   onModeChange: (mode: DesktopApprovalMode) => void;
   onModelChange: (modelId: string) => void;
+  onOpenFileReference: (filePath: string) => void;
   onPermissionResponse: (requestId: string, optionId: string) => void;
   onRefreshProjectGitStatus: () => void;
   onOpenReviewFile: (filePath: string) => void;
@@ -126,6 +133,7 @@ export function WorkspacePage({
   onSettingsDispatch: Dispatch<SettingsAction>;
   onStageReviewTarget: (target: DesktopGitReviewTarget) => void;
   onStopGeneration: () => void;
+  onRetryMessage: (message: string) => void;
   onTerminalCommandChange: (command: string) => void;
   onTerminalInputChange: (input: string) => void;
   onWriteTerminalInput: () => void;
@@ -207,12 +215,16 @@ export function WorkspacePage({
               isDraftSession={isDraftSession}
               messageText={messageText}
               modelState={modelState}
+              notice={chatNotice}
               onAskUserQuestionResponse={onAskUserQuestionResponse}
+              onCopyMessage={onCopyMessage}
               onModeChange={onModeChange}
               onModelChange={onModelChange}
               onMessageTextChange={onMessageTextChange}
+              onOpenFileReference={onOpenFileReference}
               onOpenReview={showReview}
               onPermissionResponse={onPermissionResponse}
+              onRetryMessage={onRetryMessage}
               onSendMessage={onSendMessage}
               onStopGeneration={onStopGeneration}
             />

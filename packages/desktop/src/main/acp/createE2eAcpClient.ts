@@ -179,7 +179,7 @@ export class E2eAcpClient implements AcpSessionClient {
       sessionUpdate: 'agent_message_chunk',
       content: {
         type: 'text',
-        text: `E2E fake ACP response received: ${prompt}`,
+        text: `E2E fake ACP response received: ${prompt}\n\nUpdated README.md:1 for review.`,
       },
     });
 

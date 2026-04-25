@@ -22,6 +22,101 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Assistant Message Actions and File Reference Chips
+
+Status: completed in iteration 11.
+
+Goal: add compact assistant message actions and clickable file-reference chips
+inside the conversation timeline.
+
+User-visible value: after an assistant response, users can copy the response,
+reuse the last prompt, jump into changed-file review, and open referenced files
+without leaving the workbench or reading protocol/debug output.
+
+Expected files:
+
+- `packages/desktop/src/renderer/App.tsx`
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/src/main/acp/createE2eAcpClient.ts`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/assistant-message-actions.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Assistant messages render a compact action row with Copy, Retry last prompt,
+  and Open Changes when changed files exist.
+- Retry last prompt is safe: it restores the previous user prompt into the
+  composer instead of auto-sending a new agent request.
+- File references in assistant prose, such as `README.md:1`, render as compact
+  chips with an accessible open action.
+- Copy and open actions use existing desktop-safe preload/browser APIs and do
+  not expose ACP/session IDs in the main timeline.
+- The message card stays within the conversation column and does not overlap
+  the composer in real Electron.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, send a prompt, approve the fake
+  command request, wait for the assistant response, assert the assistant action
+  row and file chip, copy the response, retry the last prompt into the
+  composer, clear the retry draft, then continue the existing review/settings/
+  terminal smoke path.
+- E2E assertions: assistant message action row is present, the file chip shows
+  `README.md:1`, Copy produces visible feedback, Retry restores the original
+  prompt without auto-sending, Open Changes remains contextual, assistant
+  geometry stays inside the timeline above the composer, and console errors/
+  failed local requests are absent.
+- Diagnostic artifacts: CDP screenshots, assistant action JSON, retry composer
+  JSON, Electron log, summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained compact
+  inline actions and file chip density; `electron-desktop-dev` for renderer
+  changes and real Electron CDP verification; `brainstorming` applied by
+  choosing the narrow conversation-first option from the repo plan and
+  immutable prototype without pausing the autonomous Ralph loop.
+
+Notes and decisions:
+
+- The prototype shows response actions and changed-file controls in the
+  reading flow, so the action row stays under assistant messages instead of
+  becoming a toolbar or drawer.
+- Retry is intentionally non-destructive and does not auto-send; it drafts the
+  last user prompt in the composer so users can inspect or edit before sending.
+- File reference chips reuse the existing project-relative open-file path and
+  remain bounded so long paths cannot stretch the timeline.
+
+Verification results:
+
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 9 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed after launch through real
+  Electron over CDP.
+- Passing artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T18-10-35-606Z/`.
+
+Next work:
+
+- Continue rich conversation primitives by adding clearer assistant feedback
+  states for copy/retry failures and by supporting multiple dense assistant
+  messages at compact viewport widths.
+- Add a follow-up fake ACP scenario with longer assistant prose and several
+  repeated file references to harden chip extraction, dedupe, and overflow.
+
 ### Completed Slice: Rich Tool-Call Activity Cards
 
 Status: completed in iteration 10.

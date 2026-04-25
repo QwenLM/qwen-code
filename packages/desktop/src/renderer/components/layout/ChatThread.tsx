@@ -17,6 +17,7 @@ import type {
   DesktopAskUserQuestionRequest,
   DesktopPermissionRequest,
 } from '../../../shared/desktopProtocol.js';
+import { CopyIcon, DiffIcon, RefreshIcon } from './SidebarIcons.js';
 
 export function ChatThread({
   activeProject,
@@ -26,12 +27,16 @@ export function ChatThread({
   isDraftSession,
   messageText,
   modelState,
+  notice,
   onAskUserQuestionResponse,
+  onCopyMessage,
   onModeChange,
   onModelChange,
   onMessageTextChange,
+  onOpenFileReference,
   onOpenReview,
   onPermissionResponse,
+  onRetryMessage,
   onSendMessage,
   onStopGeneration,
 }: {
@@ -42,12 +47,16 @@ export function ChatThread({
   isDraftSession: boolean;
   messageText: string;
   modelState: ModelState;
+  notice: string | null;
   onAskUserQuestionResponse: (requestId: string, optionId: string) => void;
+  onCopyMessage: (message: string) => void;
   onModeChange: (mode: DesktopApprovalMode) => void;
   onModelChange: (modelId: string) => void;
   onMessageTextChange: (message: string) => void;
+  onOpenFileReference: (filePath: string) => void;
   onOpenReview: () => void;
   onPermissionResponse: (requestId: string, optionId: string) => void;
+  onRetryMessage: (message: string) => void;
   onSendMessage: (event: FormEvent<HTMLFormElement>) => void;
   onStopGeneration: () => void;
 }) {
@@ -81,8 +90,11 @@ export function ChatThread({
         gitDiff={gitDiff}
         isDraftSession={isDraftSession}
         onAskUserQuestionResponse={onAskUserQuestionResponse}
+        onCopyMessage={onCopyMessage}
+        onOpenFileReference={onOpenFileReference}
         onOpenReview={onOpenReview}
         onPermissionResponse={onPermissionResponse}
+        onRetryMessage={onRetryMessage}
       />
       <form
         className={canCompose ? 'composer' : 'composer composer-disabled'}
@@ -152,6 +164,9 @@ export function ChatThread({
             </label>
           </div>
           <div className="composer-actions">
+            {notice ? (
+              <span className="composer-context-note">{notice}</span>
+            ) : null}
             {disabledReason ? (
               <span className="composer-disabled-reason">{disabledReason}</span>
             ) : null}
@@ -186,8 +201,11 @@ function ChatTimeline({
   gitDiff,
   isDraftSession,
   onAskUserQuestionResponse,
+  onCopyMessage,
+  onOpenFileReference,
   onOpenReview,
   onPermissionResponse,
+  onRetryMessage,
   state,
 }: {
   activeProject: DesktopProject | null;
@@ -195,8 +213,11 @@ function ChatTimeline({
   gitDiff: DesktopGitDiff | null;
   isDraftSession: boolean;
   onAskUserQuestionResponse: (requestId: string, optionId: string) => void;
+  onCopyMessage: (message: string) => void;
+  onOpenFileReference: (filePath: string) => void;
   onOpenReview: () => void;
   onPermissionResponse: (requestId: string, optionId: string) => void;
+  onRetryMessage: (message: string) => void;
   state: ChatState;
 }) {
   const timelineRef = useRef<HTMLDivElement | null>(null);
@@ -249,11 +270,29 @@ function ChatTimeline({
     );
   }
 
+  let latestUserMessage: string | null = null;
+
   return (
     <div className="chat-timeline" ref={timelineRef}>
-      {state.items.map((item) => (
-        <TimelineItem item={item} key={item.id} />
-      ))}
+      {state.items.map((item) => {
+        const previousUserMessage = latestUserMessage;
+        if (item.type === 'message' && item.role === 'user') {
+          latestUserMessage = item.text;
+        }
+
+        return (
+          <TimelineItem
+            gitDiff={gitDiff}
+            item={item}
+            key={item.id}
+            previousUserMessage={previousUserMessage}
+            onCopyMessage={onCopyMessage}
+            onOpenFileReference={onOpenFileReference}
+            onOpenReview={onOpenReview}
+            onRetryMessage={onRetryMessage}
+          />
+        );
+      })}
       <InlinePendingPrompts
         pendingAskUserQuestion={state.pendingAskUserQuestion}
         pendingPermission={state.pendingPermission}
@@ -283,12 +322,67 @@ function ConversationEmpty({
   );
 }
 
-function TimelineItem({ item }: { item: ChatTimelineItem }) {
+function TimelineItem({
+  gitDiff,
+  item,
+  onCopyMessage,
+  onOpenFileReference,
+  onOpenReview,
+  onRetryMessage,
+  previousUserMessage,
+}: {
+  gitDiff: DesktopGitDiff | null;
+  item: ChatTimelineItem;
+  onCopyMessage: (message: string) => void;
+  onOpenFileReference: (filePath: string) => void;
+  onOpenReview: () => void;
+  onRetryMessage: (message: string) => void;
+  previousUserMessage: string | null;
+}) {
   if (item.type === 'message') {
+    const fileReferences =
+      item.role === 'assistant' ? extractFileReferences(item.text) : [];
+    const hasChangedFiles = Boolean(gitDiff?.files.length);
+
     return (
-      <article className={`chat-message chat-message-${item.role}`}>
+      <article
+        className={`chat-message chat-message-${item.role}`}
+        data-testid={
+          item.role === 'assistant' ? 'assistant-message' : undefined
+        }
+      >
         <div className="message-role">{item.role}</div>
         <p>{item.text}</p>
+        {fileReferences.length > 0 ? (
+          <ul
+            aria-label="Assistant file references"
+            className="message-file-references"
+            data-testid="assistant-file-references"
+          >
+            {fileReferences.map((reference) => (
+              <li key={reference.label}>
+                <button
+                  aria-label={`Open ${reference.label}`}
+                  title={`Open ${reference.label}`}
+                  type="button"
+                  onClick={() => onOpenFileReference(reference.path)}
+                >
+                  {reference.label}
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {item.role === 'assistant' ? (
+          <AssistantMessageActions
+            hasChangedFiles={hasChangedFiles}
+            message={item.text}
+            retryMessage={previousUserMessage}
+            onCopyMessage={onCopyMessage}
+            onOpenReview={onOpenReview}
+            onRetryMessage={onRetryMessage}
+          />
+        ) : null}
       </article>
     );
   }
@@ -314,6 +408,98 @@ function TimelineItem({ item }: { item: ChatTimelineItem }) {
   }
 
   return <div className="chat-event">{item.label}</div>;
+}
+
+function AssistantMessageActions({
+  hasChangedFiles,
+  message,
+  onCopyMessage,
+  onOpenReview,
+  onRetryMessage,
+  retryMessage,
+}: {
+  hasChangedFiles: boolean;
+  message: string;
+  onCopyMessage: (message: string) => void;
+  onOpenReview: () => void;
+  onRetryMessage: (message: string) => void;
+  retryMessage: string | null;
+}) {
+  return (
+    <div
+      aria-label="Assistant message actions"
+      className="message-action-row"
+      data-testid="assistant-message-actions"
+    >
+      <button
+        aria-label="Copy Response"
+        className="message-action-button"
+        title="Copy Response"
+        type="button"
+        onClick={() => onCopyMessage(message)}
+      >
+        <CopyIcon />
+        <span className="sr-only">Copy Response</span>
+      </button>
+      <button
+        aria-label="Retry Last Prompt"
+        className="message-action-button"
+        disabled={!retryMessage}
+        title="Retry Last Prompt"
+        type="button"
+        onClick={() => {
+          if (retryMessage) {
+            onRetryMessage(retryMessage);
+          }
+        }}
+      >
+        <RefreshIcon />
+        <span className="sr-only">Retry Last Prompt</span>
+      </button>
+      {hasChangedFiles ? (
+        <button
+          aria-label="Open Changes"
+          className="message-action-button"
+          title="Open Changes"
+          type="button"
+          onClick={onOpenReview}
+        >
+          <DiffIcon />
+          <span className="sr-only">Open Changes</span>
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+const FILE_REFERENCE_PATTERN =
+  /(?:^|[\s([{"'`])((?:[\w@.-]+\/)*[\w@.-]+\.(?:bash|c|cc|cjs|cpp|css|go|h|hpp|html|java|js|jsx|json|kt|lock|md|mjs|py|rs|scss|sh|sql|swift|toml|ts|tsx|txt|xml|ya?ml|zsh)(?::\d+)?)(?=$|[\s)\]},.;:"'`])/giu;
+
+function extractFileReferences(
+  text: string,
+): Array<{ label: string; path: string }> {
+  const references: Array<{ label: string; path: string }> = [];
+  const seen = new Set<string>();
+
+  for (const match of text.matchAll(FILE_REFERENCE_PATTERN)) {
+    const label = match[1];
+    if (!label || seen.has(label)) {
+      continue;
+    }
+
+    seen.add(label);
+    references.push({
+      label,
+      path: stripFileReferenceLine(label),
+    });
+  }
+
+  return references.slice(0, 6);
+}
+
+function stripFileReferenceLine(reference: string): string {
+  const lineMatch = /^(.*):\d+$/u.exec(reference);
+  return lineMatch?.[1] ?? reference;
 }
 
 function ToolActivityCard({

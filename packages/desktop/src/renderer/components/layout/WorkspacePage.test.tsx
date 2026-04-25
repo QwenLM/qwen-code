@@ -394,6 +394,94 @@ describe('WorkspacePage', () => {
     expect(renderedContainer.querySelector('.chat-tool')).toBeNull();
   });
 
+  it('renders assistant message actions and clickable file reference chips', () => {
+    const onCopyMessage = vi.fn();
+    const onOpenReviewFile = vi.fn();
+    const onRetryMessage = vi.fn();
+    let chatState = chatReducer(createInitialChatState(), {
+      type: 'append_user_message',
+      content: 'Summarize the project changes',
+    });
+    chatState = chatReducer(chatState, {
+      type: 'server_message',
+      message: {
+        type: 'message_delta',
+        role: 'assistant',
+        text: 'Updated README.md:1 and packages/desktop/src/renderer/App.tsx:12.',
+      },
+    });
+    chatState = chatReducer(chatState, {
+      type: 'server_message',
+      message: { type: 'message_complete' },
+    });
+
+    const renderedContainer = renderWorkspace({
+      chatState,
+      onCopyMessage,
+      onOpenFileReference: onOpenReviewFile,
+      onOpenReviewFile,
+      onRetryMessage,
+    });
+    const assistantMessage = renderedContainer.querySelector(
+      '[data-testid="assistant-message"]',
+    );
+    const actionRow = renderedContainer.querySelector(
+      '[data-testid="assistant-message-actions"]',
+    );
+    const fileReferences = renderedContainer.querySelector(
+      '[data-testid="assistant-file-references"]',
+    );
+
+    expect(assistantMessage?.textContent).toContain('README.md:1');
+    expect(actionRow).toBeTruthy();
+    expect(fileReferences?.textContent).toContain('README.md:1');
+    expect(fileReferences?.textContent).toContain(
+      'packages/desktop/src/renderer/App.tsx:12',
+    );
+
+    act(() => {
+      (
+        actionRow?.querySelector(
+          'button[aria-label="Copy Response"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    expect(onCopyMessage).toHaveBeenCalledWith(
+      'Updated README.md:1 and packages/desktop/src/renderer/App.tsx:12.',
+    );
+
+    act(() => {
+      (
+        actionRow?.querySelector(
+          'button[aria-label="Retry Last Prompt"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    expect(onRetryMessage).toHaveBeenCalledWith(
+      'Summarize the project changes',
+    );
+
+    act(() => {
+      (
+        fileReferences?.querySelector(
+          'button[aria-label="Open README.md:1"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    expect(onOpenReviewFile).toHaveBeenCalledWith('README.md');
+
+    act(() => {
+      (
+        actionRow?.querySelector(
+          'button[aria-label="Open Changes"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    expect(
+      renderedContainer.querySelector('[data-testid="review-panel"]'),
+    ).toBeTruthy();
+  });
+
   it('routes terminal output through an attach action', () => {
     const onAttachTerminalOutput = vi.fn();
     const renderedContainer = renderWorkspace({
@@ -489,18 +577,21 @@ function renderWorkspace(
     terminalError: null,
     terminalInput: '',
     terminalNotice: null,
+    chatNotice: null,
     onAskUserQuestionResponse: vi.fn(),
     onAuthenticate: vi.fn(),
     onChooseWorkspace: vi.fn(),
     onClearTerminal: vi.fn(),
     onCommit: vi.fn(),
     onCommitMessageChange: vi.fn(),
+    onCopyMessage: vi.fn(),
     onCopyTerminalOutput: vi.fn(),
     onCreateSession: vi.fn(),
     onKillTerminal: vi.fn(),
     onMessageTextChange: vi.fn(),
     onModeChange: vi.fn(),
     onModelChange: vi.fn(),
+    onOpenFileReference: vi.fn(),
     onPermissionResponse: vi.fn(),
     onRefreshProjectGitStatus: vi.fn(),
     onOpenReviewFile: vi.fn(),
@@ -514,6 +605,7 @@ function renderWorkspace(
     onSettingsDispatch: vi.fn(),
     onStageReviewTarget: vi.fn(),
     onStopGeneration: vi.fn(),
+    onRetryMessage: vi.fn(),
     onTerminalCommandChange: vi.fn(),
     onTerminalInputChange: vi.fn(),
     onWriteTerminalInput: vi.fn(),

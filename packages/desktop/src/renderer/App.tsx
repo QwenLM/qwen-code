@@ -89,6 +89,7 @@ export function App() {
   const [terminal, setTerminal] = useState<DesktopTerminal | null>(null);
   const [terminalError, setTerminalError] = useState<string | null>(null);
   const [terminalNotice, setTerminalNotice] = useState<string | null>(null);
+  const [chatNotice, setChatNotice] = useState<string | null>(null);
   const [messageText, setMessageText] = useState('');
   const [chatState, dispatchChat] = useReducer(
     chatReducer,
@@ -604,6 +605,25 @@ export function App() {
     [activeProject],
   );
 
+  const updateMessageText = useCallback((message: string) => {
+    setMessageText(message);
+    setChatNotice(null);
+  }, []);
+
+  const copyChatMessage = useCallback(async (message: string) => {
+    try {
+      await writeClipboardText(message);
+      setChatNotice('Copied response.');
+    } catch (error) {
+      setSessionError(getErrorMessage(error));
+    }
+  }, []);
+
+  const retryChatMessage = useCallback((message: string) => {
+    setMessageText(message);
+    setChatNotice('Restored last prompt to composer.');
+  }, []);
+
   const commitChanges = useCallback(async () => {
     if (
       loadState.state !== 'ready' ||
@@ -846,6 +866,7 @@ export function App() {
 
         dispatchChat({ type: 'append_user_message', content });
         setMessageText('');
+        setChatNotice(null);
         void createDesktopSession(
           loadState.status.serverInfo,
           activeProject.path,
@@ -893,6 +914,7 @@ export function App() {
       dispatchChat({ type: 'append_user_message', content });
       socketRef.current.sendUserMessage(content);
       setMessageText('');
+      setChatNotice(null);
     },
     [activeProject, activeSessionId, loadState, messageText],
   );
@@ -952,18 +974,21 @@ export function App() {
       terminalError={terminalError}
       terminalInput={terminalInput}
       terminalNotice={terminalNotice}
+      chatNotice={chatNotice}
       onAskUserQuestionResponse={respondToAskUserQuestion}
       onAuthenticate={authenticate}
       onChooseWorkspace={chooseWorkspace}
       onClearTerminal={clearTerminal}
       onCommit={commitChanges}
       onCommitMessageChange={setCommitMessage}
+      onCopyMessage={copyChatMessage}
       onCopyTerminalOutput={copyTerminalOutput}
       onCreateSession={createSession}
       onKillTerminal={killTerminal}
-      onMessageTextChange={setMessageText}
+      onMessageTextChange={updateMessageText}
       onModeChange={changeMode}
       onModelChange={changeModel}
+      onOpenFileReference={openReviewFile}
       onPermissionResponse={respondToPermission}
       onRefreshProjectGitStatus={refreshProjectGitStatus}
       onOpenReviewFile={openReviewFile}
@@ -977,6 +1002,7 @@ export function App() {
       onSettingsDispatch={dispatchSettings}
       onStageReviewTarget={stageReviewTarget}
       onStopGeneration={stopGeneration}
+      onRetryMessage={retryChatMessage}
       onTerminalCommandChange={setTerminalCommand}
       onTerminalInputChange={setTerminalInput}
       onWriteTerminalInput={writeTerminalInput}

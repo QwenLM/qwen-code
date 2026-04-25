@@ -722,6 +722,63 @@ summary:focus-visible {
   white-space: pre-wrap;
 }
 
+.message-file-references {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.message-file-references button,
+.message-action-button {
+  border: 1px solid var(--line);
+  background: rgba(238, 244, 239, 0.035);
+  color: var(--text-soft);
+}
+
+.message-file-references button {
+  max-width: 280px;
+  min-height: 24px;
+  overflow: hidden;
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: #b7d9ff;
+  font-size: 11px;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-file-references button:not(:disabled):hover,
+.message-action-button:not(:disabled):hover {
+  border-color: rgba(85, 166, 255, 0.32);
+  background: var(--accent-soft);
+  color: #d6eaff;
+}
+
+.message-action-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+}
+
+.message-action-button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 7px;
+}
+
+.message-action-button svg {
+  width: 16px;
+  height: 16px;
+}
+
 .chat-plan {
   align-self: center;
 }
