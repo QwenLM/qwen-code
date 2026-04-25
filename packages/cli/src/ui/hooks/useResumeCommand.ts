@@ -95,6 +95,10 @@ export function useResumeCommand(
 
       // Update session history core.
       config.startNewSession(sessionId, sessionData);
+      // Rebuild turn boundary tracking so rewind works within resumed sessions.
+      config
+        .getChatRecordingService()
+        ?.rebuildTurnBoundaries(sessionData.conversation.messages);
       await config.getGeminiClient()?.initialize?.();
 
       // Fire SessionStart event after resuming session

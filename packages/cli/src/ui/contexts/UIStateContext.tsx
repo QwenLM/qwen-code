@@ -158,6 +158,9 @@ export interface UIState {
   promptSuggestion: string | null;
   /** Dismiss prompt suggestion (clears state, aborts speculation) */
   dismissPromptSuggestion: () => void;
+  // Rewind selector
+  isRewindSelectorOpen: boolean;
+  rewindEscPending: boolean;
 }
 
 export const UIStateContext = createContext<UIState | null>(null);

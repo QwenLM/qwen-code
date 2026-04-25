@@ -252,6 +252,9 @@ function convertToHistoryItems(
         if (!payload) continue;
         pendingAtCommands.push(payload);
       }
+      if (record.subtype === 'rewind') {
+        items.push({ type: 'info', text: 'Conversation rewound.' });
+      }
       continue;
     }
     switch (record.type) {

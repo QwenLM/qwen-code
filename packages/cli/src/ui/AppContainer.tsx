@@ -74,6 +74,11 @@ import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
+import { useDoublePress } from './hooks/useDoublePress.js';
+import {
+  computeApiTruncationIndex,
+  isRealUserTurn,
+} from './utils/historyMapping.js';
 import { useVimMode } from './contexts/VimModeContext.js';
 import { CompactModeProvider } from './contexts/CompactModeContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
@@ -636,6 +641,12 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isHooksDialogOpen, openHooksDialog, closeHooksDialog } =
     useHooksDialog();
 
+  // Ref bridge: the guarded openRewindSelector callback is defined later
+  // (after useDoublePress), but slashCommandActions needs it now. The ref
+  // lets the useMemo capture a stable function pointer whose implementation
+  // is swapped in once the real callback exists.
+  const openRewindSelectorRef = useRef<() => void>(() => {});
+
   const slashCommandActions = useMemo(
     () => ({
       openAuthDialog,
@@ -664,6 +675,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openMcpDialog,
       openHooksDialog,
       openResumeDialog,
+      openRewindSelector: () => openRewindSelectorRef.current(),
       handleResume,
       openDeleteDialog,
     }),
@@ -1534,6 +1546,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const [escapePressedOnce, setEscapePressedOnce] = useState(false);
   const escapeTimerRef = useRef<NodeJS.Timeout | null>(null);
   const dialogsVisibleRef = useRef(false);
+  const [isRewindSelectorOpen, setIsRewindSelectorOpen] = useState(false);
+  const [rewindEscPending, setRewindEscPending] = useState(false);
   const [constrainHeight, setConstrainHeight] = useState<boolean>(true);
   const [ideContextState, setIdeContextState] = useState<
     IdeContext | undefined
@@ -1580,6 +1594,98 @@ export const AppContainer = (props: AppContainerProps) => {
   const handleEscapePromptChange = useCallback((showPrompt: boolean) => {
     setShowEscapePrompt(showPrompt);
   }, []);
+
+  // --- Rewind selector callbacks ---
+  const openRewindSelector = useCallback(() => {
+    if (streamingState !== StreamingState.Idle) return;
+    if (config.getIdeMode()) return;
+    if (dialogsVisibleRef.current) return;
+    const hasUserTurns = historyManager.history.some((h) => h.type === 'user');
+    if (!hasUserTurns) return;
+    setIsRewindSelectorOpen(true);
+  }, [streamingState, config, historyManager.history]);
+  openRewindSelectorRef.current = openRewindSelector;
+
+  const closeRewindSelector = useCallback(() => {
+    setIsRewindSelectorOpen(false);
+  }, []);
+
+  const handleRewindConfirm = useCallback(
+    (userItem: HistoryItem) => {
+      const geminiClient = config.getGeminiClient();
+      if (!geminiClient) return;
+
+      // 1. Compute values from current history BEFORE truncation
+      const originalHistory = historyManager.history;
+      const originalLength = originalHistory.length;
+
+      let targetTurnIndex = 0;
+      for (const h of originalHistory) {
+        if (h.id === userItem.id) break;
+        if (isRealUserTurn(h)) targetTurnIndex++;
+      }
+
+      // 2. Compute API truncation point
+      const apiHistory = geminiClient.getHistory();
+      const apiTruncateIndex = computeApiTruncationIndex(
+        originalHistory,
+        userItem.id,
+        apiHistory,
+      );
+
+      // Abort if the target turn is unreachable (e.g., absorbed by compression)
+      if (apiTruncateIndex < 0) {
+        historyManager.addItem(
+          {
+            type: 'error',
+            text: 'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+          },
+          Date.now(),
+        );
+        setIsRewindSelectorOpen(false);
+        return;
+      }
+
+      // 3. Truncate API history and strip stale thinking blocks
+      geminiClient.truncateHistory(apiTruncateIndex);
+      geminiClient.stripThoughtsFromHistory();
+
+      // 4. Truncate UI history (keep everything before the target item)
+      const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);
+      historyManager.loadHistory(truncatedUi);
+
+      // 5. Re-render the terminal
+      refreshStatic();
+
+      // 6. Pre-populate input with the original user text
+      if (userItem.type === 'user' && userItem.text) {
+        buffer.setText(userItem.text);
+      }
+
+      // 7. Add info message
+      historyManager.addItem(
+        {
+          type: 'info',
+          text: 'Conversation rewound. Edit your prompt and press Enter to continue.',
+        },
+        Date.now(),
+      );
+
+      // 8. Record the rewind event — re-roots the parentUuid chain so
+      //    rewound messages end up on a dead branch during resume.
+      config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
+        truncatedCount: originalLength - truncatedUi.length,
+      });
+
+      // 9. Close the selector
+      setIsRewindSelectorOpen(false);
+    },
+    [config, historyManager, refreshStatic, buffer],
+  );
+
+  const handleDoubleEscRewind = useDoublePress(openRewindSelector, (pending) =>
+    setRewindEscPending(pending),
+  );
 
   const handleIdePromptComplete = useCallback(
     (result: IdeIntegrationNudgeResult) => {
@@ -1874,6 +1980,20 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
 
+        // Input is empty and idle — double-ESC opens rewind selector
+        if (
+          streamingState === StreamingState.Idle &&
+          !dialogsVisibleRef.current
+        ) {
+          if (escapeTimerRef.current) {
+            clearTimeout(escapeTimerRef.current);
+            escapeTimerRef.current = null;
+          }
+          setEscapePressedOnce(false);
+          handleDoubleEscRewind();
+          return;
+        }
+
         // No action available, reset the flag
         if (escapeTimerRef.current) {
           clearTimeout(escapeTimerRef.current);
@@ -1970,6 +2090,7 @@ export const AppContainer = (props: AppContainerProps) => {
       compactMode,
       setCompactMode,
       refreshStatic,
+      handleDoubleEscRewind,
     ],
   );
 
@@ -2043,7 +2164,8 @@ export const AppContainer = (props: AppContainerProps) => {
     isApprovalModeDialogOpen ||
     isResumeDialogOpen ||
     isDeleteDialogOpen ||
-    isExtensionsManagerDialogOpen;
+    isExtensionsManagerDialogOpen ||
+    isRewindSelectorOpen;
   dialogsVisibleRef.current = dialogsVisible;
 
   // Drain queued messages when idle. `queueDrainNonce` re-fires the effect
@@ -2210,6 +2332,9 @@ export const AppContainer = (props: AppContainerProps) => {
       // Prompt suggestion
       promptSuggestion,
       dismissPromptSuggestion,
+      // Rewind selector
+      isRewindSelectorOpen,
+      rewindEscPending,
     }),
     [
       isThemeDialogOpen,
@@ -2326,6 +2451,9 @@ export const AppContainer = (props: AppContainerProps) => {
       // Prompt suggestion
       promptSuggestion,
       dismissPromptSuggestion,
+      // Rewind selector
+      isRewindSelectorOpen,
+      rewindEscPending,
     ],
   );
 
@@ -2395,6 +2523,10 @@ export const AppContainer = (props: AppContainerProps) => {
       closeFeedbackDialog,
       temporaryCloseFeedbackDialog,
       submitFeedback,
+      // Rewind selector
+      openRewindSelector,
+      closeRewindSelector,
+      handleRewindConfirm,
     }),
     [
       openThemeDialog,
@@ -2459,6 +2591,10 @@ export const AppContainer = (props: AppContainerProps) => {
       closeFeedbackDialog,
       temporaryCloseFeedbackDialog,
       submitFeedback,
+      // Rewind selector
+      openRewindSelector,
+      closeRewindSelector,
+      handleRewindConfirm,
     ],
   );
 
