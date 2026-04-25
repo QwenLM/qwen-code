@@ -42,6 +42,14 @@ export interface SessionPickerProps {
    * When provided, skips initial load and disables pagination.
    */
   initialSessions?: SessionData[];
+
+  /**
+   * Enable Space-to-preview. Off by default — preview's Enter shortcut
+   * forwards to `onSelect`, which for resume flows is "resume", but for
+   * destructive flows (e.g. delete) would commit the action. Only opt in
+   * for non-destructive selection flows.
+   */
+  enablePreview?: boolean;
 }
 
 const PREFIX_CHARS = {
@@ -137,6 +145,7 @@ export function SessionPicker(props: SessionPickerProps) {
     title,
     centerSelection = true,
     initialSessions,
+    enablePreview = false,
   } = props;
 
   const { columns: width, rows: height } = useTerminalSize();
@@ -162,9 +171,11 @@ export function SessionPicker(props: SessionPickerProps) {
     centerSelection,
     initialSessions,
     isActive: true,
+    enablePreview,
   });
 
   if (
+    enablePreview &&
     picker.viewMode === 'preview' &&
     picker.previewSessionId &&
     sessionService
@@ -277,7 +288,11 @@ export function SessionPicker(props: SessionPickerProps) {
                 {t(' to toggle branch · ')}
               </Text>
             )}
-            <Text color={theme.text.secondary}>{t('Space to preview · ')}</Text>
+            {enablePreview && (
+              <Text color={theme.text.secondary}>
+                {t('Space to preview · ')}
+              </Text>
+            )}
             <Text color={theme.text.secondary}>
               {t('↑↓ to navigate · Esc to cancel')}
             </Text>

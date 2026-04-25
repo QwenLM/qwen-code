@@ -712,6 +712,7 @@ describe('SessionPicker', () => {
           sessionService={service as never}
           onSelect={vi.fn()}
           onCancel={vi.fn()}
+          enablePreview
         />,
       );
 
@@ -808,6 +809,7 @@ describe('SessionPicker', () => {
           sessionService={service as never}
           onSelect={vi.fn()}
           onCancel={vi.fn()}
+          enablePreview
         />,
       );
 
@@ -841,6 +843,7 @@ describe('SessionPicker', () => {
           sessionService={service as never}
           onSelect={onSelect}
           onCancel={vi.fn()}
+          enablePreview
         />,
       );
 
@@ -850,6 +853,54 @@ describe('SessionPicker', () => {
       stdin.write('\r'); // Enter
       await wait(50);
       expect(onSelect).toHaveBeenCalledWith('s1');
+    });
+
+    it('without enablePreview, Space is a no-op and footer omits the hint', async () => {
+      // Regression: SessionPicker is also reused by the delete-session
+      // dialog, where `onSelect = handleDelete`. If preview were on by
+      // default, Space → preview → Enter would silently delete the session
+      // while the preview UI still says "Enter to resume". The default must
+      // stay opt-in.
+      const sessions = [
+        createMockSession({
+          sessionId: 's1',
+          prompt: 'Deletable session',
+          messageCount: 2,
+        }),
+      ];
+      const service = createMockSessionService(sessions);
+      service.loadSession.mockResolvedValue(fakeResumedData('s1'));
+      const onSelect = vi.fn();
+
+      const { stdin, lastFrame } = renderPicker(
+        <SessionPicker
+          sessionService={service as never}
+          onSelect={onSelect}
+          onCancel={vi.fn()}
+          // intentionally NO enablePreview — emulates the delete dialog
+        />,
+      );
+
+      await wait(100);
+      const beforeFrame = lastFrame() ?? '';
+      expect(beforeFrame).toContain('Deletable session');
+      // Hint must not appear, otherwise we are training users to press
+      // Space in destructive flows.
+      expect(beforeFrame).not.toContain('Space to preview');
+
+      stdin.write(' '); // Space
+      await wait(150);
+      const afterFrame = lastFrame() ?? '';
+      // No preview body, still on the list.
+      expect(afterFrame).not.toContain('USER-ASKED-THIS');
+      expect(afterFrame).toContain('Deletable session');
+
+      // Enter must still call onSelect on the highlighted row (delete path
+      // unchanged), not be eaten by a phantom preview.
+      stdin.write('\r');
+      await wait(50);
+      expect(onSelect).toHaveBeenCalledWith('s1');
+      expect(service.loadSession).not.toHaveBeenCalled();
     });
   });
 });

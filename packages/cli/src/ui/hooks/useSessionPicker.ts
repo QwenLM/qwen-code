@@ -48,6 +48,11 @@ export interface UseSessionPickerOptions {
    * Enable/disable input handling.
    */
   isActive?: boolean;
+  /**
+   * Enable Space-to-preview. See SessionPickerProps.enablePreview for the
+   * safety rationale (preview's Enter forwards to onSelect).
+   */
+  enablePreview?: boolean;
 }
 
 export interface UseSessionPickerResult {
@@ -75,6 +80,7 @@ export function useSessionPicker({
   centerSelection = false,
   initialSessions,
   isActive = true,
+  enablePreview = false,
 }: UseSessionPickerOptions): UseSessionPickerResult {
   const hasInitialSessions = initialSessions !== undefined;
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -282,7 +288,7 @@ export function useSessionPicker({
         return;
       }
 
-      if (name === 'space') {
+      if (name === 'space' && enablePreview) {
         const session = filteredSessions[selectedIndex];
         if (session) {
           setPreviewSessionId(session.sessionId);

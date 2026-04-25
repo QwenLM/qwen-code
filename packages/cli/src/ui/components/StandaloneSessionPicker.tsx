@@ -87,6 +87,7 @@ function StandalonePickerScreen({
           currentBranch={currentBranch}
           centerSelection={true}
           initialSessions={initialSessions}
+          enablePreview
         />
       </SettingsContext.Provider>
     </ConfigContext.Provider>
