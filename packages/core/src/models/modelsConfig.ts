@@ -905,6 +905,8 @@ export class ModelsConfig {
           : undefined;
         const savedApiKeySource = isUnchanged
           ? this.generationConfigSources['apiKey']
+            ? { ...this.generationConfigSources['apiKey'] }
+            : undefined
           : undefined;
 
         this.applyResolvedModelDefaults(resolved);
