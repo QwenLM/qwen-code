@@ -46,6 +46,47 @@ import {
   runOpenRouterOAuthLogin,
 } from '../../commands/auth/openrouterOAuth.js';
 
+/**
+ * Generate a Qwen-managed env key from protocol and base URL.
+ * Format: QWEN_CUSTOM_API_KEY_${PROTOCOL}_${NORMALIZED_BASE_URL}
+ */
+export function generateCustomApiKeyEnvKey(
+  protocol: string,
+  baseUrl: string,
+): string {
+  const normalize = (value: string) =>
+    value
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_+|_+$/g, '');
+
+  return `QWEN_CUSTOM_API_KEY_${normalize(protocol)}_${normalize(baseUrl)}`;
+}
+
+/**
+ * Normalize model IDs: split by comma, trim, deduplicate, remove empty.
+ */
+export function normalizeCustomModelIds(modelIdsInput: string): string[] {
+  return modelIdsInput
+    .split(',')
+    .map((id) => id.trim())
+    .filter((id, index, array) => id.length > 0 && array.indexOf(id) === index);
+}
+
+/**
+ * Mask an API key for display: show first 3 and last 4 chars.
+ */
+export function maskApiKey(apiKey: string): string {
+  const trimmed = apiKey.trim();
+  if (trimmed.length === 0) return '(not set)';
+  if (trimmed.length <= 6) return '***';
+  const head = trimmed.slice(0, 3);
+  const tail = trimmed.slice(-4);
+  return `${head}...${tail}`;
+}
+
 export type { QwenAuthState } from '../hooks/useQwenAuth.js';
 
 export const useAuthCommand = (
@@ -685,6 +726,131 @@ export const useAuthCommand = (
   ]);
 
   /**
+   * Handle custom API key setup wizard submission.
+   * Persists key to env[generatedEnvKey] and creates modelProviders entries.
+   */
+  const handleCustomApiKeySubmit = useCallback(
+    async (
+      protocol:
+        | AuthType.USE_OPENAI
+        | AuthType.USE_ANTHROPIC
+        | AuthType.USE_GEMINI,
+      baseUrl: string,
+      apiKey: string,
+      modelIdsInput: string,
+    ) => {
+      try {
+        setIsAuthenticating(true);
+        setAuthError(null);
+
+        const trimmedApiKey = apiKey.trim();
+        const trimmedBaseUrl = baseUrl.trim();
+        const modelIds = normalizeCustomModelIds(modelIdsInput);
+
+        if (!trimmedApiKey) {
+          throw new Error(t('API key cannot be empty.'));
+        }
+        if (!trimmedBaseUrl) {
+          throw new Error(t('Base URL cannot be empty.'));
+        }
+        if (!/^https?:\/\//i.test(trimmedBaseUrl)) {
+          throw new Error(t('Base URL must start with http:// or https://.'));
+        }
+        if (modelIds.length === 0) {
+          throw new Error(t('Model IDs cannot be empty.'));
+        }
+
+        const generatedEnvKey = generateCustomApiKeyEnvKey(
+          protocol,
+          trimmedBaseUrl,
+        );
+        const persistScope = getPersistScopeForModelSelection(settings);
+
+        const settingsFile = settings.forScope(persistScope);
+        backupSettingsFile(settingsFile.path);
+
+        // Persist API key to env
+        settings.setValue(
+          persistScope,
+          `env.${generatedEnvKey}`,
+          trimmedApiKey,
+        );
+        process.env[generatedEnvKey] = trimmedApiKey;
+
+        // Build new model configs
+        const newConfigs: ProviderModelConfig[] = modelIds.map((modelId) => ({
+          id: modelId,
+          name: modelId,
+          baseUrl: trimmedBaseUrl,
+          envKey: generatedEnvKey,
+        }));
+
+        // Merge with existing configs: replace same generatedEnvKey, preserve rest
+        const existingConfigs =
+          (
+            settings.merged.modelProviders as ModelProvidersConfig | undefined
+          )?.[protocol] || [];
+
+        const preservedConfigs = existingConfigs.filter(
+          (existing) => existing.envKey !== generatedEnvKey,
+        );
+
+        const updatedConfigs = [...newConfigs, ...preservedConfigs];
+
+        // Persist modelProviders, security, model
+        settings.setValue(
+          persistScope,
+          `modelProviders.${protocol}`,
+          updatedConfigs,
+        );
+        settings.setValue(persistScope, 'security.auth.selectedType', protocol);
+        settings.setValue(persistScope, 'model.name', modelIds[0]);
+
+        // Hot-reload before refreshAuth
+        const updatedModelProviders: ModelProvidersConfig = {
+          ...(settings.merged.modelProviders as
+            | ModelProvidersConfig
+            | undefined),
+          [protocol]: updatedConfigs,
+        };
+        config.reloadModelProvidersConfig(updatedModelProviders);
+        await config.refreshAuth(protocol);
+
+        setAuthError(null);
+        setAuthState(AuthState.Authenticated);
+        setPendingAuthType(undefined);
+        setIsAuthDialogOpen(false);
+        setIsAuthenticating(false);
+        onAuthChange?.();
+
+        addItem(
+          {
+            type: MessageType.INFO,
+            text: t(
+              'Custom API Key authenticated successfully. Settings updated with generated env key and model provider config.',
+            ),
+          },
+          Date.now(),
+        );
+
+        addItem(
+          {
+            type: MessageType.INFO,
+            text: t('Tip: Use /model to switch between configured models.'),
+          },
+          Date.now(),
+        );
+
+        const authEvent = new AuthEvent(protocol, 'manual', 'success');
+        logAuth(config, authEvent);
+      } catch (error) {
+        handleAuthFailure(error);
+      }
+    },
+    [settings, config, handleAuthFailure, addItem, onAuthChange],
+  );
+
+  /**
    /**
     * We previously used a useEffect to trigger authentication automatically when
     * settings.security.auth.selectedType changed. This caused problems: if authentication failed,
@@ -738,6 +904,7 @@ export const useAuthCommand = (
     handleCodingPlanSubmit,
     handleAlibabaStandardSubmit,
     handleOpenRouterSubmit,
+    handleCustomApiKeySubmit,
     openAuthDialog,
     cancelAuthentication,
   };

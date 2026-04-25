@@ -666,3 +666,327 @@ describe('AuthDialog', () => {
     unmount();
   });
 });
+
+describe('AuthDialog Custom API Key Wizard', () => {
+  const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const createStandardSettings = (): LoadedSettings =>
+    new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        originalSettings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+  it('navigates to protocol selection when Custom API Key is selected', async () => {
+    const settings = createStandardSettings();
+    const handleCustomApiKeySubmit = vi.fn();
+
+    const mockUIState = {
+      authError: null,
+      pendingAuthType: undefined,
+    } as UIState;
+
+    const mockUIActions = {
+      handleAuthSelect: vi.fn(),
+      handleCodingPlanSubmit: vi.fn(),
+      handleAlibabaStandardSubmit: vi.fn(),
+      handleOpenRouterSubmit: vi.fn(),
+      handleCustomApiKeySubmit,
+      onAuthError: vi.fn(),
+      handleRetryLastPrompt: vi.fn(),
+    } as unknown as UIActions;
+
+    const mockConfig = {
+      getAuthType: vi.fn(() => undefined),
+      getContentGeneratorConfig: vi.fn(() => ({})),
+    } as unknown as Config;
+
+    const { stdin, lastFrame, unmount } = renderWithProviders(
+      <UIStateContext.Provider value={mockUIState}>
+        <UIActionsContext.Provider value={mockUIActions}>
+          <AuthDialog />
+        </UIActionsContext.Provider>
+      </UIStateContext.Provider>,
+      { settings, config: mockConfig },
+    );
+    await wait();
+
+    // Press down twice to select API Key (from default OAUTH, down once wraps to CODING_PLAN, down again to API_KEY)
+    stdin.write('\u001b[B'); // Down from OAUTH -> CODING_PLAN
+    await wait();
+    stdin.write('\u001b[B'); // Down from CODING_PLAN -> API_KEY
+    await wait();
+    stdin.write('\r'); // Enter
+    await wait();
+
+    // Now on api-key-type-select,Encoding we need to see both options
+    await vi.waitFor(() => {
+      const frame = lastFrame();
+      expect(frame).toContain('Custom API Key');
+    });
+
+    // Select Custom API Key (second option)
+    stdin.write('\u001b[B'); // Down arrow
+    await wait();
+    stdin.write('\r'); // Enter
+    await wait();
+
+    await vi.waitFor(() => {
+      const frame = lastFrame();
+      expect(frame).toContain('Custom API Key · Protocol');
+      expect(frame).toContain('OpenAI-compatible');
+      expect(frame).toContain('Anthropic-compatible');
+      expect(frame).toContain('Gemini-compatible');
+    });
+
+    unmount();
+  });
+
+  it('navigates to base URL input after selecting a protocol', async () => {
+    const settings = createStandardSettings();
+    const handleCustomApiKeySubmit = vi.fn();
+
+    const mockUIState = {
+      authError: null,
+      pendingAuthType: undefined,
+    } as UIState;
+
+    const mockUIActions = {
+      handleAuthSelect: vi.fn(),
+      handleCodingPlanSubmit: vi.fn(),
+      handleAlibabaStandardSubmit: vi.fn(),
+      handleOpenRouterSubmit: vi.fn(),
+      handleCustomApiKeySubmit,
+      onAuthError: vi.fn(),
+      handleRetryLastPrompt: vi.fn(),
+    } as unknown as UIActions;
+
+    const mockConfig = {
+      getAuthType: vi.fn(() => undefined),
+      getContentGeneratorConfig: vi.fn(() => ({})),
+    } as unknown as Config;
+
+    const { stdin, lastFrame, unmount } = renderWithProviders(
+      <UIStateContext.Provider value={mockUIState}>
+        <UIActionsContext.Provider value={mockUIActions}>
+          <AuthDialog />
+        </UIActionsContext.Provider>
+      </UIStateContext.Provider>,
+      { settings, config: mockConfig },
+    );
+    await wait();
+
+    // Navigate: Main -> API Key Type -> Custom API Key -> Protocol select
+    stdin.write('\u001b[B'); // Down from OAUTH -> CODING_PLAN
+    await wait();
+    stdin.write('\u001b[B'); // Down from CODING_PLAN -> API_KEY
+    await wait();
+    stdin.write('\r'); // Enter
+    await wait();
+    stdin.write('\u001b[B'); // Down to Custom API Key
+    await wait();
+    stdin.write('\r'); // Enter -> protocol select
+    await wait();
+
+    // Now at protocol selection. First option is OpenAI. Press Enter
+    stdin.write('\r'); // Enter -> select OpenAI protocol
+    await wait();
+
+    await vi.waitFor(() => {
+      const frame = lastFrame();
+      expect(frame).toContain('Custom API Key · Base URL');
+      expect(frame).toContain('OpenAI-compatible');
+      expect(frame).toContain('Enter the API endpoint');
+    });
+
+    unmount();
+  });
+
+  it('shows review screen with JSON after entering model IDs', async () => {
+    const settings = createStandardSettings();
+    const handleCustomApiKeySubmit = vi.fn();
+
+    const mockUIState = {
+      authError: null,
+      pendingAuthType: undefined,
+    } as UIState;
+
+    const mockUIActions = {
+      handleAuthSelect: vi.fn(),
+      handleCodingPlanSubmit: vi.fn(),
+      handleAlibabaStandardSubmit: vi.fn(),
+      handleOpenRouterSubmit: vi.fn(),
+      handleCustomApiKeySubmit,
+      onAuthError: vi.fn(),
+      handleRetryLastPrompt: vi.fn(),
+    } as unknown as UIActions;
+
+    const mockConfig = {
+      getAuthType: vi.fn(() => undefined),
+      getContentGeneratorConfig: vi.fn(() => ({})),
+    } as unknown as Config;
+
+    const { stdin, lastFrame, unmount } = renderWithProviders(
+      <UIStateContext.Provider value={mockUIState}>
+        <UIActionsContext.Provider value={mockUIActions}>
+          <AuthDialog />
+        </UIActionsContext.Provider>
+      </UIStateContext.Provider>,
+      { settings, config: mockConfig },
+    );
+    await wait();
+
+    // Navigate through the wizard:
+    // Main -> API Key -> Custom API Key -> Protocol -> Base URL -> API Key -> Model IDs -> Review
+    stdin.write('\u001b[B');
+    await wait(); // OAUTH -> CODING_PLAN
+    stdin.write('\u001b[B');
+    await wait(); // CODING_PLAN -> API_KEY
+    stdin.write('\r');
+    await wait(); // -> api-key-type-select
+    stdin.write('\u001b[B');
+    await wait(); // Custom API Key
+    stdin.write('\r');
+    await wait(); // -> protocol select
+
+    // Default protocol is OpenAI, press Enter
+    stdin.write('\r');
+    await wait(); // -> base URL input
+
+    // Base URL is pre-filled with default. Submit it.
+    stdin.write('\r');
+    await wait(); // -> API key input
+
+    // Enter test API key
+    stdin.write('sk-test-key-12345');
+    await wait();
+    stdin.write('\r');
+    await wait(); // -> model IDs input
+
+    // Enter model IDs
+    stdin.write('qwen/qwen3-coder,gpt-4.1');
+    await wait();
+    stdin.write('\r');
+    await wait(); // -> review
+
+    await vi.waitFor(() => {
+      const frame = lastFrame();
+      expect(frame).toContain('Custom API Key · Review');
+      expect(frame).toContain('The following JSON will be saved');
+      expect(frame).toContain('QWEN_CUSTOM_API_KEY_OPENAI');
+      expect(frame).toContain('qwen/qwen3-coder');
+      expect(frame).toContain('gpt-4.1');
+      expect(frame).toContain('Enter to save');
+    });
+
+    unmount();
+  });
+
+  it('calls handleCustomApiKeySubmit on Enter in review view', async () => {
+    const settings = createStandardSettings();
+    const handleCustomApiKeySubmit = vi.fn().mockResolvedValue(undefined);
+
+    const mockUIState = {
+      authError: null,
+      pendingAuthType: undefined,
+    } as UIState;
+
+    const mockUIActions = {
+      handleAuthSelect: vi.fn(),
+      handleCodingPlanSubmit: vi.fn(),
+      handleAlibabaStandardSubmit: vi.fn(),
+      handleOpenRouterSubmit: vi.fn(),
+      handleCustomApiKeySubmit,
+      onAuthError: vi.fn(),
+      handleRetryLastPrompt: vi.fn(),
+    } as unknown as UIActions;
+
+    const mockConfig = {
+      getAuthType: vi.fn(() => undefined),
+      getContentGeneratorConfig: vi.fn(() => ({})),
+    } as unknown as Config;
+
+    const { stdin, lastFrame, unmount } = renderWithProviders(
+      <UIStateContext.Provider value={mockUIState}>
+        <UIActionsContext.Provider value={mockUIActions}>
+          <AuthDialog />
+        </UIActionsContext.Provider>
+      </UIStateContext.Provider>,
+      { settings, config: mockConfig },
+    );
+    await wait();
+
+    // Navigate through wizard
+    stdin.write('\u001b[B');
+    await wait(); // OAUTH -> CODING_PLAN
+    stdin.write('\u001b[B');
+    await wait(); // CODING_PLAN -> API_KEY
+    stdin.write('\r');
+    await wait();
+    stdin.write('\u001b[B');
+    await wait(); // Custom
+    stdin.write('\r');
+    await wait();
+
+    stdin.write('\r');
+    await wait(); // protocol (OpenAI default)
+    stdin.write('\r');
+    await wait(); // base URL (default)
+    stdin.write('sk-test');
+    await wait();
+    stdin.write('\r');
+    await wait(); // API key
+
+    stdin.write('model-1,model-2');
+    await wait();
+    stdin.write('\r');
+    await wait(); // model IDs
+
+    // We're now at review screen. Verify and press Enter
+    await vi.waitFor(() => {
+      const frame = lastFrame();
+      expect(frame).toContain('Enter to save');
+    });
+
+    stdin.write('\r'); // Enter to save
+    await wait();
+
+    await vi.waitFor(() => {
+      expect(handleCustomApiKeySubmit).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'https://api.openai.com/v1',
+        'sk-test',
+        'model-1,model-2',
+      );
+    });
+
+    unmount();
+  });
+});
