@@ -11,6 +11,7 @@
     "build:preload": "esbuild src/preload/index.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist/preload/index.cjs",
     "build:renderer": "vite build",
     "dev:renderer": "vite --host 127.0.0.1",
+    "e2e:cdp": "node scripts/e2e-cdp-smoke.mjs",
     "lint": "eslint src --ext .ts,.tsx",
     "package": "electron-builder --config electron-builder.yml",
     "package:dir": "electron-builder --dir --config electron-builder.yml",

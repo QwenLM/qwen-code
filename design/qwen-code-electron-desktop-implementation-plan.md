@@ -269,9 +269,15 @@ scope before a DONE marker can be created.
 
 ### Slice 14: Desktop E2E Harness
 
-- Status: pending
+- Status: complete in iteration 9
 - Goal: add repeatable Electron E2E harness with fake ACP, temporary HOME and
   workspace, screenshot/console/network diagnostics, and CDP renderer access.
+- Files:
+  - `packages/desktop/package.json`
+  - `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+  - `packages/desktop/src/main/acp/createE2eAcpClient.ts`
+  - `packages/desktop/src/main/main.ts`
+  - `packages/desktop/src/main/native/dialogs.ts`
 - Acceptance criteria:
   - `QWEN_DESKTOP_CDP_PORT` is used by the harness to inspect the renderer on
     `127.0.0.1`.
@@ -280,6 +286,32 @@ scope before a DONE marker can be created.
     works, and package smoke still passes.
   - Failures write screenshots, console errors, failed requests, and main logs
     under `.qwen/e2e-tests/electron-desktop/`.
+- Completed:
+  - Added `npm run e2e:cdp --workspace=packages/desktop`.
+  - Harness launches Electron with `QWEN_DESKTOP_CDP_PORT`, a temporary HOME,
+    temporary runtime/userData directories, a temporary Git workspace, and a
+    fake ACP client enabled only through E2E environment variables.
+  - CDP checks stable workbench landmarks, opens the test project through the
+    preload dialog path, creates a fake local thread, sends a prompt, responds
+    to a command approval request, saves model settings, runs a scoped terminal
+    command, and captures initial/final screenshots.
+  - Failure diagnostics include screenshots, DOM text, renderer console errors,
+    failed network requests, Electron stdout/stderr, and Git status/diff.
+- Verification:
+  - `npm run typecheck --workspace=packages/desktop` passed.
+  - `npm run build --workspace=packages/desktop` passed.
+  - `npm run e2e:cdp --workspace=packages/desktop` passed. Success artifacts
+    were written under ignored
+    `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T02-54-48-799Z/`.
+  - `npm run typecheck` passed.
+  - `npm run build` passed.
+  - Bundle/package smoke passed:
+    `npm run bundle && npm run package:dir --workspace=packages/desktop && npm run smoke:package --workspace=packages/desktop`.
+  - After tightening the E2E fake ACP gate, package dir, package smoke, and
+    packaged launch smoke passed again.
+- E2E coverage:
+  - Recorded in
+    `.qwen/e2e-tests/electron-desktop/cdp-renderer-observability.md`.
 
 ## Decision Log
 
@@ -314,6 +346,10 @@ scope before a DONE marker can be created.
   extract the visible workspace regions into layout components. This preserves
   server-backed behavior while making the workbench structure testable through
   stable DOM landmarks.
+- 2026-04-25: Add a fake ACP client only behind
+  `QWEN_DESKTOP_E2E_FAKE_ACP=1` so the Electron E2E harness can cover session,
+  prompt, and permission UI without credentials or network calls. Production
+  startup still creates the real `AcpProcessClient`.
 
 ## Verification Log
 
@@ -358,6 +394,20 @@ scope before a DONE marker can be created.
   - `npm run build` passed across the configured build order. Existing VS Code
     companion lint warnings were reported by its build script, with no errors.
   - `npm run typecheck` passed across workspaces.
+- 2026-04-25 Slice 14 desktop E2E harness:
+  - `npm run typecheck --workspace=packages/desktop` passed.
+  - `npm run build --workspace=packages/desktop` passed.
+  - `npm run e2e:cdp --workspace=packages/desktop` passed and reported no
+    renderer console errors or failed network requests.
+  - `npm run typecheck` passed across workspaces.
+  - `npm run build` passed across workspaces. Existing VS Code companion lint
+    warnings were reported by its build script, with no errors.
+  - Bundle/package smoke passed:
+    `npm run bundle && npm run package:dir --workspace=packages/desktop && npm run smoke:package --workspace=packages/desktop`.
+    Electron builder reported non-fatal metadata/dependency warnings
+    consistent with prior package runs.
+  - After tightening the E2E fake ACP gate, package dir, package smoke, and
+    packaged launch smoke passed again.
 
 ## Self Review Notes
 
@@ -390,10 +440,14 @@ scope before a DONE marker can be created.
 - Slice 11 did not broaden preload or IPC. The renderer shell split is a pure
   component refactor with stable DOM landmarks for the future Electron/CDP
   harness.
+- Slice 14 E2E hooks are gated by explicit environment variables:
+  `QWEN_DESKTOP_E2E`, `QWEN_DESKTOP_E2E_FAKE_ACP`,
+  `QWEN_DESKTOP_E2E_USER_DATA_DIR`, and
+  `QWEN_DESKTOP_TEST_SELECT_DIRECTORY`. Normal desktop startup still uses the
+  native directory picker and real ACP process.
 
 ## Remaining Work
 
 - Implement hunk-level diff review, terminal PTY/write/send-output-to-AI
-  refinements, Electron E2E harness, DevTools MCP
-  DOM/console/network/screenshot checks, and final package smoke before
+  refinements, final package smoke, and any remaining MVP polish before
   creating the DONE marker.

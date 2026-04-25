@@ -9,15 +9,18 @@ import { shouldQuitWhenWindowsClosed } from './lifecycle/AppLifecycle.js';
 import { configureDesktopRemoteDebugging } from './lifecycle/remoteDebugging.js';
 import { registerIpc } from './ipc/registerIpc.js';
 import { createMainWindow } from './windows/MainWindow.js';
+import { createE2eAcpClient } from './acp/createE2eAcpClient.js';
 import { resolveDesktopAcpLaunchConfig } from './acp/resolveCli.js';
 import { AcpProcessClient } from '../server/acp/AcpProcessClient.js';
 import { startDesktopServer } from '../server/index.js';
 import type { DesktopServer } from '../server/types.js';
+import type { AcpSessionClient } from '../server/services/sessionService.js';
 
 let desktopServer: DesktopServer | undefined;
-let acpClient: AcpProcessClient | undefined;
+let acpClient: DesktopMainAcpClient | undefined;
 let mainWindow: BrowserWindow | null = null;
 
+configureE2eUserDataPath();
 configureDesktopRemoteDebugging(app.commandLine);
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
@@ -59,7 +62,7 @@ if (!gotSingleInstanceLock) {
   });
 
   app.on('before-quit', () => {
-    acpClient?.disconnect();
+    acpClient?.disconnect?.();
     void desktopServer?.close();
   });
 }
@@ -76,7 +79,11 @@ async function bootstrap(): Promise<void> {
     execPath: process.execPath,
   });
   process.env['QWEN_DESKTOP_CLI_PATH'] ??= acpLaunchConfig.cliEntryPath;
-  acpClient = new AcpProcessClient(acpLaunchConfig);
+  acpClient =
+    process.env['QWEN_DESKTOP_E2E'] === '1' &&
+    process.env['QWEN_DESKTOP_E2E_FAKE_ACP'] === '1'
+      ? createE2eAcpClient()
+      : new AcpProcessClient(acpLaunchConfig);
   desktopServer = await startDesktopServer({ acpClient });
   registerIpc({
     getServerInfo: () => {
@@ -102,6 +109,17 @@ async function createOrFocusMainWindow(): Promise<void> {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+}
+
+type DesktopMainAcpClient = AcpSessionClient & {
+  disconnect?: () => void;
+};
+
+function configureE2eUserDataPath(): void {
+  const userDataPath = process.env['QWEN_DESKTOP_E2E_USER_DATA_DIR'];
+  if (process.env['QWEN_DESKTOP_E2E'] === '1' && userDataPath) {
+    app.setPath('userData', userDataPath);
+  }
 }
 
 function registerContentSecurityPolicy(): void {
