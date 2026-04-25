@@ -796,32 +796,29 @@ export const App: React.FC = () => {
           }
         };
 
-        if (itemId === 'auth') {
+        // Client-side commands that trigger extension actions directly
+        // instead of being sent to the agent as messages.
+        const clientActions: Record<string, () => void> = {
+          auth: () => vscode.postMessage({ type: 'auth', data: {} }),
+          account: () =>
+            vscode.postMessage({ type: 'getAccountInfo', data: {} }),
+          model: () => setShowModelSelector(true),
+        };
+
+        const clientAction = clientActions[itemId];
+        if (clientAction) {
           clearTriggerText();
-          vscode.postMessage({ type: 'auth', data: {} });
+          clientAction();
           closeCompletion();
           return;
         }
 
-        if (itemId === 'account') {
-          clearTriggerText();
-          vscode.postMessage({ type: 'getAccountInfo', data: {} });
-          closeCompletion();
-          return;
-        }
-
-        if (itemId === 'model') {
-          clearTriggerText();
-          setShowModelSelector(true);
-          closeCompletion();
-          return;
-        }
-
-        // Handle server-provided slash commands by sending them as messages.
-        // Skip when fillOnly (Tab) — let the generic insertion path fill the
-        // command text so the user can keep typing arguments.
-        // Special case: /skills always uses fill behavior (Enter = Tab) to
-        // allow the secondary skill picker to appear.
+        // For server-provided slash commands, decide based on the `input`
+        // field: commands without input (input == null) auto-submit
+        // immediately; commands that accept input fall through to the generic
+        // insertion path so users can type arguments before submitting.
+        // Special case: /skills always uses fill behavior to allow the
+        // secondary skill picker to appear.
         const serverCmd = availableCommands.find((c) => c.name === itemId);
         const isSkillsCmd = shouldOpenSkillsSecondaryPicker(
           item,
@@ -829,19 +826,19 @@ export const App: React.FC = () => {
         );
         if (
           serverCmd &&
-          !fillOnly &&
           !isSkillsCmd &&
           !isExpandableSlashCommand(serverCmd.name)
         ) {
-          // Clear the trigger text since we're sending the command
-          clearTriggerText();
-          // Send the slash command as a user message
-          vscode.postMessage({
-            type: 'sendMessage',
-            data: { text: `/${serverCmd.name}` },
-          });
-          closeCompletion();
-          return;
+          if (!serverCmd.input && !fillOnly) {
+            clearTriggerText();
+            vscode.postMessage({
+              type: 'sendMessage',
+              data: { text: `/${serverCmd.name}` },
+            });
+            closeCompletion();
+            return;
+          }
+          // Command accepts input — fall through to fill the input box.
         }
 
         // Handle secondary skill selection — send `/skills <name>` with

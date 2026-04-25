@@ -81,6 +81,7 @@ import {
   type NonInteractiveSlashCommandResult,
 } from '../../nonInteractiveCliCommands.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
+import { CommandKind } from '../../ui/commands/types.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 
@@ -976,12 +977,19 @@ export class Session implements SessionContext {
         'acp',
       );
 
-      // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol
+      // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol.
+      // Commands that accept arguments (skills, commands with completion) get
+      // input: { hint } so the client can let users type arguments before
+      // submitting.  Built-in commands without completion get input: null so the
+      // client auto-submits them immediately on selection.
       const availableCommands: AvailableCommand[] = slashCommands.map(
         (cmd) => ({
           name: cmd.name,
           description: cmd.description,
-          input: null,
+          input:
+            cmd.kind !== CommandKind.BUILT_IN || cmd.completion != null
+              ? { hint: cmd.argumentHint ?? '' }
+              : null,
         }),
       );
 

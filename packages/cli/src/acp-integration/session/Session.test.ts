@@ -221,6 +221,7 @@ describe('Session', () => {
         {
           name: 'init',
           description: 'Initialize project context',
+          kind: 'built-in',
         },
       ]);
 
@@ -251,6 +252,7 @@ describe('Session', () => {
         {
           name: 'init',
           description: 'Initialize project context',
+          kind: 'built-in',
         },
       ]);
       mockConfig.getSkillManager = vi.fn().mockReturnValue({
