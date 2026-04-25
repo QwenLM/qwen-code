@@ -73,6 +73,8 @@ async function main() {
   await setFieldByAriaLabel('Message', 'Please exercise command approval.');
   await clickButton('Send');
   await waitForText('Approve Once');
+  await assertInlineCommandApproval('inline-command-approval.json');
+  await saveScreenshot('inline-command-approval.png');
   await clickButton('Approve Once');
   await waitForText('E2E fake ACP response received');
   await assertConversationChangesSummary('conversation-changes-summary.json');
@@ -603,6 +605,8 @@ async function assertConversationChangesSummary(fileName) {
           return label === 'Review Changes';
         })
       ),
+      hasPendingApprovalCard:
+        document.querySelector('[data-testid="conversation-approval-card"]') !== null,
       reviewOpen: Boolean(document.querySelector('[data-testid="review-panel"]'))
     };
   })()`);
@@ -645,6 +649,10 @@ async function assertConversationChangesSummary(fileName) {
     throw new Error('Changed-files summary is missing its review action.');
   }
 
+  if (snapshot.hasPendingApprovalCard) {
+    throw new Error('Approval card should resolve after approval.');
+  }
+
   if (snapshot.reviewOpen) {
     throw new Error('Changed-files summary should not open review by default.');
   }
@@ -659,6 +667,111 @@ async function assertConversationChangesSummary(fileName) {
         snapshot.summaryRect,
       )}`,
     );
+  }
+}
+
+async function assertInlineCommandApproval(fileName) {
+  await waitForSelector('[data-testid="conversation-approval-card"]');
+  const snapshot = await evaluate(`(() => {
+    const card = document.querySelector(
+      '[data-testid="conversation-approval-card"]'
+    );
+    const timeline = document.querySelector('.chat-timeline');
+    const composer = document.querySelector('[data-testid="message-composer"]');
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const buttons = [...(card?.querySelectorAll('button') ?? [])].map(
+      (button) =>
+        button.getAttribute('aria-label') ||
+        button.getAttribute('title') ||
+        button.textContent.trim()
+    );
+    return {
+      bodyText: document.body.innerText,
+      cardText: card?.innerText ?? '',
+      buttons,
+      cardRect: rectFor(card),
+      timelineRect: rectFor(timeline),
+      composerRect: rectFor(composer),
+      hasPermissionStrip: document.querySelector('.permission-strip') !== null,
+      hasRequestEvent: document.body.innerText.includes('Permission requested')
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  const cardText = snapshot.cardText.toLowerCase();
+  for (const expectedText of [
+    'run desktop e2e command',
+    'printf desktop-e2e',
+    'pending',
+  ]) {
+    if (!cardText.includes(expectedText)) {
+      throw new Error(
+        `Inline approval card is missing ${expectedText}: ${snapshot.cardText}`,
+      );
+    }
+  }
+
+  for (const expectedAction of ['Approve Once', 'Approve for Thread', 'Deny']) {
+    if (!snapshot.buttons.includes(expectedAction)) {
+      throw new Error(
+        `Inline approval card missing action ${expectedAction}; buttons=${snapshot.buttons.join(
+          ', ',
+        )}`,
+      );
+    }
+  }
+
+  if (snapshot.hasPermissionStrip) {
+    throw new Error(
+      'Permission approval should render inline, not in a strip.',
+    );
+  }
+
+  if (snapshot.hasRequestEvent) {
+    throw new Error('Permission request protocol event leaked into the body.');
+  }
+
+  if (!snapshot.cardRect || !snapshot.timelineRect || !snapshot.composerRect) {
+    throw new Error(
+      `Inline approval geometry is missing: ${JSON.stringify(snapshot)}`,
+    );
+  }
+
+  if (snapshot.cardRect.width < 360 || snapshot.cardRect.height > 180) {
+    throw new Error(
+      `Inline approval card geometry is unexpected: ${JSON.stringify(
+        snapshot.cardRect,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.cardRect.left < snapshot.timelineRect.left ||
+    snapshot.cardRect.right > snapshot.timelineRect.right + 1
+  ) {
+    throw new Error('Inline approval card should stay inside the timeline.');
+  }
+
+  if (snapshot.cardRect.bottom > snapshot.composerRect.top) {
+    throw new Error('Inline approval card overlaps the composer.');
   }
 }
 

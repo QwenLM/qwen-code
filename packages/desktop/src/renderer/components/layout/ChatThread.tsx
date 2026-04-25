@@ -12,7 +12,11 @@ import type {
 } from '../../api/client.js';
 import type { ChatState, ChatTimelineItem } from '../../stores/chatStore.js';
 import type { ModelState } from '../../stores/modelStore.js';
-import type { DesktopApprovalMode } from '../../../shared/desktopProtocol.js';
+import type {
+  DesktopApprovalMode,
+  DesktopAskUserQuestionRequest,
+  DesktopPermissionRequest,
+} from '../../../shared/desktopProtocol.js';
 
 export function ChatThread({
   activeProject,
@@ -76,11 +80,8 @@ export function ChatThread({
         activeSessionId={activeSessionId}
         gitDiff={gitDiff}
         isDraftSession={isDraftSession}
-        onOpenReview={onOpenReview}
-      />
-      <PermissionPrompts
-        state={chatState}
         onAskUserQuestionResponse={onAskUserQuestionResponse}
+        onOpenReview={onOpenReview}
         onPermissionResponse={onPermissionResponse}
       />
       <form
@@ -184,19 +185,26 @@ function ChatTimeline({
   activeSessionId,
   gitDiff,
   isDraftSession,
+  onAskUserQuestionResponse,
   onOpenReview,
+  onPermissionResponse,
   state,
 }: {
   activeProject: DesktopProject | null;
   activeSessionId: string | null;
   gitDiff: DesktopGitDiff | null;
   isDraftSession: boolean;
+  onAskUserQuestionResponse: (requestId: string, optionId: string) => void;
   onOpenReview: () => void;
+  onPermissionResponse: (requestId: string, optionId: string) => void;
   state: ChatState;
 }) {
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const pendingPermissionId = state.pendingPermission?.requestId ?? '';
   const pendingQuestionId = state.pendingAskUserQuestion?.requestId ?? '';
+  const hasPendingPrompt = Boolean(
+    state.pendingPermission || state.pendingAskUserQuestion,
+  );
 
   useEffect(() => {
     const timeline = timelineRef.current;
@@ -216,7 +224,12 @@ function ChatTimeline({
     return <div className="conversation-empty">Open a project to start</div>;
   }
 
-  if (!activeSessionId && !isDraftSession && state.items.length === 0) {
+  if (
+    !activeSessionId &&
+    !isDraftSession &&
+    state.items.length === 0 &&
+    !hasPendingPrompt
+  ) {
     return (
       <ConversationEmpty
         gitDiff={gitDiff}
@@ -226,7 +239,7 @@ function ChatTimeline({
     );
   }
 
-  if (state.items.length === 0) {
+  if (state.items.length === 0 && !hasPendingPrompt) {
     return (
       <ConversationEmpty
         gitDiff={gitDiff}
@@ -241,6 +254,12 @@ function ChatTimeline({
       {state.items.map((item) => (
         <TimelineItem item={item} key={item.id} />
       ))}
+      <InlinePendingPrompts
+        pendingAskUserQuestion={state.pendingAskUserQuestion}
+        pendingPermission={state.pendingPermission}
+        onAskUserQuestionResponse={onAskUserQuestionResponse}
+        onPermissionResponse={onPermissionResponse}
+      />
       <ChangedFilesSummaryCard gitDiff={gitDiff} onOpenReview={onOpenReview} />
       <div className="chat-scroll-anchor" aria-hidden="true" />
     </div>
@@ -301,6 +320,166 @@ function TimelineItem({ item }: { item: ChatTimelineItem }) {
   }
 
   return <div className="chat-event">{item.label}</div>;
+}
+
+function InlinePendingPrompts({
+  onAskUserQuestionResponse,
+  onPermissionResponse,
+  pendingAskUserQuestion,
+  pendingPermission,
+}: {
+  onAskUserQuestionResponse: (requestId: string, optionId: string) => void;
+  onPermissionResponse: (requestId: string, optionId: string) => void;
+  pendingAskUserQuestion: ChatState['pendingAskUserQuestion'];
+  pendingPermission: ChatState['pendingPermission'];
+}) {
+  if (!pendingPermission && !pendingAskUserQuestion) {
+    return null;
+  }
+
+  return (
+    <>
+      {pendingPermission ? (
+        <CommandApprovalCard
+          permission={pendingPermission.request}
+          requestId={pendingPermission.requestId}
+          onPermissionResponse={onPermissionResponse}
+        />
+      ) : null}
+      {pendingAskUserQuestion ? (
+        <AskUserQuestionCard
+          questionRequest={pendingAskUserQuestion.request}
+          requestId={pendingAskUserQuestion.requestId}
+          onAskUserQuestionResponse={onAskUserQuestionResponse}
+        />
+      ) : null}
+    </>
+  );
+}
+
+function CommandApprovalCard({
+  onPermissionResponse,
+  permission,
+  requestId,
+}: {
+  onPermissionResponse: (requestId: string, optionId: string) => void;
+  permission: DesktopPermissionRequest;
+  requestId: string;
+}) {
+  const toolCall = permission.toolCall;
+  const title = toolCall.title || toolCall.kind || 'Command approval';
+  const inputPreview = formatToolInput(toolCall.rawInput);
+  const status = toolCall.status || 'waiting for approval';
+
+  return (
+    <section
+      aria-label="Command approval"
+      className="conversation-approval-card"
+      data-testid="conversation-approval-card"
+    >
+      <div className="conversation-approval-heading">
+        <div>
+          <span className="message-role">{toolCall.kind || 'approval'}</span>
+          <strong>{title}</strong>
+        </div>
+        <span className="conversation-approval-status">{status}</span>
+      </div>
+      {inputPreview ? (
+        <pre className="conversation-approval-command">{inputPreview}</pre>
+      ) : null}
+      <div className="conversation-approval-actions">
+        {permission.options.map((option) => (
+          <button
+            aria-label={option.name}
+            className={
+              option.kind.startsWith('reject')
+                ? 'secondary-button'
+                : 'primary-button'
+            }
+            key={option.optionId}
+            onClick={() => onPermissionResponse(requestId, option.optionId)}
+            type="button"
+          >
+            {option.name}
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AskUserQuestionCard({
+  onAskUserQuestionResponse,
+  questionRequest,
+  requestId,
+}: {
+  onAskUserQuestionResponse: (requestId: string, optionId: string) => void;
+  questionRequest: DesktopAskUserQuestionRequest;
+  requestId: string;
+}) {
+  return (
+    <section
+      aria-label="Question for user"
+      className="conversation-approval-card"
+      data-testid="conversation-question-card"
+    >
+      <div className="conversation-approval-heading">
+        <div>
+          <span className="message-role">question</span>
+          <strong>Input needed</strong>
+        </div>
+        <span className="conversation-approval-status">waiting</span>
+      </div>
+      <div className="conversation-question-list">
+        {questionRequest.questions.map((item) => (
+          <div key={`${item.header}-${item.question}`}>
+            <span className="message-role">{item.header}</span>
+            <strong>{item.question}</strong>
+            {item.options.length > 0 ? (
+              <ul className="question-options">
+                {item.options.map((option) => (
+                  <li key={`${option.label}-${option.description}`}>
+                    {option.label}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        ))}
+      </div>
+      <div className="conversation-approval-actions">
+        <button
+          aria-label="Cancel Question"
+          className="secondary-button"
+          onClick={() => onAskUserQuestionResponse(requestId, 'cancel')}
+          type="button"
+        >
+          Cancel
+        </button>
+        <button
+          aria-label="Submit Question"
+          className="primary-button"
+          onClick={() => onAskUserQuestionResponse(requestId, 'proceed_once')}
+          type="button"
+        >
+          Submit
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function formatToolInput(input: unknown): string | null {
+  if (typeof input === 'string') {
+    return input.length > 0 ? input : null;
+  }
+
+  if (input && typeof input === 'object' && 'command' in input) {
+    const command = (input as { command?: unknown }).command;
+    return typeof command === 'string' && command.length > 0 ? command : null;
+  }
+
+  return null;
 }
 
 function ChangedFilesSummaryCard({
@@ -436,94 +615,3 @@ const fallbackModeOptions = [
     description: 'Ask before running commands.',
   },
 ];
-
-function PermissionPrompts({
-  onAskUserQuestionResponse,
-  onPermissionResponse,
-  state,
-}: {
-  onAskUserQuestionResponse: (requestId: string, optionId: string) => void;
-  onPermissionResponse: (requestId: string, optionId: string) => void;
-  state: ChatState;
-}) {
-  const permission = state.pendingPermission;
-  const question = state.pendingAskUserQuestion;
-  if (!permission && !question) {
-    return null;
-  }
-
-  return (
-    <div className="permission-strip">
-      {permission ? (
-        <section className="permission-panel">
-          <div>
-            <span className="message-role">
-              {permission.request.toolCall.kind || 'permission'}
-            </span>
-            <strong>
-              {permission.request.toolCall.title ||
-                permission.request.toolCall.toolCallId}
-            </strong>
-          </div>
-          <div className="permission-actions">
-            {permission.request.options.map((option) => (
-              <button
-                className={
-                  option.kind.startsWith('reject')
-                    ? 'secondary-button'
-                    : 'primary-button'
-                }
-                key={option.optionId}
-                onClick={() =>
-                  onPermissionResponse(permission.requestId, option.optionId)
-                }
-                type="button"
-              >
-                {option.name}
-              </button>
-            ))}
-          </div>
-        </section>
-      ) : null}
-      {question ? (
-        <section className="permission-panel">
-          {question.request.questions.map((item) => (
-            <div key={`${item.header}-${item.question}`}>
-              <span className="message-role">{item.header}</span>
-              <strong>{item.question}</strong>
-              {item.options.length > 0 ? (
-                <ul className="question-options">
-                  {item.options.map((option) => (
-                    <li key={`${option.label}-${option.description}`}>
-                      {option.label}
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-            </div>
-          ))}
-          <div className="permission-actions">
-            <button
-              className="secondary-button"
-              onClick={() =>
-                onAskUserQuestionResponse(question.requestId, 'cancel')
-              }
-              type="button"
-            >
-              Cancel
-            </button>
-            <button
-              className="primary-button"
-              onClick={() =>
-                onAskUserQuestionResponse(question.requestId, 'proceed_once')
-              }
-              type="button"
-            >
-              Submit
-            </button>
-          </div>
-        </section>
-      ) : null}
-    </div>
-  );
-}

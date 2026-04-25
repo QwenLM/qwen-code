@@ -16,7 +16,7 @@ import type {
   DesktopSessionSummary,
   DesktopTerminal,
 } from '../../api/client.js';
-import { createInitialChatState } from '../../stores/chatStore.js';
+import { chatReducer, createInitialChatState } from '../../stores/chatStore.js';
 import { createInitialModelState } from '../../stores/modelStore.js';
 import { createInitialSettingsState } from '../../stores/settingsStore.js';
 import { WorkspacePage } from './WorkspacePage.js';
@@ -298,6 +298,62 @@ describe('WorkspacePage', () => {
     } finally {
       HTMLFormElement.prototype.requestSubmit = originalRequestSubmit;
     }
+  });
+
+  it('renders command approvals inline in the conversation timeline', () => {
+    const onPermissionResponse = vi.fn();
+    const chatState = chatReducer(createInitialChatState(), {
+      type: 'server_message',
+      message: {
+        type: 'permission_request',
+        requestId: 'permission-1',
+        request: {
+          sessionId: session.sessionId,
+          toolCall: {
+            toolCallId: 'tool-1',
+            kind: 'execute',
+            title: 'Run tests',
+            status: 'pending',
+            rawInput: 'npm test',
+          },
+          options: [
+            {
+              optionId: 'approve_once',
+              name: 'Approve Once',
+              kind: 'allow_once',
+            },
+            {
+              optionId: 'deny',
+              name: 'Deny',
+              kind: 'reject_once',
+            },
+          ],
+        },
+      },
+    });
+
+    const renderedContainer = renderWorkspace({
+      chatState,
+      onPermissionResponse,
+    });
+    const approvalCard = renderedContainer.querySelector(
+      '[data-testid="conversation-approval-card"]',
+    );
+
+    expect(approvalCard).toBeTruthy();
+    expect(approvalCard?.textContent).toContain('Run tests');
+    expect(approvalCard?.textContent).toContain('npm test');
+    expect(renderedContainer.querySelector('.permission-strip')).toBeNull();
+    expect(renderedContainer.textContent).not.toContain('Permission requested');
+
+    act(() => {
+      clickButton(renderedContainer, 'Approve Once');
+    });
+
+    expect(onPermissionResponse).toHaveBeenCalledWith(
+      'permission-1',
+      'approve_once',
+    );
   });
 
   it('routes terminal output through an attach action', () => {

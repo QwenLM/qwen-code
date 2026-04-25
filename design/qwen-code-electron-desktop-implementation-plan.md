@@ -22,6 +22,103 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Inline Command Approval Cards
+
+Status: completed in iteration 9.
+
+Goal: make command approvals and ask-user prompts part of the conversation
+timeline instead of a detached permission strip or protocol-like event row.
+
+User-visible value: users see what command/action needs attention in the same
+reading flow as the agent plan, tool activity, and changed-files summary. The
+main conversation can answer "what needs me now?" without exposing ACP request
+plumbing.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/stores/chatStore.ts`
+- `packages/desktop/src/renderer/stores/chatStore.test.ts`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/inline-command-approval-cards.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Pending command permissions render as compact inline conversation cards with
+  command/tool title, optional command input, status, and approval/deny actions.
+- Pending ask-user questions render inline with question text, options, and
+  Cancel/Submit actions.
+- The old permission strip is no longer rendered as a separate surface between
+  the timeline and composer.
+- Permission and ask-user server messages no longer append generic
+  `Permission requested` or `Question requested` event rows to the timeline.
+- Approval controls keep stable accessible labels and continue to send the
+  same permission response.
+- The composer remains docked and usable while a pending approval card is
+  visible; changed-files summary still appears after the request resolves.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/chatStore.test.ts src/renderer/components/layout/WorkspacePage.test.tsx`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, send from the composer, assert the
+  pending command approval appears as an inline conversation card with the fake
+  command title/input and no separate permission strip, approve it, assert the
+  card resolves away and the changed-files summary appears, then continue the
+  existing review, settings, and terminal smoke path.
+- E2E assertions: inline approval card is present before approval, has compact
+  geometry within the chat timeline, exposes approval/deny actions, does not
+  render protocol request events, and console errors/failed local requests are
+  absent.
+- Diagnostic artifacts: CDP screenshots, inline approval JSON, conversation
+  summary JSON, Electron log, summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained inline
+  card density, action hierarchy, and conversation-first placement;
+  `electron-desktop-dev` for renderer changes and real Electron CDP
+  verification.
+
+Notes and decisions:
+
+- The prototype keeps approvals and task state in the reading flow, so this
+  slice removes the separate permission strip instead of duplicating the same
+  action in two places.
+- The backing permission response contract remains unchanged; only renderer
+  placement and noise filtering change.
+- The inline card intentionally shows only the tool title/kind/status and a
+  string or `command` preview from tool input; request IDs and session IDs stay
+  out of the main conversation.
+
+Verification results:
+
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/chatStore.test.ts src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 11 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed after launch through real
+  Electron over CDP.
+- Passing artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T17-47-26-492Z/`.
+
+Next work:
+
+- Continue rich conversation primitives by improving tool-call cards with
+  file-reference chips, copy/retry/open actions, and clearer completed/failed
+  command output summaries.
+- Run another prototype fidelity pass on message density and assistant action
+  rows now that approvals, changed files, terminal, review, and settings have
+  all moved into supporting surfaces.
+
 ### Completed Slice: Settings Information Architecture
 
 Status: completed in iteration 8.

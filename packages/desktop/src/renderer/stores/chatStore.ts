@@ -211,15 +211,6 @@ function applyServerMessage(
           requestId: message.requestId,
           request: message.request,
         },
-        items: [
-          ...state.items,
-          createEventItem(
-            `Permission requested: ${
-              message.request.toolCall.title ||
-              message.request.toolCall.toolCallId
-            }`,
-          ),
-        ],
       };
 
     case 'ask_user_question':
@@ -229,7 +220,6 @@ function applyServerMessage(
           requestId: message.requestId,
           request: message.request,
         },
-        items: [...state.items, createEventItem('Question requested')],
       };
 
     case 'message_complete':

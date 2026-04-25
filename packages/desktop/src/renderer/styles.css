@@ -885,37 +885,77 @@ summary:focus-visible {
   flex: 0 0 auto;
 }
 
-.permission-strip {
+.conversation-approval-card {
   display: grid;
-  width: min(900px, calc(100% - 36px));
-  justify-self: center;
-  gap: 10px;
-  padding: 0 0 12px;
-}
-
-.permission-panel {
-  display: grid;
+  width: min(860px, 100%);
+  align-self: center;
   gap: 12px;
-  padding: 12px;
+  padding: 12px 14px;
   border: 1px solid rgba(240, 182, 110, 0.48);
   border-radius: var(--radius);
-  background: var(--warning-soft);
+  background:
+    linear-gradient(180deg, rgba(240, 182, 110, 0.1), transparent),
+    var(--warning-soft);
+  color: var(--text-soft);
 }
 
-.permission-panel > div {
+.conversation-approval-heading,
+.conversation-approval-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.conversation-approval-heading {
+  justify-content: space-between;
+}
+
+.conversation-approval-heading > div,
+.conversation-question-list,
+.conversation-question-list > div {
   display: grid;
+  min-width: 0;
   gap: 6px;
 }
 
-.permission-panel strong {
+.conversation-approval-heading strong,
+.conversation-question-list strong {
+  min-width: 0;
+  overflow: hidden;
   color: var(--text);
   font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.permission-actions {
-  display: flex;
+.conversation-approval-status {
+  flex: 0 0 auto;
+  color: var(--warning);
+  font-size: 11px;
+  font-weight: 820;
+  text-transform: uppercase;
+}
+
+.conversation-approval-command {
+  max-height: 82px;
+  min-width: 0;
+  margin: 0;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(8, 10, 11, 0.36);
+  color: var(--text);
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+    monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.conversation-approval-actions {
   flex-wrap: wrap;
-  gap: 8px;
   justify-content: flex-end;
 }
 
