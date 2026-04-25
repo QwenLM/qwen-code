@@ -24,6 +24,11 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { truncateToolOutput } from '../utils/truncation.js';
+import {
+  CommitAttributionService,
+  type StagedFileInfo,
+} from '../services/commitAttribution.js';
+import { buildGitNotesCommand } from '../services/attributionTrailer.js';
 import type {
   ShellExecutionConfig,
   ShellOutputEvent,
@@ -226,8 +231,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const tempFilePath = path.join(os.tmpdir(), tempFileName);
 
     try {
-      // Add co-author to git commit commands
-      const processedCommand = this.addCoAuthorToGitCommit(strippedCommand);
+      // Add co-author to git commit commands and PR attribution
+      const processedCommand = this.addAttributionToPR(
+        this.addCoAuthorToGitCommit(strippedCommand),
+      );
 
       const shouldRunInBackground = this.params.is_background;
       let finalCommand = processedCommand;
@@ -472,6 +479,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         }
       }
 
+      // After a successful git commit, attach AI attribution as git notes
+      await this.attachCommitAttribution(strippedCommand, result, cwd);
+
       // Truncate large output and save full content to a temp file.
       if (typeof llmContent === 'string') {
         const truncatedResult = await truncateToolOutput(
@@ -509,6 +519,205 @@ export class ShellToolInvocation extends BaseToolInvocation<
     }
   }
 
+  /**
+   * After a successful git commit, attach per-file AI attribution metadata
+   * as git notes. Analyzes staged files via `git diff` to calculate real
+   * AI vs human contribution percentages.
+   *
+   * Respects the gitCoAuthor setting: if the user disables co-author,
+   * attribution notes are also skipped.
+   */
+  private async attachCommitAttribution(
+    command: string,
+    result: { exitCode: number | null; aborted?: boolean },
+    cwd: string,
+  ): Promise<void> {
+    const gitCommitPattern = /\bgit\s+commit\b/;
+    if (!gitCommitPattern.test(command)) {
+      return;
+    }
+
+    const attributionService = CommitAttributionService.getInstance();
+    if (!attributionService.hasAttributions()) {
+      return;
+    }
+
+    if (result.exitCode !== 0 || result.aborted) {
+      attributionService.clearAttributions(false);
+      return;
+    }
+
+    const gitCoAuthorSettings = this.config.getGitCoAuthor();
+    if (!gitCoAuthorSettings.enabled) {
+      // Commit succeeded but attribution disabled — still reset prompt counters
+      attributionService.clearAttributions(true);
+      return;
+    }
+
+    try {
+      // Analyze the just-committed files by diffing HEAD against its parent.
+      // The commit already happened, so we diff HEAD~1..HEAD instead of --cached.
+      const stagedInfo = await this.getCommittedFileInfo(cwd);
+
+      const generatorName = gitCoAuthorSettings.name ?? 'Qwen-Coder';
+      const baseDir = this.config.getTargetDir();
+      const note = attributionService.generateNotePayload(
+        stagedInfo,
+        baseDir,
+        generatorName,
+      );
+      const notesCommand = buildGitNotesCommand(note);
+
+      if (!notesCommand) {
+        debugLogger.warn(
+          'AI attribution note too large, skipping git notes attachment',
+        );
+        return; // finally block still runs for cleanup
+      }
+
+      // Use a short timeout to avoid blocking the user if git notes stalls
+      const notesAbort = new AbortController();
+      const notesTimeout = setTimeout(() => notesAbort.abort(), 5000);
+      let notesExitCode: number | null = null;
+      let notesOutput = '';
+      try {
+        const handle = await ShellExecutionService.execute(
+          notesCommand,
+          cwd,
+          () => {},
+          notesAbort.signal,
+          false,
+          {},
+        );
+        const notesResult = await handle.result;
+        notesExitCode = notesResult.exitCode;
+        notesOutput = notesResult.output;
+      } finally {
+        clearTimeout(notesTimeout);
+      }
+
+      if (notesExitCode !== 0) {
+        debugLogger.warn(
+          `git notes exited with code ${notesExitCode}: ${notesOutput}`,
+        );
+      } else {
+        debugLogger.debug(
+          `Attached AI attribution note: ${note.summary.aiPercent}% AI, ${note.summary.totalFilesTouched} file(s)`,
+        );
+      }
+    } catch (err) {
+      debugLogger.warn(
+        `Failed to attach AI attribution note: ${getErrorMessage(err)}`,
+      );
+    } finally {
+      attributionService.clearAttributions();
+    }
+  }
+
+  /**
+   * Get information about files in the most recent commit by diffing
+   * HEAD against its parent (HEAD~1). Falls back to empty info on error.
+   */
+  private async getCommittedFileInfo(cwd: string): Promise<StagedFileInfo> {
+    const empty: StagedFileInfo = {
+      files: [],
+      diffSizes: new Map(),
+      deletedFiles: new Set(),
+    };
+
+    const runGit = async (args: string): Promise<string> => {
+      const handle = await ShellExecutionService.execute(
+        `git ${args}`,
+        cwd,
+        () => {},
+        AbortSignal.timeout(5000),
+        false,
+        {},
+      );
+      const r = await handle.result;
+      return r.exitCode === 0 ? r.output : '';
+    };
+
+    try {
+      // Detect whether HEAD has a parent. Also fails for shallow clones
+      // where the parent was pruned, which is fine — diff-tree --root is
+      // a safe fallback that diffs against the empty tree.
+      const hasParent = (await runGit('rev-parse --verify HEAD~1')).length > 0;
+
+      // Get changed file names.
+      // For the initial commit (no parent), use diff-tree --root since
+      // `git diff --root` is not a valid option for porcelain diff.
+      let nameOutput: string;
+      let statusOutput: string;
+      let statOutput: string;
+      if (hasParent) {
+        nameOutput = await runGit('diff --name-only HEAD~1 HEAD');
+        statusOutput = await runGit('diff --name-status HEAD~1 HEAD');
+        statOutput = await runGit('diff --stat HEAD~1 HEAD');
+      } else {
+        nameOutput = await runGit(
+          'diff-tree --root --no-commit-id -r --name-only HEAD',
+        );
+        statusOutput = await runGit(
+          'diff-tree --root --no-commit-id -r --name-status HEAD',
+        );
+        statOutput = await runGit(
+          'diff-tree --root --no-commit-id -r --stat HEAD',
+        );
+      }
+
+      const files = nameOutput
+        .split('\n')
+        .map((f) => f.trim())
+        .filter(Boolean);
+      if (files.length === 0) return empty;
+
+      // Get deleted files
+      const deletedFiles = new Set<string>();
+      for (const line of statusOutput.split('\n')) {
+        if (line.startsWith('D\t')) {
+          deletedFiles.add(line.slice(2).trim());
+        }
+      }
+
+      // Get diff sizes from stat output
+      const diffSizes = this.parseDiffStat(statOutput);
+
+      return { files, diffSizes, deletedFiles };
+    } catch {
+      return empty;
+    }
+  }
+
+  /**
+   * Parse `git diff --stat` output to extract per-file change sizes.
+   * Estimates character count as (insertions + deletions) * 40 chars/line.
+   */
+  private parseDiffStat(statOutput: string): Map<string, number> {
+    const sizes = new Map<string, number>();
+    const lines = statOutput.split('\n').filter(Boolean);
+
+    for (const line of lines) {
+      // Skip summary line ("N files changed, X insertions(+), Y deletions(-)")
+      if (line.includes('file changed') || line.includes('files changed')) {
+        continue;
+      }
+      // Format: " path/to/file | 5 ++---"
+      const match = line.match(/^\s*(.+?)\s+\|\s+(\d+)/);
+      if (match) {
+        let filePath = match[1]!.trim();
+        // Handle rename brace notation: "{old => new}" or "dir/{old => new}"
+        // Extract the new name so the key matches --name-only output
+        filePath = filePath.replace(/\{[^}]*?=>\s*([^}]*)\}/g, '$1');
+        const changes = parseInt(match[2]!, 10);
+        // Approximate chars: lines changed * avg 40 chars/line
+        sizes.set(filePath, changes * 40);
+      }
+    }
+
+    return sizes;
+  }
+
   private addCoAuthorToGitCommit(command: string): string {
     // Check if co-author feature is enabled
     const gitCoAuthorSettings = this.config.getGitCoAuthor();
@@ -539,7 +748,8 @@ Co-authored-by: ${gitCoAuthorSettings.name} <${gitCoAuthorSettings.email}>`;
     //   \\.          matches escape sequences like \" or \\
     //   (?:...|...)* matches normal chars or escapes, repeated
     const doubleQuotePattern = /(-[a-zA-Z]*m\s+)"((?:[^"\\]|\\.)*)"/;
-    const singleQuotePattern = /(-[a-zA-Z]*m\s+)'((?:[^'\\]|\\.)*)'/;
+    // Single quotes in bash have no escape mechanism — match until next '
+    const singleQuotePattern = /(-[a-zA-Z]*m\s+)'([^']*)'/;
     const doubleMatch = command.match(doubleQuotePattern);
     const singleMatch = command.match(singleQuotePattern);
     const match = doubleMatch ?? singleMatch;
@@ -550,11 +760,72 @@ Co-authored-by: ${gitCoAuthorSettings.name} <${gitCoAuthorSettings.email}>`;
       const newMessage = existingMessage + coAuthor;
       const replacement = prefix + quote + newMessage + quote;
 
-      return command.replace(fullMatch, replacement);
+      // Use indexOf + slice instead of String.replace() to avoid
+      // special replacement patterns ($&, $1, etc.) in user content
+      const idx = command.indexOf(fullMatch);
+      if (idx >= 0) {
+        return (
+          command.slice(0, idx) +
+          replacement +
+          command.slice(idx + fullMatch.length)
+        );
+      }
     }
 
     // If no -m flag found, the command might open an editor
     // In this case, we can't easily modify it, so return as-is
+    return command;
+  }
+
+  /**
+   * Detect `gh pr create` commands and append AI attribution text to the
+   * PR body. Format: "🤖 Generated with Qwen Code (X% N-shotted by Qwen-Coder)"
+   */
+  private addAttributionToPR(command: string): string {
+    const ghPrPattern = /\bgh\s+pr\s+create\b/;
+    if (!ghPrPattern.test(command)) {
+      return command;
+    }
+
+    const gitCoAuthorSettings = this.config.getGitCoAuthor();
+    if (!gitCoAuthorSettings.enabled) {
+      return command;
+    }
+
+    const attributionService = CommitAttributionService.getInstance();
+    const shots = attributionService.getPromptsSinceLastCommit();
+    const generator = gitCoAuthorSettings.name ?? 'Qwen-Coder';
+
+    const attribution =
+      shots > 0
+        ? `\n\n🤖 Generated with Qwen Code (${shots}-shotted by ${generator})`
+        : `\n\n🤖 Generated with Qwen Code`;
+
+    // Append to --body "..." or --body '...'
+    const bodyDoublePattern = /(--body\s+)"((?:[^"\\]|\\.)*)"/;
+    // Single quotes in bash have no escape mechanism — match until next '
+    const bodySinglePattern = /(--body\s+)'([^']*)'/;
+    const bodyDoubleMatch = command.match(bodyDoublePattern);
+    const bodySingleMatch = command.match(bodySinglePattern);
+    const bodyMatch = bodyDoubleMatch ?? bodySingleMatch;
+    const bodyQuote = bodyDoubleMatch ? '"' : "'";
+
+    if (bodyMatch) {
+      const [fullMatch, prefix, existingBody] = bodyMatch;
+      const newBody = existingBody + attribution;
+      // Use indexOf + slice instead of String.replace() to avoid
+      // special replacement patterns ($&, $1, etc.) in user content
+      const idx = command.indexOf(fullMatch);
+      if (idx >= 0) {
+        const replacement = prefix + bodyQuote + newBody + bodyQuote;
+        return (
+          command.slice(0, idx) +
+          replacement +
+          command.slice(idx + fullMatch.length)
+        );
+      }
+    }
+
     return command;
   }
 }

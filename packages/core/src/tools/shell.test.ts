@@ -38,6 +38,7 @@ import { ToolErrorType } from './tool-error.js';
 import { OUTPUT_UPDATE_INTERVAL_MS } from './shell.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
 
 describe('ShellTool', () => {
   let shellTool: ShellTool;
@@ -92,6 +93,9 @@ describe('ShellTool', () => {
         }),
       };
     });
+
+    // Ensure attribution singleton is clean between tests
+    CommitAttributionService.resetInstance();
   });
 
   describe('isCommandAllowed', () => {

@@ -45,6 +45,7 @@ import {
   COMPRESSION_TOKEN_THRESHOLD,
 } from '../services/chatCompressionService.js';
 import { LoopDetectionService } from '../services/loopDetectionService.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
@@ -173,8 +174,41 @@ export class GeminiClient {
         resumedSessionData.conversation,
       );
       await this.startChat(resumedHistory);
+
+      // Restore attribution state from the last snapshot in the session
+      this.restoreAttributionFromSession(resumedSessionData.conversation);
     } else {
       await this.startChat();
+    }
+  }
+
+  /**
+   * Restore attribution state from the last snapshot in a resumed session.
+   */
+  private restoreAttributionFromSession(conversation: {
+    messages: Array<{ subtype?: string; systemPayload?: unknown }>;
+  }): void {
+    // Find the last attribution snapshot in the session
+    let lastSnapshot: unknown = null;
+    for (const msg of conversation.messages) {
+      if (
+        msg.subtype === 'attribution_snapshot' &&
+        msg.systemPayload &&
+        typeof msg.systemPayload === 'object' &&
+        'snapshot' in msg.systemPayload
+      ) {
+        lastSnapshot = (msg.systemPayload as { snapshot: unknown }).snapshot;
+      }
+    }
+    if (lastSnapshot && typeof lastSnapshot === 'object') {
+      try {
+        CommitAttributionService.getInstance().restoreFromSnapshot(
+          lastSnapshot as import('../services/commitAttribution.js').AttributionSnapshot,
+        );
+        debugLogger.debug('Restored attribution state from session snapshot');
+      } catch {
+        debugLogger.warn('Failed to restore attribution snapshot');
+      }
     }
   }
 
@@ -673,6 +707,12 @@ export class GeminiClient {
           });
       }
 
+      // Track prompt count for commit attribution (skip cron — not user-initiated)
+      const attributionService = CommitAttributionService.getInstance();
+      if (messageType !== SendMessageType.Cron) {
+        attributionService.incrementPromptCount();
+      }
+
       // record user/cron message for session management
       if (messageType === SendMessageType.Cron) {
         this.config
@@ -701,7 +741,18 @@ export class GeminiClient {
         );
       }
     }
+
     if (messageType !== SendMessageType.Retry) {
+      // Snapshot on every non-retry turn. ToolResult turns run right after
+      // tool execution, so their snapshot captures edits that a prior
+      // UserQuery turn scheduled. Without this, a resumed session only sees
+      // the UserQuery-time snapshot (empty) and loses tool-driven edits.
+      this.config
+        .getChatRecordingService()
+        ?.recordAttributionSnapshot(
+          CommitAttributionService.getInstance().toSnapshot(),
+        );
+
       this.sessionTurnCount++;
 
       if (

@@ -18,6 +18,7 @@ import {
 import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { AttributionSnapshot } from './commitAttribution.js';
 import { tryGenerateSessionTitle } from './sessionTitle.js';
 import type {
   ChatCompressionInfo,
@@ -89,6 +90,7 @@ export interface ChatRecord {
     | 'slash_command'
     | 'ui_telemetry'
     | 'at_command'
+    | 'attribution_snapshot'
     | 'notification'
     | 'cron'
     | 'custom_title';
@@ -132,6 +134,7 @@ export interface ChatRecord {
     | SlashCommandRecordPayload
     | UiTelemetryRecordPayload
     | AtCommandRecordPayload
+    | AttributionSnapshotPayload
     | CustomTitleRecordPayload
     | NotificationRecordPayload;
 }
@@ -210,6 +213,14 @@ export interface CustomTitleRecordPayload {
  */
 export interface UiTelemetryRecordPayload {
   uiEvent: UiEvent;
+}
+
+/**
+ * Stored payload for attribution state snapshots.
+ * Enables session persistence of AI contribution tracking.
+ */
+export interface AttributionSnapshotPayload {
+  snapshot: AttributionSnapshot;
 }
 
 /**
@@ -830,6 +841,26 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving @-command record:', error);
+    }
+  }
+
+  /**
+   * Records an attribution state snapshot for session persistence.
+   * Called at the start of every non-retry turn so that a resumed session
+   * sees the most recent state including edits made during the prior turn.
+   */
+  recordAttributionSnapshot(snapshot: AttributionSnapshot): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'attribution_snapshot',
+        systemPayload: { snapshot },
+      };
+
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving attribution snapshot:', error);
     }
   }
 }
