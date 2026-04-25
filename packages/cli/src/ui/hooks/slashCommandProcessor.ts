@@ -75,6 +75,7 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'new',
   'resume',
   'delete',
+  'branch',
   'btw',
 ]);
 
@@ -91,6 +92,7 @@ interface SlashCommandProcessorActions {
   openApprovalModeDialog: () => void;
   openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
   handleResume: (sessionId: string) => void;
+  handleBranch: (name?: string) => void;
   openDeleteDialog: () => void;
   quit: (messages: HistoryItem[]) => void;
   setDebugMessage: (message: string) => void;
@@ -621,6 +623,9 @@ export const useSlashCommandProcessor = (
                       } else {
                         actions.openResumeDialog(result.matchedSessions);
                       }
+                      return { type: 'handled' };
+                    case 'branch':
+                      actions.handleBranch(result.name);
                       return { type: 'handled' };
                     case 'delete':
                       actions.openDeleteDialog();

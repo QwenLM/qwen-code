@@ -165,6 +165,9 @@ describe('useSlashCommandProcessor', () => {
           openPermissionsDialog: vi.fn(),
           openApprovalModeDialog: vi.fn(),
           openResumeDialog: vi.fn(),
+          handleResume: vi.fn(),
+          handleBranch: vi.fn(),
+          openDeleteDialog: vi.fn(),
           quit: mockSetQuittingMessages,
           setDebugMessage: vi.fn(),
           dispatchExtensionStateUpdate: vi.fn(),
@@ -1174,6 +1177,55 @@ describe('useSlashCommandProcessor', () => {
       expect(
         result.current.commandContext.ui.btwAbortControllerRef.current,
       ).toBeNull();
+    });
+  });
+
+  describe('SLASH_COMMANDS_SKIP_RECORDING', () => {
+    // Why these live in the skip set: the fork itself is the side effect
+    // (new JSONL file with full parent history), so also writing a
+    // `/branch <name>` slash-command record into the parent session would
+    // bleed into the fork's tail as a trailing user input — user-visible
+    // noise with no semantic value. Same rationale for /new, /resume,
+    // /delete, /clear: session-level commands whose outcome is the new
+    // session state, not a conversation turn.
+    it('does not record /branch via the chat recorder', async () => {
+      const branchCmd = createTestCommand({
+        name: 'branch',
+        action: vi.fn().mockResolvedValue({ type: 'dialog', dialog: 'branch' }),
+      });
+      const result = setupProcessorHook([branchCmd]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      const recorder = mockConfig.getChatRecordingService() as {
+        recordSlashCommand: ReturnType<typeof vi.fn>;
+      };
+      recorder.recordSlashCommand.mockClear();
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/branch my-branch');
+      });
+
+      expect(recorder.recordSlashCommand).not.toHaveBeenCalled();
+    });
+
+    it('still records unrelated commands via the chat recorder (control)', async () => {
+      const testCmd = createTestCommand({
+        name: 'regular',
+        action: vi.fn().mockResolvedValue(undefined),
+      });
+      const result = setupProcessorHook([testCmd]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      const recorder = mockConfig.getChatRecordingService() as {
+        recordSlashCommand: ReturnType<typeof vi.fn>;
+      };
+      recorder.recordSlashCommand.mockClear();
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/regular');
+      });
+
+      expect(recorder.recordSlashCommand).toHaveBeenCalled();
     });
   });
 });
