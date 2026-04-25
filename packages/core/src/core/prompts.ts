@@ -116,6 +116,7 @@ export function getCoreSystemPrompt(
   userMemory?: string,
   model?: string,
   appendInstruction?: string,
+  options?: { lspEnabled?: boolean },
 ): string {
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md but can be modified via custom path in QWEN_SYSTEM_MD
@@ -144,7 +145,26 @@ export function getCoreSystemPrompt(
     ? fs.readFileSync(systemMdPath, 'utf8')
     : `
 You are Qwen Code, an interactive CLI agent developed by Alibaba Group, specializing in software engineering tasks. Your primary goal is to help users safely and efficiently, adhering strictly to the following instructions and utilizing your available tools.
+${
+  options?.lspEnabled
+    ? `
+# LSP Code Intelligence (IMPORTANT)
 
+A Language Server Protocol (LSP) tool is available and connected to a running language server. You MUST use the '${ToolNames.LSP}' tool as your FIRST choice for ALL code intelligence queries:
+- Finding definitions → use lsp with operation "goToDefinition"
+- Finding references → use lsp with operation "findReferences"
+- Hover/type info → use lsp with operation "hover"
+- Listing symbols in a file → use lsp with operation "documentSymbol"
+- Searching symbols in workspace → use lsp with operation "workspaceSymbol"
+- Finding implementations → use lsp with operation "goToImplementation"
+- Call hierarchy → use lsp with operation "prepareCallHierarchy", then "incomingCalls" or "outgoingCalls"
+- Checking errors/warnings → use lsp with operation "diagnostics" or "workspaceDiagnostics"
+- Code actions/quick fixes → use lsp with operation "codeActions"
+
+Do NOT use '${ToolNames.GREP}' or '${ToolNames.READ_FILE}' for these queries. Only fall back to grep if LSP returns no results.
+`
+    : ''
+}
 # Core Mandates
 
 - **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.
