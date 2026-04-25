@@ -45,7 +45,7 @@ interface Harness {
 }
 
 describe('AcpProcessClient', () => {
-  it('spawns qwen ACP with the Desktop channel and initializes SDK', async () => {
+  it('spawns qwen ACP with the CLI-supported ACP channel and initializes SDK', async () => {
     const harness = createHarness({
       cwd: '/workspace',
       extraArgs: ['--model', 'qwen-plus'],
@@ -56,7 +56,7 @@ describe('AcpProcessClient', () => {
 
     expect(harness.spawnProcess).toHaveBeenCalledWith(
       process.execPath,
-      ['/tmp/qwen.js', '--acp', '--channel=Desktop', '--model', 'qwen-plus'],
+      ['/tmp/qwen.js', '--acp', '--channel=ACP', '--model', 'qwen-plus'],
       expect.objectContaining({
         cwd: '/workspace',
         shell: false,
@@ -67,6 +67,18 @@ describe('AcpProcessClient', () => {
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {},
     });
+  });
+
+  it('allows callers to override the CLI channel with another supported value', async () => {
+    const harness = createHarness({ channel: 'VSCode' });
+
+    await harness.client.connect();
+
+    expect(harness.spawnProcess).toHaveBeenCalledWith(
+      process.execPath,
+      ['/tmp/qwen.js', '--acp', '--channel=VSCode'],
+      expect.any(Object),
+    );
   });
 
   it('forwards ACP client callbacks to desktop handlers', async () => {
@@ -184,6 +196,30 @@ describe('AcpProcessClient', () => {
     await expect(connectPromise).rejects.toThrow(
       'Qwen ACP process exited unexpectedly',
     );
+  });
+
+  it('handles disconnect while connect is still in startup delay', async () => {
+    const harness = createHarness({ startupDelayMs: 25 });
+    const unhandledRejections: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => {
+      unhandledRejections.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandledRejection);
+
+    try {
+      const connectPromise = harness.client.connect();
+
+      harness.client.disconnect();
+      harness.child.emit('exit', null, 'SIGTERM');
+
+      await expect(connectPromise).rejects.toThrow(
+        'Qwen ACP process startup was cancelled.',
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandledRejections).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+    }
   });
 });
 

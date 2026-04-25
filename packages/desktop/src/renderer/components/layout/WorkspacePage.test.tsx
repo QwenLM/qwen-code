@@ -57,6 +57,7 @@ describe('WorkspacePage', () => {
           loadState={readyLoadState}
           messageText=""
           modelState={createInitialModelState()}
+          isDraftSession={false}
           projects={[project]}
           reviewError={null}
           sessionError={null}
@@ -194,7 +195,7 @@ const readyStatus: DesktopConnectionStatus = {
     },
     cli: {
       path: '/tmp/qwen',
-      channel: 'Desktop',
+      channel: 'ACP',
       acpReady: true,
     },
     platform: {

@@ -27,6 +27,7 @@ import {
   killDesktopTerminal,
   listDesktopProjects,
   listDesktopSessions,
+  loadDesktopSession,
   loadDesktopStatus,
   openDesktopProject,
   revertDesktopProjectChanges,
@@ -68,12 +69,17 @@ import type {
   DesktopServerMessage,
 } from '../shared/desktopProtocol.js';
 
+type PendingSocketAction =
+  | { type: 'load'; sessionId: string; cwd: string }
+  | { type: 'send'; sessionId: string; content: string };
+
 export function App() {
   const [loadState, setLoadState] = useState<LoadState>({ state: 'loading' });
   const [projects, setProjects] = useState<DesktopProject[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<DesktopSessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [isDraftSession, setIsDraftSession] = useState(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [gitDiff, setGitDiff] = useState<DesktopGitDiff | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
@@ -100,11 +106,29 @@ export function App() {
     createInitialModelState,
   );
   const socketRef = useRef<SessionSocketClient | null>(null);
+  const pendingSocketActionRef = useRef<PendingSocketAction | null>(null);
+  const pendingPublishSessionRef = useRef<DesktopSessionSummary | null>(null);
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) ?? null,
     [activeProjectId, projects],
   );
   const activeProjectPath = activeProject?.path ?? '';
+
+  const refreshSessions = useCallback(async (): Promise<
+    DesktopSessionSummary[]
+  > => {
+    if (loadState.state !== 'ready') {
+      return [];
+    }
+
+    const result = await listDesktopSessions(
+      loadState.status.serverInfo,
+      activeProjectPath || undefined,
+    );
+    setSessions(result.sessions);
+    setSessionError(null);
+    return result.sessions;
+  }, [activeProjectPath, loadState]);
 
   useEffect(() => {
     let disposed = false;
@@ -196,13 +220,10 @@ export function App() {
     }
 
     let disposed = false;
-    void listDesktopSessions(
-      loadState.status.serverInfo,
-      activeProjectPath || undefined,
-    )
+    void refreshSessions()
       .then((result) => {
         if (!disposed) {
-          setSessions(result.sessions);
+          setSessions(result);
           setSessionError(null);
         }
       })
@@ -215,7 +236,44 @@ export function App() {
     return () => {
       disposed = true;
     };
-  }, [activeProjectPath, loadState]);
+  }, [loadState, refreshSessions]);
+
+  const publishPendingSession = useCallback(() => {
+    const pendingSession = pendingPublishSessionRef.current;
+    if (!pendingSession || pendingSession.sessionId !== activeSessionId) {
+      return;
+    }
+
+    pendingPublishSessionRef.current = null;
+    void refreshSessions()
+      .then((nextSessions) => {
+        if (
+          nextSessions.some(
+            (session) => session.sessionId === pendingSession.sessionId,
+          )
+        ) {
+          return;
+        }
+
+        setSessions((current) =>
+          current.some(
+            (session) => session.sessionId === pendingSession.sessionId,
+          )
+            ? current
+            : [pendingSession, ...current],
+        );
+      })
+      .catch((error: unknown) => {
+        setSessionError(getErrorMessage(error));
+        setSessions((current) =>
+          current.some(
+            (session) => session.sessionId === pendingSession.sessionId,
+          )
+            ? current
+            : [pendingSession, ...current],
+        );
+      });
+  }, [activeSessionId, refreshSessions]);
 
   useEffect(() => {
     socketRef.current?.close();
@@ -227,25 +285,82 @@ export function App() {
     }
 
     dispatchChat({ type: 'connect' });
+    let disposed = false;
     const socket = connectSessionSocket(
       loadState.status.serverInfo,
       activeSessionId,
       {
-        onMessage: (message) =>
-          handleSessionSocketMessage(message, dispatchChat, dispatchModel),
-        onClose: () => dispatchChat({ type: 'disconnect' }),
-        onError: () => setSessionError('Session socket connection failed.'),
+        onOpen: () => {
+          const action = pendingSocketActionRef.current;
+          if (!action || action.sessionId !== activeSessionId) {
+            return;
+          }
+
+          pendingSocketActionRef.current = null;
+          if (action.type === 'send') {
+            socket.sendUserMessage(action.content);
+            return;
+          }
+
+          void loadDesktopSession(
+            loadState.status.serverInfo,
+            action.sessionId,
+            action.cwd,
+          )
+            .then((session) => {
+              if (disposed) {
+                return;
+              }
+
+              dispatchModel({
+                type: 'session_runtime_loaded',
+                models: session.models,
+                modes: session.modes,
+              });
+              dispatchChat({ type: 'history_loaded' });
+              setSessions((current) =>
+                current.map((entry) =>
+                  entry.sessionId === session.sessionId
+                    ? { ...entry, ...session }
+                    : entry,
+                ),
+              );
+              setSessionError(null);
+            })
+            .catch((error: unknown) => {
+              if (!disposed) {
+                setSessionError(getErrorMessage(error));
+              }
+            });
+        },
+        onMessage: (message) => {
+          handleSessionSocketMessage(message, dispatchChat, dispatchModel);
+          if (message.type === 'message_complete') {
+            publishPendingSession();
+          }
+        },
+        onClose: () => {
+          if (!disposed) {
+            dispatchChat({ type: 'disconnect' });
+          }
+        },
+        onError: () => {
+          if (!disposed) {
+            setSessionError('Session socket connection failed.');
+          }
+        },
       },
     );
     socketRef.current = socket;
 
     return () => {
+      disposed = true;
       socket.close();
       if (socketRef.current === socket) {
         socketRef.current = null;
       }
     };
-  }, [activeSessionId, loadState]);
+  }, [activeSessionId, loadState, publishPendingSession]);
 
   useEffect(() => {
     if (loadState.state !== 'ready' || !activeSessionId) {
@@ -291,39 +406,73 @@ export function App() {
         ]);
         setActiveProjectId(project.id);
         setActiveSessionId(null);
+        setIsDraftSession(false);
+        pendingSocketActionRef.current = null;
+        pendingPublishSessionRef.current = null;
+        dispatchChat({ type: 'reset' });
       }
     } catch (error) {
       setSessionError(getErrorMessage(error));
     }
   }, [loadState]);
 
-  const createSession = useCallback(async () => {
+  const createSession = useCallback(() => {
     if (loadState.state !== 'ready' || !activeProject) {
       return;
     }
 
-    try {
-      const session = await createDesktopSession(
-        loadState.status.serverInfo,
-        activeProject.path,
-      );
-      setSessions((current) => [session, ...current]);
-      setActiveSessionId(session.sessionId);
-      dispatchModel({
-        type: 'session_runtime_loaded',
-        models: session.models,
-        modes: session.modes,
-      });
-      setSessionError(null);
-    } catch (error) {
-      setSessionError(getErrorMessage(error));
-    }
+    socketRef.current?.close();
+    socketRef.current = null;
+    pendingSocketActionRef.current = null;
+    pendingPublishSessionRef.current = null;
+    setActiveSessionId(null);
+    setIsDraftSession(true);
+    setMessageText('');
+    setSessionError(null);
+    dispatchChat({ type: 'reset' });
+    dispatchModel({ type: 'reset' });
   }, [activeProject, loadState]);
 
   const selectProject = useCallback((projectId: string) => {
     setActiveProjectId(projectId);
     setActiveSessionId(null);
+    setIsDraftSession(false);
+    setMessageText('');
+    pendingSocketActionRef.current = null;
+    pendingPublishSessionRef.current = null;
+    dispatchChat({ type: 'reset' });
   }, []);
+
+  const selectSession = useCallback(
+    (sessionId: string) => {
+      if (loadState.state !== 'ready' || !activeProject) {
+        return;
+      }
+
+      pendingSocketActionRef.current = {
+        type: 'load',
+        sessionId,
+        cwd: activeProject.path,
+      };
+      pendingPublishSessionRef.current = null;
+      setIsDraftSession(false);
+      setMessageText('');
+      setSessionError(null);
+      dispatchChat({ type: 'reset' });
+      dispatchModel({ type: 'reset' });
+
+      if (activeSessionId === sessionId) {
+        socketRef.current?.close();
+        socketRef.current = null;
+        setActiveSessionId(null);
+        window.setTimeout(() => setActiveSessionId(sessionId), 0);
+        return;
+      }
+
+      setActiveSessionId(sessionId);
+    },
+    [activeProject, activeSessionId, loadState],
+  );
 
   const refreshProjectGitStatus = useCallback(async () => {
     if (loadState.state !== 'ready' || !activeProject) {
@@ -688,7 +837,58 @@ export function App() {
     (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
       const content = messageText.trim();
-      if (!content || !socketRef.current) {
+      if (!content) {
+        return;
+      }
+
+      if (!activeSessionId && isDraftSession) {
+        if (loadState.state !== 'ready' || !activeProject) {
+          return;
+        }
+
+        dispatchChat({ type: 'append_user_message', content });
+        setMessageText('');
+        void createDesktopSession(
+          loadState.status.serverInfo,
+          activeProject.path,
+        )
+          .then((session) => {
+            const pendingSession = {
+              ...session,
+              cwd: session.cwd ?? activeProject.path,
+              title: session.title ?? summarizeMessage(content),
+            };
+            pendingPublishSessionRef.current = pendingSession;
+            pendingSocketActionRef.current = {
+              type: 'send',
+              sessionId: session.sessionId,
+              content,
+            };
+            setIsDraftSession(false);
+            setActiveSessionId(session.sessionId);
+            dispatchModel({
+              type: 'session_runtime_loaded',
+              models: session.models,
+              modes: session.modes,
+            });
+            setSessionError(null);
+          })
+          .catch((error: unknown) => {
+            setSessionError(getErrorMessage(error));
+            dispatchChat({
+              type: 'server_message',
+              message: {
+                type: 'error',
+                code: 'session_create_failed',
+                message: getErrorMessage(error),
+                retryable: true,
+              },
+            });
+          });
+        return;
+      }
+
+      if (!socketRef.current) {
         return;
       }
 
@@ -696,7 +896,7 @@ export function App() {
       socketRef.current.sendUserMessage(content);
       setMessageText('');
     },
-    [messageText],
+    [activeProject, activeSessionId, isDraftSession, loadState, messageText],
   );
 
   const stopGeneration = useCallback(() => {
@@ -742,6 +942,7 @@ export function App() {
       loadState={loadState}
       messageText={messageText}
       modelState={modelState}
+      isDraftSession={isDraftSession}
       projects={projects}
       reviewError={reviewError}
       sessionError={sessionError}
@@ -773,7 +974,7 @@ export function App() {
       onSaveSettings={saveSettings}
       onSendTerminalOutputToAi={sendTerminalOutputToAi}
       onSelectProject={selectProject}
-      onSelectSession={setActiveSessionId}
+      onSelectSession={selectSession}
       onSendMessage={sendMessage}
       onSettingsDispatch={dispatchSettings}
       onStageReviewTarget={stageReviewTarget}
@@ -812,6 +1013,13 @@ function isApprovalMode(value: string): value is DesktopApprovalMode {
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Desktop operation failed.';
+}
+
+function summarizeMessage(message: string): string {
+  const normalized = message.replace(/\s+/gu, ' ').trim();
+  return normalized.length > 80
+    ? `${normalized.slice(0, 77).trimEnd()}...`
+    : normalized;
 }
 
 function joinProjectFilePath(projectPath: string, filePath: string): string {

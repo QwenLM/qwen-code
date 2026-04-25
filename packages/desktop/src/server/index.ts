@@ -629,7 +629,10 @@ async function handleSessionsRoute(
     const body = await readObjectBody(request);
     const cwd = getRequiredString(body, 'cwd');
     const session = await context.sessionService.createSession(cwd);
-    sendJson(response, origin, 200, { ok: true, session });
+    sendJson(response, origin, 200, {
+      ok: true,
+      session: { cwd, ...session },
+    });
     return;
   }
 
@@ -851,7 +854,10 @@ async function handleLoadSessionRoute(
   const body = await readObjectBody(request);
   const cwd = getRequiredString(body, 'cwd');
   const session = await context.sessionService.loadSession(sessionId, cwd);
-  sendJson(response, origin, 200, { ok: true, session });
+  sendJson(response, origin, 200, {
+    ok: true,
+    session: { sessionId, cwd, ...session },
+  });
 }
 
 async function handleSessionRoute(

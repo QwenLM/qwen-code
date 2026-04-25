@@ -65,6 +65,7 @@ async function main() {
   await waitForText('Qwen Code');
   await waitForText('Connected');
   await assertWorkbenchLandmarks();
+  await assertRalphWorkspaceLayout('initial-layout.json');
   await saveScreenshot('initial-workspace.png');
 
   await clickButtonUntilText('Open Project', 'desktop-e2e-workspace');
@@ -131,6 +132,7 @@ async function main() {
   );
 
   await saveScreenshot('completed-workspace.png');
+  await assertRalphWorkspaceLayout('completed-layout.json');
   await assertNoBrowserErrors();
   await writeFile(
     join(artifactDir, 'summary.json'),
@@ -297,6 +299,133 @@ async function assertWorkbenchLandmarks() {
 
   if (landmarks.length > 0) {
     throw new Error(`Missing workbench landmarks: ${landmarks.join(', ')}`);
+  }
+}
+
+async function assertRalphWorkspaceLayout(fileName) {
+  const metrics = await evaluate(`(() => {
+    const rectFor = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+
+    return {
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight
+      },
+      document: {
+        scrollWidth: document.documentElement.scrollWidth,
+        scrollHeight: document.documentElement.scrollHeight,
+        bodyScrollWidth: document.body.scrollWidth,
+        bodyScrollHeight: document.body.scrollHeight
+      },
+      shell: rectFor('[data-testid="desktop-workspace"]'),
+      sidebar: rectFor('[data-testid="project-sidebar"]'),
+      topbar: rectFor('[data-testid="workspace-topbar"]'),
+      grid: rectFor('[data-testid="workspace-grid"]'),
+      chat: rectFor('[data-testid="chat-thread"]'),
+      review: rectFor('[data-testid="review-panel"]'),
+      composer: rectFor('[data-testid="message-composer"]'),
+      terminal: rectFor('[data-testid="terminal-drawer"]'),
+      listRows: [...document.querySelectorAll('.project-row, .session-row')]
+        .map((element) => {
+          const rect = element.getBoundingClientRect();
+          return {
+            text: element.textContent.trim(),
+            width: rect.width,
+            height: rect.height
+          };
+        })
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(metrics, null, 2)}\n`,
+    'utf8',
+  );
+
+  const requiredRects = [
+    'shell',
+    'sidebar',
+    'topbar',
+    'grid',
+    'chat',
+    'review',
+    'composer',
+    'terminal',
+  ];
+  const missing = requiredRects.filter((key) => metrics[key] === null);
+  if (missing.length > 0) {
+    throw new Error(`Missing layout rects: ${missing.join(', ')}`);
+  }
+
+  const { viewport, document: doc } = metrics;
+  if (doc.bodyScrollHeight > viewport.height + 4) {
+    throw new Error(
+      `Desktop document should fit one viewport; body scrollHeight=${doc.bodyScrollHeight}, viewport=${viewport.height}`,
+    );
+  }
+
+  if (metrics.sidebar.width < 236 || metrics.sidebar.width > 320) {
+    throw new Error(`Unexpected sidebar width: ${metrics.sidebar.width}`);
+  }
+
+  if (metrics.topbar.height < 56 || metrics.topbar.height > 82) {
+    throw new Error(`Unexpected topbar height: ${metrics.topbar.height}`);
+  }
+
+  if (metrics.review.width < 288 || metrics.review.width > 380) {
+    throw new Error(`Unexpected review panel width: ${metrics.review.width}`);
+  }
+
+  if (metrics.terminal.height < 190 || metrics.terminal.height > 280) {
+    throw new Error(
+      `Unexpected terminal drawer height: ${metrics.terminal.height}`,
+    );
+  }
+
+  if (metrics.chat.width <= metrics.review.width + 220) {
+    throw new Error(
+      `Conversation canvas should dominate the workbench; chat=${metrics.chat.width}, review=${metrics.review.width}`,
+    );
+  }
+
+  if (Math.abs(metrics.chat.right - metrics.review.left) > 1) {
+    throw new Error('Chat and review panels are not aligned side by side.');
+  }
+
+  if (Math.abs(metrics.grid.bottom - metrics.terminal.top) > 1) {
+    throw new Error('Terminal drawer is not docked below the workspace grid.');
+  }
+
+  if (metrics.terminal.bottom > viewport.height + 1) {
+    throw new Error('Terminal drawer overflows below the viewport.');
+  }
+
+  if (metrics.composer.bottom > metrics.chat.bottom + 1) {
+    throw new Error('Composer is not contained inside the conversation panel.');
+  }
+
+  const oversizedRows = metrics.listRows.filter((row) => row.height > 92);
+  if (oversizedRows.length > 0) {
+    throw new Error(
+      `Sidebar list rows should not stretch vertically: ${JSON.stringify(
+        oversizedRows,
+      )}`,
+    );
   }
 }
 

@@ -91,13 +91,10 @@ export class SessionSocketHub {
     socket.on('message', (rawMessage) => {
       void this.handleClientMessage(sessionId, socket, rawMessage).catch(
         (error: unknown) => {
+          const normalizedError = normalizeSocketError(error);
           sendMessage(socket, {
             type: 'error',
-            code: 'internal_error',
-            message:
-              error instanceof Error
-                ? error.message
-                : 'WebSocket message handling failed.',
+            ...normalizedError,
           });
         },
       );
@@ -362,6 +359,65 @@ function sendMessage(socket: WebSocket, message: DesktopServerMessage): void {
   if (socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(message));
   }
+}
+
+function normalizeSocketError(error: unknown): {
+  code: string;
+  message: string;
+} {
+  const record = asRecord(error);
+  const nestedError = asRecord(record?.['error']);
+  const code =
+    getErrorCode(nestedError?.['code']) ??
+    getErrorCode(record?.['code']) ??
+    'internal_error';
+  const message =
+    getErrorMessage(error) ??
+    getErrorMessage(record?.['message']) ??
+    getErrorMessage(nestedError?.['message']) ??
+    'WebSocket message handling failed.';
+
+  return { code, message };
+}
+
+function getErrorCode(value: unknown): string | null {
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return value;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return `acp_${value}`;
+  }
+
+  return null;
+}
+
+function getErrorMessage(value: unknown): string | null {
+  if (value instanceof Error && value.message.trim().length > 0) {
+    return value.message;
+  }
+
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return value;
+  }
+
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  return (
+    getErrorMessage(record['message']) ??
+    getErrorMessage(asRecord(record['error'])?.['message'])
+  );
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  return value as Record<string, unknown>;
 }
 
 function rejectUpgrade(

@@ -39,7 +39,7 @@ export interface DesktopRuntimeResponse {
   };
   cli: {
     path: string | null;
-    channel: 'Desktop';
+    channel: 'ACP';
     acpReady: boolean;
   };
   platform: {

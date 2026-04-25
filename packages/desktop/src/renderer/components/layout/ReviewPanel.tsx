@@ -71,7 +71,7 @@ export function ReviewPanel({
       data-testid="review-panel"
     >
       <div className="panel-header">
-        <h3>Review</h3>
+        <h3>Changes</h3>
       </div>
       <ReviewSummary
         commitMessage={commitMessage}
@@ -130,6 +130,7 @@ function ReviewSummary({
   const [reviewComments, setReviewComments] = useState<
     Record<string, string[]>
   >({});
+  const [activeTab, setActiveTab] = useState('changes');
 
   if (!project) {
     return (
@@ -141,13 +142,21 @@ function ReviewSummary({
 
   const status = project.gitStatus;
   const changedFiles = gitDiff?.files ?? [];
+  const tabs = ['changes', 'files', 'artifacts', 'summary'];
+
   return (
     <div className="review-summary">
       <div className="review-tabs" aria-label="Review sections">
-        <span>Changes</span>
-        <span>Files</span>
-        <span>Artifacts</span>
-        <span>Summary</span>
+        {tabs.map((tab) => (
+          <button
+            className={tab === activeTab ? 'review-tab-active' : undefined}
+            key={tab}
+            type="button"
+            onClick={() => setActiveTab(tab)}
+          >
+            {tab}
+          </button>
+        ))}
       </div>
       <dl className="runtime-details runtime-details-compact">
         <div>
@@ -570,7 +579,7 @@ function SettingsPanel({
   const provider = state.form.provider;
 
   return (
-    <div className="settings-panel">
+    <div className="settings-panel" data-testid="model-config">
       <div className="panel-header panel-header-inline">
         <h3>Settings</h3>
       </div>

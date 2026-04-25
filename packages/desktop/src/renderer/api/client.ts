@@ -131,7 +131,7 @@ export interface DesktopRuntime {
   };
   cli: {
     path: string | null;
-    channel: 'Desktop';
+    channel: 'ACP';
     acpReady: boolean;
   };
   platform: {
@@ -377,6 +377,21 @@ export async function createDesktopSession(
   return response.session;
 }
 
+export async function loadDesktopSession(
+  serverInfo: DesktopServerInfo,
+  sessionId: string,
+  cwd: string,
+): Promise<DesktopSessionSummary> {
+  const response = await writeJson(
+    serverInfo,
+    `/api/sessions/${encodeURIComponent(sessionId)}/load`,
+    'POST',
+    { cwd },
+    isCreateSessionResponse,
+  );
+  return response.session;
+}
+
 export async function getDesktopUserSettings(
   serverInfo: DesktopServerInfo,
 ): Promise<DesktopUserSettings> {
@@ -577,7 +592,7 @@ function isDesktopRuntimeCli(
   return (
     !!value &&
     (typeof value.path === 'string' || value.path === null) &&
-    value.channel === 'Desktop' &&
+    value.channel === 'ACP' &&
     typeof value.acpReady === 'boolean'
   );
 }

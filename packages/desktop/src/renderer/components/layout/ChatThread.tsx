@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { FormEvent } from 'react';
+import { useEffect, useRef, type FormEvent } from 'react';
 import type { ChatState, ChatTimelineItem } from '../../stores/chatStore.js';
 
 export function ChatThread({
   activeSessionId,
   chatState,
+  isDraftSession,
   messageText,
   onAskUserQuestionResponse,
   onMessageTextChange,
@@ -19,6 +20,7 @@ export function ChatThread({
 }: {
   activeSessionId: string | null;
   chatState: ChatState;
+  isDraftSession: boolean;
   messageText: string;
   onAskUserQuestionResponse: (requestId: string, optionId: string) => void;
   onMessageTextChange: (message: string) => void;
@@ -26,28 +28,38 @@ export function ChatThread({
   onSendMessage: (event: FormEvent<HTMLFormElement>) => void;
   onStopGeneration: () => void;
 }) {
+  const canCompose = Boolean(activeSessionId) || isDraftSession;
+
   return (
     <section
       className="panel panel-main"
       aria-label="AI conversation thread"
       data-testid="chat-thread"
     >
-      <div className="panel-header">
+      <div className="panel-header chat-header">
         <h3>Conversation</h3>
         <span>{chatState.streaming ? 'Streaming' : chatState.connection}</span>
       </div>
-      <ChatTimeline state={chatState} activeSessionId={activeSessionId} />
+      <ChatTimeline
+        state={chatState}
+        activeSessionId={activeSessionId}
+        isDraftSession={isDraftSession}
+      />
       <PermissionPrompts
         state={chatState}
         onAskUserQuestionResponse={onAskUserQuestionResponse}
         onPermissionResponse={onPermissionResponse}
       />
-      <form className="composer" onSubmit={onSendMessage}>
+      <form
+        className="composer"
+        data-testid="message-composer"
+        onSubmit={onSendMessage}
+      >
         <textarea
           aria-label="Message"
-          disabled={!activeSessionId}
+          disabled={!canCompose}
           onChange={(event) => onMessageTextChange(event.target.value)}
-          placeholder={activeSessionId ? 'Message Qwen Code' : ''}
+          placeholder={canCompose ? 'Message Qwen Code' : ''}
           rows={3}
           value={messageText}
         />
@@ -62,7 +74,7 @@ export function ChatThread({
           </button>
           <button
             className="primary-button"
-            disabled={!activeSessionId || messageText.trim().length === 0}
+            disabled={!canCompose || messageText.trim().length === 0}
             type="submit"
           >
             Send
@@ -75,24 +87,49 @@ export function ChatThread({
 
 function ChatTimeline({
   activeSessionId,
+  isDraftSession,
   state,
 }: {
   activeSessionId: string | null;
+  isDraftSession: boolean;
   state: ChatState;
 }) {
-  if (!activeSessionId) {
+  const timelineRef = useRef<HTMLDivElement | null>(null);
+  const pendingPermissionId = state.pendingPermission?.requestId ?? '';
+  const pendingQuestionId = state.pendingAskUserQuestion?.requestId ?? '';
+
+  useEffect(() => {
+    const timeline = timelineRef.current;
+    if (!timeline) {
+      return;
+    }
+
+    timeline.scrollTop = timeline.scrollHeight;
+  }, [
+    pendingPermissionId,
+    pendingQuestionId,
+    state.items.length,
+    state.streaming,
+  ]);
+
+  if (!activeSessionId && !isDraftSession) {
     return <div className="conversation-empty">No session selected</div>;
   }
 
   if (state.items.length === 0) {
-    return <div className="conversation-empty">Session ready</div>;
+    return (
+      <div className="conversation-empty">
+        {isDraftSession ? 'New thread ready' : 'Session ready'}
+      </div>
+    );
   }
 
   return (
-    <div className="chat-timeline">
+    <div className="chat-timeline" ref={timelineRef}>
       {state.items.map((item) => (
         <TimelineItem item={item} key={item.id} />
       ))}
+      <div className="chat-scroll-anchor" aria-hidden="true" />
     </div>
   );
 }

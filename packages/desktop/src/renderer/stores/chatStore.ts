@@ -65,8 +65,10 @@ export interface ChatState {
 }
 
 export type ChatAction =
+  | { type: 'reset' }
   | { type: 'connect' }
   | { type: 'disconnect' }
+  | { type: 'history_loaded' }
   | { type: 'append_user_message'; content: string }
   | { type: 'clear_permission_request'; requestId: string }
   | { type: 'clear_ask_user_question'; requestId: string }
@@ -90,6 +92,9 @@ export function createInitialChatState(): ChatState {
 
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
+    case 'reset':
+      return createInitialChatState();
+
     case 'connect':
       return {
         ...state,
@@ -102,6 +107,13 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         ...state,
         connection: 'closed',
         streaming: false,
+      };
+
+    case 'history_loaded':
+      return {
+        ...state,
+        streaming: false,
+        items: markStreamingMessagesComplete(state.items),
       };
 
     case 'append_user_message':

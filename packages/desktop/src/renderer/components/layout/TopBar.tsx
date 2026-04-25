@@ -11,24 +11,35 @@ import type { LoadState } from './types.js';
 
 export function TopBar({
   activeProject,
+  activeSessionTitle,
   loadState,
   onRefreshGitStatus,
   statusLabel,
 }: {
   activeProject: DesktopProject | null;
+  activeSessionTitle: string | null;
   loadState: LoadState;
   onRefreshGitStatus: () => void;
   statusLabel: string;
 }) {
+  const title =
+    activeSessionTitle || activeProject?.name || 'Qwen Code Desktop';
+  const projectLabel = activeProject?.name ?? 'No project selected';
+
   return (
     <header
       className="topbar"
       aria-label="Workspace status"
       data-testid="workspace-topbar"
     >
-      <div>
-        <p className="eyebrow">Local workspace</p>
-        <h2>{activeProject?.name || 'Qwen Code Desktop'}</h2>
+      <div className="topbar-title">
+        <h2>{title}</h2>
+        <span>{projectLabel}</span>
+        <button className="topbar-more" type="button" aria-label="More">
+          ...
+        </button>
+      </div>
+      <div className="topbar-center">
         <div className="topbar-meta">
           <span>{statusLabel}</span>
           <span>{activeProject?.gitBranch || 'No Git branch'}</span>

@@ -61,7 +61,7 @@ export interface AcpProcessClientOptions {
   cliEntryPath: string;
   cwd?: string;
   command?: string;
-  channel?: 'Desktop';
+  channel?: 'ACP' | 'VSCode' | 'SDK' | 'CI';
   extraArgs?: string[];
   env?: NodeJS.ProcessEnv;
   startupDelayMs?: number;
@@ -79,6 +79,7 @@ export interface ListSessionsOptions {
 export class AcpProcessClient {
   private child: ChildProcess | null = null;
   private connection: AcpSdkConnection | null = null;
+  private readonly disconnectingChildren = new WeakSet<ChildProcess>();
   private readonly options: Required<
     Pick<
       AcpProcessClientOptions,
@@ -107,7 +108,7 @@ export class AcpProcessClient {
   constructor(options: AcpProcessClientOptions) {
     this.options = {
       ...options,
-      channel: options.channel ?? 'Desktop',
+      channel: options.channel ?? 'ACP',
       startupDelayMs: options.startupDelayMs ?? 1000,
       validateCliPath: options.validateCliPath ?? true,
     };
@@ -140,13 +141,17 @@ export class AcpProcessClient {
     const stderrChunks: string[] = [];
     let spawnError: Error | null = null;
     let startupComplete = false;
+    let startupExitError: Error | null = null;
+    let startupCancelled = false;
 
-    const processExitPromise = new Promise<never>((_resolve, reject) => {
+    const processExitPromise = new Promise<void>((resolve) => {
       child.on('exit', (code: number | null, signal: string | null) => {
         const stderrOutput = stderrChunks.join('').trim();
         const stderrSuffix = stderrOutput
           ? `\nCLI stderr: ${stderrOutput.slice(-500)}`
           : '';
+        const disconnectRequested = this.disconnectingChildren.has(child);
+        this.disconnectingChildren.delete(child);
 
         if (this.child === child) {
           this.child = null;
@@ -155,12 +160,16 @@ export class AcpProcessClient {
         }
 
         if (!startupComplete) {
-          reject(
-            new Error(
+          if (disconnectRequested) {
+            startupCancelled = true;
+          } else {
+            startupExitError = new Error(
               `Qwen ACP process exited unexpectedly (exit code: ${code}, signal: ${signal})${stderrSuffix}`,
-            ),
-          );
+            );
+          }
         }
+
+        resolve();
       });
     });
 
@@ -174,9 +183,18 @@ export class AcpProcessClient {
     this.child = child;
 
     if (this.options.startupDelayMs > 0) {
-      await delay(this.options.startupDelayMs);
+      await Promise.race([
+        delay(this.options.startupDelayMs),
+        processExitPromise,
+      ]);
     }
 
+    if (startupExitError) {
+      throw startupExitError;
+    }
+    if (startupCancelled) {
+      throw new Error('Qwen ACP process startup was cancelled.');
+    }
     if (spawnError) {
       throw spawnError;
     }
@@ -192,7 +210,17 @@ export class AcpProcessClient {
         protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: this.getClientCapabilities(),
       }),
-      processExitPromise,
+      processExitPromise.then(() => {
+        if (startupExitError) {
+          throw startupExitError;
+        }
+
+        if (startupCancelled) {
+          throw new Error('Qwen ACP process startup was cancelled.');
+        }
+
+        throw new Error('Qwen ACP process startup was cancelled.');
+      }),
     ]).finally(() => {
       startupComplete = true;
     });
@@ -203,6 +231,7 @@ export class AcpProcessClient {
 
   disconnect(): void {
     if (this.child) {
+      this.disconnectingChildren.add(this.child);
       this.child.kill();
     }
 

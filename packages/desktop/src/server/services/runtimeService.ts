@@ -26,7 +26,7 @@ export async function getRuntimeInfo(
     },
     cli: {
       path: process.env['QWEN_DESKTOP_CLI_PATH'] ?? null,
-      channel: 'Desktop',
+      channel: 'ACP',
       acpReady: acpClient?.isConnected === true,
     },
     platform: {

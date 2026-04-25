@@ -22,19 +22,23 @@ execution order, verification, decisions, and remaining work.
 
 ## Current Status
 
-Slices 1-17 established the desktop package, Electron main/preload/renderer
+Slices 1-18 established the desktop package, Electron main/preload/renderer
 startup, authenticated health/runtime/settings/session APIs, ACP process
 wrapper, WebSocket chat loop, permission bridge, settings/model/mode controls,
 packaging configuration, package smoke verification, project/Git status,
 renderer asset/CDP startup support, the componentized workspace shell, the
 CDP-driven Electron E2E harness, hunk-aware diff review controls, terminal
-stdin/copy/send-to-AI controls, UI-driven commit coverage, and final package
-launch smoke verification.
+stdin/copy/send-to-AI controls, UI-driven commit coverage, final package launch
+smoke verification, and the Ralph/home.jpg-aligned fixed-viewport workbench
+layout.
 
-Iteration 12 closed the remaining P0 verification gap by driving the commit UI
-from the Electron CDP harness and re-running package launch smoke. PTY resize,
-terminal tabs/history, persisted review comments, worktree tasks, and richer
-artifacts remain deferred beyond MVP.
+Iteration 13 corrected the renderer layout drift called out in
+`.qwen/scripts/electron-desktop-ralph-prompt.md` by reshaping the visible
+workspace around the `docs/design/qwen-code-electron-desktop/home.jpg`
+reference: narrow project/thread sidebar, compact top status bar, dominant
+conversation canvas, independently scrolling review panel, and docked terminal
+drawer. PTY resize, terminal tabs/history, persisted review comments, worktree
+tasks, and richer artifacts remain deferred beyond MVP.
 
 ## Task Breakdown
 
@@ -501,6 +505,61 @@ hunkId }` and stages only that current hunk.
     warnings only.
   - `npm run smoke:package --workspace=packages/desktop -- --launch` passed.
 
+### Slice 18: Ralph-Aligned Workbench Layout
+
+- Status: complete in iteration 13
+- Goal: fix renderer UI drift by aligning the desktop workspace with
+  `.qwen/scripts/electron-desktop-ralph-prompt.md` and the
+  `docs/design/qwen-code-electron-desktop/home.jpg` workbench reference.
+- frontend-design:
+  - Used before changing renderer UI.
+  - Visual direction: dense local coding workbench, not a dashboard form.
+    Keep a fixed dark desktop viewport, a narrow project/thread navigation
+    rail, a compact top status/control bar, a dominant conversation canvas,
+    an independently scrolling right review column, and a docked terminal
+    drawer. Use blue, green, and amber status accents instead of a single
+    one-note palette.
+- Files:
+  - `packages/desktop/src/renderer/styles.css`
+  - `packages/desktop/src/renderer/components/layout/TopBar.tsx`
+  - `packages/desktop/src/renderer/components/layout/ProjectSidebar.tsx`
+  - `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+  - `packages/desktop/src/renderer/components/layout/ReviewPanel.tsx`
+  - `packages/desktop/src/renderer/components/layout/WorkspacePage.tsx`
+  - `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+  - `.qwen/e2e-tests/electron-desktop/ralph-layout-alignment.md`
+- Acceptance criteria:
+  - The app document fits a single Electron viewport; page content does not
+    stretch into a long form.
+  - Sidebar, topbar, conversation panel, right review panel, message composer,
+    and terminal drawer are visible and aligned in the first viewport.
+  - The conversation canvas is wider than the right review panel and remains
+    the dominant work area.
+  - Project/thread rows stay compact when only one item exists.
+  - Composer and terminal drawer are docked within the workspace instead of
+    creating document-level vertical overflow.
+  - Chat timeline auto-scrolls to the newest AI/user activity.
+- E2E coverage:
+  - Updated `packages/desktop/scripts/e2e-cdp-smoke.mjs` with layout metrics
+    assertions for viewport height, sidebar width, topbar height, review panel
+    width, terminal drawer height, chat/review alignment, terminal docking,
+    composer containment, and compact project/thread row heights.
+  - The same executable harness still drives Open Project, hunk accept,
+    review note, stage all, UI commit, new thread, command approval, settings
+    save, terminal copy/stdin/send-to-AI, screenshots, console errors, failed
+    network requests, and Electron logs.
+- Verification:
+  - `cd packages/desktop && SHELL=/bin/bash vitest run` passed: 9 files, 55
+    tests. The explicit shell setting avoids a pre-existing stdin race in the
+    terminal command-runner test under zsh.
+  - `tsc --noEmit --project packages/desktop/tsconfig.main.json` passed.
+  - `tsc --noEmit --project packages/desktop/tsconfig.renderer.json` passed.
+  - `eslint src --ext .ts,.tsx` passed from `packages/desktop`.
+  - Desktop build passed via `tsc`, preload `esbuild`, and `vite build`.
+  - `node packages/desktop/scripts/e2e-cdp-smoke.mjs` passed with success
+    artifacts at ignored
+    `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T05-09-38-476Z/`.
+
 ## Decision Log
 
 - 2026-04-25: Use a main-process hosted `DesktopServer` for MVP, matching the
@@ -554,6 +613,11 @@ hunkId }` and stages only that current hunk.
 - 2026-04-25: Treat UI-driven commit as part of the CDP smoke, not only a
   server test. The harness now waits for stage-all status to settle before
   committing and verifies Git state after the renderer action.
+- 2026-04-25: Treat Ralph/home.jpg alignment as a renderer quality gate, not
+  just a CSS refresh. The CDP smoke now records layout metrics and fails if the
+  workbench turns back into a document-length form, if sidebar rows stretch, or
+  if the main canvas/review/terminal regions drift out of their desktop
+  proportions.
 
 ## Verification Log
 
@@ -643,6 +707,17 @@ hunkId }` and stages only that current hunk.
   - `npm run bundle` passed.
   - `npm run package:dir --workspace=packages/desktop` passed.
   - `npm run smoke:package --workspace=packages/desktop -- --launch` passed.
+- 2026-04-25 Slice 18 Ralph-aligned workbench layout:
+  - `cd packages/desktop && SHELL=/bin/bash vitest run` passed: 9 files, 55
+    tests.
+  - `tsc --noEmit --project packages/desktop/tsconfig.main.json` passed.
+  - `tsc --noEmit --project packages/desktop/tsconfig.renderer.json` passed.
+  - `cd packages/desktop && eslint src --ext .ts,.tsx` passed.
+  - Desktop build passed via package-equivalent `tsc`, preload `esbuild`, and
+    `vite build`.
+  - `node packages/desktop/scripts/e2e-cdp-smoke.mjs` passed with screenshots,
+    layout metrics, console/network diagnostics, and Electron logs at
+    `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T05-09-38-476Z/`.
 
 ## Self Review Notes
 
@@ -698,6 +773,9 @@ hunkId }` and stages only that current hunk.
 - Slice 17 verifies commit via the renderer action and independent Git checks.
   It still uses fake ACP for AI traffic, so live-provider model behavior remains
   covered by the existing CLI/core paths rather than desktop E2E credentials.
+- Slice 18 is a renderer-only quality correction and does not broaden preload,
+  IPC, server APIs, ACP permissions, or terminal/Git mutation scope. CDP now
+  asserts actual layout proportions in addition to visual screenshots.
 
 ## Remaining Work
 

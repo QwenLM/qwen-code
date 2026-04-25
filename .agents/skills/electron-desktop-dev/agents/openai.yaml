@@ -1,0 +1,4 @@
+interface:
+  display_name: 'Electron Desktop Dev'
+  short_description: 'Develop and verify Electron desktop UI'
+  default_prompt: 'Use $electron-desktop-dev when changing the Electron desktop app and verify the real user path.'

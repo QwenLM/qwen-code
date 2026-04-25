@@ -104,7 +104,7 @@ describe('DesktopServer', () => {
       },
       cli: {
         path: null,
-        channel: 'Desktop',
+        channel: 'ACP',
         acpReady: false,
       },
       auth: {
@@ -641,12 +641,16 @@ describe('DesktopServer', () => {
     expect(created.status).toBe(200);
     expect(created.body).toMatchObject({
       ok: true,
-      session: { sessionId: 'session-1' },
+      session: { sessionId: 'session-1', cwd: '/repo' },
     });
     expect(loaded.status).toBe(200);
     expect(loaded.body).toMatchObject({
       ok: true,
-      session: { models: { currentModelId: 'openai/qwen-plus' } },
+      session: {
+        sessionId: 'session-1',
+        cwd: '/repo',
+        models: { currentModelId: 'openai/qwen-plus' },
+      },
     });
     expect(acpClient.newSession).toHaveBeenCalledWith('/repo');
     expect(acpClient.loadSession).toHaveBeenCalledWith('session-1', '/repo');
@@ -791,6 +795,30 @@ describe('DesktopServer', () => {
       stopReason: 'end_turn',
     });
     expect(acpClient.prompt).toHaveBeenCalledWith('session-1', 'hello');
+    testSocket.socket.close();
+  });
+
+  it('surfaces ACP prompt errors returned as plain protocol objects', async () => {
+    const acpClient = createAcpClient();
+    vi.mocked(acpClient.prompt).mockRejectedValueOnce({
+      error: {
+        code: 'unauthorized',
+        message: 'invalid access token or token expired',
+      },
+    });
+    const server = await createTestServer(acpClient);
+    const testSocket = await connectSocket(server, '/ws/session-1');
+    await testSocket.readMessage();
+
+    testSocket.socket.send(
+      JSON.stringify({ type: 'user_message', content: 'hello' }),
+    );
+
+    expect(await testSocket.readMessage()).toMatchObject({
+      type: 'error',
+      code: 'unauthorized',
+      message: 'invalid access token or token expired',
+    });
     testSocket.socket.close();
   });
 

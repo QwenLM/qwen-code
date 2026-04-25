@@ -36,6 +36,7 @@ export function WorkspacePage({
   loadState,
   messageText,
   modelState,
+  isDraftSession,
   projects,
   reviewError,
   sessionError,
@@ -85,6 +86,7 @@ export function WorkspacePage({
   loadState: LoadState;
   messageText: string;
   modelState: ModelState;
+  isDraftSession: boolean;
   projects: DesktopProject[];
   reviewError: string | null;
   sessionError: string | null;
@@ -125,6 +127,9 @@ export function WorkspacePage({
   onTerminalInputChange: (input: string) => void;
   onWriteTerminalInput: () => void;
 }) {
+  const activeSession =
+    sessions.find((session) => session.sessionId === activeSessionId) ?? null;
+
   return (
     <main className="desktop-shell" data-testid="desktop-workspace">
       <ProjectSidebar
@@ -136,6 +141,11 @@ export function WorkspacePage({
         sessions={sessions}
         onChooseWorkspace={onChooseWorkspace}
         onCreateSession={onCreateSession}
+        onFocusModelConfig={() => {
+          document
+            .querySelector('[data-testid="model-config"]')
+            ?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        }}
         onSelectProject={onSelectProject}
         onSelectSession={onSelectSession}
       />
@@ -143,6 +153,7 @@ export function WorkspacePage({
       <section className="workbench" aria-label="Workbench">
         <TopBar
           activeProject={activeProject}
+          activeSessionTitle={activeSession?.title || null}
           loadState={loadState}
           statusLabel={statusLabel}
           onRefreshGitStatus={onRefreshProjectGitStatus}
@@ -152,6 +163,7 @@ export function WorkspacePage({
           <ChatThread
             activeSessionId={activeSessionId}
             chatState={chatState}
+            isDraftSession={isDraftSession}
             messageText={messageText}
             onAskUserQuestionResponse={onAskUserQuestionResponse}
             onMessageTextChange={onMessageTextChange}

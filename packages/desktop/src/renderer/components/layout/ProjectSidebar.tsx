@@ -20,6 +20,7 @@ export function ProjectSidebar({
   sessions,
   onChooseWorkspace,
   onCreateSession,
+  onFocusModelConfig,
   onSelectProject,
   onSelectSession,
 }: {
@@ -31,6 +32,7 @@ export function ProjectSidebar({
   sessions: DesktopSessionSummary[];
   onChooseWorkspace: () => void;
   onCreateSession: () => void;
+  onFocusModelConfig: () => void;
   onSelectProject: (projectId: string) => void;
   onSelectSession: (sessionId: string) => void;
 }) {
@@ -49,6 +51,24 @@ export function ProjectSidebar({
           <p>Desktop</p>
         </div>
       </div>
+
+      <section className="sidebar-section quick-actions">
+        <button
+          className="primary-button"
+          disabled={loadState.state !== 'ready' || !activeProject}
+          type="button"
+          onClick={onCreateSession}
+        >
+          New Thread
+        </button>
+        <button
+          className="secondary-button"
+          type="button"
+          onClick={onFocusModelConfig}
+        >
+          Model Config
+        </button>
+      </section>
 
       <section className="sidebar-section">
         <h2>Projects</h2>
@@ -71,14 +91,6 @@ export function ProjectSidebar({
 
       <section className="sidebar-section sidebar-section-fill">
         <h2>Threads</h2>
-        <button
-          className="primary-button"
-          disabled={loadState.state !== 'ready' || !activeProject}
-          type="button"
-          onClick={onCreateSession}
-        >
-          New Thread
-        </button>
         <ThreadList
           activeSessionId={activeSessionId}
           sessions={sessions}

@@ -164,3 +164,27 @@ Execution result:
 - Final package smoke passed:
   `npm run bundle`, `npm run package:dir --workspace=packages/desktop`, and
   `npm run smoke:package --workspace=packages/desktop -- --launch`.
+
+## Iteration 13 Ralph Layout Assertions
+
+The CDP harness now records and asserts renderer layout metrics in addition to
+screenshots and workflow behavior:
+
+- viewport/document height must remain one desktop viewport;
+- sidebar, topbar, chat thread, review panel, message composer, and terminal
+  drawer must have measurable rects;
+- the conversation canvas must remain wider than the review panel;
+- chat and review panels must align side by side;
+- the terminal drawer must dock directly below the workspace grid;
+- project/thread rows must stay compact instead of stretching to fill the
+  sidebar.
+
+Execution result:
+
+- `node packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- Passing run artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-25T05-09-38-476Z/`.
+- The passing run saved `initial-layout.json`, `completed-layout.json`,
+  `initial-workspace.png`, and `completed-workspace.png`.
+- The passing run reported no renderer console errors or failed network
+  requests.
