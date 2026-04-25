@@ -98,7 +98,7 @@ import { shouldDefaultToNodePty } from '../utils/shell-utils.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { type ToolName } from '../utils/tool-utils.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { normalizeProxyUrl } from '../utils/proxyUtils.js';
+import { buildNoProxyList, normalizeProxyUrl } from '../utils/proxyUtils.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -2071,14 +2071,8 @@ export class Config {
       return;
     }
 
-    // Build NO_PROXY list from existing env value + localhost variants
-    const existingNoProxy = env?.['NO_PROXY'] || env?.['no_proxy'] || '';
-    const noProxyList = [existingNoProxy, 'localhost', '127.0.0.1', '::1']
-      .filter(Boolean)
-      .join(',');
-
     const agentOptions: ConstructorParameters<typeof EnvHttpProxyAgent>[0] = {
-      noProxy: noProxyList,
+      noProxy: buildNoProxyList(),
     };
 
     // When --proxy is provided, pass it explicitly so it overrides env vars
