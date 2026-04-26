@@ -17,6 +17,7 @@ import type {
   SettingInputRequest,
   PluginChoiceRequest,
 } from '../types.js';
+import type { TodoItem } from '../components/TodoDisplay.js';
 import type { QwenAuthState } from '../hooks/useQwenAuth.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
@@ -110,6 +111,7 @@ export interface UIState {
   staticExtraHeight: number;
   dialogsVisible: boolean;
   pendingHistoryItems: HistoryItemWithoutId[];
+  stickyTodos: TodoItem[] | null;
   btwItem: HistoryItemBtw | null;
   setBtwItem: (item: HistoryItemBtw | null) => void;
   cancelBtw: () => void;

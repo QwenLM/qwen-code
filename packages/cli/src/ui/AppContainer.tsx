@@ -58,6 +58,7 @@ import {
   type WaitingToolCall,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
+import { getStickyTodos } from './utils/todoSnapshot.js';
 import { validateAuthMethod } from '../config/auth.js';
 import { loadHierarchicalGeminiMemory } from '../config/config.js';
 import process from 'node:process';
@@ -1229,6 +1230,10 @@ export const AppContainer = (props: AppContainerProps) => {
     () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
     [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
   );
+  const stickyTodos = useMemo(
+    () => getStickyTodos(historyManager.history, pendingHistoryItems),
+    [historyManager.history, pendingHistoryItems],
+  );
 
   // Terminal tab progress bar (OSC 9;4) for iTerm2/Ghostty
   useTerminalProgress(streamingState, isToolExecuting(pendingHistoryItems));
@@ -1281,40 +1286,6 @@ export const AppContainer = (props: AppContainerProps) => {
     (streamingState === StreamingState.Idle ||
       streamingState === StreamingState.Responding);
 
-  const [controlsHeight, setControlsHeight] = useState(0);
-
-  useLayoutEffect(() => {
-    if (mainControlsRef.current) {
-      const fullFooterMeasurement = measureElement(mainControlsRef.current);
-      if (fullFooterMeasurement.height > 0) {
-        setControlsHeight(fullFooterMeasurement.height);
-      }
-    }
-  }, [buffer, terminalWidth, terminalHeight, btwItem]);
-
-  // agentViewState is declared earlier (before handleFinalSubmit) so it
-  // is available for input routing. Referenced here for layout computation.
-
-  // Compute available terminal height based on controls measurement.
-  // When in-process agents are present the AgentTabBar renders an extra
-  // row at the top of the layout; subtract it so downstream consumers
-  // (shell, transcript, etc.) don't overestimate available space.
-  const tabBarHeight = agentViewState.agents.size > 0 ? 1 : 0;
-  const availableTerminalHeight = Math.max(
-    0,
-    terminalHeight - controlsHeight - staticExtraHeight - 2 - tabBarHeight,
-  );
-
-  config.setShellExecutionConfig({
-    terminalWidth: Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
-    terminalHeight: Math.max(
-      Math.floor(availableTerminalHeight - SHELL_HEIGHT_PADDING),
-      1,
-    ),
-    pager: settings.merged.tools?.shell?.pager,
-    showColor: settings.merged.tools?.shell?.showColor,
-  });
-
   const isFocused = useFocus();
   useBracketedPaste();
 
@@ -1341,16 +1312,6 @@ export const AppContainer = (props: AppContainerProps) => {
   // Initial prompt handling
   const initialPrompt = useMemo(() => config.getQuestion(), [config]);
   const initialPromptSubmitted = useRef(false);
-
-  useEffect(() => {
-    if (activePtyId) {
-      ShellExecutionService.resizePty(
-        activePtyId,
-        Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
-        Math.max(Math.floor(availableTerminalHeight - SHELL_HEIGHT_PADDING), 1),
-      );
-    }
-  }, [terminalWidth, availableTerminalHeight, activePtyId]);
 
   useEffect(() => {
     if (
@@ -1561,7 +1522,105 @@ export const AppContainer = (props: AppContainerProps) => {
     needsRestart: ideNeedsRestart,
     restartReason: ideTrustRestartReason,
   } = useIdeTrustListener();
+  const {
+    isFeedbackDialogOpen,
+    openFeedbackDialog,
+    closeFeedbackDialog,
+    temporaryCloseFeedbackDialog,
+    submitFeedback,
+  } = useFeedbackDialog({
+    config,
+    settings,
+    streamingState,
+    history: historyManager.history,
+    sessionStats,
+  });
+  const dialogsVisible =
+    showWelcomeBackDialog ||
+    shouldShowIdePrompt ||
+    shouldShowCommandMigrationNudge ||
+    isFolderTrustDialogOpen ||
+    !!shellConfirmationRequest ||
+    !!confirmationRequest ||
+    confirmUpdateExtensionRequests.length > 0 ||
+    !!codingPlanUpdateRequest ||
+    settingInputRequests.length > 0 ||
+    pluginChoiceRequests.length > 0 ||
+    !!loopDetectionConfirmationRequest ||
+    isThemeDialogOpen ||
+    isSettingsDialogOpen ||
+    isMemoryDialogOpen ||
+    isModelDialogOpen ||
+    isTrustDialogOpen ||
+    activeArenaDialog !== null ||
+    isPermissionsDialogOpen ||
+    isAuthDialogOpen ||
+    isAuthenticating ||
+    isEditorDialogOpen ||
+    showIdeRestartPrompt ||
+    isSubagentCreateDialogOpen ||
+    isAgentsManagerDialogOpen ||
+    isMcpDialogOpen ||
+    isHooksDialogOpen ||
+    isApprovalModeDialogOpen ||
+    isResumeDialogOpen ||
+    isDeleteDialogOpen ||
+    isExtensionsManagerDialogOpen ||
+    isRewindSelectorOpen;
+  dialogsVisibleRef.current = dialogsVisible;
+  const shouldShowStickyTodos =
+    stickyTodos !== null &&
+    !dialogsVisible &&
+    !isFeedbackDialogOpen &&
+    streamingState !== StreamingState.WaitingForConfirmation;
+  const [controlsHeight, setControlsHeight] = useState(0);
+
+  useLayoutEffect(() => {
+    if (!mainControlsRef.current) {
+      setControlsHeight(0);
+      return;
+    }
+
+    const fullFooterMeasurement = measureElement(mainControlsRef.current);
+    setControlsHeight(fullFooterMeasurement.height);
+  }, [
+    buffer,
+    terminalWidth,
+    terminalHeight,
+    btwItem,
+    dialogsVisible,
+    shouldShowStickyTodos,
+    stickyTodos,
+  ]);
+
+  // agentViewState is declared earlier (before handleFinalSubmit) so it
+  // is available for input routing. Referenced here for layout computation.
+  const tabBarHeight = agentViewState.agents.size > 0 ? 1 : 0;
+  const availableTerminalHeight = Math.max(
+    0,
+    terminalHeight - controlsHeight - staticExtraHeight - 2 - tabBarHeight,
+  );
+
+  config.setShellExecutionConfig({
+    terminalWidth: Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
+    terminalHeight: Math.max(
+      Math.floor(availableTerminalHeight - SHELL_HEIGHT_PADDING),
+      1,
+    ),
+    pager: settings.merged.tools?.shell?.pager,
+    showColor: settings.merged.tools?.shell?.showColor,
+  });
   const isInitialMount = useRef(true);
+
+  useEffect(() => {
+    if (activePtyId) {
+      ShellExecutionService.resizePty(
+        activePtyId,
+        Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
+        Math.max(Math.floor(availableTerminalHeight - SHELL_HEIGHT_PADDING), 1),
+      );
+    }
+  }, [terminalWidth, availableTerminalHeight, activePtyId]);
 
   useEffect(() => {
     if (ideNeedsRestart) {
@@ -2132,42 +2191,6 @@ export const AppContainer = (props: AppContainerProps) => {
     stdout,
   ]);
 
-  const nightly = props.version.includes('nightly');
-
-  const dialogsVisible =
-    showWelcomeBackDialog ||
-    shouldShowIdePrompt ||
-    shouldShowCommandMigrationNudge ||
-    isFolderTrustDialogOpen ||
-    !!shellConfirmationRequest ||
-    !!confirmationRequest ||
-    confirmUpdateExtensionRequests.length > 0 ||
-    !!codingPlanUpdateRequest ||
-    settingInputRequests.length > 0 ||
-    pluginChoiceRequests.length > 0 ||
-    !!loopDetectionConfirmationRequest ||
-    isThemeDialogOpen ||
-    isSettingsDialogOpen ||
-    isMemoryDialogOpen ||
-    isModelDialogOpen ||
-    isTrustDialogOpen ||
-    activeArenaDialog !== null ||
-    isPermissionsDialogOpen ||
-    isAuthDialogOpen ||
-    isAuthenticating ||
-    isEditorDialogOpen ||
-    showIdeRestartPrompt ||
-    isSubagentCreateDialogOpen ||
-    isAgentsManagerDialogOpen ||
-    isMcpDialogOpen ||
-    isHooksDialogOpen ||
-    isApprovalModeDialogOpen ||
-    isResumeDialogOpen ||
-    isDeleteDialogOpen ||
-    isExtensionsManagerDialogOpen ||
-    isRewindSelectorOpen;
-  dialogsVisibleRef.current = dialogsVisible;
-
   // Drain queued messages when idle. `queueDrainNonce` re-fires the effect
   // after each submission settles so multi-step queues drain end-to-end.
   const queueDrainingRef = useRef(false);
@@ -2201,19 +2224,7 @@ export const AppContainer = (props: AppContainerProps) => {
     queueDrainNonce,
   ]);
 
-  const {
-    isFeedbackDialogOpen,
-    openFeedbackDialog,
-    closeFeedbackDialog,
-    temporaryCloseFeedbackDialog,
-    submitFeedback,
-  } = useFeedbackDialog({
-    config,
-    settings,
-    streamingState,
-    history: historyManager.history,
-    sessionStats,
-  });
+  const nightly = props.version.includes('nightly');
 
   const uiState: UIState = useMemo(
     () => ({
@@ -2289,6 +2300,7 @@ export const AppContainer = (props: AppContainerProps) => {
       staticExtraHeight,
       dialogsVisible,
       pendingHistoryItems,
+      stickyTodos,
       btwItem,
       setBtwItem,
       cancelBtw,
@@ -2406,6 +2418,7 @@ export const AppContainer = (props: AppContainerProps) => {
       staticExtraHeight,
       dialogsVisible,
       pendingHistoryItems,
+      stickyTodos,
       btwItem,
       setBtwItem,
       cancelBtw,
