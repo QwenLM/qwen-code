@@ -120,9 +120,10 @@ function normalizeSessionTitle(title: string): string {
     .replace(/\*\*([^*]+)\*\*/gu, '$1')
     .replace(/\bConnected to\s+(?:session[-_\w]+|[0-9a-f-]{8,})/giu, '')
     .replace(
-      /https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?(?:\/[^\s)"'`<>,;]*)?/giu,
-      'local server',
+      /(?:\s+\b(?:in|at|from|via|on|to)\s+)?https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?(?:\/[^\s)"'`<>,;]*)?/giu,
+      '',
     )
+    .replace(/\s+\b(?:in|at|from|via|on|to)\s+local server\b/giu, '')
     .replace(
       /(^|[\s(["'`])((?:~|\/(?:Users|home|tmp|var|private|Volumes|opt|workspace|run|mnt))\/[^\s)"'`<>,;]+)/gu,
       (_match, prefix: string, path: string) => `${prefix}${basename(path)}`,

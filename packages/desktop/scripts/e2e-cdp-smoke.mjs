@@ -45,6 +45,8 @@ const compactThreadTitle = 'Review README.md after the failing test';
 const noisyThreadTitleLeaks = [
   '/tmp/',
   '127.0.0.1',
+  'local server',
+  'local...',
   'session-e2e-deadbeef',
   'desktopE2EThreadTitleNoiseToken',
 ];
@@ -1414,6 +1416,8 @@ async function assertSidebarAppRail(fileName) {
       return {
         label,
         text: row.textContent.trim(),
+        threadTitle:
+          row.querySelector('.session-row-title')?.textContent.trim() ?? null,
         className: row.className,
         rect: rectFor(row),
         style: styleFor(row),
@@ -1766,6 +1770,26 @@ async function assertSidebarAppRail(fileName) {
     );
   }
 
+  const activeThreadRow = metrics.rows.find(
+    (row) =>
+      row.className.includes('session-row-active') &&
+      row.text.includes(compactThreadTitle),
+  );
+  if (!activeThreadRow) {
+    throw new Error(
+      `Sidebar active thread row did not expose the compact thread title: ${JSON.stringify(
+        metrics.rows,
+      )}`,
+    );
+  }
+  if (activeThreadRow.threadTitle !== compactThreadTitle) {
+    throw new Error(
+      `Sidebar active thread row kept prompt tail noise: ${JSON.stringify(
+        activeThreadRow,
+      )}`,
+    );
+  }
+
   const sidebarLeaks = noisyThreadTitleLeaks.filter((leak) =>
     metrics.sidebarText.includes(leak),
   );
@@ -1885,6 +1909,7 @@ async function assertTopbarContextFidelity(fileName) {
       topbar: topbarRect,
       titleStack: rectFor(titleStack),
       title: rectFor(title),
+      titleText: title?.querySelector('h2')?.textContent.trim() ?? '',
       titleHeadingStyle: styleFor(title?.querySelector('h2')),
       titleProjectStyle: styleFor(title?.querySelector('span')),
       context: contextRect,
@@ -2022,6 +2047,15 @@ async function assertTopbarContextFidelity(fileName) {
   if (!metrics.topbarText.includes(compactThreadTitle)) {
     throw new Error(
       `Topbar did not expose the compact thread title: ${metrics.topbarText}`,
+    );
+  }
+
+  if (metrics.titleText !== compactThreadTitle) {
+    throw new Error(
+      `Topbar title kept prompt tail noise: ${JSON.stringify({
+        titleText: metrics.titleText,
+        topbarText: metrics.topbarText,
+      })}`,
     );
   }
 

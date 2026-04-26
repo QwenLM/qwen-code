@@ -22,6 +22,99 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Thread Title Local Endpoint Tail Restraint
+
+Status: completed in iteration 68.
+
+Goal: remove residual local endpoint wording from normalized thread titles so
+populated sidebar and topbar rows read like user task titles instead of
+protocol-derived prompts.
+
+User-visible value: users see concise thread names such as
+`Review README.md after the failing test` rather than titles ending in
+`in local...`, which keeps the populated project/thread browser closer to
+`home.jpg` and reduces diagnostic noise in the main workbench chrome.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/formatters.ts`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/thread-title-local-endpoint-restraint.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Local `127.0.0.1` and `localhost` URLs are removed from session display
+  titles along with a directly preceding preposition such as `in`, `at`, or
+  `from`.
+- Sidebar thread rows and the topbar title show the compact task title without
+  `local server`, `local...`, raw local URLs, ACP/session IDs, or temp paths.
+- Missing or ID-like titles still render as `Untitled thread`.
+- Existing project metadata, branch controls, composer, review, settings,
+  terminal, and compact layout workflows remain unchanged.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, create the noisy fake ACP thread,
+  inspect populated sidebar and topbar title text, then continue the existing
+  composer, branch, review, settings, terminal, relaunch, and compact viewport
+  workflows.
+- E2E assertions: thread row and topbar title contain
+  `Review README.md after the failing test`; visible navigation chrome omits
+  local endpoint tails and protocol/session/path noise; no console errors or
+  failed local requests are recorded.
+- Diagnostic artifacts: updated `sidebar-app-rail.json`,
+  `topbar-context-fidelity.json`, screenshots, Electron log, and `summary.json`
+  under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` using the Ralph prompt and current
+  artifacts as the requirements source without a blocking user question;
+  `frontend-design` with the prototype as the visual contract and title
+  restraint as the design direction; `electron-desktop-dev` for renderer
+  formatter behavior verified through component coverage and real Electron CDP.
+
+Notes and decisions:
+
+- This slice does not attempt semantic AI title generation; it is a deterministic
+  cleanup for local diagnostic tails that should never be visible in main
+  navigation chrome.
+- The formatter only strips localhost/127.0.0.1 endpoints and their immediate
+  preposition, avoiding broad removal of natural phrases like `sign in`.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 28 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T22-12-56-109Z/`.
+- Key recorded metrics: `sidebar-app-rail.json` recorded the active row
+  `threadTitle` as `Review README.md after the failing test`; the visible
+  sidebar text omitted local endpoint tails and protocol/path noise.
+  `topbar-context-fidelity.json` recorded `titleText` as the same compact
+  title, with zero horizontal overflow. `summary.json` recorded zero console
+  errors and zero failed local requests.
+
+Next work:
+
+- Continue populated-sidebar fidelity by making project/thread grouping closer
+  to `home.jpg` when several recent projects and threads are present.
+- Consider reducing remaining sidebar app-action text prominence or moving
+  repeated actions toward a more icon-led rail once the grouped browser shape
+  is stable.
+
 ### Slice: No-Project Composer Quiet State
 
 Status: completed in iteration 67.

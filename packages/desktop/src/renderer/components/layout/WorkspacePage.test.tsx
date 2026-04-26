@@ -1817,6 +1817,9 @@ describe('WorkspacePage', () => {
     const topbarTitle =
       renderedContainer.querySelector('[data-testid="topbar-title"]')
         ?.textContent ?? '';
+    const topbarHeading = renderedContainer.querySelector(
+      '[data-testid="topbar-title"] h2',
+    );
     const firstThreadTitle = renderedContainer.querySelector(
       '[data-testid="thread-row"] .session-row-title',
     );
@@ -1827,12 +1830,19 @@ describe('WorkspacePage', () => {
     expect(sidebarText).toContain('Review README.md after the failing test');
     expect(sidebarText).toContain('Untitled thread');
     expect(topbarTitle).toContain('Review README.md after the failing test');
-    expect(firstThreadTitle?.textContent).toContain('Review README.md');
+    expect(topbarHeading?.textContent).toBe(
+      'Review README.md after the failing test',
+    );
+    expect(firstThreadTitle?.textContent).toBe(
+      'Review README.md after the failing test',
+    );
     expect(untitledThread?.getAttribute('aria-label')).toBe('Untitled thread');
 
     for (const noisyText of [
       '/Users/dragon',
       '127.0.0.1',
+      'local server',
+      'local...',
       'session-e2e-deadbeef',
       'desktopE2EThreadTitleNoiseToken',
     ]) {
