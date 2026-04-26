@@ -744,6 +744,17 @@ export async function showAuthStatus(): Promise<void> {
         }
 
         writeStdoutLine(t('  Status: API key configured\n'));
+      } else if (codingPlanRegion || codingPlanVersion) {
+        // Coding Plan metadata exists but key is missing
+        writeStdoutLine(
+          t(
+            '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)',
+          ),
+        );
+        writeStdoutLine(
+          t('  Issue: API key not found in environment or settings\n'),
+        );
+        writeStdoutLine(t('  Run `qwen auth coding-plan` to re-configure.\n'));
       } else {
         writeStdoutLine(
           t('✓ Authentication Method: OpenAI-compatible API Key'),
