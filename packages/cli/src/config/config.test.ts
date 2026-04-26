@@ -878,6 +878,22 @@ describe('loadCliConfig', () => {
       const config = await loadCliConfig({}, argv);
       expect(config.getInsecure()).toBe(true);
     });
+
+    it('--no-insecure forces verification on even with QWEN_TLS_INSECURE=1', async () => {
+      vi.stubEnv('QWEN_TLS_INSECURE', '1');
+      process.argv = ['node', 'script.js', '--no-insecure'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getInsecure()).toBe(false);
+    });
+
+    it('--no-insecure overrides NODE_TLS_REJECT_UNAUTHORIZED=0', async () => {
+      vi.stubEnv('NODE_TLS_REJECT_UNAUTHORIZED', '0');
+      process.argv = ['node', 'script.js', '--no-insecure'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getInsecure()).toBe(false);
+    });
   });
 });
 
