@@ -22,6 +22,111 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Recent Project Relaunch Recovery
+
+Status: completed in iteration 62.
+
+Goal: preserve the user-selected recent project across an app relaunch when
+multiple projects are present, so the sidebar order and active project recover
+the last project the user intentionally switched to.
+
+User-visible value: a user can open a dirty project, open a clean comparison
+project, switch back from the sidebar, quit, and relaunch without the desktop
+silently returning them to the clean project just because it was the last
+project opened through the native dialog.
+
+Expected files:
+
+- `packages/desktop/src/renderer/App.tsx`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/recent-project-relaunch-recovery.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Selecting a recent project from the sidebar refreshes that project as the
+  most recently opened project without requiring the native open-project dialog.
+- Relaunching the real Electron app with the same isolated HOME/user-data after
+  switching back to the dirty project restores that dirty project as the active
+  sidebar row and topbar project.
+- The persisted recent-project store contains both projects once each, with the
+  sidebar-selected project first after relaunch.
+- The dirty project's compact topbar diff stat and inline changed-files summary
+  return after relaunch; the clean project's stale state does not leak into the
+  active workbench.
+- Existing composer, branch, review, settings, terminal, model, and commit CDP
+  workflows remain unchanged.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/server/index.test.ts src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open a dirty project, open a clean second project, switch back
+  to the dirty project from the sidebar, restart Electron with the same isolated
+  HOME/user-data, assert the dirty project is active and first in recent
+  projects, then continue the existing branch, review, settings, terminal,
+  model, composer, and commit workflows.
+- E2E assertions: recent-project store order matches the active sidebar row,
+  both project paths are persisted without duplicates, topbar project and
+  `+2 -1` diff stat belong to the dirty project after relaunch, no stale clean
+  state is visible, and no console errors or failed local requests are recorded.
+- Diagnostic artifacts: `project-relaunch-persistence.json`,
+  `project-relaunch-persistence.png`, updated Electron log, and `summary.json`
+  under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` to choose a narrow workflow
+  hardening slice; `frontend-design` to keep project recovery aligned with the
+  prototype's compact recent-project navigation instead of adding new chrome;
+  and `electron-desktop-dev` for renderer behavior verified in a relaunched
+  real Electron app through CDP.
+
+Notes and decisions:
+
+- Reuse the existing authenticated `open project` API to mark a sidebar
+  selection as recently opened. This avoids adding a new server route while
+  preserving the same path validation and Git status refresh used by the native
+  open-project flow.
+- Keep active-project recovery tied to the persisted recent-project order for
+  this slice. A separate explicit active-project preference can be added later
+  if the product needs a different ordering model.
+- The CDP harness now normalizes temporary workspace paths through `realpath`
+  before handing them to Electron. This keeps Git assertions and the persisted
+  recent-project store aligned on macOS, where `/var` paths are stored as
+  `/private/var`.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/server/index.test.ts src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 66 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T20-51-16-222Z/`.
+- Key recorded metrics: `project-relaunch-persistence.json` recorded the dirty
+  project as the only active project row and first recent project after
+  relaunch, the clean project as second and inactive, exactly two persisted
+  project paths with no duplicates, topbar Git text `+2 -1`, full Git metadata
+  `1 modified · 0 staged · 1 untracked · Diff +2 -1`, a visible conversation
+  changed-files summary, no body overflow, and a clean second workspace.
+  `summary.json` recorded zero console errors and zero failed local requests.
+
+Next work:
+
+- Continue prototype fidelity by reducing remaining visible text weight in the
+  review drawer tabs and runtime details, or by making the comment area more
+  compact when no note has been entered.
+- Consider adding an explicit active-project preference if future product
+  requirements need active recovery to diverge from recent-project ordering.
+
 ### Slice: Review Drawer Action Density
 
 Status: completed in iteration 61.

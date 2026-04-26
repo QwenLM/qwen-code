@@ -441,16 +441,37 @@ export function App() {
     dispatchModel({ type: 'reset' });
   }, [activeProject, loadState]);
 
-  const selectProject = useCallback((projectId: string) => {
-    setActiveProjectId(projectId);
-    setActiveSessionId(null);
-    setIsDraftSession(false);
-    setMessageText('');
-    setGitDiff(null);
-    pendingSocketActionRef.current = null;
-    pendingPublishSessionRef.current = null;
-    dispatchChat({ type: 'reset' });
-  }, []);
+  const selectProject = useCallback(
+    (projectId: string) => {
+      const selectedProject =
+        projects.find((project) => project.id === projectId) ?? null;
+      setActiveProjectId(projectId);
+      setActiveSessionId(null);
+      setIsDraftSession(false);
+      setMessageText('');
+      setGitDiff(null);
+      pendingSocketActionRef.current = null;
+      pendingPublishSessionRef.current = null;
+      dispatchChat({ type: 'reset' });
+
+      if (loadState.state !== 'ready' || !selectedProject) {
+        return;
+      }
+
+      void openDesktopProject(loadState.status.serverInfo, selectedProject.path)
+        .then((project) => {
+          setProjects((current) => [
+            project,
+            ...current.filter((entry) => entry.id !== project.id),
+          ]);
+          setSessionError(null);
+        })
+        .catch((error: unknown) => {
+          setSessionError(getErrorMessage(error));
+        });
+    },
+    [loadState, projects],
+  );
 
   const selectSession = useCallback(
     (sessionId: string) => {

@@ -181,6 +181,43 @@ describe('DesktopServer', () => {
     });
   });
 
+  it('moves reopened recent projects to the front without duplication', async () => {
+    const firstProjectPath = await createTempDirectory(
+      'qwen-desktop-first-project-',
+    );
+    const secondProjectPath = await createTempDirectory(
+      'qwen-desktop-second-project-',
+    );
+    const storePath = join(
+      await createTempDirectory('qwen-desktop-store-'),
+      'desktop-projects.json',
+    );
+    const server = await createTestServer(undefined, undefined, storePath);
+
+    await postJson(server, '/api/projects/open', { path: firstProjectPath });
+    await postJson(server, '/api/projects/open', { path: secondProjectPath });
+    const reopened = await postJson(server, '/api/projects/open', {
+      path: firstProjectPath,
+    });
+    const listed = await getJson(server, '/api/projects', {
+      Authorization: 'Bearer test-token',
+    });
+    const persisted = JSON.parse(await readFile(storePath, 'utf8')) as {
+      projects?: Array<{ path?: string }>;
+    };
+
+    expect(reopened.status).toBe(200);
+    expect(listed.status).toBe(200);
+    expect(listed.body).toMatchObject({
+      ok: true,
+      projects: [{ path: firstProjectPath }, { path: secondProjectPath }],
+    });
+    expect(persisted.projects?.map((project) => project.path)).toEqual([
+      firstProjectPath,
+      secondProjectPath,
+    ]);
+  });
+
   it('rejects project open requests for non-directory paths', async () => {
     const server = await createTestServer();
 

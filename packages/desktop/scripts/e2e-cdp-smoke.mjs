@@ -7,7 +7,13 @@
 
 import { execFile, spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  writeFile,
+} from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -73,17 +79,7 @@ async function main() {
     workspaceDirs: [workspaceDir, cleanWorkspaceDir],
   });
 
-  const target = await waitForCdpTarget(cdpPort);
-  const browserTarget = await waitForBrowserCdp(cdpPort);
-  browserCdp = await CdpClient.connect(browserTarget.webSocketDebuggerUrl);
-  cdp = await CdpClient.connect(target.webSocketDebuggerUrl);
-  cdp.onEvent((event) => collectBrowserEvent(event));
-
-  await cdp.send('Page.enable');
-  await cdp.send('Runtime.enable');
-  await cdp.send('Network.enable');
-  await cdp.send('Log.enable');
-  await cdp.send('Page.bringToFront');
+  let target = await connectDesktopCdp(cdpPort);
   await waitForText('Qwen Code');
   await waitForText('Connected');
   await assertWorkbenchLandmarks();
@@ -99,6 +95,21 @@ async function main() {
   await clickButton('desktop-e2e-workspace');
   await assertProjectSwitchDirtyState('project-switch-dirty-git-status.json');
   await saveScreenshot('project-switch-dirty-git-status.png');
+  target = await relaunchDesktopApp({
+    cdpPort,
+    homeDir,
+    runtimeDir,
+    userDataDir,
+    workspaceDirs: [workspaceDir, cleanWorkspaceDir],
+  });
+  await waitForSelector('[data-testid="desktop-workspace"]');
+  await waitForText('Connected');
+  await assertWorkbenchLandmarks();
+  await assertProjectRelaunchPersistence(
+    homeDir,
+    'project-relaunch-persistence.json',
+  );
+  await saveScreenshot('project-relaunch-persistence.png');
   await setFieldByAriaLabel('Message', commandApprovalPrompt);
   await clickButton('Send');
   await waitForText('Approve Once');
@@ -317,7 +328,8 @@ async function createArtifactDir() {
 }
 
 async function createGitWorkspace() {
-  const dir = await mkdtemp(join(tmpdir(), 'desktop-e2e-workspace-'));
+  const rawDir = await mkdtemp(join(tmpdir(), 'desktop-e2e-workspace-'));
+  const dir = await realpath(rawDir);
   await writeFile(join(dir, 'README.md'), '# Desktop E2E\n\ninitial\n', 'utf8');
   await writeFile(
     join(dir, 'package.json'),
@@ -339,7 +351,10 @@ async function createGitWorkspace() {
 }
 
 async function createCleanGitWorkspace() {
-  const dir = await mkdtemp(join(tmpdir(), 'desktop-e2e-clean-workspace-'));
+  const rawDir = await mkdtemp(
+    join(tmpdir(), 'desktop-e2e-clean-workspace-'),
+  );
+  const dir = await realpath(rawDir);
   await writeFile(
     join(dir, 'README.md'),
     '# Desktop E2E Clean\n\ninitial\n',
@@ -420,7 +435,12 @@ function launchDesktopApp({
   userDataDir,
   workspaceDirs,
 }) {
-  const logStream = createWriteStream(join(artifactDir, 'electron.log'));
+  const logStream = createWriteStream(join(artifactDir, 'electron.log'), {
+    flags: 'a',
+  });
+  logStream.write(
+    `\n[desktop launch] ${new Date().toISOString()} cdp=${cdpPort}\n`,
+  );
   const child = spawn(electronPath, ['.'], {
     cwd: packageDir,
     env: {
@@ -445,6 +465,56 @@ function launchDesktopApp({
   });
 
   return child;
+}
+
+async function connectDesktopCdp(cdpPort) {
+  const target = await waitForCdpTarget(cdpPort);
+  const browserTarget = await waitForBrowserCdp(cdpPort);
+  browserCdp = await CdpClient.connect(browserTarget.webSocketDebuggerUrl);
+  cdp = await CdpClient.connect(target.webSocketDebuggerUrl);
+  cdp.onEvent((event) => collectBrowserEvent(event));
+
+  await cdp.send('Page.enable');
+  await cdp.send('Runtime.enable');
+  await cdp.send('Network.enable');
+  await cdp.send('Log.enable');
+  await cdp.send('Page.bringToFront');
+  return target;
+}
+
+async function relaunchDesktopApp({
+  cdpPort,
+  homeDir,
+  runtimeDir,
+  userDataDir,
+  workspaceDirs,
+}) {
+  cdp?.close();
+  cdp = null;
+  browserCdp?.close();
+  browserCdp = null;
+  await stopDesktopApp();
+  appProcess = launchDesktopApp({
+    cdpPort,
+    homeDir,
+    runtimeDir,
+    userDataDir,
+    workspaceDirs,
+  });
+  return connectDesktopCdp(cdpPort);
+}
+
+async function stopDesktopApp() {
+  const child = appProcess;
+  if (!child || child.killed || child.exitCode !== null) {
+    return;
+  }
+
+  const exited = new Promise((resolve) => {
+    child.once('exit', resolve);
+  });
+  child.kill();
+  await Promise.race([exited, delay(5_000)]);
 }
 
 async function waitForCdpTarget(port) {
@@ -1933,6 +2003,184 @@ async function assertProjectSwitchDirtyState(fileName) {
   if (!snapshot.dirtyGitStatus.includes('README.md')) {
     throw new Error(
       `Dirty workspace should still include README.md changes:\n${snapshot.dirtyGitStatus}`,
+    );
+  }
+}
+
+async function assertProjectRelaunchPersistence(homeDir, fileName) {
+  await waitFor(
+    'dirty project recovered after relaunch',
+    async () =>
+      evaluate(`(() => {
+        const rows = [...document.querySelectorAll(
+          '[data-testid="project-row"]'
+        )];
+        const activeProject = rows.find((row) =>
+          row.classList.contains('project-row-active')
+        );
+        const firstProject = rows[0];
+        const gitStatus = document.querySelector(
+          '[data-testid="topbar-git-status"]'
+        );
+        const projectLabel = document.querySelector(
+          '[data-testid="topbar-title"] span'
+        );
+        return Boolean(
+          rows.length >= 2 &&
+            activeProject === firstProject &&
+            activeProject?.textContent.includes('desktop-e2e-workspace') &&
+            !activeProject?.textContent.includes('desktop-e2e-clean-workspace') &&
+            projectLabel?.textContent.includes('desktop-e2e-workspace') &&
+            gitStatus?.textContent.trim() === '+2 -1' &&
+            gitStatus?.querySelector('[data-testid="topbar-diff-stat"]') &&
+            document.querySelector('[data-testid="conversation-changes-summary"]')
+        );
+      })()`),
+    20_000,
+  );
+
+  const [ui, dirtyStatus, cleanStatus] = await Promise.all([
+    evaluate(`(() => {
+      const rectFor = (element) => {
+        if (!element) {
+          return null;
+        }
+        const rect = element.getBoundingClientRect();
+        return {
+          top: rect.top,
+          right: rect.right,
+          bottom: rect.bottom,
+          left: rect.left,
+          width: rect.width,
+          height: rect.height
+        };
+      };
+      const rows = [...document.querySelectorAll('[data-testid="project-row"]')]
+        .map((row, index) => ({
+          index,
+          label: row.getAttribute('aria-label') || '',
+          title: row.getAttribute('title') || '',
+          text: row.textContent.trim(),
+          active: row.classList.contains('project-row-active'),
+          name:
+            row
+              .querySelector('[data-testid="project-row-name"]')
+              ?.textContent.trim() ?? '',
+          branch:
+            row
+              .querySelector('[data-testid="project-row-branch"]')
+              ?.textContent.trim() ?? '',
+          dirty:
+            row
+              .querySelector('[data-testid="project-row-dirty"]')
+              ?.textContent.trim() ?? null,
+          rect: rectFor(row)
+        }));
+      const gitStatus = document.querySelector('[data-testid="topbar-git-status"]');
+      const title = document.querySelector('[data-testid="topbar-title"]');
+      const diffStat = gitStatus?.querySelector('[data-testid="topbar-diff-stat"]');
+      return {
+        viewport: {
+          width: window.innerWidth,
+          height: window.innerHeight
+        },
+        document: {
+          bodyScrollWidth: document.body.scrollWidth,
+          bodyScrollHeight: document.body.scrollHeight
+        },
+        topbarProject: title?.querySelector('span')?.textContent.trim() ?? '',
+        gitStatusText: gitStatus?.textContent.trim() ?? '',
+        gitStatusTitle: gitStatus?.getAttribute('title') ?? '',
+        hasTopbarDiffStat: diffStat !== null,
+        hasConversationChangesSummary:
+          document.querySelector('[data-testid="conversation-changes-summary"]') !== null,
+        projectRows: rows,
+        activeProjectCount: rows.filter((row) => row.active).length
+      };
+    })()`),
+    execFileP('git', ['-C', workspaceDir, 'status', '--porcelain=v1']),
+    execFileP('git', ['-C', cleanWorkspaceDir, 'status', '--porcelain=v1']),
+  ]);
+  const storePath = join(homeDir, '.qwen', 'desktop-projects.json');
+  const store = JSON.parse(await readFile(storePath, 'utf8'));
+  const storeProjects = Array.isArray(store.projects) ? store.projects : [];
+  const snapshot = {
+    ui,
+    storePath,
+    storeProjects,
+    dirtyGitStatus: dirtyStatus.stdout,
+    cleanGitStatus: cleanStatus.stdout,
+  };
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  const paths = storeProjects.map((project) => project.path);
+  const uniquePaths = new Set(paths);
+  if (
+    store.version !== 1 ||
+    paths.length !== 2 ||
+    uniquePaths.size !== 2 ||
+    paths[0] !== workspaceDir ||
+    paths[1] !== cleanWorkspaceDir
+  ) {
+    throw new Error(
+      `Recent project store did not preserve sidebar-selected recency: ${JSON.stringify(
+        storeProjects,
+      )}`,
+    );
+  }
+
+  const firstRow = ui.projectRows[0];
+  const activeRows = ui.projectRows.filter((row) => row.active);
+  if (
+    activeRows.length !== 1 ||
+    firstRow !== activeRows[0] ||
+    !firstRow.name.includes('desktop-e2e-workspace') ||
+    firstRow.name.includes('desktop-e2e-clean-workspace')
+  ) {
+    throw new Error(
+      `Relaunch should recover the sidebar-selected dirty project first: ${JSON.stringify(
+        ui.projectRows,
+      )}`,
+    );
+  }
+
+  if (
+    ui.gitStatusText !== '+2 -1' ||
+    !ui.gitStatusTitle.includes('1 modified · 0 staged · 1 untracked') ||
+    !ui.gitStatusTitle.includes('Diff +2 -1') ||
+    !ui.hasTopbarDiffStat ||
+    !ui.hasConversationChangesSummary ||
+    !ui.topbarProject.includes('desktop-e2e-workspace')
+  ) {
+    throw new Error(
+      `Relaunch did not restore the dirty project workbench state: ${JSON.stringify(
+        ui,
+      )}`,
+    );
+  }
+
+  if (cleanStatus.stdout.trim() !== '') {
+    throw new Error(
+      `Clean workspace should stay clean across relaunch:\n${cleanStatus.stdout}`,
+    );
+  }
+
+  if (!dirtyStatus.stdout.includes('README.md')) {
+    throw new Error(
+      `Dirty workspace should still include README.md after relaunch:\n${dirtyStatus.stdout}`,
+    );
+  }
+
+  if (ui.document.bodyScrollWidth > ui.viewport.width + 4) {
+    throw new Error(
+      `Relaunch recovery caused horizontal overflow: ${JSON.stringify(
+        ui.document,
+      )}`,
     );
   }
 }
