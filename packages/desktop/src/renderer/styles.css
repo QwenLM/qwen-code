@@ -134,9 +134,9 @@ summary:focus-visible {
   padding: 0 6px;
   border-radius: 6px;
   background: transparent;
-  color: rgba(225, 232, 242, 0.72);
-  font-size: 11.5px;
-  font-weight: 650;
+  color: rgba(225, 232, 242, 0.64);
+  font-size: 11px;
+  font-weight: 560;
   letter-spacing: 0;
   text-align: left;
   transition:
@@ -192,8 +192,8 @@ summary:focus-visible {
 .sidebar-section-heading span {
   margin: 0;
   color: var(--text-soft);
-  font-size: 9.5px;
-  font-weight: 800;
+  font-size: 9px;
+  font-weight: 720;
   letter-spacing: 0;
   text-transform: uppercase;
 }
@@ -213,10 +213,10 @@ summary:focus-visible {
 .empty-row,
 .workspace-path {
   min-height: 28px;
-  padding: 6px 2px;
-  color: rgba(225, 232, 228, 0.52);
-  font-size: 11.5px;
-  font-weight: 650;
+  padding: 5px 2px;
+  color: rgba(225, 232, 228, 0.46);
+  font-size: 10.8px;
+  font-weight: 560;
 }
 
 .workspace-path {
@@ -366,8 +366,8 @@ summary:focus-visible {
 
 .project-row-name,
 .session-row-title {
-  font-size: 11.5px;
-  font-weight: 650;
+  font-size: 11px;
+  font-weight: 600;
   line-height: 1.2;
 }
 
@@ -387,8 +387,8 @@ summary:focus-visible {
   align-items: center;
   gap: 3px;
   color: rgba(225, 232, 228, 0.48);
-  font-size: 9.2px;
-  font-weight: 680;
+  font-size: 9px;
+  font-weight: 620;
   letter-spacing: 0;
   line-height: 1;
   white-space: nowrap;
@@ -426,7 +426,7 @@ summary:focus-visible {
   min-width: 26px;
   gap: 4px;
   color: rgba(225, 232, 228, 0.52);
-  font-weight: 760;
+  font-weight: 650;
 }
 
 .session-open-icon {
@@ -450,8 +450,8 @@ summary:focus-visible {
 .session-row-meta {
   max-width: 40px;
   color: rgba(225, 232, 228, 0.54);
-  font-size: 9.2px;
-  font-weight: 720;
+  font-size: 9px;
+  font-weight: 640;
   line-height: 1;
 }
 
@@ -507,8 +507,8 @@ summary:focus-visible {
 .topbar-title h2 {
   min-width: 0;
   overflow: hidden;
-  font-size: 13px;
-  font-weight: 780;
+  font-size: 12.5px;
+  font-weight: 700;
   line-height: 1.12;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -518,8 +518,8 @@ summary:focus-visible {
   min-width: 0;
   overflow: hidden;
   color: var(--muted);
-  font-size: 10.5px;
-  font-weight: 680;
+  font-size: 10.2px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -563,8 +563,8 @@ summary:focus-visible {
   gap: 4px;
   overflow: hidden;
   color: rgba(215, 225, 218, 0.58);
-  font-size: 10.5px;
-  font-weight: 700;
+  font-size: 10.2px;
+  font-weight: 620;
   line-height: 15px;
   white-space: nowrap;
 }
@@ -646,8 +646,8 @@ summary:focus-visible {
   font-family:
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
     monospace;
-  font-size: 10.5px;
-  font-weight: 820;
+  font-size: 10.2px;
+  font-weight: 760;
   line-height: 15px;
 }
 
@@ -890,8 +890,8 @@ summary:focus-visible {
   border: 1px solid rgba(213, 224, 255, 0.14);
   border-radius: 999px;
   color: var(--text-soft);
-  font-size: 10.5px;
-  font-weight: 820;
+  font-size: 10.2px;
+  font-weight: 740;
   text-transform: uppercase;
 }
 
@@ -1024,15 +1024,19 @@ summary:focus-visible {
 .conversation-empty {
   display: grid;
   min-height: 0;
-  place-items: center;
-  color: var(--muted);
-  font-size: 14px;
+  align-items: end;
+  justify-items: center;
+  padding: 0 18px 22px;
+  color: rgba(177, 188, 184, 0.52);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: center;
 }
 
 .conversation-empty-stack {
-  align-content: center;
-  gap: 18px;
-  padding: 18px;
+  align-content: end;
+  gap: 12px;
 }
 
 .chat-timeline {
@@ -1728,14 +1732,14 @@ summary:focus-visible {
   display: inline-flex;
   min-width: 0;
   max-width: 128px;
-  min-height: 24px;
+  min-height: 22px;
   align-items: center;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 999px;
   color: var(--text-soft);
-  font-size: 11px;
-  font-weight: 730;
+  font-size: 10.6px;
+  font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1758,6 +1762,7 @@ summary:focus-visible {
 }
 
 .composer-disabled-reason {
+  max-width: 148px;
   border-color: rgba(240, 182, 110, 0.36);
   background: var(--warning-soft);
   color: #f4d095;
@@ -1811,7 +1816,7 @@ summary:focus-visible {
   color: var(--text-soft);
   cursor: pointer;
   font-size: 11px;
-  font-weight: 730;
+  font-weight: 650;
   line-height: 1;
   padding: 0 23px 0 27px;
   text-overflow: ellipsis;

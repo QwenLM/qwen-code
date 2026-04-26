@@ -296,7 +296,11 @@ function ChatTimeline({
   ]);
 
   if (!activeProject) {
-    return <div className="conversation-empty">Open a project to start</div>;
+    return (
+      <div className="conversation-empty" data-testid="conversation-empty">
+        <span>Open a project to start</span>
+      </div>
+    );
   }
 
   if (
@@ -369,7 +373,10 @@ function ConversationEmpty({
   onOpenReview: () => void;
 }) {
   return (
-    <div className="conversation-empty conversation-empty-stack">
+    <div
+      className="conversation-empty conversation-empty-stack"
+      data-testid="conversation-empty"
+    >
       <span>{label}</span>
       <ChangedFilesSummaryCard gitDiff={gitDiff} onOpenReview={onOpenReview} />
     </div>

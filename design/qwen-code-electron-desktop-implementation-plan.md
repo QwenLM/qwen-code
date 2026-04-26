@@ -22,6 +22,107 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: First Viewport Chrome Restraint
+
+Status: completed in iteration 66.
+
+Goal: make the no-project first viewport and remaining sidebar/topbar text
+weight feel closer to `home.jpg` instead of a sparse debug dashboard.
+
+User-visible value: first launch keeps the workbench calm and conversation-led:
+the empty-state prompt sits quietly near the composer, the sidebar actions and
+rows stop shouting, and the slim topbar metadata reads as supporting context.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/first-viewport-chrome-restraint.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The no-project conversation empty state is a compact, muted prompt anchored
+  near the composer instead of large centered copy.
+- The disabled no-project composer reason remains present and accessible while
+  using smaller, softer control chrome.
+- Sidebar app actions, section headings, project rows, thread rows, and empty
+  rows use lower font weight and smaller visual scale without overflowing.
+- Topbar title, project context, branch/Git metadata, and runtime status keep
+  the existing slim geometry but reduce remaining heavy type weight.
+- Existing composer-first thread creation, branch, review, settings, terminal,
+  model, relaunch, and compact viewport workflows remain unchanged.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, assert the no-project initial workspace geometry and typography,
+  then open projects and continue the existing composer, branch, review,
+  settings, terminal, model, relaunch, and compact viewport workflows.
+- E2E assertions: initial empty-state text is present, muted, compact, and
+  positioned just above the composer; disabled composer reason stays compact;
+  sidebar row/headline text weights are under the new restrained thresholds;
+  topbar title/context/runtime text weights stay below heavy-dashboard values;
+  no console errors or failed local requests are recorded.
+- Diagnostic artifacts: updated `initial-layout.json`, `initial-workspace.png`,
+  `sidebar-app-rail.json`, `topbar-context-fidelity.json`, corresponding
+  screenshots, Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` using the Ralph prompt, prototype,
+  and current artifacts as requirements without a blocking user question;
+  `frontend-design` with the prototype as the visual contract and restraint as
+  the design direction; `electron-desktop-dev` for renderer CSS/DOM changes
+  verified through the real Electron CDP harness.
+
+Notes and decisions:
+
+- This slice intentionally avoids new navigation concepts or behavior changes;
+  it is a fidelity pass on the workbench chrome and first-launch state.
+- The no-project composer remains disabled because composer-first creation is
+  scoped to an active project; this pass only reduces redundant visual weight.
+- The compact settings CDP assertion now scrolls the drawer content directly
+  with smooth scrolling disabled for the measurement frame, avoiding a
+  `scrollIntoView` path that could move the wrong container under compact
+  geometry while preserving the same reachability assertion.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 28 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T21-54-33-740Z/`.
+- Key recorded metrics: `initial-layout.json` recorded the empty-state label
+  at 12 px / 600 weight with 0.52 text alpha, positioned just above the
+  composer; the disabled composer reason at 138.836 px wide, 22 px tall, 10.6
+  px / 650 weight, and no overflow; sidebar app actions at 11 px / 560 weight;
+  sidebar headings at 9 px / 720 weight; the topbar at 50 px tall with title
+  12.5 px / 700 weight, context text 10.2 px / 620 weight, and runtime status
+  10.2 px / 740 weight. `summary.json` recorded zero console errors and zero
+  failed local requests.
+
+Next work:
+
+- Continue prototype fidelity by reducing the remaining no-project composer
+  disabled affordance weight and making the sidebar/topbar closer to the
+  `home.jpg` visual rhythm when populated with several real projects.
+- Consider active-section state for the settings rail now that the drawer
+  scroll checks are deterministic.
+
 ### Slice: Settings Drawer Section Rail
 
 Status: completed in iteration 65.

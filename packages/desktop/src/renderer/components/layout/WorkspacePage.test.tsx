@@ -861,6 +861,10 @@ describe('WorkspacePage', () => {
 
     expect(textarea.disabled).toBe(false);
     expect(textarea.placeholder).toBe('Ask Qwen Code about example-workspace');
+    expect(
+      renderedContainer.querySelector('[data-testid="conversation-empty"]')
+        ?.textContent,
+    ).toContain('Start a task in example-workspace');
     expect(renderedContainer.textContent).toContain(
       'Start a task in example-workspace',
     );
@@ -1276,6 +1280,10 @@ describe('WorkspacePage', () => {
 
     expect(textarea.disabled).toBe(true);
     expect(textarea.placeholder).toBe('Open a project to start');
+    expect(
+      renderedContainer.querySelector('[data-testid="conversation-empty"]')
+        ?.textContent,
+    ).toBe('Open a project to start');
     expect(renderedContainer.textContent).toContain('Open a project to start');
   });
 

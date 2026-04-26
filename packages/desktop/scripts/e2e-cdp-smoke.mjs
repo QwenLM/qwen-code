@@ -955,9 +955,9 @@ async function assertProjectComposerReady(fileName) {
 }
 
 async function assertRalphWorkspaceLayout(fileName) {
+  const expectInitialEmptyState = fileName === 'initial-layout.json';
   const metrics = await evaluate(`(() => {
-    const rectFor = (selector) => {
-      const element = document.querySelector(selector);
+    const rectForElement = (element) => {
       if (!element) {
         return null;
       }
@@ -971,10 +971,45 @@ async function assertRalphWorkspaceLayout(fileName) {
         height: rect.height
       };
     };
+    const rectFor = (selector) => rectForElement(document.querySelector(selector));
+    const alphaFromColor = (color) => {
+      if (!color || color === 'transparent') {
+        return 0;
+      }
+      const match = color.match(/rgba?\\(([^)]+)\\)/u);
+      if (!match) {
+        return 1;
+      }
+      const parts = match[1].split(',').map((part) => part.trim());
+      return parts.length < 4 ? 1 : Number.parseFloat(parts[3]);
+    };
+    const styleForElement = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        color: style.color,
+        colorAlpha: alphaFromColor(style.color),
+        backgroundAlpha: alphaFromColor(style.backgroundColor),
+        fontSize: Number.parseFloat(style.fontSize),
+        fontWeight: Number.parseFloat(style.fontWeight),
+        lineHeight: Number.parseFloat(style.lineHeight)
+      };
+    };
+    const styleFor = (selector) =>
+      styleForElement(document.querySelector(selector));
     const overflows = (selector) => {
       const element = document.querySelector(selector);
       return Boolean(element && element.scrollWidth > element.clientWidth + 4);
     };
+    const overflowsElement = (element) =>
+      Boolean(element && element.scrollWidth > element.clientWidth + 4);
+    const emptyState = document.querySelector(
+      '[data-testid="conversation-empty"]'
+    );
+    const emptyStateLabel = emptyState?.firstElementChild ?? emptyState;
+    const disabledReason = document.querySelector('.composer-disabled-reason');
 
     return {
       viewport: {
@@ -1001,6 +1036,44 @@ async function assertRalphWorkspaceLayout(fileName) {
       terminalProject: rectFor('[data-testid="terminal-strip-project"]'),
       terminalStatus: rectFor('[data-testid="terminal-strip-status"]'),
       terminalPreview: rectFor('[data-testid="terminal-strip-preview"]'),
+      emptyState: {
+        text: emptyState?.textContent.trim() ?? null,
+        rect: rectForElement(emptyState),
+        style: styleForElement(emptyState),
+        labelRect: rectForElement(emptyStateLabel),
+        labelStyle: styleForElement(emptyStateLabel)
+      },
+      disabledComposerReason: {
+        text: disabledReason?.textContent.trim() ?? null,
+        rect: rectForElement(disabledReason),
+        style: styleForElement(disabledReason),
+        overflows: overflowsElement(disabledReason)
+      },
+      sidebarActionRows: [
+        ...document.querySelectorAll('.sidebar-action-row')
+      ].map((row) => ({
+        text: row.textContent.trim(),
+        rect: rectForElement(row),
+        style: styleForElement(row),
+        overflows: overflowsElement(row)
+      })),
+      sidebarHeadingStyles: [
+        ...document.querySelectorAll('.sidebar-section-heading h2')
+      ].map((heading) => styleForElement(heading)),
+      sidebarEmptyRows: [...document.querySelectorAll('.empty-row')].map(
+        (row) => ({
+          text: row.textContent.trim(),
+          rect: rectForElement(row),
+          style: styleForElement(row),
+          overflows: overflowsElement(row)
+        })
+      ),
+      topbarTitleHeadingStyle: styleFor('[data-testid="topbar-title"] h2'),
+      topbarTitleProjectStyle: styleFor('[data-testid="topbar-title"] span'),
+      topbarContextStyles: [
+        ...document.querySelectorAll('.topbar-context-item')
+      ].map((item) => styleForElement(item)),
+      runtimeStatusStyle: styleFor('[data-testid="topbar-runtime-status"]'),
       terminalVisibleLabelText:
         document
           .querySelector('[data-testid="terminal-toggle"] .message-role')
@@ -1045,6 +1118,120 @@ async function assertRalphWorkspaceLayout(fileName) {
   }
 
   const { viewport, document: doc } = metrics;
+  if (expectInitialEmptyState) {
+    if (
+      metrics.emptyState.text !== 'Open a project to start' ||
+      !metrics.emptyState.rect ||
+      !metrics.emptyState.style ||
+      !metrics.emptyState.labelRect ||
+      !metrics.emptyState.labelStyle
+    ) {
+      throw new Error(
+        `Initial empty state is missing or changed: ${JSON.stringify(
+          metrics.emptyState,
+        )}`,
+      );
+    }
+
+    if (
+      metrics.emptyState.labelStyle.fontSize > 12.2 ||
+      metrics.emptyState.labelStyle.fontWeight > 620 ||
+      metrics.emptyState.labelStyle.colorAlpha > 0.58
+    ) {
+      throw new Error(
+        `Initial empty state should stay visually quiet: ${JSON.stringify(
+          metrics.emptyState,
+        )}`,
+      );
+    }
+
+    if (metrics.emptyState.labelRect.bottom < metrics.composer.top - 48) {
+      throw new Error(
+        `Initial empty state should sit near the composer instead of centered high in the canvas: ${JSON.stringify(
+          {
+            emptyState: metrics.emptyState.labelRect,
+            composer: metrics.composer,
+          },
+        )}`,
+      );
+    }
+
+    if (
+      metrics.disabledComposerReason.text !== 'Open a project to start' ||
+      !metrics.disabledComposerReason.rect ||
+      !metrics.disabledComposerReason.style ||
+      metrics.disabledComposerReason.overflows ||
+      metrics.disabledComposerReason.rect.height > 24 ||
+      metrics.disabledComposerReason.style.fontSize > 10.8 ||
+      metrics.disabledComposerReason.style.fontWeight > 680
+    ) {
+      throw new Error(
+        `Disabled composer reason should stay present and compact: ${JSON.stringify(
+          metrics.disabledComposerReason,
+        )}`,
+      );
+    }
+  }
+
+  const heavySidebarActions = metrics.sidebarActionRows.filter(
+    (row) =>
+      !row.style ||
+      row.style.fontSize > 11.2 ||
+      row.style.fontWeight > 600 ||
+      row.overflows,
+  );
+  if (heavySidebarActions.length > 0) {
+    throw new Error(
+      `Initial sidebar actions are too heavy: ${JSON.stringify(
+        heavySidebarActions,
+      )}`,
+    );
+  }
+
+  const heavySidebarHeadings = metrics.sidebarHeadingStyles.filter(
+    (style) => !style || style.fontSize > 9.2 || style.fontWeight > 740,
+  );
+  if (heavySidebarHeadings.length > 0) {
+    throw new Error(
+      `Initial sidebar headings are too heavy: ${JSON.stringify(
+        heavySidebarHeadings,
+      )}`,
+    );
+  }
+
+  const heavySidebarEmptyRows = metrics.sidebarEmptyRows.filter(
+    (row) =>
+      !row.style ||
+      row.style.fontSize > 11 ||
+      row.style.fontWeight > 580 ||
+      row.overflows,
+  );
+  if (heavySidebarEmptyRows.length > 0) {
+    throw new Error(
+      `Initial sidebar empty rows are too heavy: ${JSON.stringify(
+        heavySidebarEmptyRows,
+      )}`,
+    );
+  }
+
+  if (
+    metrics.topbarTitleHeadingStyle?.fontWeight > 720 ||
+    metrics.topbarTitleProjectStyle?.fontWeight > 620 ||
+    metrics.runtimeStatusStyle?.fontWeight > 760 ||
+    metrics.topbarContextStyles.some(
+      (style) => !style || style.fontWeight > 640,
+    )
+  ) {
+    throw new Error(
+      `Initial topbar typography should stay restrained: ${JSON.stringify({
+        title: metrics.topbarTitleHeadingStyle,
+        project: metrics.topbarTitleProjectStyle,
+        context: metrics.topbarContextStyles,
+        runtime: metrics.runtimeStatusStyle,
+      })}`,
+    );
+  }
+
   if (doc.bodyScrollHeight > viewport.height + 4) {
     throw new Error(
       `Desktop document should fit one viewport; body scrollHeight=${doc.bodyScrollHeight}, viewport=${viewport.height}`,
@@ -1381,6 +1568,20 @@ async function assertSidebarAppRail(fileName) {
     );
   }
 
+  const heavySidebarActionText = metrics.rows.filter(
+    (row) =>
+      row.className.includes('sidebar-action-row') &&
+      row.style &&
+      row.style.fontWeight > 600,
+  );
+  if (heavySidebarActionText.length > 0) {
+    throw new Error(
+      `Sidebar action text weight regressed: ${JSON.stringify(
+        heavySidebarActionText,
+      )}`,
+    );
+  }
+
   const oversizedHeadings = metrics.headingStyles.filter(
     (style) => style && style.fontSize > 9.75,
   );
@@ -1388,6 +1589,17 @@ async function assertSidebarAppRail(fileName) {
     throw new Error(
       `Sidebar heading typography regressed: ${JSON.stringify(
         oversizedHeadings,
+      )}`,
+    );
+  }
+
+  const heavyHeadings = metrics.headingStyles.filter(
+    (style) => style && style.fontWeight > 740,
+  );
+  if (heavyHeadings.length > 0) {
+    throw new Error(
+      `Sidebar heading text weight regressed: ${JSON.stringify(
+        heavyHeadings,
       )}`,
     );
   }
@@ -1416,6 +1628,34 @@ async function assertSidebarAppRail(fileName) {
         oversizedProjectMeta,
         oversizedThreadTitles,
         oversizedThreadMeta,
+      })}`,
+    );
+  }
+
+  const heavyProjectTitles = metrics.projectTitleStyles.filter(
+    (style) => style && style.fontWeight > 620,
+  );
+  const heavyProjectMeta = metrics.projectMetaStyles.filter(
+    (style) => style && style.fontWeight > 650,
+  );
+  const heavyThreadTitles = metrics.threadTitleStyles.filter(
+    (style) => style && style.fontWeight > 620,
+  );
+  const heavyThreadMeta = metrics.threadMetaStyles.filter(
+    (style) => style && style.fontWeight > 660,
+  );
+  if (
+    heavyProjectTitles.length > 0 ||
+    heavyProjectMeta.length > 0 ||
+    heavyThreadTitles.length > 0 ||
+    heavyThreadMeta.length > 0
+  ) {
+    throw new Error(
+      `Sidebar project/thread text weight regressed: ${JSON.stringify({
+        heavyProjectTitles,
+        heavyProjectMeta,
+        heavyThreadTitles,
+        heavyThreadMeta,
       })}`,
     );
   }
@@ -1800,6 +2040,18 @@ async function assertTopbarContextFidelity(fileName) {
     );
   }
 
+  if (
+    metrics.titleHeadingStyle?.fontWeight > 720 ||
+    metrics.titleProjectStyle?.fontWeight > 620
+  ) {
+    throw new Error(
+      `Topbar title weight regressed: ${JSON.stringify({
+        title: metrics.titleHeadingStyle,
+        project: metrics.titleProjectStyle,
+      })}`,
+    );
+  }
+
   if (metrics.titleProjectStyle?.fontSize > 11) {
     throw new Error(
       `Topbar project typography regressed: ${JSON.stringify(
@@ -1819,10 +2071,22 @@ async function assertTopbarContextFidelity(fileName) {
     );
   }
 
+  const heavyContextText = metrics.contextItems.filter(
+    (item) => item.style.fontWeight > 640,
+  );
+  if (heavyContextText.length > 0) {
+    throw new Error(
+      `Topbar context text weight regressed: ${JSON.stringify(
+        heavyContextText,
+      )}`,
+    );
+  }
+
   if (
     metrics.runtimeStatus.height > 29 ||
     metrics.runtimeStatus.width > 72 ||
-    metrics.runtimeStatusStyle.fontSize > 10.75
+    metrics.runtimeStatusStyle.fontSize > 10.75 ||
+    metrics.runtimeStatusStyle.fontWeight > 760
   ) {
     throw new Error(
       `Runtime status should stay compact: ${JSON.stringify(
@@ -1830,6 +2094,14 @@ async function assertTopbarContextFidelity(fileName) {
           rect: metrics.runtimeStatus,
           style: metrics.runtimeStatusStyle,
         },
+      )}`,
+    );
+  }
+
+  if (metrics.diffStat.style?.fontWeight > 780) {
+    throw new Error(
+      `Topbar diff stat text weight regressed: ${JSON.stringify(
+        metrics.diffStat,
       )}`,
     );
   }
@@ -7232,7 +7504,7 @@ async function assertCompactSettingsOverlayLayout(fileName) {
     5_000,
   );
 
-  const metrics = await evaluate(`(() => {
+  const metrics = await evaluate(`(async () => {
     const rectForElement = (element) => {
       if (!element) {
         return null;
@@ -7310,7 +7582,26 @@ async function assertCompactSettingsOverlayLayout(fileName) {
         document.querySelector('[data-testid="settings-page"]')?.innerText ?? ''
     };
 
-    permissions?.scrollIntoView({ block: 'center' });
+    if (settingsContent && permissions) {
+      const contentRect = settingsContent.getBoundingClientRect();
+      const permissionRect = permissions.getBoundingClientRect();
+      const targetScrollTop =
+        settingsContent.scrollTop +
+        permissionRect.top -
+        contentRect.top -
+        (contentRect.height - permissionRect.height) / 2;
+      const previousScrollBehavior = settingsContent.style.scrollBehavior;
+      settingsContent.style.scrollBehavior = 'auto';
+      settingsContent.scrollTop = Math.max(
+        0,
+        Math.min(
+          targetScrollTop,
+          settingsContent.scrollHeight - settingsContent.clientHeight
+        )
+      );
+      settingsContent.style.scrollBehavior = previousScrollBehavior;
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
     const afterPermissionsScroll = {
       contentScrollTop: settingsContent?.scrollTop ?? null,
       permissionsConfig: rectForElement(permissions),
