@@ -438,6 +438,55 @@ describe('modelConfigResolver', () => {
         const clientTimeout = result.config.timeout;
         expect(clientTimeout).toBe(900000);
       });
+
+      it('handles extremely large timeout values safely', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: { apiKey: 'key' },
+          env: {
+            OPENAI_API_KEY: 'key',
+            QWEN_CODE_API_TIMEOUT_MS: '999999999',
+          },
+        });
+
+        expect(result.config.timeout).toBe(999999999);
+        expect(result.sources['timeout'].kind).toBe('env');
+      });
+
+      it('handles whitespace-padded env values', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: { apiKey: 'key' },
+          env: {
+            OPENAI_API_KEY: 'key',
+            QWEN_CODE_API_TIMEOUT_MS: ' 300000 ',
+          },
+        });
+
+        // Number() implicitly trims whitespace, so this should parse correctly
+        expect(result.config.timeout).toBe(300000);
+        expect(result.sources['timeout'].kind).toBe('env');
+      });
+
+      it('ignores negative QWEN_CODE_API_TIMEOUT_MS values', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: {
+            apiKey: 'key',
+            generationConfig: { timeout: 30000 },
+          },
+          env: {
+            OPENAI_API_KEY: 'key',
+            QWEN_CODE_API_TIMEOUT_MS: '-100',
+          },
+        });
+
+        expect(result.config.timeout).toBe(30000);
+        expect(result.sources['timeout'].kind).toBe('settings');
+      });
     });
 
     describe('proxy handling', () => {
