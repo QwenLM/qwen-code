@@ -755,6 +755,7 @@ summary:focus-visible {
 
 .branch-menu-error {
   color: #ffb3a5;
+  overflow-wrap: anywhere;
 }
 
 .branch-menu-actions {

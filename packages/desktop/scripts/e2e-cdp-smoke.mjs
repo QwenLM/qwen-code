@@ -113,7 +113,6 @@ async function main() {
   await assertBranchSwitchMenu('branch-create-menu.json', longBranchName);
   await assertBranchCreateValidation('branch-create-validation.json');
   await saveScreenshot('branch-create-menu.png');
-  await setFieldByAriaLabel('New branch name', createdBranchName);
   await clickButton('Create Branch');
   await assertBranchCreateResult('branch-create-result.json');
   await clickButton('Branch');
@@ -1210,17 +1209,105 @@ async function assertBranchSwitchMenu(fileName, expectedCurrentBranch) {
 }
 
 async function assertBranchCreateValidation(fileName) {
-  const snapshot = await evaluate(`(() => {
-    const form = document.querySelector('[data-testid="branch-create-form"]');
-    const input = document.querySelector('[aria-label="New branch name"]');
-    const button = [...document.querySelectorAll('button')]
-      .find((candidate) => candidate.textContent.trim().includes('Create Branch'));
-    return {
-      formText: form?.textContent.trim() ?? '',
-      inputValue: input?.value ?? null,
-      buttonDisabled: button?.disabled ?? null
-    };
-  })()`);
+  const readSnapshot = async (label) =>
+    evaluate(`(() => {
+      const rectFor = (element) => {
+        if (!element) {
+          return null;
+        }
+        const rect = element.getBoundingClientRect();
+        return {
+          top: rect.top,
+          right: rect.right,
+          bottom: rect.bottom,
+          left: rect.left,
+          width: rect.width,
+          height: rect.height
+        };
+      };
+      const menu = document.querySelector('[data-testid="branch-menu"]');
+      const form = document.querySelector('[data-testid="branch-create-form"]');
+      const input = document.querySelector('[aria-label="New branch name"]');
+      const error = document.querySelector('[data-testid="branch-create-error"]');
+      const button = [...document.querySelectorAll('button')]
+        .find((candidate) => candidate.textContent.trim().includes('Create Branch'));
+      const menuRect = rectFor(menu);
+      const errorRect = rectFor(error);
+      return {
+        label: ${JSON.stringify(label)},
+        formText: form?.textContent.trim() ?? '',
+        inputValue: input?.value ?? null,
+        buttonDisabled: button?.disabled ?? null,
+        errorText: error?.textContent.trim() ?? '',
+        menu: menuRect,
+        createForm: rectFor(form),
+        error: errorRect,
+        errorEscapesMenu: Boolean(
+          errorRect &&
+            menuRect &&
+            (errorRect.left < menuRect.left - 1 ||
+              errorRect.right > menuRect.right + 1)
+        ),
+        bodyScrollWidth: document.body.scrollWidth,
+        viewportWidth: window.innerWidth
+      };
+    })()`);
+
+  const empty = await readSnapshot('empty');
+
+  await setFieldByAriaLabel('New branch name', longBranchName);
+  await waitFor(
+    'duplicate branch create validation',
+    async () =>
+      evaluate(`(() => {
+        const error = document.querySelector('[data-testid="branch-create-error"]');
+        const button = [...document.querySelectorAll('button')]
+          .find((candidate) => candidate.textContent.trim().includes('Create Branch'));
+        return Boolean(
+          button?.disabled &&
+            error?.textContent.includes('already exists')
+        );
+      })()`),
+    10_000,
+  );
+  const duplicate = await readSnapshot('duplicate');
+
+  await setFieldByAriaLabel('New branch name', 'feature/has space');
+  await waitFor(
+    'malformed branch create validation',
+    async () =>
+      evaluate(`(() => {
+        const error = document.querySelector('[data-testid="branch-create-error"]');
+        const button = [...document.querySelectorAll('button')]
+          .find((candidate) => candidate.textContent.trim().includes('Create Branch'));
+        return Boolean(
+          button?.disabled &&
+            error?.textContent.includes('valid local branch')
+        );
+      })()`),
+    10_000,
+  );
+  const malformed = await readSnapshot('malformed');
+
+  await setFieldByAriaLabel('New branch name', createdBranchName);
+  await waitFor(
+    'valid branch create validation',
+    async () =>
+      evaluate(`(() => {
+        const error = document.querySelector('[data-testid="branch-create-error"]');
+        const button = [...document.querySelectorAll('button')]
+          .find((candidate) => candidate.textContent.trim().includes('Create Branch'));
+        return Boolean(button && !button.disabled && !error);
+      })()`),
+    10_000,
+  );
+  const valid = await readSnapshot('valid');
+  const snapshot = {
+    empty,
+    duplicate,
+    malformed,
+    valid,
+  };
 
   await writeFile(
     join(artifactDir, fileName),
@@ -1228,18 +1315,66 @@ async function assertBranchCreateValidation(fileName) {
     'utf8',
   );
 
-  if (snapshot.inputValue !== '') {
+  if (snapshot.empty.inputValue !== '') {
     throw new Error(
       `New branch input should start empty: ${JSON.stringify(snapshot)}`,
     );
   }
 
-  if (snapshot.buttonDisabled !== true) {
+  if (snapshot.empty.buttonDisabled !== true) {
     throw new Error(
       `Create Branch should be disabled while the branch name is empty: ${JSON.stringify(
         snapshot,
       )}`,
     );
+  }
+
+  if (
+    snapshot.duplicate.buttonDisabled !== true ||
+    !snapshot.duplicate.errorText.includes('already exists')
+  ) {
+    throw new Error(
+      `Duplicate branch validation did not disable creation: ${JSON.stringify(
+        snapshot.duplicate,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.malformed.buttonDisabled !== true ||
+    !snapshot.malformed.errorText.includes('valid local branch')
+  ) {
+    throw new Error(
+      `Malformed branch validation did not disable creation: ${JSON.stringify(
+        snapshot.malformed,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.valid.inputValue !== createdBranchName ||
+    snapshot.valid.buttonDisabled !== false ||
+    snapshot.valid.errorText !== ''
+  ) {
+    throw new Error(
+      `Valid branch name should clear validation: ${JSON.stringify(
+        snapshot.valid,
+      )}`,
+    );
+  }
+
+  for (const state of [snapshot.duplicate, snapshot.malformed]) {
+    if (state.errorEscapesMenu) {
+      throw new Error(
+        `Branch validation error escaped the menu: ${JSON.stringify(state)}`,
+      );
+    }
+
+    if (state.bodyScrollWidth > state.viewportWidth + 4) {
+      throw new Error(
+        `Branch validation caused body overflow: ${JSON.stringify(state)}`,
+      );
+    }
   }
 }
 

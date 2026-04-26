@@ -22,6 +22,105 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Branch Create Inline Validation
+
+Status: completed in iteration 22.
+
+Goal: keep branch creation errors inside the compact topbar branch menu by
+validating duplicate and malformed names before submission and proving the
+error state in real Electron.
+
+User-visible value: users get immediate, contained feedback when a branch name
+cannot be created, without a failed Git request, menu overflow, or leaving the
+conversation-first workbench.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/TopBar.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/branch-creation.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Empty branch creation remains disabled.
+- Duplicate local branch names show an inline error and keep the create action
+  disabled without calling the create route.
+- Malformed names with leading/trailing whitespace, whitespace inside the name,
+  option-looking names, path traversal, or `.lock` suffixes show a concise
+  inline error and keep the create action disabled.
+- Editing back to a valid unique branch name clears the inline error and allows
+  creation.
+- The error text, create form, and rows remain width-bounded inside the compact
+  branch menu at the default Electron viewport.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, open the branch menu, type duplicate
+  and malformed branch names, assert inline error/disabled state/geometry, type
+  `desktop-e2e/new-branch-from-menu`, create it, then continue the existing
+  branch switching, review, settings, terminal, discard safety, and commit
+  workflows.
+- E2E assertions: duplicate and invalid names do not close the menu or call
+  branch creation; valid names clear the inline error; the error block does not
+  overflow the menu; no console errors or failed local requests are recorded.
+- Diagnostic artifacts: `branch-create-validation.json`,
+  `branch-create-menu.png`, Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained compact
+  menu feedback; `electron-desktop-dev` for real Electron CDP verification of
+  the renderer workflow.
+
+Notes and decisions:
+
+- Validation remains renderer-side for fast feedback and mirrors the server's
+  pre-Git rejection rules for common malformed names. The server remains the
+  final authority for Git ref validation and duplicate checks.
+- Duplicate names are checked against the loaded local branch list, including
+  the current branch. The create action stays disabled while the inline error is
+  visible, so users do not get a failed request for obvious conflicts.
+- The menu continues to use the compact topbar surface from the prototype;
+  errors render as a single inline status message beneath the create form
+  rather than expanding into a Git management view.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 14 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron with
+  duplicate and malformed branch-create validation, successful branch creation,
+  dirty branch switching, review, settings, terminal, discard safety, and
+  commit workflows.
+- Passing artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T02-59-40-308Z/`.
+- Key recorded metrics: the branch menu stayed `320` px wide; duplicate and
+  malformed validation errors stayed inside the menu; the create button stayed
+  disabled for invalid names and became enabled for
+  `desktop-e2e/new-branch-from-menu`; no document overflow, console errors, or
+  failed local requests were recorded.
+
+Next work:
+
+- Continue prototype fidelity by reducing the remaining composer height and
+  changed-files summary weight visible in the latest screenshots.
+- Add a compact settings/model switch path from the composer once the model
+  configuration workflow is resumed.
+
 ### Completed Slice: Safe Topbar Branch Creation
 
 Status: completed in iteration 21.

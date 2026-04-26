@@ -328,6 +328,117 @@ describe('WorkspacePage', () => {
     ).toBeNull();
   });
 
+  it('validates compact branch creation names before submitting', async () => {
+    const branches: DesktopGitBranch[] = [
+      { name: 'main', current: true },
+      { name: 'feature/safe-switch', current: false },
+    ];
+    const onListProjectBranches = vi.fn(async () => branches);
+    const onCreateProjectBranch = vi.fn(async () => undefined);
+    const renderedContainer = renderWorkspace({
+      onListProjectBranches,
+      onCreateProjectBranch,
+    });
+
+    await act(async () => {
+      clickButton(renderedContainer, 'Branch main');
+    });
+
+    const createForm = renderedContainer.querySelector(
+      '[data-testid="branch-create-form"]',
+    );
+    const input = createForm?.querySelector(
+      'input[aria-label="New branch name"]',
+    );
+    const createButton = createForm?.querySelector('button[type="submit"]');
+    expect(input).toBeInstanceOf(HTMLInputElement);
+    expect(createButton).toBeInstanceOf(HTMLButtonElement);
+
+    await act(async () => {
+      setInputValue(input as HTMLInputElement, 'main');
+    });
+
+    expect((createButton as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      renderedContainer.querySelector('[data-testid="branch-create-error"]')
+        ?.textContent,
+    ).toContain('already exists');
+
+    for (const invalidBranchName of [
+      ' feature/leading-space',
+      'feature/has space',
+      '../escape',
+      '-option-looking',
+      'feature/name.lock',
+    ]) {
+      await act(async () => {
+        setInputValue(input as HTMLInputElement, invalidBranchName);
+      });
+
+      expect((createButton as HTMLButtonElement).disabled).toBe(true);
+      expect(
+        renderedContainer.querySelector('[data-testid="branch-create-error"]')
+          ?.textContent,
+      ).not.toBe('');
+    }
+
+    await act(async () => {
+      setInputValue(input as HTMLInputElement, 'feature/new-task');
+    });
+
+    expect(
+      renderedContainer.querySelector('[data-testid="branch-create-error"]'),
+    ).toBeNull();
+    expect((createButton as HTMLButtonElement).disabled).toBe(false);
+
+    await act(async () => {
+      (createButton as HTMLButtonElement).click();
+    });
+
+    expect(onCreateProjectBranch).toHaveBeenCalledTimes(1);
+    expect(onCreateProjectBranch).toHaveBeenCalledWith('feature/new-task');
+  });
+
+  it('keeps stale create validation out of branch switch confirmation', async () => {
+    const branches: DesktopGitBranch[] = [
+      { name: 'main', current: true },
+      { name: 'feature/safe-switch', current: false },
+    ];
+    const renderedContainer = renderWorkspace({
+      onListProjectBranches: vi.fn(async () => branches),
+    });
+
+    await act(async () => {
+      clickButton(renderedContainer, 'Branch main');
+    });
+
+    const input = renderedContainer.querySelector(
+      'input[aria-label="New branch name"]',
+    );
+    expect(input).toBeInstanceOf(HTMLInputElement);
+
+    await act(async () => {
+      setInputValue(input as HTMLInputElement, 'feature/has space');
+    });
+
+    expect(
+      renderedContainer.querySelector('[data-testid="branch-create-error"]'),
+    ).toBeTruthy();
+
+    await act(async () => {
+      clickButton(renderedContainer, 'Switch to branch feature/safe-switch');
+    });
+
+    expect(
+      renderedContainer.querySelector(
+        '[data-testid="branch-switch-confirmation"]',
+      ),
+    ).toBeTruthy();
+    expect(
+      renderedContainer.querySelector('[data-testid="branch-create-error"]'),
+    ).toBeNull();
+  });
+
   it('keeps the composer enabled for an active project with no thread', () => {
     const renderedContainer = renderWorkspace({
       activeSessionId: null,

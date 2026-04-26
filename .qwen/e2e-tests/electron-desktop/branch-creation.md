@@ -21,12 +21,17 @@ Safe Topbar Branch Creation.
 3. Send a prompt and approve the fake command request.
 4. Open the topbar branch menu and assert the compact create form is present.
 5. Assert empty branch creation is disabled.
-6. Create `desktop-e2e/new-branch-from-menu`.
-7. Assert the topbar branch label and real repository branch switch to the new
+6. Type the existing long branch name and assert the duplicate inline error
+   keeps creation disabled.
+7. Type `feature/has space` and assert the malformed-name inline error keeps
+   creation disabled.
+8. Type `desktop-e2e/new-branch-from-menu` and assert validation clears.
+9. Create `desktop-e2e/new-branch-from-menu`.
+10. Assert the topbar branch label and real repository branch switch to the new
    branch, while dirty status remains visible.
-8. Reopen the menu, assert the new branch is marked current, then switch back
+11. Reopen the menu, assert the new branch is marked current, then switch back
    to `main` through the existing dirty-worktree confirmation path.
-9. Continue the existing review, discard-cancel, commit, settings, terminal,
+12. Continue the existing review, discard-cancel, commit, settings, terminal,
    and terminal-attachment smoke paths.
 
 ## Assertions
@@ -34,6 +39,9 @@ Safe Topbar Branch Creation.
 - Branch creation stays inside the slim topbar branch menu.
 - The create form, branch rows, and menu stay width-bounded.
 - Empty branch creation is disabled before request submission.
+- Duplicate and malformed branch names show concise inline errors and keep the
+  create action disabled.
+- Valid unique branch names clear the inline error and enable creation.
 - Server branch creation validates names and rejects duplicates/invalid refs in
   focused tests.
 - Successful creation runs through the token-protected desktop server route,
@@ -59,7 +67,7 @@ Pass.
 Passing artifact directory:
 
 ```text
-.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T02-47-05-265Z/
+.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T02-59-40-308Z/
 ```
 
 Important artifacts:
@@ -85,8 +93,21 @@ Intermediate passing artifact before the stale-row product cleanup:
 .qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T02-39-03-398Z/
 ```
 
+Previous passing artifact before inline validation coverage:
+
+```text
+.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T02-47-05-265Z/
+```
+
+Intermediate passing artifact before the stale validation self-review fix:
+
+```text
+.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T02-57-34-887Z/
+```
+
 ## Known Uncovered Risk
 
-The real Electron path covers disabled empty submission and successful branch
-creation. Duplicate and malformed branch names are covered by server tests but
-not yet by an inline CDP error-state assertion.
+The real Electron path now covers disabled empty submission, duplicate inline
+validation, one malformed inline validation, and successful branch creation.
+Additional malformed patterns remain covered by focused component/server tests
+rather than separate CDP interactions.

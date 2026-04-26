@@ -254,10 +254,21 @@ function BranchMenu({
     }
   };
 
+  const branchValidationError = getBranchCreateValidationError(
+    newBranchName,
+    branches,
+  );
+  const createDisabled =
+    newBranchName.trim().length === 0 ||
+    Boolean(branchValidationError) ||
+    isCreating ||
+    isSwitching;
+  const visibleError = pendingBranch ? error : (branchValidationError ?? error);
+
   const createBranch = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const branchName = newBranchName;
-    if (branchName.trim().length === 0 || isCreating || isSwitching) {
+    const branchName = newBranchName.trim();
+    if (createDisabled) {
       return;
     }
 
@@ -386,11 +397,7 @@ function BranchMenu({
                     />
                     <button
                       className="secondary-button"
-                      disabled={
-                        newBranchName.trim().length === 0 ||
-                        isCreating ||
-                        isSwitching
-                      }
+                      disabled={createDisabled}
                       type="submit"
                     >
                       Create Branch
@@ -401,7 +408,15 @@ function BranchMenu({
             </>
           )}
 
-          {error ? <p className="branch-menu-error">{error}</p> : null}
+          {visibleError ? (
+            <p
+              className="branch-menu-error"
+              data-testid="branch-create-error"
+              role="status"
+            >
+              {visibleError}
+            </p>
+          ) : null}
         </div>
       ) : null}
     </span>
@@ -423,6 +438,48 @@ function getTopBarTitle(
 function getChangedCount(project: DesktopProject): number {
   const status = project.gitStatus;
   return status.modified + status.staged + status.untracked;
+}
+
+function getBranchCreateValidationError(
+  branchName: string,
+  branches: DesktopGitBranch[],
+): string | null {
+  if (branchName.length === 0) {
+    return null;
+  }
+
+  const trimmed = branchName.trim();
+  if (trimmed.length === 0 || trimmed !== branchName) {
+    return 'Remove leading or trailing spaces.';
+  }
+
+  if (trimmed.length > 160) {
+    return 'Use a branch name under 160 characters.';
+  }
+
+  if (
+    hasWhitespace(trimmed) ||
+    trimmed.startsWith('-') ||
+    trimmed.startsWith('/') ||
+    trimmed.endsWith('/') ||
+    trimmed.includes('//') ||
+    trimmed.includes('..') ||
+    trimmed.includes('@{') ||
+    trimmed.includes('\\') ||
+    trimmed.endsWith('.lock')
+  ) {
+    return 'Use a valid local branch name.';
+  }
+
+  if (branches.some((branch) => branch.name === trimmed)) {
+    return 'A local branch with that name already exists.';
+  }
+
+  return null;
+}
+
+function hasWhitespace(value: string): boolean {
+  return value.split('').some((character) => character.trim().length === 0);
 }
 
 function getErrorMessage(error: unknown): string {
