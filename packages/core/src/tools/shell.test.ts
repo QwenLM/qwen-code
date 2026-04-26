@@ -31,8 +31,6 @@ import {
 } from '../services/shellExecutionService.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
-import { EOL } from 'node:os';
-import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import { ToolErrorType } from './tool-error.js';
 import { OUTPUT_UPDATE_INTERVAL_MS } from './shell.js';
@@ -55,12 +53,14 @@ describe('ShellTool', () => {
       getPermissionsDeny: vi.fn().mockReturnValue([]),
       getDebugMode: vi.fn().mockReturnValue(false),
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
+      getSessionId: vi.fn().mockReturnValue('test-session'),
       getWorkspaceContext: vi
         .fn()
         .mockReturnValue(createMockWorkspaceContext('/test/dir')),
       storage: {
         getUserSkillsDirs: vi.fn().mockReturnValue(['/test/dir/.qwen/skills']),
         getProjectTempDir: vi.fn().mockReturnValue('/tmp/qwen-temp'),
+        getProjectDir: vi.fn().mockReturnValue('/test/proj'),
       },
       getTruncateToolOutputThreshold: vi.fn().mockReturnValue(0),
       getTruncateToolOutputLines: vi.fn().mockReturnValue(0),
@@ -72,7 +72,22 @@ describe('ShellTool', () => {
         email: 'qwen-coder@alibabacloud.com',
       }),
       getShouldUseNodePtyShell: vi.fn().mockReturnValue(false),
+      getBackgroundShellRegistry: vi.fn().mockReturnValue({
+        register: vi.fn(),
+        get: vi.fn(),
+        getAll: vi.fn().mockReturnValue([]),
+        cancel: vi.fn(),
+        complete: vi.fn(),
+        fail: vi.fn(),
+      }),
     } as unknown as Config;
+
+    // executeBackground writes to disk; stub mkdirSync + createWriteStream.
+    vi.mocked(fs.mkdirSync).mockReturnValue(undefined);
+    vi.mocked(fs.createWriteStream).mockReturnValue({
+      write: vi.fn(),
+      end: vi.fn(),
+    } as unknown as fs.WriteStream);
 
     shellTool = new ShellTool(mockConfig);
 
@@ -271,81 +286,129 @@ describe('ShellTool', () => {
       resolveExecutionPromise(fullResult);
     };
 
-    it('should wrap background command on linux and parse pgrep output', async () => {
+    it('runs background commands as managed pool entries (no & / pgrep wrap)', async () => {
+      const registry = mockConfig.getBackgroundShellRegistry();
       const invocation = shellTool.build({
-        command: 'my-command',
+        command: 'npm start',
         is_background: true,
       });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({ pid: 54321 });
 
-      vi.mocked(fs.existsSync).mockReturnValue(true);
-      vi.mocked(fs.readFileSync).mockReturnValue(`54321${EOL}54322${EOL}`); // Service PID and background PID
+      const result = await invocation.execute(mockAbortSignal);
 
-      const result = await promise;
-
-      const tmpFile = path.join(os.tmpdir(), 'shell_pgrep_abcdef.tmp');
-      const wrappedCommand = `{ my-command & }; __code=$?; pgrep -g 0 >${tmpFile} 2>&1; exit $__code;`;
+      // Spawn happens with the unwrapped command — no '&', no pgrep envelope.
       expect(mockShellExecutionService).toHaveBeenCalledWith(
-        wrappedCommand,
+        'npm start',
         '/test/dir',
         expect.any(Function),
         expect.any(AbortSignal),
         false,
         {},
       );
-      expect(result.llmContent).toContain('PIDs: 54322');
-      expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalledWith(tmpFile);
+      // Entry registered with the spawn pid.
+      expect(registry.register).toHaveBeenCalledTimes(1);
+      const entry = (registry.register as Mock).mock.calls[0][0];
+      expect(entry.command).toBe('npm start');
+      expect(entry.cwd).toBe('/test/dir');
+      expect(entry.status).toBe('running');
+      expect(entry.pid).toBe(12345);
+      expect(typeof entry.shellId).toBe('string');
+      expect(entry.outputPath).toContain('shell-');
+      // Returns immediately with id + output path; agent's turn isn't blocked.
+      expect(result.llmContent).toContain(entry.shellId);
+      expect(result.llmContent).toContain(entry.outputPath);
     });
 
-    it('should add ampersand to command when is_background is true and command does not end with &', async () => {
+    it('settles a background entry as completed when the process exits cleanly', async () => {
+      const registry = mockConfig.getBackgroundShellRegistry();
       const invocation = shellTool.build({
-        command: 'npm start',
+        command: 'true',
         is_background: true,
       });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({ pid: 54321 });
+      await invocation.execute(mockAbortSignal);
+      const entry = (registry.register as Mock).mock.calls[0][0];
 
-      vi.mocked(fs.existsSync).mockReturnValue(true);
-      vi.mocked(fs.readFileSync).mockReturnValue('54321\n54322\n');
+      resolveExecutionPromise({
+        rawOutput: Buffer.from(''),
+        output: '',
+        exitCode: 0,
+        signal: null,
+        error: null,
+        aborted: false,
+        pid: 12345,
+        executionMethod: 'child_process',
+      });
+      // Flush the .then() microtask attached to resultPromise.
+      await new Promise((r) => setImmediate(r));
 
-      await promise;
-
-      const tmpFile = path.join(os.tmpdir(), 'shell_pgrep_abcdef.tmp');
-      const wrappedCommand = `{ npm start & }; __code=$?; pgrep -g 0 >${tmpFile} 2>&1; exit $__code;`;
-      expect(mockShellExecutionService).toHaveBeenCalledWith(
-        wrappedCommand,
-        expect.any(String),
-        expect.any(Function),
-        expect.any(AbortSignal),
-        false,
-        {},
+      expect(registry.complete).toHaveBeenCalledWith(
+        entry.shellId,
+        0,
+        expect.any(Number),
       );
+      expect(registry.fail).not.toHaveBeenCalled();
+      expect(registry.cancel).not.toHaveBeenCalled();
     });
 
-    it('should not add extra ampersand when is_background is true and command already ends with &', async () => {
+    it('settles a background entry as failed when ShellExecutionService reports error', async () => {
+      const registry = mockConfig.getBackgroundShellRegistry();
       const invocation = shellTool.build({
-        command: 'npm start &',
+        command: 'no-such-command',
         is_background: true,
       });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({ pid: 54321 });
+      await invocation.execute(mockAbortSignal);
+      const entry = (registry.register as Mock).mock.calls[0][0];
 
-      vi.mocked(fs.existsSync).mockReturnValue(true);
-      vi.mocked(fs.readFileSync).mockReturnValue('54321\n54322\n');
+      resolveExecutionPromise({
+        rawOutput: Buffer.from(''),
+        output: '',
+        exitCode: null,
+        signal: null,
+        error: new Error('spawn ENOENT'),
+        aborted: false,
+        pid: 12345,
+        executionMethod: 'child_process',
+      });
+      await new Promise((r) => setImmediate(r));
 
-      await promise;
-
-      const tmpFile = path.join(os.tmpdir(), 'shell_pgrep_abcdef.tmp');
-      const wrappedCommand = `{ npm start & }; __code=$?; pgrep -g 0 >${tmpFile} 2>&1; exit $__code;`;
-      expect(mockShellExecutionService).toHaveBeenCalledWith(
-        wrappedCommand,
-        expect.any(String),
-        expect.any(Function),
-        expect.any(AbortSignal),
-        false,
-        {},
+      expect(registry.fail).toHaveBeenCalledWith(
+        entry.shellId,
+        'spawn ENOENT',
+        expect.any(Number),
       );
+      expect(registry.complete).not.toHaveBeenCalled();
+    });
+
+    it('settles a background entry as cancelled when the abort signal fires', async () => {
+      const registry = mockConfig.getBackgroundShellRegistry();
+      const ac = new AbortController();
+      const invocation = shellTool.build({
+        command: 'sleep 99',
+        is_background: true,
+      });
+      await invocation.execute(ac.signal);
+      const entry = (registry.register as Mock).mock.calls[0][0];
+      // Simulate registry already setting status to 'running' before cancel hits.
+      (registry.get as Mock).mockReturnValue({ status: 'running' });
+
+      ac.abort();
+      resolveExecutionPromise({
+        rawOutput: Buffer.from(''),
+        output: '',
+        exitCode: null,
+        signal: 'SIGTERM',
+        error: null,
+        aborted: true,
+        pid: 12345,
+        executionMethod: 'child_process',
+      });
+      await new Promise((r) => setImmediate(r));
+
+      expect(registry.cancel).toHaveBeenCalledWith(
+        entry.shellId,
+        expect.any(Number),
+      );
+      expect(registry.complete).not.toHaveBeenCalled();
+      expect(registry.fail).not.toHaveBeenCalled();
     });
 
     it('should not add ampersand when is_background is false', async () => {
@@ -477,23 +540,6 @@ describe('ShellTool', () => {
           is_background: false,
         }),
       ).toThrow('Directory must be an absolute path.');
-    });
-
-    it('should clean up the temp file on synchronous execution error', async () => {
-      const error = new Error('sync spawn error');
-      mockShellExecutionService.mockImplementation(() => {
-        throw error;
-      });
-      vi.mocked(fs.existsSync).mockReturnValue(true); // Pretend the file exists
-
-      const invocation = shellTool.build({
-        command: 'a-command',
-        is_background: false,
-      });
-      await expect(invocation.execute(mockAbortSignal)).rejects.toThrow(error);
-
-      const tmpFile = path.join(os.tmpdir(), 'shell_pgrep_abcdef.tmp');
-      expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalledWith(tmpFile);
     });
 
     describe('Streaming to `updateOutput`', () => {
@@ -1016,43 +1062,6 @@ describe('ShellTool', () => {
     });
   });
 
-  describe('Windows background execution', () => {
-    it('should clean up trailing ampersand on Windows for background tasks', async () => {
-      vi.mocked(os.platform).mockReturnValue('win32');
-      const mockAbortSignal = new AbortController().signal;
-
-      const invocation = shellTool.build({
-        command: 'npm start &',
-        is_background: true,
-      });
-
-      const promise = invocation.execute(mockAbortSignal);
-
-      // Simulate immediate success (process started)
-      resolveExecutionPromise({
-        rawOutput: Buffer.from(''),
-        output: '',
-        exitCode: 0,
-        signal: null,
-        error: null,
-        aborted: false,
-        pid: 12345,
-        executionMethod: 'child_process',
-      });
-
-      await promise;
-
-      expect(mockShellExecutionService).toHaveBeenCalledWith(
-        'npm start',
-        expect.any(String),
-        expect.any(Function),
-        expect.any(AbortSignal),
-        false,
-        {},
-      );
-    });
-  });
-
   describe('timeout parameter', () => {
     it('should validate timeout parameter correctly', async () => {
       // Valid timeout
@@ -1175,40 +1184,6 @@ describe('ShellTool', () => {
       // The signal passed should be different from the original signal
       const calledSignal = mockShellExecutionService.mock.calls[0][3];
       expect(calledSignal).not.toBe(mockAbortSignal);
-    });
-
-    it('should not create timeout signal for background execution', async () => {
-      const mockAbortSignal = new AbortController().signal;
-      const invocation = shellTool.build({
-        command: 'npm start',
-        is_background: true,
-        timeout: 5000,
-      });
-
-      const promise = invocation.execute(mockAbortSignal);
-
-      resolveExecutionPromise({
-        rawOutput: Buffer.from(''),
-        output: 'Background command started. PID: 12345',
-        exitCode: 0,
-        signal: null,
-        error: null,
-        aborted: false,
-        pid: 12345,
-        executionMethod: 'child_process',
-      });
-
-      await promise;
-
-      // For background execution, the original signal should be used
-      expect(mockShellExecutionService).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.any(String),
-        expect.any(Function),
-        mockAbortSignal,
-        false,
-        {},
-      );
     });
 
     it('should handle timeout vs user cancellation correctly', async () => {
