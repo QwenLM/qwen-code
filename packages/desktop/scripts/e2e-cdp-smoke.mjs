@@ -735,6 +735,10 @@ async function assertRalphWorkspaceLayout(fileName) {
         height: rect.height
       };
     };
+    const overflows = (selector) => {
+      const element = document.querySelector(selector);
+      return Boolean(element && element.scrollWidth > element.clientWidth + 4);
+    };
 
     return {
       viewport: {
@@ -758,10 +762,20 @@ async function assertRalphWorkspaceLayout(fileName) {
       terminal: rectFor('[data-testid="terminal-drawer"]'),
       terminalBody: rectFor('[data-testid="terminal-body"]'),
       terminalToggle: rectFor('[data-testid="terminal-toggle"]'),
+      terminalProject: rectFor('[data-testid="terminal-strip-project"]'),
+      terminalStatus: rectFor('[data-testid="terminal-strip-status"]'),
+      terminalPreview: rectFor('[data-testid="terminal-strip-preview"]'),
+      terminalVisibleLabelText:
+        document
+          .querySelector('[data-testid="terminal-toggle"] .message-role')
+          ?.textContent.trim() ?? null,
       terminalExpanded:
         document
           .querySelector('[data-testid="terminal-toggle"]')
           ?.getAttribute('aria-expanded') ?? null,
+      terminalOverflow: {
+        toggle: overflows('[data-testid="terminal-toggle"]')
+      },
       listRows: [...document.querySelectorAll('.project-row, .session-row')]
         .map((element) => {
           const rect = element.getBoundingClientRect();
@@ -817,10 +831,50 @@ async function assertRalphWorkspaceLayout(fileName) {
     throw new Error('Initial layout should render a collapsed terminal strip.');
   }
 
-  if (metrics.terminal.height < 44 || metrics.terminal.height > 82) {
+  if (metrics.terminal.height < 38 || metrics.terminal.height > 52) {
     throw new Error(
       `Unexpected collapsed terminal height: ${metrics.terminal.height}`,
     );
+  }
+
+  if (
+    !metrics.terminalToggle ||
+    metrics.terminalToggle.height < 30 ||
+    metrics.terminalToggle.height > 36
+  ) {
+    throw new Error(
+      `Collapsed terminal toggle should be slim: ${JSON.stringify(
+        metrics.terminalToggle,
+      )}`,
+    );
+  }
+
+  if (metrics.terminalVisibleLabelText !== null) {
+    throw new Error(
+      `Collapsed terminal should not render a visible section label: ${metrics.terminalVisibleLabelText}`,
+    );
+  }
+
+  if (metrics.terminalOverflow.toggle) {
+    throw new Error('Collapsed terminal toggle overflowed.');
+  }
+
+  for (const [key, rect] of Object.entries({
+    project: metrics.terminalProject,
+    status: metrics.terminalStatus,
+    preview: metrics.terminalPreview,
+  })) {
+    if (
+      !rect ||
+      rect.left < metrics.terminalToggle.left - 1 ||
+      rect.right > metrics.terminalToggle.right + 1
+    ) {
+      throw new Error(
+        `Collapsed terminal ${key} is not contained in the strip: ${JSON.stringify(
+          rect,
+        )}`,
+      );
+    }
   }
 
   if (metrics.chat.height < metrics.terminal.height * 6) {
@@ -3043,6 +3097,15 @@ async function assertCompactDenseConversationLayout(fileName) {
     const terminalToggle = document.querySelector(
       '[data-testid="terminal-toggle"]'
     );
+    const terminalProject = document.querySelector(
+      '[data-testid="terminal-strip-project"]'
+    );
+    const terminalStatus = document.querySelector(
+      '[data-testid="terminal-strip-status"]'
+    );
+    const terminalPreview = document.querySelector(
+      '[data-testid="terminal-strip-preview"]'
+    );
     const chatHeader = document.querySelector('.chat-header');
     const chatStatus = document.querySelector('.chat-status-announcement');
 
@@ -3121,6 +3184,13 @@ async function assertCompactDenseConversationLayout(fileName) {
       summary: rectFor(summary),
       composer: composerRect,
       terminal: rectFor(terminal),
+      terminalToggle: rectFor(terminalToggle),
+      terminalProject: rectFor(terminalProject),
+      terminalStatus: rectFor(terminalStatus),
+      terminalPreview: rectFor(terminalPreview),
+      terminalVisibleLabelText:
+        terminalToggle?.querySelector('.message-role')?.textContent.trim() ??
+        null,
       terminalExpanded: terminalToggle?.getAttribute('aria-expanded') ?? null,
       terminalBodyPresent: terminalBody !== null,
       preScroll,
@@ -3164,7 +3234,8 @@ async function assertCompactDenseConversationLayout(fileName) {
         fileReferences: overflows(fileReferences),
         composer: overflows(composer),
         composerContext: overflows(document.querySelector('.composer-context')),
-        composerActions: overflows(document.querySelector('.composer-actions'))
+        composerActions: overflows(document.querySelector('.composer-actions')),
+        terminalToggle: overflows(terminalToggle)
       }
     };
   })()`);
@@ -3316,10 +3387,50 @@ async function assertCompactDenseConversationLayout(fileName) {
     );
   }
 
-  if (snapshot.terminal.height < 44 || snapshot.terminal.height > 82) {
+  if (snapshot.terminal.height < 38 || snapshot.terminal.height > 52) {
     throw new Error(
       `Compact terminal strip height is unexpected: ${snapshot.terminal.height}`,
     );
+  }
+
+  if (
+    !snapshot.terminalToggle ||
+    snapshot.terminalToggle.height < 30 ||
+    snapshot.terminalToggle.height > 36
+  ) {
+    throw new Error(
+      `Compact terminal toggle should stay slim: ${JSON.stringify(
+        snapshot.terminalToggle,
+      )}`,
+    );
+  }
+
+  if (snapshot.terminalVisibleLabelText !== null) {
+    throw new Error(
+      `Compact terminal should not render a visible section label: ${snapshot.terminalVisibleLabelText}`,
+    );
+  }
+
+  if (snapshot.overflow.terminalToggle) {
+    throw new Error('Compact terminal toggle overflowed.');
+  }
+
+  for (const [key, rect] of Object.entries({
+    project: snapshot.terminalProject,
+    status: snapshot.terminalStatus,
+    preview: snapshot.terminalPreview,
+  })) {
+    if (
+      !rect ||
+      rect.left < snapshot.terminalToggle.left - 1 ||
+      rect.right > snapshot.terminalToggle.right + 1
+    ) {
+      throw new Error(
+        `Compact terminal ${key} is not contained in the strip: ${JSON.stringify(
+          rect,
+        )}`,
+      );
+    }
   }
 
   if (!snapshot.summaryVisibleBeforeAssistantScroll) {
@@ -3625,7 +3736,7 @@ async function assertReviewDrawerLayout(fileName) {
     );
   }
 
-  if (metrics.terminal.height < 44 || metrics.terminal.height > 82) {
+  if (metrics.terminal.height < 38 || metrics.terminal.height > 52) {
     throw new Error(
       `Review layout has unexpected terminal strip height: ${metrics.terminal.height}`,
     );
@@ -3954,7 +4065,7 @@ async function assertCompactReviewDrawerLayout(fileName) {
     throw new Error('Compact review should keep Terminal collapsed.');
   }
 
-  if (metrics.terminal.height < 44 || metrics.terminal.height > 82) {
+  if (metrics.terminal.height < 38 || metrics.terminal.height > 52) {
     throw new Error(
       `Compact review terminal strip height is unexpected: ${metrics.terminal.height}`,
     );

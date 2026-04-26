@@ -117,6 +117,15 @@ describe('WorkspacePage', () => {
         .querySelector('button[aria-label="Expand Terminal"]')
         ?.getAttribute('aria-expanded'),
     ).toBe('false');
+    expect(
+      renderedContainer.querySelector(
+        '[data-testid="terminal-toggle"] .message-role',
+      ),
+    ).toBeNull();
+    expect(
+      renderedContainer.querySelector('[data-testid="terminal-strip-project"]')
+        ?.textContent,
+    ).toContain('example-workspace');
     expect(renderedContainer.querySelector('.topbar-nav')).toBeNull();
     expect(renderedContainer.querySelector('.chat-header')).toBeNull();
     expect(

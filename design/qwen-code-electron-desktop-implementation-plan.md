@@ -22,6 +22,102 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Terminal Strip Fidelity
+
+Status: completed in iteration 46.
+
+Goal: tighten the collapsed terminal so it reads as a slim supporting local
+status row like the `home.jpg` prototype instead of a competing boxed bottom
+panel.
+
+User-visible value: users keep more attention on the conversation and composer
+while still having an obvious terminal affordance with project, status, and
+last-command context.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/TerminalDrawer.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/terminal-strip-fidelity.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The collapsed terminal strip is a one-line, icon-led status control with
+  accessible expand/collapse labels and no visible uppercase section label
+  competing with the composer.
+- The collapsed strip height is reduced and remains docked below the workspace
+  grid at default and compact Electron viewports without body overflow.
+- The strip shows project context, terminal status, and last output/command
+  preview without overflowing long project, branch, command, or output text.
+- The expanded terminal remains a supporting drawer, keeps icon-only actions,
+  and does not push the conversation below half the viewport.
+- Terminal attach/copy/run/stdin behavior remains unchanged.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, verify the initial collapsed terminal geometry, send a prompt,
+  re-check compact conversation geometry with terminal collapsed, expand the
+  terminal, run a deterministic command, attach output to composer, collapse
+  the terminal again, and verify no console errors or failed local requests.
+- E2E assertions: collapsed strip height is slim, icon/status/preview remain
+  horizontally contained, the conversation remains dominant, expanded height
+  stays supporting, and terminal output attachment does not create an approval
+  request.
+- Diagnostic artifacts: updated `initial-layout.json`,
+  `compact-dense-conversation.json`, `terminal-expanded-layout.json`,
+  `terminal-attachment.json`, `completed-layout.json`, screenshots, Electron
+  log, and summary JSON under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for choosing the smallest next
+  fidelity slice without user interruption, `frontend-design` for
+  prototype-constrained density and hierarchy, and `electron-desktop-dev` for
+  real Electron CDP verification.
+
+Notes and decisions:
+
+- The prototype shows local mode and branch as low, slim context controls below
+  the composer; this slice keeps Qwen's terminal affordance in that supporting
+  position but removes the heavier boxed label treatment.
+- No new icon dependency is needed; the existing local terminal/chevron icons
+  are sufficient.
+- Long project names and terminal previews may be ellipsized, but the CDP
+  harness now asserts their visible boxes stay contained inside the strip.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 20 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T18-08-19-344Z/`.
+- Key recorded metrics: default terminal strip 42 px high with a 32 px toggle,
+  compact terminal strip 42 px high with a 32 px toggle, no visible terminal
+  section label, collapsed strip docked below the workspace grid, expanded
+  terminal 238 px high while conversation remains 500 px high, and no console
+  errors or failed local requests.
+
+Next work:
+
+- Continue terminal fidelity by making the expanded drawer command/input rows
+  denser and more icon-led if screenshot review still shows too much utility
+  chrome.
+- Continue message-system polish by reducing `PLAN` and tool activity label
+  weight if screenshot review shows they still compete with assistant prose.
+
 ### Slice: Assistant Message Chrome Reduction
 
 Status: completed in iteration 45.

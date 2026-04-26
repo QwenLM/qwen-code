@@ -1957,47 +1957,47 @@ textarea:focus {
   overflow: hidden;
   border-top: 1px solid var(--line);
   background:
-    linear-gradient(180deg, rgba(19, 22, 23, 0.96), rgba(10, 12, 13, 0.96)),
+    linear-gradient(180deg, rgba(16, 19, 20, 0.94), rgba(10, 12, 13, 0.96)),
     #0b0d0e;
 }
 
 .terminal-drawer-collapsed {
-  height: 54px;
-  padding: 7px 18px;
+  height: 42px;
+  padding: 5px 18px;
 }
 
 .terminal-drawer-expanded {
-  height: 252px;
+  height: 238px;
   grid-template-rows: auto minmax(0, 1fr);
-  padding: 8px 18px 12px;
+  padding: 6px 18px 10px;
 }
 
 .terminal-strip {
   display: grid;
   width: 100%;
   min-width: 0;
-  min-height: 38px;
-  grid-template-columns: auto minmax(124px, 0.34fr) auto minmax(0, 1fr) auto;
+  min-height: 32px;
+  grid-template-columns: auto minmax(112px, 0.3fr) auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
-  padding: 0 8px;
+  gap: 8px;
+  padding: 0 6px;
   border: 1px solid transparent;
-  border-radius: 7px;
-  background: rgba(238, 244, 239, 0.03);
+  border-radius: 6px;
+  background: transparent;
   color: var(--text-soft);
   text-align: left;
 }
 
 .terminal-strip:not(:disabled):hover {
-  border-color: rgba(85, 166, 255, 0.25);
-  background: rgba(238, 244, 239, 0.055);
+  border-color: rgba(85, 166, 255, 0.2);
+  background: rgba(238, 244, 239, 0.035);
 }
 
 .terminal-strip-icon,
 .terminal-strip-chevron {
   display: grid;
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   place-items: center;
   color: rgba(225, 232, 228, 0.62);
 }
@@ -2020,23 +2020,23 @@ textarea:focus {
 .terminal-strip-copy strong {
   color: var(--text);
   font-size: 12px;
-  font-weight: 760;
+  font-weight: 720;
   line-height: 1.1;
 }
 
 .terminal-strip-status {
-  min-height: 22px;
-  padding: 3px 8px;
-  border: 1px solid var(--line);
+  min-height: 18px;
+  padding: 1px 6px;
+  border: 1px solid rgba(226, 232, 222, 0.12);
   border-radius: 999px;
-  color: var(--text-soft);
+  color: rgba(225, 232, 228, 0.66);
   font-size: 11px;
-  font-weight: 820;
+  font-weight: 760;
   text-transform: uppercase;
 }
 
 .terminal-strip-preview {
-  color: rgba(225, 232, 228, 0.58);
+  color: rgba(225, 232, 228, 0.52);
   font-family:
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
     monospace;
@@ -2047,8 +2047,8 @@ textarea:focus {
   display: grid;
   min-height: 0;
   grid-template-rows: auto auto auto minmax(0, 1fr) auto;
-  gap: 8px;
-  padding-top: 8px;
+  gap: 7px;
+  padding-top: 6px;
 }
 
 .terminal-actions,
@@ -2690,12 +2690,12 @@ textarea:focus {
 
   .terminal-drawer-collapsed {
     height: auto;
-    min-height: 54px;
+    min-height: 42px;
   }
 
   .terminal-drawer-expanded {
     height: auto;
-    min-height: 280px;
+    min-height: 268px;
   }
 
   .terminal-strip {

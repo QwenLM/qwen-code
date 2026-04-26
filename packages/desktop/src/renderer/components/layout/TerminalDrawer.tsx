@@ -81,11 +81,23 @@ export function TerminalDrawer({
           <TerminalIcon />
         </span>
         <span className="terminal-strip-copy">
-          <span className="message-role">Terminal</span>
-          <strong>{project?.name || 'No project'}</strong>
+          <span className="sr-only">Terminal project</span>
+          <strong data-testid="terminal-strip-project">
+            {project?.name || 'No project'}
+          </strong>
         </span>
-        <span className="terminal-strip-status">{terminalStatus}</span>
-        <span className="terminal-strip-preview">{terminalPreview}</span>
+        <span
+          className="terminal-strip-status"
+          data-testid="terminal-strip-status"
+        >
+          {terminalStatus}
+        </span>
+        <span
+          className="terminal-strip-preview"
+          data-testid="terminal-strip-preview"
+        >
+          {terminalPreview}
+        </span>
         <span className="terminal-strip-chevron" aria-hidden="true">
           {isExpanded ? <ChevronDownIcon /> : <ChevronUpIcon />}
         </span>
