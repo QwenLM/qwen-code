@@ -1033,7 +1033,13 @@ describe('modelConfigUtils', () => {
           '';
         return {
           config: { model, apiKey: '', baseUrl: '' },
-          sources: { model: model === 'custom-model' ? 'settings' : 'env' },
+          sources: {
+            model: {
+              kind: (model === 'custom-model' ? 'settings' : 'env') as
+                | 'settings'
+                | 'env',
+            },
+          },
           warnings: [],
         };
       });
