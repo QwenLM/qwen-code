@@ -81,7 +81,7 @@ export function getAuthTypeFromEnv(): AuthType | undefined {
  * Unified resolver for CLI generation config.
  *
  * Precedence (for OpenAI auth):
- * - model: argv.model > OPENAI_MODEL > QWEN_MODEL > settings.model.name
+ * - model: argv.model > settings.model.name > OPENAI_MODEL > QWEN_MODEL
  * - apiKey: argv.openaiApiKey > OPENAI_API_KEY > settings.security.auth.apiKey
  * - baseUrl: argv.openaiBaseUrl > OPENAI_BASE_URL > settings.security.auth.baseUrl
  *
@@ -96,16 +96,23 @@ export function resolveCliGenerationConfig(
   const authType = selectedAuthType;
 
   // Find modelProvider from settings.modelProviders based on authType and model
+  // Precedence: argv.model > settings.model.name > OPENAI_MODEL > QWEN_MODEL
   let modelProvider: ProviderModelConfig | undefined;
   if (authType && settings.modelProviders) {
     const providers = settings.modelProviders[authType];
     if (providers && Array.isArray(providers)) {
-      // Try to find by requested model (from CLI or settings)
-      const requestedModel = argv.model || settings.model?.name;
-      if (requestedModel) {
-        modelProvider = providers.find((p) => p.id === requestedModel) as
-          | ProviderModelConfig
-          | undefined;
+      const candidates = [
+        argv.model,
+        settings.model?.name,
+        authType === AuthType.USE_OPENAI ? env['OPENAI_MODEL'] : undefined,
+        authType === AuthType.USE_OPENAI ? env['QWEN_MODEL'] : undefined,
+      ].filter((v): v is string => typeof v === 'string');
+      for (const candidate of candidates) {
+        const found = providers.find((p) => p.id === candidate);
+        if (found) {
+          modelProvider = found;
+          break;
+        }
       }
     }
   }
