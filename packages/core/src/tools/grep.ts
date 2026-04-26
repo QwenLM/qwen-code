@@ -564,13 +564,10 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
   static readonly Name = ToolNames.GREP;
 
   constructor(private readonly config: Config) {
-    const lspNote = config.isLspEnabled()
-      ? '\n  - IMPORTANT: An LSP tool is available. For code intelligence queries (finding definitions, references, implementations, symbols, hover info, diagnostics, call hierarchy), use the "lsp" tool instead of Grep. Grep should only be used for text pattern searches, NOT for code navigation or symbol lookups.\n'
-      : '';
     super(
       GrepTool.Name,
       ToolDisplayNames.GREP,
-      `A powerful search tool for finding patterns in files\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke \`grep\` or \`rg\` as a Bash command. The Grep tool has been optimized for correct permissions and access.${lspNote}\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Case-insensitive by default\n  - Use Agent tool for open-ended searches requiring multiple rounds\n`,
+      'A powerful search tool for finding patterns in files\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Case-insensitive by default\n  - Use Agent tool for open-ended searches requiring multiple rounds\n',
       Kind.Search,
       {
         properties: {

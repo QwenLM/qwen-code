@@ -340,7 +340,6 @@ describe('Gemini Client (client.ts)', () => {
       getUserMemory: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getAppendSystemPrompt: vi.fn().mockReturnValue(undefined),
-      isLspEnabled: vi.fn().mockReturnValue(false),
       getFullContext: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getProxy: vi.fn().mockReturnValue(undefined),
@@ -2919,7 +2918,6 @@ Other open files:
         '',
         'test-model',
         'Be extra concise.',
-        { lspEnabled: false },
       );
     });
 

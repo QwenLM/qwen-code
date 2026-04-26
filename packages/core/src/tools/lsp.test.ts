@@ -5,6 +5,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Config } from '../config/config.js';
@@ -81,6 +83,19 @@ const createMockConfig = (client?: LspClient, enabled = true): Config =>
  */
 const createTool = (client?: LspClient, enabled = true) =>
   new LspTool(createMockConfig(client, enabled));
+
+const createToolWithRoot = (root: string, client?: LspClient, enabled = true) =>
+  new LspTool({
+    getLspClient: () => client,
+    isLspEnabled: () => enabled,
+    getProjectRoot: () => root,
+    getWorkspaceContext: () => ({
+      getDirectories: () => [root],
+    }),
+    getFileService: () => ({
+      shouldIgnoreFile: () => false,
+    }),
+  } as unknown as Config);
 
 describe('LspTool', () => {
   describe('validateToolParams', () => {
@@ -367,6 +382,85 @@ describe('LspTool', () => {
 
         expect(result.llmContent).toContain('No definitions found');
       });
+
+      it('returns the resolved symbol location when definitions are empty', async () => {
+        const client = createMockClient();
+        const tool = createTool(client);
+        const filePath = resolvePath('src', 'calculator.py');
+        const symbol: LspSymbolInformation = {
+          name: 'SimpleCalculator',
+          kind: 'Class',
+          location: createLocation(filePath, 21, 6),
+          serverName: 'pylsp',
+        };
+        (client.workspaceSymbols as Mock).mockResolvedValue([symbol]);
+        (client.definitions as Mock).mockResolvedValue([]);
+
+        const invocation = tool.build({
+          operation: 'goToDefinition',
+          symbolName: 'SimpleCalculator',
+        });
+        const result = await invocation.execute(abortSignal);
+
+        expect(client.definitions).toHaveBeenCalledWith(
+          expect.objectContaining({
+            uri: toUri(filePath),
+            range: expect.objectContaining({
+              start: { line: 21, character: 6 },
+            }),
+          }),
+          'pylsp',
+          20,
+        );
+        expect(result.llmContent).toContain('Definitions for');
+        expect(result.returnDisplay).toContain(
+          '1. src/calculator.py:22:7 [pylsp]',
+        );
+      });
+
+      it('matches document symbols that include a language-specific signature', async () => {
+        const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-tool-'));
+        try {
+          const javaDir = path.join(tempRoot, 'src', 'main', 'java', 'com');
+          fs.mkdirSync(javaDir, { recursive: true });
+          const filePath = path.join(javaDir, 'Main.java');
+          fs.writeFileSync(
+            filePath,
+            [
+              'class Main {',
+              '  static int computeSum(Calculator calc) {',
+              '    return 0;',
+              '  }',
+              '}',
+            ].join('\n'),
+          );
+
+          const client = createMockClient();
+          const tool = createToolWithRoot(tempRoot, client);
+          const symbol: LspSymbolInformation = {
+            name: 'computeSum(Calculator)',
+            kind: 'Method',
+            containerName: 'Main',
+            location: createLocation(filePath, 1, 13),
+            serverName: 'jdtls',
+          };
+          (client.workspaceSymbols as Mock).mockResolvedValue([]);
+          (client.documentSymbols as Mock).mockResolvedValue([symbol]);
+          (client.definitions as Mock).mockResolvedValue([]);
+
+          const invocation = tool.build({
+            operation: 'goToDefinition',
+            symbolName: 'computeSum',
+          });
+          const result = await invocation.execute(abortSignal);
+
+          expect(result.returnDisplay).toContain(
+            '1. src/main/java/com/Main.java:2:14 [jdtls]',
+          );
+        } finally {
+          fs.rmSync(tempRoot, { recursive: true, force: true });
+        }
+      });
     });
 
     describe('findReferences operation', () => {
@@ -399,6 +493,177 @@ describe('LspTool', () => {
         expect(result.llmContent).toContain('References for');
         expect(result.llmContent).toContain('1.');
         expect(result.llmContent).toContain('2.');
+      });
+
+      it('resolves symbolName before dispatching references to the matching server', async () => {
+        const client = createMockClient();
+        const tool = createTool(client);
+        const filePath = resolvePath('include', 'calculator.h');
+        const symbol: LspSymbolInformation = {
+          name: 'Calculator',
+          kind: 'Class',
+          location: createLocation(filePath, 12, 6),
+          serverName: 'clangd',
+        };
+        const refs: LspReference[] = [
+          { ...createLocation(resolvePath('src', 'main.cpp'), 9, 4) },
+        ];
+        (client.workspaceSymbols as Mock).mockResolvedValue([symbol]);
+        (client.references as Mock).mockResolvedValue(refs);
+
+        const invocation = tool.build({
+          operation: 'findReferences',
+          symbolName: 'Calculator',
+        });
+        const result = await invocation.execute(abortSignal);
+
+        expect(client.workspaceSymbols).toHaveBeenCalledWith('Calculator', 5);
+        expect(client.references).toHaveBeenCalledWith(
+          expect.objectContaining({
+            uri: toUri(filePath),
+            range: expect.objectContaining({
+              start: { line: 12, character: 6 },
+            }),
+          }),
+          'clangd',
+          false,
+          50,
+        );
+        expect(result.llmContent).toContain('References for');
+      });
+
+      it('trims symbolName before workspace symbol search', async () => {
+        const client = createMockClient();
+        const tool = createTool(client);
+        const filePath = resolvePath('src', 'calculator.cpp');
+        const symbol: LspSymbolInformation = {
+          name: 'Calculator',
+          location: createLocation(filePath, 6, 5),
+          serverName: 'clangd',
+        };
+        (client.workspaceSymbols as Mock).mockResolvedValue([symbol]);
+        (client.references as Mock).mockResolvedValue([]);
+
+        const invocation = tool.build({
+          operation: 'findReferences',
+          symbolName: '  Calculator  ',
+        });
+        await invocation.execute(abortSignal);
+
+        expect(client.workspaceSymbols).toHaveBeenCalledWith('Calculator', 5);
+      });
+
+      it('falls back to document symbols when workspace symbol search is empty', async () => {
+        const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-tool-'));
+        try {
+          const includeDir = path.join(tempRoot, 'include');
+          fs.mkdirSync(includeDir, { recursive: true });
+          const filePath = path.join(includeDir, 'calculator.h');
+          fs.writeFileSync(filePath, 'class Calculator {};\n');
+
+          const client = createMockClient();
+          const tool = createToolWithRoot(tempRoot, client);
+          const symbol: LspSymbolInformation = {
+            name: 'Calculator',
+            kind: 'Class',
+            location: createLocation(filePath, 0, 6),
+            serverName: 'clangd',
+          };
+          (client.workspaceSymbols as Mock).mockResolvedValue([]);
+          (client.documentSymbols as Mock).mockResolvedValue([symbol]);
+          (client.references as Mock).mockResolvedValue([
+            { ...createLocation(path.join(tempRoot, 'src', 'main.cpp'), 9, 4) },
+          ]);
+
+          const invocation = tool.build({
+            operation: 'findReferences',
+            symbolName: 'Calculator',
+          });
+          const result = await invocation.execute(abortSignal);
+
+          expect(client.documentSymbols).toHaveBeenCalledWith(
+            toUri(filePath),
+            undefined,
+            200,
+          );
+          expect(client.references).toHaveBeenCalledWith(
+            expect.objectContaining({
+              uri: toUri(filePath),
+              range: expect.objectContaining({
+                start: { line: 0, character: 6 },
+              }),
+            }),
+            'clangd',
+            false,
+            50,
+          );
+          expect(result.llmContent).toContain('References for');
+        } finally {
+          fs.rmSync(tempRoot, { recursive: true, force: true });
+        }
+      });
+
+      it('prefers declaration document symbols over imported symbols with the same name', async () => {
+        const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-tool-'));
+        try {
+          const srcDir = path.join(tempRoot, 'src');
+          fs.mkdirSync(srcDir, { recursive: true });
+          const filePath = path.join(srcDir, 'module.py');
+          fs.writeFileSync(
+            filePath,
+            [
+              'from z_calculator import SimpleCalculator',
+              '',
+              'class SimpleCalculator:',
+              '    pass',
+              '',
+              'calc = SimpleCalculator()',
+            ].join('\n'),
+          );
+
+          const client = createMockClient();
+          const tool = createToolWithRoot(tempRoot, client);
+          const importedSymbol: LspSymbolInformation = {
+            name: 'SimpleCalculator',
+            kind: 'Class',
+            location: createLocation(filePath, 0, 0),
+            serverName: 'pylsp',
+          };
+          const declaredSymbol: LspSymbolInformation = {
+            name: 'SimpleCalculator',
+            kind: 'Class',
+            location: createLocation(filePath, 2, 6),
+            serverName: 'pylsp',
+          };
+          (client.workspaceSymbols as Mock).mockResolvedValue([]);
+          (client.documentSymbols as Mock).mockResolvedValue([
+            importedSymbol,
+            declaredSymbol,
+          ]);
+          (client.references as Mock).mockResolvedValue([
+            { ...createLocation(filePath, 5, 7), serverName: 'pylsp' },
+          ]);
+
+          const invocation = tool.build({
+            operation: 'findReferences',
+            symbolName: 'SimpleCalculator',
+          });
+          await invocation.execute(abortSignal);
+
+          expect(client.references).toHaveBeenCalledWith(
+            expect.objectContaining({
+              uri: toUri(filePath),
+              range: expect.objectContaining({
+                start: { line: 2, character: 6 },
+              }),
+            }),
+            'pylsp',
+            false,
+            50,
+          );
+        } finally {
+          fs.rmSync(tempRoot, { recursive: true, force: true });
+        }
       });
     });
 

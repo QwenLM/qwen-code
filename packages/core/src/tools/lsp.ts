@@ -5,7 +5,9 @@
  */
 
 import path from 'node:path';
+import fs from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { globSync } from 'glob';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
@@ -89,6 +91,13 @@ type ResolvedTarget =
     }
   | { error: string };
 
+type SymbolTarget = {
+  filePath: string;
+  line: number;
+  character: number;
+  serverName?: string;
+};
+
 /** Operations that require filePath and line. */
 const LOCATION_REQUIRED_OPERATIONS = new Set<LspOperation>([
   'goToDefinition',
@@ -116,7 +125,39 @@ const ITEM_REQUIRED_OPERATIONS = new Set<LspOperation>([
 /** Operations that require filePath and range for code actions. */
 const RANGE_REQUIRED_OPERATIONS = new Set<LspOperation>(['codeActions']);
 
+const SYMBOL_FALLBACK_EXTENSIONS = [
+  'ts',
+  'tsx',
+  'js',
+  'jsx',
+  'py',
+  'java',
+  'go',
+  'rs',
+  'c',
+  'cc',
+  'cpp',
+  'cxx',
+  'h',
+  'hpp',
+  'hxx',
+];
+
+const SYMBOL_FALLBACK_EXCLUDES = [
+  '**/node_modules/**',
+  '**/.git/**',
+  '**/dist/**',
+  '**/build/**',
+  '**/target/**',
+  '**/.venv/**',
+];
+
+const SYMBOL_FALLBACK_FILE_LIMIT = 200;
+const SYMBOL_FALLBACK_SYMBOL_LIMIT = 200;
+
 class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
+  private resolvedLocationFromSymbolName = false;
+
   constructor(
     private readonly config: Config,
     params: LspToolParams,
@@ -169,6 +210,8 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
         this.params.filePath = resolved.filePath;
         this.params.line = resolved.line;
         this.params.character = resolved.character;
+        this.params.serverName ??= resolved.serverName;
+        this.resolvedLocationFromSymbolName = true;
       } else {
         const message = `Could not resolve symbol "${this.params.symbolName}" via workspace symbol search.`;
         return { llmContent: message, returnDisplay: message };
@@ -229,6 +272,19 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
     }
 
     if (!definitions.length) {
+      if (this.resolvedLocationFromSymbolName) {
+        const workspaceRoot = this.config.getProjectRoot();
+        const line = `1. ${this.formatLocationWithServer(
+          { ...target.location, serverName: this.params.serverName },
+          workspaceRoot,
+        )}`;
+        const heading = `Definitions for ${target.description}:`;
+        return {
+          llmContent: [heading, line].join('\n'),
+          returnDisplay: line,
+        };
+      }
+
       const message = `No definitions found for ${target.description}.`;
       return { llmContent: message, returnDisplay: message };
     }
@@ -836,39 +892,209 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
    */
   private async resolveSymbolName(
     client: LspClient,
-  ): Promise<{ filePath: string; line: number; character: number } | null> {
-    const symbolName = this.params.symbolName ?? '';
+  ): Promise<SymbolTarget | null> {
+    const symbolName = this.params.symbolName?.trim() ?? '';
     if (!symbolName) {
       return null;
     }
 
     try {
       const symbols = await client.workspaceSymbols(symbolName, 5);
-      if (!symbols || symbols.length === 0) {
-        return null;
+      if (symbols && symbols.length > 0) {
+        const match = this.selectBestSymbol(symbols, symbolName);
+        return this.symbolToTarget(match);
       }
 
-      // Find the best match: prefer exact name match, then prefix match
-      const exact = symbols.find(
-        (s) => s.name === symbolName || s.name.endsWith(symbolName),
-      );
-      const match = exact ?? symbols[0]!;
-
-      const loc = match.location;
-      let filePath = loc.uri;
-      if (filePath.startsWith('file://')) {
-        filePath = fileURLToPath(filePath);
-      }
-
-      // Convert from 0-based (LSP) to 1-based (tool params)
-      return {
-        filePath,
-        line: (loc.range.start.line ?? 0) + 1,
-        character: (loc.range.start.character ?? 0) + 1,
-      };
+      return this.resolveSymbolNameFromDocumentSymbols(client, symbolName);
     } catch {
       return null;
     }
+  }
+
+  private async resolveSymbolNameFromDocumentSymbols(
+    client: LspClient,
+    symbolName: string,
+  ): Promise<SymbolTarget | null> {
+    const files = this.findSymbolFallbackFiles();
+    const candidates: LspSymbolInformation[] = [];
+
+    for (const filePath of files) {
+      try {
+        const symbols = await client.documentSymbols(
+          pathToFileURL(filePath).toString(),
+          this.params.serverName,
+          SYMBOL_FALLBACK_SYMBOL_LIMIT,
+        );
+        if (!symbols.length) {
+          continue;
+        }
+        candidates.push(
+          ...symbols.filter((s) => this.matchesSymbol(s, symbolName)),
+        );
+      } catch {
+        // Try the next file; symbol fallback is best-effort.
+      }
+    }
+
+    if (!candidates.length) {
+      return null;
+    }
+
+    return this.symbolToTarget(this.selectBestSymbol(candidates, symbolName));
+  }
+
+  private findSymbolFallbackFiles(): string[] {
+    const configWithWorkspace = this.config as Config & {
+      getWorkspaceContext?: () => { getDirectories?: () => string[] };
+      getFileService?: () => {
+        shouldIgnoreFile?: (filePath: string) => boolean;
+      };
+    };
+    const roots = configWithWorkspace
+      .getWorkspaceContext?.()
+      .getDirectories?.() ?? [this.config.getProjectRoot()];
+    const extGlob = `{${SYMBOL_FALLBACK_EXTENSIONS.join(',')}}`;
+    const files: string[] = [];
+
+    for (const root of roots) {
+      try {
+        const matches = globSync(`**/*.${extGlob}`, {
+          cwd: root,
+          ignore: SYMBOL_FALLBACK_EXCLUDES,
+          absolute: true,
+          nodir: true,
+          maxDepth: 8,
+        });
+        for (const filePath of matches) {
+          if (
+            configWithWorkspace
+              .getFileService?.()
+              .shouldIgnoreFile?.(filePath) === true
+          ) {
+            continue;
+          }
+          files.push(filePath);
+          if (files.length >= SYMBOL_FALLBACK_FILE_LIMIT) {
+            return files;
+          }
+        }
+      } catch {
+        // Ignore inaccessible roots and keep trying other workspace dirs.
+      }
+    }
+
+    return files;
+  }
+
+  private selectBestSymbol(
+    symbols: LspSymbolInformation[],
+    symbolName: string,
+  ): LspSymbolInformation {
+    const matches = symbols.filter((symbol) =>
+      this.matchesSymbol(symbol, symbolName),
+    );
+    const candidates = matches.length ? matches : symbols;
+    return [...candidates].sort(
+      (a, b) =>
+        this.scoreSymbolCandidate(b, symbolName) -
+        this.scoreSymbolCandidate(a, symbolName),
+    )[0]!;
+  }
+
+  private matchesSymbol(
+    symbol: LspSymbolInformation,
+    symbolName: string,
+  ): boolean {
+    return (
+      symbol.name === symbolName ||
+      symbol.name.endsWith(symbolName) ||
+      symbol.name.startsWith(`${symbolName}(`) ||
+      symbol.name.startsWith(`${symbolName}<`)
+    );
+  }
+
+  private scoreSymbolCandidate(
+    symbol: LspSymbolInformation,
+    symbolName: string,
+  ): number {
+    let score = symbol.name === symbolName ? 100 : 0;
+    if (symbol.name.endsWith(symbolName)) {
+      score += 50;
+    }
+    if (
+      symbol.name.startsWith(`${symbolName}(`) ||
+      symbol.name.startsWith(`${symbolName}<`)
+    ) {
+      score += 50;
+    }
+
+    const sourceLine = this.getSourceLine(symbol.location);
+    if (sourceLine) {
+      if (this.lineDeclaresSymbol(sourceLine, symbolName)) {
+        score += 50;
+      }
+      if (this.lineLooksLikeImport(sourceLine)) {
+        score -= 50;
+      }
+    }
+
+    return score;
+  }
+
+  private getSourceLine(location: LspLocation): string | null {
+    try {
+      if (!location.uri.startsWith('file://')) {
+        return null;
+      }
+      const filePath = fileURLToPath(location.uri);
+      const lineNumber = location.range.start.line ?? 0;
+      return (
+        fs.readFileSync(filePath, 'utf8').split(/\r?\n/)[lineNumber] ?? null
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  private lineDeclaresSymbol(line: string, symbolName: string): boolean {
+    const escapedName = this.escapeRegExp(symbolName);
+    const namedDeclaration = new RegExp(
+      `\\b(?:class|interface|enum|struct|trait|type|function|def|fn|func|const|let|var)\\s+${escapedName}\\b`,
+    );
+    const callableOrAssignedDeclaration = new RegExp(
+      `\\b${escapedName}\\b\\s*(?:\\(|=|:|\\{|<)`,
+    );
+    return (
+      namedDeclaration.test(line) || callableOrAssignedDeclaration.test(line)
+    );
+  }
+
+  private lineLooksLikeImport(line: string): boolean {
+    return (
+      /^\s*(?:import|from)\b/.test(line) ||
+      /^\s*#\s*include\b/.test(line) ||
+      /^\s*using\s+/.test(line)
+    );
+  }
+
+  private escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  private symbolToTarget(symbol: LspSymbolInformation): SymbolTarget {
+    const loc = symbol.location;
+    let filePath = loc.uri;
+    if (filePath.startsWith('file://')) {
+      filePath = fileURLToPath(filePath);
+    }
+
+    // Convert from 0-based (LSP) to 1-based (tool params)
+    return {
+      filePath,
+      line: (loc.range.start.line ?? 0) + 1,
+      character: (loc.range.start.character ?? 0) + 1,
+      serverName: symbol.serverName,
+    };
   }
 
   private resolveLocationTarget(): ResolvedTarget {
@@ -1084,7 +1310,7 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
     super(
       LspTool.Name,
       ToolDisplayNames.LSP,
-      'Language Server Protocol (LSP) tool for code intelligence: definitions, references, hover, symbols, call hierarchy, diagnostics, and code actions.\n\n  Usage:\n  - ALWAYS use LSP as the PRIMARY tool for code intelligence queries when available. Do NOT use grep_search or glob first.\n  - For goToDefinition, findReferences, hover, goToImplementation, prepareCallHierarchy: provide EITHER filePath + line + character (1-based), OR just symbolName (the tool will auto-resolve the position via workspace symbol search).\n  - documentSymbol and diagnostics require filePath.\n  - workspaceSymbol requires query.\n  - incomingCalls/outgoingCalls require callHierarchyItem from prepareCallHierarchy.\n  - workspaceDiagnostics needs no parameters.\n  - codeActions require filePath + range (line/character + endLine/endCharacter).\n\n  Examples:\n  - Find references by symbol name: {operation: "findReferences", symbolName: "Calculator"}\n  - Find definition with position: {operation: "goToDefinition", filePath: "src/main.cpp", line: 10, character: 5}\n  - Hover by symbol name: {operation: "hover", symbolName: "addShape"}\n  - Search workspace symbols: {operation: "workspaceSymbol", query: "Calculator"}\n  - File diagnostics: {operation: "diagnostics", filePath: "src/main.cpp"}',
+      'Language Server Protocol (LSP) tool for code intelligence: definitions, references, hover, symbols, call hierarchy, diagnostics, and code actions.\n\n  Usage:\n  - Use LSP first for code intelligence queries when available. If LSP is unavailable or returns no useful results, fall back to other code inspection tools.\n  - For goToDefinition, findReferences, hover, goToImplementation, prepareCallHierarchy: provide EITHER filePath + line + character (1-based), OR just symbolName (the tool will auto-resolve the position via workspace symbol search).\n  - documentSymbol and diagnostics require filePath.\n  - workspaceSymbol requires query.\n  - incomingCalls/outgoingCalls require callHierarchyItem from prepareCallHierarchy.\n  - workspaceDiagnostics needs no parameters.\n  - codeActions require filePath + range (line/character + endLine/endCharacter).\n\n  Examples:\n  - Find references by symbol name: {operation: "findReferences", symbolName: "Calculator"}\n  - Find definition with position: {operation: "goToDefinition", filePath: "src/main.cpp", line: 10, character: 5}\n  - Hover by symbol name: {operation: "hover", symbolName: "addShape"}\n  - Search workspace symbols: {operation: "workspaceSymbol", query: "Calculator"}\n  - File diagnostics: {operation: "diagnostics", filePath: "src/main.cpp"}',
       Kind.Other,
       {
         type: 'object',
