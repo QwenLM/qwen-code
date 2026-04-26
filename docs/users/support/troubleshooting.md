@@ -27,6 +27,10 @@ This guide provides solutions to common issues and debugging tips, including top
     - If you are behind a proxy, set it via `qwen --proxy <url>` (or the `proxy` setting in `settings.json`).
     - If your network uses a corporate TLS inspection CA, set `NODE_EXTRA_CA_CERTS` as described above.
 
+- **Self-signed model endpoint: `[API Error: Connection error. (cause: fetch failed)]`**
+  - **Cause:** A self-signed or otherwise untrusted TLS certificate on the model server (common in dev / lab / homelab setups). Setting `NODE_TLS_REJECT_UNAUTHORIZED=0` alone does **not** fix this for `fetch`-based code paths because Node's bundled HTTP client (`undici`) ignores that env var by design.
+  - **Solution:** Pass `--insecure` on the command line, set `QWEN_TLS_INSECURE=1`, or set `NODE_TLS_REJECT_UNAUTHORIZED=0` (Qwen Code now also honors the latter for parity with Claude Code / Node's legacy http stack). All three configure undici with `rejectUnauthorized: false` for outbound model API and MCP traffic. Only use this on networks you trust — it disables certificate verification for the entire process.
+
 - **Issue: Unable to display UI after authentication failure**
   - **Cause:** If authentication fails after selecting an authentication type, the `security.auth.selectedType` setting may be persisted in `settings.json`. On restart, the CLI may get stuck trying to authenticate with the failed auth type and fail to display the UI.
   - **Solution:** Clear the `security.auth.selectedType` configuration item in your `settings.json` file:

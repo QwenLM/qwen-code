@@ -11,7 +11,7 @@ import * as path from 'node:path';
 import process from 'node:process';
 
 // External dependencies
-import { ProxyAgent, setGlobalDispatcher } from 'undici';
+import { Agent, ProxyAgent, setGlobalDispatcher } from 'undici';
 
 // Types
 import type {
@@ -372,6 +372,13 @@ export interface ConfigParameters {
   };
   checkpointing?: boolean;
   proxy?: string;
+  /**
+   * Disable TLS certificate verification for outbound HTTPS requests
+   * (model APIs, MCP servers reached over HTTPS, and similar). Intended for
+   * self-signed dev/lab endpoints. See ``getInsecure`` for the resolution
+   * order applied at the CLI layer (#3535).
+   */
+  insecure?: boolean;
   cwd: string;
   fileDiscoveryService?: FileDiscoveryService;
   includeDirectories?: string[];
@@ -613,6 +620,7 @@ export class Config {
   private chatRecordingService: ChatRecordingService | undefined = undefined;
   private readonly checkpointing: boolean;
   private readonly proxy: string | undefined;
+  private readonly insecure: boolean;
   private readonly cwd: string;
   private readonly explicitIncludeDirectories: string[];
   private readonly bugCommand: BugCommandSettings | undefined;
@@ -759,6 +767,7 @@ export class Config {
     };
     this.checkpointing = params.checkpointing ?? false;
     this.proxy = params.proxy;
+    this.insecure = params.insecure ?? false;
     this.cwd = params.cwd ?? process.cwd();
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
@@ -850,8 +859,22 @@ export class Config {
     }
 
     const proxyUrl = this.getProxy();
+    // The global dispatcher backs every ``fetch`` call that does not provide
+    // its own dispatcher (MCP transports, streaming endpoints, telemetry).
+    // Apply both proxy and insecure-TLS here so they take effect uniformly,
+    // not only for the SDK clients we control directly (#3535).
+    const connect = this.insecure ? { rejectUnauthorized: false } : undefined;
     if (proxyUrl) {
-      setGlobalDispatcher(new ProxyAgent(proxyUrl));
+      setGlobalDispatcher(
+        new ProxyAgent({
+          uri: proxyUrl,
+          ...(connect ? { connect } : {}),
+        }),
+      );
+    } else if (this.insecure) {
+      setGlobalDispatcher(
+        new Agent({ connect: { rejectUnauthorized: false } }),
+      );
     }
     this.geminiClient = new GeminiClient(this);
     this.chatRecordingService = this.chatRecordingEnabled
@@ -2033,6 +2056,20 @@ export class Config {
 
   getProxy(): string | undefined {
     return normalizeProxyUrl(this.proxy);
+  }
+
+  /**
+   * Whether outbound HTTPS connections should skip TLS certificate
+   * verification. Useful for self-signed dev/lab model endpoints (#3535).
+   *
+   * Resolution order is applied by the CLI layer:
+   *   1. ``--insecure`` flag
+   *   2. ``QWEN_TLS_INSECURE`` env var (truthy: ``1``, ``true``, ``yes``)
+   *   3. ``NODE_TLS_REJECT_UNAUTHORIZED=0`` for parity with Node's
+   *      legacy http stack and Claude Code.
+   */
+  getInsecure(): boolean {
+    return this.insecure;
   }
 
   getWorkingDir(): string {
