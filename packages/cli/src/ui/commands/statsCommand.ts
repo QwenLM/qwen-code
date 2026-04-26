@@ -100,7 +100,8 @@ export const statsCommand: SlashCommand = {
             );
             const cost = calculateCost({
               inputTokens: modelMetrics.tokens.prompt,
-              outputTokens: modelMetrics.tokens.candidates,
+              outputTokens:
+                modelMetrics.tokens.candidates + modelMetrics.tokens.thoughts,
               pricing: pricing?.[modelName],
             });
             if (cost != null) {

@@ -442,6 +442,193 @@ describe('modelConfigUtils', () => {
       );
     });
 
+    it('should find modelProvider from settings.model.name when set (takes precedence over OPENAI_MODEL)', () => {
+      const argv = {};
+      const settingsProvider: ProviderModelConfig = {
+        id: 'settings-model',
+        name: 'Settings Model',
+      };
+      const envProvider: ProviderModelConfig = {
+        id: 'env-openai-model',
+        name: 'Env OpenAI Model',
+        generationConfig: {
+          samplingParams: { temperature: 0.6 },
+        },
+      };
+      const settings = makeMockSettings({
+        model: { name: 'settings-model' },
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [settingsProvider, envProvider],
+        },
+      });
+      const selectedAuthType = AuthType.USE_OPENAI;
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'settings-model',
+          apiKey: '',
+          baseUrl: '',
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType,
+        env: { OPENAI_MODEL: 'env-openai-model' },
+      });
+
+      expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          modelProvider: settingsProvider,
+        }),
+      );
+    });
+
+    it('should find modelProvider from settings.model.name when set (takes precedence over QWEN_MODEL)', () => {
+      const argv = {};
+      const settingsProvider: ProviderModelConfig = {
+        id: 'settings-model',
+        name: 'Settings Model',
+      };
+      const envProvider: ProviderModelConfig = {
+        id: 'qwen-env-model',
+        name: 'Qwen Env Model',
+        generationConfig: {
+          samplingParams: { temperature: 0.7 },
+        },
+      };
+      const settings = makeMockSettings({
+        model: { name: 'settings-model' },
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [settingsProvider, envProvider],
+        },
+      });
+      const selectedAuthType = AuthType.USE_OPENAI;
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'settings-model',
+          apiKey: '',
+          baseUrl: '',
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType,
+        env: { QWEN_MODEL: 'qwen-env-model' },
+      });
+
+      expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          modelProvider: settingsProvider,
+        }),
+      );
+    });
+
+    it('should prefer settings.model.name over OPENAI_MODEL for USE_OPENAI provider lookup', () => {
+      const argv = {};
+      const settingsProvider: ProviderModelConfig = {
+        id: 'settings-model',
+        name: 'Settings Model',
+      };
+      const openAIProvider: ProviderModelConfig = {
+        id: 'openai-env-model',
+        name: 'OpenAI Env Model',
+      };
+      const qwenProvider: ProviderModelConfig = {
+        id: 'qwen-env-model',
+        name: 'Qwen Env Model',
+      };
+      const settings = makeMockSettings({
+        model: { name: 'settings-model' },
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [
+            settingsProvider,
+            qwenProvider,
+            openAIProvider,
+          ],
+        },
+      });
+      const selectedAuthType = AuthType.USE_OPENAI;
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'settings-model',
+          apiKey: '',
+          baseUrl: '',
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType,
+        env: {
+          OPENAI_MODEL: 'openai-env-model',
+          QWEN_MODEL: 'qwen-env-model',
+        },
+      });
+
+      expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          modelProvider: settingsProvider,
+        }),
+      );
+    });
+
+    it('should ignore OPENAI_MODEL for non-USE_OPENAI provider lookup', () => {
+      const argv = {};
+      const settingsModelProvider: ProviderModelConfig = {
+        id: 'settings-model',
+        name: 'Settings Model',
+      };
+      const unrelatedOpenAIProvider: ProviderModelConfig = {
+        id: 'openai-env-model',
+        name: 'OpenAI Env Model',
+      };
+      const settings = makeMockSettings({
+        model: { name: 'settings-model' },
+        modelProviders: {
+          [AuthType.USE_ANTHROPIC]: [
+            settingsModelProvider,
+            unrelatedOpenAIProvider,
+          ],
+        },
+      });
+      const selectedAuthType = AuthType.USE_ANTHROPIC;
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'settings-model',
+          apiKey: '',
+          baseUrl: '',
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType,
+        env: { OPENAI_MODEL: 'openai-env-model' },
+      });
+
+      expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          modelProvider: settingsModelProvider,
+        }),
+      );
+    });
     it('should not find modelProvider when authType is undefined', () => {
       const argv = { model: 'test-model' };
       const settings = makeMockSettings({
@@ -723,41 +910,110 @@ describe('modelConfigUtils', () => {
         }),
       );
     });
+
+    it('should respect precedence: argv.model > OPENAI_MODEL > QWEN_MODEL > settings.model.name', () => {
+      const mockSettings = makeMockSettings({
+        model: { name: 'settings-model' },
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [
+            { id: 'settings-model' } as ProviderModelConfig,
+            { id: 'openai-env-model' } as ProviderModelConfig,
+            { id: 'qwen-env-model' } as ProviderModelConfig,
+            { id: 'cli-model' } as ProviderModelConfig,
+          ],
+        },
+      });
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: 'cli-model', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+      const result1 = resolveCliGenerationConfig({
+        argv: { model: 'cli-model' },
+        settings: mockSettings,
+        selectedAuthType: AuthType.USE_OPENAI,
+        env: { OPENAI_MODEL: 'openai-env-model' },
+      });
+      expect(result1.model).toBe('cli-model');
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: 'openai-env-model', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+      const result2 = resolveCliGenerationConfig({
+        argv: {},
+        settings: mockSettings,
+        selectedAuthType: AuthType.USE_OPENAI,
+        env: { OPENAI_MODEL: 'openai-env-model', QWEN_MODEL: 'qwen-env-model' },
+      });
+      expect(result2.model).toBe('openai-env-model');
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: 'openai-env-model', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+      const result3 = resolveCliGenerationConfig({
+        argv: {},
+        settings: mockSettings,
+        selectedAuthType: AuthType.USE_OPENAI,
+        env: { OPENAI_MODEL: 'openai-env-model' },
+      });
+      expect(result3.model).toBe('openai-env-model');
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: 'settings-model', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+      const result4 = resolveCliGenerationConfig({
+        argv: {},
+        settings: mockSettings,
+        selectedAuthType: AuthType.USE_OPENAI,
+        env: {},
+      });
+      expect(result4.model).toBe('settings-model');
+    });
+    it('should not use env-matched provider when settings.model.name is set but unmatched', () => {
+      // Regression: when settings.model.name is set but doesn't match any
+      // provider, the code should NOT fall through to OPENAI_MODEL/QWEN_MODEL.
+      // The env-matched provider should only supply metadata when no model is requested.
+      const mockSettings = makeMockSettings({
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [{ id: 'gpt-4', model: 'gpt-4' }],
+        },
+        model: { name: 'custom-model-not-in-providers' },
+      });
+      const selectedAuthType = AuthType.USE_OPENAI;
+      process.env['OPENAI_MODEL'] = 'gpt-4';
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'custom-model-not-in-providers',
+          apiKey: '',
+          baseUrl: '',
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings: mockSettings,
+        selectedAuthType,
+      });
+
+      // Should use settings.model.name, not fall through to OPENAI_MODEL
+      expect(result.model).toBe('custom-model-not-in-providers');
+      expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          modelProvider: undefined, // No provider found for custom model
+        }),
+      );
+
+      delete process.env['OPENAI_MODEL'];
+    });
   });
-});
-
-it('should not use env-matched provider when settings.model.name is set but unmatched', () => {
-  // Regression: when settings.model.name is set but doesn't match any
-  // provider, the code should NOT fall through to OPENAI_MODEL/QWEN_MODEL.
-  // The env-matched provider should only supply metadata when no model is requested.
-  const mockSettings = makeMockSettings({
-    modelProviders: {
-      [AuthType.USE_OPENAI]: [{ id: 'gpt-4', model: 'gpt-4' }],
-    },
-    model: { name: 'custom-model-not-in-providers' },
-  });
-  const selectedAuthType = AuthType.USE_OPENAI;
-  process.env['OPENAI_MODEL'] = 'gpt-4';
-
-  vi.mocked(resolveModelConfig).mockReturnValue({
-    config: { model: 'custom-model-not-in-providers', apiKey: '', baseUrl: '' },
-    sources: {},
-    warnings: [],
-  });
-
-  const result = resolveCliGenerationConfig({
-    argv: {},
-    settings: mockSettings,
-    selectedAuthType,
-  });
-
-  // Should use settings.model.name, not fall through to OPENAI_MODEL
-  expect(result.model).toBe('custom-model-not-in-providers');
-  expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
-    expect.objectContaining({
-      modelProvider: undefined, // No provider found for custom model
-    }),
-  );
-
-  delete process.env['OPENAI_MODEL'];
 });

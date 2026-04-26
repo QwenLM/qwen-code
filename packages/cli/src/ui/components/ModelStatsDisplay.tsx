@@ -235,7 +235,8 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
             values={entries.map(({ key, metrics }) => {
               const cost = calculateCost({
                 inputTokens: metrics.tokens.prompt,
-                outputTokens: metrics.tokens.candidates,
+                outputTokens:
+                  metrics.tokens.candidates + metrics.tokens.thoughts,
                 pricing: modelPricing?.[getModelName(key)],
               });
               return cost != null ? `$${cost.toFixed(4)}` : 'N/A';
