@@ -22,6 +22,109 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Review Drawer Action Density
+
+Status: completed in iteration 61.
+
+Goal: make repeated review drawer actions match the prototype's compact,
+icon-led supporting-tool shape without weakening Stage/Discard terminology or
+destructive-action confirmation.
+
+User-visible value: the review drawer remains available for code review, but
+its file and hunk controls no longer read as large dashboard buttons that
+compete with the conversation. Users still get explicit accessible labels,
+tooltips, and confirmation before any discard.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ReviewPanel.tsx`
+- `packages/desktop/src/renderer/components/layout/SidebarIcons.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/review-drawer-action-density.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Review drawer global, file, hunk, and comment actions render as compact
+  icon-led controls with stable accessible names and tooltips.
+- Destructive discard actions remain visually secondary/danger-styled and still
+  require the existing confirmation before changing local files.
+- Stage/Discard/Open/Add Comment/Commit terminology remains available to
+  assistive technology and tests; `Accept`/`Revert` do not return.
+- Review-open desktop and compact viewports keep all drawer action controls
+  within compact geometry thresholds with no horizontal overflow.
+- Git staging, discard cancel, commit, branch, settings, terminal, composer,
+  and model workflows remain unchanged.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the dirty fake project, open the review drawer, assert
+  compact icon-led review controls, cancel a discard confirmation, stage all,
+  commit, then continue the existing branch, settings, terminal, compact
+  viewport, and composer workflows.
+- E2E assertions: review action labels are present through aria/title, action
+  controls include SVG icons and sr-only text, repeated review controls stay
+  compact, destructive controls keep danger styling plus confirmation, and no
+  console errors or failed local requests are recorded.
+- Diagnostic artifacts: updated review drawer layout JSON, compact review
+  layout JSON, review safety JSON, review screenshots, Electron log, and
+  `summary.json` under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` to select icon-led density over a
+  larger review IA rewrite; `frontend-design` to keep the drawer subordinate to
+  the conversation and closer to `home.jpg`; and `electron-desktop-dev` for
+  renderer changes verified through the real Electron CDP harness.
+
+Notes and decisions:
+
+- Keep the existing review service, staging, discard, and commit handlers
+  unchanged. This slice changes only the review control presentation and
+  harness assertions.
+- Do not hide destructive action semantics behind an unlabeled overflow menu in
+  this slice; preserve direct but compact controls while relying on the
+  existing confirmation gate.
+- The first-viewport review drawer now uses icon-led controls for the repeated
+  global, file, hunk, comment, and commit actions. Labels remain in
+  `aria-label`, `title`, and sr-only text so keyboard/search/test paths still
+  use Stage/Discard/Open/Add Comment/Commit language.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 28 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T20-42-32-251Z/`.
+- Key recorded metrics: `review-drawer-layout.json` recorded review action
+  controls at 30 px with SVG icons, sr-only labels, no direct text, danger
+  styling on discard actions, and primary styling on commit.
+  `compact-review-drawer.json` recorded the same controls at 28 px in a
+  960x608 viewport with no review, changed-file, commit, composer, grid, or
+  topbar overflow. `summary.json` recorded zero console errors and zero failed
+  local requests.
+
+Next work:
+
+- Continue prototype fidelity by reducing remaining visible text weight in the
+  review drawer tabs and runtime details, or by making the comment area more
+  compact when no note has been entered.
+- Add restart-persistence coverage for multiple recent projects so sidebar
+  ordering and active project recovery stay aligned after app relaunch.
+
 ### Slice: Review Drawer Git Refresh Relocation
 
 Status: completed in iteration 60.

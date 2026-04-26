@@ -227,6 +227,35 @@ describe('WorkspacePage', () => {
     expect(renderedContainer.textContent).toContain('Discard Hunk');
     expect(renderedContainer.textContent).not.toContain('Accept');
     expect(renderedContainer.textContent).not.toContain('Revert');
+    for (const [label, expectedClass] of [
+      ['Discard All', 'review-icon-button-danger'],
+      ['Stage All', 'review-icon-button'],
+      ['Open', 'review-icon-button'],
+      ['Discard File', 'review-icon-button-danger'],
+      ['Stage File', 'review-icon-button'],
+      ['Discard Hunk', 'review-icon-button-danger'],
+      ['Stage Hunk', 'review-icon-button'],
+      ['Add Comment', 'review-icon-button'],
+      ['Commit', 'review-icon-button-primary'],
+    ] as const) {
+      const button = [
+        ...renderedContainer.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="review-panel"] button',
+        ),
+      ].find((candidate) => candidate.getAttribute('aria-label') === label);
+      expect(button).toBeInstanceOf(HTMLButtonElement);
+      expect(button?.classList.contains('review-icon-button')).toBe(true);
+      expect(button?.classList.contains(expectedClass)).toBe(true);
+      expect(button?.querySelector('svg')).toBeTruthy();
+      expect(button?.querySelector('.sr-only')?.textContent).toBe(label);
+      expect(button?.getAttribute('title')).not.toBe('');
+      expect(
+        [...(button?.childNodes ?? [])]
+          .filter((node) => node.nodeType === Node.TEXT_NODE)
+          .map((node) => node.textContent?.trim())
+          .join(''),
+      ).toBe('');
+    }
 
     act(() => {
       clickButton(renderedContainer, 'Settings');

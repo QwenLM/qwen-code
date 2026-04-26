@@ -5140,6 +5140,14 @@ async function assertReviewDrawerLayout(fileName) {
           button.getAttribute('aria-label') ||
           button.getAttribute('title') ||
           button.textContent.trim(),
+        title: button.getAttribute('title') || '',
+        className: button.className,
+        hasIcon: button.querySelector('svg') !== null,
+        hasSrOnly: button.querySelector('.sr-only') !== null,
+        directText: [...button.childNodes]
+          .filter((node) => node.nodeType === Node.TEXT_NODE)
+          .map((node) => node.textContent.trim())
+          .join(''),
         width: button.getBoundingClientRect().width,
         height: button.getBoundingClientRect().height
       })),
@@ -5211,6 +5219,7 @@ async function assertReviewDrawerLayout(fileName) {
       )}`,
     );
   }
+  assertReviewActionButtonDensity(metrics.reviewButtons, 'review drawer');
 
   const oversizedActions = metrics.topbarActions.filter(
     (action) => action.width > 40 || action.height > 40,
@@ -5266,6 +5275,64 @@ async function assertReviewDrawerLayout(fileName) {
     throw new Error(
       `Review drawer document should fit one viewport; body scrollHeight=${metrics.document.bodyScrollHeight}, viewport=${metrics.viewport.height}`,
     );
+  }
+}
+
+function assertReviewActionButtonDensity(buttons, context) {
+  const expected = [
+    'Discard All',
+    'Stage All',
+    'Open',
+    'Discard File',
+    'Stage File',
+    'Discard Hunk',
+    'Stage Hunk',
+    'Add Comment',
+    'Commit',
+  ];
+  const labels = buttons.map((button) => button.label);
+
+  for (const label of expected) {
+    const button = buttons.find((candidate) => candidate.label === label);
+    if (!button) {
+      throw new Error(
+        `${context} missing review action ${label}; labels=${labels.join(
+          ', ',
+        )}`,
+      );
+    }
+
+    if (!button.hasIcon || !button.hasSrOnly || button.directText !== '') {
+      throw new Error(
+        `${context} action ${label} should be icon-led with sr-only text: ${JSON.stringify(
+          button,
+        )}`,
+      );
+    }
+
+    if (button.width > 42 || button.height > 42) {
+      throw new Error(
+        `${context} action ${label} should stay compact: ${JSON.stringify(
+          button,
+        )}`,
+      );
+    }
+
+    if (label.startsWith('Discard') && !button.className.includes('danger')) {
+      throw new Error(
+        `${context} discard action ${label} lost danger styling: ${JSON.stringify(
+          button,
+        )}`,
+      );
+    }
+
+    if (label === 'Commit' && !button.className.includes('primary')) {
+      throw new Error(
+        `${context} commit action should keep primary styling: ${JSON.stringify(
+          button,
+        )}`,
+      );
+    }
   }
 }
 
@@ -5351,6 +5418,14 @@ async function assertCompactReviewDrawerLayout(fileName) {
         button.getAttribute('aria-label') ||
         button.getAttribute('title') ||
         button.textContent.trim(),
+      title: button.getAttribute('title') || '',
+      className: button.className,
+      hasIcon: button.querySelector('svg') !== null,
+      hasSrOnly: button.querySelector('.sr-only') !== null,
+      directText: [...button.childNodes]
+        .filter((node) => node.nodeType === Node.TEXT_NODE)
+        .map((node) => node.textContent.trim())
+        .join(''),
       width: button.getBoundingClientRect().width,
       height: button.getBoundingClientRect().height
     }));
@@ -5727,6 +5802,7 @@ async function assertCompactReviewDrawerLayout(fileName) {
       );
     }
   }
+  assertReviewActionButtonDensity(metrics.reviewButtons, 'compact review');
 
   if (!metrics.bodyText.includes('README.md')) {
     throw new Error('Compact review should show the changed README.md row.');

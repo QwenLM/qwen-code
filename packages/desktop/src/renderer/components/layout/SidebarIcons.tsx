@@ -464,6 +464,94 @@ export function TrashIcon(props: SidebarIconProps) {
   );
 }
 
+export function StageIcon(props: SidebarIconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="20"
+      viewBox="0 0 24 24"
+      width="20"
+      {...props}
+    >
+      <path
+        d="M5.5 16.5h13M7.5 19.5h9"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.7"
+      />
+      <path
+        d="M12 4.5v9.2M8.6 10.3l3.4 3.4 3.4-3.4"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.7"
+      />
+    </svg>
+  );
+}
+
+export function CommentIcon(props: SidebarIconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="20"
+      viewBox="0 0 24 24"
+      width="20"
+      {...props}
+    >
+      <path
+        d="M5.5 6.5c0-1.1.9-2 2-2h9c1.1 0 2 .9 2 2v6.4c0 1.1-.9 2-2 2h-4.9l-4.2 4v-4H7.5c-1.1 0-2-.9-2-2V6.5Z"
+        stroke="currentColor"
+        strokeLinejoin="round"
+        strokeWidth="1.7"
+      />
+      <path
+        d="M8.8 8.4h6.4M8.8 11.2h4.4"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.7"
+      />
+    </svg>
+  );
+}
+
+export function CommitIcon(props: SidebarIconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="20"
+      viewBox="0 0 24 24"
+      width="20"
+      {...props}
+    >
+      <circle cx="7" cy="12" r="2.4" stroke="currentColor" strokeWidth="1.7" />
+      <circle
+        cx="17"
+        cy="6.5"
+        r="2.4"
+        stroke="currentColor"
+        strokeWidth="1.7"
+      />
+      <circle
+        cx="17"
+        cy="17.5"
+        r="2.4"
+        stroke="currentColor"
+        strokeWidth="1.7"
+      />
+      <path
+        d="M9.2 11 14.8 7.6M9.2 13l5.6 3.4"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.7"
+      />
+    </svg>
+  );
+}
+
 export function StopIcon(props: SidebarIconProps) {
   return (
     <svg

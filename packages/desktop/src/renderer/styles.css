@@ -1980,6 +1980,62 @@ textarea:focus {
   justify-content: flex-end;
 }
 
+.review-icon-button {
+  position: relative;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: rgba(238, 244, 239, 0.045);
+  color: var(--text-soft);
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.review-icon-button:not(:disabled):hover {
+  border-color: rgba(85, 166, 255, 0.28);
+  background: rgba(85, 166, 255, 0.1);
+  color: #c7e2ff;
+}
+
+.review-icon-button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.review-icon-button-danger {
+  border-color: rgba(255, 127, 105, 0.26);
+  color: #ffb3a5;
+}
+
+.review-icon-button-danger:not(:disabled):hover {
+  border-color: rgba(255, 127, 105, 0.42);
+  background: rgba(255, 127, 105, 0.11);
+  color: #ffd0c8;
+}
+
+.review-icon-button-primary {
+  border-color: rgba(85, 166, 255, 0.36);
+  background: linear-gradient(180deg, #64b0ff, #3d8fe8);
+  color: #081015;
+}
+
+.review-icon-button-primary:not(:disabled):hover {
+  border-color: rgba(174, 214, 255, 0.72);
+  background: linear-gradient(180deg, #76bdff, #4d9cf2);
+  color: #071117;
+}
+
+.commit-box .review-icon-button,
+.review-actions .review-icon-button {
+  flex: 0 0 auto;
+}
+
 .review-discard-confirm {
   display: grid;
   gap: 10px;
@@ -2064,6 +2120,10 @@ textarea:focus {
   justify-content: flex-end;
   padding: 8px 10px;
   border-top: 1px solid var(--line);
+}
+
+.review-comment-box .review-icon-button {
+  justify-self: end;
 }
 
 .diff-hunks {
@@ -2841,6 +2901,12 @@ textarea:focus {
   .workspace-grid-review-open .review-comment-box .secondary-button {
     min-height: 28px;
     padding: 0 8px;
+  }
+
+  .workspace-grid-review-open .review-icon-button {
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
   }
 
   .workspace-grid-review-open .changed-files {

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import type {
   DesktopGitChangedFile,
   DesktopGitDiff,
@@ -12,7 +12,15 @@ import type {
   DesktopGitReviewTarget,
   DesktopProject,
 } from '../../api/client.js';
-import { CloseIcon, RefreshIcon } from './SidebarIcons.js';
+import {
+  CloseIcon,
+  CommentIcon,
+  CommitIcon,
+  OpenThreadIcon,
+  RefreshIcon,
+  StageIcon,
+  TrashIcon,
+} from './SidebarIcons.js';
 
 type RequestDiscard = (
   target: DesktopGitReviewTarget,
@@ -198,10 +206,11 @@ function ReviewSummary({
         ) : null}
       </dl>
       <div className="review-actions">
-        <button
-          className="secondary-button secondary-button-danger"
+        <ReviewActionButton
+          label="Discard All"
+          title="Discard all local changes"
+          variant="danger"
           disabled={changedFiles.length === 0}
-          type="button"
           onClick={() =>
             requestDiscard(
               { scope: 'all' },
@@ -210,16 +219,16 @@ function ReviewSummary({
             )
           }
         >
-          Discard All
-        </button>
-        <button
-          className="secondary-button"
+          <TrashIcon />
+        </ReviewActionButton>
+        <ReviewActionButton
+          label="Stage All"
+          title="Stage all changes"
           disabled={changedFiles.length === 0}
-          type="button"
           onClick={() => onStageTarget({ scope: 'all' })}
         >
-          Stage All
-        </button>
+          <StageIcon />
+        </ReviewActionButton>
       </div>
       {discardConfirmation ? (
         <div
@@ -296,14 +305,19 @@ function ReviewSummary({
           value={commitMessage}
           onChange={(event) => onCommitMessageChange(event.target.value)}
         />
-        <button
-          className="primary-button"
+        <ReviewActionButton
+          label="Commit"
+          title={
+            commitMessage.trim().length === 0
+              ? 'Enter a commit message to commit'
+              : 'Commit staged changes'
+          }
+          variant="primary"
           disabled={commitMessage.trim().length === 0}
-          type="button"
           onClick={onCommit}
         >
-          Commit
-        </button>
+          <CommitIcon />
+        </ReviewActionButton>
       </div>
       {reviewError ? <p className="error-text">{reviewError}</p> : null}
     </div>
@@ -344,16 +358,17 @@ function ChangedFileReview({
         </small>
       </summary>
       <div className="file-review-actions">
-        <button
-          className="secondary-button"
-          type="button"
+        <ReviewActionButton
+          label="Open"
+          title={`Open ${file.path}`}
           onClick={() => onOpenFile(file.path)}
         >
-          Open
-        </button>
-        <button
-          className="secondary-button secondary-button-danger"
-          type="button"
+          <OpenThreadIcon />
+        </ReviewActionButton>
+        <ReviewActionButton
+          label="Discard File"
+          title={`Discard changes in ${file.path}`}
+          variant="danger"
           onClick={() =>
             onRequestDiscard(
               fileTarget,
@@ -362,16 +377,16 @@ function ChangedFileReview({
             )
           }
         >
-          Discard File
-        </button>
-        <button
-          className="secondary-button"
+          <TrashIcon />
+        </ReviewActionButton>
+        <ReviewActionButton
+          label={canStageFile ? 'Stage File' : 'Staged File'}
+          title={canStageFile ? `Stage ${file.path}` : `${file.path} is staged`}
           disabled={!canStageFile}
-          type="button"
           onClick={() => onStageTarget(fileTarget)}
         >
-          {canStageFile ? 'Stage File' : 'Staged File'}
-        </button>
+          <StageIcon />
+        </ReviewActionButton>
       </div>
       {file.hunks.length === 0 ? (
         <pre>{file.diff || 'No textual diff available.'}</pre>
@@ -399,14 +414,14 @@ function ChangedFileReview({
             onChange={(event) => onCommentDraftChange(event.target.value)}
           />
         </label>
-        <button
-          className="secondary-button"
+        <ReviewActionButton
+          label="Add Comment"
+          title="Add review comment"
           disabled={commentDraft.trim().length === 0}
-          type="button"
           onClick={onAddComment}
         >
-          Add Comment
-        </button>
+          <CommentIcon />
+        </ReviewActionButton>
         {comments.length > 0 ? (
           <ul className="review-comments">
             {comments.map((comment, index) => (
@@ -443,9 +458,10 @@ function DiffHunkReview({
         <small>{formatHunkSource(hunk.source)}</small>
       </div>
       <div className="diff-hunk-actions">
-        <button
-          className="secondary-button secondary-button-danger"
-          type="button"
+        <ReviewActionButton
+          label="Discard Hunk"
+          title={`Discard hunk in ${file.path}`}
+          variant="danger"
           onClick={() =>
             onRequestDiscard(
               hunkTarget,
@@ -454,19 +470,61 @@ function DiffHunkReview({
             )
           }
         >
-          Discard Hunk
-        </button>
-        <button
-          className="secondary-button"
+          <TrashIcon />
+        </ReviewActionButton>
+        <ReviewActionButton
+          label={hunk.source === 'staged' ? 'Staged' : 'Stage Hunk'}
+          title={
+            hunk.source === 'staged'
+              ? 'Hunk is already staged'
+              : `Stage hunk in ${file.path}`
+          }
           disabled={hunk.source === 'staged'}
-          type="button"
           onClick={() => onStageTarget(hunkTarget)}
         >
-          {hunk.source === 'staged' ? 'Staged' : 'Stage Hunk'}
-        </button>
+          <StageIcon />
+        </ReviewActionButton>
       </div>
       <pre>{hunk.lines.join('\n') || 'No textual hunk available.'}</pre>
     </section>
+  );
+}
+
+function ReviewActionButton({
+  children,
+  disabled,
+  label,
+  onClick,
+  title = label,
+  variant = 'secondary',
+}: {
+  children: ReactNode;
+  disabled?: boolean;
+  label: string;
+  onClick: () => void;
+  title?: string;
+  variant?: 'secondary' | 'danger' | 'primary';
+}) {
+  const classNames = [
+    'review-icon-button',
+    variant === 'danger' ? 'review-icon-button-danger' : null,
+    variant === 'primary' ? 'review-icon-button-primary' : null,
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  return (
+    <button
+      aria-label={label}
+      className={classNames}
+      disabled={disabled}
+      title={title}
+      type="button"
+      onClick={onClick}
+    >
+      {children}
+      <span className="sr-only">{label}</span>
+    </button>
   );
 }
 
