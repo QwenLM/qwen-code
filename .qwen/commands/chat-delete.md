@@ -24,17 +24,17 @@ Otherwise, **MUST ask for confirmation:**
 
 ---
 
-## Step 1: Validate name
+## Step 1: Validate Name
 
-Validate `{{name}}` (Common rules): `^[a-zA-Z0-9_.-]+$`, ≤128, ≠ `.`/`..`/`__proto__`/`constructor`/`prototype`.
+1. Validate `{{name}}`: `^[a-zA-Z0-9_.-]+$`, ≤128, ≠ `.`/`..`/`__proto__`/`constructor`/`prototype`. Invalid → error, stop.
 
-## Step 2: Look up and delete
+## Step 2: Read Index & Delete
 
 1. Read `.qwen/chat-index.json` (project root, NOT `~/.qwen/`).
-2. If `{{name}}` not found → show list + "Session not in index", STOP.
+2. If `{{name}}` NOT found: show list + "Session not in index", stop.
 3. Remove `{{name}}` from index, write back.
 
-## Step 3: Confirm result
+## Step 3: Confirm Result
 
 Output: `Session "{{name}}" removed from index.` + note: "Session file NOT deleted."
 

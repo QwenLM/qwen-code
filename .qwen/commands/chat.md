@@ -55,10 +55,6 @@ Extract the name (everything after the flag). Also check for `-y` or `--force` a
 
 - Is name missing, empty, or whitespace only? → **Show Help immediately, STOP**
 - Is `-y` or `--force` present? → Set `forceDelete = true` for delete command
-
-Extract the name (everything after the flag).
-
-- Is name missing, empty, or whitespace only? → **Show Help immediately, STOP**
 - Does name match `^[a-zA-Z0-9_.-]+$` and length ≤ 128?
   - **NO** → Output error: `Invalid name. Must match: ^[a-zA-Z0-9_.-]+$ (max 128 chars)` and STOP
   - **YES** → Check if name is reserved (`.`, `..`, `__proto__`, `constructor`, `prototype`)
@@ -101,8 +97,7 @@ Flags:
   -s, --save <name>   Save current session with a name
   -l, --list          List all saved sessions
   -r, --resume <name> Resume a saved session
-  -d, --delete <name> Delete a saved session from index
-  -d, --delete <name> -y, --force   Delete without confirmation
+  -d, --delete <name> Delete a saved session from index (-y/--force to skip confirmation)
   -h, --help          Show this help
 
 Examples:
@@ -110,4 +105,7 @@ Examples:
   /chat -l
   /chat -r my-session
   /chat -d my-session
+  /chat -d my-session -y  # Delete without confirmation
 ```
+
+(End of file - 107 lines)
