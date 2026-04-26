@@ -774,20 +774,23 @@ describe('EditTool', () => {
       expect(() => tool.build(params)).toThrow();
     });
 
-    it('should return FILE_WRITE_FAILURE on write error', async () => {
-      fs.writeFileSync(filePath, 'content', 'utf8');
-      // Make file readonly to trigger a write error
-      fs.chmodSync(filePath, '444');
+    it.skipIf(process.getuid && process.getuid() === 0)(
+      'should return FILE_WRITE_FAILURE on write error',
+      async () => {
+        fs.writeFileSync(filePath, 'content', 'utf8');
+        // Make file readonly to trigger a write error
+        fs.chmodSync(filePath, '444');
 
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'content',
-        new_string: 'new content',
-      };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
-      expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
-    });
+        const params: EditToolParams = {
+          file_path: filePath,
+          old_string: 'content',
+          new_string: 'new content',
+        };
+        const invocation = tool.build(params);
+        const result = await invocation.execute(new AbortController().signal);
+        expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
+      },
+    );
   });
 
   describe('getDescription', () => {

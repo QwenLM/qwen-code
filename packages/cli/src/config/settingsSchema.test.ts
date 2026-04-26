@@ -28,7 +28,6 @@ describe('SettingsSchema', () => {
         'mcp',
         'security',
         'advanced',
-        'webSearch',
       ];
 
       expectedSettings.forEach((setting) => {

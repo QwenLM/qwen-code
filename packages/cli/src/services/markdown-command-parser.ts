@@ -18,7 +18,10 @@ export const MarkdownCommandDefSchema = z.object({
   frontmatter: z
     .object({
       description: z.string().optional(),
+      when_to_use: z.string().optional(),
+      'disable-model-invocation': z.boolean().optional(),
     })
+    .passthrough()
     .optional(),
   prompt: z.string({
     required_error: 'The prompt content is required.',

@@ -57,6 +57,18 @@ export async function getNpmVersion(): Promise<string> {
 }
 
 /**
+ * Gets the Git version, handling cases where git might not be available.
+ * Returns 'unknown' if git command fails or is not found.
+ */
+export async function getGitVersion(): Promise<string> {
+  try {
+    return execSync('git --version', { encoding: 'utf-8' }).trim();
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
  * Gets the IDE client name if IDE mode is enabled.
  * Returns empty string if IDE mode is disabled or IDE client is not detected.
  */

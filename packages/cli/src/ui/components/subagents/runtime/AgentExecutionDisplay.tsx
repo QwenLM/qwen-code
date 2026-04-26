@@ -45,6 +45,8 @@ const getStatusColor = (
     case 'completed':
     case 'success':
       return theme.status.success;
+    case 'background':
+      return theme.text.secondary;
     case 'cancelled':
       return theme.status.warning;
     case 'failed':
@@ -60,6 +62,8 @@ const getStatusText = (status: AgentResultDisplay['status']) => {
       return 'Running';
     case 'completed':
       return 'Completed';
+    case 'background':
+      return 'Running in background';
     case 'cancelled':
       return 'User Cancelled';
     case 'failed':

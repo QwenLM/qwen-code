@@ -10,14 +10,16 @@ import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { DiffRenderer } from './DiffRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
-import { AnsiOutputText } from '../AnsiOutput.js';
-import { MaxSizedBox } from '../shared/MaxSizedBox.js';
+import { AnsiOutputText, ShellStatsBar } from '../AnsiOutput.js';
+import type { ShellStatsBarProps } from '../AnsiOutput.js';
+import { MaxSizedBox, MINIMUM_MAX_HEIGHT } from '../shared/MaxSizedBox.js';
 import { TodoDisplay } from '../TodoDisplay.js';
 import type {
   TodoResultDisplay,
   AgentResultDisplay,
   PlanResultDisplay,
   AnsiOutput,
+  AnsiOutputDisplay,
   Config,
   McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
@@ -29,20 +31,82 @@ import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../../config/settings.js';
 import { useCompactMode } from '../../contexts/CompactModeContext.js';
+import { getCachedStringWidth, toCodePoints } from '../../utils/textUtils.js';
 
 import {
   ToolStatusIndicator,
   STATUS_INDICATOR_WIDTH,
 } from '../shared/ToolStatusIndicator.js';
+import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 
 const STATIC_HEIGHT = 1;
 const RESERVED_LINE_COUNT = 5; // for tool name, status, padding etc.
 const MIN_LINES_SHOWN = 2; // show at least this many lines
+const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
 
 // Large threshold to ensure we don't cause performance issues for very large
 // outputs that will get truncated further MaxSizedBox anyway.
 const MAXIMUM_RESULT_DISPLAY_CHARACTERS = 1000000;
 export type TextEmphasis = 'high' | 'medium' | 'low';
+
+function sliceTextForMaxHeight(
+  text: string,
+  maxHeight: number | undefined,
+  maxWidth: number,
+): { text: string; hiddenLinesCount: number } {
+  if (maxHeight === undefined) {
+    return { text, hiddenLinesCount: 0 };
+  }
+
+  const targetMaxHeight = Math.max(Math.round(maxHeight), MINIMUM_MAX_HEIGHT);
+  const visibleContentHeight = targetMaxHeight - 1;
+  const visualWidth = Math.max(1, Math.floor(maxWidth));
+  const visibleLines: string[] = [];
+  let visualLineCount = 0;
+  let currentLine = '';
+  let currentLineWidth = 0;
+
+  const appendVisibleLine = (line: string) => {
+    visualLineCount += 1;
+    visibleLines.push(line);
+    if (visibleLines.length > visibleContentHeight) {
+      visibleLines.shift();
+    }
+  };
+
+  const flushCurrentLine = () => {
+    appendVisibleLine(currentLine);
+    currentLine = '';
+    currentLineWidth = 0;
+  };
+
+  for (const char of toCodePoints(text)) {
+    if (char === '\n') {
+      flushCurrentLine();
+      continue;
+    }
+
+    const charWidth = Math.max(getCachedStringWidth(char), 1);
+    if (currentLineWidth > 0 && currentLineWidth + charWidth > visualWidth) {
+      flushCurrentLine();
+    }
+
+    currentLine += char;
+    currentLineWidth += charWidth;
+  }
+
+  flushCurrentLine();
+
+  if (visualLineCount <= targetMaxHeight) {
+    return { text, hiddenLinesCount: 0 };
+  }
+
+  const hiddenLinesCount = visualLineCount - visibleContentHeight;
+  return {
+    text: visibleLines.join('\n'),
+    hiddenLinesCount,
+  };
+}
 
 type DisplayRendererResult =
   | { type: 'none' }
@@ -51,7 +115,7 @@ type DisplayRendererResult =
   | { type: 'string'; data: string }
   | { type: 'diff'; data: { fileDiff: string; fileName: string } }
   | { type: 'task'; data: AgentResultDisplay }
-  | { type: 'ansi'; data: AnsiOutput };
+  | { type: 'ansi'; data: AnsiOutput; stats?: ShellStatsBarProps };
 
 /**
  * Custom hook to determine the type of result display and return appropriate rendering info
@@ -136,7 +200,15 @@ const useResultDisplayRenderer = (
       resultDisplay !== null &&
       'ansiOutput' in resultDisplay
     ) {
-      return { type: 'ansi', data: resultDisplay.ansiOutput as AnsiOutput };
+      const display = resultDisplay as AnsiOutputDisplay;
+      return {
+        type: 'ansi',
+        data: display.ansiOutput,
+        stats: {
+          totalLines: display.totalLines,
+          totalBytes: display.totalBytes,
+        },
+      };
     }
 
     // Default to string
@@ -222,11 +294,21 @@ const StringResultRenderer: React.FC<{
     );
   }
 
+  const sliced = sliceTextForMaxHeight(
+    displayData,
+    availableHeight,
+    childWidth,
+  );
+
   return (
-    <MaxSizedBox maxHeight={availableHeight} maxWidth={childWidth}>
+    <MaxSizedBox
+      maxHeight={availableHeight}
+      maxWidth={childWidth}
+      additionalHiddenLinesCount={sliced.hiddenLinesCount}
+    >
       <Box>
         <Text wrap="wrap" color={theme.text.primary}>
-          {displayData}
+          {sliced.text}
         </Text>
       </Box>
     </MaxSizedBox>
@@ -282,6 +364,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   forceShowResult,
   isFocused,
   isWaitingForOtherApproval,
+  executionStartTime,
 }) => {
   const settings = useSettings();
   const isThisShellFocused =
@@ -298,6 +381,21 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     if (resultDisplay) {
       setLastUpdateTime(new Date());
     }
+  }, [resultDisplay]);
+
+  // Shell tools surface their configured timeout via AnsiOutputDisplay as
+  // soon as streaming starts. Feed it into ToolElapsedTime so the budget is
+  // shown inline (`(elapsed · timeout N)`) instead of in a separate stats
+  // row.
+  const shellTimeoutMs = React.useMemo(() => {
+    if (
+      typeof resultDisplay === 'object' &&
+      resultDisplay !== null &&
+      'ansiOutput' in resultDisplay
+    ) {
+      return (resultDisplay as AnsiOutputDisplay).timeoutMs;
+    }
+    return undefined;
   }, [resultDisplay]);
 
   React.useEffect(() => {
@@ -332,6 +430,33 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         MIN_LINES_SHOWN + 1, // enforce minimum lines shown
       )
     : undefined;
+  // Cap inline shell output. Applies to both the streaming ANSI display and
+  // the completed string display (shell.ts emits the final result as a plain
+  // string via `returnDisplayMessage = result.output`). ShellStatsBar surfaces
+  // hidden lines via `+N lines` for ANSI; MaxSizedBox handles overflow for string.
+  const isShellTool = name === SHELL_COMMAND_NAME || name === SHELL_NAME;
+  const rawShellCap =
+    settings.merged.ui?.shellOutputMaxLines ?? DEFAULT_SHELL_OUTPUT_MAX_LINES;
+  // Defensive: clamp non-negative integers; treat negatives / NaN / fractions
+  // as the user's clear intent (0 = disable, otherwise floor to whole rows).
+  const shellOutputMaxLines = Math.max(0, Math.floor(rawShellCap || 0));
+  const isCappingShell =
+    isShellTool &&
+    shellOutputMaxLines > 0 &&
+    !forceShowResult &&
+    !isThisShellFocused;
+  const shellCapHeight = isCappingShell
+    ? Math.min(availableHeight ?? shellOutputMaxLines, shellOutputMaxLines)
+    : availableHeight;
+  // String path: MaxSizedBox reserves one row for its overflow banner when
+  // content overflows (see MaxSizedBox.tsx visibleContentHeight = max - 1),
+  // so passing the bare cap shows N-1 content rows. ANSI pre-slices to N
+  // (no MaxSizedBox overflow) and renders N rows + the ShellStatsBar line.
+  // +1 keeps the two paths visually symmetric at N visible content rows.
+  const shellStringCapHeight =
+    isCappingShell && shellCapHeight !== undefined
+      ? shellCapHeight + 1
+      : availableHeight;
   const innerWidth = contentWidth - STATUS_INDICATOR_WIDTH;
 
   // Long tool call response in MarkdownDisplay doesn't respect availableTerminalHeight properly,
@@ -366,6 +491,11 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
             </Text>
           </Box>
         )}
+        <ToolElapsedTime
+          status={status}
+          executionStartTime={executionStartTime}
+          timeoutMs={shellTimeoutMs}
+        />
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
       {effectiveDisplayRenderer.type !== 'none' && (
@@ -400,16 +530,25 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
               />
             )}
             {effectiveDisplayRenderer.type === 'ansi' && (
-              <AnsiOutputText
-                data={effectiveDisplayRenderer.data}
-                availableTerminalHeight={availableHeight}
-              />
+              <>
+                <AnsiOutputText
+                  data={effectiveDisplayRenderer.data}
+                  availableTerminalHeight={shellCapHeight}
+                  maxWidth={innerWidth}
+                />
+                {effectiveDisplayRenderer.stats && (
+                  <ShellStatsBar
+                    {...effectiveDisplayRenderer.stats}
+                    displayHeight={shellCapHeight}
+                  />
+                )}
+              </>
             )}
             {effectiveDisplayRenderer.type === 'string' && (
               <StringResultRenderer
                 data={effectiveDisplayRenderer.data}
                 renderAsMarkdown={renderOutputAsMarkdown}
-                availableHeight={availableHeight}
+                availableHeight={shellStringCapHeight}
                 childWidth={innerWidth}
               />
             )}
@@ -455,7 +594,7 @@ const ToolInfo: React.FC<ToolInfo> = ({
     }
   }, [emphasis]);
   return (
-    <Box>
+    <Box flexGrow={1}>
       <Text
         wrap="truncate-end"
         strikethrough={status === ToolCallStatus.Canceled}

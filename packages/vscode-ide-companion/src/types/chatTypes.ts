@@ -8,7 +8,10 @@ import type {
   AvailableCommand,
   RequestPermissionRequest,
 } from '@agentclientprotocol/sdk';
-import type { AskUserQuestionRequest } from './acpTypes.js';
+import type {
+  AskUserQuestionRequest,
+  SlashCommandNotification,
+} from './acpTypes.js';
 import type { ApprovalModeValue } from './approvalModeValueTypes.js';
 
 export interface ChatMessage {
@@ -29,6 +32,7 @@ export interface ToolCallUpdateData {
   title?: string;
   status?: string;
   rawInput?: unknown;
+  rawOutput?: unknown;
   content?: Array<Record<string, unknown>>;
   locations?: Array<{ path: string; line?: number | null }>;
   timestamp?: number;
@@ -77,8 +81,10 @@ export interface QwenAgentCallbacks {
   onModelInfo?: (info: ModelInfo) => void;
   onModelChanged?: (model: ModelInfo) => void;
   onAvailableCommands?: (commands: AvailableCommand[]) => void;
+  onAvailableSkills?: (skills: string[]) => void;
   onAvailableModels?: (models: ModelInfo[]) => void;
   onDisconnected?: (code: number | null, signal: string | null) => void;
+  onSlashCommandNotification?: (event: SlashCommandNotification) => void;
 }
 
 export interface ToolCallUpdate {
@@ -88,6 +94,7 @@ export interface ToolCallUpdate {
   title?: string;
   status?: 'pending' | 'in_progress' | 'completed' | 'failed';
   rawInput?: unknown;
+  rawOutput?: unknown;
   content?: Array<{
     type: 'content' | 'diff';
     content?: {

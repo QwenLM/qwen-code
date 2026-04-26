@@ -121,8 +121,11 @@ function convertSettingToJsonSchema(
     case 'enum':
       if (setting.options && setting.options.length > 0) {
         schema.enum = setting.options.map((o) => o.value);
-        schema.description +=
-          ' Options: ' + setting.options.map((o) => `${o.value}`).join(', ');
+        const optionsText =
+          'Options: ' + setting.options.map((o) => `${o.value}`).join(', ');
+        schema.description = schema.description
+          ? `${schema.description} ${optionsText}`
+          : optionsText;
       } else {
         // Enum without predefined options - accept any string
         schema.type = 'string';

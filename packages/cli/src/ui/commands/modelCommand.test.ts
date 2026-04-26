@@ -139,4 +139,57 @@ describe('modelCommand', () => {
       content: 'Authentication type not available.',
     });
   });
+
+  describe('non-interactive mode', () => {
+    it('should return current model without triggering dialog when no args', async () => {
+      mockContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'qwen-max',
+              authType: AuthType.QWEN_OAUTH,
+            }),
+            getModel: vi.fn().mockReturnValue('qwen-max'),
+          },
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('qwen-max'),
+      });
+      expect((result as { type: string }).type).toBe('message');
+    });
+
+    it('should return current fast model without triggering dialog for --fast no args', async () => {
+      mockContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        invocation: { args: '--fast' },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'qwen-max',
+              authType: AuthType.QWEN_OAUTH,
+            }),
+            getModel: vi.fn().mockReturnValue('qwen-max'),
+          },
+          settings: {
+            merged: { fastModel: 'qwen-turbo' } as Record<string, unknown>,
+          },
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, '--fast');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('qwen-turbo'),
+      });
+    });
+  });
 });

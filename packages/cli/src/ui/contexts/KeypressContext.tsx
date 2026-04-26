@@ -49,6 +49,15 @@ export const DRAG_COMPLETION_TIMEOUT_MS = 100; // Broadcast full path after 100m
 // - Too long: delayed recovery from interrupted sequences (e.g., IME interruptions)
 // Based on empirical testing with IME input patterns in VS Code integrated terminal.
 export const KITTY_SEQUENCE_TIMEOUT_MS = 200;
+
+// Paste idle timeout: auto-recovers from a stuck bracketed-paste mode
+// when `paste-end` (`ESC[201~`) never arrives. Without this safety net, a
+// lost paste-end marker leaves `isPaste = true` forever, every subsequent
+// keystroke (including Ctrl+C) is silently buffered, and the only way to
+// recover is to kill the terminal. 1000ms is long enough to cover slow
+// chunked pastes on cold terminals yet short enough that users don't
+// perceive the recovery as a hang.
+export const PASTE_IDLE_TIMEOUT_MS = 1000;
 export const SINGLE_QUOTE = "'";
 export const DOUBLE_QUOTE = '"';
 
@@ -128,12 +137,14 @@ export function KeypressProvider({
   pasteWorkaround = false,
   config,
   debugKeystrokeLogging,
+  initialCapturedInput,
 }: {
   children?: React.ReactNode;
   kittyProtocolEnabled: boolean;
   pasteWorkaround?: boolean;
   config?: Config;
   debugKeystrokeLogging?: boolean;
+  initialCapturedInput?: Buffer;
 }) {
   const { stdin, setRawMode } = useStdin();
   const subscribers = useRef<Set<KeypressHandler>>(new Set()).current;
@@ -158,6 +169,11 @@ export function KeypressProvider({
       setRawMode(true);
     }
 
+    // Use pre-drained captured input passed from outside React.
+    // Draining happens before render() so StrictMode's mount/cleanup/remount
+    // always reads from the stable prop reference, not the (already empty) module buffer.
+    const capturedInput = initialCapturedInput ?? Buffer.alloc(0);
+
     const keypressStream = new PassThrough();
     let usePassthrough = false;
     // Use passthrough mode when pasteWorkaround is enabled,
@@ -167,6 +183,12 @@ export function KeypressProvider({
 
     let isPaste = false;
     let pasteBuffer = Buffer.alloc(0);
+    // Set to true when paste mode is ended by something other than a
+    // received paste-end event (idle timeout or Ctrl+C escape). The next
+    // real paste-end event that arrives — if any — is then a stale echo
+    // and must be swallowed instead of producing a spurious empty paste.
+    let pasteAlreadyFlushed = false;
+    let pasteIdleTimeout: NodeJS.Timeout | null = null;
     const kittySequenceBufferRef = { current: '' };
     let kittySequenceTimeout: NodeJS.Timeout | null = null;
     let backslashTimeout: NodeJS.Timeout | null = null;
@@ -225,6 +247,48 @@ export function KeypressProvider({
     const clearKittyBufferAndTimeout = () => {
       clearKittyTimeout();
       kittySequenceBufferRef.current = '';
+    };
+
+    const clearPasteIdleTimeout = () => {
+      if (pasteIdleTimeout) {
+        clearTimeout(pasteIdleTimeout);
+        pasteIdleTimeout = null;
+      }
+    };
+
+    // Force-flush a paste that has gone too long without its paste-end
+    // marker. Rather than dropping whatever the user typed, broadcast the
+    // buffered content as a regular paste event and reset state so the
+    // next keystroke is handled normally.
+    const forceFlushStuckPaste = () => {
+      clearPasteIdleTimeout();
+      // Nothing to recover from: not in paste mode AND no buffered content.
+      // We still run when either condition is true — e.g. isPaste=true with
+      // an empty buffer (need to clear the flag) or isPaste=false with stale
+      // buffered content (e.g. after a race between Ctrl+C and the timer).
+      if (!isPaste && pasteBuffer.length === 0) return;
+      const buffered = pasteBuffer.toString();
+      isPaste = false;
+      pasteBuffer = Buffer.alloc(0);
+      pasteAlreadyFlushed = true;
+      if (buffered.length > 0) {
+        broadcast({
+          name: '',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: true,
+          sequence: buffered,
+        });
+      }
+    };
+
+    const startPasteIdleTimeout = () => {
+      clearPasteIdleTimeout();
+      pasteIdleTimeout = setTimeout(
+        forceFlushStuckPaste,
+        PASTE_IDLE_TIMEOUT_MS,
+      );
     };
 
     const createPrintableKey = (char: string): Key => {
@@ -607,11 +671,63 @@ export function KeypressProvider({
       if (key.sequence === FOCUS_IN || key.sequence === FOCUS_OUT) {
         return;
       }
+
+      // Ctrl+C is an always-available escape hatch. It MUST be processed
+      // before the `isPaste` branch below, otherwise a stuck paste mode
+      // (paste-start without paste-end) silently buffers every key —
+      // including Ctrl+C itself — and the user has no way to recover
+      // without killing the terminal.
+      const isCtrlCKey =
+        (key.ctrl && key.name === 'c') ||
+        key.sequence === `${ESC}${KITTY_CTRL_C}`;
+      if (isCtrlCKey) {
+        if (isPaste || pasteBuffer.length > 0) {
+          isPaste = false;
+          pasteBuffer = Buffer.alloc(0);
+          pasteAlreadyFlushed = true;
+          clearPasteIdleTimeout();
+        }
+        if (kittySequenceBufferRef.current && debugKeystrokeLogging) {
+          debugLogger.debug(
+            '[DEBUG] Kitty buffer cleared on Ctrl+C:',
+            kittySequenceBufferRef.current,
+          );
+        }
+        clearKittyBufferAndTimeout();
+        if (key.sequence === `${ESC}${KITTY_CTRL_C}`) {
+          broadcast({
+            name: 'c',
+            ctrl: true,
+            meta: false,
+            shift: false,
+            paste: false,
+            sequence: key.sequence,
+            kittyProtocol: true,
+          });
+        } else {
+          broadcast(key);
+        }
+        return;
+      }
+
       if (key.name === 'paste-start') {
         isPaste = true;
+        pasteAlreadyFlushed = false;
+        startPasteIdleTimeout();
         return;
       }
       if (key.name === 'paste-end') {
+        clearPasteIdleTimeout();
+        // A stale paste-end may arrive after we force-flushed the paste
+        // via the idle timeout or Ctrl+C escape — swallow it so we don't
+        // broadcast a spurious empty/image paste event.
+        if (pasteAlreadyFlushed) {
+          // Reset for the next paste cycle.
+          pasteAlreadyFlushed = false;
+          isPaste = false;
+          pasteBuffer = Buffer.alloc(0);
+          return;
+        }
         isPaste = false;
         if (pasteBuffer.toString().length > 0) {
           broadcast({
@@ -641,6 +757,7 @@ export function KeypressProvider({
 
       if (isPaste) {
         pasteBuffer = Buffer.concat([pasteBuffer, Buffer.from(key.sequence)]);
+        startPasteIdleTimeout();
         return;
       }
 
@@ -694,32 +811,8 @@ export function KeypressProvider({
         return;
       }
 
-      if (
-        (key.ctrl && key.name === 'c') ||
-        key.sequence === `${ESC}${KITTY_CTRL_C}`
-      ) {
-        if (kittySequenceBufferRef.current && debugKeystrokeLogging) {
-          debugLogger.debug(
-            '[DEBUG] Kitty buffer cleared on Ctrl+C:',
-            kittySequenceBufferRef.current,
-          );
-        }
-        clearKittyBufferAndTimeout();
-        if (key.sequence === `${ESC}${KITTY_CTRL_C}`) {
-          broadcast({
-            name: 'c',
-            ctrl: true,
-            meta: false,
-            shift: false,
-            paste: false,
-            sequence: key.sequence,
-            kittyProtocol: true,
-          });
-        } else {
-          broadcast(key);
-        }
-        return;
-      }
+      // Ctrl+C is handled earlier, above the paste-state branches, so
+      // that it remains an escape hatch even when paste mode is stuck.
 
       if (kittyProtocolEnabled) {
         if (
@@ -903,6 +996,14 @@ export function KeypressProvider({
       sequence,
     });
 
+    const shouldFlushRawDataAsPaste = (data: Buffer) => {
+      const hasReturn = data.includes(0x0d);
+      const hasEmbeddedTab = data.length > 1 && data.includes(0x09);
+      const isSingleReturn = data.length <= 2 && hasReturn;
+
+      return !isSingleReturn && (hasReturn || hasEmbeddedTab);
+    };
+
     const flushRawBuffer = () => {
       if (!rawDataBuffer.length) {
         return;
@@ -959,11 +1060,7 @@ export function KeypressProvider({
         return;
       }
 
-      if (
-        (rawDataBuffer.length <= 2 && rawDataBuffer.includes(0x0d)) ||
-        !rawDataBuffer.includes(0x0d) ||
-        isPaste
-      ) {
+      if (isPaste || !shouldFlushRawDataAsPaste(rawDataBuffer)) {
         keypressStream.write(rawDataBuffer);
       } else {
         // Flush raw data buffer as a paste event
@@ -1012,7 +1109,30 @@ export function KeypressProvider({
       stdin.on('keypress', handleKeypress);
     }
 
+    // Startup optimization: replay captured input if available
+    let replayPending = false;
+    if (capturedInput.length > 0) {
+      debugLogger.debug(
+        `Replaying ${capturedInput.length} bytes of captured input`,
+      );
+      // Process in next event loop tick to ensure subscribers are ready.
+      // Always emit on stdin so that handleRawKeypress processes paste markers
+      // correctly in passthrough mode.
+      // In non-passthrough mode, readline.emitKeypressEvents installs an internal
+      // 'data' listener on stdin that converts data events to keypress events.
+      replayPending = true;
+      setImmediate(() => {
+        if (!replayPending) return;
+        try {
+          stdin.emit('data', capturedInput);
+        } catch (err) {
+          debugLogger.error('Failed to replay captured input:', err);
+        }
+      });
+    }
+
     return () => {
+      replayPending = false;
       if (usePassthrough) {
         keypressStream.removeListener('keypress', handleKeypress);
         stdin.removeListener('data', handleRawKeypress);
@@ -1033,6 +1153,7 @@ export function KeypressProvider({
       }
 
       clearKittyBufferAndTimeout();
+      clearPasteIdleTimeout();
 
       if (rawFlushTimeout) {
         clearTimeout(rawFlushTimeout);
@@ -1060,6 +1181,7 @@ export function KeypressProvider({
     pasteWorkaround,
     config,
     subscribers,
+    initialCapturedInput,
   ]);
 
   return (

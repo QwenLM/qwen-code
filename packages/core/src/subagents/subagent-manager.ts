@@ -34,6 +34,7 @@ import type {
   AgentHooks,
 } from '../agents/runtime/agent-events.js';
 import type { Config } from '../config/config.js';
+import { APPROVAL_MODES } from '../config/config.js';
 import {
   type AuthType,
   type ContentGenerator,
@@ -582,6 +583,10 @@ export class SubagentManager {
       frontmatter['tools'] = config.tools;
     }
 
+    if (config.disallowedTools && config.disallowedTools.length > 0) {
+      frontmatter['disallowedTools'] = config.disallowedTools;
+    }
+
     if (config.model && config.model !== 'inherit') {
       frontmatter['model'] = config.model;
     }
@@ -592,6 +597,17 @@ export class SubagentManager {
 
     if (config.color && config.color !== 'auto') {
       frontmatter['color'] = config.color;
+    }
+
+    if (
+      config.approvalMode &&
+      APPROVAL_MODES.includes(config.approvalMode as never)
+    ) {
+      frontmatter['approvalMode'] = config.approvalMode;
+    }
+
+    if (config.background) {
+      frontmatter['background'] = true;
     }
 
     // Serialize to YAML
@@ -620,7 +636,7 @@ export class SubagentManager {
     },
   ): Promise<AgentHeadless> {
     try {
-      const runtimeConfig = this.convertToRuntimeConfig(config);
+      const runtimeConfig = await this.convertToRuntimeConfig(config);
 
       // When the model selector specifies a different provider, build a
       // per-agent Config with a dedicated ContentGenerator so the subagent
@@ -707,7 +723,9 @@ export class SubagentManager {
    * @param config - File-based subagent configuration
    * @returns Runtime configuration for AgentHeadless
    */
-  convertToRuntimeConfig(config: SubagentConfig): SubagentRuntimeConfig {
+  async convertToRuntimeConfig(
+    config: SubagentConfig,
+  ): Promise<SubagentRuntimeConfig> {
     const promptConfig: PromptConfig = {
       systemPrompt: config.systemPrompt,
     };
@@ -722,10 +740,22 @@ export class SubagentManager {
     };
 
     let toolConfig: ToolConfig | undefined;
-    if (config.tools && config.tools.length > 0) {
-      const toolNames = this.transformToToolNames(config.tools);
+    if (
+      (config.tools && config.tools.length > 0) ||
+      (config.disallowedTools && config.disallowedTools.length > 0)
+    ) {
+      const toolNames = config.tools
+        ? await this.transformToToolNames(config.tools)
+        : ['*'];
       toolConfig = {
         tools: toolNames,
+        ...(config.disallowedTools && config.disallowedTools.length > 0
+          ? {
+              disallowedTools: await this.transformToToolNames(
+                config.disallowedTools,
+              ),
+            }
+          : {}),
       };
     }
 
@@ -745,12 +775,13 @@ export class SubagentManager {
    * @returns Array of tool names
    * @private
    */
-  private transformToToolNames(tools: string[]): string[] {
+  private async transformToToolNames(tools: string[]): Promise<string[]> {
     const toolRegistry = this.config.getToolRegistry();
     if (!toolRegistry) {
       return tools;
     }
 
+    await toolRegistry.warmAll();
     const allTools = toolRegistry.getAllTools();
 
     const result: string[] = [];
@@ -883,8 +914,12 @@ export class SubagentManager {
         try {
           const config = await this.parseSubagentFile(filePath, level);
           subagents.push(config);
-        } catch (_error) {
-          // Ignore invalid files
+        } catch (error) {
+          // Skip invalid files but surface the reason. Before this warning
+          // was added, invalid subagent files failed silently — a user who
+          // mistyped frontmatter or used a reserved name had no way to see
+          // why their agent wasn't loading.
+          warnInvalidSubagentFile(filePath, error);
           continue;
         }
       }
@@ -963,8 +998,8 @@ export async function loadSubagentFromDir(
           new SubagentValidator(),
         );
         subagents.push(config);
-      } catch (_error) {
-        // Ignore invalid files
+      } catch (error) {
+        warnInvalidSubagentFile(filePath, error);
         continue;
       }
     }
@@ -1016,6 +1051,16 @@ function parseSubagentContent(
 
     // Extract optional fields
     const tools = frontmatter['tools'] as string[] | undefined;
+    const disallowedToolsRaw = frontmatter['disallowedTools'];
+    const disallowedTools: string[] | undefined = Array.isArray(
+      disallowedToolsRaw,
+    )
+      ? disallowedToolsRaw.filter(
+          (item): item is string => typeof item === 'string',
+        )
+      : typeof disallowedToolsRaw === 'string'
+        ? [disallowedToolsRaw]
+        : undefined;
     const modelRaw = frontmatter['model'];
     const legacyModelConfig = frontmatter['modelConfig'] as
       | Record<string, unknown>
@@ -1024,6 +1069,28 @@ function parseSubagentContent(
       | Record<string, unknown>
       | undefined;
     const color = frontmatter['color'] as string | undefined;
+    const approvalModeRaw = frontmatter['approvalMode'];
+    if (
+      approvalModeRaw !== undefined &&
+      approvalModeRaw !== null &&
+      typeof approvalModeRaw !== 'string'
+    ) {
+      throw new Error(
+        `Invalid "approvalMode" value: expected a string, got ${typeof approvalModeRaw}. Valid values: ${APPROVAL_MODES.join(', ')}`,
+      );
+    }
+    const approvalMode =
+      typeof approvalModeRaw === 'string' && approvalModeRaw !== ''
+        ? approvalModeRaw
+        : undefined;
+    if (
+      approvalMode !== undefined &&
+      !APPROVAL_MODES.includes(approvalMode as never)
+    ) {
+      throw new Error(
+        `Invalid "approvalMode" value "${approvalMode}". Valid values: ${APPROVAL_MODES.join(', ')}`,
+      );
+    }
     const model =
       modelRaw != null && modelRaw !== ''
         ? String(modelRaw)
@@ -1031,16 +1098,34 @@ function parseSubagentContent(
           ? legacyModelConfig['model']
           : undefined;
 
+    const backgroundRaw = frontmatter['background'];
+    if (
+      backgroundRaw !== undefined &&
+      backgroundRaw !== 'true' &&
+      backgroundRaw !== 'false' &&
+      backgroundRaw !== true &&
+      backgroundRaw !== false
+    ) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid background value '${backgroundRaw}'. Must be 'true', 'false', or omitted.`,
+      );
+    }
+    const background =
+      backgroundRaw === 'true' || backgroundRaw === true ? true : undefined;
+
     const config: SubagentConfig = {
       name,
       description,
       tools,
+      disallowedTools,
+      approvalMode,
       systemPrompt: systemPrompt.trim(),
       filePath,
       model,
       runConfig: runConfig as Partial<RunConfig>,
       color,
       level,
+      ...(background ? { background } : {}),
     };
 
     // Validate the parsed configuration
@@ -1056,4 +1141,15 @@ function parseSubagentContent(
       SubagentErrorCode.INVALID_CONFIG,
     );
   }
+}
+
+/**
+ * Log an invalid-subagent-file error via the debug logger. Before this was
+ * added, the loader swallowed these errors entirely — users running with
+ * debug logging enabled had no way to tell why their subagent wasn't loading.
+ * Kept on the debug channel so the TUI stays quiet during normal startup.
+ */
+function warnInvalidSubagentFile(filePath: string, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  debugLogger.debug(`Skipped invalid file ${filePath}: ${message}`);
 }

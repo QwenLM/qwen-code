@@ -954,6 +954,34 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.advanced?.excludedEnvVars).toHaveLength(2);
     });
 
+    it('should UNION-merge slashCommands.disabled across user and workspace scopes', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      const userSettings = {
+        slashCommands: { disabled: ['auth', 'quit'] },
+      };
+      const workspaceSettings = {
+        // Workspace overlaps with user and adds one entry. UNION de-dupes the
+        // overlap and merges the new entry; it cannot remove user entries.
+        slashCommands: { disabled: ['quit', 'clear'] },
+      };
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return JSON.stringify(userSettings);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettings);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const disabled = settings.merged.slashCommands?.disabled ?? [];
+      expect(disabled).toEqual(
+        expect.arrayContaining(['auth', 'quit', 'clear']),
+      );
+      expect(disabled).toHaveLength(3);
+    });
+
     it('should merge all settings files with the correct precedence', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       const systemDefaultsContent = {

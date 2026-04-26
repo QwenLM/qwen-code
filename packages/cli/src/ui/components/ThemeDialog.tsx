@@ -8,7 +8,11 @@ import type React from 'react';
 import { useCallback, useState } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
-import { themeManager, DEFAULT_THEME } from '../themes/theme-manager.js';
+import {
+  themeManager,
+  DEFAULT_THEME,
+  AUTO_THEME_NAME,
+} from '../themes/theme-manager.js';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { DiffRenderer } from './messages/DiffRenderer.js';
 import { colorizeCode } from '../utils/CodeColorizer.js';
@@ -42,10 +46,11 @@ export function ThemeDialog({
     SettingScope.User,
   );
 
-  // Track the currently highlighted theme name
+  // Track the currently highlighted theme name. An unset theme means
+  // auto-detection is in effect, so reflect that by highlighting Auto.
   const [highlightedThemeName, setHighlightedThemeName] = useState<
     string | undefined
-  >(settings.merged.ui?.theme || DEFAULT_THEME.name);
+  >(settings.merged.ui?.theme || AUTO_THEME_NAME);
 
   // Generate theme items filtered by selected scope
   const customThemes =
@@ -57,8 +62,15 @@ export function ThemeDialog({
     .filter((theme) => theme.type !== 'custom');
   const customThemeNames = Object.keys(customThemes);
   const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
-  // Generate theme items
+  // Generate theme items with "Auto" at the top
   const themeItems = [
+    {
+      label: t('Auto (detect terminal theme)'),
+      value: AUTO_THEME_NAME,
+      themeNameDisplay: t('Auto'),
+      themeTypeDisplay: t('Auto'),
+      key: AUTO_THEME_NAME,
+    },
     ...builtInThemes.map((theme) => ({
       label: theme.name,
       value: theme.name,
@@ -224,10 +236,13 @@ export function ThemeDialog({
             </Text>
             {/* Get the Theme object for the highlighted theme, fall back to default if not found */}
             {(() => {
+              // For 'auto', show the currently resolved theme (set by onHighlight → applyTheme)
               const previewTheme =
-                themeManager.getTheme(
-                  highlightedThemeName || DEFAULT_THEME.name,
-                ) || DEFAULT_THEME;
+                highlightedThemeName === AUTO_THEME_NAME
+                  ? themeManager.getActiveTheme()
+                  : themeManager.getTheme(
+                      highlightedThemeName || DEFAULT_THEME.name,
+                    ) || DEFAULT_THEME;
               return (
                 <Box
                   borderStyle="single"

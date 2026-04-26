@@ -35,6 +35,7 @@ describe('executeToolCall', () => {
 
     mockToolRegistry = {
       getTool: vi.fn(),
+      ensureTool: vi.fn(async (name: string) => mockToolRegistry.getTool(name)),
       getAllToolNames: vi.fn(),
     } as unknown as ToolRegistry;
 

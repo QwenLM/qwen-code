@@ -10,6 +10,7 @@ export enum AppEvent {
   OpenDebugConsole = 'open-debug-console',
   LogError = 'log-error',
   OauthDisplayMessage = 'oauth-display-message',
+  OauthAuthUrl = 'oauth-auth-url',
 }
 
 export const appEvents = new EventEmitter();

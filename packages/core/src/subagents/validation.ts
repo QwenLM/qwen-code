@@ -55,6 +55,15 @@ export class SubagentValidator {
       warnings.push(...toolsValidation.warnings);
     }
 
+    // Validate disallowedTools if specified
+    if (config.disallowedTools && config.disallowedTools.length > 0) {
+      const disallowedValidation = this.validateTools(config.disallowedTools);
+      if (!disallowedValidation.isValid) {
+        errors.push(...disallowedValidation.errors);
+      }
+      warnings.push(...disallowedValidation.warnings);
+    }
+
     // Validate model selector if specified
     if (config.model) {
       const modelValidation = this.validateModel(config.model);
@@ -107,8 +116,8 @@ export class SubagentValidator {
       errors.push('Name must be 50 characters or less');
     }
 
-    // Check valid characters (alphanumeric, hyphens, underscores)
-    const validNameRegex = /^[a-zA-Z0-9_-]+$/;
+    // Check valid characters (Unicode letters/numbers, hyphens, underscores)
+    const validNameRegex = /^[\p{L}\p{N}_-]+$/u;
     if (!validNameRegex.test(trimmedName)) {
       errors.push(
         'Name can only contain letters, numbers, hyphens, and underscores',
@@ -124,7 +133,10 @@ export class SubagentValidator {
       errors.push('Name cannot end with a hyphen or underscore');
     }
 
-    // Check for reserved names
+    // Check for reserved names. `main` is the sentinel used by the /stats
+    // attribution pipeline to label the main (non-subagent) conversation;
+    // a subagent named `main` would collide with that sentinel and be
+    // silently merged into the main bucket.
     const reservedNames = [
       'self',
       'system',
@@ -133,13 +145,17 @@ export class SubagentValidator {
       'tool',
       'config',
       'default',
+      'main',
     ];
     if (reservedNames.includes(trimmedName.toLowerCase())) {
       errors.push(`"${trimmedName}" is a reserved name and cannot be used`);
     }
 
-    // Warnings for naming conventions
-    if (trimmedName !== trimmedName.toLowerCase()) {
+    // Warnings for naming conventions (only for names that have case distinctions)
+    if (
+      trimmedName !== trimmedName.toLowerCase() &&
+      /[a-zA-Z]/.test(trimmedName)
+    ) {
       warnings.push('Consider using lowercase names for consistency');
     }
 

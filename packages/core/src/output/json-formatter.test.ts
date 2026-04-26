@@ -66,6 +66,7 @@ describe('JsonFormatter', () => {
             thoughts: 103,
             tool: 0,
           },
+          bySource: {},
         },
         'gemini-2.5-flash': {
           api: {
@@ -81,6 +82,7 @@ describe('JsonFormatter', () => {
             thoughts: 138,
             tool: 0,
           },
+          bySource: {},
         },
       },
       tools: {

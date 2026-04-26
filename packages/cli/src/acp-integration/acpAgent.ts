@@ -14,10 +14,14 @@ import {
   qwenOAuth2Events,
   MCPServerConfig,
   SessionService,
+  SESSION_TITLE_MAX_LENGTH,
   tokenLimit,
   type Config,
   type ConversationRecord,
   type DeviceAuthorizationData,
+  SessionStartSource,
+  SessionEndReason,
+  type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -38,6 +42,8 @@ import type {
   LoadSessionRequest,
   LoadSessionResponse,
   McpServer,
+  McpServerHttp,
+  McpServerSse,
   McpServerStdio,
   NewSessionRequest,
   NewSessionResponse,
@@ -74,6 +80,10 @@ export async function runAcpAgent(
   settings: LoadedSettings,
   argv: CliArgs,
 ) {
+  // Initialize config to set up hookSystem (required for SessionStart/SessionEnd hooks)
+  // This is needed because gemini.tsx calls runAcpAgent without calling config.initialize()
+  await config.initialize();
+
   const stdout = Writable.toWeb(process.stdout) as WritableStream;
   const stdin = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
 
@@ -94,10 +104,34 @@ export async function runAcpAgent(
   // (e.g., stdin raw mode restoration) override the default exit behavior,
   // causing the ACP process to ignore termination signals.
   let shuttingDown = false;
-  const shutdownHandler = () => {
+  let sessionEndFired = false;
+
+  // Helper to fire SessionEnd hook once, preventing double-fire from both
+  // shutdown handler path and connection.closed path.
+  const fireSessionEndOnce = async (reason: SessionEndReason) => {
+    if (sessionEndFired) return;
+    sessionEndFired = true;
+    const hookSystem = config.getHookSystem?.();
+    const hooksEnabled = !config.getDisableAllHooks?.();
+    if (hooksEnabled && hookSystem && config.hasHooksForEvent?.('SessionEnd')) {
+      try {
+        await hookSystem.fireSessionEndEvent(reason);
+      } catch (err) {
+        debugLogger.warn(
+          `SessionEnd hook failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  };
+
+  const shutdownHandler = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
     debugLogger.debug('[ACP] Shutdown signal received, closing streams');
+
+    // Fire SessionEnd hook for all active sessions (aligned with core path)
+    await fireSessionEndOnce(SessionEndReason.Other);
+
     try {
       process.stdin.destroy();
     } catch {
@@ -123,14 +157,34 @@ export async function runAcpAgent(
   process.on('SIGINT', shutdownHandler);
 
   await connection.closed;
+  // Connection closed by IDE - fire SessionEnd hook (aligned with core path)
+  await fireSessionEndOnce(SessionEndReason.PromptInputExit);
 
   process.off('SIGTERM', shutdownHandler);
   process.off('SIGINT', shutdownHandler);
 }
 
-function toStdioServer(server: McpServer): McpServerStdio | undefined {
+export function toStdioServer(server: McpServer): McpServerStdio | undefined {
   if ('command' in server && 'args' in server && 'env' in server) {
     return server as McpServerStdio;
+  }
+  return undefined;
+}
+
+export function toSseServer(
+  server: McpServer,
+): (McpServerSse & { type: 'sse' }) | undefined {
+  if ('type' in server && server.type === 'sse') {
+    return server as McpServerSse & { type: 'sse' };
+  }
+  return undefined;
+}
+
+export function toHttpServer(
+  server: McpServer,
+): (McpServerHttp & { type: 'http' }) | undefined {
+  if ('type' in server && server.type === 'http') {
+    return server as McpServerHttp & { type: 'http' };
   }
   return undefined;
 }
@@ -169,6 +223,10 @@ class QwenAgent implements Agent {
         sessionCapabilities: {
           list: {},
           resume: {},
+        },
+        mcpCapabilities: {
+          sse: true,
+          http: true,
         },
       },
     };
@@ -263,17 +321,29 @@ class QwenAgent implements Agent {
   ): Promise<ListSessionsResponse> {
     const cwd = params.cwd || process.cwd();
     const numericCursor = params.cursor ? Number(params.cursor) : undefined;
+
+    // The ACP spec's ListSessionsRequest doesn't include a page-size field,
+    // so the SDK's zod validator strips any top-level `size` the client sends
+    // before it reaches this handler. Carry page size through `_meta.size`
+    // (same pattern filesystem.ts uses for `_meta.bom` / `_meta.encoding`).
+    const metaSize = params._meta?.['size'];
+    const size =
+      typeof metaSize === 'number' && metaSize > 0
+        ? Math.floor(metaSize)
+        : undefined;
+
     const result = await runWithAcpRuntimeOutputDir(this.settings, cwd, () => {
       const sessionService = new SessionService(cwd);
       return sessionService.listSessions({
         cursor: Number.isNaN(numericCursor) ? undefined : numericCursor,
+        size,
       });
     });
 
     const sessions: SessionInfo[] = result.items.map((item) => ({
       cwd: item.cwd,
       sessionId: item.sessionId,
-      title: item.prompt || '(session)',
+      title: item.customTitle || item.prompt || '(session)',
       updatedAt: new Date(item.mtime).toISOString(),
     }));
 
@@ -368,9 +438,76 @@ class QwenAgent implements Agent {
 
   async extMethod(
     method: string,
-    _params: Record<string, unknown>,
+    params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    throw RequestError.methodNotFound(method);
+    const cwd = (params['cwd'] as string) || process.cwd();
+    const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
+
+    switch (method) {
+      case 'deleteSession': {
+        const sessionId = params['sessionId'] as string;
+        if (!sessionId || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const success = await runWithAcpRuntimeOutputDir(
+          this.settings,
+          cwd,
+          async () => {
+            const sessionService = new SessionService(cwd);
+            return sessionService.removeSession(sessionId);
+          },
+        );
+        return { success };
+      }
+      case 'renameSession': {
+        const sessionId = params['sessionId'] as string;
+        const title = params['title'] as string;
+        if (!sessionId || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (!title || typeof title !== 'string') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing title',
+          );
+        }
+        if (title.length > SESSION_TITLE_MAX_LENGTH) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Title too long (max ${SESSION_TITLE_MAX_LENGTH} chars)`,
+          );
+        }
+        const success = await runWithAcpRuntimeOutputDir(
+          this.settings,
+          cwd,
+          async () => {
+            const sessionService = new SessionService(cwd);
+            return sessionService.renameSession(sessionId, title);
+          },
+        );
+        return { success };
+      }
+      case 'getAccountInfo': {
+        const sessionId = params['sessionId'] as string | undefined;
+        const session = sessionId ? this.sessions.get(sessionId) : undefined;
+        const config = session ? session.getConfig() : this.config;
+        const cfg = config.getContentGeneratorConfig();
+        return {
+          authType: cfg?.authType ?? config.getAuthType() ?? null,
+          model: cfg?.model ?? config.getModel() ?? null,
+          baseUrl: cfg?.baseUrl ?? null,
+          apiKeyEnvKey: cfg?.apiKeyEnvKey ?? null,
+        };
+      }
+      default:
+        throw RequestError.methodNotFound(method);
+    }
   }
 
   // --- private helpers ---
@@ -386,18 +523,55 @@ class QwenAgent implements Agent {
 
     for (const server of mcpServers) {
       const stdioServer = toStdioServer(server);
-      if (!stdioServer) continue;
-
-      const env: Record<string, string> = {};
-      for (const { name: envName, value } of stdioServer.env) {
-        env[envName] = value;
+      if (stdioServer) {
+        const env: Record<string, string> = {};
+        for (const { name: envName, value } of stdioServer.env) {
+          env[envName] = value;
+        }
+        mergedMcpServers[stdioServer.name] = new MCPServerConfig(
+          stdioServer.command,
+          stdioServer.args,
+          env,
+          cwd,
+        );
+        continue;
       }
-      mergedMcpServers[stdioServer.name] = new MCPServerConfig(
-        stdioServer.command,
-        stdioServer.args,
-        env,
-        cwd,
-      );
+
+      const sseServer = toSseServer(server);
+      if (sseServer) {
+        const headers: Record<string, string> = {};
+        for (const { name: headerName, value } of sseServer.headers) {
+          headers[headerName] = value;
+        }
+        mergedMcpServers[sseServer.name] = new MCPServerConfig(
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          sseServer.url,
+          undefined,
+          Object.keys(headers).length > 0 ? headers : undefined,
+        );
+        continue;
+      }
+
+      const httpServer = toHttpServer(server);
+      if (httpServer) {
+        const headers: Record<string, string> = {};
+        for (const { name: headerName, value } of httpServer.headers) {
+          headers[headerName] = value;
+        }
+        mergedMcpServers[httpServer.name] = new MCPServerConfig(
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          httpServer.url,
+          Object.keys(headers).length > 0 ? headers : undefined,
+        );
+        continue;
+      }
     }
 
     const settings = { ...this.settings.merged, mcpServers: mergedMcpServers };
@@ -407,7 +581,17 @@ class QwenAgent implements Agent {
       continue: false,
     };
 
-    const config = await loadCliConfig(settings, argvForSession, cwd, []);
+    const config = await loadCliConfig(
+      settings,
+      argvForSession,
+      cwd,
+      [],
+      // Pass separated hooks for proper source attribution
+      {
+        userHooks: this.settings.getUserHooks(),
+        projectHooks: this.settings.getProjectHooks(),
+      },
+    );
     await config.initialize();
     return config;
   }
@@ -495,16 +679,31 @@ class QwenAgent implements Agent {
       await geminiClient.initialize();
     }
 
-    const chat = geminiClient.getChat();
-
     const session = new Session(
       sessionId,
-      chat,
       config,
       this.connection,
       this.settings,
     );
     this.sessions.set(sessionId, session);
+
+    // Fire SessionStart hook (aligned with core path)
+    const hookSystem = config.getHookSystem();
+    const hooksEnabled = !config.getDisableAllHooks();
+    if (hooksEnabled && hookSystem && config.hasHooksForEvent('SessionStart')) {
+      const source = conversation
+        ? SessionStartSource.Resume
+        : SessionStartSource.Startup;
+      const model = config.getModel();
+      const permissionMode = String(config.getApprovalMode()) as PermissionMode;
+      try {
+        await hookSystem.fireSessionStartEvent(source, model, permissionMode);
+      } catch (err) {
+        debugLogger.warn(
+          `SessionStart hook failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
 
     setTimeout(async () => {
       await session.sendAvailableCommandsUpdate();
@@ -513,6 +712,9 @@ class QwenAgent implements Agent {
     if (conversation && conversation.messages) {
       await session.replayHistory(conversation.messages);
     }
+
+    // Install rewriter AFTER history replay to avoid rewriting historical messages
+    session.installRewriter();
 
     return session;
   }

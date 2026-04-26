@@ -3,6 +3,7 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ChildProcess } from 'child_process';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
@@ -12,6 +13,7 @@ export enum HooksConfigSource {
   User = 'user',
   System = 'system',
   Extensions = 'extensions',
+  Session = 'session',
 }
 
 /**
@@ -54,7 +56,7 @@ export enum HookEventName {
 export const HOOKS_CONFIG_FIELDS = ['enabled', 'disabled', 'notifications'];
 
 /**
- * Hook configuration entry
+ * Hook configuration entry for command hooks
  */
 export interface CommandHookConfig {
   type: HookType.Command;
@@ -64,9 +66,88 @@ export interface CommandHookConfig {
   timeout?: number;
   source?: HooksConfigSource;
   env?: Record<string, string>;
+  async?: boolean;
+  shell?: 'bash' | 'powershell';
+  /** Custom status message to display while hook is executing */
+  statusMessage?: string;
 }
 
-export type HookConfig = CommandHookConfig;
+/**
+ * Hook configuration entry for HTTP hooks
+ */
+export interface HttpHookConfig {
+  type: HookType.Http;
+  url: string;
+  headers?: Record<string, string>;
+  allowedEnvVars?: string[];
+  timeout?: number;
+  if?: string;
+  name?: string;
+  description?: string;
+  statusMessage?: string;
+  once?: boolean;
+  source?: HooksConfigSource;
+}
+
+/**
+ * Hook execution outcome - describes the result of hook execution
+ */
+export type HookExecutionOutcome =
+  | 'success' // Hook executed successfully
+  | 'blocking' // Hook blocked the operation
+  | 'non_blocking_error' // Hook failed but doesn't block
+  | 'cancelled'; // Hook was cancelled/aborted
+
+/**
+ * Context provided to function hooks for state access
+ */
+export interface FunctionHookContext {
+  /** Optional messages for conversation context */
+  messages?: Array<Record<string, unknown>>;
+  /** Optional tool use ID for关联 to specific tool call */
+  toolUseID?: string;
+  /** Optional abort signal for cancellation */
+  signal?: AbortSignal;
+}
+
+/**
+ * Function hook callback type
+ * Supports both simple boolean semantics and complex HookOutput semantics
+ * - Return boolean: true=success, false=blocking error
+ * - Return HookOutput: for advanced control over hook behavior
+ * - Return undefined: treated as {continue: true} (success)
+ */
+export type FunctionHookCallback = (
+  input: HookInput,
+  context?: FunctionHookContext,
+) => Promise<HookOutput | boolean | undefined>;
+
+/**
+ * Hook configuration entry for function hooks (Session Hook specific)
+ */
+export interface FunctionHookConfig {
+  type: HookType.Function;
+  id?: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  callback: FunctionHookCallback;
+  errorMessage: string;
+  statusMessage?: string;
+  /** Optional callback invoked on successful hook execution */
+  onHookSuccess?: (result: HookExecutionResult) => void;
+}
+
+/**
+ * Messages provider callback type for automatically passing conversation history
+ * to function hooks during execution
+ */
+export type MessagesProvider = () => Array<Record<string, unknown>> | undefined;
+
+export type HookConfig =
+  | CommandHookConfig
+  | HttpHookConfig
+  | FunctionHookConfig;
 
 /**
  * Hook definition with matcher
@@ -82,6 +163,8 @@ export interface HookDefinition {
  */
 export enum HookType {
   Command = 'command',
+  Http = 'http',
+  Function = 'function',
 }
 
 /**
@@ -89,7 +172,18 @@ export enum HookType {
  */
 export function getHookKey(hook: HookConfig): string {
   const name = hook.name ?? '';
-  return name ? `${name}:${hook.command}` : hook.command;
+  switch (hook.type) {
+    case HookType.Command:
+      return name ? `${name}:${hook.command}` : hook.command;
+    case HookType.Http:
+      return name ? `${name}:${hook.url}` : hook.url;
+    case HookType.Function:
+      return name
+        ? `${name}:${hook.id ?? 'function'}`
+        : (hook.id ?? 'function');
+    default:
+      return name || 'unknown';
+  }
 }
 
 /**
@@ -795,12 +889,15 @@ export interface HookExecutionResult {
   hookConfig: HookConfig;
   eventName: HookEventName;
   success: boolean;
+  /** Execution outcome for finer-grained result handling */
+  outcome?: HookExecutionOutcome;
   output?: HookOutput;
   stdout?: string;
   stderr?: string;
   exitCode?: number;
   duration: number;
   error?: Error;
+  isAsync?: boolean; // Indicates if this was an async hook execution
 }
 
 /**
@@ -810,4 +907,45 @@ export interface HookExecutionPlan {
   eventName: HookEventName;
   hookConfigs: HookConfig[];
   sequential: boolean;
+}
+
+/**
+ * Pending async hook information
+ */
+export interface PendingAsyncHook {
+  hookId: string;
+  hookName: string;
+  hookEvent: HookEventName;
+  sessionId: string;
+  startTime: number;
+  timeout: number;
+  stdout: string;
+  stderr: string;
+  status: 'running' | 'completed' | 'failed' | 'timeout';
+  output?: HookOutput;
+  error?: Error;
+  /**
+   * Reference to the child process for async command hooks.
+   * Used to terminate the process on timeout or cancellation.
+   */
+  process?: ChildProcess;
+}
+
+/**
+ * Async hook output message
+ */
+export interface AsyncHookOutputMessage {
+  type: 'system' | 'info' | 'warning' | 'error';
+  message: string;
+  hookName: string;
+  hookId: string;
+  timestamp: number;
+}
+
+/**
+ * Pending async output collection
+ */
+export interface PendingAsyncOutput {
+  messages: AsyncHookOutputMessage[];
+  contexts: string[];
 }

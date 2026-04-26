@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { HookDefinition, HookEventName } from '../hooks/types.js';
+
 /**
  * Represents the storage level for a skill configuration.
  * - 'project': Stored in `.qwen/skills/` within the project directory
@@ -12,6 +14,14 @@
  * - 'bundled': Built-in skills shipped with qwen-code
  */
 export type SkillLevel = 'project' | 'user' | 'extension' | 'bundled';
+
+/**
+ * Hooks configuration for a skill.
+ * Maps hook event names to hook definitions.
+ */
+export type SkillHooksSettings = Partial<
+  Record<HookEventName, HookDefinition[]>
+>;
 
 /**
  * Core configuration for a skill as stored in SKILL.md files.
@@ -32,6 +42,20 @@ export interface SkillConfig {
   allowedTools?: string[];
 
   /**
+   * Hooks to register when this skill is invoked.
+   * Hooks are registered as session-scoped hooks that persist
+   * for the duration of the session.
+   */
+  hooks?: SkillHooksSettings;
+  /**
+   * Optional model override for this skill's execution.
+   * Uses the same selector syntax as subagent model selectors:
+   * bare model ID (e.g., `qwen-coder-plus`), `authType:modelId`
+   * for cross-provider, or omitted/`inherit` to use the session model.
+   */
+  model?: string;
+
+  /**
    * Storage level - determines where the configuration file is stored
    */
   level: SkillLevel;
@@ -42,6 +66,12 @@ export interface SkillConfig {
   filePath: string;
 
   /**
+   * Absolute path to the skill root directory (directory containing SKILL.md).
+   * Used to set QWEN_SKILL_ROOT environment variable for skill hooks.
+   */
+  skillRoot?: string;
+
+  /**
    * The markdown body content from SKILL.md (after the frontmatter)
    */
   body: string;
@@ -50,6 +80,21 @@ export interface SkillConfig {
    * For extension-level skills: the name of the providing extension
    */
   extensionName?: string;
+
+  /**
+   * Describes when to invoke this skill — shown to the model in the SkillTool
+   * description so it can decide whether to use it. Parsed from the
+   * `when_to_use` frontmatter field in SKILL.md.
+   */
+  whenToUse?: string;
+
+  /**
+   * When true, the skill is hidden from the model's SkillTool listing and
+   * cannot be invoked by the model. Only the user can trigger it via
+   * `/<skill-name>`. Parsed from the `disable-model-invocation` frontmatter
+   * field in SKILL.md.
+   */
+  disableModelInvocation?: boolean;
 }
 
 /**
@@ -57,6 +102,27 @@ export interface SkillConfig {
  * Extends SkillConfig with additional runtime-specific fields.
  */
 export type SkillRuntimeConfig = SkillConfig;
+
+/**
+ * Parse the `model` field from skill frontmatter.
+ * Returns `undefined` for omitted, empty, or "inherit" values.
+ */
+export function parseModelField(
+  frontmatter: Record<string, unknown>,
+): string | undefined {
+  const raw = frontmatter['model'];
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (typeof raw !== 'string') {
+    throw new Error('"model" must be a string');
+  }
+  const trimmed = raw.trim();
+  if (trimmed === '' || trimmed === 'inherit') {
+    return undefined;
+  }
+  return trimmed;
+}
 
 /**
  * Result of a validation operation on a skill configuration.

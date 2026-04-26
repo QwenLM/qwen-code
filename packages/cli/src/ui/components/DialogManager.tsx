@@ -43,6 +43,9 @@ import { ExtensionsManagerDialog } from './extensions/ExtensionsManagerDialog.js
 import { MCPManagementDialog } from './mcp/MCPManagementDialog.js';
 import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
 import { SessionPicker } from './SessionPicker.js';
+import { RewindSelector } from './RewindSelector.js';
+import { MemoryDialog } from './MemoryDialog.js';
+import { t } from '../../i18n/index.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
@@ -237,6 +240,9 @@ export const DialogManager = ({
       </Box>
     );
   }
+  if (uiState.isMemoryDialogOpen) {
+    return <MemoryDialog onClose={uiActions.closeMemoryDialog} />;
+  }
   if (uiState.isApprovalModeDialogOpen) {
     const currentMode = config.getApprovalMode();
     return (
@@ -375,6 +381,30 @@ export const DialogManager = ({
         currentBranch={uiState.branchName}
         onSelect={uiActions.handleResume}
         onCancel={uiActions.closeResumeDialog}
+        initialSessions={uiState.resumeMatchedSessions}
+        enablePreview
+      />
+    );
+  }
+
+  if (uiState.isDeleteDialogOpen) {
+    return (
+      <SessionPicker
+        sessionService={config.getSessionService()}
+        currentBranch={uiState.branchName}
+        onSelect={uiActions.handleDelete}
+        onCancel={uiActions.closeDeleteDialog}
+        title={t('Delete Session')}
+      />
+    );
+  }
+
+  if (uiState.isRewindSelectorOpen) {
+    return (
+      <RewindSelector
+        history={uiState.history}
+        onRewind={uiActions.handleRewindConfirm}
+        onCancel={uiActions.closeRewindSelector}
       />
     );
   }

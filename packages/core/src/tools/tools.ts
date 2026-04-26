@@ -395,6 +395,13 @@ export interface ToolResult {
     message: string; // raw error message
     type?: ToolErrorType; // An optional machine-readable error type (e.g., 'FILE_NOT_FOUND').
   };
+
+  /**
+   * Optional model override propagated from skill execution.
+   * When present, the client should use this model for subsequent
+   * turns within the same agentic loop.
+   */
+  modelOverride?: string;
 }
 
 /**
@@ -488,10 +495,12 @@ export interface AgentResultDisplay {
   subagentColor?: string;
   taskDescription: string;
   taskPrompt: string;
-  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'running' | 'completed' | 'failed' | 'cancelled' | 'background';
   terminateReason?: string;
   result?: string;
   executionSummary?: AgentStatsSummary;
+  /** Real-time output-token count during execution, accumulated across subagent rounds. */
+  tokenCount?: number;
 
   // If the subagent is awaiting approval for a tool call,
   // this contains the confirmation details for inline UI rendering.
@@ -512,6 +521,9 @@ export interface AgentResultDisplay {
 
 export interface AnsiOutputDisplay {
   ansiOutput: AnsiOutput;
+  totalLines?: number;
+  totalBytes?: number;
+  timeoutMs?: number;
 }
 
 /**
@@ -737,6 +749,17 @@ export const MUTATOR_KINDS: Kind[] = [
   Kind.Move,
   Kind.Execute,
 ] as const;
+
+/**
+ * Tool kinds that are safe to execute concurrently (pure reads, no writes).
+ * Kind.Think is excluded because some Think tools write to disk
+ * (e.g., save_memory, todo_write).
+ */
+export const CONCURRENCY_SAFE_KINDS: ReadonlySet<Kind> = new Set([
+  Kind.Read,
+  Kind.Search,
+  Kind.Fetch,
+]);
 
 export interface ToolLocation {
   // Absolute path to the file

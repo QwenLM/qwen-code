@@ -14,7 +14,7 @@
  * which wraps these controllers with a stable programmatic API.
  *
  * Controllers:
- * - SystemController: initialize, interrupt, set_model, supported_commands
+ * - SystemController: initialize, interrupt, set_model, supported_commands, get_context_usage
  * - PermissionController: can_use_tool, set_permission_mode
  * - SdkMcpController: mcp_server_status (mcp_message handled via callback)
  * - HookController: hook_callback
@@ -380,6 +380,7 @@ export class ControlDispatcher implements IPendingRequestRegistry {
       case 'interrupt':
       case 'set_model':
       case 'supported_commands':
+      case 'get_context_usage':
         return this.systemController;
 
       case 'can_use_tool':

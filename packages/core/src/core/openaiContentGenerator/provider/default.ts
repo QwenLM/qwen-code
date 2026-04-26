@@ -121,6 +121,12 @@ export class DefaultOpenAICompatibleProvider
   protected applyOutputTokenLimit<
     T extends { max_tokens?: number | null; model: string },
   >(request: T): T {
+    // When samplingParams is set, it is the source of truth for the wire shape.
+    // Don't inject a max_tokens default — honor the user's explicit choice.
+    if (this.contentGeneratorConfig.samplingParams !== undefined) {
+      return request;
+    }
+
     const userMaxTokens = request.max_tokens;
 
     // Get model-specific output limit and check if model is known

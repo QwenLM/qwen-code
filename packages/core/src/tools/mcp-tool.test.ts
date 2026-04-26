@@ -1262,12 +1262,12 @@ describe('DiscoveredMCPTool', () => {
       );
 
       const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
-      const getTool = vi.fn().mockReturnValue(newTool);
+      const ensureTool = vi.fn().mockResolvedValue(newTool);
       const mockConfig = {
         isTrustedFolder: () => true,
         getToolRegistry: () => ({
           discoverToolsForServer,
-          getTool,
+          ensureTool,
         }),
         getTruncateToolOutputThreshold: () => 0,
         getTruncateToolOutputLines: () => 0,
@@ -1309,7 +1309,7 @@ describe('DiscoveredMCPTool', () => {
         isTrustedFolder: () => true,
         getToolRegistry: () => ({
           discoverToolsForServer,
-          getTool: vi.fn().mockReturnValue(null),
+          ensureTool: vi.fn().mockResolvedValue(null),
         }),
       };
 
@@ -1365,7 +1365,7 @@ describe('DiscoveredMCPTool', () => {
         isTrustedFolder: () => true,
         getToolRegistry: () => ({
           discoverToolsForServer,
-          getTool: vi.fn().mockReturnValue(secondTool),
+          ensureTool: vi.fn().mockResolvedValue(secondTool),
         }),
       };
 
@@ -1436,7 +1436,7 @@ describe('DiscoveredMCPTool', () => {
           isTrustedFolder: () => true,
           getToolRegistry: () => ({
             discoverToolsForServer,
-            getTool: vi.fn().mockReturnValue(newTool),
+            ensureTool: vi.fn().mockResolvedValue(newTool),
           }),
           getTruncateToolOutputThreshold: () => 0,
           getTruncateToolOutputLines: () => 0,
@@ -1494,7 +1494,7 @@ describe('DiscoveredMCPTool', () => {
         isTrustedFolder: () => true,
         getToolRegistry: () => ({
           discoverToolsForServer,
-          getTool: vi.fn().mockReturnValue(newTool),
+          ensureTool: vi.fn().mockResolvedValue(newTool),
         }),
         getTruncateToolOutputThreshold: () => 0,
         getTruncateToolOutputLines: () => 0,

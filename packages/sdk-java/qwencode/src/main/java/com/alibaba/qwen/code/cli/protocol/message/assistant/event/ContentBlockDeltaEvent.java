@@ -8,7 +8,7 @@ import com.alibaba.fastjson2.annotation.JSONField;
 import com.alibaba.fastjson2.annotation.JSONType;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantContent;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.TextAssistantContent;
-import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ThingkingAssistantContent;
+import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ThinkingAssistantContent;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ToolUseAssistantContent;
 
 /**
@@ -152,7 +152,7 @@ public class ContentBlockDeltaEvent extends StreamEvent {
      * Represents a thinking delta.
      */
     @JSONType(typeKey = "type", typeName = "thinking_delta")
-    public static class ContentBlockDeltaThinking extends ContentBlockDelta<String> implements ThingkingAssistantContent {
+    public static class ContentBlockDeltaThinking extends ContentBlockDelta<String> implements ThinkingAssistantContent {
         /**
          * The thinking content.
          */

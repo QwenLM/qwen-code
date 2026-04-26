@@ -17,6 +17,10 @@ import type {
   ToolResult,
   ChatRecord,
   AgentEventEmitter,
+  StopHookOutput,
+  HookExecutionRequest,
+  HookExecutionResponse,
+  MessageBus,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -29,10 +33,7 @@ import {
   logToolCall,
   logUserPrompt,
   getErrorStatus,
-  AgentTool,
   UserPromptEvent,
-  TodoWriteTool,
-  ExitPlanModeTool,
   readManyFiles,
   Storage,
   ToolNames,
@@ -40,9 +41,18 @@ import {
   evaluatePermissionRules,
   fireNotificationHook,
   firePermissionRequestHook,
+  firePreToolUseHook,
+  firePostToolUseHook,
+  firePostToolUseFailureHook,
   injectPermissionRulesIfMissing,
   NotificationType,
   persistPermissionOutcome,
+  createHookOutput,
+  generateToolUseId,
+  MessageBusType,
+  getPlanModeSystemReminder,
+  getSubagentSystemReminder,
+  getArenaSystemReminder,
 } from '@qwen-code/qwen-code-core';
 
 import { RequestError } from '@agentclientprotocol/sdk';
@@ -72,6 +82,7 @@ import {
 } from '../../nonInteractiveCliCommands.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
+import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 
 // Import modular session components
 import type {
@@ -88,6 +99,10 @@ import {
   buildPermissionRequestContent,
   toPermissionOptions,
 } from './permissionUtils.js';
+import {
+  MessageRewriteMiddleware,
+  loadRewriteConfig,
+} from './rewrite/index.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -124,12 +139,14 @@ export class Session implements SessionContext {
   private readonly planEmitter: PlanEmitter;
   private readonly messageEmitter: MessageEmitter;
 
+  // Message rewrite middleware (optional, installed after history replay)
+  messageRewriter?: MessageRewriteMiddleware;
+
   // Implement SessionContext interface
   readonly sessionId: string;
 
   constructor(
     id: string,
-    private readonly chat: GeminiChat,
     readonly config: Config,
     private readonly client: AgentSideConnection,
     private readonly settings: LoadedSettings,
@@ -150,6 +167,22 @@ export class Session implements SessionContext {
 
   getConfig(): Config {
     return this.config;
+  }
+
+  /**
+   * Install the message rewrite middleware if configured.
+   * Must be called AFTER history replay to avoid rewriting historical messages.
+   */
+  installRewriter(): void {
+    const rewriteConfig = loadRewriteConfig(this.settings);
+    if (rewriteConfig?.enabled) {
+      debugLogger.info('Message rewrite middleware enabled');
+      this.messageRewriter = new MessageRewriteMiddleware(
+        this.config,
+        rewriteConfig,
+        (update) => this.sendUpdate(update),
+      );
+    }
   }
 
   /**
@@ -260,7 +293,9 @@ export class Session implements SessionContext {
         // Increment turn counter for each user prompt
         this.turn += 1;
 
-        const chat = this.chat;
+        // Always fetch the current chat from GeminiClient so that /clear's
+        // resetChat() (which replaces the chat instance) is reflected here.
+        const chat = this.config.getGeminiClient()!.getChat();
         const promptId = this.config.getSessionId() + '########' + this.turn;
 
         // Extract text from all text blocks to construct the full prompt text for logging
@@ -293,7 +328,7 @@ export class Session implements SessionContext {
         let parts: Part[] | null;
 
         if (isSlashCommand(inputText)) {
-          // Handle slash command - uses default allowed commands (init, summary, compress)
+          // Handle slash command in ACP mode using capability-based filtering
           const slashCommandResult = await handleSlashCommand(
             inputText,
             pendingSend,
@@ -314,6 +349,62 @@ export class Session implements SessionContext {
         } else {
           // Normal processing for non-slash commands
           parts = await this.#resolvePrompt(params.prompt, pendingSend.signal);
+        }
+
+        // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
+        const hooksEnabled = !this.config.getDisableAllHooks?.();
+        const messageBus = this.config.getMessageBus?.();
+        if (
+          hooksEnabled &&
+          messageBus &&
+          this.config.hasHooksForEvent?.('UserPromptSubmit')
+        ) {
+          const response = await messageBus.request<
+            HookExecutionRequest,
+            HookExecutionResponse
+          >(
+            {
+              type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              eventName: 'UserPromptSubmit',
+              input: {
+                prompt: promptText,
+              },
+              signal: pendingSend.signal,
+            },
+            MessageBusType.HOOK_EXECUTION_RESPONSE,
+          );
+          const hookOutput = response.output
+            ? createHookOutput('UserPromptSubmit', response.output)
+            : undefined;
+
+          if (
+            hookOutput?.isBlockingDecision() ||
+            hookOutput?.shouldStopExecution()
+          ) {
+            // Hook blocked the prompt - send notification to UI and return
+            const blockReason =
+              hookOutput?.getEffectiveReason() || 'No reason provided';
+            await this.messageEmitter.emitAgentMessage(
+              `🚫 **UserPromptSubmit blocked**: ${blockReason}`,
+            );
+            return { stopReason: 'end_turn' };
+          }
+
+          // Add additional context from hooks to the request
+          const additionalContext = hookOutput?.getAdditionalContext();
+          if (additionalContext) {
+            parts = [...parts, { text: additionalContext }];
+          }
+        }
+
+        // Prepend session-level system reminders (plan mode / subagent /
+        // arena) so the model sees them, matching the behaviour of
+        // `GeminiClient.sendMessageStream` in the CLI/TUI path. Without this,
+        // plan mode in ACP has no effect because the model never learns it
+        // should avoid edits (#1151).
+        const systemReminders = await this.#buildInitialSystemReminders();
+        if (systemReminders.length > 0) {
+          parts = [...systemReminders, ...parts];
         }
 
         let nextMessage: Content | null = { role: 'user', parts };
@@ -380,7 +471,272 @@ export class Session implements SessionContext {
               }
             }
           } catch (error) {
-            if (getErrorStatus(error) === 429) {
+            // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
+            // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
+            const errorStatus = getErrorStatus(error);
+            const errorMessage =
+              error instanceof Error ? error.message : String(error);
+            const errorType = classifyApiError({
+              message: errorMessage,
+              status: errorStatus,
+            });
+
+            const hookSystem = this.config.getHookSystem?.();
+            const hooksEnabledForStopFailure =
+              !this.config.getDisableAllHooks?.();
+            if (
+              hooksEnabledForStopFailure &&
+              hookSystem &&
+              this.config.hasHooksForEvent?.('StopFailure')
+            ) {
+              // Fire-and-forget: don't wait for hook to complete
+              hookSystem
+                .fireStopFailureEvent(errorType, errorMessage)
+                .catch((err) => {
+                  debugLogger.warn(`StopFailure hook failed: ${err}`);
+                });
+            }
+
+            if (errorStatus === 429) {
+              throw new RequestError(
+                429,
+                'Rate limit exceeded. Try again later.',
+              );
+            }
+
+            throw error;
+          }
+
+          if (usageMetadata) {
+            // Kick off rewrite in background (non-blocking, runs parallel to tools)
+            if (this.messageRewriter) {
+              this.messageRewriter.flushTurn(pendingSend.signal);
+            }
+
+            const durationMs = Date.now() - streamStartTime;
+            await this.messageEmitter.emitUsageMetadata(
+              usageMetadata,
+              '',
+              durationMs,
+            );
+          }
+
+          if (functionCalls.length > 0) {
+            const toolResponseParts = await this.runToolCalls(
+              pendingSend.signal,
+              promptId,
+              functionCalls,
+            );
+            nextMessage = { role: 'user', parts: toolResponseParts };
+          }
+        }
+
+        // Wait for any pending rewrite before returning
+        if (this.messageRewriter) {
+          await this.messageRewriter.waitForPendingRewrites();
+        }
+
+        // Fire Stop hook loop (aligned with core path in client.ts)
+        // This is triggered after model response completes with no pending tool calls
+        return this.#handleStopHookLoop(
+          chat,
+          pendingSend,
+          promptId,
+          hooksEnabled,
+          messageBus,
+        );
+      },
+    );
+  }
+
+  /**
+   * Handles the Stop hook iteration loop.
+   * This method processes Stop hooks after a model response completes with no pending tool calls.
+   * If a Stop hook requests continuation, it sends a follow-up message and loops back.
+   * Maximum iterations (100) prevent infinite loops.
+   *
+   * @param chat - The GeminiChat instance
+   * @param pendingSend - The abort controller for the current prompt
+   * @param promptId - The prompt ID for tracking
+   * @param hooksEnabled - Whether hooks are enabled
+   * @param messageBus - The MessageBus for hook communication (may be undefined)
+   * @returns The stop reason ('end_turn' or 'cancelled')
+   */
+  async #handleStopHookLoop(
+    chat: GeminiChat,
+    pendingSend: AbortController,
+    promptId: string,
+    hooksEnabled: boolean,
+    messageBus: MessageBus | undefined,
+  ): Promise<{ stopReason: 'end_turn' | 'cancelled' }> {
+    const MAX_STOP_HOOK_ITERATIONS = 100;
+    let stopHookIterationCount = 0;
+    let stopHookReasons: string[] = [];
+
+    while (stopHookIterationCount < MAX_STOP_HOOK_ITERATIONS) {
+      if (
+        !hooksEnabled ||
+        !messageBus ||
+        pendingSend.signal.aborted ||
+        !this.config.hasHooksForEvent?.('Stop')
+      ) {
+        return { stopReason: 'end_turn' };
+      }
+
+      // Get response text from the chat history
+      const history = chat.getHistory();
+      const lastModelMessage = history
+        .filter((msg: Content) => msg.role === 'model')
+        .pop();
+      const responseText =
+        lastModelMessage?.parts
+          ?.filter((p: Part): p is { text: string } & Part => 'text' in p)
+          .map((p: { text: string }) => p.text)
+          .join('') || '[no response text]';
+
+      const response = await messageBus.request<
+        HookExecutionRequest,
+        HookExecutionResponse
+      >(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'Stop',
+          input: {
+            stop_hook_active: true,
+            last_assistant_message: responseText,
+          },
+          signal: pendingSend.signal,
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+
+      // Check if aborted after hook execution
+      if (pendingSend.signal.aborted) {
+        return { stopReason: 'cancelled' };
+      }
+
+      const hookOutput = response.output
+        ? createHookOutput('Stop', response.output)
+        : undefined;
+
+      const stopOutput = hookOutput as StopHookOutput | undefined;
+
+      // Emit system message if provided by hook
+      if (stopOutput?.systemMessage) {
+        await this.messageEmitter.emitAgentMessage(stopOutput.systemMessage);
+      }
+
+      // For Stop hooks, blocking/stop execution should force continuation
+      if (
+        stopOutput?.isBlockingDecision() ||
+        stopOutput?.shouldStopExecution()
+      ) {
+        const continueReason = stopOutput.getEffectiveReason();
+
+        // Track Stop hook iterations
+        stopHookIterationCount++;
+        stopHookReasons = [...stopHookReasons, continueReason];
+
+        // Emit StopHookLoop event for iterations after the first one
+        if (stopHookIterationCount > 1) {
+          await this.messageEmitter.emitStopHookLoop(
+            stopHookIterationCount,
+            stopHookReasons,
+            response.stopHookCount ?? 1,
+          );
+        }
+
+        // Continue the conversation with the hook's reason
+        const continueParts: Part[] = [{ text: continueReason }];
+        let nextMessage: Content | null = {
+          role: 'user',
+          parts: continueParts,
+        };
+
+        // Process the follow-up message and any tool calls that result
+        while (nextMessage !== null) {
+          if (pendingSend.signal.aborted) {
+            return { stopReason: 'cancelled' };
+          }
+
+          const functionCalls: FunctionCall[] = [];
+          let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
+          const streamStartTime = Date.now();
+
+          try {
+            const continueResponseStream = await chat.sendMessageStream(
+              this.config.getModel(),
+              {
+                message: nextMessage?.parts ?? [],
+                config: {
+                  abortSignal: pendingSend.signal,
+                },
+              },
+              promptId + '_stop_hook_' + stopHookIterationCount,
+            );
+            nextMessage = null;
+
+            for await (const resp of continueResponseStream) {
+              if (pendingSend.signal.aborted) {
+                return { stopReason: 'cancelled' };
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.candidates &&
+                resp.value.candidates.length > 0
+              ) {
+                const candidate = resp.value.candidates[0];
+                for (const part of candidate.content?.parts ?? []) {
+                  if (!part.text) continue;
+                  this.messageEmitter.emitMessage(
+                    part.text,
+                    'assistant',
+                    part.thought,
+                  );
+                }
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.usageMetadata
+              ) {
+                usageMetadata = resp.value.usageMetadata;
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.functionCalls
+              ) {
+                functionCalls.push(...resp.value.functionCalls);
+              }
+            }
+          } catch (error) {
+            // Fire StopFailure hook (fire-and-forget)
+            const errorStatus = getErrorStatus(error);
+            const errorMessage =
+              error instanceof Error ? error.message : String(error);
+            const errorType = classifyApiError({
+              message: errorMessage,
+              status: errorStatus,
+            });
+
+            const hookSystem = this.config.getHookSystem?.();
+            const hooksEnabledForStopFailure =
+              !this.config.getDisableAllHooks?.();
+            if (
+              hooksEnabledForStopFailure &&
+              hookSystem &&
+              this.config.hasHooksForEvent?.('StopFailure')
+            ) {
+              hookSystem
+                .fireStopFailureEvent(errorType, errorMessage)
+                .catch((err) => {
+                  debugLogger.warn(`StopFailure hook failed: ${err}`);
+                });
+            }
+
+            if (errorStatus === 429) {
               throw new RequestError(
                 429,
                 'Rate limit exceeded. Try again later.',
@@ -399,24 +755,33 @@ export class Session implements SessionContext {
             );
           }
 
+          // Process tool calls from the follow-up message
           if (functionCalls.length > 0) {
-            const toolResponseParts: Part[] = [];
-
-            for (const fc of functionCalls) {
-              const response = await this.runTool(
-                pendingSend.signal,
-                promptId,
-                fc,
-              );
-              toolResponseParts.push(...response);
-            }
-
+            const toolResponseParts = await this.runToolCalls(
+              pendingSend.signal,
+              promptId,
+              functionCalls,
+            );
             nextMessage = { role: 'user', parts: toolResponseParts };
           }
         }
-        return { stopReason: 'end_turn' };
-      },
-    );
+
+        // Loop continues to check Stop hook again after processing the follow-up
+        continue;
+      }
+
+      // Stop hook allowed stopping, exit the loop
+      break;
+    }
+
+    // If we exceeded max iterations, log a warning but still end gracefully
+    if (stopHookIterationCount >= MAX_STOP_HOOK_ITERATIONS) {
+      debugLogger.warn(
+        `Stop hook loop reached maximum iterations (${MAX_STOP_HOOK_ITERATIONS}), forcing stop`,
+      );
+    }
+
+    return { stopReason: 'end_turn' };
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
@@ -502,9 +867,12 @@ export class Session implements SessionContext {
             _meta: { source: 'cron' },
           });
 
+          // Prepend session-level system reminders (same rationale as the
+          // user-query path in #executePrompt).
+          const cronReminders = await this.#buildInitialSystemReminders();
           let nextMessage: Content | null = {
             role: 'user',
-            parts: [{ text: prompt }],
+            parts: [...cronReminders, { text: prompt }],
           };
 
           while (nextMessage !== null) {
@@ -515,14 +883,17 @@ export class Session implements SessionContext {
               null;
             const streamStartTime = Date.now();
 
-            const responseStream = await this.chat.sendMessageStream(
-              this.config.getModel(),
-              {
-                message: nextMessage.parts ?? [],
-                config: { abortSignal: ac.signal },
-              },
-              promptId,
-            );
+            const responseStream = await this.config
+              .getGeminiClient()!
+              .getChat()
+              .sendMessageStream(
+                this.config.getModel(),
+                {
+                  message: nextMessage.parts ?? [],
+                  config: { abortSignal: ac.signal },
+                },
+                promptId,
+              );
             nextMessage = null;
 
             for await (const resp of responseStream) {
@@ -560,6 +931,10 @@ export class Session implements SessionContext {
             }
 
             if (usageMetadata) {
+              // Kick off rewrite in background (non-blocking)
+              if (this.messageRewriter) {
+                this.messageRewriter.flushTurn(ac.signal);
+              }
               const durationMs = Date.now() - streamStartTime;
               await this.messageEmitter.emitUsageMetadata(
                 usageMetadata,
@@ -569,11 +944,11 @@ export class Session implements SessionContext {
             }
 
             if (functionCalls.length > 0) {
-              const toolResponseParts: Part[] = [];
-              for (const fc of functionCalls) {
-                const response = await this.runTool(ac.signal, promptId, fc);
-                toolResponseParts.push(...response);
-              }
+              const toolResponseParts = await this.runToolCalls(
+                ac.signal,
+                promptId,
+                functionCalls,
+              );
               nextMessage = { role: 'user', parts: toolResponseParts };
             }
           }
@@ -594,10 +969,11 @@ export class Session implements SessionContext {
   async sendAvailableCommandsUpdate(): Promise<void> {
     const abortController = new AbortController();
     try {
-      // Use default allowed commands from getAvailableCommands
+      // Load commands available in ACP mode
       const slashCommands = await getAvailableCommands(
         this.config,
         abortController.signal,
+        'acp',
       );
 
       // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol
@@ -609,9 +985,27 @@ export class Session implements SessionContext {
         }),
       );
 
+      let availableSkills: string[] | undefined;
+      try {
+        const skillManager = this.config.getSkillManager();
+        if (skillManager) {
+          const skills = await skillManager.listSkills();
+          availableSkills = skills.map((skill) => skill.name);
+        }
+      } catch (error) {
+        debugLogger.error('Error loading available skills:', error);
+      }
+
       const update: SessionUpdate = {
         sessionUpdate: 'available_commands_update',
         availableCommands,
+        ...(availableSkills
+          ? {
+              _meta: {
+                availableSkills,
+              },
+            }
+          : {}),
       };
 
       await this.sendUpdate(update);
@@ -715,6 +1109,124 @@ export class Session implements SessionContext {
     await this.sendUpdate(update);
   }
 
+  /**
+   * Execute a batch of model-returned tool calls, running Agent calls
+   * concurrently while keeping other tools sequential.
+   *
+   * Mirrors the partition logic in `coreToolScheduler.partitionToolCalls`:
+   * consecutive Agent calls form a parallel batch (they spawn independent
+   * sub-agents with no shared mutable state); any other tool forms its own
+   * sequential batch to preserve the implicit ordering the model may rely
+   * on. Response-part ordering matches the original `functionCalls` order.
+   */
+  private async runToolCalls(
+    abortSignal: AbortSignal,
+    promptId: string,
+    functionCalls: FunctionCall[],
+  ): Promise<Part[]> {
+    type Batch = { concurrent: boolean; calls: FunctionCall[] };
+    const batches: Batch[] = [];
+    for (const fc of functionCalls) {
+      const isAgent = fc.name === ToolNames.AGENT;
+      const last = batches[batches.length - 1];
+      if (isAgent && last?.concurrent) {
+        last.calls.push(fc);
+      } else {
+        batches.push({ concurrent: isAgent, calls: [fc] });
+      }
+    }
+
+    // Bounded-concurrency runner: matches core's `runConcurrently`
+    // behaviour (`coreToolScheduler.ts:1506`), capped by
+    // `QWEN_CODE_MAX_TOOL_CONCURRENCY` (default 10). Results are returned
+    // in input order regardless of resolution order.
+    const runBounded = async (calls: FunctionCall[]): Promise<Part[][]> => {
+      const parsed = parseInt(
+        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] || '',
+        10,
+      );
+      const maxConcurrency =
+        Number.isFinite(parsed) && parsed >= 1 ? parsed : 10;
+      const results: Part[][] = new Array(calls.length);
+      const executing = new Set<Promise<void>>();
+      for (let i = 0; i < calls.length; i++) {
+        const idx = i;
+        const p = this.runTool(abortSignal, promptId, calls[idx])
+          .then((r) => {
+            results[idx] = r;
+          })
+          .finally(() => {
+            executing.delete(p);
+          });
+        executing.add(p);
+        if (executing.size >= maxConcurrency) {
+          await Promise.race(executing);
+        }
+      }
+      await Promise.all(executing);
+      return results;
+    };
+
+    const parts: Part[] = [];
+    for (const batch of batches) {
+      if (batch.concurrent && batch.calls.length > 1) {
+        const results = await runBounded(batch.calls);
+        for (const r of results) parts.push(...r);
+      } else {
+        for (const fc of batch.calls) {
+          const r = await this.runTool(abortSignal, promptId, fc);
+          parts.push(...r);
+        }
+      }
+    }
+    return parts;
+  }
+
+  /**
+   * Assemble the per-turn system reminders the model needs to see at the
+   * start of a user query or cron fire. Mirrors the subagent/plan/arena
+   * branches in `GeminiClient.sendMessageStream` (`client.ts:848-878`) —
+   * the ACP path bypasses that code, so without this helper plan mode is
+   * silently inert (#1151) and subagent/arena sessions lose context.
+   *
+   * Scope note: the `relevantAutoMemory` reminder is intentionally NOT
+   * included here. Managed auto-memory requires a prefetch pipeline that
+   * lives in `GeminiClient`, and porting it into the ACP path is tracked
+   * separately as part of the broader middleware-alignment work.
+   */
+  async #buildInitialSystemReminders(): Promise<Part[]> {
+    const reminders: Part[] = [];
+
+    const hasAgentTool = await this.config
+      .getToolRegistry()
+      .ensureTool(ToolNames.AGENT);
+    const subagents = (await this.config.getSubagentManager().listSubagents())
+      .filter((subagent) => subagent.level !== 'builtin')
+      .map((subagent) => subagent.name);
+    if (hasAgentTool && subagents.length > 0) {
+      reminders.push({ text: getSubagentSystemReminder(subagents) });
+    }
+
+    if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+      reminders.push({
+        text: getPlanModeSystemReminder(this.config.getSdkMode?.()),
+      });
+    }
+
+    const arenaManager = this.config.getArenaManager?.();
+    if (arenaManager) {
+      try {
+        const sessionDir = arenaManager.getArenaSessionDir();
+        const configPath = `${sessionDir}/config.json`;
+        reminders.push({ text: getArenaSystemReminder(configPath) });
+      } catch {
+        // Arena config not yet initialized — skip (matches client.ts).
+      }
+    }
+
+    return reminders;
+  }
+
   private async runTool(
     abortSignal: AbortSignal,
     promptId: string,
@@ -758,7 +1270,7 @@ export class Session implements SessionContext {
       error: Error,
       toolName = fc.name ?? 'unknown_tool',
     ) => {
-      if (toolName !== TodoWriteTool.Name) {
+      if (toolName !== ToolNames.TODO_WRITE) {
         await this.toolCallEmitter.emitError(callId, toolName, error);
       }
 
@@ -798,24 +1310,35 @@ export class Session implements SessionContext {
     }
 
     // Detect TodoWriteTool early - route to plan updates instead of tool_call events
-    const isTodoWriteTool = tool.name === TodoWriteTool.Name;
-    const isAgentTool = tool.name === AgentTool.Name;
-    const isExitPlanModeTool = tool.name === ExitPlanModeTool.Name;
+    const isTodoWriteTool = tool.name === ToolNames.TODO_WRITE;
+    const isAgentTool = tool.name === ToolNames.AGENT;
+    const isExitPlanModeTool = tool.name === ToolNames.EXIT_PLAN_MODE;
 
     // Track cleanup functions for sub-agent event listeners
     let subAgentCleanupFunctions: Array<() => void> = [];
 
+    // Generate tool_use_id for hook tracking (aligned with core path)
+    const toolUseId = generateToolUseId();
+
+    // Get approval mode for hook context (defined outside try for catch block access)
+    const approvalMode = this.config.getApprovalMode();
+
     try {
       const invocation = tool.build(args);
 
-      if (isAgentTool && 'eventEmitter' in invocation) {
-        // Access eventEmitter from AgentTool invocation
-        const taskEventEmitter = (
-          invocation as {
-            eventEmitter: AgentEventEmitter;
-          }
-        ).eventEmitter;
-
+      // Production AgentTool always initializes `eventEmitter` on its
+      // invocation (`agent.ts:392`). Be defensive about the `undefined`
+      // case too so an incomplete/custom AgentTool invocation degrades
+      // gracefully (no sub-agent event forwarding) instead of throwing
+      // inside SubAgentTracker.setup — the `'eventEmitter' in invocation`
+      // key-presence check passed for `{ eventEmitter: undefined }` and
+      // the ensuing `eventEmitter.on(...)` blew up.
+      const taskEventEmitter = (
+        invocation as {
+          eventEmitter?: AgentEventEmitter;
+        }
+      ).eventEmitter;
+      if (isAgentTool && taskEventEmitter) {
         // Extract subagent metadata from AgentTool call
         const parentToolCallId = callId;
         const subagentType = (args['subagent_type'] as string) ?? '';
@@ -869,7 +1392,6 @@ export class Session implements SessionContext {
       const needsConfirmation = finalPermission === 'ask';
 
       // ---- L5: ApprovalMode overrides ----
-      const approvalMode = this.config.getApprovalMode();
       const isPlanMode = approvalMode === ApprovalMode.PLAN;
 
       if (finalPermission === 'deny') {
@@ -1071,6 +1593,41 @@ export class Session implements SessionContext {
         await this.toolCallEmitter.emitStart(startParams);
       }
 
+      // Fire PreToolUse hook (aligned with core path in coreToolScheduler.ts)
+      const hooksEnabledForTool = !this.config.getDisableAllHooks?.();
+      const messageBusForTool = this.config.getMessageBus?.();
+      const permissionMode = String(approvalMode);
+
+      if (hooksEnabledForTool && messageBusForTool) {
+        const preHookResult = await firePreToolUseHook(
+          messageBusForTool,
+          fc.name,
+          args,
+          toolUseId,
+          permissionMode,
+          abortSignal,
+        );
+
+        if (!preHookResult.shouldProceed) {
+          // Hook blocked the tool execution - send notification to UI
+          const blockReason =
+            preHookResult.blockReason || 'Blocked by PreToolUse hook';
+          await this.messageEmitter.emitAgentMessage(
+            `🚫 **PreToolUse blocked**: ${fc.name} - ${blockReason}`,
+          );
+          return earlyErrorResponse(new Error(blockReason), fc.name);
+        }
+
+        // Add additional context from PreToolUse hook if provided
+        // Note: This context would need to be passed to the tool invocation
+        // For now, we just log it as the tool execution proceeds
+        if (preHookResult.additionalContext) {
+          debugLogger.debug(
+            `PreToolUse hook additional context for ${fc.name}: ${preHookResult.additionalContext}`,
+          );
+        }
+      }
+
       const toolResult: ToolResult = await invocation.execute(abortSignal);
 
       // Clean up event listeners
@@ -1082,6 +1639,61 @@ export class Session implements SessionContext {
         callId,
         toolResult.llmContent,
       );
+
+      // Fire PostToolUse hook on successful execution (aligned with core path)
+      if (hooksEnabledForTool && messageBusForTool && !toolResult.error) {
+        // Use the same response shape as core (llmContent/returnDisplay)
+        const toolResponse = {
+          llmContent: toolResult.llmContent,
+          returnDisplay: toolResult.returnDisplay,
+        };
+        const postHookResult = await firePostToolUseHook(
+          messageBusForTool,
+          fc.name,
+          args,
+          toolResponse,
+          toolUseId,
+          permissionMode,
+          abortSignal,
+        );
+
+        // If hook indicates to stop, return an error response
+        if (postHookResult.shouldStop) {
+          const stopMessage =
+            postHookResult.stopReason ||
+            'Execution stopped by PostToolUse hook';
+          debugLogger.info(
+            `PostToolUse hook requested stop for ${fc.name}: ${stopMessage}`,
+          );
+          return earlyErrorResponse(new Error(stopMessage), fc.name);
+        }
+
+        // Add additional context from PostToolUse hook if provided
+        if (postHookResult.additionalContext) {
+          // Append additional context to the tool response
+          const contextPart = { text: postHookResult.additionalContext };
+          responseParts.push(contextPart);
+        }
+      } else if (hooksEnabledForTool && messageBusForTool && toolResult.error) {
+        // Fire PostToolUseFailure hook when tool returns an error (aligned with core path)
+        const failureHookResult = await firePostToolUseFailureHook(
+          messageBusForTool,
+          toolUseId,
+          fc.name ?? 'unknown_tool',
+          args,
+          toolResult.error.message,
+          false, // not an interrupt
+          permissionMode,
+          abortSignal,
+        );
+
+        // Log additional context if provided
+        if (failureHookResult.additionalContext) {
+          debugLogger.debug(
+            `PostToolUseFailure hook additional context for ${fc.name}: ${failureHookResult.additionalContext}`,
+          );
+        }
+      }
 
       // Handle TodoWriteTool: extract todos and send plan update
       if (isTodoWriteTool) {
@@ -1147,6 +1759,31 @@ export class Session implements SessionContext {
 
       const error = e instanceof Error ? e : new Error(String(e));
 
+      // Fire PostToolUseFailure hook (aligned with core path in coreToolScheduler.ts)
+      const hooksEnabledForError = !this.config.getDisableAllHooks?.();
+      const messageBusForError = this.config.getMessageBus?.();
+      const isInterrupt = abortSignal.aborted;
+
+      if (hooksEnabledForError && messageBusForError) {
+        const failureHookResult = await firePostToolUseFailureHook(
+          messageBusForError,
+          toolUseId,
+          fc.name ?? 'unknown_tool',
+          args,
+          error.message,
+          isInterrupt,
+          String(approvalMode),
+          abortSignal,
+        );
+
+        // Log additional context if provided
+        if (failureHookResult.additionalContext) {
+          debugLogger.debug(
+            `PostToolUseFailure hook additional context for ${fc.name}: ${failureHookResult.additionalContext}`,
+          );
+        }
+      }
+
       // Use ToolCallEmitter for error handling
       await this.toolCallEmitter.emitError(
         callId,
@@ -1203,44 +1840,59 @@ export class Session implements SessionContext {
         return normalizePartList(result.content);
 
       case 'message': {
-        await this.client.extNotification('_qwencode/slash_command', {
-          sessionId: this.sessionId,
-          command: originalPrompt
-            .filter((block) => block.type === 'text')
-            .map((block) => (block.type === 'text' ? block.text : ''))
-            .join(' '),
-          messageType: result.messageType,
-          message: result.content || '',
-        });
-
         if (result.messageType === 'error') {
           // Throw error to stop execution
           throw new Error(result.content || 'Slash command failed.');
         }
-        // For info messages, return null to indicate command was handled
+        // Emit the message as an agent message chunk so Zed renders it in the
+        // chat UI. extNotification only goes to the ACP debug log and is not
+        // rendered by Zed.
+        // Replace bare \n with Markdown hard line-breaks (two trailing spaces)
+        // so Zed's Markdown renderer preserves the line structure.
+        const rendered = (result.content || '').replace(/\n/g, '  \n');
+        await this.messageEmitter.emitAgentMessage(rendered);
+        // Write a system/slash_command record so history replay on restart can
+        // re-emit this message. system records are skipped by
+        // buildApiHistoryFromConversation, so this won't pollute model context.
+        this.config.getChatRecordingService()?.recordSlashCommand({
+          phase: 'result',
+          rawCommand: originalPrompt
+            .filter((b) => b.type === 'text')
+            .map((b) => (b.type === 'text' ? b.text : ''))
+            .join(' '),
+          outputHistoryItems: [
+            { type: 'assistant', text: result.content || '' },
+          ],
+        });
         return null;
       }
 
       case 'stream_messages': {
         // Command returns multiple messages via async generator (ACP-preferred)
-        const command = originalPrompt
-          .filter((block) => block.type === 'text')
-          .map((block) => (block.type === 'text' ? block.text : ''))
-          .join(' ');
-
-        // Stream all messages to the client
+        // Stream all messages to the client as agent message chunks.
+        const chunks: string[] = [];
         for await (const msg of result.messages) {
-          await this.client.extNotification('_qwencode/slash_command', {
-            sessionId: this.sessionId,
-            command,
-            messageType: msg.messageType,
-            message: msg.content,
-          });
-
-          // If we encounter an error message, throw after sending
           if (msg.messageType === 'error') {
             throw new Error(msg.content || 'Slash command failed.');
           }
+          await this.messageEmitter.emitAgentMessage(
+            (msg.content || '').replace(/\n/g, '  \n'),
+          );
+          chunks.push(msg.content || '');
+        }
+        // Write a system/slash_command record for history replay (same reason as
+        // 'message' case — system records are invisible to model history).
+        if (chunks.length > 0) {
+          this.config.getChatRecordingService()?.recordSlashCommand({
+            phase: 'result',
+            rawCommand: originalPrompt
+              .filter((b) => b.type === 'text')
+              .map((b) => (b.type === 'text' ? b.text : ''))
+              .join(' '),
+            outputHistoryItems: [
+              { type: 'assistant', text: chunks.join('\n') },
+            ],
+          });
         }
 
         // All messages sent successfully, return null to indicate command was handled

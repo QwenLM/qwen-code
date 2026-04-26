@@ -73,6 +73,7 @@ describe('SessionStatsContext', () => {
             thoughts: 20,
             tool: 10,
           },
+          bySource: {},
         },
       },
       tools: {
@@ -151,6 +152,7 @@ describe('SessionStatsContext', () => {
             thoughts: 0,
             tool: 0,
           },
+          bySource: {},
         },
       },
       tools: {
@@ -192,6 +194,7 @@ describe('SessionStatsContext', () => {
             thoughts: 0,
             tool: 0,
           },
+          bySource: {},
         },
       },
     };

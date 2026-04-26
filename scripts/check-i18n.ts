@@ -13,7 +13,6 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 
 // Get __dirname for ESM modules
-// @ts-expect-error - import.meta is supported in NodeNext module system at runtime
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 interface CheckResult {
@@ -23,6 +22,7 @@ interface CheckResult {
   stats: {
     totalKeys: number;
     translatedKeys: number;
+    zhTWTranslatedKeys: number;
     unusedKeys: string[];
     unusedKeysOnlyInLocales?: string[]; // 新增：只在 locales 中存在的未使用键
   };
@@ -172,27 +172,31 @@ function checkKeyValueConsistency(
 }
 
 /**
- * Check if en.js and zh.js have matching keys
+ * Check if locale files have matching keys with en.js
+ * @param enTranslations The en.js translations
+ * @param localeTranslations The target locale translations (zh.js or zh-TW.js)
+ * @param localeLabel Label for diagnostics (e.g., "zh.js" or "zh-TW.js")
  */
 function checkKeyMatching(
   enTranslations: Record<string, string | string[]>,
-  zhTranslations: Record<string, string | string[]>,
+  localeTranslations: Record<string, string | string[]>,
+  localeLabel: string,
 ): string[] {
   const errors: string[] = [];
   const enKeys = new Set(Object.keys(enTranslations));
-  const zhKeys = new Set(Object.keys(zhTranslations));
+  const localeKeys = new Set(Object.keys(localeTranslations));
 
-  // Check for keys in en but not in zh
+  // Check for keys in en but not in locale
   for (const key of enKeys) {
-    if (!zhKeys.has(key)) {
-      errors.push(`Missing translation in zh.js: "${key}"`);
+    if (!localeKeys.has(key)) {
+      errors.push(`Missing translation in ${localeLabel}: "${key}"`);
     }
   }
 
-  // Check for keys in zh but not in en
-  for (const key of zhKeys) {
+  // Check for keys in locale but not in en
+  for (const key of localeKeys) {
     if (!enKeys.has(key)) {
-      errors.push(`Extra key in zh.js (not in en.js): "${key}"`);
+      errors.push(`Extra key in ${localeLabel} (not in en.js): "${key}"`);
     }
   }
 
@@ -304,10 +308,12 @@ async function checkI18n(): Promise<CheckResult> {
 
   const enPath = path.join(localesDir, 'en.js');
   const zhPath = path.join(localesDir, 'zh.js');
+  const zhTWPath = path.join(localesDir, 'zh-TW.js');
 
   // Load translation files
   let enTranslations: Record<string, string | string[]>;
   let zhTranslations: Record<string, string | string[]>;
+  let zhTWTranslations: Record<string, string | string[]>;
 
   try {
     enTranslations = await loadTranslationsFile(enPath);
@@ -319,7 +325,12 @@ async function checkI18n(): Promise<CheckResult> {
       success: false,
       errors,
       warnings,
-      stats: { totalKeys: 0, translatedKeys: 0, unusedKeys: [] },
+      stats: {
+        totalKeys: 0,
+        translatedKeys: 0,
+        zhTWTranslatedKeys: 0,
+        unusedKeys: [],
+      },
     };
   }
 
@@ -333,7 +344,31 @@ async function checkI18n(): Promise<CheckResult> {
       success: false,
       errors,
       warnings,
-      stats: { totalKeys: 0, translatedKeys: 0, unusedKeys: [] },
+      stats: {
+        totalKeys: 0,
+        translatedKeys: 0,
+        zhTWTranslatedKeys: 0,
+        unusedKeys: [],
+      },
+    };
+  }
+
+  try {
+    zhTWTranslations = await loadTranslationsFile(zhTWPath);
+  } catch (error) {
+    errors.push(
+      `Failed to load zh-TW.js: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return {
+      success: false,
+      errors,
+      warnings,
+      stats: {
+        totalKeys: 0,
+        translatedKeys: 0,
+        zhTWTranslatedKeys: 0,
+        unusedKeys: [],
+      },
     };
   }
 
@@ -342,8 +377,20 @@ async function checkI18n(): Promise<CheckResult> {
   errors.push(...consistencyErrors);
 
   // Check key matching between en and zh
-  const matchingErrors = checkKeyMatching(enTranslations, zhTranslations);
+  const matchingErrors = checkKeyMatching(
+    enTranslations,
+    zhTranslations,
+    'zh.js',
+  );
   errors.push(...matchingErrors);
+
+  // Check key matching between en and zh-TW
+  const matchingTWErrors = checkKeyMatching(
+    enTranslations,
+    zhTWTranslations,
+    'zh-TW.js',
+  );
+  errors.push(...matchingTWErrors);
 
   // Extract used keys from source code
   const usedKeys = await extractUsedKeys(sourceDir);
@@ -363,7 +410,8 @@ async function checkI18n(): Promise<CheckResult> {
   }
 
   const totalKeys = Object.keys(enTranslations).length;
-  const translatedKeys = Object.keys(zhTranslations).length;
+  const zhTranslatedKeys = Object.keys(zhTranslations).length;
+  const zhTWTranslatedKeys = Object.keys(zhTWTranslations).length;
 
   return {
     success: errors.length === 0,
@@ -371,7 +419,8 @@ async function checkI18n(): Promise<CheckResult> {
     warnings,
     stats: {
       totalKeys,
-      translatedKeys,
+      translatedKeys: zhTranslatedKeys,
+      zhTWTranslatedKeys,
       unusedKeys,
       unusedKeysOnlyInLocales,
     },
@@ -429,15 +478,17 @@ async function main() {
         console.log(`  - "${key}"`),
       );
 
-      // Save these keys to a JSON file
-      const outputPath = path.join(
-        __dirname,
-        'unused-keys-only-in-locales.json',
-      );
-      saveKeysOnlyInLocalesToJson(
-        result.stats.unusedKeysOnlyInLocales,
-        outputPath,
-      );
+      // Save these keys to a JSON file (skip in CI to avoid dirtying the working tree)
+      if (!process.env['CI']) {
+        const outputPath = path.join(
+          __dirname,
+          'unused-keys-only-in-locales.json',
+        );
+        saveKeysOnlyInLocalesToJson(
+          result.stats.unusedKeysOnlyInLocales,
+          outputPath,
+        );
+      }
     }
 
     console.log();

@@ -5,10 +5,24 @@
  */
 
 import { render } from 'ink-testing-library';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { StatsDisplay } from './StatsDisplay.js';
 import * as SessionContext from '../contexts/SessionContext.js';
-import type { SessionMetrics } from '../contexts/SessionContext.js';
+import type {
+  ModelMetrics,
+  ModelMetricsCore,
+  SessionMetrics,
+} from '../contexts/SessionContext.js';
+import { MAIN_SOURCE } from '@qwen-code/qwen-code-core';
+import { DEFAULT_THEME, themeManager } from '../themes/theme-manager.js';
+
+// Wraps a core metrics object as a ModelMetrics with a single `main` source
+// bucket, matching the shape produced by processing an API call with no
+// subagent attribution. Used to keep fixtures terse.
+const mainOnly = (core: ModelMetricsCore): ModelMetrics => ({
+  ...core,
+  bySource: { [MAIN_SOURCE]: core },
+});
 
 // Mock the context to provide controlled data for testing
 vi.mock('../contexts/SessionContext.js', async (importOriginal) => {
@@ -20,6 +34,21 @@ vi.mock('../contexts/SessionContext.js', async (importOriginal) => {
 });
 
 const useSessionStatsMock = vi.mocked(SessionContext.useSessionStats);
+const originalNoColor = process.env['NO_COLOR'];
+
+beforeEach(() => {
+  delete process.env['NO_COLOR'];
+});
+
+afterEach(() => {
+  if (originalNoColor === undefined) {
+    delete process.env['NO_COLOR'];
+  } else {
+    process.env['NO_COLOR'] = originalNoColor;
+  }
+  themeManager.loadCustomThemes({});
+  themeManager.setActiveTheme(DEFAULT_THEME.name);
+});
 
 const renderWithMockedStats = (metrics: SessionMetrics) => {
   useSessionStatsMock.mockReturnValue({
@@ -69,7 +98,7 @@ describe('<StatsDisplay />', () => {
   it('renders a table with two models correctly', () => {
     const metrics: SessionMetrics = {
       models: {
-        'gemini-2.5-pro': {
+        'gemini-2.5-pro': mainOnly({
           api: { totalRequests: 3, totalErrors: 0, totalLatencyMs: 15000 },
           tokens: {
             prompt: 1000,
@@ -79,8 +108,8 @@ describe('<StatsDisplay />', () => {
             thoughts: 100,
             tool: 50,
           },
-        },
-        'gemini-2.5-flash': {
+        }),
+        'gemini-2.5-flash': mainOnly({
           api: { totalRequests: 5, totalErrors: 1, totalLatencyMs: 4500 },
           tokens: {
             prompt: 25000,
@@ -90,7 +119,7 @@ describe('<StatsDisplay />', () => {
             thoughts: 2000,
             tool: 1000,
           },
-        },
+        }),
       },
       tools: {
         totalCalls: 0,
@@ -119,7 +148,7 @@ describe('<StatsDisplay />', () => {
   it('renders all sections when all data is present', () => {
     const metrics: SessionMetrics = {
       models: {
-        'gemini-2.5-pro': {
+        'gemini-2.5-pro': mainOnly({
           api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
           tokens: {
             prompt: 100,
@@ -129,7 +158,7 @@ describe('<StatsDisplay />', () => {
             thoughts: 0,
             tool: 0,
           },
-        },
+        }),
       },
       tools: {
         totalCalls: 2,
@@ -202,7 +231,7 @@ describe('<StatsDisplay />', () => {
     it('hides Efficiency section when cache is not used', () => {
       const metrics: SessionMetrics = {
         models: {
-          'gemini-2.5-pro': {
+          'gemini-2.5-pro': mainOnly({
             api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
             tokens: {
               prompt: 100,
@@ -212,7 +241,7 @@ describe('<StatsDisplay />', () => {
               thoughts: 0,
               tool: 0,
             },
-          },
+          }),
         },
         tools: {
           totalCalls: 0,
@@ -350,6 +379,154 @@ describe('<StatsDisplay />', () => {
     });
   });
 
+  describe('Subagent source attribution', () => {
+    const baseTools: SessionMetrics['tools'] = {
+      totalCalls: 0,
+      totalSuccess: 0,
+      totalFail: 0,
+      totalDurationMs: 0,
+      totalDecisions: { accept: 0, reject: 0, modify: 0 },
+      byName: {},
+    };
+    const baseFiles: SessionMetrics['files'] = {
+      totalLinesAdded: 0,
+      totalLinesRemoved: 0,
+    };
+    const coreMetrics = (reqs: number, tokens: number): ModelMetricsCore => ({
+      api: { totalRequests: reqs, totalErrors: 0, totalLatencyMs: 100 },
+      tokens: {
+        prompt: tokens,
+        candidates: tokens,
+        total: tokens * 2,
+        cached: 0,
+        thoughts: 0,
+        tool: 0,
+      },
+    });
+
+    it('renders a plain model name when only main is a source', () => {
+      const metrics: SessionMetrics = {
+        models: { 'glm-5': mainOnly(coreMetrics(1, 100)) },
+        tools: baseTools,
+        files: baseFiles,
+      };
+
+      const { lastFrame } = renderWithMockedStats(metrics);
+      const output = lastFrame();
+
+      expect(output).toContain('glm-5');
+      expect(output).not.toContain('glm-5 (main)');
+      expect(output).not.toContain('(main)');
+    });
+
+    it('shows main and subagent suffixes when the same model has multiple sources', () => {
+      const mainCore = coreMetrics(2, 200);
+      const echoerCore = coreMetrics(1, 40);
+      const metrics: SessionMetrics = {
+        models: {
+          'glm-5': {
+            api: {
+              totalRequests:
+                mainCore.api.totalRequests + echoerCore.api.totalRequests,
+              totalErrors: 0,
+              totalLatencyMs: 200,
+            },
+            tokens: {
+              prompt: mainCore.tokens.prompt + echoerCore.tokens.prompt,
+              candidates:
+                mainCore.tokens.candidates + echoerCore.tokens.candidates,
+              total: mainCore.tokens.total + echoerCore.tokens.total,
+              cached: 0,
+              thoughts: 0,
+              tool: 0,
+            },
+            bySource: {
+              [MAIN_SOURCE]: mainCore,
+              echoer: echoerCore,
+            },
+          },
+        },
+        tools: baseTools,
+        files: baseFiles,
+      };
+
+      const { lastFrame } = renderWithMockedStats(metrics);
+      const output = lastFrame();
+
+      expect(output).toContain('glm-5 (main)');
+      expect(output).toContain('glm-5 (echoer)');
+    });
+
+    it('labels main rows session-wide when a subagent uses a different model', () => {
+      // Session has two models: glm-5 used only by main, qwen-plus used only by
+      // a subagent. Even though glm-5 has a single main source, it must still
+      // render with `(main)` because the session-wide rule triggers on qwen-plus.
+      const metrics: SessionMetrics = {
+        models: {
+          'glm-5': mainOnly(coreMetrics(2, 200)),
+          'qwen-plus': {
+            api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+            tokens: {
+              prompt: 40,
+              candidates: 40,
+              total: 80,
+              cached: 0,
+              thoughts: 0,
+              tool: 0,
+            },
+            bySource: {
+              researcher: coreMetrics(1, 40),
+            },
+          },
+        },
+        tools: baseTools,
+        files: baseFiles,
+      };
+
+      const { lastFrame } = renderWithMockedStats(metrics);
+      const output = lastFrame();
+
+      expect(output).toContain('glm-5 (main)');
+      expect(output).toContain('qwen-plus (researcher)');
+      // The bare `glm-5` label (not followed by a space + `(`) must not appear
+      // as a row label in this session.
+      expect(output).not.toMatch(/glm-5\s{2,}/);
+    });
+
+    it('shows distinct rows when two subagents share a model', () => {
+      const alphaCore = coreMetrics(1, 10);
+      const bravoCore = coreMetrics(1, 20);
+      const metrics: SessionMetrics = {
+        models: {
+          'glm-5': {
+            api: { totalRequests: 2, totalErrors: 0, totalLatencyMs: 100 },
+            tokens: {
+              prompt: 30,
+              candidates: 30,
+              total: 60,
+              cached: 0,
+              thoughts: 0,
+              tool: 0,
+            },
+            bySource: {
+              alpha: alphaCore,
+              bravo: bravoCore,
+            },
+          },
+        },
+        tools: baseTools,
+        files: baseFiles,
+      };
+
+      const { lastFrame } = renderWithMockedStats(metrics);
+      const output = lastFrame();
+
+      expect(output).toContain('glm-5 (alpha)');
+      expect(output).toContain('glm-5 (bravo)');
+      expect(output).not.toContain('glm-5 (main)');
+    });
+  });
+
   describe('Title Rendering', () => {
     const zeroMetrics: SessionMetrics = {
       models: {},
@@ -396,6 +573,36 @@ describe('<StatsDisplay />', () => {
       expect(output).toContain('Agent powering down. Goodbye!');
       expect(output).not.toContain('Session Stats');
       expect(output).toMatchSnapshot();
+    });
+
+    it('renders a custom title as plain text when the theme has too few gradient colors', () => {
+      themeManager.loadCustomThemes({
+        OneColorGradient: {
+          name: 'OneColorGradient',
+          type: 'custom',
+          ui: { gradient: ['red'] },
+        },
+      });
+      themeManager.setActiveTheme('OneColorGradient');
+      useSessionStatsMock.mockReturnValue({
+        stats: {
+          sessionId: 'test-session-id',
+          sessionStartTime: new Date(),
+          metrics: zeroMetrics,
+          lastPromptTokenCount: 0,
+          promptCount: 5,
+        },
+
+        getPromptCount: () => 5,
+        startNewPrompt: vi.fn(),
+      });
+
+      const { lastFrame } = render(
+        <StatsDisplay duration="1s" title="Agent powering down. Goodbye!" />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('Agent powering down. Goodbye!');
+      expect(output).not.toContain('Invalid number of stops');
     });
   });
 });

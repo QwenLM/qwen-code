@@ -78,6 +78,8 @@ export type {
   AssistantMessageProps,
   AssistantMessageStatus,
 } from './components/messages/Assistant/AssistantMessage';
+export { InsightProgressCard } from './components/messages/InsightProgressCard.js';
+export type { InsightProgressCardProps } from './components/messages/InsightProgressCard.js';
 export {
   CollapsibleFileContent,
   parseContentWithFileReferences,
@@ -151,8 +153,10 @@ export {
   mapToolStatusToContainerStatus,
   // Business ToolCall components
   ThinkToolCall,
-  SaveMemoryToolCall,
   GenericToolCall,
+  AgentToolCall,
+  isAgentExecutionRawOutput,
+  isAgentExecutionToolCall,
   EditToolCall,
   WriteToolCall,
   SearchToolCall,
@@ -164,6 +168,11 @@ export {
 } from './components/toolcalls';
 export type {
   ToolCallContainerProps,
+  AgentExecutionRawOutput,
+  AgentExecutionStatus,
+  AgentExecutionSummary,
+  AgentExecutionToolCall,
+  AgentToolCallStatus,
   ToolCallContent,
   ToolCallData,
   BaseToolCallProps,
@@ -251,6 +260,10 @@ export type { CompletionItem, CompletionItemType } from './types/completion';
 // Utils
 export { groupSessionsByDate, getTimeAgo } from './utils/sessionGrouping';
 export type { SessionGroup } from './utils/sessionGrouping';
+export {
+  ZERO_WIDTH_SPACE,
+  stripZeroWidthSpaces,
+} from './utils/inputPlaceholder';
 
 // Adapters - for normalizing different data formats
 export {
