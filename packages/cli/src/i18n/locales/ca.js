@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Traduccions en català per al CLI de Qwen Code
+// Traduccions en català per al CLI de Qwen Code per Jordi Mas i Hernàndez <jmas@softcatala.org>
 
 export default {
   // ============================================================================
@@ -83,7 +83,7 @@ export default {
   'docs/keyboard-shortcuts.md': 'docs/keyboard-shortcuts.md',
   'for help on Qwen Code': 'per a ajuda sobre Qwen Code',
   'show version info': 'mostrar informació de la versió',
-  'submit a bug report': 'enviar un informe de error',
+  'submit a bug report': "enviar un informe d'error",
   'About Qwen Code': 'Sobre Qwen Code',
   Status: 'Estat',
 
@@ -534,9 +534,9 @@ export default {
   'Extension "{{name}}" installed successfully and enabled.':
     'L\'extensió "{{name}}" s\'ha instal·lat i activat correctament.',
   'Installs an extension from a git repository URL, local path, or claude marketplace (marketplace-url:plugin-name).':
-    "Instal·la una extensió des d'una URL de repositori git, un camí local o el mercat (marketplace-url:nom-del-plugin).",
+    "Instal·la una extensió des d'una URL de repositori git, un camí local o el mercat (marketplace-url:nom-del-connector).",
   'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.':
-    "La URL de GitHub, el camí local o la font del mercat (marketplace-url:nom-del-plugin) de l'extensió a instal·lar.",
+    "La URL de GitHub, el camí local o la font del mercat (marketplace-url:nom-del-connector) de l'extensió a instal·lar.",
   'The git ref to install from.':
     'La referència git des de la qual instal·lar.',
   'Enable auto-update for this extension.':
@@ -622,14 +622,14 @@ export default {
     'Cal especificar una ordre (set o list).',
 
   // ============================================================================
-  // Plugin Choice / Mercat
+  // Selecció de connector / Mercat
   // ============================================================================
   'No plugins available in this marketplace.':
-    'No hi ha plugins disponibles en aquest mercat.',
+    'No hi ha connectors disponibles en aquest mercat.',
   'Select a plugin to install from marketplace "{{name}}":':
-    'Seleccioneu un plugin per instal·lar des del mercat "{{name}}":',
-  'Plugin selection cancelled.': 'Selecció de plugin cancel·lada.',
-  'Select a plugin from "{{name}}"': 'Seleccionar un plugin de "{{name}}"',
+    'Seleccioneu un connector per instal·lar des del mercat "{{name}}":',
+  'Plugin selection cancelled.': 'Selecció de connector cancel·lada.',
+  'Select a plugin from "{{name}}"': 'Seleccionar un connector de "{{name}}"',
   'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':
     'Useu ↑↓ o j/k per navegar, Retorn per seleccionar, Esc per cancel·lar',
   '{{count}} more above': '{{count}} més amunt',
@@ -684,11 +684,11 @@ export default {
   Hooks: 'Hooks',
   'Loading hooks...': 'Carregant hooks...',
   'Error loading hooks:': 'Error en carregar els hooks:',
-  'Press Escape to close': 'Premeu Escape per tancar',
+  'Press Escape to close': 'Premeu Esc per tancar',
   'Press Escape, Ctrl+C, or Ctrl+D to cancel':
-    'Premeu Escape, Ctrl+C o Ctrl+D per cancel·lar',
+    'Premeu Esc, Ctrl+C o Ctrl+D per cancel·lar',
   'Press Space, Enter, or Escape to dismiss':
-    'Premeu Espai, Retorn o Escape per descartar',
+    'Premeu Espai, Retorn o Esc per descartar',
   'No hook selected': 'Cap hook seleccionat',
   'No hook events found.': "No s'han trobat esdeveniments de hook.",
   '{{count}} hook configured': '{{count}} hook configurat',
@@ -817,10 +817,10 @@ export default {
   'Export session to markdown format': 'Exportar la sessió en format markdown',
 
   // ============================================================================
-  // Ordres - Insights
+  // Ordres - Idees
   // ============================================================================
   'generate personalized programming insights from your chat history':
-    'generar insights de programació personalitzats a partir del vostre historial de xat',
+    'generar idees de programació personalitzades a partir del vostre historial de xat',
 
   // ============================================================================
   // Ordres - Historial de sessió
@@ -1628,7 +1628,7 @@ export default {
   'You can switch permission mode quickly with Tab or /approval-mode.':
     'Podeu canviar ràpidament el mode de permisos amb Tab o /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
-    'Proveu /insight per generar insights personalitzats a partir del vostre historial de xat.',
+    'Proveu /insight per generar idees personalitzades a partir del vostre historial de xat.',
   'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
     'Premeu Ctrl+O per canviar el mode compacte — amagueu la sortida de les eines i el pensament per a una vista més neta.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
@@ -1859,7 +1859,7 @@ export default {
   'Enter value...': 'Introduïu el valor...',
   'Enter sensitive value...': 'Introduïu el valor sensible...',
   'Press Enter to submit, Escape to cancel':
-    'Premeu Retorn per enviar, Escape per cancel·lar',
+    'Premeu Retorn per enviar, Esc per cancel·lar',
 
   // ============================================================================
   // Eina de migració d'ordres
@@ -1955,9 +1955,9 @@ export default {
     'Més instruccions sobre la configuració manual de `modelProviders`.',
   'Select API-KEY configuration mode:':
     'Seleccioneu el mode de configuració de la clau API:',
-  '(Press Escape to go back)': '(Premeu Escape per tornar enrere)',
+  '(Press Escape to go back)': '(Premeu Esc per tornar enrere)',
   '(Press Enter to submit, Escape to cancel)':
-    '(Premeu Retorn per enviar, Escape per cancel·lar)',
+    '(Premeu Retorn per enviar, Esc per cancel·lar)',
   'Select Region for Coding Plan': 'Seleccioneu la regió per al Coding Plan',
   'Choose based on where your account is registered':
     "Trieu en funció d'on teniu registrat el compte",
