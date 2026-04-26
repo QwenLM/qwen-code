@@ -3129,9 +3129,7 @@ async function assertConversationSurfaceFidelity(fileName) {
       candidate.innerText.includes('E2E fake ACP response received')
     );
     const userMessage = document.querySelector('.chat-message-user');
-    const assistantRole = assistantMessage?.querySelector('.message-role');
     const assistantParagraph = assistantMessage?.querySelector('p');
-    const userRole = userMessage?.querySelector('.message-role');
     const userParagraph = userMessage?.querySelector('p');
     const plan = document.querySelector('.chat-plan');
     const planItem = plan?.querySelector('li');
@@ -3174,24 +3172,21 @@ async function assertConversationSurfaceFidelity(fileName) {
       },
       assistant: {
         rect: rectFor(assistantMessage),
-        style: styleFor(assistantMessage)
+        style: styleFor(assistantMessage),
+        label: assistantMessage?.getAttribute('aria-label') ?? '',
+        hasRoleLabel: Boolean(assistantMessage?.querySelector('.message-role')),
+        text: assistantMessage?.innerText ?? ''
       },
       user: {
         rect: rectFor(userMessage),
-        style: styleFor(userMessage)
+        style: styleFor(userMessage),
+        label: userMessage?.getAttribute('aria-label') ?? '',
+        hasRoleLabel: Boolean(userMessage?.querySelector('.message-role')),
+        text: userMessage?.innerText ?? ''
       },
       assistantParagraph: {
         rect: rectFor(assistantParagraph),
         style: styleFor(assistantParagraph)
-      },
-      assistantRole: {
-        rect: rectFor(assistantRole),
-        style: styleFor(assistantRole),
-        text: assistantRole?.textContent.trim() ?? ''
-      },
-      userRole: {
-        rect: rectFor(userRole),
-        style: styleFor(userRole)
       },
       userParagraph: {
         rect: rectFor(userParagraph),
@@ -3220,6 +3215,7 @@ async function assertConversationSurfaceFidelity(fileName) {
         rowLabelStyle: styleFor(firstSummaryRowLabel)
       },
       timeline: rectFor(timeline),
+      timelineText: timeline?.innerText ?? '',
       composer: {
         rect: rectFor(composer),
         textareaRect: rectFor(composerTextarea)
@@ -3249,8 +3245,6 @@ async function assertConversationSurfaceFidelity(fileName) {
     !snapshot.user.style ||
     !snapshot.assistantParagraph.rect ||
     !snapshot.assistantParagraph.style ||
-    !snapshot.assistantRole.rect ||
-    !snapshot.assistantRole.style ||
     !snapshot.userParagraph.rect ||
     !snapshot.userParagraph.style ||
     !snapshot.plan.rect ||
@@ -3324,25 +3318,51 @@ async function assertConversationSurfaceFidelity(fileName) {
     );
   }
 
-  if (snapshot.userRole.style?.display !== 'none') {
+  if (
+    snapshot.assistant.label !== 'Assistant message' ||
+    snapshot.user.label !== 'User message'
+  ) {
     throw new Error(
-      `User prompt should not spend vertical space on a role label: ${JSON.stringify(
-        snapshot.userRole.style,
+      `Message articles should expose accessible labels without visible role chrome: ${JSON.stringify(
+        {
+          assistant: snapshot.assistant.label,
+          user: snapshot.user.label,
+        },
       )}`,
     );
   }
 
-  if (
-    snapshot.assistantRole.text !== 'Assistant message' ||
-    snapshot.assistantRole.style.position !== 'absolute' ||
-    snapshot.assistantRole.rect.width > 2 ||
-    snapshot.assistantRole.rect.height > 2
-  ) {
+  if (snapshot.assistant.hasRoleLabel || snapshot.user.hasRoleLabel) {
     throw new Error(
-      `Assistant role label should stay screen-reader-only: ${JSON.stringify(
-        snapshot.assistantRole,
+      `Messages should not render role-label text nodes: ${JSON.stringify(
+        {
+          assistant: snapshot.assistant,
+          user: snapshot.user,
+        },
       )}`,
     );
+  }
+
+  for (const roleText of [
+    'Assistant message',
+    'ASSISTANT MESSAGE',
+    'User message',
+    'USER MESSAGE',
+  ]) {
+    if (
+      snapshot.assistant.text.includes(roleText) ||
+      snapshot.user.text.includes(roleText) ||
+      snapshot.timelineText.includes(roleText)
+    ) {
+      throw new Error(
+        `Conversation text should not include role label ${roleText}: ${JSON.stringify(
+          {
+            assistant: snapshot.assistant.text,
+            user: snapshot.user.text,
+          },
+        )}`,
+      );
+    }
   }
 
   if (
@@ -3627,7 +3647,6 @@ async function assertCompactDenseConversationLayout(fileName) {
       '[data-testid="assistant-file-references"]'
     );
     const messageParagraph = message?.querySelector('p');
-    const assistantRole = message?.querySelector('.message-role-assistant');
     const plan = document.querySelector('.chat-plan');
     const planItem = plan?.querySelector('li');
     const actions = message?.querySelector(
@@ -3676,12 +3695,11 @@ async function assertCompactDenseConversationLayout(fileName) {
       chatStatusText: chatStatus?.textContent.trim() ?? '',
       timeline: timelineRect,
       message: messageRect,
+      messageLabel: message?.getAttribute('aria-label') ?? '',
+      messageHasRoleLabel: Boolean(message?.querySelector('.message-role')),
+      messageText: message?.innerText ?? '',
+      timelineText: timeline?.innerText ?? '',
       messageParagraphStyle: typeStyleFor(messageParagraph),
-      assistantRole: {
-        rect: rectFor(assistantRole),
-        style: typeStyleFor(assistantRole),
-        text: assistantRole?.textContent.trim() ?? ''
-      },
       plan: rectFor(plan),
       planItemStyle: typeStyleFor(planItem),
       fileReferences: rectFor(fileReferences),
@@ -3771,7 +3789,6 @@ async function assertCompactDenseConversationLayout(fileName) {
     'chat',
     'timeline',
     'message',
-    'assistantRole',
     'fileReferences',
     'actions',
     'composer',
@@ -3789,14 +3806,6 @@ async function assertCompactDenseConversationLayout(fileName) {
         messageParagraphStyle: snapshot.messageParagraphStyle,
         planItemStyle: snapshot.planItemStyle,
       })}`,
-    );
-  }
-
-  if (!snapshot.assistantRole.rect || !snapshot.assistantRole.style) {
-    throw new Error(
-      `Compact assistant role metrics are missing: ${JSON.stringify(
-        snapshot.assistantRole,
-      )}`,
     );
   }
 
@@ -3836,17 +3845,30 @@ async function assertCompactDenseConversationLayout(fileName) {
     );
   }
 
-  if (
-    snapshot.assistantRole.text !== 'Assistant message' ||
-    snapshot.assistantRole.style.position !== 'absolute' ||
-    snapshot.assistantRole.rect.width > 2 ||
-    snapshot.assistantRole.rect.height > 2
-  ) {
+  if (snapshot.messageLabel !== 'Assistant message') {
     throw new Error(
-      `Compact assistant role label should stay screen-reader-only: ${JSON.stringify(
-        snapshot.assistantRole,
-      )}`,
+      `Compact assistant message is missing its accessible label: ${snapshot.messageLabel}`,
     );
+  }
+
+  if (snapshot.messageHasRoleLabel) {
+    throw new Error('Compact assistant message rendered a role-label node.');
+  }
+
+  for (const roleText of [
+    'Assistant message',
+    'ASSISTANT MESSAGE',
+    'User message',
+    'USER MESSAGE',
+  ]) {
+    if (
+      snapshot.messageText.includes(roleText) ||
+      snapshot.timelineText.includes(roleText)
+    ) {
+      throw new Error(
+        `Compact conversation text should not include role label ${roleText}.`,
+      );
+    }
   }
 
   if (

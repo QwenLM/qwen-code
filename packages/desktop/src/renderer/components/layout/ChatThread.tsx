@@ -369,20 +369,14 @@ function TimelineItem({
 
     return (
       <article
+        aria-label={
+          item.role === 'assistant' ? 'Assistant message' : 'User message'
+        }
         className={`chat-message chat-message-${item.role}`}
         data-testid={
           item.role === 'assistant' ? 'assistant-message' : undefined
         }
       >
-        <div
-          className={
-            item.role === 'assistant'
-              ? 'message-role message-role-assistant sr-only'
-              : 'message-role'
-          }
-        >
-          {item.role === 'assistant' ? 'Assistant message' : item.role}
-        </div>
         <p>{item.text}</p>
         {fileReferences.length > 0 ? (
           <ul

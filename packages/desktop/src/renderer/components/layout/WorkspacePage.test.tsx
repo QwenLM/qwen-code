@@ -1141,9 +1141,7 @@ describe('WorkspacePage', () => {
     const assistantMessage = renderedContainer.querySelector(
       '[data-testid="assistant-message"]',
     );
-    const assistantRole = assistantMessage?.querySelector(
-      '.message-role-assistant',
-    );
+    const userMessage = renderedContainer.querySelector('.chat-message-user');
     const actionRow = renderedContainer.querySelector(
       '[data-testid="assistant-message-actions"]',
     );
@@ -1152,9 +1150,14 @@ describe('WorkspacePage', () => {
     );
 
     expect(assistantMessage?.textContent).toContain('README.md:1');
-    expect(assistantRole).toBeTruthy();
-    expect(assistantRole?.classList.contains('sr-only')).toBe(true);
-    expect(assistantRole?.textContent).toBe('Assistant message');
+    expect(assistantMessage?.getAttribute('aria-label')).toBe(
+      'Assistant message',
+    );
+    expect(userMessage?.getAttribute('aria-label')).toBe('User message');
+    expect(assistantMessage?.querySelector('.message-role')).toBeNull();
+    expect(userMessage?.querySelector('.message-role')).toBeNull();
+    expect(assistantMessage?.textContent).not.toContain('Assistant message');
+    expect(userMessage?.textContent).not.toContain('User message');
     expect(actionRow).toBeTruthy();
     for (const action of actionRow?.querySelectorAll('button') ?? []) {
       expect(action.querySelector('svg')).toBeTruthy();

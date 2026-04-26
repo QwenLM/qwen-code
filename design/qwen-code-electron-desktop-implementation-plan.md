@@ -22,6 +22,96 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Conversation Role Label DOM Restraint
+
+Status: completed in iteration 51.
+
+Goal: remove the last assistant/user role-label text nodes from the main
+conversation DOM while preserving accessible message identity.
+
+User-visible value: conversation messages read as clean prose and compact user
+bubbles, matching `home.jpg` more closely, while diagnostics and text snapshots
+no longer surface uppercase role chrome such as `ASSISTANT MESSAGE`.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/conversation-role-label-dom-restraint.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- User and assistant message articles expose accessible names through article
+  attributes instead of visible or `sr-only` `.message-role` text nodes.
+- Conversation body text, `innerText`, and compact viewport diagnostics do not
+  include `Assistant message`, `ASSISTANT MESSAGE`, `User message`, or
+  uppercase role-label chrome.
+- Existing assistant actions, retry/copy/open-changes buttons, file reference
+  chips, changed-file summary, plan/tool activity, pending approvals, review,
+  settings, terminal, branch, and composer workflows remain unchanged.
+- Default and compact Electron viewports keep message geometry, composer
+  docking, and conversation dominance aligned with the existing CDP layout
+  assertions, with no console errors or failed local requests.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake project, send a prompt, approve the command,
+  inspect user and assistant messages in the default and compact conversation
+  viewports, then continue the existing review/settings/terminal workflows.
+- E2E assertions: message articles have accessible labels, no `.message-role`
+  descendants, no role-label text in message or timeline `innerText`, compact
+  geometry remains within thresholds, and no browser console errors or failed
+  local requests are recorded.
+- Diagnostic artifacts: updated `conversation-surface-fidelity.json`,
+  `compact-dense-conversation.json`, screenshots, Electron log, and summary
+  JSON under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for choosing between removing role
+  nodes, keeping `sr-only` labels, or adding new visible labels;
+  `frontend-design` for keeping the prototype-first prose hierarchy restrained;
+  `electron-desktop-dev` for real Electron CDP verification of message DOM and
+  geometry.
+
+Notes and decisions:
+
+- The preferred implementation is an `aria-label` on the message `<article>`.
+  This keeps message identity available to assistive technology without adding
+  extra timeline text nodes that appear in diagnostics or copy-like DOM reads.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 22 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T18-53-30-889Z/`.
+- Key recorded metrics: default viewport assistant and user messages exposed
+  `aria-label` values of `Assistant message` and `User message`,
+  `hasRoleLabel` was `false` for both, compact viewport
+  `messageHasRoleLabel` was `false`, and `summary.json` recorded zero console
+  errors and zero failed local requests.
+
+Next work:
+
+- Continue conversation fidelity by removing or replacing the now-unused
+  `.message-role` CSS token if no supporting surface needs it.
+- Broaden compact viewport coverage for very long user prompts and assistant
+  responses with localized action labels.
+
 ### Slice: Pending Prompt Card Label Restraint
 
 Status: completed in iteration 50.
