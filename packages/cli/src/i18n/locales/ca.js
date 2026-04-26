@@ -36,7 +36,7 @@ export default {
   'Commands:': 'Ordres:',
   'shell command': 'ordre shell',
   'Model Context Protocol command (from external servers)':
-    "Ordre del protocol de context del model (des de servidors externs)",
+    'Ordre del protocol de context del model (des de servidors externs)',
   'Keyboard Shortcuts:': 'Dreceres de teclat:',
   'Toggle this help display': 'Mostrar/amagar aquesta ajuda',
   'Toggle shell mode': 'Canviar el mode shell',
@@ -75,10 +75,9 @@ export default {
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Premeu 'i' per al mode INSERCIÓ i 'Esc' per al mode NORMAL.",
   'Cancel operation / Clear input (double press)':
-    "Cancel·lar operació / Esborrar entrada (doble premuda)",
+    'Cancel·lar operació / Esborrar entrada (doble premuda)',
   'Cycle approval modes': "Canviar els modes d'aprovació",
-  'Cycle through your prompt history':
-    "Navegar per l'historial de missatges",
+  'Cycle through your prompt history': "Navegar per l'historial de missatges",
   'For a full list of shortcuts, see {{docPath}}':
     'Per a una llista completa de dreceres, vegeu {{docPath}}',
   'docs/keyboard-shortcuts.md': 'docs/keyboard-shortcuts.md',
@@ -92,7 +91,7 @@ export default {
   // Informació del sistema
   // ============================================================================
   'Qwen Code': 'Qwen Code',
-  Runtime: 'Entorn d\'execució',
+  Runtime: "Entorn d'execució",
   OS: 'SO',
   Auth: 'Autenticació',
   'CLI Version': 'Versió del CLI',
@@ -127,16 +126,17 @@ export default {
   'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
     'Mode d\'aprovació no vàlid "{{arg}}". Modes vàlids: {{modes}}',
   'Approval mode set to "{{mode}}"': 'Mode d\'aprovació establert a "{{mode}}"',
-  'View or change the language setting': "Veure o canviar la configuració d'idioma",
+  'View or change the language setting':
+    "Veure o canviar la configuració d'idioma",
   'change the theme': 'canviar el tema',
   'Select Theme': 'Seleccionar tema',
   Preview: 'Previsualització',
   '(Use Enter to select, Tab to configure scope)':
-    '(Useu Retorn per seleccionar, Tab per configurar l\'àmbit)',
+    "(Useu Retorn per seleccionar, Tab per configurar l'àmbit)",
   '(Use Enter to apply scope, Tab to go back)':
-    '(Useu Retorn per aplicar l\'àmbit, Tab per tornar enrere)',
+    "(Useu Retorn per aplicar l'àmbit, Tab per tornar enrere)",
   'Theme configuration unavailable due to NO_COLOR env variable.':
-    'La configuració del tema no està disponible degut a la variable d\'entorn NO_COLOR.',
+    "La configuració del tema no està disponible degut a la variable d'entorn NO_COLOR.",
   'Theme "{{themeName}}" not found.': 'Tema "{{themeName}}" no trobat.',
   'Theme "{{themeName}}" not found in selected scope.':
     'Tema "{{themeName}}" no trobat en l\'àmbit seleccionat.',
@@ -182,11 +182,12 @@ export default {
     'Retorn per seleccionar, ↑↓ per navegar, Esc per tornar enrere',
   'Enter to submit, Esc to go back': 'Retorn per enviar, Esc per tornar enrere',
   'Invalid step: {{step}}': 'Pas no vàlid: {{step}}',
-  'No subagents found.': 'No s\'han trobat subagents.',
+  'No subagents found.': "No s'han trobat subagents.",
   "Use '/agents create' to create your first subagent.":
     "Useu '/agents create' per crear el vostre primer subagent.",
   '(built-in)': '(integrat)',
-  '(overridden by project level agent)': '(sobreescrit per un agent de nivell de projecte)',
+  '(overridden by project level agent)':
+    '(sobreescrit per un agent de nivell de projecte)',
   'Project Level ({{path}})': 'Nivell de projecte ({{path}})',
   'User Level ({{path}})': "Nivell d'usuari ({{path}})",
   'Built-in Agents': 'Agents integrats',
@@ -234,27 +235,28 @@ export default {
   'Step {{n}}: Choose Location': 'Pas {{n}}: Triar ubicació',
   'Step {{n}}: Choose Generation Method':
     'Pas {{n}}: Triar mètode de generació',
-  'Generate with Qwen Code (Recommended)':
-    'Generar amb Qwen Code (Recomanat)',
+  'Generate with Qwen Code (Recommended)': 'Generar amb Qwen Code (Recomanat)',
   'Manual Creation': 'Creació manual',
   'Describe what this subagent should do and when it should be used. (Be comprehensive for best results)':
-    'Descriviu què ha de fer aquest subagent i quan s\'ha d\'usar. (Sigueu exhaustiu per obtenir els millors resultats)',
+    "Descriviu què ha de fer aquest subagent i quan s'ha d'usar. (Sigueu exhaustiu per obtenir els millors resultats)",
   'e.g., Expert code reviewer that reviews code based on best practices...':
     'p. ex., Revisor de codi expert que revisa el codi seguint les millors pràctiques...',
   'Generating subagent configuration...':
     'Generant la configuració del subagent...',
   'Failed to generate subagent: {{error}}':
     'Error en generar el subagent: {{error}}',
-  'Step {{n}}: Describe Your Subagent': 'Pas {{n}}: Descriure el vostre subagent',
+  'Step {{n}}: Describe Your Subagent':
+    'Pas {{n}}: Descriure el vostre subagent',
   'Step {{n}}: Enter Subagent Name': 'Pas {{n}}: Introduir el nom del subagent',
-  'Step {{n}}: Enter System Prompt': 'Pas {{n}}: Introduir el missatge del sistema',
+  'Step {{n}}: Enter System Prompt':
+    'Pas {{n}}: Introduir el missatge del sistema',
   'Step {{n}}: Enter Description': 'Pas {{n}}: Introduir la descripció',
   'Step {{n}}: Select Tools': 'Pas {{n}}: Seleccionar eines',
   'All Tools (Default)': 'Totes les eines (per defecte)',
   'All Tools': 'Totes les eines',
   'Read-only Tools': 'Eines de només lectura',
   'Read & Edit Tools': 'Eines de lectura i edició',
-  'Read & Edit & Execution Tools': "Eines de lectura, edició i execució",
+  'Read & Edit & Execution Tools': 'Eines de lectura, edició i execució',
   'All tools selected, including MCP tools':
     'Totes les eines seleccionades, incloses les eines MCP',
   'Selected tools:': 'Eines seleccionades:',
@@ -276,17 +278,17 @@ export default {
   'e.g., Code Reviewer': 'p. ex., Revisor de codi',
   'Name cannot be empty.': 'El nom no pot estar buit.',
   "Write the system prompt that defines this subagent's behavior. Be comprehensive for best results.":
-    'Escriviu el missatge del sistema que defineix el comportament d\'aquest subagent. Sigueu exhaustiu per obtenir els millors resultats.',
+    "Escriviu el missatge del sistema que defineix el comportament d'aquest subagent. Sigueu exhaustiu per obtenir els millors resultats.",
   'e.g., You are an expert code reviewer...':
     'p. ex., Sou un revisor de codi expert...',
-  'System prompt cannot be empty.': 'El missatge del sistema no pot estar buit.',
+  'System prompt cannot be empty.':
+    'El missatge del sistema no pot estar buit.',
   'Describe when and how this subagent should be used.':
-    'Descriviu quan i com s\'ha d\'usar aquest subagent.',
+    "Descriviu quan i com s'ha d'usar aquest subagent.",
   'e.g., Reviews code for best practices and potential bugs.':
     'p. ex., Revisa el codi seguint les millors pràctiques i detectant errors potencials.',
   'Description cannot be empty.': 'La descripció no pot estar buida.',
-  'Failed to launch editor: {{error}}':
-    "Error en iniciar l'editor: {{error}}",
+  'Failed to launch editor: {{error}}': "Error en iniciar l'editor: {{error}}",
   'Failed to save and edit subagent: {{error}}':
     'Error en desar i editar el subagent: {{error}}',
 
@@ -303,7 +305,7 @@ export default {
   'Select Scope': "Seleccionar l'àmbit",
   'User Scope': "Àmbit d'usuari",
   'Workspace Scope': "Àmbit de l'espai de treball",
-  'No extensions found.': 'No s\'han trobat extensions.',
+  'No extensions found.': "No s'han trobat extensions.",
   Active: 'Activa',
   Disabled: 'Desactivada',
   'Update available': 'Actualització disponible',
@@ -325,8 +327,9 @@ export default {
     'L\'extensió "{{name}}" s\'ha actualitzat correctament.',
   'Failed to update extension "{{name}}": {{error}}':
     'Error en actualitzar l\'extensió "{{name}}": {{error}}',
-  'Select the scope for this action:': "Seleccioneu l'àmbit per a aquesta acció:",
-  'User - Applies to all projects': 'Usuari - S\'aplica a tots els projectes',
+  'Select the scope for this action:':
+    "Seleccioneu l'àmbit per a aquesta acció:",
+  'User - Applies to all projects': "Usuari - S'aplica a tots els projectes",
   'Workspace - Applies to current project only':
     "Espai de treball - S'aplica només al projecte actual",
   'Name:': 'Nom:',
@@ -339,7 +342,7 @@ export default {
   'Updating {{name}}...': 'Actualitzant {{name}}...',
   'Update complete!': 'Actualització completada!',
   'User (global)': 'Usuari (global)',
-  'Workspace (project-specific)': "Espai de treball (específic del projecte)",
+  'Workspace (project-specific)': 'Espai de treball (específic del projecte)',
   'Disable "{{name}}" - Select Scope':
     'Desactivar "{{name}}" - Seleccionar àmbit',
   'Enable "{{name}}" - Select Scope': 'Activar "{{name}}" - Seleccionar àmbit',
@@ -360,7 +363,8 @@ export default {
   // ============================================================================
   // Ordres - General (continuació)
   // ============================================================================
-  'View and edit Qwen Code settings': 'Veure i editar la configuració de Qwen Code',
+  'View and edit Qwen Code settings':
+    'Veure i editar la configuració de Qwen Code',
   Settings: 'Configuració',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
     'Per veure els canvis, cal reiniciar Qwen Code. Premeu r per sortir i aplicar els canvis ara.',
@@ -408,7 +412,7 @@ export default {
   'Skip Startup Context': "Ometre el context d'inici",
   'Enable OpenAI Logging': "Activar el registre d'OpenAI",
   'OpenAI Logging Directory': "Directori de registres d'OpenAI",
-  Timeout: 'Temps d\'espera',
+  Timeout: "Temps d'espera",
   'Max Retries': 'Reintents màxims',
   'Disable Cache Control': 'Desactivar el control de memòria cau',
   'Memory Discovery Max Dirs': 'Directoris màxims de descoberta de memòria',
@@ -423,8 +427,10 @@ export default {
   'Auto Accept': 'Acceptació automàtica',
   'Use Ripgrep': 'Usar Ripgrep',
   'Use Builtin Ripgrep': 'Usar Ripgrep integrat',
-  'Enable Tool Output Truncation': "Activar el truncament de la sortida d'eines",
-  'Tool Output Truncation Threshold': "Llindar de truncament de la sortida d'eines",
+  'Enable Tool Output Truncation':
+    "Activar el truncament de la sortida d'eines",
+  'Tool Output Truncation Threshold':
+    "Llindar de truncament de la sortida d'eines",
   'Tool Output Truncation Lines': "Línies de truncament de la sortida d'eines",
   'Folder Trust': 'Confiança de carpeta',
   'Vision Model Preview': 'Previsualització del model de visió',
@@ -440,17 +446,18 @@ export default {
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'activar/desactivar el mode Vim',
   'check session stats. Usage: /stats [model|tools]':
-    "comprovar les estadístiques de la sessió. Ús: /stats [model|tools]",
+    'comprovar les estadístiques de la sessió. Ús: /stats [model|tools]',
   'Show model-specific usage statistics.':
-    'Mostrar les estadístiques d\'ús específiques del model.',
+    "Mostrar les estadístiques d'ús específiques del model.",
   'Show tool-specific usage statistics.':
     "Mostrar les estadístiques d'ús específiques de les eines.",
   'exit the cli': 'sortir del CLI',
   'Open MCP management dialog, or authenticate with OAuth-enabled servers':
-    "Obrir el diàleg de gestió MCP o autenticar-se amb servidors OAuth",
+    'Obrir el diàleg de gestió MCP o autenticar-se amb servidors OAuth',
   'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
     'Llistar els servidors MCP configurats i les seves eines, o autenticar-se amb servidors OAuth',
-  'Manage workspace directories': "Gestionar els directoris de l'espai de treball",
+  'Manage workspace directories':
+    "Gestionar els directoris de l'espai de treball",
   'Add directories to the workspace. Use comma to separate multiple paths':
     "Afegir directoris a l'espai de treball. Useu comes per separar múltiples camins",
   'Show all directories in the workspace':
@@ -460,12 +467,12 @@ export default {
   'Editor Preference': "Preferència d'editor",
   'These editors are currently supported. Please note that some editors cannot be used in sandbox mode.':
     'Aquests editors estan suportats. Cal tenir en compte que alguns editors no es poden usar en mode aïllat.',
-  'Your preferred editor is:': "El vostre editor preferit és:",
+  'Your preferred editor is:': 'El vostre editor preferit és:',
   'Manage extensions': 'Gestionar extensions',
   'Manage installed extensions': 'Gestionar les extensions instal·lades',
   'List active extensions': 'Llistar les extensions actives',
   'Update extensions. Usage: update <extension-names>|--all':
-    'Actualitzar extensions. Ús: update <noms-d\'extensions>|--all',
+    "Actualitzar extensions. Ús: update <noms-d'extensions>|--all",
   'Disable an extension': 'Desactivar una extensió',
   'Enable an extension': 'Activar una extensió',
   'Install an extension from a git repo or local path':
@@ -473,7 +480,7 @@ export default {
   'Uninstall an extension': 'Desinstal·lar una extensió',
   'No extensions installed.': 'No hi ha extensions instal·lades.',
   'Usage: /extensions update <extension-names>|--all':
-    'Ús: /extensions update <noms-d\'extensions>|--all',
+    "Ús: /extensions update <noms-d'extensions>|--all",
   'Extension "{{name}}" not found.': 'Extensió "{{name}}" no trobada.',
   'No extensions to update.': 'No hi ha extensions per actualitzar.',
   'Usage: /extensions install <source>': 'Ús: /extensions install <font>',
@@ -484,8 +491,9 @@ export default {
   'Failed to install extension from "{{source}}": {{error}}':
     'Error en instal·lar l\'extensió des de "{{source}}": {{error}}',
   'Usage: /extensions uninstall <extension-name>':
-    'Ús: /extensions uninstall <nom-de-l\'extensió>',
-  'Uninstalling extension "{{name}}"...': 'Desinstal·lant l\'extensió "{{name}}"...',
+    "Ús: /extensions uninstall <nom-de-l'extensió>",
+  'Uninstalling extension "{{name}}"...':
+    'Desinstal·lant l\'extensió "{{name}}"...',
   'Extension "{{name}}" uninstalled successfully.':
     'L\'extensió "{{name}}" s\'ha desinstal·lat correctament.',
   'Failed to uninstall extension "{{name}}": {{error}}':
@@ -502,7 +510,7 @@ export default {
   'Do you want to continue?': 'Voleu continuar?',
   'Installing extension "{{name}}".': 'Instal·lant l\'extensió "{{name}}".',
   '**Extensions may introduce unexpected behavior. Ensure you have investigated the extension source and trust the author.**':
-    '**Les extensions poden introduir comportaments inesperats. Assegureu-vos d\'haver investigat la font de l\'extensió i de confiar en l\'autor.**',
+    "**Les extensions poden introduir comportaments inesperats. Assegureu-vos d'haver investigat la font de l'extensió i de confiar en l'autor.**",
   'This extension will run the following MCP servers:':
     'Aquesta extensió executarà els servidors MCP següents:',
   local: 'local',
@@ -522,29 +530,29 @@ export default {
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
     'Esteu instal·lant una extensió des de {{originSource}}. Algunes funcions poden no funcionar perfectament amb Qwen Code.',
   '--ref and --auto-update are not applicable for marketplace extensions.':
-    '--ref i --auto-update no s\'apliquen a les extensions del mercat.',
+    "--ref i --auto-update no s'apliquen a les extensions del mercat.",
   'Extension "{{name}}" installed successfully and enabled.':
     'L\'extensió "{{name}}" s\'ha instal·lat i activat correctament.',
   'Installs an extension from a git repository URL, local path, or claude marketplace (marketplace-url:plugin-name).':
-    'Instal·la una extensió des d\'una URL de repositori git, un camí local o el mercat (marketplace-url:nom-del-plugin).',
+    "Instal·la una extensió des d'una URL de repositori git, un camí local o el mercat (marketplace-url:nom-del-plugin).",
   'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.':
-    'La URL de GitHub, el camí local o la font del mercat (marketplace-url:nom-del-plugin) de l\'extensió a instal·lar.',
-  'The git ref to install from.': 'La referència git des de la qual instal·lar.',
+    "La URL de GitHub, el camí local o la font del mercat (marketplace-url:nom-del-plugin) de l'extensió a instal·lar.",
+  'The git ref to install from.':
+    'La referència git des de la qual instal·lar.',
   'Enable auto-update for this extension.':
-    'Activar l\'actualització automàtica per a aquesta extensió.',
+    "Activar l'actualització automàtica per a aquesta extensió.",
   'Enable pre-release versions for this extension.':
     'Activar les versions preliminars per a aquesta extensió.',
   'Acknowledge the security risks of installing an extension and skip the confirmation prompt.':
-    'Acceptar els riscos de seguretat d\'instal·lar una extensió i ometre el missatge de confirmació.',
-  'The source argument must be provided.':
-    "Cal proporcionar l'argument font.",
+    "Acceptar els riscos de seguretat d'instal·lar una extensió i ometre el missatge de confirmació.",
+  'The source argument must be provided.': "Cal proporcionar l'argument font.",
   'Extension "{{name}}" successfully uninstalled.':
     'L\'extensió "{{name}}" s\'ha desinstal·lat correctament.',
   'Uninstalls an extension.': 'Desinstal·la una extensió.',
   'The name or source path of the extension to uninstall.':
-    'El nom o camí font de l\'extensió a desinstal·lar.',
+    "El nom o camí font de l'extensió a desinstal·lar.",
   'Please include the name of the extension to uninstall as a positional argument.':
-    'Incloeu el nom de l\'extensió a desinstal·lar com a argument posicional.',
+    "Incloeu el nom de l'extensió a desinstal·lar com a argument posicional.",
   'Enables an extension.': 'Activa una extensió.',
   'The name of the extension to enable.': "El nom de l'extensió a activar.",
   'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
@@ -578,21 +586,22 @@ export default {
   'Source:': 'Font:',
   'Type:': 'Tipus:',
   'Ref:': 'Ref:',
-  'Release tag:': "Etiqueta de versió:",
-  'Enabled (User):': "Activada (Usuari):",
-  'Enabled (Workspace):': "Activada (Espai de treball):",
+  'Release tag:': 'Etiqueta de versió:',
+  'Enabled (User):': 'Activada (Usuari):',
+  'Enabled (Workspace):': 'Activada (Espai de treball):',
   'Context files:': 'Fitxers de context:',
   'Skills:': 'Habilitats:',
   'Agents:': 'Agents:',
   'MCP servers:': 'Servidors MCP:',
-  'Link extension failed to install.': "No s'ha pogut instal·lar l'extensió d'enllaç.",
+  'Link extension failed to install.':
+    "No s'ha pogut instal·lar l'extensió d'enllaç.",
   'Extension "{{name}}" linked successfully and enabled.':
     'L\'extensió "{{name}}" s\'ha enllaçat i activat correctament.',
   'Links an extension from a local path. Updates made to the local path will always be reflected.':
     "Enllaça una extensió des d'un camí local. Els canvis al camí local sempre es reflectiran.",
   'The name of the extension to link.': "El nom de l'extensió a enllaçar.",
   'Set a specific setting for an extension.':
-    "Establir una configuració específica per a una extensió.",
+    'Establir una configuració específica per a una extensió.',
   'Name of the extension to configure.': "Nom de l'extensió a configurar.",
   'The setting to configure (name or env var).':
     "La configuració a establir (nom o variable d'entorn).",
@@ -603,14 +612,14 @@ export default {
   'Extension "{{name}}" has no settings to configure.':
     'L\'extensió "{{name}}" no té cap configuració.',
   'Settings for "{{name}}":': 'Configuració per a "{{name}}":',
-  '(workspace)': "(espai de treball)",
-  '(user)': "(usuari)",
+  '(workspace)': '(espai de treball)',
+  '(user)': '(usuari)',
   '[not set]': '[no establert]',
   '[value stored in keychain]': '[valor emmagatzemat al clauer]',
   'Value:': 'Valor:',
-  'Manage extension settings.': "Gestionar la configuració de les extensions.",
+  'Manage extension settings.': 'Gestionar la configuració de les extensions.',
   'You need to specify a command (set or list).':
-    "Cal especificar una ordre (set o list).",
+    'Cal especificar una ordre (set o list).',
 
   // ============================================================================
   // Plugin Choice / Mercat
@@ -626,9 +635,10 @@ export default {
   '{{count}} more above': '{{count}} més amunt',
   '{{count}} more below': '{{count}} més avall',
   'manage IDE integration': "gestionar la integració de l'IDE",
-  'check status of IDE integration': "comprovar l'estat de la integració de l'IDE",
+  'check status of IDE integration':
+    "comprovar l'estat de la integració de l'IDE",
   'install required IDE companion for {{ideName}}':
-    "instal·lar el complement IDE necessari per a {{ideName}}",
+    'instal·lar el complement IDE necessari per a {{ideName}}',
   'enable IDE integration': "activar la integració de l'IDE",
   'disable IDE integration': "desactivar la integració de l'IDE",
   'IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks.':
@@ -641,21 +651,21 @@ export default {
   'Failed to configure terminal: {{error}}':
     'Error en configurar el terminal: {{error}}',
   'Could not determine {{terminalName}} config path on Windows: APPDATA environment variable is not set.':
-    'No s\'ha pogut determinar el camí de configuració de {{terminalName}} a Windows: la variable d\'entorn APPDATA no està establerta.',
+    "No s'ha pogut determinar el camí de configuració de {{terminalName}} a Windows: la variable d'entorn APPDATA no està establerta.",
   '{{terminalName}} keybindings.json exists but is not a valid JSON array. Please fix the file manually or delete it to allow automatic configuration.':
     '{{terminalName}} keybindings.json existeix però no és un array JSON vàlid. Corregiu el fitxer manualment o elimineu-lo per permetre la configuració automàtica.',
   'File: {{file}}': 'Fitxer: {{file}}',
   'Failed to parse {{terminalName}} keybindings.json. The file contains invalid JSON. Please fix the file manually or delete it to allow automatic configuration.':
     'Error en analitzar {{terminalName}} keybindings.json. El fitxer conté JSON no vàlid. Corregiu el fitxer manualment o elimineu-lo per permetre la configuració automàtica.',
   'Error: {{error}}': 'Error: {{error}}',
-  'Shift+Enter binding already exists': "La drecera Shift+Retorn ja existeix",
-  'Ctrl+Enter binding already exists': "La drecera Ctrl+Retorn ja existeix",
+  'Shift+Enter binding already exists': 'La drecera Shift+Retorn ja existeix',
+  'Ctrl+Enter binding already exists': 'La drecera Ctrl+Retorn ja existeix',
   'Existing keybindings detected. Will not modify to avoid conflicts.':
-    'S\'han detectat dreceres existents. No es modificaran per evitar conflictes.',
+    "S'han detectat dreceres existents. No es modificaran per evitar conflictes.",
   'Please check and modify manually if needed: {{file}}':
     'Comproveu i modifiqueu manualment si cal: {{file}}',
   'Added Shift+Enter and Ctrl+Enter keybindings to {{terminalName}}.':
-    'S\'han afegit les dreceres Shift+Retorn i Ctrl+Retorn a {{terminalName}}.',
+    "S'han afegit les dreceres Shift+Retorn i Ctrl+Retorn a {{terminalName}}.",
   'Modified: {{file}}': 'Modificat: {{file}}',
   '{{terminalName}} keybindings already configured.':
     'Les dreceres de {{terminalName}} ja estan configurades.',
@@ -685,11 +695,12 @@ export default {
   '{{count}} hooks configured': '{{count}} hooks configurats',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Aquest menú és de només lectura. Per afegir o modificar hooks, editeu settings.json directament o demaneu-ho a Qwen Code.',
-  'Enter to select · Esc to cancel': 'Retorn per seleccionar · Esc per cancel·lar',
+  'Enter to select · Esc to cancel':
+    'Retorn per seleccionar · Esc per cancel·lar',
   'Exit codes:': 'Codis de sortida:',
   'Configured hooks:': 'Hooks configurats:',
   'No hooks configured for this event.':
-    "No hi ha hooks configurats per a aquest esdeveniment.",
+    'No hi ha hooks configurats per a aquest esdeveniment.',
   'To add hooks, edit settings.json directly or ask Qwen.':
     'Per afegir hooks, editeu settings.json directament o demaneu-ho a Qwen.',
   'Enter to select · Esc to go back':
@@ -708,7 +719,7 @@ export default {
   '{{count}} configured hooks': '{{count}} hooks configurats',
   'When hooks are disabled:': 'Quan els hooks estan desactivats:',
   'No hook commands will execute': "Cap ordre de hook s'executarà",
-  'StatusLine will not be displayed': 'La barra d\'estat no es mostrarà',
+  'StatusLine will not be displayed': "La barra d'estat no es mostrarà",
   'Tool operations will proceed without hook validation':
     "Les operacions d'eines continuaran sense validació de hook",
   'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
@@ -727,17 +738,17 @@ export default {
   'Before tool execution': "Abans de l'execució de l'eina",
   'After tool execution': "Després de l'execució de l'eina",
   'After tool execution fails': "Quan falla l'execució de l'eina",
-  'When notifications are sent': 'Quan s\'envien notificacions',
+  'When notifications are sent': "Quan s'envien notificacions",
   'When the user submits a prompt': "Quan l'usuari envia un missatge",
-  'When a new session is started': 'Quan s\'inicia una nova sessió',
+  'When a new session is started': "Quan s'inicia una nova sessió",
   'Right before Qwen Code concludes its response':
     'Immediatament abans que Qwen Code conclou la seva resposta',
   'When a subagent (Agent tool call) is started':
-    'Quan s\'inicia un subagent (crida a l\'eina Agent)',
+    "Quan s'inicia un subagent (crida a l'eina Agent)",
   'Right before a subagent concludes its response':
     'Immediatament abans que un subagent conclou la seva resposta',
   'Before conversation compaction': 'Abans de la compactació de la conversa',
-  'When a session is ending': 'Quan una sessió s\'està acabant',
+  'When a session is ending': "Quan una sessió s'està acabant",
   'When a permission dialog is displayed':
     'Quan es mostra un diàleg de permisos',
   'Input to command is JSON of tool call arguments.':
@@ -765,17 +776,17 @@ export default {
   'stdout/stderr not shown': 'stdout/stderr no es mostra',
   'show stderr to model and continue conversation':
     'mostrar stderr al model i continuar la conversa',
-  'show stderr to user only': 'mostrar stderr només a l\'usuari',
+  'show stderr to user only': "mostrar stderr només a l'usuari",
   'stdout shown in transcript mode (ctrl+o)':
     'stdout mostrat en mode transcripció (ctrl+o)',
   'show stderr to model immediately': 'mostrar stderr al model immediatament',
   'show stderr to user only but continue with tool call':
-    'mostrar stderr només a l\'usuari però continuar amb la crida a l\'eina',
+    "mostrar stderr només a l'usuari però continuar amb la crida a l'eina",
   'block processing, erase original prompt, and show stderr to user only':
     "blocar el processament, esborrar el missatge original i mostrar stderr només a l'usuari",
   'stdout shown to Qwen': 'stdout mostrat a Qwen',
   'show stderr to user only (blocking errors ignored)':
-    'mostrar stderr només a l\'usuari (errors de bloqueig ignorats)',
+    "mostrar stderr només a l'usuari (errors de bloqueig ignorats)",
   'command completes successfully': "l'ordre es completa correctament",
   'stdout shown to subagent': 'stdout mostrat al subagent',
   'show stderr to subagent and continue having it run':
@@ -784,20 +795,21 @@ export default {
     'stdout afegit com a instruccions compactes personalitzades',
   'block compaction': 'blocar la compactació',
   'show stderr to user only but continue with compaction':
-    'mostrar stderr només a l\'usuari però continuar amb la compactació',
+    "mostrar stderr només a l'usuari però continuar amb la compactació",
   'use hook decision if provided': 'usar la decisió del hook si es proporciona',
   'Config not loaded.': 'Configuració no carregada.',
   'Hooks are not enabled. Enable hooks in settings to use this feature.':
     'Els hooks no estan activats. Activeu els hooks a la configuració per usar aquesta funció.',
   'No hooks configured. Add hooks in your settings.json file.':
     'No hi ha hooks configurats. Afegiu hooks al vostre fitxer settings.json.',
-  'Configured Hooks ({{count}} total)': 'Hooks configurats ({{count}} en total)',
+  'Configured Hooks ({{count}} total)':
+    'Hooks configurats ({{count}} en total)',
 
   // ============================================================================
   // Ordres - Exportació de sessió
   // ============================================================================
   'Export current session message history to a file':
-    'Exportar l\'historial de missatges de la sessió actual a un fitxer',
+    "Exportar l'historial de missatges de la sessió actual a un fitxer",
   'Export session to HTML format': 'Exportar la sessió en format HTML',
   'Export session to JSON format': 'Exportar la sessió en format JSON',
   'Export session to JSONL format (one message per line)':
@@ -808,16 +820,16 @@ export default {
   // Ordres - Insights
   // ============================================================================
   'generate personalized programming insights from your chat history':
-    "generar insights de programació personalitzats a partir del vostre historial de xat",
+    'generar insights de programació personalitzats a partir del vostre historial de xat',
 
   // ============================================================================
   // Ordres - Historial de sessió
   // ============================================================================
   'Resume a previous session': 'Reprendre una sessió anterior',
   'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
-    'Restaurar una crida a una eina. Això restablirà la conversa i l\'historial de fitxers a l\'estat en què es trobaven quan es va suggerir la crida a l\'eina',
+    "Restaurar una crida a una eina. Això restablirà la conversa i l'historial de fitxers a l'estat en què es trobaven quan es va suggerir la crida a l'eina",
   'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
-    'No s\'ha pogut detectar el tipus de terminal. Terminals compatibles: VS Code, Cursor, Windsurf i Trae.',
+    "No s'ha pogut detectar el tipus de terminal. Terminals compatibles: VS Code, Cursor, Windsurf i Trae.",
   'Terminal "{{terminal}}" is not supported yet.':
     'El terminal "{{terminal}}" no és compatible encara.',
 
@@ -828,7 +840,7 @@ export default {
     'Idioma no vàlid. Disponibles: {{options}}',
   'Language subcommands do not accept additional arguments.':
     "Les subordres d'idioma no accepten arguments addicionals.",
-  'Current UI language: {{lang}}': "Idioma actual de la interfície: {{lang}}",
+  'Current UI language: {{lang}}': 'Idioma actual de la interfície: {{lang}}',
   'Current LLM output language: {{lang}}':
     'Idioma actual de la sortida del model: {{lang}}',
   'LLM output language not set': 'Idioma de sortida del model no establert',
@@ -840,22 +852,24 @@ export default {
   'Example: /language output English': 'Exemple: /language output English',
   'Example: /language output 日本語': 'Exemple: /language output 日本語',
   'Example: /language output Português': 'Exemple: /language output Português',
-  'UI language changed to {{lang}}': "Idioma de la interfície canviat a {{lang}}",
+  'UI language changed to {{lang}}':
+    'Idioma de la interfície canviat a {{lang}}',
   'LLM output language set to {{lang}}':
-    "Idioma de sortida del model establert a {{lang}}",
+    'Idioma de sortida del model establert a {{lang}}',
   'LLM output language rule file generated at {{path}}':
-    'Fitxer de regles d\'idioma de sortida del model generat a {{path}}',
+    "Fitxer de regles d'idioma de sortida del model generat a {{path}}",
   'Please restart the application for the changes to take effect.':
     "Reinicieu l'aplicació perquè els canvis tinguin efecte.",
   'Failed to generate LLM output language rule file: {{error}}':
-    'Error en generar el fitxer de regles d\'idioma de sortida del model: {{error}}',
+    "Error en generar el fitxer de regles d'idioma de sortida del model: {{error}}",
   'Invalid command. Available subcommands:':
     'Ordre no vàlida. Subordres disponibles:',
   'Available subcommands:': 'Subordres disponibles:',
   'To request additional UI language packs, please open an issue on GitHub.':
-    'Per sol·licitar paquets d\'idioma addicionals per a la interfície, obriu una incidència a GitHub.',
+    "Per sol·licitar paquets d'idioma addicionals per a la interfície, obriu una incidència a GitHub.",
   'Available options:': 'Opcions disponibles:',
-  'Set UI language to {{name}}': "Establir l'idioma de la interfície a {{name}}",
+  'Set UI language to {{name}}':
+    "Establir l'idioma de la interfície a {{name}}",
 
   // ============================================================================
   // Ordres - Mode d'aprovació
@@ -873,7 +887,7 @@ export default {
   'Plan mode - Analyze only, do not modify files or execute commands':
     'Mode de planificació - Analitzar només, sense modificar fitxers ni executar ordres',
   'Default mode - Require approval for file edits or shell commands':
-    "Mode per defecte - Requerir aprovació per a edicions de fitxers o ordres shell",
+    'Mode per defecte - Requerir aprovació per a edicions de fitxers o ordres shell',
   'Auto-edit mode - Automatically approve file edits':
     "Mode d'edició automàtica - Aprovar automàticament les edicions de fitxers",
   'YOLO mode - Automatically approve all tools':
@@ -887,13 +901,14 @@ export default {
     "Error en canviar el mode d'aprovació: {{error}}",
   'Apply to current session only (temporary)':
     'Aplicar només a la sessió actual (temporal)',
-  'Persist for this project/workspace': "Persistir per a aquest projecte/espai de treball",
+  'Persist for this project/workspace':
+    'Persistir per a aquest projecte/espai de treball',
   'Persist for this user on this machine':
-    "Persistir per a aquest usuari en aquesta màquina",
+    'Persistir per a aquest usuari en aquesta màquina',
   'Analyze only, do not modify files or execute commands':
     'Analitzar només, sense modificar fitxers ni executar ordres',
   'Require approval for file edits or shell commands':
-    "Requerir aprovació per a edicions de fitxers o ordres shell",
+    'Requerir aprovació per a edicions de fitxers o ordres shell',
   'Automatically approve file edits':
     'Aprovar automàticament les edicions de fitxers',
   'Automatically approve all tools': 'Aprovar automàticament totes les eines',
@@ -907,14 +922,16 @@ export default {
   // ============================================================================
   'Commands for interacting with memory.':
     'Ordres per interactuar amb la memòria.',
-  'Show the current memory contents.': 'Mostrar el contingut actual de la memòria.',
+  'Show the current memory contents.':
+    'Mostrar el contingut actual de la memòria.',
   'Show project-level memory contents.':
     'Mostrar el contingut de la memòria a nivell de projecte.',
   'Show global memory contents.': 'Mostrar el contingut de la memòria global.',
   'Add content to project-level memory.':
     'Afegir contingut a la memòria a nivell de projecte.',
   'Add content to global memory.': 'Afegir contingut a la memòria global.',
-  'Refresh the memory from the source.': 'Actualitzar la memòria des de la font.',
+  'Refresh the memory from the source.':
+    'Actualitzar la memòria des de la font.',
   'Usage: /memory add --project <text to remember>':
     'Ús: /memory add --project <text a recordar>',
   'Usage: /memory add --global <text to remember>':
@@ -927,9 +944,9 @@ export default {
     'Contingut actual de la memòria de {{count}} fitxer(s):',
   'Memory is currently empty.': 'La memòria és buida actualment.',
   'Project memory file not found or is currently empty.':
-    'El fitxer de memòria del projecte no s\'ha trobat o és buit.',
+    "El fitxer de memòria del projecte no s'ha trobat o és buit.",
   'Global memory file not found or is currently empty.':
-    'El fitxer de memòria global no s\'ha trobat o és buit.',
+    "El fitxer de memòria global no s'ha trobat o és buit.",
   'Global memory is currently empty.': 'La memòria global és buida actualment.',
   'Global memory content:\n\n---\n{{content}}\n---':
     'Contingut de la memòria global:\n\n---\n{{content}}\n---',
@@ -959,17 +976,18 @@ export default {
   'No managed auto-memory entries matched: {{query}}':
     'Cap entrada de memòria automàtica gestionada coincideix: {{query}}',
   'Show managed auto-memory status.':
-    'Mostrar l\'estat de la memòria automàtica gestionada.',
+    "Mostrar l'estat de la memòria automàtica gestionada.",
   'Run managed auto-memory extraction for the current session.':
     "Executar l'extracció de memòria automàtica gestionada per a la sessió actual.",
   'Managed auto-memory root: {{root}}':
     'Arrel de la memòria automàtica gestionada: {{root}}',
   'Managed auto-memory topics:': 'Temes de la memòria automàtica gestionada:',
-  'No extraction cursor found yet.': "Encara no s'ha trobat cap cursor d'extracció.",
+  'No extraction cursor found yet.':
+    "Encara no s'ha trobat cap cursor d'extracció.",
   'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
     'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}',
   'No chat client available to extract memory.':
-    "No hi ha cap client de xat disponible per extreure memòria.",
+    'No hi ha cap client de xat disponible per extreure memòria.',
   'Managed auto-memory extraction is already running.':
     "L'extracció de memòria automàtica gestionada ja s'està executant.",
   'Managed auto-memory extraction found no new durable memories.':
@@ -1001,7 +1019,8 @@ export default {
     'Servidors MCP amb autenticació OAuth:',
   'Use /mcp auth <server-name> to authenticate.':
     'Useu /mcp auth <nom-del-servidor> per autenticar-vos.',
-  "MCP server '{{name}}' not found.": "El servidor MCP '{{name}}' no s'ha trobat.",
+  "MCP server '{{name}}' not found.":
+    "El servidor MCP '{{name}}' no s'ha trobat.",
   "Successfully authenticated and refreshed tools for '{{name}}'.":
     "S'ha autenticat correctament i s'han actualitzat les eines per a '{{name}}'.",
   "Failed to authenticate with MCP server '{{name}}': {{error}}":
@@ -1011,10 +1030,10 @@ export default {
   "Discovered {{count}} tool(s) from '{{name}}'.":
     "S'han descobert {{count}} eina(es) de '{{name}}'.",
   'Authentication complete. Returning to server details...':
-    "Autenticació completada. Tornant als detalls del servidor...",
+    'Autenticació completada. Tornant als detalls del servidor...',
   'Authentication successful.': 'Autenticació correcta.',
   'If the browser does not open, copy and paste this URL into your browser:':
-    'Si el navegador no s\'obre, copieu i enganxeu aquesta URL al vostre navegador:',
+    "Si el navegador no s'obre, copieu i enganxeu aquesta URL al vostre navegador:",
   'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.':
     'Assegureu-vos de copiar la URL COMPLETA - pot ocupar múltiples línies.',
 
@@ -1064,7 +1083,7 @@ export default {
   connected: 'connectat',
   connecting: 'connectant',
   disconnected: 'desconnectat',
-  'User MCPs': 'MCPs de l\'usuari',
+  'User MCPs': "MCPs de l'usuari",
   'Project MCPs': 'MCPs del projecte',
   'Extension MCPs': 'MCPs de les extensions',
   server: 'servidor',
@@ -1072,12 +1091,12 @@ export default {
   'Add MCP servers to your settings to get started.':
     'Afegiu servidors MCP a la configuració per començar.',
   'Run qwen --debug to see error logs':
-    'Executeu qwen --debug per veure els registres d\'errors',
+    "Executeu qwen --debug per veure els registres d'errors",
   'OAuth Authentication': 'Autenticació OAuth',
   'Press Enter to start authentication, Esc to go back':
     "Premeu Retorn per iniciar l'autenticació, Esc per tornar enrere",
   'Authenticating... Please complete the login in your browser.':
-    'Autenticant... Completeu l\'inici de sessió al vostre navegador.',
+    "Autenticant... Completeu l'inici de sessió al vostre navegador.",
   'Press c to copy the authorization URL to your clipboard.':
     "Premeu c per copiar la URL d'autorització al porta-retalls.",
   'Copy request sent to your terminal. If paste is empty, copy the URL above manually.':
@@ -1125,7 +1144,7 @@ export default {
   'List saved conversation checkpoints':
     'Llistar els punts de control desats de la conversa',
   'No saved conversation checkpoints found.':
-    'No s\'han trobat punts de control de conversa desats.',
+    "No s'han trobat punts de control de conversa desats.",
   'List of saved conversations:': 'Llista de converses desades:',
   'Note: Newest last, oldest first':
     'Nota: Les més recents al final, les més antigues al principi',
@@ -1142,27 +1161,27 @@ export default {
   "Error: No checkpoint found with tag '{{tag}}'.":
     "Error: No s'ha trobat cap punt de control amb l'etiqueta '{{tag}}'.",
   'Resume a conversation from a checkpoint. Usage: /chat resume <tag>':
-    'Reprendre una conversa des d\'un punt de control. Ús: /chat resume <etiqueta>',
+    "Reprendre una conversa des d'un punt de control. Ús: /chat resume <etiqueta>",
   'Missing tag. Usage: /chat resume <tag>':
     'Etiqueta absent. Ús: /chat resume <etiqueta>',
   'No saved checkpoint found with tag: {{tag}}.':
-    'No s\'ha trobat cap punt de control desat amb l\'etiqueta: {{tag}}.',
+    "No s'ha trobat cap punt de control desat amb l'etiqueta: {{tag}}.",
   'A checkpoint with the tag {{tag}} already exists. Do you want to overwrite it?':
-    'Ja existeix un punt de control amb l\'etiqueta {{tag}}. Voleu sobreescriure\'l?',
+    "Ja existeix un punt de control amb l'etiqueta {{tag}}. Voleu sobreescriure'l?",
   'No chat client available to save conversation.':
     'No hi ha cap client de xat disponible per desar la conversa.',
   'Conversation checkpoint saved with tag: {{tag}}.':
-    'Punt de control de conversa desat amb l\'etiqueta: {{tag}}.',
-  'No conversation found to save.': 'No s\'ha trobat cap conversa per desar.',
+    "Punt de control de conversa desat amb l'etiqueta: {{tag}}.",
+  'No conversation found to save.': "No s'ha trobat cap conversa per desar.",
   'No chat client available to share conversation.':
     'No hi ha cap client de xat disponible per compartir la conversa.',
   'Invalid file format. Only .md and .json are supported.':
     'Format de fitxer no vàlid. Només es suporten .md i .json.',
   'Error sharing conversation: {{error}}':
     'Error en compartir la conversa: {{error}}',
-  'Conversation shared to {{filePath}}':
-    'Conversa compartida a {{filePath}}',
-  'No conversation found to share.': 'No s\'ha trobat cap conversa per compartir.',
+  'Conversation shared to {{filePath}}': 'Conversa compartida a {{filePath}}',
+  'No conversation found to share.':
+    "No s'ha trobat cap conversa per compartir.",
   'Share the current conversation to a markdown or json file. Usage: /chat share <file>':
     'Compartir la conversa actual a un fitxer markdown o json. Ús: /chat share <fitxer>',
 
@@ -1174,9 +1193,9 @@ export default {
   'No chat client available to generate summary.':
     'No hi ha cap client de xat disponible per generar el resum.',
   'Already generating summary, wait for previous request to complete':
-    'Ja s\'està generant el resum, espereu que acabi la sol·licitud anterior',
+    "Ja s'està generant el resum, espereu que acabi la sol·licitud anterior",
   'No conversation found to summarize.':
-    'No s\'ha trobat cap conversa per resumir.',
+    "No s'ha trobat cap conversa per resumir.",
   'Failed to generate project context summary: {{error}}':
     'Error en generar el resum del context del projecte: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -1184,7 +1203,7 @@ export default {
   'Saving project summary...': 'Desant el resum del projecte...',
   'Generating project summary...': 'Generant el resum del projecte...',
   'Failed to generate summary - no text content received from LLM response':
-    'Error en generar el resum - no s\'ha rebut contingut de text de la resposta del model',
+    "Error en generar el resum - no s'ha rebut contingut de text de la resposta del model",
 
   // ============================================================================
   // Ordres - Model
@@ -1195,8 +1214,7 @@ export default {
     'Establir un model més lleuger per a suggeriments de missatges i execució especulativa',
   'Content generator configuration not available.':
     'Configuració del generador de contingut no disponible.',
-  'Authentication type not available.':
-    "Tipus d'autenticació no disponible.",
+  'Authentication type not available.': "Tipus d'autenticació no disponible.",
   'No models available for the current authentication type ({{authType}}).':
     "No hi ha models disponibles per al tipus d'autenticació actual ({{authType}}).",
 
@@ -1212,16 +1230,15 @@ export default {
   // Ordres - Comprimir
   // ============================================================================
   'Already compressing, wait for previous request to complete':
-    'Ja s\'està comprimint, espereu que acabi la sol·licitud anterior',
-  'Failed to compress chat history.':
-    "Error en comprimir l'historial del xat.",
+    "Ja s'està comprimint, espereu que acabi la sol·licitud anterior",
+  'Failed to compress chat history.': "Error en comprimir l'historial del xat.",
   'Failed to compress chat history: {{error}}':
     "Error en comprimir l'historial del xat: {{error}}",
   'Compressing chat history': "Comprimint l'historial del xat",
   'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.':
     "L'historial del xat s'ha comprimit de {{originalTokens}} a {{newTokens}} tokens.",
   'Compression was not beneficial for this history size.':
-    'La compressió no ha estat beneficiosa per a aquesta mida d\'historial.',
+    "La compressió no ha estat beneficiosa per a aquesta mida d'historial.",
   'Chat history compression did not reduce size. This may indicate issues with the compression prompt.':
     "La compressió de l'historial del xat no ha reduït la mida. Això pot indicar problemes amb el missatge de compressió.",
   'Could not compress chat history due to a token counting error.':
@@ -1239,11 +1256,11 @@ export default {
     "L'ordre /directory add no és compatible en perfils d'entorn aïllat restrictius. En el seu lloc, useu --include-directories en iniciar la sessió.",
   "Error adding '{{path}}': {{error}}": "Error en afegir '{{path}}': {{error}}",
   'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}':
-    'S\'han afegit correctament els fitxers QWEN.md dels directoris següents si n\'hi ha:\n- {{directories}}',
+    "S'han afegit correctament els fitxers QWEN.md dels directoris següents si n'hi ha:\n- {{directories}}",
   'Error refreshing memory: {{error}}':
     'Error en actualitzar la memòria: {{error}}',
   'Successfully added directories:\n- {{directories}}':
-    'S\'han afegit correctament els directoris:\n- {{directories}}',
+    "S'han afegit correctament els directoris:\n- {{directories}}",
   'Current workspace directories:\n{{directories}}':
     "Directoris actuals de l'espai de treball:\n{{directories}}",
 
@@ -1271,9 +1288,10 @@ export default {
     "Deseu i tanqueu l'editor extern per continuar",
   'Apply this change?': 'Aplicar aquest canvi?',
   'Yes, allow always': 'Sí, permetre sempre',
-  'Modify with external editor': "Modificar amb editor extern",
+  'Modify with external editor': 'Modificar amb editor extern',
   'No, suggest changes (esc)': 'No, suggerir canvis (esc)',
-  "Allow execution of: '{{command}}'?": "Permetre l'execució de: '{{command}}'?",
+  "Allow execution of: '{{command}}'?":
+    "Permetre l'execució de: '{{command}}'?",
   'Yes, allow always ...': 'Sí, permetre sempre...',
   'Always allow in this project': 'Permetre sempre en aquest projecte',
   'Always allow {{action}} in this project':
@@ -1288,7 +1306,7 @@ export default {
   'No, keep planning (esc)': 'No, seguir planificant (esc)',
   'URLs to fetch:': 'URLs a recuperar:',
   'MCP Server: {{server}}': 'Servidor MCP: {{server}}',
-  'Tool: {{tool}}': "Eina: {{tool}}",
+  'Tool: {{tool}}': 'Eina: {{tool}}',
   'Allow execution of MCP tool "{{tool}}" from server "{{server}}"?':
     'Permetre l\'execució de l\'eina MCP "{{tool}}" del servidor "{{server}}"?',
   'Yes, always allow tool "{{tool}}" from server "{{server}}"':
@@ -1307,7 +1325,7 @@ export default {
   // Diàlegs - Quota Pro
   // ============================================================================
   'Pro quota limit reached for {{model}}.':
-    'S\'ha assolit el límit de quota Pro per a {{model}}.',
+    "S'ha assolit el límit de quota Pro per a {{model}}.",
   'Change auth (executes the /auth command)':
     "Canviar autenticació (executa l'ordre /auth)",
   'Continue with {{model}}': 'Continuar amb {{model}}',
@@ -1333,9 +1351,9 @@ export default {
   // Diàlegs - Autenticació
   // ============================================================================
   'Get started': 'Comencem',
-  'Select Authentication Method': "Seleccionar el mètode d'autenticació",
+  'Select Authentication Method': "Seleccioneu el mètode d'autenticació",
   'OpenAI API key is required to use OpenAI authentication.':
-    'Cal una clau API d\'OpenAI per usar l\'autenticació d\'OpenAI.',
+    "Cal una clau API d'OpenAI per usar l'autenticació d'OpenAI.",
   'You must select an auth method to proceed. Press Ctrl+C again to exit.':
     "Cal seleccionar un mètode d'autenticació per continuar. Premeu Ctrl+C de nou per sortir.",
   'Terms of Services and Privacy Notice':
@@ -1348,12 +1366,12 @@ export default {
   'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.':
     'El nivell gratuït de Qwen OAuth es va descontinuar el 15-04-2026. Seleccioneu Coding Plan o clau API en el seu lloc.',
   'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.':
-    'El nivell gratuït de Qwen OAuth es va descontinuar el 15-04-2026. Seleccioneu un model d\'un altre proveïdor o executeu /auth per canviar.',
+    "El nivell gratuït de Qwen OAuth es va descontinuar el 15-04-2026. Seleccioneu un model d'un altre proveïdor o executeu /auth per canviar.",
   '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n':
     '\n⚠ El nivell gratuït de Qwen OAuth es va descontinuar el 15-04-2026. Seleccioneu una altra opció.\n',
   'Paid · Up to 6,000 requests/5 hrs · All Alibaba Cloud Coding Plan Models':
-    'De pagament · Fins a 6.000 sol·licituds/5 h · Tots els models del Coding Plan d\'Alibaba Cloud',
-  'Alibaba Cloud Coding Plan': 'Coding Plan d\'Alibaba Cloud',
+    "De pagament · Fins a 6.000 sol·licituds/5 h · Tots els models del Coding Plan d'Alibaba Cloud",
+  'Alibaba Cloud Coding Plan': "Coding Plan d'Alibaba Cloud",
   'Bring your own API key': 'Porteu la vostra pròpia clau API',
   'API-KEY': 'API-KEY',
   'Use coding plan credentials or your own api-keys/providers.':
@@ -1368,8 +1386,7 @@ export default {
   'Qwen OAuth authentication cancelled.':
     "L'autenticació Qwen OAuth s'ha cancel·lat.",
   'Qwen OAuth Authentication': 'Autenticació Qwen OAuth',
-  'Please visit this URL to authorize:':
-    'Visiteu aquesta URL per autoritzar:',
+  'Please visit this URL to authorize:': 'Visiteu aquesta URL per autoritzar:',
   'Or scan the QR code below:': 'O escanegeu el codi QR de sota:',
   'Waiting for authorization': "Esperant l'autorització",
   'Time remaining:': 'Temps restant:',
@@ -1383,15 +1400,15 @@ export default {
   'Waiting for Qwen OAuth authentication...':
     "Esperant l'autenticació Qwen OAuth...",
   'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.':
-    'Nota: La vostra clau API existent a settings.json no s\'esborrarà en usar Qwen OAuth. Podeu tornar a l\'autenticació d\'OpenAI més endavant si cal.',
+    "Nota: La vostra clau API existent a settings.json no s'esborrarà en usar Qwen OAuth. Podeu tornar a l'autenticació d'OpenAI més endavant si cal.",
   'Note: Your existing API key will not be cleared when using Qwen OAuth.':
-    'Nota: La vostra clau API existent no s\'esborrarà en usar Qwen OAuth.',
+    "Nota: La vostra clau API existent no s'esborrarà en usar Qwen OAuth.",
   'Authentication timed out. Please try again.':
     "L'autenticació ha expirat. Torneu-ho a intentar.",
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
     "Esperant l'autenticació... (Premeu ESC o CTRL+C per cancel·lar)",
   'Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the {{envKeyHint}} environment variable.':
-    'Manca la clau API per a l\'autenticació compatible amb OpenAI. Establiu settings.security.auth.apiKey o la variable d\'entorn {{envKeyHint}}.',
+    "Manca la clau API per a l'autenticació compatible amb OpenAI. Establiu settings.security.auth.apiKey o la variable d'entorn {{envKeyHint}}.",
   '{{envKeyHint}} environment variable not found.':
     "La variable d'entorn {{envKeyHint}} no s'ha trobat.",
   '{{envKeyHint}} environment variable not found. Please set it in your .env file or environment variables.':
@@ -1399,21 +1416,22 @@ export default {
   '{{envKeyHint}} environment variable not found (or set settings.security.auth.apiKey). Please set it in your .env file or environment variables.':
     "La variable d'entorn {{envKeyHint}} no s'ha trobat (o establiu settings.security.auth.apiKey). Establiu-la al fitxer .env o a les variables d'entorn.",
   'Missing API key for OpenAI-compatible auth. Set the {{envKeyHint}} environment variable.':
-    'Manca la clau API per a l\'autenticació compatible amb OpenAI. Establiu la variable d\'entorn {{envKeyHint}}.',
+    "Manca la clau API per a l'autenticació compatible amb OpenAI. Establiu la variable d'entorn {{envKeyHint}}.",
   'Anthropic provider missing required baseUrl in modelProviders[].baseUrl.':
     'El proveïdor Anthropic no té la baseUrl obligatòria a modelProviders[].baseUrl.',
   'ANTHROPIC_BASE_URL environment variable not found.':
     "La variable d'entorn ANTHROPIC_BASE_URL no s'ha trobat.",
-  'Invalid auth method selected.': "S'ha seleccionat un mètode d'autenticació no vàlid.",
+  'Invalid auth method selected.':
+    "S'ha seleccionat un mètode d'autenticació no vàlid.",
   'Failed to authenticate. Message: {{message}}':
-    "Error en autenticar-se. Missatge: {{message}}",
+    'Error en autenticar-se. Missatge: {{message}}',
   'Authenticated successfully with {{authType}} credentials.':
     "S'ha autenticat correctament amb les credencials {{authType}}.",
   'Invalid QWEN_DEFAULT_AUTH_TYPE value: "{{value}}". Valid values are: {{validValues}}':
     'Valor de QWEN_DEFAULT_AUTH_TYPE no vàlid: "{{value}}". Els valors vàlids són: {{validValues}}',
-  'OpenAI Configuration Required': 'Configuració d\'OpenAI necessària',
+  'OpenAI Configuration Required': "Configuració d'OpenAI necessària",
   'Please enter your OpenAI configuration. You can get an API key from':
-    'Introduïu la vostra configuració d\'OpenAI. Podeu obtenir una clau API de',
+    "Introduïu la vostra configuració d'OpenAI. Podeu obtenir una clau API de",
   'API Key:': 'Clau API:',
   'Invalid credentials: {{errorMessage}}':
     'Credencials no vàlides: {{errorMessage}}',
@@ -1427,7 +1445,7 @@ export default {
   'Select Model': 'Seleccionar model',
   '(Press Esc to close)': '(Premeu Esc per tancar)',
   'Current (effective) configuration': 'Configuració actual (efectiva)',
-  AuthType: 'Tipus d\'autenticació',
+  AuthType: "Tipus d'autenticació",
   'API Key': 'Clau API',
   unset: 'no establert',
   '(default)': '(per defecte)',
@@ -1454,12 +1472,13 @@ export default {
   // ============================================================================
   // Diàlegs - Permisos
   // ============================================================================
-  'Manage folder trust settings': 'Gestionar la configuració de confiança de carpetes',
+  'Manage folder trust settings':
+    'Gestionar la configuració de confiança de carpetes',
   'Manage permission rules': 'Gestionar les regles de permisos',
   Allow: 'Permetre',
   Ask: 'Preguntar',
   Deny: 'Denegar',
-  Workspace: "Espai de treball",
+  Workspace: 'Espai de treball',
   "Qwen Code won't ask before using allowed tools.":
     "Qwen Code no preguntarà abans d'usar les eines permeses.",
   'Qwen Code will ask before using these tools.':
@@ -1483,12 +1502,12 @@ export default {
   'Add a new rule…': 'Afegir una nova regla…',
   'Add {{type}} permission rule': 'Afegir una regla de permís {{type}}',
   'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
-    'Les regles de permisos són un nom d\'eina, seguit opcionalment d\'un especificador entre parèntesis.',
+    "Les regles de permisos són un nom d'eina, seguit opcionalment d'un especificador entre parèntesis.",
   'e.g.,': 'p. ex.,',
   or: 'o',
   'Enter permission rule…': 'Introduïu la regla de permís…',
   'Enter to submit · Esc to cancel': 'Retorn per enviar · Esc per cancel·lar',
-  'Where should this rule be saved?': 'On s\'ha de desar aquesta regla?',
+  'Where should this rule be saved?': "On s'ha de desar aquesta regla?",
   'Enter to confirm · Esc to cancel':
     'Retorn per confirmar · Esc per cancel·lar',
   'Delete {{type}} rule?': 'Eliminar la regla {{type}}?',
@@ -1547,9 +1566,9 @@ export default {
   // ============================================================================
   'No MCP servers configured.': 'No hi ha servidors MCP configurats.',
   '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ Els servidors MCP s\'estan iniciant ({{count}} inicialitzant)...',
+    "⏳ Els servidors MCP s'estan iniciant ({{count}} inicialitzant)...",
   'Note: First startup may take longer. Tool availability will update automatically.':
-    'Nota: El primer inici pot tardar més. La disponibilitat de les eines s\'actualitzarà automàticament.',
+    "Nota: El primer inici pot tardar més. La disponibilitat de les eines s'actualitzarà automàticament.",
   'Configured MCP servers:': 'Servidors MCP configurats:',
   Ready: 'Preparat',
   'Starting... (first startup may take longer)':
@@ -1595,7 +1614,7 @@ export default {
   'Start a fresh idea with /clear or /new; the previous session stays available in history.':
     "Comenceu una idea nova amb /clear o /new; la sessió anterior segueix disponible a l'historial.",
   'Use /bug to submit issues to the maintainers when something goes off.':
-    "Useu /bug per enviar incidències als mantenidors quan alguna cosa vagi malament.",
+    'Useu /bug per enviar incidències als mantenidors quan alguna cosa vagi malament.',
   'Switch auth type quickly with /auth.':
     "Canvieu ràpidament el tipus d'autenticació amb /auth.",
   'You can run any shell commands from Qwen Code using ! (e.g. !ls).':
@@ -1609,9 +1628,9 @@ export default {
   'You can switch permission mode quickly with Tab or /approval-mode.':
     'Podeu canviar ràpidament el mode de permisos amb Tab o /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
-    "Proveu /insight per generar insights personalitzats a partir del vostre historial de xat.",
+    'Proveu /insight per generar insights personalitzats a partir del vostre historial de xat.',
   'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    "Premeu Ctrl+O per canviar el mode compacte — amagueu la sortida de les eines i el pensament per a una vista més neta.",
+    'Premeu Ctrl+O per canviar el mode compacte — amagueu la sortida de les eines i el pensament per a una vista més neta.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Afegiu un fitxer QWEN.md per donar a Qwen Code un context persistent del projecte.',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1628,9 +1647,9 @@ export default {
   // ============================================================================
   'Agent powering down. Goodbye!': "L'agent s'apaga. Fins aviat!",
   'To continue this session, run': 'Per continuar aquesta sessió, executeu',
-  'Interaction Summary': "Resum de la interacció",
+  'Interaction Summary': 'Resum de la interacció',
   'Session ID:': 'ID de sessió:',
-  'Tool Calls:': "Crides a eines:",
+  'Tool Calls:': 'Crides a eines:',
   'Success Rate:': "Taxa d'èxit:",
   'User Agreement:': "Acord de l'usuari:",
   reviewed: 'revisades',
@@ -1638,7 +1657,7 @@ export default {
   Performance: 'Rendiment',
   'Wall Time:': 'Temps real:',
   'Agent Active:': 'Agent actiu:',
-  'API Time:': 'Temps de l\'API:',
+  'API Time:': "Temps de l'API:",
   'Tool Time:': "Temps d'eines:",
   'Session Stats': 'Estadístiques de la sessió',
   'Model Usage': 'Ús del model',
@@ -1649,7 +1668,7 @@ export default {
   'of input tokens were served from the cache, reducing costs.':
     "dels tokens d'entrada s'han servit des de la memòria cau, reduint els costos.",
   'Tip: For a full token breakdown, run `/stats model`.':
-    "Consell: Per a un desglossament complet de tokens, executeu `/stats model`.",
+    'Consell: Per a un desglossament complet de tokens, executeu `/stats model`.',
   'Model Stats For Nerds': 'Estadístiques del model per a nerds',
   'Tool Stats For Nerds': "Estadístiques d'eines per a nerds",
   Metric: 'Mètrica',
@@ -1685,14 +1704,15 @@ export default {
   // Migració del format d'ordres
   // ============================================================================
   'Command Format Migration': "Migració del format d'ordres",
-  'Found {{count}} TOML command file:': "S'ha trobat {{count}} fitxer d'ordres TOML:",
+  'Found {{count}} TOML command file:':
+    "S'ha trobat {{count}} fitxer d'ordres TOML:",
   'Found {{count}} TOML command files:':
     "S'han trobat {{count}} fitxers d'ordres TOML:",
   '... and {{count}} more': '... i {{count}} més',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'El format TOML és obsolet. Voleu migrar-los al format Markdown?',
   '(Backups will be created and original files will be preserved)':
-    "(Es crearan còpies de seguretat i els fitxers originals es conservaran)",
+    '(Es crearan còpies de seguretat i els fitxers originals es conservaran)',
 
   // ============================================================================
   // Frases de càrrega
@@ -1724,20 +1744,20 @@ export default {
     'Desenredant les xarxes neuronals...',
     'Compilant la brillantor...',
     'Carregant gràcia.exe...',
-    "Invocant el núvol de saviesa...",
+    'Invocant el núvol de saviesa...',
     'Preparant una resposta enginyosa...',
-    "Un segon, estic depurant la realitat...",
-    "Confusionant les opcions...",
+    'Un segon, estic depurant la realitat...',
+    'Confusionant les opcions...',
     'Afinant les freqüències còsmiques...',
     'Elaborant una resposta digna de la vostra paciència...',
-    "Compilant els 1 i els 0...",
+    'Compilant els 1 i els 0...',
     'Resolent dependències... i crisis existencials...',
     'Desfragmentant records... tant de RAM com personals...',
     "Reiniciant el mòdul de l'humor...",
     'Emmagatzemant en memòria cau el necessari (principalment mems de gats)...',
     'Optimitzant per a velocitat ridícula',
     'Intercanviant bits... que no ho sàpiguen els bytes...',
-    "Recollint brossa... torno de seguida...",
+    'Recollint brossa... torno de seguida...',
     'Assemblant les entrelectures...',
     'Convertint cafè en codi...',
     'Actualitzant la sintaxi de la realitat...',
@@ -1751,10 +1771,10 @@ export default {
     'Alineant les estrelles per a una resposta òptima...',
     'I tots ho diem...',
     'Carregant la propera gran idea...',
-    "Un moment, estic en plena forma...",
+    'Un moment, estic en plena forma...',
     'Preparant-me per impressionar-vos amb brillantor...',
     'Un moment, polit el meu enginy...',
-    "Aguanteu, estic creant una obra mestra...",
+    'Aguanteu, estic creant una obra mestra...',
     "Un moment, depurant l'univers...",
     'Un moment, alineant els píxels...',
     "Un segon, optimitzant l'humor...",
@@ -1776,7 +1796,7 @@ export default {
     'Polint els píxels...',
     'Buscant un acudit per a la pantalla de càrrega...',
     'Distreu-vos amb aquesta frase enginyosa...',
-    "Gairebé a punt... probablement...",
+    'Gairebé a punt... probablement...',
     'Els nostres hàmsters treballen tan ràpid com poden...',
     'Fent un petó al Cloudy...',
     'Fent festes al gat...',
@@ -1792,44 +1812,44 @@ export default {
     'Pensant com fer això més enginyós...',
     'Hmm... deixeu-me pensar...',
     "Com s'anomena un peix sense ulls? Un pix...",
-    "Per què va el computador al terapeuta? Tenia massa bytes...",
-    "Per què als programadors no els agrada la natura? Té massa errors...",
-    "Per què els programadors prefereixen el mode fosc? Perquè la llum atrau errors...",
-    "Per què el desenvolupador es va quedar sense diners? Perquè va esgotar tota la memòria cau...",
-    "Què pots fer amb un llapis trencat? Res, no té punta...",
+    'Per què va el computador al terapeuta? Tenia massa bytes...',
+    'Per què als programadors no els agrada la natura? Té massa errors...',
+    'Per què els programadors prefereixen el mode fosc? Perquè la llum atrau errors...',
+    'Per què el desenvolupador es va quedar sense diners? Perquè va esgotar tota la memòria cau...',
+    'Què pots fer amb un llapis trencat? Res, no té punta...',
     'Aplicant manteniment percussiu...',
     "Buscant l'orientació correcta de l'USB...",
     'Assegurant que el fum màgic quedi dins dels cables...',
     'Intentant sortir del Vim...',
-    "Girant la roda del hàmster...",
-    "Això no és un error, és una característica no documentada...",
-    "Endavant.",
-    "Tornaré... amb una resposta.",
-    "El meu altre procés és una TARDIS...",
-    "Comuniant amb l'esperit de la màquina...",
+    'Girant la roda del hàmster...',
+    'Això no és un error, és una característica no documentada...',
+    'Endavant.',
+    'Tornaré... amb una resposta.',
+    'El meu altre procés és una TARDIS...',
+    'Posant oli als engranatges...',
     'Deixant que els pensaments macerin...',
-    "Acabo de recordar on he deixat les claus...",
-    'Ponderant l\'orbe...',
-    "He vist coses que no creuríeu... com un usuari que llegeix els missatges de càrrega.",
+    'Acabo de recordar on he deixat les claus...',
+    "Ponderant l'orbe...",
+    'He vist coses que no creuríeu... com un usuari que llegeix els missatges de càrrega.',
     'Iniciant la mirada pensativa...',
     "Quin és el berenar preferit d'un computador? Xips micro.",
-    "Per què els programadors de Java porten ulleres? Perquè no veuen en C#.",
-    "Carregant el làser... piu piu!",
-    "Dividint per zero... és broma!",
-    "Buscant un supervisor adult... és a dir, processant.",
-    "Fent que faci bip bup.",
-    "Emmarcant... perquè fins i tot les IAs necessiten un moment.",
-    "Entrellaçant partícules quàntiques per a una resposta més ràpida...",
-    "Polint el crom... dels algorismes.",
-    "No esteu entretinguts? (Hi estem treballant!)",
-    "Invocant els follets del codi... per ajudar, és clar.",
-    "Esperant que acabi el so del mòdem de marcació...",
+    'Per què els programadors de Java porten ulleres? Perquè no veuen en C#.',
+    'Carregant el làser... piu piu!',
+    'Dividint per zero... és broma!',
+    'Buscant un supervisor adult... és a dir, processant.',
+    'Fent que faci bip bup.',
+    'Emmarcant... perquè fins i tot les IAs necessiten un moment.',
+    'Entrellaçant partícules quàntiques per a una resposta més ràpida...',
+    'Polint el crom... dels algorismes.',
+    'No esteu entretinguts? (Hi estem treballant!)',
+    'Invocant els follets del codi... per ajudar, és clar.',
+    'Esperant que acabi el so del mòdem de marcació...',
     "Recalibrant el mesurament de l'humor.",
-    "La meva altra pantalla de càrrega és fins i tot més divertida.",
-    "Estic bastant segur que hi ha un gat caminant per algun teclat...",
-    "Millorant... Millorant... Encara carregant.",
+    'La meva altra pantalla de càrrega és fins i tot més divertida.',
+    'Estic bastant segur que hi ha un gat caminant per algun teclat...',
+    'Millorant... Millorant... Encara carregant.',
     "No és un error, és una característica... d'aquesta pantalla de càrrega.",
-    "Heu provat apagar-ho i tornar-lo a encendre? (La pantalla de càrrega, no jo.)",
+    'Heu provat apagar-ho i tornar-lo a encendre? (La pantalla de càrrega, no jo.)',
     'Construint piló addicionals...',
   ],
 
@@ -1853,7 +1873,7 @@ export default {
   'The TOML format for commands is being deprecated in favor of Markdown format.':
     "El format TOML per a ordres s'està fent obsolet en favor del format Markdown.",
   'Markdown format is more readable and easier to edit.':
-    'El format Markdown és més llegible i fàcil d\'editar.',
+    "El format Markdown és més llegible i fàcil d'editar.",
   'You can migrate these files automatically using:':
     'Podeu migrar aquests fitxers automàticament usant:',
   'Or manually convert each file:': 'O convertiu cada fitxer manualment:',
@@ -1863,10 +1883,12 @@ export default {
     'Markdown: capçalera YAML + contingut',
   'The migration tool will:': "L'eina de migració farà:",
   'Convert TOML files to Markdown': 'Convertir fitxers TOML a Markdown',
-  'Create backups of original files': 'Crear còpies de seguretat dels fitxers originals',
-  'Preserve all command functionality': "Preservar tota la funcionalitat de les ordres",
+  'Create backups of original files':
+    'Crear còpies de seguretat dels fitxers originals',
+  'Preserve all command functionality':
+    'Preservar tota la funcionalitat de les ordres',
   'TOML format will continue to work for now, but migration is recommended.':
-    "El format TOML seguirà funcionant de moment, però es recomana la migració.",
+    'El format TOML seguirà funcionant de moment, però es recomana la migració.',
 
   // ============================================================================
   // Extensions - Ordre d'explorar
@@ -1874,15 +1896,15 @@ export default {
   'Open extensions page in your browser':
     "Obrir la pàgina d'extensions al vostre navegador",
   'Unknown extensions source: {{source}}.':
-    'Font d\'extensions desconeguda: {{source}}.',
+    "Font d'extensions desconeguda: {{source}}.",
   'Would open extensions page in your browser: {{url}} (skipped in test environment)':
-    'Obriria la pàgina d\'extensions al vostre navegador: {{url}} (omès en entorn de proves)',
+    "Obriria la pàgina d'extensions al vostre navegador: {{url}} (omès en entorn de proves)",
   'View available extensions at {{url}}':
     'Veure les extensions disponibles a {{url}}',
   'Opening extensions page in your browser: {{url}}':
     "Obrint la pàgina d'extensions al vostre navegador: {{url}}",
   'Failed to open browser. Check out the extensions gallery at {{url}}':
-    'Error en obrir el navegador. Visiteu la galeria d\'extensions a {{url}}',
+    "Error en obrir el navegador. Visiteu la galeria d'extensions a {{url}}",
 
   // ============================================================================
   // Reintents / Límit de velocitat
@@ -1891,8 +1913,9 @@ export default {
   'Retrying in {{seconds}} seconds… (attempt {{attempt}}/{{maxRetries}})':
     'Reintentant en {{seconds}} segons… (intent {{attempt}}/{{maxRetries}})',
   'Press Ctrl+Y to retry': 'Premeu Ctrl+Y per reintentar',
-  'No failed request to retry.': 'No hi ha cap sol·licitud fallida per reintentar.',
-  'to retry last request': 'per reintentar l\'última sol·licitud',
+  'No failed request to retry.':
+    'No hi ha cap sol·licitud fallida per reintentar.',
+  'to retry last request': "per reintentar l'última sol·licitud",
 
   // ============================================================================
   // Autenticació del Coding Plan
@@ -1903,13 +1926,13 @@ export default {
   'You can get your Coding Plan API key here':
     'Podeu obtenir la vostra clau API del Coding Plan aquí',
   'API key is stored in settings.env. You can migrate it to a .env file for better security.':
-    'La clau API s\'emmagatzema a settings.env. Podeu migrar-la a un fitxer .env per una millor seguretat.',
+    "La clau API s'emmagatzema a settings.env. Podeu migrar-la a un fitxer .env per una millor seguretat.",
   'New model configurations are available for Alibaba Cloud Coding Plan. Update now?':
-    'Hi ha noves configuracions de model disponibles per al Coding Plan d\'Alibaba Cloud. Actualitzeu ara?',
+    "Hi ha noves configuracions de model disponibles per al Coding Plan d'Alibaba Cloud. Actualitzeu ara?",
   'Coding Plan configuration updated successfully. New models are now available.':
-    'La configuració del Coding Plan s\'ha actualitzat correctament. Ara hi ha nous models disponibles.',
+    "La configuració del Coding Plan s'ha actualitzat correctament. Ara hi ha nous models disponibles.",
   'Coding Plan API key not found. Please re-authenticate with Coding Plan.':
-    'No s\'ha trobat la clau API del Coding Plan. Torneu a autenticar-vos amb el Coding Plan.',
+    "No s'ha trobat la clau API del Coding Plan. Torneu a autenticar-vos amb el Coding Plan.",
   'Failed to update Coding Plan configuration: {{message}}':
     'Error en actualitzar la configuració del Coding Plan: {{message}}',
 
@@ -1926,11 +1949,12 @@ export default {
   // ============================================================================
   'Coding Plan': 'Coding Plan',
   "Paste your api key of ModelStudio Coding Plan and you're all set!":
-    "Enganxeu la vostra clau API del Coding Plan de ModelStudio i ja esteu llest!",
+    'Enganxeu la vostra clau API del Coding Plan de ModelStudio i ja esteu llest!',
   Custom: 'Personalitzat',
   'More instructions about configuring `modelProviders` manually.':
     'Més instruccions sobre la configuració manual de `modelProviders`.',
-  'Select API-KEY configuration mode:': 'Seleccioneu el mode de configuració de la clau API:',
+  'Select API-KEY configuration mode:':
+    'Seleccioneu el mode de configuració de la clau API:',
   '(Press Escape to go back)': '(Premeu Escape per tornar enrere)',
   '(Press Enter to submit, Escape to cancel)':
     '(Premeu Retorn per enviar, Escape per cancel·lar)',
@@ -1947,7 +1971,7 @@ export default {
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     'La configuració de {{region}} s\'ha actualitzat correctament. El model ha canviat a "{{model}}".',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
-    'S\'ha autenticat correctament amb {{region}}. La clau API i les configuracions del model s\'han desat a settings.json (amb còpia de seguretat).',
+    "S'ha autenticat correctament amb {{region}}. La clau API i les configuracions del model s'han desat a settings.json (amb còpia de seguretat).",
 
   // ============================================================================
   // Component d'ús del context
@@ -1960,7 +1984,8 @@ export default {
   'Use /compress or /clear': 'Useu /compress o /clear',
   'No API response yet. Send a message to see actual usage.':
     "Encara no hi ha cap resposta de l'API. Envieu un missatge per veure l'ús real.",
-  'Estimated pre-conversation overhead': 'Càrrega estimada prèvia a la conversa',
+  'Estimated pre-conversation overhead':
+    'Càrrega estimada prèvia a la conversa',
   'Context window': 'Finestra de context',
   tokens: 'tokens',
   Used: 'Usat',
@@ -1974,7 +1999,7 @@ export default {
   Skills: 'Habilitats',
   Messages: 'Missatges',
   'Show context window usage breakdown.':
-    'Mostrar el desglossament de l\'ús de la finestra de context.',
+    "Mostrar el desglossament de l'ús de la finestra de context.",
   'Run /context detail for per-item breakdown.':
     'Executeu /context detail per a un desglossament per element.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
@@ -1982,9 +2007,9 @@ export default {
   'body loaded': 'cos carregat',
   memory: 'memòria',
   '{{region}} configuration updated successfully.':
-    'La configuració de {{region}} s\'ha actualitzat correctament.',
+    "La configuració de {{region}} s'ha actualitzat correctament.",
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
-    'S\'ha autenticat correctament amb {{region}}. La clau API i les configuracions del model s\'han desat a settings.json.',
+    "S'ha autenticat correctament amb {{region}}. La clau API i les configuracions del model s'han desat a settings.json.",
   'Tip: Use /model to switch between available Coding Plan models.':
     'Consell: Useu /model per canviar entre els models del Coding Plan disponibles.',
 
@@ -1999,14 +2024,16 @@ export default {
     "L'usuari ha declinat respondre les preguntes.",
   'User has provided the following answers:':
     "L'usuari ha proporcionat les respostes següents:",
-  'Failed to process user answers:': "Error en processar les respostes de l'usuari:",
+  'Failed to process user answers:':
+    "Error en processar les respostes de l'usuari:",
   'Type something...': 'Escriviu alguna cosa...',
   Submit: 'Enviar',
   'Submit answers': 'Enviar respostes',
   Cancel: 'Cancel·lar',
   'Your answers:': 'Les vostres respostes:',
   '(not answered)': '(sense resposta)',
-  'Ready to submit your answers?': 'Preparats per enviar les vostres respostes?',
+  'Ready to submit your answers?':
+    'Preparats per enviar les vostres respostes?',
   '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
     '↑/↓: Navegar | ←/→: Canviar pestanyes | Retorn: Seleccionar',
   '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
@@ -2028,27 +2055,29 @@ export default {
     'Regió per al Coding Plan (china/global)',
   'API key for Coding Plan': 'Clau API per al Coding Plan',
   'Show current authentication status': "Mostrar l'estat d'autenticació actual",
-  'Authentication completed successfully.': "L'autenticació s'ha completat correctament.",
+  'Authentication completed successfully.':
+    "L'autenticació s'ha completat correctament.",
   'Starting Qwen OAuth authentication...':
     "Iniciant l'autenticació Qwen OAuth...",
   'Successfully authenticated with Qwen OAuth.':
     "S'ha autenticat correctament amb Qwen OAuth.",
   'Failed to authenticate with Qwen OAuth: {{error}}':
-    "Error en autenticar-se amb Qwen OAuth: {{error}}",
+    'Error en autenticar-se amb Qwen OAuth: {{error}}',
   'Processing Alibaba Cloud Coding Plan authentication...':
     "Processant l'autenticació del Coding Plan d'Alibaba Cloud...",
   'Successfully authenticated with Alibaba Cloud Coding Plan.':
     "S'ha autenticat correctament amb el Coding Plan d'Alibaba Cloud.",
   'Failed to authenticate with Coding Plan: {{error}}':
-    "Error en autenticar-se amb el Coding Plan: {{error}}",
+    'Error en autenticar-se amb el Coding Plan: {{error}}',
   '中国 (China)': '中国 (China)',
   '阿里云百炼 (aliyun.com)': '阿里云百炼 (aliyun.com)',
   Global: 'Global',
   'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
   'Select region for Coding Plan:': 'Seleccioneu la regió per al Coding Plan:',
-  'Enter your Coding Plan API key: ': 'Introduïu la vostra clau API del Coding Plan: ',
+  'Enter your Coding Plan API key: ':
+    'Introduïu la vostra clau API del Coding Plan: ',
   'Select authentication method:': "Seleccioneu el mètode d'autenticació:",
-  '\n=== Authentication Status ===\n': '\n=== Estat d\'autenticació ===\n',
+  '\n=== Authentication Status ===\n': "\n=== Estat d'autenticació ===\n",
   '⚠️  No authentication method configured.\n':
     "⚠️  Cap mètode d'autenticació configurat.\n",
   'Run one of the following commands to get started:\n':
@@ -2060,8 +2089,7 @@ export default {
   'Or simply run:': 'O simplement executeu:',
   '  qwen auth                - Interactive authentication setup\n':
     "  qwen auth                - Configuració interactiva de l'autenticació\n",
-  '✓ Authentication Method: Qwen OAuth':
-    "✓ Mètode d'autenticació: Qwen OAuth",
+  '✓ Authentication Method: Qwen OAuth': "✓ Mètode d'autenticació: Qwen OAuth",
   '  Type: Free tier (discontinued 2026-04-15)':
     '  Tipus: Nivell gratuït (descontinuat el 15-04-2026)',
   '  Limit: No longer available': '  Límit: Ja no disponible',
@@ -2071,7 +2099,7 @@ export default {
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     "✓ Mètode d'autenticació: Coding Plan d'Alibaba Cloud",
   '中国 (China) - 阿里云百炼': '中国 (China) - 阿里云百炼',
-  'Global - Alibaba Cloud': "Global - Alibaba Cloud",
+  'Global - Alibaba Cloud': 'Global - Alibaba Cloud',
   '  Region: {{region}}': '  Regió: {{region}}',
   '  Current Model: {{model}}': '  Model actual: {{model}}',
   '  Config Version: {{version}}': '  Versió de configuració: {{version}}',
@@ -2092,9 +2120,10 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Useu les fletxes ↑ ↓ per navegar, Retorn per seleccionar, Ctrl+C per sortir)\n',
   compact: 'compacte',
-  'compact mode: on (Ctrl+O off)': 'mode compacte: activat (Ctrl+O per desactivar)',
+  'compact mode: on (Ctrl+O off)':
+    'mode compacte: activat (Ctrl+O per desactivar)',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    "Amagueu la sortida de les eines i el pensament per a una vista més neta (canvieu amb Ctrl+O).",
+    'Amagueu la sortida de les eines i el pensament per a una vista més neta (canvieu amb Ctrl+O).',
   'Press Ctrl+O to show full tool output':
     'Premeu Ctrl+O per mostrar la sortida completa de les eines',
 
