@@ -40,13 +40,11 @@ meaningful names. This command creates the mapping so users can later resume wit
 
 ### 4. Find the Current Session ID
 
-- **Preferred method**: Use the session ID from the **current runtime context** (the session this `/chat` command is running in). This is reliable and always refers to the conversation the user is actually using.
-- Directory: `~/.qwen/projects/<hash>/chats/`
+- **Method**: Find the most recently modified `.jsonl` file in `~/.qwen/projects/<hash>/chats/`. The filename (without `.jsonl` extension) IS the session UUID.
   - `<hash>` = SHA-256 of the full project root path (normalized to lowercase on Windows).
-- **Fallback method**: If the runtime context does not expose a session ID, find the most recently modified `.jsonl` file in the chats directory. In this case, **output a warning**: `"Warning: Using most recent session by file time. If this is wrong, resume the target session first."`
-- The filename (without `.jsonl` extension) IS the session UUID.
-- If no `.jsonl` file is found: output `"No active session found. Please start a conversation first."` and stop.
-- Why: Using `newest .jsonl` by mtime is unreliable when multiple sessions exist — it may bind the name to a different conversation than the one the user intends. Runtime context is authoritative; filesystem mtime is a last resort with an explicit warning.
+- ⚠️ **IMPORTANT**: If you think the wrong session might be saved, **resume the target session first**, then run `/chat -s`. This ensures you save the intended conversation.
+- If no `.jsonl` file is found: output `"No session found. Start a conversation first."` and stop.
+- **Why this method?**: File-based custom commands cannot access the active chat UUID directly. Using mtime is the only available approach. The explicit warning helps users correct mistakes.
 
 ### 5. Write to Index
 

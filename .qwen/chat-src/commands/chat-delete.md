@@ -26,13 +26,18 @@ Same rules as `chat-save.md` and `chat-resume.md`.
 - If `{{name}}` not found: display saved sessions list + usage hint, then stop.
 - Why: Users often typo session names; showing available sessions helps them correct the mistake.
 
-### 3. Ask for Confirmation
+### 3. Check for Force Flag
+
+- If user provided `-y` or `--force` after the name (e.g., `/chat -d name -y` or `/chat -d name --force`): **Skip confirmation and delete immediately.**
+- Otherwise: Continue to Step 4 for confirmation.
+
+### 4. Ask for Confirmation (if no -y/--force)
 
 - Prompt: `"Delete session '{{name}}'? (yes/no)"`
 - If response ≠ `"yes"`: stop.
-- Why: Name deletion is immediate and has no undo. Confirmation prevents accidental removal from typos.
+- Why: Name deletion is immediate and has no undo. Confirmation prevents accidental removal from typos. The `-y`/`--force` flag allows scripted deletions without interaction.
 
-### 4. Remove from Index
+### 5. Remove from Index
 
 - Delete the key `{{name}}` from the index object.
 - Write updated JSON back to `.qwen/chat-index.json`.

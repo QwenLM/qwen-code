@@ -98,7 +98,7 @@ Flags:
   -s, --save <name>   Save current session with a name
   -l, --list          List all saved sessions
   -r, --resume <name> Resume a saved session
-  -d, --delete <name> Delete a saved session from index
+  -d, --delete <name> Delete a saved session from index (-y/--force to skip confirmation)
   -h, --help          Show this help
 
 Examples:

@@ -1,6 +1,12 @@
 # chat-delete.md — Remove a Session Name from Index
 
-## Step 0: MUST Ask for Confirmation (DO NOT SKIP)
+If user provided `-y` or `--force` flag (e.g., `/chat -d name -y` or `/chat -d name --force`), **SKIP confirmation and delete immediately.** Otherwise, follow the confirmation flow below.
+
+## Step 0: Confirmation (skip if -y/--force provided)
+
+**If `-y` or `--force` was provided in the command, skip this step entirely and go directly to Step 1.**
+
+Otherwise, **MUST ask for confirmation:**
 
 **⚠️ CRITICAL: Before ANY deletion, you MUST:**
 

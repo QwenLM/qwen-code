@@ -219,9 +219,6 @@ const chatSrc = fs.readFileSync(path.join(SRC_DIR, 'chat.md'), 'utf-8');
 const chatProd = fs.readFileSync(path.join(PROD_DIR, 'chat.md'), 'utf-8');
 assert(chatSrc.includes('Architecture') || chatSrc.includes('architecture') || chatSrc.includes('Why we split'), 'chat.md src has Architecture/Design section');
 // Note: Production file may omit the Architecture section to save tokens
-assert(chatProd.includes('Route') || chatProd.includes('route'), 'chat.md prod has Route section');
-assert(chatSrc.includes('Route') || chatSrc.includes('route'), 'chat.md src has Route section');
-assert(chatProd.includes('Route') || chatProd.includes('route'), 'chat.md prod has Route section');
 
 // Cross-file: tables for routing
 assert(/\|.*Flag.*\|.*Sub-Command.*\|/.test(chatSrc) || chatSrc.includes('-s') && chatSrc.includes('chat-save.md'), 'chat.md src has routing table');

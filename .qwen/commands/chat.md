@@ -46,10 +46,15 @@ Split `{{args}}` by whitespace. First token = flag. Remaining = name.
 | `-s` / `--save`   | Go to Step 3                              | `chat-save.md`   |
 | `-l` / `--list`   | Read `chat-list.md` and execute its logic | `chat-list.md`   |
 | `-r` / `--resume` | Go to Step 3                              | `chat-resume.md` |
-| `-d` / `--delete` | Go to Step 3                              | `chat-delete.md` |
+| `-d` / `--delete` | Check for `-y`/`--force`, then route      | `chat-delete.md` |
 | `-h` / `--help`   | **Show Help immediately, STOP**           | —                |
 
 ### Step 3: Validate name (for `-s`, `-r`, `-d`)
+
+Extract the name (everything after the flag). Also check for `-y` or `--force` after the name.
+
+- Is name missing, empty, or whitespace only? → **Show Help immediately, STOP**
+- Is `-y` or `--force` present? → Set `forceDelete = true` for delete command
 
 Extract the name (everything after the flag).
 
@@ -97,6 +102,7 @@ Flags:
   -l, --list          List all saved sessions
   -r, --resume <name> Resume a saved session
   -d, --delete <name> Delete a saved session from index
+  -d, --delete <name> -y, --force   Delete without confirmation
   -h, --help          Show this help
 
 Examples:
