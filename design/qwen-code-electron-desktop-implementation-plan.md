@@ -22,6 +22,103 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Compact Conversation Text Containment
+
+Status: completed in iteration 52.
+
+Goal: keep long user prompts and echoed assistant prose contained in compact
+conversation viewports while removing the dead `.message-role` styling token
+that no renderer component emits anymore.
+
+User-visible value: long command names, generated identifiers, file-like text,
+or localized prose no longer create horizontal scroll or push the compact
+conversation away from the `home.jpg`-style first viewport.
+
+Expected files:
+
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/compact-conversation-text-containment.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- User and assistant message prose wraps long unbroken text inside the message
+  column at default and compact desktop sizes.
+- Compact CDP coverage includes a long prompt token that is echoed by the fake
+  ACP response and asserts user/assistant messages do not overflow.
+- No renderer component or stylesheet keeps active `.message-role` presentation
+  rules; existing negative DOM assertions still guard against reintroducing
+  visible role-label nodes.
+- Existing assistant actions, file chips, changed-file summary, command
+  approvals, ask-user prompts, review, settings, branch, terminal, and composer
+  workflows remain unchanged.
+- Default and compact Electron viewports keep the conversation dominant with no
+  console errors, failed local requests, or horizontal document overflow.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake project, send the normal command-approval
+  prompt, approve it, then send an ask-user-question prompt containing a long
+  unbroken token and inspect the echoed assistant response and original user
+  message at compact size before continuing the existing review, settings,
+  branch, terminal, and composer workflows.
+- E2E assertions: long prompt token is visible in both user and assistant
+  messages, message paragraphs use wrap-safe styles, message rectangles remain
+  inside the timeline width, no message/timeline/composer/terminal horizontal
+  overflow is recorded, and no `.message-role` nodes appear in conversation
+  surfaces.
+- Diagnostic artifacts: updated `compact-dense-conversation.json`,
+  `compact-dense-conversation.png`, `conversation-surface-fidelity.json`,
+  screenshots, Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained compact
+  typography and overflow handling; `electron-desktop-dev` for real Electron
+  CDP verification of renderer layout.
+
+Notes and decisions:
+
+- This is deliberately a containment pass, not a new visual direction. The
+  prototype still wins: keep prose visually quiet, avoid new cards, and make
+  dense compact windows robust.
+- The long-token prompt now runs through the ask-user-question branch after the
+  normal command-approval path. That keeps the default conversation bubble
+  density assertion focused on ordinary prompts while compact coverage still
+  proves wrapped user and assistant prose.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 22 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T19-03-10-359Z/`.
+- Key recorded metrics: `compact-dense-conversation.json` recorded
+  `promptTokenInAssistant: true`, `promptTokenInUser: true`,
+  `longAssistantMessageContained: true`, `userMessageContained: true`, all
+  compact overflow checks `false`, `overflowWrap: anywhere` for both long
+  message paragraphs, zero console errors, and zero failed local requests.
+
+Next work:
+
+- Add compact containment coverage for long localized labels in approval,
+  settings, branch, and terminal controls.
+- Consider extracting the long-message CDP assertions into a helper before
+  adding more text-containment cases.
+
 ### Slice: Conversation Role Label DOM Restraint
 
 Status: completed in iteration 51.

@@ -30,6 +30,11 @@ const compactWindowBounds = { width: 960, height: 640 };
 const longBranchName =
   'desktop-e2e/very-long-branch-name-for-topbar-overflow-check';
 const createdBranchName = 'desktop-e2e/new-branch-from-menu';
+const longPromptToken =
+  'desktopE2ELongPromptSegment_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' +
+  'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+const commandApprovalPrompt = 'Please exercise command approval.';
+const questionPrompt = `Please ask a user question. ${longPromptToken}`;
 
 const consoleErrors = [];
 const failedRequests = [];
@@ -78,7 +83,7 @@ async function main() {
 
   await clickButtonUntilText('Open Project', 'desktop-e2e-workspace');
   await assertProjectComposerReady('project-composer.json');
-  await setFieldByAriaLabel('Message', 'Please exercise command approval.');
+  await setFieldByAriaLabel('Message', commandApprovalPrompt);
   await clickButton('Send');
   await waitForText('Approve Once');
   await assertInlineCommandApproval('inline-command-approval.json');
@@ -91,7 +96,7 @@ async function main() {
   await saveScreenshot('assistant-message-actions.png');
   await assertConversationSurfaceFidelity('conversation-surface-fidelity.json');
   await saveScreenshot('conversation-surface-fidelity.png');
-  await setFieldByAriaLabel('Message', 'Please ask a user question.');
+  await setFieldByAriaLabel('Message', questionPrompt);
   await clickButton('Send');
   await waitForText('Pick the next review focus');
   await assertInlineQuestionCard('inline-question-card.json');
@@ -3569,6 +3574,7 @@ async function assertCompactDenseConversationLayout(fileName) {
 
   await waitForSelector('[data-testid="assistant-file-references"]');
   const snapshot = await evaluate(`(() => {
+    const promptToken = ${JSON.stringify(longPromptToken)};
     const numberFromPixel = (value) => {
       const number = Number.parseFloat(value);
       return Number.isFinite(number) ? number : 0;
@@ -3582,7 +3588,10 @@ async function assertCompactDenseConversationLayout(fileName) {
       return {
         fontSize: numberFromPixel(style.fontSize),
         lineHeight: numberFromPixel(style.lineHeight),
-        position: style.position
+        overflowWrap: style.overflowWrap,
+        position: style.position,
+        whiteSpace: style.whiteSpace,
+        wordBreak: style.wordBreak
       };
     };
     const rectFor = (element) => {
@@ -3612,6 +3621,14 @@ async function assertCompactDenseConversationLayout(fileName) {
       .find((candidate) =>
         candidate.innerText.includes('E2E fake ACP response received')
       );
+    const longAssistantMessage = [
+      ...document.querySelectorAll('[data-testid="assistant-message"]')
+    ].find((candidate) =>
+      candidate.innerText.includes('E2E fake ACP question response recorded') &&
+      candidate.innerText.includes(promptToken)
+    );
+    const userMessage = [...document.querySelectorAll('.chat-message-user')]
+      .find((candidate) => candidate.innerText.includes(promptToken));
     const timeline = document.querySelector('.chat-timeline');
     const summary = document.querySelector(
       '[data-testid="conversation-changes-summary"]'
@@ -3647,12 +3664,16 @@ async function assertCompactDenseConversationLayout(fileName) {
       '[data-testid="assistant-file-references"]'
     );
     const messageParagraph = message?.querySelector('p');
+    const longAssistantParagraph = longAssistantMessage?.querySelector('p');
+    const userParagraph = userMessage?.querySelector('p');
     const plan = document.querySelector('.chat-plan');
     const planItem = plan?.querySelector('li');
     const actions = message?.querySelector(
       '[data-testid="assistant-message-actions"]'
     );
     const messageRect = rectFor(message);
+    const longAssistantMessageRect = rectFor(longAssistantMessage);
+    const userMessageRect = rectFor(userMessage);
     const timelineRect = rectFor(timeline);
     const composerRect = rectFor(composer);
     const chipRects = fileReferences
@@ -3698,8 +3719,27 @@ async function assertCompactDenseConversationLayout(fileName) {
       messageLabel: message?.getAttribute('aria-label') ?? '',
       messageHasRoleLabel: Boolean(message?.querySelector('.message-role')),
       messageText: message?.innerText ?? '',
+      longAssistantMessage: longAssistantMessageRect,
+      longAssistantMessageLabel:
+        longAssistantMessage?.getAttribute('aria-label') ?? '',
+      longAssistantMessageHasRoleLabel: Boolean(
+        longAssistantMessage?.querySelector('.message-role')
+      ),
+      longAssistantMessageText: longAssistantMessage?.innerText ?? '',
+      userMessage: userMessageRect,
+      userMessageLabel: userMessage?.getAttribute('aria-label') ?? '',
+      userMessageHasRoleLabel: Boolean(
+        userMessage?.querySelector('.message-role')
+      ),
+      userMessageText: userMessage?.innerText ?? '',
       timelineText: timeline?.innerText ?? '',
       messageParagraphStyle: typeStyleFor(messageParagraph),
+      longAssistantParagraphStyle: typeStyleFor(longAssistantParagraph),
+      userParagraphStyle: typeStyleFor(userParagraph),
+      promptTokenInAssistant: Boolean(
+        longAssistantMessage?.innerText.includes(promptToken)
+      ),
+      promptTokenInUser: Boolean(userMessage?.innerText.includes(promptToken)),
       plan: rectFor(plan),
       planItemStyle: typeStyleFor(planItem),
       fileReferences: rectFor(fileReferences),
@@ -3742,6 +3782,11 @@ async function assertCompactDenseConversationLayout(fileName) {
         preScroll.timelineRect
       ),
       messageContained: isContained(messageRect, timelineRect),
+      longAssistantMessageContained: isContained(
+        longAssistantMessageRect,
+        timelineRect
+      ),
+      userMessageContained: isContained(userMessageRect, timelineRect),
       actionsContained: isContained(rectFor(actions), messageRect),
       composerContained: isContained(composerRect, timelineRect),
       terminalDocked: Boolean(
@@ -3754,6 +3799,8 @@ async function assertCompactDenseConversationLayout(fileName) {
         topbar: overflows(document.querySelector('[data-testid="workspace-topbar"]')),
         timeline: overflows(timeline),
         message: overflows(message),
+        longAssistantMessage: overflows(longAssistantMessage),
+        userMessage: overflows(userMessage),
         fileReferences: overflows(fileReferences),
         composer: overflows(composer),
         composerContext: overflows(document.querySelector('.composer-context')),
@@ -3789,6 +3836,8 @@ async function assertCompactDenseConversationLayout(fileName) {
     'chat',
     'timeline',
     'message',
+    'longAssistantMessage',
+    'userMessage',
     'fileReferences',
     'actions',
     'composer',
@@ -3800,10 +3849,17 @@ async function assertCompactDenseConversationLayout(fileName) {
     );
   }
 
-  if (!snapshot.messageParagraphStyle || !snapshot.planItemStyle) {
+  if (
+    !snapshot.messageParagraphStyle ||
+    !snapshot.longAssistantParagraphStyle ||
+    !snapshot.userParagraphStyle ||
+    !snapshot.planItemStyle
+  ) {
     throw new Error(
       `Compact conversation type metrics are missing: ${JSON.stringify({
         messageParagraphStyle: snapshot.messageParagraphStyle,
+        longAssistantParagraphStyle: snapshot.longAssistantParagraphStyle,
+        userParagraphStyle: snapshot.userParagraphStyle,
         planItemStyle: snapshot.planItemStyle,
       })}`,
     );
@@ -3853,6 +3909,54 @@ async function assertCompactDenseConversationLayout(fileName) {
 
   if (snapshot.messageHasRoleLabel) {
     throw new Error('Compact assistant message rendered a role-label node.');
+  }
+
+  if (snapshot.longAssistantMessageLabel !== 'Assistant message') {
+    throw new Error(
+      `Compact long assistant message is missing its accessible label: ${snapshot.longAssistantMessageLabel}`,
+    );
+  }
+
+  if (snapshot.longAssistantMessageHasRoleLabel) {
+    throw new Error(
+      'Compact long assistant message rendered a role-label node.',
+    );
+  }
+
+  if (snapshot.userMessageLabel !== 'User message') {
+    throw new Error(
+      `Compact user message is missing its accessible label: ${snapshot.userMessageLabel}`,
+    );
+  }
+
+  if (snapshot.userMessageHasRoleLabel) {
+    throw new Error('Compact user message rendered a role-label node.');
+  }
+
+  if (!snapshot.promptTokenInAssistant || !snapshot.promptTokenInUser) {
+    throw new Error(
+      `Compact long prompt token is missing from the conversation: ${JSON.stringify(
+        {
+          promptTokenInAssistant: snapshot.promptTokenInAssistant,
+          promptTokenInUser: snapshot.promptTokenInUser,
+          longAssistantMessageText: snapshot.longAssistantMessageText,
+          userMessageText: snapshot.userMessageText,
+        },
+      )}`,
+    );
+  }
+
+  for (const [name, style] of Object.entries({
+    assistant: snapshot.longAssistantParagraphStyle,
+    user: snapshot.userParagraphStyle,
+  })) {
+    if (style.overflowWrap !== 'anywhere') {
+      throw new Error(
+        `Compact ${name} message prose should wrap long tokens: ${JSON.stringify(
+          style,
+        )}`,
+      );
+    }
   }
 
   for (const roleText of [
@@ -4031,6 +4135,16 @@ async function assertCompactDenseConversationLayout(fileName) {
     throw new Error('Dense assistant message escaped the compact timeline.');
   }
 
+  if (!snapshot.longAssistantMessageContained) {
+    throw new Error(
+      'Dense long assistant message escaped the compact timeline.',
+    );
+  }
+
+  if (!snapshot.userMessageContained) {
+    throw new Error('Dense user message escaped the compact timeline.');
+  }
+
   if (!snapshot.actionsContained) {
     throw new Error('Assistant action row escaped the compact message.');
   }
@@ -4139,7 +4253,7 @@ async function assertRetryDrafted(fileName) {
     'utf8',
   );
 
-  if (snapshot.composerValue !== 'Please exercise command approval.') {
+  if (snapshot.composerValue !== commandApprovalPrompt) {
     throw new Error(
       `Retry should restore the last prompt into the composer: ${snapshot.composerValue}`,
     );

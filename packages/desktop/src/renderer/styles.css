@@ -111,8 +111,7 @@ summary:focus-visible {
   margin: 0;
 }
 
-.eyebrow,
-.message-role {
+.eyebrow {
   color: var(--muted);
   font-size: 10.5px;
   font-weight: 780;
@@ -1005,10 +1004,6 @@ summary:focus-visible {
   background: rgba(240, 182, 110, 0.1);
 }
 
-.chat-message-user .message-role {
-  display: none;
-}
-
 .chat-message-assistant {
   padding: 2px 0 0;
 }
@@ -1029,7 +1024,9 @@ summary:focus-visible {
   color: var(--text);
   font-size: 13px;
   line-height: 1.48;
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .message-file-references {
