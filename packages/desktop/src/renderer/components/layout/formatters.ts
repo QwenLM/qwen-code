@@ -4,10 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { DesktopProject } from '../../api/client.js';
+import type { DesktopGitDiff, DesktopProject } from '../../api/client.js';
 
 const MAX_SESSION_DISPLAY_TITLE_LENGTH = 52;
 const MAX_TOPBAR_BRANCH_LABEL_LENGTH = 30;
+
+export interface GitDiffStats {
+  additions: number;
+  deletions: number;
+  files: number;
+}
 
 export function formatGitStatus(status: DesktopProject['gitStatus']): string {
   if (!status.isRepository) {
@@ -44,6 +50,48 @@ export function formatGitStatusSummary(
   }
 
   return parts.length > 0 ? parts.join(' · ') : 'Dirty';
+}
+
+export function summarizeGitDiffStats(
+  gitDiff: DesktopGitDiff | null | undefined,
+): GitDiffStats | null {
+  const files = gitDiff?.files ?? [];
+  if (files.length === 0) {
+    return null;
+  }
+
+  const stats = files.reduce(
+    (totals, file) => {
+      const lines =
+        file.hunks.length > 0
+          ? file.hunks.flatMap((hunk) => hunk.lines)
+          : file.diff.split('\n');
+
+      for (const line of lines) {
+        if (line.startsWith('+++') || line.startsWith('---')) {
+          continue;
+        }
+
+        if (line.startsWith('+')) {
+          totals.additions += 1;
+        } else if (line.startsWith('-')) {
+          totals.deletions += 1;
+        }
+      }
+
+      return totals;
+    },
+    { additions: 0, deletions: 0 },
+  );
+
+  return {
+    ...stats,
+    files: files.length,
+  };
+}
+
+export function formatGitDiffStats(stats: GitDiffStats): string {
+  return `+${stats.additions} -${stats.deletions}`;
 }
 
 export function formatSessionDisplayTitle(

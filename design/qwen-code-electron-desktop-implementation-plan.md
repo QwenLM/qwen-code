@@ -22,6 +22,114 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Topbar Diff Stat Affordance
+
+Status: completed in iteration 58.
+
+Goal: make the topbar dirty-state affordance read like the `home.jpg`
+prototype by showing compact line-level diff counts (`+N -M`) when review diff
+data is available, while preserving full Git file-count details in
+accessibility metadata.
+
+User-visible value: the slim topbar communicates the size of pending code
+changes with the same quick-scan shape as the prototype instead of competing
+with the conversation through generic `dirty` text.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/TopBar.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/components/layout/formatters.ts`
+- `packages/desktop/src/renderer/App.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/topbar-diff-stat-affordance.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- When the active project has a loaded review diff, the topbar Git status
+  visible text shows compact additions/deletions such as `+2 -1`.
+- The full modified/staged/untracked breakdown remains in `title` and
+  `aria-label`; file-count fallback labels such as `2 dirty` remain available
+  when no diff is loaded.
+- Addition and deletion values use the existing success/danger color language
+  without introducing a new heavy pill or dashboard-style Git panel.
+- The review drawer badge, branch creation/switching, discard cancel, stage,
+  commit, refresh, composer, settings, and terminal workflows remain unchanged.
+- Default, compact, and review-open Electron viewports keep the topbar slim,
+  contained, and free of horizontal overflow.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake project with one modified tracked file and one
+  untracked file, inspect the topbar diff-stat affordance, create/switch
+  branches with dirty changes, cancel discard, stage and commit, and continue
+  the existing review, settings, terminal, model, and composer workflows.
+- E2E assertions: topbar visible Git status shows `+2 -1`, additions/deletions
+  have distinct diff stat styling, full Git status metadata remains present,
+  file-count review badge remains `2`, staged and committed states still
+  update, and no console errors or failed local requests are recorded.
+- Diagnostic artifacts: updated `topbar-context-fidelity.json`,
+  `topbar-context-fidelity.png`, branch result JSON, review screenshots,
+  Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for choosing the narrow
+  diff-stat slice; `frontend-design` for prototype-constrained topbar density
+  and color treatment; and `electron-desktop-dev` for real Electron CDP
+  verification of renderer behavior.
+
+Notes and decisions:
+
+- Use the already-loaded review diff as the source for line-level stats rather
+  than expanding the project Git status API in this slice. That keeps the
+  change scoped to first-viewport presentation while preserving file-count
+  fallbacks when diff data is not available yet.
+- Project switching now clears the loaded review diff before the next project's
+  diff loads, preventing stale line counts from appearing in the topbar during
+  project changes.
+- The real Electron harness previously waited for visible `2 staged` text from
+  the old topbar label. The staged-state assertion now checks review counts and
+  topbar metadata instead, matching the new prototype-style visible diff stat.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 27 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T20-09-47-255Z/`.
+- Key recorded metrics: `topbar-context-fidelity.json` recorded visible Git
+  status `+2 -1`, title and aria metadata containing
+  `1 modified · 0 staged · 1 untracked · Diff +2 -1`, distinct addition and
+  deletion colors, a 50 px topbar, no visible raw long branch, and no document
+  overflow. `review-stage-all-result.json` recorded topbar text `+2 -1` after
+  staging, metadata containing the staged breakdown plus `Diff +2 -1`, review
+  counts of modified `0`, staged `2`, untracked `0`, and the added file state.
+  `summary.json` recorded zero console errors and zero failed local requests.
+
+Next work:
+
+- Continue prototype fidelity by reducing the remaining topbar action chrome:
+  evaluate whether Refresh Git should move behind an overflow or review drawer
+  action now that the primary diff affordance is compact.
+- Add a project-switching CDP assertion for stale diff-stat prevention when
+  multiple recent projects are present.
+
 ### Slice: Topbar Context Meta Restraint
 
 Status: completed in iteration 57.

@@ -190,6 +190,7 @@ export function WorkspacePage({
           activeProject={activeProject}
           activeSessionTitle={activeSession?.title || null}
           activeView={workspaceView}
+          gitDiff={gitDiff}
           isReviewOpen={!isSettingsOpen && isReviewOpen}
           loadState={loadState}
           statusLabel={statusLabel}

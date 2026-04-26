@@ -5,12 +5,18 @@
  */
 
 import { useState, type FormEvent } from 'react';
-import type { DesktopGitBranch, DesktopProject } from '../../api/client.js';
+import type {
+  DesktopGitBranch,
+  DesktopGitDiff,
+  DesktopProject,
+} from '../../api/client.js';
 import {
+  formatGitDiffStats,
   formatGitStatus,
   formatGitStatusSummary,
   formatSessionDisplayTitle,
   formatTopbarBranchLabel,
+  summarizeGitDiffStats,
 } from './formatters.js';
 import {
   BranchIcon,
@@ -26,6 +32,7 @@ export function TopBar({
   activeProject,
   activeSessionTitle,
   activeView,
+  gitDiff,
   isReviewOpen,
   loadState,
   onCheckoutBranch,
@@ -40,6 +47,7 @@ export function TopBar({
   activeProject: DesktopProject | null;
   activeSessionTitle: string | null;
   activeView: 'chat' | 'settings';
+  gitDiff: DesktopGitDiff | null;
   isReviewOpen: boolean;
   loadState: LoadState;
   onCheckoutBranch: (branchName: string) => Promise<void>;
@@ -60,9 +68,22 @@ export function TopBar({
   const gitStatusTitle = activeProject
     ? formatGitStatus(activeProject.gitStatus)
     : 'No project';
-  const gitStatusLabel = activeProject
-    ? formatGitStatusSummary(activeProject.gitStatus)
-    : 'No project';
+  const diffStats = summarizeGitDiffStats(gitDiff);
+  const diffStatusLabel =
+    activeProject &&
+    !activeProject.gitStatus.clean &&
+    diffStats &&
+    (diffStats.additions > 0 || diffStats.deletions > 0)
+      ? formatGitDiffStats(diffStats)
+      : null;
+  const gitStatusLabel =
+    diffStatusLabel ??
+    (activeProject
+      ? formatGitStatusSummary(activeProject.gitStatus)
+      : 'No project');
+  const gitStatusMetadata = diffStatusLabel
+    ? `${gitStatusTitle} · Diff ${diffStatusLabel}`
+    : gitStatusTitle;
   const changedCount = activeProject ? getChangedCount(activeProject) : 0;
   const reviewLabel = isReviewOpen ? 'Close Changes' : 'Open Changes';
   const canSwitchBranch =
@@ -105,11 +126,18 @@ export function TopBar({
           />
           <span
             className="topbar-context-item topbar-git-status"
-            aria-label={`Git status ${gitStatusLabel}: ${gitStatusTitle}`}
+            aria-label={`Git status ${gitStatusLabel}: ${gitStatusMetadata}`}
             data-testid="topbar-git-status"
-            title={`Git status: ${gitStatusTitle}`}
+            title={`Git status: ${gitStatusMetadata}`}
           >
-            <span className="topbar-context-text">{gitStatusLabel}</span>
+            {diffStatusLabel && diffStats ? (
+              <span className="topbar-diff-stat" data-testid="topbar-diff-stat">
+                <span className="diff-addition">+{diffStats.additions}</span>{' '}
+                <span className="diff-deletion">-{diffStats.deletions}</span>
+              </span>
+            ) : (
+              <span className="topbar-context-text">{gitStatusLabel}</span>
+            )}
           </span>
         </div>
       </div>

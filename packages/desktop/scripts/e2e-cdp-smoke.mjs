@@ -168,9 +168,9 @@ async function main() {
         );
         return (
           !document.querySelector('[data-testid="discard-confirmation"]') &&
-          gitStatus?.textContent.trim() === '2 dirty' &&
+          gitStatus?.textContent.trim() === '+2 -1' &&
           gitStatus?.getAttribute('title') ===
-            'Git status: 1 modified · 0 staged · 1 untracked'
+            'Git status: 1 modified · 0 staged · 1 untracked · Diff +2 -1'
         );
       })()`),
     10_000,
@@ -185,8 +185,7 @@ async function main() {
   await clickButton('Add Comment');
   await waitForText('Review note from E2E');
   await clickButton('Stage All');
-  await waitForText('2 staged');
-  await waitForText('ADDED · 1 HUNK');
+  await assertReviewStageAllResult('review-stage-all-result.json');
   await setFieldByAriaLabel('Commit message', 'desktop e2e commit');
   await clickButton('Commit');
   await waitForText('No changes');
@@ -1434,6 +1433,7 @@ async function assertTopbarContextFidelity(fileName) {
       }
       const style = window.getComputedStyle(element);
       return {
+        color: style.color,
         backgroundAlpha: alphaFromColor(style.backgroundColor),
         borderTopWidth: Number.parseFloat(style.borderTopWidth),
         borderRightWidth: Number.parseFloat(style.borderRightWidth),
@@ -1462,6 +1462,9 @@ async function assertTopbarContextFidelity(fileName) {
       '[data-testid="topbar-branch-trigger"]'
     );
     const gitStatus = document.querySelector('[data-testid="topbar-git-status"]');
+    const diffStat = gitStatus?.querySelector('[data-testid="topbar-diff-stat"]');
+    const diffAddition = diffStat?.querySelector('.diff-addition');
+    const diffDeletion = diffStat?.querySelector('.diff-deletion');
     const runtimeStatus = document.querySelector(
       '[data-testid="topbar-runtime-status"]'
     );
@@ -1518,6 +1521,15 @@ async function assertTopbarContextFidelity(fileName) {
         title: gitStatus?.getAttribute('title') ?? '',
         ariaLabel: gitStatus?.getAttribute('aria-label') ?? '',
         rect: rectFor(gitStatus)
+      },
+      diffStat: {
+        text: diffStat?.textContent.trim() ?? '',
+        rect: rectFor(diffStat),
+        style: styleFor(diffStat),
+        additionText: diffAddition?.textContent.trim() ?? '',
+        deletionText: diffDeletion?.textContent.trim() ?? '',
+        additionStyle: styleFor(diffAddition),
+        deletionStyle: styleFor(diffDeletion)
       },
       actionRects,
       hasLegacyMeta: document.querySelector('.topbar-meta') !== null,
@@ -1598,13 +1610,27 @@ async function assertTopbarContextFidelity(fileName) {
   if (
     metrics.contextText.includes('modified ·') ||
     metrics.contextText.includes('untracked') ||
-    metrics.gitStatus.text !== '2 dirty' ||
+    metrics.gitStatus.text !== '+2 -1' ||
     !metrics.gitStatus.title.includes('1 modified · 0 staged · 1 untracked') ||
-    !metrics.gitStatus.ariaLabel.includes('1 modified · 0 staged · 1 untracked')
+    !metrics.gitStatus.title.includes('Diff +2 -1') ||
+    !metrics.gitStatus.ariaLabel.includes(
+      '1 modified · 0 staged · 1 untracked',
+    ) ||
+    !metrics.gitStatus.ariaLabel.includes('Diff +2 -1') ||
+    metrics.diffStat.text !== '+2 -1' ||
+    metrics.diffStat.additionText !== '+2' ||
+    metrics.diffStat.deletionText !== '-1' ||
+    !metrics.diffStat.additionStyle ||
+    !metrics.diffStat.deletionStyle ||
+    metrics.diffStat.additionStyle.color ===
+      metrics.diffStat.deletionStyle.color
   ) {
     throw new Error(
-      `Topbar Git status should be compact but preserve details: ${JSON.stringify(
-        metrics.gitStatus,
+      `Topbar Git status should expose compact diff stats and preserve details: ${JSON.stringify(
+        {
+          gitStatus: metrics.gitStatus,
+          diffStat: metrics.diffStat,
+        },
       )}`,
     );
   }
@@ -2140,8 +2166,11 @@ async function assertBranchCreateResult(fileName) {
   }
 
   if (
-    snapshot.ui.gitStatusText !== '2 dirty' ||
-    !snapshot.ui.gitStatusTitle.includes('1 modified · 0 staged · 1 untracked')
+    snapshot.ui.gitStatusText !== '+2 -1' ||
+    !snapshot.ui.gitStatusTitle.includes(
+      '1 modified · 0 staged · 1 untracked',
+    ) ||
+    !snapshot.ui.gitStatusTitle.includes('Diff +2 -1')
   ) {
     throw new Error(
       `Branch creation should preserve dirty status in the topbar: ${JSON.stringify(
@@ -2269,8 +2298,11 @@ async function assertBranchSwitchResult(fileName) {
   }
 
   if (
-    snapshot.ui.gitStatusText !== '2 dirty' ||
-    !snapshot.ui.gitStatusTitle.includes('1 modified · 0 staged · 1 untracked')
+    snapshot.ui.gitStatusText !== '+2 -1' ||
+    !snapshot.ui.gitStatusTitle.includes(
+      '1 modified · 0 staged · 1 untracked',
+    ) ||
+    !snapshot.ui.gitStatusTitle.includes('Diff +2 -1')
   ) {
     throw new Error(
       `Branch switch should preserve dirty status in the topbar: ${JSON.stringify(
@@ -5498,13 +5530,94 @@ async function assertDiscardConfirmation(fileName) {
     }
   }
 
-  if (
-    !/MODIFIED\s+1\s+STAGED\s+0\s+UNTRACKED\s+1/u.test(
-      snapshot.reviewText,
-    )
-  ) {
+  if (!/MODIFIED\s+1\s+STAGED\s+0\s+UNTRACKED\s+1/u.test(snapshot.reviewText)) {
     throw new Error(
       'Discard confirmation opened after the review counts already changed.',
+    );
+  }
+}
+
+async function assertReviewStageAllResult(fileName) {
+  await waitFor(
+    'review staged state after Stage All',
+    async () =>
+      evaluate(`(() => {
+        const review = document.querySelector('[data-testid="review-panel"]');
+        const gitStatus = document.querySelector(
+          '[data-testid="topbar-git-status"]'
+        );
+        const stats = Object.fromEntries(
+          [...(review?.querySelectorAll('.runtime-details-compact div') ?? [])]
+            .map((row) => [
+              row.querySelector('dt')?.textContent.trim() ?? '',
+              row.querySelector('dd')?.textContent.trim() ?? ''
+            ])
+        );
+        return (
+          stats.Modified === '0' &&
+          stats.Staged === '2' &&
+          stats.Untracked === '0' &&
+          gitStatus?.textContent.trim() === '+2 -1' &&
+          gitStatus?.getAttribute('title')?.includes(
+            '0 modified · 2 staged · 0 untracked'
+          ) === true &&
+          (review?.innerText ?? '').includes('ADDED · 1 HUNK')
+        );
+      })()`),
+    10_000,
+  );
+
+  const snapshot = await evaluate(`(() => {
+    const review = document.querySelector('[data-testid="review-panel"]');
+    const gitStatus = document.querySelector('[data-testid="topbar-git-status"]');
+    const stats = Object.fromEntries(
+      [...(review?.querySelectorAll('.runtime-details-compact div') ?? [])]
+        .map((row) => [
+          row.querySelector('dt')?.textContent.trim() ?? '',
+          row.querySelector('dd')?.textContent.trim() ?? ''
+        ])
+    );
+    return {
+      topbarText: gitStatus?.textContent.trim() ?? '',
+      topbarTitle: gitStatus?.getAttribute('title') ?? '',
+      topbarAriaLabel: gitStatus?.getAttribute('aria-label') ?? '',
+      stats,
+      reviewText: review?.innerText ?? ''
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (
+    snapshot.stats.Modified !== '0' ||
+    snapshot.stats.Staged !== '2' ||
+    snapshot.stats.Untracked !== '0'
+  ) {
+    throw new Error(
+      `Stage All did not update review counts: ${JSON.stringify(snapshot)}`,
+    );
+  }
+
+  if (
+    snapshot.topbarText !== '+2 -1' ||
+    !snapshot.topbarTitle.includes('0 modified · 2 staged · 0 untracked') ||
+    !snapshot.topbarTitle.includes('Diff +2 -1') ||
+    !snapshot.topbarAriaLabel.includes('0 modified · 2 staged · 0 untracked')
+  ) {
+    throw new Error(
+      `Stage All did not preserve topbar diff metadata: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (!snapshot.reviewText.includes('ADDED · 1 HUNK')) {
+    throw new Error(
+      `Stage All did not update changed-file states: ${snapshot.reviewText}`,
     );
   }
 }

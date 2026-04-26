@@ -638,6 +638,19 @@ summary:focus-visible {
   max-width: 118px;
 }
 
+.topbar-diff-stat {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+    monospace;
+  font-size: 10.5px;
+  font-weight: 820;
+  line-height: 15px;
+}
+
 .topbar-branch-menu {
   position: absolute;
   top: 24px;

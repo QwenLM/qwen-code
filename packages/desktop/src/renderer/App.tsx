@@ -414,6 +414,7 @@ export function App() {
         setActiveProjectId(project.id);
         setActiveSessionId(null);
         setIsDraftSession(false);
+        setGitDiff(null);
         pendingSocketActionRef.current = null;
         pendingPublishSessionRef.current = null;
         dispatchChat({ type: 'reset' });
@@ -445,6 +446,7 @@ export function App() {
     setActiveSessionId(null);
     setIsDraftSession(false);
     setMessageText('');
+    setGitDiff(null);
     pendingSocketActionRef.current = null;
     pendingPublishSessionRef.current = null;
     dispatchChat({ type: 'reset' });
