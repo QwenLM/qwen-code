@@ -22,6 +22,101 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: No-Project Composer Quiet State
+
+Status: completed in iteration 67.
+
+Goal: make the first-launch no-project composer feel like a quiet inactive
+task control instead of an amber warning/action state.
+
+User-visible value: users still get a clear `Open a project to start` reason,
+but the disabled composer no longer competes with the conversation canvas or
+suggests a risky warning; the send affordance only uses the blue action styling
+when it can actually send.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/no-project-composer-quiet-state.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The no-project empty-state label remains visible, compact, and anchored near
+  the composer.
+- The disabled composer reason remains present and accessible, but uses muted
+  neutral chrome instead of warning color and heavy pill emphasis.
+- Disabled send buttons use neutral inactive styling rather than the primary
+  blue gradient; active send styling remains unchanged when a message can send.
+- Composer project/branch/model/permission chips stay contained at the default
+  desktop viewport and compact viewport.
+- Existing composer-first thread creation, branch, review, settings, terminal,
+  model, relaunch, and compact viewport workflows remain unchanged.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, assert first-launch no-project composer styling and geometry,
+  then open projects and continue the existing composer, branch, review,
+  settings, terminal, model, relaunch, and compact viewport workflows.
+- E2E assertions: disabled composer reason is present, muted, compact, and
+  non-overflowing; disabled send action has no blue gradient and remains an
+  icon button; no console errors or failed local requests are recorded.
+- Diagnostic artifacts: updated `initial-layout.json`, `initial-workspace.png`,
+  Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` using the Ralph prompt and current
+  artifacts as the requirements source without blocking on a user question;
+  `frontend-design` with the prototype as the contract and the quiet inactive
+  state as the direction; `electron-desktop-dev` for renderer CSS/DOM changes
+  verified through the real Electron CDP harness.
+
+Notes and decisions:
+
+- This slice keeps the no-project composer disabled; composer-first creation
+  remains scoped to an active project.
+- The muted disabled reason still uses explicit text because the no-project
+  state needs a discoverable next action, but it is no longer styled as a
+  warning pill.
+- Disabled send buttons now use neutral inactive chrome globally, so the
+  primary blue send treatment is reserved for sendable composer states.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 28 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T22-05-13-907Z/`.
+- Key recorded metrics: `initial-layout.json` recorded the disabled composer
+  reason at 138.133 px wide, 22 px tall, 10.6 px / 620 weight, 0.56 text alpha,
+  0.035 background alpha, no overflow, and no background image. The disabled
+  Send button recorded `backgroundImage: none`, 0.055 background alpha, and
+  0.72 opacity. `summary.json` recorded zero console errors and zero failed
+  local requests.
+
+Next work:
+
+- Continue prototype fidelity by making the populated sidebar read more like
+  the grouped project/thread browser in `home.jpg`, especially when several
+  recent projects and threads are present.
+- Consider reducing the remaining no-project terminal strip prominence now that
+  the composer disabled state is quieter.
+
 ### Slice: First Viewport Chrome Restraint
 
 Status: completed in iteration 66.

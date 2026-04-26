@@ -869,6 +869,11 @@ describe('WorkspacePage', () => {
       'Start a task in example-workspace',
     );
     expect(renderedContainer.textContent).toContain('New thread');
+    expect(
+      renderedContainer.querySelector(
+        '[data-testid="composer-disabled-reason"]',
+      ),
+    ).toBeNull();
     expect(permissionMode).toBeInstanceOf(HTMLSelectElement);
     expect((permissionMode as HTMLSelectElement).disabled).toBe(true);
     expect(permissionMode?.getAttribute('title')).toBe(
@@ -1283,6 +1288,11 @@ describe('WorkspacePage', () => {
     expect(
       renderedContainer.querySelector('[data-testid="conversation-empty"]')
         ?.textContent,
+    ).toBe('Open a project to start');
+    expect(
+      renderedContainer.querySelector(
+        '[data-testid="composer-disabled-reason"]',
+      )?.textContent,
     ).toBe('Open a project to start');
     expect(renderedContainer.textContent).toContain('Open a project to start');
   });

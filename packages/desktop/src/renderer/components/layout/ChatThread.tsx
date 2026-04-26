@@ -216,7 +216,12 @@ export function ChatThread({
               <span className="composer-context-note">{notice}</span>
             ) : null}
             {disabledReason ? (
-              <span className="composer-disabled-reason">{disabledReason}</span>
+              <span
+                className="composer-disabled-reason"
+                data-testid="composer-disabled-reason"
+              >
+                {disabledReason}
+              </span>
             ) : null}
             {!activeSessionId && activeProject ? (
               <span className="composer-context-note">New thread</span>

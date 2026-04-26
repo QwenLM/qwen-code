@@ -1676,7 +1676,9 @@ summary:focus-visible {
 }
 
 .composer-disabled {
-  background: rgba(24, 29, 30, 0.62);
+  border-color: rgba(226, 232, 222, 0.075);
+  background: rgba(24, 29, 30, 0.48);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.14);
 }
 
 .composer-control-row,
@@ -1763,10 +1765,11 @@ summary:focus-visible {
 
 .composer-disabled-reason {
   max-width: 148px;
-  border-color: rgba(240, 182, 110, 0.36);
-  background: var(--warning-soft);
-  color: #f4d095;
+  border-color: rgba(226, 232, 222, 0.08);
+  background: rgba(238, 244, 239, 0.035);
+  color: rgba(225, 232, 228, 0.56);
   padding: 0 8px;
+  font-weight: 620;
 }
 
 .composer-select-label {
@@ -1895,6 +1898,14 @@ textarea:focus {
   box-shadow:
     0 10px 26px rgba(85, 166, 255, 0.32),
     inset 0 1px 0 rgba(255, 255, 255, 0.26);
+}
+
+.composer-send-button:disabled {
+  border-color: rgba(226, 232, 222, 0.11);
+  background: rgba(238, 244, 239, 0.055);
+  color: rgba(225, 232, 228, 0.44);
+  box-shadow: none;
+  opacity: 0.72;
 }
 
 .composer-send-button:not(:disabled):hover {

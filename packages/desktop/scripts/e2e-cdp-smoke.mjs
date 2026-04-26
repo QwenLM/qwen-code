@@ -992,9 +992,11 @@ async function assertRalphWorkspaceLayout(fileName) {
         color: style.color,
         colorAlpha: alphaFromColor(style.color),
         backgroundAlpha: alphaFromColor(style.backgroundColor),
+        backgroundImage: style.backgroundImage,
         fontSize: Number.parseFloat(style.fontSize),
         fontWeight: Number.parseFloat(style.fontWeight),
-        lineHeight: Number.parseFloat(style.lineHeight)
+        lineHeight: Number.parseFloat(style.lineHeight),
+        opacity: Number.parseFloat(style.opacity)
       };
     };
     const styleFor = (selector) =>
@@ -1009,7 +1011,9 @@ async function assertRalphWorkspaceLayout(fileName) {
       '[data-testid="conversation-empty"]'
     );
     const emptyStateLabel = emptyState?.firstElementChild ?? emptyState;
-    const disabledReason = document.querySelector('.composer-disabled-reason');
+    const disabledReason = document.querySelector(
+      '[data-testid="composer-disabled-reason"]'
+    );
 
     return {
       viewport: {
@@ -1049,6 +1053,15 @@ async function assertRalphWorkspaceLayout(fileName) {
         style: styleForElement(disabledReason),
         overflows: overflowsElement(disabledReason)
       },
+      composerActionButtons: [
+        ...document.querySelectorAll('.composer-actions button')
+      ].map((button) => ({
+        label: button.getAttribute('aria-label') || '',
+        disabled: button.disabled,
+        className: button.className,
+        rect: rectForElement(button),
+        style: styleForElement(button)
+      })),
       sidebarActionRows: [
         ...document.querySelectorAll('.sidebar-action-row')
       ].map((row) => ({
@@ -1163,11 +1176,32 @@ async function assertRalphWorkspaceLayout(fileName) {
       metrics.disabledComposerReason.overflows ||
       metrics.disabledComposerReason.rect.height > 24 ||
       metrics.disabledComposerReason.style.fontSize > 10.8 ||
-      metrics.disabledComposerReason.style.fontWeight > 680
+      metrics.disabledComposerReason.style.fontWeight > 640 ||
+      metrics.disabledComposerReason.style.colorAlpha > 0.62 ||
+      metrics.disabledComposerReason.style.backgroundAlpha > 0.08
     ) {
       throw new Error(
-        `Disabled composer reason should stay present and compact: ${JSON.stringify(
+        `Disabled composer reason should stay present, muted, and compact: ${JSON.stringify(
           metrics.disabledComposerReason,
+        )}`,
+      );
+    }
+
+    const disabledSend = metrics.composerActionButtons.find(
+      (button) => button.label === 'Send',
+    );
+    if (
+      !disabledSend ||
+      !disabledSend.disabled ||
+      !disabledSend.className.includes('composer-send-button') ||
+      !disabledSend.style ||
+      disabledSend.style.backgroundImage !== 'none' ||
+      disabledSend.style.backgroundAlpha > 0.08 ||
+      disabledSend.style.opacity < 0.68
+    ) {
+      throw new Error(
+        `Initial disabled send action should be neutral, not primary blue: ${JSON.stringify(
+          disabledSend,
         )}`,
       );
     }
