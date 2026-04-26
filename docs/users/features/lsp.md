@@ -148,6 +148,8 @@ For servers that use TCP or Unix socket transport:
 
 Qwen Code exposes LSP functionality through the unified `lsp` tool. Here are the available operations:
 
+For location-based operations (`goToDefinition`, `findReferences`, `hover`, `goToImplementation`, and `prepareCallHierarchy`), you can either provide an exact `filePath` + `line` + `character`, or provide `symbolName` and let Qwen Code resolve the symbol position through workspace symbol search first.
+
 ### Code Navigation
 
 #### Go to Definition
@@ -157,9 +159,8 @@ Find where a symbol is defined.
 ```
 Operation: goToDefinition
 Parameters:
-  - filePath: Path to the file
-  - line: Line number (1-based)
-  - character: Column number (1-based)
+  - filePath + line + character: Exact source position (1-based), or
+  - symbolName: Symbol name to resolve automatically
 ```
 
 #### Find References
@@ -169,9 +170,8 @@ Find all references to a symbol.
 ```
 Operation: findReferences
 Parameters:
-  - filePath: Path to the file
-  - line: Line number (1-based)
-  - character: Column number (1-based)
+  - filePath + line + character: Exact source position (1-based), or
+  - symbolName: Symbol name to resolve automatically
   - includeDeclaration: Include the declaration itself (optional)
 ```
 
@@ -182,9 +182,8 @@ Find implementations of an interface or abstract method.
 ```
 Operation: goToImplementation
 Parameters:
-  - filePath: Path to the file
-  - line: Line number (1-based)
-  - character: Column number (1-based)
+  - filePath + line + character: Exact source position (1-based), or
+  - symbolName: Symbol name to resolve automatically
 ```
 
 ### Symbol Information
@@ -196,9 +195,8 @@ Get documentation and type information for a symbol.
 ```
 Operation: hover
 Parameters:
-  - filePath: Path to the file
-  - line: Line number (1-based)
-  - character: Column number (1-based)
+  - filePath + line + character: Exact source position (1-based), or
+  - symbolName: Symbol name to resolve automatically
 ```
 
 #### Document Symbols
@@ -231,9 +229,8 @@ Get the call hierarchy item at a position.
 ```
 Operation: prepareCallHierarchy
 Parameters:
-  - filePath: Path to the file
-  - line: Line number (1-based)
-  - character: Column number (1-based)
+  - filePath + line + character: Exact source position (1-based), or
+  - symbolName: Symbol name to resolve automatically
 ```
 
 #### Incoming Calls

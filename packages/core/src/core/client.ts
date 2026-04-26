@@ -267,7 +267,6 @@ export class GeminiClient {
       userMemory,
       this.config.getModel(),
       appendSystemPrompt,
-      { lspEnabled: this.config.isLspEnabled() },
     );
   }
 

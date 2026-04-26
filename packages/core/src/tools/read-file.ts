@@ -211,13 +211,10 @@ export class ReadFileTool extends BaseDeclarativeTool<
   static readonly Name: string = ToolNames.READ_FILE;
 
   constructor(private config: Config) {
-    const lspNote = config.isLspEnabled()
-      ? ' Note: An LSP tool is available for code intelligence. For finding definitions, references, implementations, symbols, hover info, diagnostics, or call hierarchy, prefer the "lsp" tool over reading files manually.'
-      : '';
     super(
       ReadFileTool.Name,
       ToolDisplayNames.READ_FILE,
-      `Reads and returns the content of a specified file. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb). For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Max 20 pages per request. This tool can read Jupyter notebooks (.ipynb) and returns structured cell content with outputs.${lspNote}`,
+      `Reads and returns the content of a specified file. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb). For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Max 20 pages per request. This tool can read Jupyter notebooks (.ipynb) and returns structured cell content with outputs.`,
       Kind.Read,
       {
         properties: {
