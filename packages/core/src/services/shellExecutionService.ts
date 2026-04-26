@@ -329,6 +329,7 @@ export class ShellExecutionService {
     abortSignal: AbortSignal,
     shouldUseNodePty: boolean,
     shellExecutionConfig: ShellExecutionConfig,
+    options: { streamStdout?: boolean } = {},
   ): Promise<ShellExecutionHandle> {
     if (shouldUseNodePty) {
       const ptyInfo = await getPty();
@@ -353,6 +354,7 @@ export class ShellExecutionService {
       cwd,
       onOutputEvent,
       abortSignal,
+      options.streamStdout ?? false,
     );
   }
 
@@ -361,6 +363,7 @@ export class ShellExecutionService {
     cwd: string,
     onOutputEvent: (event: ShellOutputEvent) => void,
     abortSignal: AbortSignal,
+    streamStdout: boolean,
   ): ShellExecutionHandle {
     try {
       const isWindows = os.platform() === 'win32';
@@ -435,6 +438,15 @@ export class ShellExecutionService {
             } else {
               stderr += decodedChunk;
             }
+
+            // Push each chunk through to the consumer in streaming mode so
+            // long-running background commands (dev servers, watchers) don't
+            // accumulate output in memory until exit. Default mode (foreground)
+            // still emits the cleaned final blob in handleExit, preserving
+            // existing behavior for the in-line shell tool path.
+            if (streamStdout) {
+              onOutputEvent({ type: 'data', chunk: decodedChunk });
+            }
           }
         };
 
@@ -451,7 +463,9 @@ export class ShellExecutionService {
           const finalStrippedOutput = stripAnsi(combinedOutput).trim();
 
           if (isStreamingRawContent) {
-            if (finalStrippedOutput) {
+            // In streaming mode chunks were already emitted as they arrived;
+            // re-emitting the final blob would duplicate everything.
+            if (!streamStdout && finalStrippedOutput) {
               onOutputEvent({ type: 'data', chunk: finalStrippedOutput });
             }
           } else {

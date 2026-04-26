@@ -34,10 +34,10 @@ function statusLabel(entry: BackgroundShellEntry): string {
 }
 
 export const bashesCommand: SlashCommand = {
-  name: 'bashes',
-  altNames: ['shells'],
+  name: 'tasks',
+  altNames: ['bashes'],
   get description() {
-    return t('List background shells started via the shell tool');
+    return t('List and manage background tasks');
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,

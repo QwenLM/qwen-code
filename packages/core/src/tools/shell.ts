@@ -469,8 +469,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // unhelpful.
       },
       entryAc.signal,
+      // Background shells are non-interactive by design — no terminal to
+      // attach a PTY to, no human to type at it. Force the child_process
+      // path so we don't pull in node-pty for fire-and-forget commands.
       false,
       shellExecutionConfig ?? {},
+      // Stream stdout/stderr through to the output file as chunks arrive.
+      // Default child_process mode buffers until exit, which would leave
+      // dev-server / watcher output files empty until the process dies.
+      { streamStdout: true },
     );
 
     if (pid !== undefined) entry.pid = pid;
@@ -487,8 +494,21 @@ export class ShellToolInvocation extends BaseToolInvocation<
           if (registry.get(shellId)?.status === 'running') {
             registry.cancel(shellId, endTime);
           }
-        } else if (result.error) {
-          registry.fail(shellId, result.error.message, endTime);
+        } else if (
+          result.error ||
+          (result.exitCode !== null && result.exitCode !== 0) ||
+          result.signal !== null
+        ) {
+          // Non-zero exit / killed by signal / spawn error all count as failed.
+          // Treating them as `completed` would let `/bashes` (and any future
+          // model-facing notification) misreport a failed `npm test` or
+          // `false` command as a success.
+          const reason = result.error
+            ? result.error.message
+            : result.signal !== null
+              ? `terminated by signal ${result.signal}`
+              : `exited with code ${result.exitCode}`;
+          registry.fail(shellId, reason, endTime);
         } else {
           registry.complete(shellId, result.exitCode ?? 0, endTime);
         }
@@ -506,7 +526,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `id: ${shellId}\n` +
         pidLine +
         `output file: ${outputPath}\n` +
-        `Use the /bashes command to list and inspect background shells, or Read the output file directly.`,
+        `Use the /tasks command to list and inspect background shells, or Read the output file directly.`,
       returnDisplay: `Background shell ${shellId} started${pid !== undefined ? ` (pid ${pid})` : ''}.`,
     };
   }

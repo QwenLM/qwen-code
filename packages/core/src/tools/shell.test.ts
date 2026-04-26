@@ -296,6 +296,8 @@ describe('ShellTool', () => {
       const result = await invocation.execute(mockAbortSignal);
 
       // Spawn happens with the unwrapped command — no '&', no pgrep envelope.
+      // Streaming mode is on so dev-server / watcher output flushes to the
+      // output file as it arrives instead of buffering until exit.
       expect(mockShellExecutionService).toHaveBeenCalledWith(
         'npm start',
         '/test/dir',
@@ -303,6 +305,7 @@ describe('ShellTool', () => {
         expect.any(AbortSignal),
         false,
         {},
+        { streamStdout: true },
       );
       // Entry registered with the spawn pid.
       expect(registry.register).toHaveBeenCalledTimes(1);
@@ -378,6 +381,38 @@ describe('ShellTool', () => {
       expect(registry.complete).not.toHaveBeenCalled();
     });
 
+    it('settles a background entry as failed on non-zero exit code (no error object)', async () => {
+      const registry = mockConfig.getBackgroundShellRegistry();
+      const invocation = shellTool.build({
+        command: 'false',
+        is_background: true,
+      });
+      await invocation.execute(mockAbortSignal);
+      const entry = (registry.register as Mock).mock.calls[0][0];
+
+      // ShellExecutionService reports a clean non-zero exit (no error object,
+      // no signal) — historically this got bucketed as `completed`, which
+      // misreported a failed `npm test` / `false` as a success.
+      resolveExecutionPromise({
+        rawOutput: Buffer.from(''),
+        output: '',
+        exitCode: 1,
+        signal: null,
+        error: null,
+        aborted: false,
+        pid: 12345,
+        executionMethod: 'child_process',
+      });
+      await new Promise((r) => setImmediate(r));
+
+      expect(registry.fail).toHaveBeenCalledWith(
+        entry.shellId,
+        expect.stringContaining('exited with code 1'),
+        expect.any(Number),
+      );
+      expect(registry.complete).not.toHaveBeenCalled();
+    });
+
     it('settles a background entry as cancelled when the abort signal fires', async () => {
       const registry = mockConfig.getBackgroundShellRegistry();
       const ac = new AbortController();
@@ -395,7 +430,7 @@ describe('ShellTool', () => {
         rawOutput: Buffer.from(''),
         output: '',
         exitCode: null,
-        signal: 'SIGTERM',
+        signal: null,
         error: null,
         aborted: true,
         pid: 12345,
