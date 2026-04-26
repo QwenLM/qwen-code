@@ -151,6 +151,22 @@ describe('DefaultAppLayout', () => {
     expect(output).toContain('Composer');
   });
 
+  it('renders sticky todo list while responding', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      streamingState: StreamingState.Responding,
+    });
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('StickyTodoList');
+    expect(output).toContain('Composer');
+  });
+
   it('does not render sticky todo list when feedback dialog is open', () => {
     mockedUseAgentViewState.mockReturnValue({
       activeView: 'main',

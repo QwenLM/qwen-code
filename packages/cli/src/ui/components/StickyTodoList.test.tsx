@@ -54,4 +54,23 @@ describe('StickyTodoList', () => {
       output.indexOf('Summarize results'),
     );
   });
+
+  it('limits visible items and shows an overflow summary', () => {
+    const todos: TodoItem[] = Array.from({ length: 7 }, (_, index) => ({
+      id: `todo-${index + 1}`,
+      content: `Task ${index + 1}`,
+      status: 'pending',
+    }));
+
+    const { lastFrame } = render(
+      <StickyTodoList todos={todos} width={60} maxVisibleItems={5} />,
+    );
+    const output = lastFrame() ?? '';
+
+    expect(output).toContain('Task 1');
+    expect(output).toContain('Task 5');
+    expect(output).not.toContain('Task 6');
+    expect(output).not.toContain('Task 7');
+    expect(output).toContain('... and 2 more');
+  });
 });

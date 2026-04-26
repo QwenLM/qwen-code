@@ -16,10 +16,14 @@ import { StickyTodoList } from '../components/StickyTodoList.js';
 import { BtwMessage } from '../components/messages/BtwMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { StreamingState } from '../types.js';
+import { getStickyTodoMaxVisibleItems } from '../utils/todoSnapshot.js';
 
 export const ScreenReaderAppLayout: React.FC = () => {
   const uiState = useUIState();
   const stickyTodoWidth = Math.min(uiState.mainAreaWidth, 64);
+  const stickyTodoMaxVisibleItems = getStickyTodoMaxVisibleItems(
+    uiState.terminalHeight,
+  );
   const shouldShowStickyTodos =
     uiState.stickyTodos !== null &&
     !uiState.dialogsVisible &&
@@ -47,6 +51,7 @@ export const ScreenReaderAppLayout: React.FC = () => {
             <StickyTodoList
               todos={uiState.stickyTodos!}
               width={stickyTodoWidth}
+              maxVisibleItems={stickyTodoMaxVisibleItems}
             />
           )}
           {uiState.btwItem && (

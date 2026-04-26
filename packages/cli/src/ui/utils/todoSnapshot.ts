@@ -18,6 +18,8 @@ const STICKY_TODO_STATUS_PRIORITY: Record<TodoItem['status'], number> = {
   pending: 1,
   completed: 2,
 };
+export const STICKY_TODO_MAX_VISIBLE_ITEMS = 5;
+const STICKY_TODO_HEIGHT_RATIO = 4;
 
 function extractTodosFromResultDisplay(
   resultDisplay: unknown,
@@ -83,9 +85,12 @@ export function getStickyTodos(
   history: readonly HistoryItem[],
   pendingHistoryItems: readonly HistoryItemWithoutId[],
 ): TodoItem[] | null {
+  // Hide sticky panel when pending TodoWrite result is visible inline.
+  // This avoids duplicate rendering and prevents layout reflows that cause
+  // flickering on Windows PowerShell and other terminals.
   const pendingSnapshot = findLatestTodoSnapshot(pendingHistoryItems);
   if (pendingSnapshot !== undefined) {
-    return pendingSnapshot;
+    return null;
   }
 
   const historySnapshot = findLatestTodoSnapshot(history);
@@ -106,4 +111,42 @@ export function getOrderedStickyTodos(todos: readonly TodoItem[]): TodoItem[] {
         left.index - right.index,
     )
     .map(({ todo }) => todo);
+}
+
+export function getStickyTodosRenderKey(
+  todos: readonly TodoItem[] | null,
+): string {
+  if (!todos) {
+    return 'null';
+  }
+
+  return JSON.stringify(
+    todos.map((todo) => [todo.id, todo.content, todo.status]),
+  );
+}
+
+export function getStickyTodosLayoutKey(
+  todos: readonly TodoItem[] | null,
+  width: number,
+  maxVisibleItems: number,
+): string {
+  if (!todos) {
+    return 'null';
+  }
+
+  return JSON.stringify({
+    width,
+    maxVisibleItems,
+    todos: todos.map((todo) => [todo.id, todo.content]),
+  });
+}
+
+export function getStickyTodoMaxVisibleItems(terminalHeight: number): number {
+  return Math.max(
+    1,
+    Math.min(
+      STICKY_TODO_MAX_VISIBLE_ITEMS,
+      Math.floor(terminalHeight / STICKY_TODO_HEIGHT_RATIO),
+    ),
+  );
 }
