@@ -175,6 +175,7 @@ export function App() {
       .then((settings) => {
         if (!disposed) {
           dispatchSettings({ type: 'load_success', settings });
+          dispatchModel({ type: 'settings_models_loaded', settings });
         }
       })
       .catch((error: unknown) => {
@@ -850,6 +851,7 @@ export function App() {
         buildSettingsUpdateRequest(settingsState.form),
       );
       dispatchSettings({ type: 'save_success', settings });
+      dispatchModel({ type: 'settings_models_loaded', settings });
     } catch (error) {
       dispatchSettings({ type: 'save_error', message: getErrorMessage(error) });
     }

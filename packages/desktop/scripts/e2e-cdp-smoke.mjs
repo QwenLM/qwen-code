@@ -188,6 +188,7 @@ async function main() {
 
   await clickButton('Conversation');
   await waitForSelector('[data-testid="terminal-drawer"]');
+  await assertComposerModelSwitch('composer-model-switch.json', 'qwen-e2e-cdp');
   await clickButton('Expand Terminal');
   await waitForSelector('[data-testid="terminal-body"]');
   await assertTerminalExpandedLayout('terminal-expanded-layout.json');
@@ -4161,6 +4162,123 @@ async function assertSettingsAdvancedDiagnostics(fileName) {
 
   if (snapshot.hasSecret) {
     throw new Error('Advanced diagnostics exposed the fake API key.');
+  }
+}
+
+async function assertComposerModelSwitch(fileName, modelId) {
+  await waitFor(
+    'configured composer model option',
+    async () =>
+      evaluate(`(() => {
+        const select = document.querySelector('select[aria-label="Model"]');
+        return Boolean(
+          select &&
+          !select.disabled &&
+          [...select.options].some(
+            (option) => option.value === ${JSON.stringify(modelId)}
+          )
+        );
+      })()`),
+    15_000,
+  );
+
+  await setFieldByAriaLabel('Model', modelId);
+  await waitFor(
+    'composer model switch',
+    async () =>
+      evaluate(`(() => {
+        const select = document.querySelector('select[aria-label="Model"]');
+        return Boolean(select && select.value === ${JSON.stringify(modelId)});
+      })()`),
+    15_000,
+  );
+
+  const snapshot = await evaluate(`(() => {
+    const rectFor = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const select = document.querySelector('select[aria-label="Model"]');
+    const options = select
+      ? [...select.options].map((option) => ({
+          value: option.value,
+          text: option.textContent.trim(),
+          selected: option.selected
+        }))
+      : [];
+    const selected = options.find((option) => option.selected) ?? null;
+    const bodyText = document.body.innerText;
+    return {
+      composer: rectFor('[data-testid="message-composer"]'),
+      chat: rectFor('[data-testid="chat-thread"]'),
+      terminal: rectFor('[data-testid="terminal-drawer"]'),
+      disabled: select?.disabled ?? null,
+      value: select?.value ?? null,
+      options,
+      selected,
+      hasSavedModel: options.some(
+        (option) => option.value === ${JSON.stringify(modelId)}
+      ),
+      hasSecret:
+        bodyText.includes('sk-desktop-e2e') ||
+        [...document.querySelectorAll('input, textarea')].some((field) =>
+          field.value.includes('sk-desktop-e2e')
+        ),
+      hasServerUrl: /http:\\/\\/127\\.0\\.0\\.1:/u.test(bodyText),
+      composerOverflow:
+        Boolean(
+          document.querySelector('[data-testid="message-composer"]') &&
+          document.querySelector('[data-testid="message-composer"]').scrollWidth >
+            document.querySelector('[data-testid="message-composer"]').clientWidth + 4
+        )
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (snapshot.disabled !== false) {
+    throw new Error('Composer model picker should be enabled for active thread.');
+  }
+
+  if (!snapshot.hasSavedModel || snapshot.value !== modelId) {
+    throw new Error(
+      `Composer did not switch to configured model: ${JSON.stringify(snapshot)}`,
+    );
+  }
+
+  if (snapshot.hasSecret) {
+    throw new Error('Composer model workflow exposed the fake API key.');
+  }
+
+  if (snapshot.hasServerUrl) {
+    throw new Error('Conversation view exposed the local server URL.');
+  }
+
+  if (
+    !snapshot.composer ||
+    !snapshot.chat ||
+    snapshot.composer.bottom > snapshot.chat.bottom + 1
+  ) {
+    throw new Error('Composer model picker is not contained in chat panel.');
+  }
+
+  if (snapshot.composerOverflow) {
+    throw new Error('Composer overflows after model switch.');
   }
 }
 

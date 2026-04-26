@@ -22,6 +22,110 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Composer Model Provider Promotion
+
+Status: completed in iteration 27.
+
+Goal: make a model saved in desktop settings immediately available from the
+composer model picker for the active thread, so the settings flow connects to
+the first-viewport task controls instead of ending on the settings page.
+
+User-visible value: after adding or editing an API-key model configuration,
+users can return to the conversation, choose that saved model from the composer,
+and see the active thread model update without restarting the desktop app or
+creating a new thread.
+
+Expected files:
+
+- `packages/desktop/src/renderer/App.tsx`
+- `packages/desktop/src/renderer/stores/modelStore.ts`
+- `packages/desktop/src/renderer/stores/modelStore.test.ts`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/model-configuration-workflow.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Saving an API-key model provider merges the saved model into the active
+  session model options without leaking the API key into DOM text, input values,
+  screenshots, logs, or diagnostics.
+- The composer model picker stays disabled before a thread exists, then shows
+  the runtime model and the saved configured model once a session is active.
+- Selecting the saved model from the composer calls the existing token-protected
+  session model route and updates the visible composer selection.
+- Settings remains a supporting surface; returning to Conversation restores the
+  conversation-first workbench, terminal strip, and compact composer.
+- No raw ACP/session IDs or server URLs are introduced into the main
+  conversation or composer.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/modelStore.test.ts src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, create a thread, complete the
+  command-approval path, open Settings, save `qwen-e2e-cdp` with a fake API key,
+  return to Conversation, select `qwen-e2e-cdp` from the composer model picker,
+  assert the composer selection changes and the secret is absent, then continue
+  terminal attach/send verification.
+- E2E assertions: saved configured model appears in composer options, selecting
+  it updates the active select value and visible text, the API key remains
+  hidden, the composer remains contained, and no console errors or failed local
+  requests are recorded.
+- Diagnostic artifacts: `settings-product-state.json`,
+  `composer-model-switch.json`, `settings-page.png`, Electron log, and summary
+  JSON under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for selecting the smallest
+  settings-to-composer workflow slice without asking routine product questions,
+  `frontend-design` for keeping the picker compact and prototype-constrained,
+  and `electron-desktop-dev` for real Electron CDP verification.
+
+Notes and decisions:
+
+- Chosen approach: promote saved provider models into renderer model state as
+  selectable session candidates, then continue using the existing
+  `/api/sessions/:id/model` route for the actual thread switch. This keeps the
+  server ACP session model route as the authority for runtime state while making
+  the settings result visible in the first viewport.
+- Alternatives rejected for this slice: rebuilding the full model provider UI
+  as a composer popover, or automatically switching the active session when
+  settings are saved. Both are broader than needed and risk surprising users.
+- Configured model options are replaced when settings change rather than
+  accumulated indefinitely. Session resets preserve the configured option cache
+  so the next loaded runtime model list can be merged without another settings
+  fetch.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/modelStore.test.ts src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 21 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T03-47-01-812Z/`.
+- Key recorded model-switch metrics: composer model picker enabled, selected
+  value `qwen-e2e-cdp`, options `e2e/qwen-code` and `qwen-e2e-cdp`, composer
+  height `101` px, no composer overflow, no fake API key exposure, no local
+  server URL exposure in the conversation view, no console errors, and no
+  failed local requests.
+
+Next work:
+
+- Continue the model configuration workflow by adding inline validation and
+  clearer disabled/save reasons for missing model, base URL, or API key states.
+- Continue prototype fidelity by checking whether the settings page needs a
+  narrower modal/drawer treatment instead of a full workbench replacement.
+
 ### Completed Slice: Sidebar and Topbar Chrome Density Pass
 
 Status: completed in iteration 26.

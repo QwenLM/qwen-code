@@ -463,6 +463,43 @@ describe('WorkspacePage', () => {
     expect((model as HTMLSelectElement).disabled).toBe(true);
   });
 
+  it('shows configured settings models in the active composer picker', () => {
+    const onModelChange = vi.fn();
+    const renderedContainer = renderWorkspace({
+      modelState: {
+        ...createInitialModelState(),
+        models: {
+          currentModelId: 'e2e/qwen-code',
+          availableModels: [
+            { modelId: 'e2e/qwen-code', name: 'Qwen Code E2E' },
+            {
+              modelId: 'qwen-e2e-cdp',
+              name: 'qwen-e2e-cdp',
+              description: 'Configured in desktop settings',
+            },
+          ],
+        },
+      },
+      onModelChange,
+    });
+    const model = renderedContainer.querySelector('select[aria-label="Model"]');
+
+    expect(model).toBeInstanceOf(HTMLSelectElement);
+    expect((model as HTMLSelectElement).disabled).toBe(false);
+    expect((model as HTMLSelectElement).value).toBe('e2e/qwen-code');
+    expect(
+      [...(model as HTMLSelectElement).options].map((option) => option.value),
+    ).toEqual(['e2e/qwen-code', 'qwen-e2e-cdp']);
+    expect(renderedContainer.textContent).toContain('qwen-e2e-cdp');
+    expect(renderedContainer.textContent).not.toContain('sk-desktop-e2e');
+
+    act(() => {
+      setSelectValue(model as HTMLSelectElement, 'qwen-e2e-cdp');
+    });
+
+    expect(onModelChange).toHaveBeenCalledWith('qwen-e2e-cdp');
+  });
+
   it('bounds the inline changed-files summary before opening review', () => {
     const manyFileDiff: DesktopGitDiff = {
       ...gitDiff,
@@ -1000,6 +1037,15 @@ function setInputValue(input: HTMLInputElement, value: string): void {
   descriptor?.set?.call(input, value);
   input.dispatchEvent(new Event('input', { bubbles: true }));
   input.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function setSelectValue(select: HTMLSelectElement, value: string): void {
+  const descriptor = Object.getOwnPropertyDescriptor(
+    HTMLSelectElement.prototype,
+    'value',
+  );
+  descriptor?.set?.call(select, value);
+  select.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
 const project: DesktopProject = {
