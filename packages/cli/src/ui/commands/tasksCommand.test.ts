@@ -5,7 +5,7 @@
  */
 
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { bashesCommand } from './bashesCommand.js';
+import { tasksCommand } from './tasksCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import type { BackgroundShellEntry } from '@qwen-code/qwen-code-core';
@@ -25,7 +25,7 @@ function entry(
   };
 }
 
-describe('bashesCommand', () => {
+describe('tasksCommand', () => {
   let context: CommandContext;
   let getAll: ReturnType<typeof vi.fn>;
 
@@ -41,7 +41,7 @@ describe('bashesCommand', () => {
   });
 
   it('reports an empty registry', async () => {
-    const result = await bashesCommand.action!(context, '');
+    const result = await tasksCommand.action!(context, '');
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
@@ -77,7 +77,7 @@ describe('bashesCommand', () => {
       }),
     ]);
 
-    const result = await bashesCommand.action!(context, '');
+    const result = await tasksCommand.action!(context, '');
     if (!result || result.type !== 'message') {
       throw new Error('expected message result');
     }

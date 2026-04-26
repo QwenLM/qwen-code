@@ -25,9 +25,8 @@ function statusLabel(entry: BackgroundShellEntry): string {
   }
 }
 
-export const bashesCommand: SlashCommand = {
+export const tasksCommand: SlashCommand = {
   name: 'tasks',
-  altNames: ['bashes'],
   get description() {
     return t('List background tasks');
   },
