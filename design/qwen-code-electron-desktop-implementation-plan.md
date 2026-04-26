@@ -22,6 +22,110 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Review Drawer Chrome Restraint
+
+Status: completed in iteration 63.
+
+Goal: make the review drawer read as a compact supporting surface rather than
+another large dashboard by reducing tab/meta visual weight and collapsing the
+empty per-file comment editor until it is needed.
+
+User-visible value: users can still open changes, inspect files, add review
+notes, stage, discard with confirmation, and commit, but the first viewport
+keeps more attention on the conversation and composer.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ReviewPanel.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/review-drawer-chrome-restraint.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Review drawer section tabs are compact, icon-led, and no longer appear as
+  heavy full-width dashboard tabs.
+- Review Git metadata remains accessible as `Branch`, `Modified`, `Staged`,
+  `Untracked`, and `Files`, but renders as a compact strip.
+- Empty file comment editors are collapsed by default; clicking `Add Comment`
+  opens the textarea, saves the note, and returns the drawer to the compact
+  state.
+- Stage/Discard/Open/Add Comment/Commit labels remain accessible through
+  `aria-label`, `title`, and sr-only text where appropriate.
+- Review-open desktop and compact viewports keep the conversation wider than
+  the drawer, avoid horizontal overflow, and keep the terminal collapsed.
+- Existing discard confirmation, staging, commit, branch, settings, terminal,
+  model, composer, and relaunch workflows remain unchanged.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the dirty fake project, open review, assert compact
+  tab/meta/comment chrome in desktop and compact windows, open a review comment
+  editor, save a comment, cancel discard confirmation, stage all, commit, and
+  continue the existing branch, settings, terminal, model, composer, and
+  relaunch workflows.
+- E2E assertions: review tabs include icons and compact geometry, metadata
+  items fit a short strip without overflow, no review-comment textarea is
+  visible by default, the textarea appears only after `Add Comment`, saved
+  comments remain visible, and no console errors or failed local requests are
+  recorded.
+- Diagnostic artifacts: updated review drawer layout JSON, compact review
+  layout JSON, review screenshots, discard confirmation JSON, Electron log,
+  and `summary.json` under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` to choose a narrow fidelity slice
+  instead of a larger review IA rewrite; `frontend-design` to keep the drawer
+  restrained and subordinate to the conversation per `home.jpg`; and
+  `electron-desktop-dev` for renderer behavior verified in a real Electron app
+  through the CDP harness.
+
+Notes and decisions:
+
+- Keep the review service, staging, discard, and commit behavior unchanged.
+  This slice is presentation and interaction chrome only.
+- Keep the existing section tabs as controls for future Files/Artifacts/Summary
+  content, but make them icon-led and compact now so they no longer dominate
+  the drawer.
+- Collapse only empty comment editors by default. Existing/saved comments
+  remain visible, and `Add Comment` is still the accessible action that opens
+  and submits the note.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 28 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T21-03-53-113Z/`.
+- Key recorded metrics: `review-drawer-layout.json` recorded four icon-led
+  review tabs at 28 px high, five Git metadata chips at 22 px high, and a
+  collapsed 51 px comment affordance with no textarea visible by default.
+  `compact-review-drawer.json` recorded tabs at 26 px, metadata chips at 22 px,
+  and a collapsed 43 px comment affordance in the compact viewport.
+  `summary.json` recorded zero console errors and zero failed local requests.
+
+Next work:
+
+- Continue prototype fidelity by making the review drawer tabs switch actual
+  local bodies or by further reducing the drawer file/diff typography so the
+  conversation keeps visual priority.
+- Consider improving the settings overlay header and secondary section chrome
+  so product settings stay compact without exposing diagnostics by default.
+
 ### Slice: Recent Project Relaunch Recovery
 
 Status: completed in iteration 62.

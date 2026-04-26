@@ -16,8 +16,12 @@ import {
   CloseIcon,
   CommentIcon,
   CommitIcon,
+  DiffIcon,
+  FolderIcon,
   OpenThreadIcon,
+  PaperclipIcon,
   RefreshIcon,
+  SlidersIcon,
   StageIcon,
   TrashIcon,
 } from './SidebarIcons.js';
@@ -33,6 +37,8 @@ interface DiscardConfirmation {
   title: string;
   description: string;
 }
+
+type ReviewTabId = 'changes' | 'files' | 'artifacts' | 'summary';
 
 export function ReviewPanel({
   activeProject,
@@ -138,7 +144,7 @@ function ReviewSummary({
   >({});
   const [discardConfirmation, setDiscardConfirmation] =
     useState<DiscardConfirmation | null>(null);
-  const [activeTab, setActiveTab] = useState('changes');
+  const [activeTab, setActiveTab] = useState<ReviewTabId>('changes');
 
   if (!project) {
     return (
@@ -150,7 +156,16 @@ function ReviewSummary({
 
   const status = project.gitStatus;
   const changedFiles = gitDiff?.files ?? [];
-  const tabs = ['changes', 'files', 'artifacts', 'summary'];
+  const tabs: Array<{
+    icon: ReactNode;
+    id: ReviewTabId;
+    label: string;
+  }> = [
+    { id: 'changes', label: 'Changes', icon: <DiffIcon /> },
+    { id: 'files', label: 'Files', icon: <FolderIcon /> },
+    { id: 'artifacts', label: 'Artifacts', icon: <PaperclipIcon /> },
+    { id: 'summary', label: 'Summary', icon: <SlidersIcon /> },
+  ];
   const requestDiscard: RequestDiscard = (target, title, description) => {
     setDiscardConfirmation({ target, title, description });
   };
@@ -167,14 +182,14 @@ function ReviewSummary({
     <div className="review-summary">
       <div className="review-tabs" aria-label="Review sections">
         {tabs.map((tab) => (
-          <button
-            className={tab === activeTab ? 'review-tab-active' : undefined}
-            key={tab}
-            type="button"
-            onClick={() => setActiveTab(tab)}
-          >
-            {tab}
-          </button>
+          <ReviewTabButton
+            active={tab.id === activeTab}
+            icon={tab.icon}
+            id={tab.id}
+            key={tab.id}
+            label={tab.label}
+            onClick={() => setActiveTab(tab.id)}
+          />
         ))}
       </div>
       <dl className="runtime-details runtime-details-compact">
@@ -347,6 +362,25 @@ function ChangedFileReview({
 }) {
   const fileTarget = { scope: 'file' as const, filePath: file.path };
   const canStageFile = file.unstaged || file.untracked || !file.staged;
+  const [isCommentEditorOpen, setIsCommentEditorOpen] = useState(false);
+  const commentDraftTrimmed = commentDraft.trim();
+  const handleCommentAction = () => {
+    if (!isCommentEditorOpen) {
+      setIsCommentEditorOpen(true);
+      return;
+    }
+
+    if (!commentDraftTrimmed) {
+      return;
+    }
+
+    onAddComment();
+    setIsCommentEditorOpen(false);
+  };
+  const handleCancelComment = () => {
+    onCommentDraftChange('');
+    setIsCommentEditorOpen(false);
+  };
 
   return (
     <details data-testid={`changed-file-${file.path}`} open={isInitiallyOpen}>
@@ -403,25 +437,14 @@ function ChangedFileReview({
           ))}
         </div>
       )}
-      <div className="review-comment-box">
-        <label>
-          <span>Comment</span>
-          <textarea
-            aria-label={`Review comment for ${file.path}`}
-            placeholder="Add review note for this file"
-            rows={2}
-            value={commentDraft}
-            onChange={(event) => onCommentDraftChange(event.target.value)}
-          />
-        </label>
-        <ReviewActionButton
-          label="Add Comment"
-          title="Add review comment"
-          disabled={commentDraft.trim().length === 0}
-          onClick={onAddComment}
-        >
-          <CommentIcon />
-        </ReviewActionButton>
+      <div
+        className={
+          isCommentEditorOpen
+            ? 'review-comment-box review-comment-box-open'
+            : 'review-comment-box review-comment-box-collapsed'
+        }
+        data-testid="review-comment-box"
+      >
         {comments.length > 0 ? (
           <ul className="review-comments">
             {comments.map((comment, index) => (
@@ -429,8 +452,75 @@ function ChangedFileReview({
             ))}
           </ul>
         ) : null}
+        {!isCommentEditorOpen && comments.length === 0 ? (
+          <span className="review-comment-prompt">Review note</span>
+        ) : null}
+        {isCommentEditorOpen ? (
+          <label data-testid="review-comment-editor">
+            <span>Comment</span>
+            <textarea
+              aria-label={`Review comment for ${file.path}`}
+              placeholder="Add review note for this file"
+              rows={2}
+              value={commentDraft}
+              onChange={(event) => onCommentDraftChange(event.target.value)}
+            />
+          </label>
+        ) : null}
+        <div className="review-comment-actions">
+          <ReviewActionButton
+            label="Add Comment"
+            title={
+              isCommentEditorOpen
+                ? 'Add review comment'
+                : `Add review note for ${file.path}`
+            }
+            disabled={isCommentEditorOpen && !commentDraftTrimmed}
+            onClick={handleCommentAction}
+          >
+            <CommentIcon />
+          </ReviewActionButton>
+          {isCommentEditorOpen ? (
+            <ReviewActionButton
+              label="Cancel Comment"
+              title="Cancel review comment"
+              onClick={handleCancelComment}
+            >
+              <CloseIcon />
+            </ReviewActionButton>
+          ) : null}
+        </div>
       </div>
     </details>
+  );
+}
+
+function ReviewTabButton({
+  active,
+  icon,
+  id,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  icon: ReactNode;
+  id: ReviewTabId;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      aria-label={`Show ${label}`}
+      aria-pressed={active}
+      className={active ? 'review-tab-active' : undefined}
+      data-testid={`review-tab-${id}`}
+      title={label}
+      type="button"
+      onClick={onClick}
+    >
+      {icon}
+      <span aria-hidden="true">{label}</span>
+    </button>
   );
 }
 

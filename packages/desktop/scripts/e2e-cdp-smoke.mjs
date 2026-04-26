@@ -198,6 +198,8 @@ async function main() {
   await assertWorkspaceStillDirtyAfterDiscardCancel(
     'discard-cancel-git-status.txt',
   );
+  await clickButton('Add Comment');
+  await waitForSelector('[aria-label="Review comment for README.md"]');
   await setFieldByAriaLabel(
     'Review comment for README.md',
     'Review note from E2E',
@@ -5399,6 +5401,35 @@ async function assertReviewDrawerLayout(fileName) {
         width: button.getBoundingClientRect().width,
         height: button.getBoundingClientRect().height
       })),
+      reviewTabs: Array.from(
+        document.querySelectorAll(
+          '[data-testid="review-panel"] .review-tabs button',
+        )
+      ).map((button) => ({
+        label:
+          button.getAttribute('aria-label') ||
+          button.getAttribute('title') ||
+          button.textContent.trim(),
+        title: button.getAttribute('title') || '',
+        hasIcon: button.querySelector('svg') !== null,
+        directText: [...button.childNodes]
+          .filter((node) => node.nodeType === Node.TEXT_NODE)
+          .map((node) => node.textContent.trim())
+          .join(''),
+        width: button.getBoundingClientRect().width,
+        height: button.getBoundingClientRect().height
+      })),
+      reviewMetaItems: Array.from(
+        document.querySelectorAll('.runtime-details-compact div')
+      ).map((item) => ({
+        label: item.querySelector('dt')?.textContent.trim() ?? '',
+        value: item.querySelector('dd')?.textContent.trim() ?? '',
+        width: item.getBoundingClientRect().width,
+        height: item.getBoundingClientRect().height
+      })),
+      commentBox: rectFor('.review-comment-box'),
+      commentEditor: rectFor('[data-testid="review-comment-editor"]'),
+      commentTextarea: rectFor('[aria-label="Review comment for README.md"]'),
       composerActionButtons: [
         ...document.querySelectorAll('.composer-actions button')
       ].map((button) => ({
@@ -5468,6 +5499,54 @@ async function assertReviewDrawerLayout(fileName) {
     );
   }
   assertReviewActionButtonDensity(metrics.reviewButtons, 'review drawer');
+
+  if (metrics.reviewTabs.length !== 4) {
+    throw new Error(
+      `Review drawer should keep four compact section tabs: ${JSON.stringify(
+        metrics.reviewTabs,
+      )}`,
+    );
+  }
+  for (const tab of metrics.reviewTabs) {
+    if (!tab.hasIcon || !tab.title || tab.directText !== '') {
+      throw new Error(
+        `Review tab should be icon-led with title metadata: ${JSON.stringify(
+          tab,
+        )}`,
+      );
+    }
+    if (tab.height > 34) {
+      throw new Error(
+        `Review tab height should stay compact: ${JSON.stringify(tab)}`,
+      );
+    }
+  }
+
+  if (metrics.reviewMetaItems.length < 5) {
+    throw new Error(
+      `Review metadata strip is missing Git context: ${JSON.stringify(
+        metrics.reviewMetaItems,
+      )}`,
+    );
+  }
+  for (const item of metrics.reviewMetaItems) {
+    if (item.height > 28) {
+      throw new Error(
+        `Review metadata item should stay compact: ${JSON.stringify(item)}`,
+      );
+    }
+  }
+
+  if (metrics.commentBox === null || metrics.commentBox.height > 56) {
+    throw new Error(
+      `Collapsed review comment box should stay compact: ${JSON.stringify(
+        metrics.commentBox,
+      )}`,
+    );
+  }
+  if (metrics.commentEditor !== null || metrics.commentTextarea !== null) {
+    throw new Error('Review comment editor should be collapsed by default.');
+  }
 
   const oversizedActions = metrics.topbarActions.filter(
     (action) => action.width > 40 || action.height > 40,
@@ -5757,6 +5836,35 @@ async function assertCompactReviewDrawerLayout(fileName) {
         };
       }),
       reviewButtons,
+      reviewTabs: [
+        ...document.querySelectorAll(
+          '[data-testid="review-panel"] .review-tabs button'
+        )
+      ].map((button) => ({
+        label:
+          button.getAttribute('aria-label') ||
+          button.getAttribute('title') ||
+          button.textContent.trim(),
+        title: button.getAttribute('title') || '',
+        hasIcon: button.querySelector('svg') !== null,
+        directText: [...button.childNodes]
+          .filter((node) => node.nodeType === Node.TEXT_NODE)
+          .map((node) => node.textContent.trim())
+          .join(''),
+        width: button.getBoundingClientRect().width,
+        height: button.getBoundingClientRect().height
+      })),
+      reviewMetaItems: [
+        ...document.querySelectorAll('.runtime-details-compact div')
+      ].map((item) => ({
+        label: item.querySelector('dt')?.textContent.trim() ?? '',
+        value: item.querySelector('dd')?.textContent.trim() ?? '',
+        width: item.getBoundingClientRect().width,
+        height: item.getBoundingClientRect().height
+      })),
+      commentBox: rectFor('.review-comment-box'),
+      commentEditor: rectFor('[data-testid="review-comment-editor"]'),
+      commentTextarea: rectFor('[aria-label="Review comment for README.md"]'),
       changedFileRows,
       composerTextareaHeight:
         document
@@ -6052,6 +6160,58 @@ async function assertCompactReviewDrawerLayout(fileName) {
   }
   assertReviewActionButtonDensity(metrics.reviewButtons, 'compact review');
 
+  if (metrics.reviewTabs.length !== 4) {
+    throw new Error(
+      `Compact review should keep four section tabs: ${JSON.stringify(
+        metrics.reviewTabs,
+      )}`,
+    );
+  }
+  for (const tab of metrics.reviewTabs) {
+    if (!tab.hasIcon || !tab.title || tab.directText !== '') {
+      throw new Error(
+        `Compact review tab should be icon-led with title metadata: ${JSON.stringify(
+          tab,
+        )}`,
+      );
+    }
+    if (tab.height > 32) {
+      throw new Error(
+        `Compact review tab height regressed: ${JSON.stringify(tab)}`,
+      );
+    }
+  }
+
+  if (metrics.reviewMetaItems.length < 5) {
+    throw new Error(
+      `Compact review metadata strip is missing Git context: ${JSON.stringify(
+        metrics.reviewMetaItems,
+      )}`,
+    );
+  }
+  for (const item of metrics.reviewMetaItems) {
+    if (item.height > 26) {
+      throw new Error(
+        `Compact review metadata item should stay short: ${JSON.stringify(
+          item,
+        )}`,
+      );
+    }
+  }
+
+  if (metrics.commentBox === null || metrics.commentBox.height > 50) {
+    throw new Error(
+      `Compact collapsed comment box should stay short: ${JSON.stringify(
+        metrics.commentBox,
+      )}`,
+    );
+  }
+  if (metrics.commentEditor !== null || metrics.commentTextarea !== null) {
+    throw new Error(
+      'Compact review comment editor should be collapsed by default.',
+    );
+  }
+
   if (!metrics.bodyText.includes('README.md')) {
     throw new Error('Compact review should show the changed README.md row.');
   }
@@ -6158,7 +6318,9 @@ async function assertDiscardConfirmation(fileName) {
     }
   }
 
-  if (!/MODIFIED\s+1\s+STAGED\s+0\s+UNTRACKED\s+1/u.test(snapshot.reviewText)) {
+  if (
+    !/Modified\s+1\s+Staged\s+0\s+Untracked\s+1/iu.test(snapshot.reviewText)
+  ) {
     throw new Error(
       'Discard confirmation opened after the review counts already changed.',
     );

@@ -1930,7 +1930,38 @@ textarea:focus {
 }
 
 .runtime-details-compact {
-  padding: 12px 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 0 0;
+}
+
+.runtime-details-compact div {
+  display: flex;
+  align-items: center;
+  min-height: 22px;
+  max-width: 100%;
+  gap: 5px;
+  padding: 0 7px;
+  border: 1px solid rgba(213, 224, 255, 0.09);
+  border-radius: 999px;
+  background: rgba(238, 244, 239, 0.035);
+}
+
+.runtime-details-compact dt {
+  font-size: 10px;
+  font-weight: 720;
+  line-height: 1;
+  text-transform: none;
+}
+
+.runtime-details-compact dd {
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 760;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .review-summary {
@@ -1939,33 +1970,54 @@ textarea:focus {
 }
 
 .review-tabs {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  display: flex;
+  gap: 4px;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: 9px;
+  padding: 3px;
+  background: rgba(8, 12, 18, 0.28);
 }
 
 .review-tabs button {
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
   min-width: 0;
-  min-height: 34px;
+  min-height: 28px;
+  gap: 5px;
   overflow: hidden;
+  padding: 0 7px;
+  border-radius: 7px;
   background: transparent;
   color: var(--muted);
-  font-size: 10px;
-  font-weight: 820;
+  font-size: 11px;
+  font-weight: 720;
   text-align: center;
   text-overflow: ellipsis;
-  text-transform: uppercase;
+  text-transform: none;
   white-space: nowrap;
 }
 
+.review-tabs button svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+}
+
+.review-tabs button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .review-tabs button + button {
-  border-left: 1px solid var(--line);
+  border-left: 0;
 }
 
 .review-tabs .review-tab-active {
-  background: rgba(85, 166, 255, 0.12);
+  background: rgba(85, 166, 255, 0.13);
   color: var(--text);
 }
 
@@ -2126,6 +2178,13 @@ textarea:focus {
   justify-self: end;
 }
 
+.review-comment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-self: end;
+}
+
 .diff-hunks {
   display: grid;
   gap: 8px;
@@ -2197,6 +2256,33 @@ textarea:focus {
   border-top: 1px solid var(--line);
 }
 
+.review-comment-box-collapsed {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 40px;
+}
+
+.review-comment-box-open {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+}
+
+.review-comment-box-open label,
+.review-comment-box-open .review-comments {
+  grid-column: 1 / -1;
+}
+
+.review-comment-prompt {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 .review-comment-box label {
   display: grid;
   gap: 6px;
@@ -2221,6 +2307,7 @@ textarea:focus {
   margin: 0;
   padding: 0;
   list-style: none;
+  min-width: 0;
 }
 
 .review-comments li {
@@ -2876,15 +2963,17 @@ textarea:focus {
   }
 
   .workspace-grid-review-open .runtime-details {
-    gap: 8px;
+    gap: 5px;
   }
 
   .workspace-grid-review-open .runtime-details-compact {
-    padding-top: 8px;
+    padding-top: 6px;
   }
 
   .workspace-grid-review-open .review-tabs button {
-    min-height: 30px;
+    min-height: 26px;
+    padding: 0 6px;
+    font-size: 10px;
   }
 
   .workspace-grid-review-open .review-actions,
@@ -2943,7 +3032,11 @@ textarea:focus {
 
   .workspace-grid-review-open .review-comment-box {
     gap: 6px;
-    padding: 8px;
+    padding: 7px 8px;
+  }
+
+  .workspace-grid-review-open .review-comment-box-collapsed {
+    min-height: 36px;
   }
 
   .settings-page-content {

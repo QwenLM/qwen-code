@@ -227,6 +227,14 @@ describe('WorkspacePage', () => {
     expect(renderedContainer.textContent).toContain('Discard Hunk');
     expect(renderedContainer.textContent).not.toContain('Accept');
     expect(renderedContainer.textContent).not.toContain('Revert');
+    const reviewTabs = renderedContainer.querySelectorAll(
+      '[data-testid="review-panel"] .review-tabs button',
+    );
+    expect(reviewTabs).toHaveLength(4);
+    for (const tab of reviewTabs) {
+      expect(tab.querySelector('svg')).toBeTruthy();
+      expect(tab.getAttribute('title')).not.toBe('');
+    }
     for (const [label, expectedClass] of [
       ['Discard All', 'review-icon-button-danger'],
       ['Stage All', 'review-icon-button'],
@@ -256,6 +264,34 @@ describe('WorkspacePage', () => {
           .join(''),
       ).toBe('');
     }
+    expect(
+      renderedContainer.querySelector(
+        '[aria-label="Review comment for src/index.ts"]',
+      ),
+    ).toBeNull();
+
+    act(() => {
+      clickButton(renderedContainer, 'Add Comment');
+    });
+
+    expect(
+      renderedContainer.querySelector(
+        '[aria-label="Review comment for src/index.ts"]',
+      ),
+    ).toBeTruthy();
+    expect(
+      renderedContainer.querySelector('button[aria-label="Cancel Comment"]'),
+    ).toBeTruthy();
+
+    act(() => {
+      clickButton(renderedContainer, 'Cancel Comment');
+    });
+
+    expect(
+      renderedContainer.querySelector(
+        '[aria-label="Review comment for src/index.ts"]',
+      ),
+    ).toBeNull();
 
     act(() => {
       clickButton(renderedContainer, 'Settings');
