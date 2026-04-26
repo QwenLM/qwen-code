@@ -255,9 +255,9 @@ export function WorkspacePage({
             role="presentation"
           >
             <button
-              aria-label="Close Settings"
+              aria-hidden="true"
               className="settings-overlay-backdrop"
-              title="Close Settings"
+              tabIndex={-1}
               type="button"
               onClick={showConversation}
             />

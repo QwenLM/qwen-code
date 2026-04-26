@@ -894,14 +894,14 @@ summary:focus-visible {
 }
 
 .settings-overlay .settings-page {
-  flex: 0 1 min(780px, calc(100vw - 340px));
-  width: min(780px, calc(100vw - 340px));
-  min-width: 540px;
+  flex: 0 1 min(680px, calc(100vw - 340px));
+  width: min(680px, calc(100vw - 340px));
+  min-width: 520px;
   height: 100%;
   border-top: 1px solid rgba(213, 224, 255, 0.12);
   border-left: 1px solid rgba(213, 224, 255, 0.16);
   border-radius: 12px 0 0 0;
-  box-shadow: -24px 0 64px rgba(0, 0, 0, 0.34);
+  box-shadow: -20px 0 52px rgba(0, 0, 0, 0.32);
 }
 
 .panel {
@@ -2192,6 +2192,35 @@ textarea:focus {
 
 .settings-page-header {
   flex: 0 0 auto;
+  min-height: 42px;
+  padding: 0 12px 0 14px;
+}
+
+.settings-close-button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid rgba(213, 224, 255, 0.12);
+  border-radius: 7px;
+  background: rgba(238, 244, 239, 0.018);
+  color: rgba(225, 232, 228, 0.72);
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.settings-close-button:not(:disabled):hover {
+  border-color: rgba(85, 166, 255, 0.28);
+  background: rgba(85, 166, 255, 0.1);
+  color: #c7e2ff;
+}
+
+.settings-close-button svg {
+  width: 14px;
+  height: 14px;
 }
 
 .settings-page-content {
@@ -2199,16 +2228,16 @@ textarea:focus {
   width: 100%;
   min-height: 0;
   grid-template-columns: minmax(300px, 1.08fr) minmax(230px, 0.92fr);
-  gap: 12px;
+  gap: 10px;
   margin: 0;
   overflow: auto;
-  padding: 14px;
+  padding: 12px;
 }
 
 .settings-page-main {
   display: grid;
   align-content: start;
-  gap: 16px;
+  gap: 12px;
   min-width: 0;
 }
 
@@ -2222,9 +2251,9 @@ textarea:focus {
 .settings-section {
   min-width: 0;
   overflow: hidden;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(213, 224, 255, 0.09);
   border-radius: var(--radius);
-  background: rgba(238, 244, 239, 0.035);
+  background: rgba(238, 244, 239, 0.028);
 }
 
 .panel-header-inline {

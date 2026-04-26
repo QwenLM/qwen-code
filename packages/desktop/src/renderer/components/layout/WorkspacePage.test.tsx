@@ -202,6 +202,26 @@ describe('WorkspacePage', () => {
       renderedContainer.querySelector('[data-testid="settings-overlay"]'),
     ).toBeTruthy();
     expect(
+      renderedContainer
+        .querySelector('.settings-overlay-backdrop')
+        ?.getAttribute('tabindex'),
+    ).toBe('-1');
+    expect(
+      renderedContainer
+        .querySelector('.settings-overlay-backdrop')
+        ?.getAttribute('aria-hidden'),
+    ).toBe('true');
+    const settingsCloseButton = renderedContainer.querySelector(
+      '[data-testid="settings-close-button"]',
+    );
+    expect(settingsCloseButton).toBeInstanceOf(HTMLButtonElement);
+    expect(settingsCloseButton?.getAttribute('aria-label')).toBe(
+      'Close Settings',
+    );
+    expect(settingsCloseButton?.getAttribute('title')).toBe('Close Settings');
+    expect(settingsCloseButton?.textContent?.trim()).toBe('');
+    expect(settingsCloseButton?.querySelector('svg')).toBeTruthy();
+    expect(
       renderedContainer.querySelector('[data-testid="model-config"]'),
     ).toBeTruthy();
     expect(

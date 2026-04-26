@@ -14,6 +14,7 @@ import {
   type SettingsState,
 } from '../../stores/settingsStore.js';
 import type { DesktopApprovalMode } from '../../../shared/desktopProtocol.js';
+import { CloseIcon } from './SidebarIcons.js';
 import type { LoadState } from './types.js';
 
 export function SettingsPage({
@@ -60,12 +61,14 @@ export function SettingsPage({
         </div>
         <button
           aria-label="Close Settings"
-          className="secondary-button"
+          autoFocus
+          className="settings-close-button"
+          data-testid="settings-close-button"
           title="Close Settings"
           type="button"
           onClick={onBack}
         >
-          Close
+          <CloseIcon />
         </button>
       </div>
       <div className="settings-page-content">

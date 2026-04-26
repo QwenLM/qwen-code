@@ -176,6 +176,10 @@ async function main() {
   await waitForSelector('[data-testid="settings-page"]');
   await assertSettingsPageLayout('settings-layout.json');
   await saveScreenshot('settings-page.png');
+  await setElectronWindowBounds(target.id, compactWindowBounds);
+  await assertCompactSettingsOverlayLayout('compact-settings-overlay.json');
+  await saveScreenshot('compact-settings-overlay.png');
+  await setElectronWindowBounds(target.id, defaultWindowBounds);
   await assertSettingsValidation('settings-validation.json');
   await clickButton('Save');
   await waitForText('qwen-e2e-cdp');
@@ -4216,6 +4220,15 @@ async function assertTerminalOutputAttached(fileName) {
 }
 
 async function assertSettingsPageLayout(fileName) {
+  await waitFor(
+    'settings close button focused',
+    async () =>
+      evaluate(
+        `document.activeElement?.getAttribute('aria-label') === 'Close Settings'`,
+      ),
+    5_000,
+  );
+
   const metrics = await evaluate(`(() => {
     const rectFor = (selector) => {
       const element = document.querySelector(selector);
@@ -4248,10 +4261,31 @@ async function assertSettingsPageLayout(fileName) {
       overlay: rectFor('[data-testid="settings-overlay"]'),
       backdrop: rectFor('.settings-overlay-backdrop'),
       settings: rectFor('[data-testid="settings-page"]'),
+      closeButton: rectFor('[data-testid="settings-close-button"]'),
       modelConfig: rectFor('[data-testid="model-config"]'),
       permissionsConfig: rectFor('[data-testid="permissions-config"]'),
       runtimeDiagnostics: rectFor('[data-testid="runtime-diagnostics"]'),
       terminal: rectFor('[data-testid="terminal-drawer"]'),
+      activeLabel:
+        document.activeElement?.getAttribute('aria-label') ?? '',
+      backdropTabIndex:
+        document.querySelector('.settings-overlay-backdrop')
+          ?.getAttribute('tabindex') ?? null,
+      backdropAriaHidden:
+        document.querySelector('.settings-overlay-backdrop')
+          ?.getAttribute('aria-hidden') ?? null,
+      closeButtonLabel:
+        document.querySelector('[data-testid="settings-close-button"]')
+          ?.getAttribute('aria-label') ?? '',
+      closeButtonTitle:
+        document.querySelector('[data-testid="settings-close-button"]')
+          ?.getAttribute('title') ?? '',
+      closeButtonText:
+        document.querySelector('[data-testid="settings-close-button"]')
+          ?.textContent.trim() ?? '',
+      closeButtonHasIcon:
+        document.querySelector('[data-testid="settings-close-button"] svg') !==
+        null,
       settingsRole:
         document.querySelector('[data-testid="settings-page"]')
           ?.getAttribute('role') ?? '',
@@ -4284,6 +4318,7 @@ async function assertSettingsPageLayout(fileName) {
     'overlay',
     'backdrop',
     'settings',
+    'closeButton',
     'modelConfig',
     'permissionsConfig',
   ].filter((key) => metrics[key] === null);
@@ -4348,6 +4383,33 @@ async function assertSettingsPageLayout(fileName) {
     );
   }
 
+  if (
+    metrics.activeLabel !== 'Close Settings' ||
+    metrics.closeButtonLabel !== 'Close Settings' ||
+    metrics.closeButtonTitle !== 'Close Settings' ||
+    metrics.closeButtonText !== '' ||
+    !metrics.closeButtonHasIcon ||
+    metrics.closeButton.width > 32 ||
+    metrics.closeButton.height > 32
+  ) {
+    throw new Error(
+      `Settings close control is not compact and focused: ${JSON.stringify(
+        metrics,
+      )}`,
+    );
+  }
+
+  if (
+    metrics.backdropTabIndex !== '-1' ||
+    metrics.backdropAriaHidden !== 'true'
+  ) {
+    throw new Error(
+      `Settings backdrop should not become a keyboard stop: ${JSON.stringify(
+        metrics,
+      )}`,
+    );
+  }
+
   if (metrics.modelConfig.width < 250) {
     throw new Error(
       `Settings form is too narrow: ${metrics.modelConfig.width}`,
@@ -4402,6 +4464,226 @@ async function assertSettingsPageLayout(fileName) {
       `Settings page is missing Advanced Diagnostics action; buttons=${metrics.buttons.join(
         ', ',
       )}`,
+    );
+  }
+}
+
+async function assertCompactSettingsOverlayLayout(fileName) {
+  await waitFor(
+    'compact settings close button focused',
+    async () =>
+      evaluate(
+        `document.activeElement?.getAttribute('aria-label') === 'Close Settings'`,
+      ),
+    5_000,
+  );
+
+  const metrics = await evaluate(`(() => {
+    const rectForElement = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const rectFor = (selector) =>
+      rectForElement(document.querySelector(selector));
+    const settingsContent = document.querySelector('.settings-page-content');
+    const permissions = document.querySelector(
+      '[data-testid="permissions-config"]'
+    );
+    const initial = {
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight
+      },
+      document: {
+        bodyScrollWidth: document.body.scrollWidth,
+        bodyScrollHeight: document.body.scrollHeight
+      },
+      grid: rectFor('[data-testid="workspace-grid"]'),
+      chat: rectFor('[data-testid="chat-thread"]'),
+      overlay: rectFor('[data-testid="settings-overlay"]'),
+      backdrop: rectFor('.settings-overlay-backdrop'),
+      settings: rectFor('[data-testid="settings-page"]'),
+      settingsContent: rectForElement(settingsContent),
+      closeButton: rectFor('[data-testid="settings-close-button"]'),
+      modelConfig: rectFor('[data-testid="model-config"]'),
+      permissionsConfig: rectForElement(permissions),
+      runtimeDiagnostics: rectFor('[data-testid="runtime-diagnostics"]'),
+      terminal: rectFor('[data-testid="terminal-drawer"]'),
+      contentClientHeight: settingsContent?.clientHeight ?? null,
+      contentScrollHeight: settingsContent?.scrollHeight ?? null,
+      contentScrollTop: settingsContent?.scrollTop ?? null,
+      activeLabel:
+        document.activeElement?.getAttribute('aria-label') ?? '',
+      backdropTabIndex:
+        document.querySelector('.settings-overlay-backdrop')
+          ?.getAttribute('tabindex') ?? null,
+      backdropAriaHidden:
+        document.querySelector('.settings-overlay-backdrop')
+          ?.getAttribute('aria-hidden') ?? null,
+      closeButtonText:
+        document.querySelector('[data-testid="settings-close-button"]')
+          ?.textContent.trim() ?? '',
+      closeButtonHasIcon:
+        document.querySelector('[data-testid="settings-close-button"] svg') !==
+        null,
+      settingsText:
+        document.querySelector('[data-testid="settings-page"]')?.innerText ?? ''
+    };
+
+    permissions?.scrollIntoView({ block: 'center' });
+    const afterPermissionsScroll = {
+      contentScrollTop: settingsContent?.scrollTop ?? null,
+      permissionsConfig: rectForElement(permissions),
+      settingsContent: rectForElement(settingsContent)
+    };
+    if (settingsContent) {
+      settingsContent.scrollTop = 0;
+    }
+
+    return { ...initial, afterPermissionsScroll };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(metrics, null, 2)}\n`,
+    'utf8',
+  );
+
+  const missing = [
+    'grid',
+    'chat',
+    'overlay',
+    'backdrop',
+    'settings',
+    'settingsContent',
+    'closeButton',
+    'modelConfig',
+    'permissionsConfig',
+    'terminal',
+  ].filter((key) => metrics[key] === null);
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing compact settings layout rects: ${missing.join(', ')}`,
+    );
+  }
+
+  if (metrics.viewport.width > 1000 || metrics.viewport.height > 700) {
+    throw new Error(
+      `Compact settings viewport did not apply: ${JSON.stringify(
+        metrics.viewport,
+      )}`,
+    );
+  }
+
+  if (
+    metrics.document.bodyScrollWidth > metrics.viewport.width + 4 ||
+    metrics.document.bodyScrollHeight > metrics.viewport.height + 4
+  ) {
+    throw new Error(
+      `Compact settings caused document overflow: ${JSON.stringify(metrics)}`,
+    );
+  }
+
+  if (
+    Math.abs(metrics.overlay.left - metrics.grid.left) > 1 ||
+    Math.abs(metrics.overlay.right - metrics.grid.right) > 1 ||
+    Math.abs(metrics.overlay.bottom - metrics.terminal.bottom) > 1
+  ) {
+    throw new Error(
+      `Compact settings overlay is not aligned with the workbench: ${JSON.stringify(
+        metrics,
+      )}`,
+    );
+  }
+
+  if (
+    metrics.settings.right < metrics.grid.right - 1 ||
+    metrics.settings.width < 500 ||
+    metrics.settings.width > metrics.grid.width - 72 ||
+    metrics.backdrop.width < 72
+  ) {
+    throw new Error(
+      `Compact settings sheet no longer preserves task context: ${JSON.stringify(
+        metrics,
+      )}`,
+    );
+  }
+
+  if (
+    metrics.settings.height > metrics.overlay.height + 1 ||
+    metrics.settingsContent.right > metrics.settings.right + 1 ||
+    metrics.modelConfig.width < 250
+  ) {
+    throw new Error(
+      `Compact settings content is not contained: ${JSON.stringify(metrics)}`,
+    );
+  }
+
+  if (
+    metrics.activeLabel !== 'Close Settings' ||
+    metrics.closeButtonText !== '' ||
+    !metrics.closeButtonHasIcon ||
+    metrics.closeButton.width > 32 ||
+    metrics.closeButton.height > 32 ||
+    metrics.backdropTabIndex !== '-1' ||
+    metrics.backdropAriaHidden !== 'true'
+  ) {
+    throw new Error(
+      `Compact settings controls are not icon-led and keyboard-safe: ${JSON.stringify(
+        metrics,
+      )}`,
+    );
+  }
+
+  if (
+    metrics.afterPermissionsScroll.contentScrollTop === null ||
+    metrics.afterPermissionsScroll.contentScrollTop <= 0 ||
+    metrics.afterPermissionsScroll.permissionsConfig.bottom >
+      metrics.afterPermissionsScroll.settingsContent.bottom + 1 ||
+    metrics.afterPermissionsScroll.permissionsConfig.top <
+      metrics.afterPermissionsScroll.settingsContent.top - 1
+  ) {
+    throw new Error(
+      `Compact settings permissions are not reachable by sheet scroll: ${JSON.stringify(
+        metrics,
+      )}`,
+    );
+  }
+
+  for (const hiddenDiagnostic of [
+    'Server',
+    'Node',
+    'ACP',
+    'Health',
+    'session-e2e-1',
+    'Settings path',
+  ]) {
+    if (metrics.settingsText.includes(hiddenDiagnostic)) {
+      throw new Error(
+        `Compact settings default view exposed diagnostic ${hiddenDiagnostic}: ${metrics.settingsText}`,
+      );
+    }
+  }
+
+  if (/http:\/\/127\.0\.0\.1:/u.test(metrics.settingsText)) {
+    throw new Error(
+      `Compact settings default view exposed the local server URL: ${metrics.settingsText}`,
+    );
+  }
+
+  if (metrics.runtimeDiagnostics !== null) {
+    throw new Error(
+      'Compact settings opened runtime diagnostics before Advanced Diagnostics.',
     );
   }
 }

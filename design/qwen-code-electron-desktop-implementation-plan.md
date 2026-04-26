@@ -22,6 +22,111 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Compact Settings Overlay Fidelity
+
+Status: completed in iteration 44.
+
+Goal: tighten the Settings overlay so it behaves like a compact supporting
+surface at both default and compact Electron viewports.
+
+User-visible value: users can open Settings without losing the conversation,
+get an icon-led close affordance consistent with the rest of the workbench, and
+use the sheet at compact desktop sizes without page overflow or hidden primary
+controls.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.tsx`
+- `packages/desktop/src/renderer/components/layout/SettingsPage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/settings-compact-overlay.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Settings header uses a compact icon close button with `aria-label`,
+  tooltip/title, and keyboard focus when the modal sheet opens.
+- The overlay backdrop remains pointer-clickable but does not become a hidden
+  keyboard stop before the settings sheet.
+- At the default CDP viewport, Settings still opens as a right-aligned modal
+  drawer while chat and the terminal strip remain mounted and review is closed.
+- At the compact `960x640` CDP viewport, the settings sheet stays contained
+  inside the workbench, keeps a visible task-context backdrop, avoids
+  document/body overflow, and leaves model/provider and permissions controls
+  reachable in the scrollable sheet.
+- Default Settings still hides server URLs, Node versions, ACP/session IDs,
+  settings paths, API keys, and other diagnostics until Advanced Diagnostics is
+  opened.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, complete the existing open-project/chat/review/commit path,
+  open Settings, verify default overlay geometry and focus, resize the real
+  Electron window to `960x640`, verify compact sheet geometry and overflow,
+  restore the default viewport, then continue the existing settings validation,
+  Coding Plan, Advanced Diagnostics, composer model, and terminal paths.
+- E2E assertions: close control is icon-sized, focused, and accessible;
+  backdrop is not keyboard focusable; compact overlay remains right-aligned,
+  bounded, scrollable internally, and context-preserving; diagnostics and fake
+  secrets stay hidden by default; and no console errors or failed local
+  requests are recorded.
+- Diagnostic artifacts: `settings-layout.json`,
+  `compact-settings-overlay.json`, `settings-page.png`,
+  `compact-settings-overlay.png`, Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for choosing the smallest uncovered
+  settings risk, `frontend-design` for prototype-constrained icon density and
+  hierarchy, and `electron-desktop-dev` for real Electron CDP verification.
+
+Notes and decisions:
+
+- The prototype favors icon-led support surfaces; this slice changes the close
+  affordance from a text button to a compact icon while preserving the same
+  accessible label.
+- The settings sheet remains a modal overlay rather than a main workbench tab.
+- The backdrop remains click-to-close for pointer users, but is removed from
+  the keyboard tab order so focus lands directly inside the modal sheet.
+- The sheet width was reduced from 780 px to 680 px at the default viewport to
+  preserve more visible task context behind Settings while keeping the model
+  form wider than the 250 px minimum.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 20 tests.
+- `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+  passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T17-45-34-724Z/`.
+- Key recorded metrics: default viewport 1240x788, settings sheet 680x738 px,
+  backdrop 316 px, focused close icon 28x28 px, backdrop `tabindex="-1"` and
+  `aria-hidden="true"`, no body/document overflow, compact viewport 960x608,
+  compact sheet 620x558 px, compact backdrop 108 px, compact settings content
+  scrollHeight 1193 px with permissions reachable at scrollTop 453.5, hidden
+  diagnostics absent by default, and no console errors or failed local
+  requests.
+
+Next work:
+
+- Continue Settings fidelity by reducing large form-control heights and card
+  borders inside the sheet if screenshot review shows the overlay still reads
+  heavier than `home.jpg`.
+- Add keyboard escape/return-focus coverage for Settings once modal focus
+  management is expanded beyond the initial close-button focus.
+
 ### Slice: Settings Overlay Surface
 
 Status: completed in iteration 43.
