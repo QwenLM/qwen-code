@@ -441,15 +441,21 @@ function processContent(
         requestContext,
       );
       if (toolMessage) {
-        // OpenAI spec only permits string / text-part content on
-        // `role: "tool"` messages. Strict OpenAI-compatible servers (e.g.
-        // LM Studio) reject tool messages containing image_url / input_audio
-        // / video_url / file parts with HTTP 400 "Invalid 'messages' in
-        // payload". Split any non-text media into a follow-up `role: "user"`
+        // Opt-in only (ContentGeneratorConfig.splitToolMedia). OpenAI spec
+        // only permits string / text-part content on `role: "tool"` messages.
+        // Strict OpenAI-compatible servers (e.g. LM Studio) reject tool
+        // messages containing image_url / input_audio / video_url / file
+        // parts with HTTP 400 "Invalid 'messages' in payload". When the flag
+        // is set, split any non-text media into a follow-up `role: "user"`
         // message so the model still sees the media while the tool message
-        // stays spec-compliant. Permissive providers see equivalent content.
+        // stays spec-compliant. Default (flag false) preserves prior
+        // behavior: media is embedded in the tool message and permissive
+        // providers continue to receive it that way. See #3616.
         const mediaParts: OpenAIContentPart[] = [];
-        if (Array.isArray(toolMessage.content)) {
+        if (
+          requestContext.splitToolMedia &&
+          Array.isArray(toolMessage.content)
+        ) {
           const textParts: OpenAI.Chat.ChatCompletionContentPartText[] = [];
           for (const cp of toolMessage.content as OpenAIContentPart[]) {
             if (

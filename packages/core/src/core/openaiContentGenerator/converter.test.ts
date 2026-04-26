@@ -382,6 +382,79 @@ describe('OpenAIContentConverter', () => {
       expect(userMessage).toBeUndefined();
     });
 
+    it('should split tool-result media into a follow-up user message when splitToolMedia is enabled (issue #3616)', () => {
+      // Same shape as the embedded-image test above, but with the strict
+      // OpenAI-compat opt-in flag set. The tool message must stay
+      // spec-compliant (string / text-part content only) and the image must
+      // arrive in a follow-up user message.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_1',
+                  name: 'Read',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_1',
+                  name: 'Read',
+                  response: { output: 'Image content' },
+                  parts: [
+                    {
+                      inlineData: {
+                        mimeType: 'image/png',
+                        data: 'base64encodedimagedata',
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const strictContext: RequestContext = {
+        ...requestContext,
+        splitToolMedia: true,
+      };
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        strictContext,
+      );
+
+      const toolMessage = messages.find((m) => m.role === 'tool');
+      expect(toolMessage).toBeDefined();
+      // Tool message content is a plain string (or text-part array) — no media
+      expect(typeof toolMessage?.content === 'string').toBe(true);
+      expect(toolMessage?.content).toContain('Image content');
+
+      // The image lives in a follow-up user message
+      const userMessage = messages.find((m) => m.role === 'user');
+      expect(userMessage).toBeDefined();
+      const userContent = userMessage?.content as Array<{
+        type: string;
+        text?: string;
+        image_url?: { url: string };
+      }>;
+      expect(Array.isArray(userContent)).toBe(true);
+      const imagePart = userContent.find((p) => p.type === 'image_url');
+      expect(imagePart?.image_url?.url).toBe(
+        'data:image/png;base64,base64encodedimagedata',
+      );
+    });
+
     it('should convert function responses with fileData to tool message with embedded image_url', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
