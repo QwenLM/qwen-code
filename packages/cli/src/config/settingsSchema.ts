@@ -914,6 +914,17 @@ const SETTINGS_SCHEMA = {
             parentKey: 'generationConfig',
             showInDialog: false,
           },
+          requestConcurrency: {
+            type: 'number',
+            label: 'Request Concurrency',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined as number | undefined,
+            description:
+              'Maximum number of concurrent in-flight requests against this model. Useful when the upstream returns 429 "Too many concurrent requests for this model". 0 / unset means unlimited. Falls back to QWEN_REQUEST_CONCURRENCY env var.',
+            parentKey: 'generationConfig',
+            showInDialog: false,
+          },
           enableCacheControl: {
             type: 'boolean',
             label: 'Enable Cache Control',
