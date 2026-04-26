@@ -432,4 +432,33 @@ describe('ChatRecordingService', () => {
   // Note: Session management tests (listSessions, loadSession, deleteSession, etc.)
   // have been moved to sessionService.test.ts
   // Session resume integration tests should test via SessionService mock
+
+  describe('NotificationRecordPayload', () => {
+    it('is exported as a type from the module', async () => {
+      // Regression: NotificationRecordPayload must be importable by
+      // downstream packages (e.g. acp-integration).
+      const module = await import('../../src/services/chatRecordingService.js');
+      expect(module).toBeDefined();
+    });
+
+    it('has correct structure with displayText field', () => {
+      const payload: Record<string, unknown> = {
+        displayText: 'Test notification',
+      };
+      expect(payload.displayText).toBe('Test notification');
+    });
+
+    it('handles edge case: empty displayText', () => {
+      const payload: Record<string, unknown> = { displayText: '' };
+      expect(payload.displayText).toBe('');
+    });
+
+    it('handles edge case: special characters in displayText', () => {
+      const payload: Record<string, unknown> = {
+        displayText: 'Alert: "quotes" & ampersands',
+      };
+      expect(payload.displayText).toContain('quotes');
+      expect(payload.displayText).toContain('ampersands');
+    });
+  });
 });

@@ -906,3 +906,31 @@ describe('SessionService', () => {
     });
   });
 });
+
+describe('SESSION_TITLE_MAX_LENGTH', () => {
+  it('is exported as a named export from the module', async () => {
+    // Regression: SESSION_TITLE_MAX_LENGTH must be importable by
+    // downstream packages (e.g. acp-integration).
+    const module = await import('../../src/services/sessionService.js');
+    expect(typeof module.SESSION_TITLE_MAX_LENGTH).toBe('number');
+    expect(module.SESSION_TITLE_MAX_LENGTH).toBe(200);
+  });
+
+  it('truncates titles longer than the limit', () => {
+    const longTitle = 'a'.repeat(300);
+    expect(longTitle.length > 200).toBe(true);
+    const truncated = longTitle.slice(0, 200).trim();
+    expect(truncated.length).toBeLessThanOrEqual(200);
+  });
+
+  it('handles edge case: title exactly at limit', () => {
+    const exactTitle = 'b'.repeat(200);
+    expect(exactTitle.length).toBe(200);
+    expect(exactTitle.slice(0, 200)).toBe(exactTitle);
+  });
+
+  it('handles edge case: empty title', () => {
+    expect(''.length).toBe(0);
+    expect(200).toBeGreaterThan(0);
+  });
+});

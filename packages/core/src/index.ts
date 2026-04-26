@@ -137,6 +137,7 @@ export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
 // ============================================================================
 
 export * from './services/chatRecordingService.js';
+export type { NotificationRecordPayload } from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileSystemService.js';
@@ -144,6 +145,7 @@ export * from './services/gitService.js';
 export * from './services/gitWorktreeService.js';
 export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
+export { SESSION_TITLE_MAX_LENGTH } from './services/sessionService.js';
 export * from './services/sessionTitle.js';
 export { stripTerminalControlSequences } from './utils/terminalSafe.js';
 export * from './services/shellExecutionService.js';
