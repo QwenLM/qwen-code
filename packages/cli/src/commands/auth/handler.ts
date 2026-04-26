@@ -458,7 +458,8 @@ export async function showAuthStatus(): Promise<void> {
         | undefined;
       const models = modelProviders?.[AuthType.USE_OPENAI];
       const activeModelConfig = Array.isArray(models)
-        ? (models.find((m) => m.id === modelName) ?? models[0])
+        ? (models.find((m) => m.id === modelName) ??
+          (modelName ? undefined : models[0]))
         : undefined;
 
       // Detect Coding Plan via region OR active model matching Coding Plan baseUrl/envKey
@@ -474,11 +475,6 @@ export async function showAuthStatus(): Promise<void> {
         const codingPlanVersion = mergedSettings.codingPlan?.version;
 
         const hasCodingPlanKey =
-          !!(
-            activeModelConfig?.envKey &&
-            (process.env[activeModelConfig.envKey] ||
-              mergedSettings.env?.[activeModelConfig.envKey])
-          ) ||
           !!process.env[CODING_PLAN_ENV_KEY] ||
           !!mergedSettings.env?.[CODING_PLAN_ENV_KEY];
 

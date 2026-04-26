@@ -513,6 +513,46 @@ describe('showAuthStatus', () => {
       );
     });
 
+    it('should not bind to unrelated provider entry when model.name does not match', async () => {
+      process.env['OPENAI_API_KEY'] = 'test-key';
+
+      vi.mocked(loadSettings).mockReturnValue(
+        createMockSettings({
+          security: {
+            auth: {
+              selectedType: AuthType.USE_OPENAI,
+            },
+          },
+          model: {
+            name: 'manual-model-not-in-providers',
+          },
+          modelProviders: {
+            openai: [
+              {
+                id: 'other-model',
+                envKey: 'OTHER_API_KEY',
+                baseUrl: 'https://other-api.example.com/v1',
+              },
+            ],
+          },
+        }),
+      );
+
+      await showAuthStatus();
+
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('OpenAI-compatible Provider'),
+      );
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('API key configured'),
+      );
+      // Should NOT show the unrelated provider's base URL
+      expect(writeStdoutLine).not.toHaveBeenCalledWith(
+        expect.stringContaining('https://other-api.example.com/v1'),
+      );
+      expect(process.exit).toHaveBeenCalledWith(0);
+    });
+
     it('should show OpenAI-compatible when stale Coding Plan key exists but active model is generic', async () => {
       process.env[CODING_PLAN_ENV_KEY] = 'stale-coding-plan-key';
       process.env['XUNFEI_API_KEY'] = 'active-key';
