@@ -463,6 +463,43 @@ describe('WorkspacePage', () => {
     expect((model as HTMLSelectElement).disabled).toBe(true);
   });
 
+  it('bounds the inline changed-files summary before opening review', () => {
+    const manyFileDiff: DesktopGitDiff = {
+      ...gitDiff,
+      files: Array.from({ length: 5 }, (_, index) => ({
+        ...gitDiff.files[0],
+        path: `src/file-${index}.ts`,
+      })),
+    };
+    const renderedContainer = renderWorkspace({ gitDiff: manyFileDiff });
+    const summary = renderedContainer.querySelector(
+      '[data-testid="conversation-changes-summary"]',
+    );
+    const rows = summary?.querySelectorAll('ul[aria-label="Changed files"] li');
+
+    expect(summary?.textContent).toContain('5 files changed');
+    expect(rows).toHaveLength(4);
+    expect(summary?.textContent).toContain('src/file-0.ts');
+    expect(summary?.textContent).toContain('src/file-2.ts');
+    expect(summary?.textContent).toContain('2 more');
+    expect(summary?.textContent).not.toContain('src/file-4.ts');
+    expect(
+      summary?.querySelector('button[aria-label="Review Changes"]'),
+    ).toBeTruthy();
+
+    act(() => {
+      (
+        summary?.querySelector(
+          'button[aria-label="Review Changes"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+
+    expect(
+      renderedContainer.querySelector('[data-testid="review-panel"]'),
+    ).toBeTruthy();
+  });
+
   it('shows a clear disabled composer reason with no active project', () => {
     const renderedContainer = renderWorkspace({
       activeProject: null,

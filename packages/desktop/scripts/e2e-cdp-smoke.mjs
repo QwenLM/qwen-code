@@ -2265,6 +2265,10 @@ async function assertConversationSurfaceFidelity(fileName) {
       '.conversation-changes-list li'
     );
     const timeline = document.querySelector('.chat-timeline');
+    const composer = document.querySelector('[data-testid="message-composer"]');
+    const composerTextarea = composer?.querySelector(
+      'textarea[aria-label="Message"]'
+    );
     const actionButtons = assistantMessage
       ? [
           ...assistantMessage.querySelectorAll(
@@ -2289,6 +2293,10 @@ async function assertConversationSurfaceFidelity(fileName) {
         rowStyle: styleFor(firstSummaryRow)
       },
       timeline: rectFor(timeline),
+      composer: {
+        rect: rectFor(composer),
+        textareaRect: rectFor(composerTextarea)
+      },
       actionButtons: actionButtons.map((button) => ({
         label: button.getAttribute('aria-label') || '',
         rect: rectFor(button),
@@ -2316,7 +2324,9 @@ async function assertConversationSurfaceFidelity(fileName) {
     !snapshot.summary.style ||
     !snapshot.summary.actionRect ||
     !snapshot.summary.rowStyle ||
-    !snapshot.timeline
+    !snapshot.timeline ||
+    !snapshot.composer.rect ||
+    !snapshot.composer.textareaRect
   ) {
     throw new Error(
       `Conversation surface fidelity metrics are missing: ${JSON.stringify(
@@ -2377,7 +2387,7 @@ async function assertConversationSurfaceFidelity(fileName) {
     );
   }
 
-  if (snapshot.summary.rect.height > 158) {
+  if (snapshot.summary.rect.height > 112) {
     throw new Error(
       `Changed-files summary should stay compact: ${JSON.stringify(
         snapshot.summary.rect,
@@ -2393,10 +2403,26 @@ async function assertConversationSurfaceFidelity(fileName) {
     );
   }
 
-  if (snapshot.summary.actionRect.height > 34) {
+  if (snapshot.summary.actionRect.height > 32) {
     throw new Error(
       `Changed-files action is too tall: ${JSON.stringify(
         snapshot.summary.actionRect,
+      )}`,
+    );
+  }
+
+  if (snapshot.composer.rect.height > 116) {
+    throw new Error(
+      `Composer should stay compact in the default conversation view: ${JSON.stringify(
+        snapshot.composer.rect,
+      )}`,
+    );
+  }
+
+  if (snapshot.composer.textareaRect.height > 54) {
+    throw new Error(
+      `Composer textarea should stay short in the default conversation view: ${JSON.stringify(
+        snapshot.composer.textareaRect,
       )}`,
     );
   }
@@ -2516,6 +2542,14 @@ async function assertCompactDenseConversationLayout(fileName) {
           rectFor(button)
         )
       : [];
+    if (timeline) {
+      timeline.scrollTop = timeline.scrollHeight;
+    }
+    const bottomScroll = {
+      summaryRect: rectFor(summary),
+      timelineRect: rectFor(timeline),
+      composerRect: rectFor(composer)
+    };
 
     return {
       viewport: {
@@ -2554,6 +2588,7 @@ async function assertCompactDenseConversationLayout(fileName) {
         : [],
       chipRects,
       actionRects,
+      bottomScroll,
       summaryVisibleBeforeAssistantScroll: Boolean(
         preScroll.summaryRect &&
         preScroll.timelineRect &&
@@ -2674,7 +2709,49 @@ async function assertCompactDenseConversationLayout(fileName) {
     throw new Error('Changed-files summary escaped the compact timeline.');
   }
 
-  if (snapshot.composer.height > 154) {
+  if (
+    !snapshot.bottomScroll.summaryRect ||
+    !snapshot.bottomScroll.timelineRect ||
+    !snapshot.bottomScroll.composerRect
+  ) {
+    throw new Error(
+      `Compact bottom scroll metrics are missing: ${JSON.stringify(
+        snapshot.bottomScroll,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.bottomScroll.summaryRect.bottom >
+    snapshot.bottomScroll.composerRect.top + 1
+  ) {
+    throw new Error(
+      `Compact changed-files summary should not sit behind the composer: ${JSON.stringify(
+        snapshot.bottomScroll,
+      )}`,
+    );
+  }
+
+  if (
+    !isRectContained(
+      snapshot.bottomScroll.summaryRect,
+      snapshot.bottomScroll.timelineRect,
+    )
+  ) {
+    throw new Error(
+      `Compact changed-files summary should remain inside the timeline after bottom scroll: ${JSON.stringify(
+        snapshot.bottomScroll,
+      )}`,
+    );
+  }
+
+  if (snapshot.summary && snapshot.summary.height > 112) {
+    throw new Error(
+      `Compact changed-files summary should stay compact: ${snapshot.summary.height}`,
+    );
+  }
+
+  if (snapshot.composer.height > 118) {
     throw new Error(
       `Compact composer should not crowd the conversation: ${snapshot.composer.height}`,
     );
@@ -4218,6 +4295,17 @@ function execFileP(command, args, options = {}) {
 
 function escapeSelector(value) {
   return value.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
+}
+
+function isRectContained(child, parent, tolerance = 1) {
+  return Boolean(
+    child &&
+      parent &&
+      child.left >= parent.left - tolerance &&
+      child.right <= parent.right + tolerance &&
+      child.top >= parent.top - tolerance &&
+      child.bottom <= parent.bottom + tolerance,
+  );
 }
 
 function delay(ms) {

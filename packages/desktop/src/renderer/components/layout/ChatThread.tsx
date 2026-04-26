@@ -107,7 +107,7 @@ export function ChatThread({
           onKeyDown={handleComposerKeyDown}
           onChange={(event) => onMessageTextChange(event.target.value)}
           placeholder={placeholder}
-          rows={3}
+          rows={2}
           value={messageText}
         />
         <div className="composer-control-row">
@@ -905,7 +905,7 @@ function ChangedFilesSummaryCard({
   }
 
   const stats = summarizeChangedFiles(files);
-  const visibleFiles = files.slice(0, 4);
+  const visibleFiles = files.slice(0, 3);
   const hiddenFileCount = Math.max(0, files.length - visibleFiles.length);
 
   return (
@@ -915,18 +915,28 @@ function ChangedFilesSummaryCard({
       data-testid="conversation-changes-summary"
     >
       <div className="conversation-changes-heading">
-        <div>
+        <div className="conversation-changes-title">
           <span className="message-role">Changed files</span>
           <strong>
             {files.length} {files.length === 1 ? 'file' : 'files'} changed
           </strong>
         </div>
-        <span className="conversation-diff-stat" aria-label="Diff stats">
-          <span className="diff-addition">+{stats.additions}</span>
-          <span className="diff-deletion">-{stats.deletions}</span>
-        </span>
+        <div className="conversation-changes-meta">
+          <span className="conversation-diff-stat" aria-label="Diff stats">
+            <span className="diff-addition">+{stats.additions}</span>
+            <span className="diff-deletion">-{stats.deletions}</span>
+          </span>
+          <button
+            aria-label="Review Changes"
+            className="secondary-button"
+            type="button"
+            onClick={onOpenReview}
+          >
+            Review Changes
+          </button>
+        </div>
       </div>
-      <ul className="conversation-changes-list">
+      <ul className="conversation-changes-list" aria-label="Changed files">
         {visibleFiles.map((file) => (
           <li key={file.path}>
             <span title={file.path}>{file.path}</span>
@@ -940,16 +950,6 @@ function ChangedFilesSummaryCard({
           </li>
         ) : null}
       </ul>
-      <div className="conversation-changes-actions">
-        <button
-          aria-label="Review Changes"
-          className="secondary-button"
-          type="button"
-          onClick={onOpenReview}
-        >
-          Review Changes
-        </button>
-      </div>
     </section>
   );
 }

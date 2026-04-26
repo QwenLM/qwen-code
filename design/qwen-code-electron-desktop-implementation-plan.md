@@ -22,6 +22,113 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Composer and Changed-Files Density Pass
+
+Status: completed in iteration 23.
+
+Goal: make the first viewport closer to `home.jpg` by reducing the bottom
+composer's visual height and converting the inline changed-files summary from a
+mini review panel into a compact conversation activity card.
+
+User-visible value: users keep more conversation context visible while the
+composer still exposes project, branch, permission, model, stop, and send
+controls. The changed-files prompt remains discoverable but no longer competes
+with assistant prose or the real review drawer.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/conversation-surface-fidelity.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The composer uses a shorter textarea and slimmer accessory controls while
+  preserving attach, project, branch, permission, model, stop, and send access.
+- Composer controls wrap safely at the compact Electron viewport without
+  horizontal overflow.
+- The inline changed-files summary shows the file count, diff stats, a short
+  bounded file list, and Review Changes action in a compact surface.
+- The changed-files summary remains visibly secondary to assistant prose and
+  stays inside the conversation timeline at 1240x820 and 960x640.
+- The review drawer still opens from the changed-files summary and assistant
+  Open Changes action.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, send a prompt, approve the command,
+  wait for assistant prose and changed-files summary, assert the compact summary
+  and composer geometry, switch to the compact viewport, then continue the
+  existing branch, review, settings, terminal, discard safety, and commit
+  workflows.
+- E2E assertions: default summary height is below the previous 153.5 px
+  baseline, compact summary height is bounded, composer height is below the
+  previous 126.9 px compact baseline, textarea height stays short, controls do
+  not overflow, and no console errors or failed local requests are recorded.
+- Diagnostic artifacts: `conversation-surface-fidelity.json`,
+  `conversation-surface-fidelity.png`, `compact-dense-conversation.json`,
+  `compact-dense-conversation.png`, Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for choosing the narrow slice
+  without involving the user in routine product choices, `frontend-design` for
+  prototype-constrained density and visual hierarchy, and
+  `electron-desktop-dev` for real Electron CDP verification of the renderer
+  workflow.
+
+Notes and decisions:
+
+- The prototype treats the composer as the task control center, but not as a
+  tall form. The textarea now defaults to two rows with slimmer accessory
+  controls; project, branch, permission, model, stop, and send remain in the
+  composer.
+- The changed-files summary now uses a single heading/action row and compact
+  file chips. It shows up to three files inline and sends larger sets to the
+  review drawer through a `+N more` chip.
+- A self-review of the first passing CDP artifacts showed the compact
+  screenshot was captured after the harness scrolled the assistant message into
+  view, leaving the summary partly behind the composer in the diagnostic image.
+  The harness now restores bottom-of-conversation scroll before the screenshot
+  and asserts the compact summary stays above the composer.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 15 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` first passed at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T03-06-50-043Z/`.
+  After the compact screenshot/bottom-scroll harness fix, it passed again at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T03-08-46-544Z/`.
+- Key recorded metrics from the final pass: default changed-files summary
+  height `80` px, default composer height `101` px, default textarea height
+  `46` px, compact changed-files summary height `80` px, compact composer
+  height `97.1875` px, no composer/control overflow, no document overflow, no
+  console errors, and no failed local requests.
+
+Next work:
+
+- Continue prototype fidelity by reducing the remaining large message/tool
+  typography and command activity vertical weight visible above the assistant
+  response.
+- Resume the model configuration workflow from the composer model picker and
+  settings entry once the first viewport density is stable.
+
 ### Completed Slice: Branch Create Inline Validation
 
 Status: completed in iteration 22.
