@@ -1034,11 +1034,10 @@ describe('modelConfigUtils', () => {
         return {
           config: { model, apiKey: '', baseUrl: '' },
           sources: {
-            model: {
-              kind: (model === 'custom-model' ? 'settings' : 'env') as
-                | 'settings'
-                | 'env',
-            },
+            model:
+              model === 'custom-model'
+                ? { kind: 'settings' as const, path: 'model.name' }
+                : { kind: 'env' as const, envKey: 'OPENAI_MODEL' },
           },
           warnings: [],
         };
