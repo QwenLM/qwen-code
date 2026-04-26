@@ -1606,6 +1606,7 @@ export class Config {
       }
 
       this.backgroundTaskRegistry.abortAll();
+      this.backgroundShellRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
     } catch (error) {

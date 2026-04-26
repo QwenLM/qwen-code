@@ -101,6 +101,33 @@ describe('BackgroundShellRegistry', () => {
     });
   });
 
+  describe('abortAll', () => {
+    it('cancels every running entry and leaves terminal entries alone', () => {
+      const reg = new BackgroundShellRegistry();
+      const acRunning1 = new AbortController();
+      const acRunning2 = new AbortController();
+      const acDone = new AbortController();
+      reg.register(makeEntry({ shellId: 'a', abortController: acRunning1 }));
+      reg.register(makeEntry({ shellId: 'b', abortController: acRunning2 }));
+      reg.register(makeEntry({ shellId: 'c', abortController: acDone }));
+      reg.complete('c', 0, 1500);
+
+      reg.abortAll();
+
+      expect(reg.get('a')!.status).toBe('cancelled');
+      expect(reg.get('b')!.status).toBe('cancelled');
+      expect(reg.get('c')!.status).toBe('completed');
+      expect(acRunning1.signal.aborted).toBe(true);
+      expect(acRunning2.signal.aborted).toBe(true);
+      expect(acDone.signal.aborted).toBe(false);
+    });
+
+    it('is a no-op when registry is empty', () => {
+      const reg = new BackgroundShellRegistry();
+      expect(() => reg.abortAll()).not.toThrow();
+    });
+  });
+
   describe('cancel', () => {
     it('transitions running → cancelled and aborts the signal', () => {
       const reg = new BackgroundShellRegistry();

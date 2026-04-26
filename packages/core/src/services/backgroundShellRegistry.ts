@@ -91,4 +91,19 @@ export class BackgroundShellRegistry {
     entry.endTime = endTime;
     entry.abortController.abort();
   }
+
+  /**
+   * Cancel every still-running entry. Called on session/Config shutdown so
+   * background shells don't outlive the CLI process and leak orphaned
+   * children. Symmetric with `BackgroundTaskRegistry.abortAll()` for the
+   * subagent path.
+   */
+  abortAll(): void {
+    const endTime = Date.now();
+    for (const entry of Array.from(this.entries.values())) {
+      if (entry.status === 'running') {
+        this.cancel(entry.shellId, endTime);
+      }
+    }
+  }
 }

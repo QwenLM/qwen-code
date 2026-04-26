@@ -414,37 +414,39 @@ describe('ShellTool', () => {
       expect(registry.complete).not.toHaveBeenCalled();
     });
 
-    it('settles a background entry as cancelled when the abort signal fires', async () => {
-      const registry = mockConfig.getBackgroundShellRegistry();
-      const ac = new AbortController();
+    it('strips trailing & from the spawned command (managed path handles backgrounding)', async () => {
       const invocation = shellTool.build({
-        command: 'sleep 99',
+        command: 'node server.js &',
         is_background: true,
       });
-      await invocation.execute(ac.signal);
-      const entry = (registry.register as Mock).mock.calls[0][0];
-      // Simulate registry already setting status to 'running' before cancel hits.
-      (registry.get as Mock).mockReturnValue({ status: 'running' });
-
-      ac.abort();
-      resolveExecutionPromise({
-        rawOutput: Buffer.from(''),
-        output: '',
-        exitCode: null,
-        signal: null,
-        error: null,
-        aborted: true,
-        pid: 12345,
-        executionMethod: 'child_process',
-      });
-      await new Promise((r) => setImmediate(r));
-
-      expect(registry.cancel).toHaveBeenCalledWith(
-        entry.shellId,
-        expect.any(Number),
+      await invocation.execute(mockAbortSignal);
+      expect(mockShellExecutionService).toHaveBeenCalledWith(
+        'node server.js',
+        '/test/dir',
+        expect.any(Function),
+        expect.any(AbortSignal),
+        false,
+        {},
+        { streamStdout: true },
       );
-      expect(registry.complete).not.toHaveBeenCalled();
-      expect(registry.fail).not.toHaveBeenCalled();
+    });
+
+    it('does not forward the turn signal into the background shell', async () => {
+      // Verifies: the AbortSignal handed to ShellExecutionService is the
+      // entry's own controller, not the outer turn signal. Cancelling the
+      // turn must not kill an intentionally backgrounded dev server / watcher.
+      const turnAc = new AbortController();
+      const invocation = shellTool.build({
+        command: 'npm run dev',
+        is_background: true,
+      });
+      await invocation.execute(turnAc.signal);
+      const passedSignal = mockShellExecutionService.mock.calls[0][3];
+      expect(passedSignal).not.toBe(turnAc.signal);
+      turnAc.abort();
+      // The signal handed to ShellExecutionService stays un-aborted —
+      // the turn's abort doesn't propagate into the background shell.
+      expect(passedSignal.aborted).toBe(false);
     });
 
     it('should not add ampersand when is_background is false', async () => {

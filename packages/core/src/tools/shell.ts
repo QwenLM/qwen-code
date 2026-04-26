@@ -420,15 +420,29 @@ export class ShellToolInvocation extends BaseToolInvocation<
     shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<ToolResult> {
     const strippedCommand = stripShellWrapper(this.params.command);
-    const processedCommand = this.addCoAuthorToGitCommit(strippedCommand);
+    // Strip a trailing `&` (and surrounding whitespace) before spawn:
+    // bash treats it as background-detach, exits the wrapper immediately,
+    // and the real child outlives the wrapper — the registry would settle
+    // as `completed` while the shell is still running, and chunked output
+    // would land on a closed stream. The managed path is itself the
+    // backgrounding mechanism, so the trailing `&` is redundant at best
+    // and dangerous at worst.
+    const noTrailingAmp = strippedCommand.replace(/\s*&+\s*$/, '');
+    if (noTrailingAmp !== strippedCommand) {
+      debugLogger.warn(
+        'Stripped trailing & from background shell command — managed path handles backgrounding',
+      );
+    }
+    const processedCommand = this.addCoAuthorToGitCommit(noTrailingAmp);
     const cwd = this.params.directory || this.config.getTargetDir();
 
-    // Per-session output dir under the project. Path layout aligns with the
-    // direction sketched in #3471 review (`<projectDir>/tasks/<sessionId>/`)
-    // so future task kinds (subagent transcripts, monitor logs) sit alongside.
+    // Output goes under the project temp dir (which `ReadFileTool`
+    // auto-allows by default), so the LLM can `Read` the captured output
+    // without bouncing off a permission prompt — important because
+    // background-agent contexts can't surface interactive prompts.
     const outputDir = path.join(
-      this.config.storage.getProjectDir(),
-      'tasks',
+      this.config.storage.getProjectTempDir(),
+      'background-shells',
       this.config.getSessionId(),
     );
     fs.mkdirSync(outputDir, { recursive: true });
@@ -436,19 +450,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const shellId = `bg_${crypto.randomBytes(4).toString('hex')}`;
     const outputPath = path.join(outputDir, `shell-${shellId}.output`);
 
-    // Bridge external signal (tool-framework abort, e.g. Ctrl+C) into the
-    // entry's AC so a single source of truth governs cancellation. Keep
-    // the handler reference around so we can detach it in the settle
-    // callback — background shells outlive the turn, and a dangling
-    // listener would keep `entryAc` (and transitively `outputStream`)
-    // reachable until the turn signal itself is GC'd.
+    // Background shells are explicitly independent of the current turn:
+    // the user pressing Ctrl+C on a turn (which aborts `signal`) should
+    // NOT kill a long-running dev server / watcher they intentionally
+    // backgrounded. Cancellation flows only through the entry's own
+    // AbortController, driven by future `task_stop` integration (#3471).
+    // The `signal` parameter is still honored for the synchronous early
+    // return below (don't even spawn if the agent already aborted), but
+    // we deliberately do not forward it.
     const entryAc = new AbortController();
-    const onSignalAbort = () => entryAc.abort();
-    if (signal.aborted) {
-      entryAc.abort();
-    } else {
-      signal.addEventListener('abort', onSignalAbort, { once: true });
-    }
 
     const outputStream = fs.createWriteStream(outputPath, { flags: 'w' });
     // Without an 'error' listener, a write failure (disk full, permission
@@ -507,7 +517,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // unblocked immediately.
     void resultPromise.then(
       (result) => {
-        signal.removeEventListener('abort', onSignalAbort);
         outputStream.end();
         const endTime = Date.now();
         if (entryAc.signal.aborted) {
@@ -534,7 +543,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
         }
       },
       (err) => {
-        signal.removeEventListener('abort', onSignalAbort);
         outputStream.end();
         registry.fail(shellId, getErrorMessage(err), Date.now());
       },
