@@ -1340,13 +1340,18 @@ function mergeConsecutiveAssistantMessages(
           .filter(Boolean)
           .join('');
 
-        // Update the last message with combined data
+        // Update the last message with combined data.
+        // When reasoning_content is present, fall back to "" instead of null
+        // for empty content. Some OpenAI-compatible providers (e.g. Ollama)
+        // reject content: null when reasoning_content is set (issue #3499).
+        // processContent already enforces this rule for single messages; we
+        // mirror it here so the merged result stays compatible.
         (
           lastMessage as OpenAI.Chat.ChatCompletionMessageParam & {
             content: string | OpenAI.Chat.ChatCompletionContentPart[] | null;
             tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
           }
-        ).content = combinedContent || null;
+        ).content = combinedContent || (combinedReasoning ? '' : null);
         if (combinedToolCalls.length > 0) {
           (
             lastMessage as OpenAI.Chat.ChatCompletionMessageParam & {

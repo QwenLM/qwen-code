@@ -2122,6 +2122,36 @@ describe('OpenAIContentConverter', () => {
       ).toBe('only thought');
     });
 
+    it('should use empty string instead of null for content when merged result has reasoning but no visible text (issue #3499)', () => {
+      // Two reasoning-only assistant turns merge to content='' (Ollama
+      // compatibility), not null. processContent enforces this for single
+      // messages; the merge must keep it intact.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ text: 'r1', thought: true }],
+          },
+          {
+            role: 'model',
+            parts: [{ text: 'r2', thought: true }],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      expect(messages).toHaveLength(1);
+      expect(messages[0].content).toBe('');
+      expect(
+        (messages[0] as { reasoning_content?: string }).reasoning_content,
+      ).toBe('r1r2');
+    });
+
     it('should preserve reasoning_content across three consecutive assistant messages', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
