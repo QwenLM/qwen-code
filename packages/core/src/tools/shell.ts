@@ -30,6 +30,7 @@ import type {
 } from '../services/shellExecutionService.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
 import type { BackgroundShellEntry } from '../services/backgroundShellRegistry.js';
+import stripAnsi from 'strip-ansi';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import { isSubpaths } from '../utils/paths.js';
@@ -462,7 +463,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       cwd,
       (event: ShellOutputEvent) => {
         if (event.type === 'data' && typeof event.chunk === 'string') {
-          outputStream.write(event.chunk);
+          // Strip ANSI escape codes (color, cursor-move, clear-screen) before
+          // writing — agents read the file as plain text, and dev servers /
+          // build tools spam plenty of escape sequences that would render as
+          // garbage. Costs ~one regex per chunk; cheap relative to disk I/O.
+          outputStream.write(stripAnsi(event.chunk));
         }
         // ANSI array chunks and binary streams are not written to the output
         // file: agents read the file as plain text and binary spam would be

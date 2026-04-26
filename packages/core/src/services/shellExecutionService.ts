@@ -418,6 +418,20 @@ export class ShellExecutionService {
             }
           }
 
+          if (streamStdout) {
+            // Streaming mode: decode + push through immediately. No buffering
+            // of stdout/stderr strings or outputChunks — long-running
+            // background commands (dev servers, watchers) would otherwise
+            // accumulate unbounded memory until exit. The consumer is
+            // expected to write each chunk to its own sink (e.g. a file).
+            const decoder = stream === 'stdout' ? stdoutDecoder : stderrDecoder;
+            const decodedChunk = decoder.decode(data, { stream: true });
+            onOutputEvent({ type: 'data', chunk: decodedChunk });
+            return;
+          }
+
+          // Buffered mode (foreground): accumulate for binary sniff +
+          // a single cleaned-blob emit at exit.
           outputChunks.push(data);
 
           if (isStreamingRawContent && sniffedBytes < MAX_SNIFF_SIZE) {
@@ -437,15 +451,6 @@ export class ShellExecutionService {
               stdout += decodedChunk;
             } else {
               stderr += decodedChunk;
-            }
-
-            // Push each chunk through to the consumer in streaming mode so
-            // long-running background commands (dev servers, watchers) don't
-            // accumulate output in memory until exit. Default mode (foreground)
-            // still emits the cleaned final blob in handleExit, preserving
-            // existing behavior for the in-line shell tool path.
-            if (streamStdout) {
-              onOutputEvent({ type: 'data', chunk: decodedChunk });
             }
           }
         };

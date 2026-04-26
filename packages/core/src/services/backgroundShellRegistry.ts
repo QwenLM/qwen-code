@@ -48,6 +48,12 @@ export interface BackgroundShellEntry {
 }
 
 export class BackgroundShellRegistry {
+  // Entries persist for the session lifetime — no automatic eviction of
+  // terminal entries. For typical interactive sessions (tens of background
+  // shells over an hour) this is fine, but long-running sessions that spawn
+  // many short-lived background commands will see the map and the on-disk
+  // output files grow without bound. Eviction policy (LRU? age-based? cap?)
+  // is left as a follow-up alongside output-file rotation.
   private readonly entries = new Map<string, BackgroundShellEntry>();
 
   register(entry: BackgroundShellEntry): void {
