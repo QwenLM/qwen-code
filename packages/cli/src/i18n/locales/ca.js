@@ -1442,7 +1442,7 @@ export default {
   // ============================================================================
   // Diàlegs - Model
   // ============================================================================
-  'Select Model': 'Seleccionar model',
+  'Select Model': 'Seleccioneu el model',
   '(Press Esc to close)': '(Premeu Esc per tancar)',
   'Current (effective) configuration': 'Configuració actual (efectiva)',
   AuthType: "Tipus d'autenticació",
@@ -1452,7 +1452,7 @@ export default {
   '(set)': '(establert)',
   '(not set)': '(no establert)',
   Modality: 'Modalitat',
-  'Context Window': 'Finestra de context',
+  'Context Window': 'Fin. de context',
   text: 'text',
   'text-only': 'només text',
   image: 'imatge',
