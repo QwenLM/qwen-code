@@ -22,6 +22,99 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Plan and Tool Activity Label Restraint
+
+Status: completed in iteration 48.
+
+Goal: reduce the remaining uppercase plan/tool activity chrome so timeline
+progress reads like compact task context instead of debugger metadata.
+
+User-visible value: users can scan assistant prose, plan steps, and completed
+tool activity in one conversation flow without `PLAN`, `INPUT`, `RESULT`, and
+raw status labels visually competing with the main response.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/plan-tool-label-restraint.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Plan activity renders with a compact title-case header and subdued step
+  statuses instead of a standalone uppercase `PLAN` role label.
+- Tool activity keeps title, kind, status, input, output, and file references
+  visible, but kind/section/status labels are title-case, lower weight, and
+  visually secondary to the tool title.
+- Existing hidden-internal-ID behavior, assistant actions, file chips, changed
+  files summary, command approval, composer, review, settings, and terminal
+  workflows remain unchanged.
+- Default and compact Electron viewports keep plan/tool rows contained, with
+  no document overflow and no console errors or failed local requests.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake project, send a prompt, inspect plan and resolved
+  tool activity label text/style, approve the command, complete the existing
+  assistant/review/settings/terminal path, and assert compact viewport layout.
+- E2E assertions: plan and tool activity labels use title-case product
+  language, uppercase legacy labels are absent, metadata label weight/color are
+  subordinate to titles/prose, activity rows stay compact and in timeline, and
+  no console errors or failed local requests are recorded.
+- Diagnostic artifacts: updated `conversation-surface-fidelity.json`,
+  `resolved-tool-activity.json`, screenshots, Electron log, and summary JSON
+  under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for the narrow autonomous design
+  choice, `frontend-design` for prototype-constrained label hierarchy, and
+  `electron-desktop-dev` for renderer changes verified through real Electron
+  CDP interaction.
+
+Notes and decisions:
+
+- The `home.jpg` prototype uses progress/task context inline with the
+  conversation, but not as loud uppercase debugger sections. This slice keeps
+  the existing timeline primitives and only changes presentation/formatting.
+- No new icon dependency is needed; this is a typography and hierarchy pass.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 21 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T18-28-25-933Z/`.
+- Key recorded metrics: plan labels render as `Plan`, `2 tasks`,
+  `Completed`, and `In progress` with no uppercase legacy plan labels; plan
+  label/status weights are 650 with `text-transform: none`; resolved tool
+  labels render as `Execute`, `Completed`, `Input`, and `Result` with no
+  uppercase legacy tool labels; tool metadata label weights are at most 680;
+  plan height is 69.27 px, resolved tool activity height is 113.7 px, and no
+  console errors or failed local requests were recorded.
+
+Next work:
+
+- Continue conversation fidelity by reducing the remaining changed-files
+  summary card weight if it still reads heavier than the inline summary in
+  `home.jpg`.
+- Consider compact/live ACP coverage for unexpected tool status strings and
+  localized plan labels.
+
 ### Slice: Terminal Expanded Control Density
 
 Status: completed in iteration 47.

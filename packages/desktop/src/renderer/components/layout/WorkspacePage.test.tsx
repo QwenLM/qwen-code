@@ -939,6 +939,43 @@ describe('WorkspacePage', () => {
     );
   });
 
+  it('renders plan activity with restrained product labels', () => {
+    const chatState = chatReducer(createInitialChatState(), {
+      type: 'server_message',
+      message: {
+        type: 'plan',
+        entries: [
+          {
+            content: 'Inspect the opened project',
+            status: 'completed',
+          },
+          {
+            content: 'Request command approval',
+            status: 'in_progress',
+          },
+        ],
+      },
+    });
+
+    const renderedContainer = renderWorkspace({ chatState });
+    const planCard = renderedContainer.querySelector(
+      '[data-testid="conversation-plan-card"]',
+    );
+    const planText = planCard?.textContent ?? '';
+
+    expect(planCard).toBeTruthy();
+    expect(planText).toContain('Plan');
+    expect(planText).toContain('2 tasks');
+    expect(planText).toContain('Completed');
+    expect(planText).toContain('In progress');
+    expect(planText).toContain('Inspect the opened project');
+    expect(planText).not.toContain('COMPLETED');
+    expect(planText).not.toContain('IN_PROGRESS');
+    expect(
+      planCard?.querySelector('.conversation-plan-status-completed'),
+    ).toBeTruthy();
+  });
+
   it('renders rich tool activity cards with file references', () => {
     const chatState = chatReducer(createInitialChatState(), {
       type: 'server_message',
@@ -966,12 +1003,16 @@ describe('WorkspacePage', () => {
     const toolText = toolCard?.textContent ?? '';
 
     expect(toolCard).toBeTruthy();
-    expect(toolText).toContain('execute');
+    expect(toolText).toContain('Execute');
     expect(toolText).toContain('Run focused tests');
-    expect(toolText).toContain('completed');
+    expect(toolText).toContain('Completed');
     expect(toolText).toContain('npm test -- WorkspacePage.test.tsx');
     expect(toolText).toContain('tests passed');
     expect(toolText).toContain('src/renderer/WorkspacePage.tsx:42');
+    expect(toolText).toContain('Input');
+    expect(toolText).toContain('Result');
+    expect(toolText).not.toContain('INPUT');
+    expect(toolText).not.toContain('RESULT');
     expect(
       toolCard?.querySelector('pre[aria-label="Tool input preview"]'),
     ).toBeTruthy();

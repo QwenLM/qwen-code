@@ -2175,6 +2175,11 @@ async function assertResolvedToolActivity(fileName) {
     const composer = document.querySelector('[data-testid="message-composer"]');
     const firstPreview = card?.querySelector('.conversation-tool-section pre');
     const fileChip = card?.querySelector('.conversation-tool-files li');
+    const kindLabel = card?.querySelector('.conversation-activity-label');
+    const statusLabel = card?.querySelector('.conversation-tool-status');
+    const sectionLabels = card
+      ? [...card.querySelectorAll('.conversation-tool-section-label')]
+      : [];
     const rectFor = (element) => {
       if (!element) {
         return null;
@@ -2228,7 +2233,11 @@ async function assertResolvedToolActivity(fileName) {
         borderRightWidth: numberFromPixel(style.borderRightWidth),
         borderBottomWidth: numberFromPixel(style.borderBottomWidth),
         borderLeftWidth: numberFromPixel(style.borderLeftWidth),
-        borderRadius: style.borderTopLeftRadius
+        borderRadius: style.borderTopLeftRadius,
+        color: style.color,
+        fontSize: numberFromPixel(style.fontSize),
+        fontWeight: numberFromPixel(style.fontWeight),
+        textTransform: style.textTransform
       };
     };
     return {
@@ -2241,6 +2250,14 @@ async function assertResolvedToolActivity(fileName) {
       legacyToolRows: document.querySelectorAll('.chat-tool').length,
       previewStyle: styleFor(firstPreview),
       fileChipStyle: styleFor(fileChip),
+      kindLabelText: kindLabel?.textContent.trim() ?? '',
+      kindLabelStyle: styleFor(kindLabel),
+      statusLabelText: statusLabel?.textContent.trim() ?? '',
+      statusLabelStyle: styleFor(statusLabel),
+      sectionLabels: sectionLabels.map((label) => ({
+        text: label.textContent.trim(),
+        style: styleFor(label)
+      })),
       fileChipText:
         document.querySelector('.conversation-tool-files')?.innerText ?? ''
     };
@@ -2286,6 +2303,31 @@ async function assertResolvedToolActivity(fileName) {
     );
   }
 
+  if (
+    snapshot.kindLabelText !== 'Execute' ||
+    snapshot.statusLabelText !== 'Completed' ||
+    snapshot.sectionLabels.map((label) => label.text).join(',') !==
+      'Input,Result'
+  ) {
+    throw new Error(
+      `Resolved tool activity labels should use title-case product language: ${JSON.stringify(
+        {
+          kind: snapshot.kindLabelText,
+          status: snapshot.statusLabelText,
+          sections: snapshot.sectionLabels,
+        },
+      )}`,
+    );
+  }
+
+  for (const legacyLabel of ['EXECUTE', 'INPUT', 'RESULT', 'COMPLETED']) {
+    if (snapshot.cardText.includes(legacyLabel)) {
+      throw new Error(
+        `Resolved tool activity should not show uppercase legacy label ${legacyLabel}: ${snapshot.cardText}`,
+      );
+    }
+  }
+
   if (!snapshot.cardRect || !snapshot.timelineRect || !snapshot.composerRect) {
     throw new Error(
       `Resolved tool activity geometry is missing: ${JSON.stringify(snapshot)}`,
@@ -2308,9 +2350,35 @@ async function assertResolvedToolActivity(fileName) {
     );
   }
 
-  if (!snapshot.cardStyle || !snapshot.previewStyle || !snapshot.fileChipStyle) {
+  if (
+    !snapshot.cardStyle ||
+    !snapshot.previewStyle ||
+    !snapshot.fileChipStyle ||
+    !snapshot.kindLabelStyle ||
+    !snapshot.statusLabelStyle ||
+    snapshot.sectionLabels.some((label) => !label.style)
+  ) {
     throw new Error(
       `Resolved tool activity styles are missing: ${JSON.stringify(snapshot)}`,
+    );
+  }
+
+  if (
+    snapshot.kindLabelStyle.textTransform !== 'none' ||
+    snapshot.kindLabelStyle.fontWeight > 700 ||
+    snapshot.statusLabelStyle.textTransform !== 'none' ||
+    snapshot.statusLabelStyle.fontWeight > 700 ||
+    snapshot.sectionLabels.some(
+      (label) =>
+        label.style.textTransform !== 'none' || label.style.fontWeight > 700,
+    )
+  ) {
+    throw new Error(
+      `Resolved tool activity labels are too heavy: ${JSON.stringify({
+        kind: snapshot.kindLabelStyle,
+        status: snapshot.statusLabelStyle,
+        sections: snapshot.sectionLabels,
+      })}`,
     );
   }
 
@@ -2662,9 +2730,10 @@ async function assertConversationSurfaceFidelity(fileName) {
         borderRadius: style.borderTopLeftRadius,
         display: style.display,
         fontSize: numberFromPixel(style.fontSize),
-        fontWeight: style.fontWeight,
+        fontWeight: numberFromPixel(style.fontWeight),
         lineHeight: numberFromPixel(style.lineHeight),
-        position: style.position
+        position: style.position,
+        textTransform: style.textTransform
       };
     };
     const assistantMessage = [
@@ -2679,6 +2748,11 @@ async function assertConversationSurfaceFidelity(fileName) {
     const userParagraph = userMessage?.querySelector('p');
     const plan = document.querySelector('.chat-plan');
     const planItem = plan?.querySelector('li');
+    const planLabel = plan?.querySelector('.conversation-activity-label');
+    const planCount = plan?.querySelector('.conversation-plan-count');
+    const planStatuses = plan
+      ? [...plan.querySelectorAll('.conversation-plan-status')]
+      : [];
     const summary = document.querySelector(
       '[data-testid="conversation-changes-summary"]'
     );
@@ -2739,7 +2813,16 @@ async function assertConversationSurfaceFidelity(fileName) {
       plan: {
         rect: rectFor(plan),
         itemRect: rectFor(planItem),
-        itemStyle: styleFor(planItem)
+        itemStyle: styleFor(planItem),
+        labelText: planLabel?.textContent.trim() ?? '',
+        labelStyle: styleFor(planLabel),
+        countText: planCount?.textContent.trim() ?? '',
+        countStyle: styleFor(planCount),
+        statuses: planStatuses.map((status) => ({
+          text: status.textContent.trim(),
+          style: styleFor(status)
+        })),
+        text: plan?.innerText ?? ''
       },
       summary: {
         rect: rectFor(summary),
@@ -2786,6 +2869,9 @@ async function assertConversationSurfaceFidelity(fileName) {
     !snapshot.plan.rect ||
     !snapshot.plan.itemRect ||
     !snapshot.plan.itemStyle ||
+    !snapshot.plan.labelStyle ||
+    !snapshot.plan.countStyle ||
+    snapshot.plan.statuses.some((status) => !status.style) ||
     !snapshot.summary.rect ||
     !snapshot.summary.style ||
     !snapshot.summary.actionRect ||
@@ -2875,11 +2961,38 @@ async function assertConversationSurfaceFidelity(fileName) {
   if (
     snapshot.plan.itemStyle.fontSize > 12.5 ||
     snapshot.plan.itemStyle.lineHeight > 17 ||
-    snapshot.plan.rect.height > 96
+    snapshot.plan.rect.height > 96 ||
+    snapshot.plan.labelStyle.fontWeight > 700 ||
+    snapshot.plan.labelStyle.textTransform !== 'none' ||
+    snapshot.plan.statuses.some(
+      (status) =>
+        status.style.fontWeight > 700 || status.style.textTransform !== 'none',
+    )
   ) {
     throw new Error(
       `Plan rows should stay compact: ${JSON.stringify(snapshot.plan)}`,
     );
+  }
+
+  if (
+    snapshot.plan.labelText !== 'Plan' ||
+    snapshot.plan.countText !== '2 tasks' ||
+    snapshot.plan.statuses.map((status) => status.text).join(',') !==
+      'Completed,In progress'
+  ) {
+    throw new Error(
+      `Plan labels should use restrained title-case text: ${JSON.stringify(
+        snapshot.plan,
+      )}`,
+    );
+  }
+
+  for (const legacyLabel of ['PLAN', 'COMPLETED', 'IN_PROGRESS']) {
+    if (snapshot.plan.text.includes(legacyLabel)) {
+      throw new Error(
+        `Plan should not show uppercase legacy label ${legacyLabel}: ${snapshot.plan.text}`,
+      );
+    }
   }
 
   const assistantBorders = [

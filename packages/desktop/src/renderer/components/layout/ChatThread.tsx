@@ -16,6 +16,7 @@ import type {
   DesktopApprovalMode,
   DesktopAskUserQuestionRequest,
   DesktopModelInfo,
+  DesktopPlanEntry,
   DesktopPermissionRequest,
 } from '../../../shared/desktopProtocol.js';
 import {
@@ -432,14 +433,31 @@ function TimelineItem({
   }
 
   if (item.type === 'plan') {
+    const taskCount = item.entries.length;
+
     return (
-      <article className="chat-plan">
-        <div className="message-role">plan</div>
+      <article
+        aria-label="Plan"
+        className="chat-plan"
+        data-testid="conversation-plan-card"
+      >
+        <div className="chat-plan-heading">
+          <span className="conversation-activity-label">Plan</span>
+          <span className="conversation-plan-count">
+            {taskCount} {taskCount === 1 ? 'task' : 'tasks'}
+          </span>
+        </div>
         <ol>
           {item.entries.map((entry) => (
             <li key={`${entry.content}-${entry.status}`}>
-              <span>{entry.status}</span>
-              {entry.content}
+              <span
+                className={`conversation-plan-status ${getPlanStatusClass(
+                  entry.status,
+                )}`}
+              >
+                {formatPlanStatus(entry.status)}
+              </span>
+              <span className="conversation-plan-content">{entry.content}</span>
             </li>
           ))}
         </ol>
@@ -570,14 +588,18 @@ function ToolActivityCard({
     >
       <div className="conversation-tool-heading">
         <div>
-          <span className="message-role">{kind}</span>
+          <span className="conversation-activity-label">
+            {formatToolKindTitle(kind) ?? 'Tool'}
+          </span>
           <strong>{title}</strong>
         </div>
-        <span className="conversation-tool-status">{status}</span>
+        <span className="conversation-tool-status">
+          {formatActivityStatus(status)}
+        </span>
       </div>
       {inputPreview ? (
         <div className="conversation-tool-section">
-          <span className="message-role">Input</span>
+          <span className="conversation-tool-section-label">Input</span>
           <pre aria-label="Tool input preview" title={inputPreview}>
             {inputPreview}
           </pre>
@@ -595,7 +617,7 @@ function ToolActivityCard({
       ) : null}
       {outputPreview ? (
         <div className="conversation-tool-section conversation-tool-output">
-          <span className="message-role">Result</span>
+          <span className="conversation-tool-section-label">Result</span>
           <pre aria-label="Tool result preview" title={outputPreview}>
             {outputPreview}
           </pre>
@@ -868,10 +890,24 @@ function formatToolKindTitle(kind: string | undefined): string | null {
     return null;
   }
 
-  const normalized = kind.replace(/[-_]+/gu, ' ').trim();
-  return normalized.length > 0
-    ? `${normalized.slice(0, 1).toUpperCase()}${normalized.slice(1)}`
-    : null;
+  return formatActivityStatus(kind);
+}
+
+function formatActivityStatus(value: string): string {
+  const normalized = value.replace(/[-_]+/gu, ' ').trim().toLowerCase();
+  if (normalized.length === 0) {
+    return 'Unknown';
+  }
+
+  return `${normalized.slice(0, 1).toUpperCase()}${normalized.slice(1)}`;
+}
+
+function formatPlanStatus(status: DesktopPlanEntry['status']): string {
+  return formatActivityStatus(status);
+}
+
+function getPlanStatusClass(status: DesktopPlanEntry['status']): string {
+  return `conversation-plan-status-${status.replace(/_/gu, '-')}`;
 }
 
 function getToolStatusClass(status: string): string {

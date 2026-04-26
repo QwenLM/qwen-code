@@ -1113,26 +1113,67 @@ summary:focus-visible {
   border-left: 2px solid rgba(85, 166, 255, 0.28);
 }
 
+.chat-plan-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.conversation-activity-label,
+.conversation-tool-section-label {
+  color: rgba(177, 188, 184, 0.78);
+  font-size: 10.5px;
+  font-weight: 650;
+  line-height: 1.3;
+  text-transform: none;
+}
+
+.conversation-plan-count {
+  color: rgba(177, 188, 184, 0.58);
+  font-size: 10.5px;
+  font-weight: 620;
+  line-height: 1.3;
+}
+
 .chat-plan ol {
   display: grid;
-  gap: 5px;
-  padding-left: 16px;
+  gap: 4px;
+  padding-left: 0;
+  list-style: none;
 }
 
 .chat-plan li {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
   color: var(--text-soft);
   font-size: 12px;
   line-height: 1.36;
 }
 
-.chat-plan li span {
-  display: inline-block;
-  min-width: 88px;
-  margin-right: 8px;
-  color: var(--muted);
+.conversation-plan-status {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(177, 188, 184, 0.66);
   font-size: 10.5px;
-  font-weight: 800;
-  text-transform: uppercase;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-plan-status-completed {
+  color: rgba(169, 234, 189, 0.74);
+}
+
+.conversation-plan-status-in-progress {
+  color: rgba(159, 206, 255, 0.76);
+}
+
+.conversation-plan-content {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .chat-event {
@@ -1185,12 +1226,12 @@ summary:focus-visible {
 }
 
 .conversation-tool-section {
-  grid-template-columns: 52px minmax(0, 1fr);
+  grid-template-columns: 44px minmax(0, 1fr);
   align-items: start;
   gap: 8px;
 }
 
-.conversation-tool-section .message-role {
+.conversation-tool-section-label {
   padding-top: 1px;
 }
 
@@ -1208,8 +1249,8 @@ summary:focus-visible {
   flex: 0 0 auto;
   color: #a9eabd;
   font-size: 10px;
-  font-weight: 820;
-  text-transform: uppercase;
+  font-weight: 680;
+  text-transform: none;
 }
 
 .conversation-tool-card-running .conversation-tool-status {
