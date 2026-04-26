@@ -5,6 +5,7 @@
  */
 
 import type { DesktopSessionSummary } from '../../api/client.js';
+import { formatSessionDisplayTitle } from './formatters.js';
 import { OpenThreadIcon } from './SidebarIcons.js';
 
 export function ThreadList({
@@ -42,21 +43,24 @@ export function ThreadList({
       ) : null}
       {sessions.map((session) => {
         const meta = formatSessionMeta(session);
+        const title = formatSessionDisplayTitle(session.title);
+        const accessibleLabel = meta ? `${title}, ${meta}` : title;
 
         return (
           <button
+            aria-label={accessibleLabel}
             className={
               session.sessionId === activeSessionId
                 ? 'session-row session-row-active'
                 : 'session-row'
             }
+            data-testid="thread-row"
             key={session.sessionId}
             onClick={() => onSelect(session.sessionId)}
+            title={title}
             type="button"
           >
-            <span className="session-row-title">
-              {session.title || session.sessionId}
-            </span>
+            <span className="session-row-title">{title}</span>
             <span className="session-row-trailing">
               {session.sessionId === activeSessionId ? (
                 <span className="session-ring" aria-hidden="true" />

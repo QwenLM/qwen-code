@@ -22,6 +22,104 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Thread Title Noise Restraint
+
+Status: completed in iteration 55.
+
+Goal: keep sidebar thread rows and the topbar title from exposing raw long
+prompts, absolute paths, local server URLs, or ACP/session identifiers by
+normalizing session titles into compact product labels.
+
+User-visible value: the first viewport stays close to `home.jpg`: thread rows
+remain short and scannable, the active title does not push out project/Git
+context, and internal or path-heavy prompt text stays out of the main
+navigation chrome.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/formatters.ts`
+- `packages/desktop/src/renderer/components/layout/ThreadList.tsx`
+- `packages/desktop/src/renderer/components/layout/TopBar.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/main/acp/createE2eAcpClient.ts`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/thread-title-noise-restraint.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Sidebar thread rows render a derived display title instead of raw long prompt
+  text, full absolute paths, local server URLs, or session IDs.
+- Missing or ID-like session titles fall back to `Untitled thread` rather than
+  exposing ACP/session identifiers.
+- The topbar uses the same compact display title as the active thread and
+  keeps the project label, context row, and icon actions contained.
+- Existing session selection, draft-thread display, composer first-send thread
+  creation, branch/review/settings/terminal workflows, and accessibility labels
+  remain unchanged.
+- Real Electron CDP coverage exercises a fake ACP session with a noisy title
+  and records sidebar/topbar metrics with no console errors or failed requests.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake project, create the first thread whose fake ACP
+  title contains a long prompt, absolute path, local URL, and session-like ID,
+  then inspect sidebar and topbar title metrics before continuing the existing
+  branch, review, settings, terminal, and composer workflows.
+- E2E assertions: sidebar/topbar expose the compact derived thread title,
+  preserve accessible row names, omit raw path/URL/session-noise text from
+  visible navigation, keep row/topbar typography within existing thresholds,
+  and record no console errors or failed local requests.
+- Diagnostic artifacts: updated `sidebar-app-rail.json`,
+  `topbar-context-fidelity.json`, screenshots, Electron log, and summary JSON
+  under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for the scoped autonomous design
+  choice; `frontend-design` for prototype-constrained navigation density; and
+  `electron-desktop-dev` for real Electron CDP verification of renderer
+  behavior.
+
+Notes and decisions:
+
+- This slice normalizes the display label only. It does not alter the ACP
+  session title stored by the backend or introduce generated AI titles.
+- Full raw prompts and internal identifiers remain diagnostics concerns, not
+  first-viewport navigation text.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 24 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T19-40-50-335Z/`.
+- Key recorded metrics: `sidebar-app-rail.json` recorded the active thread as
+  `Review README.md after the failing test in local...` with no row overflow;
+  `topbar-context-fidelity.json` recorded the same compact title, preserved the
+  long branch in DOM text, kept topbar containment true, and recorded no
+  horizontal document overflow; `summary.json` recorded zero console errors and
+  zero failed local requests.
+
+Next work:
+
+- Continue prototype fidelity by shortening project-row meta in the sidebar;
+  current row text still concatenates project name and branch metadata too
+  tightly in DOM diagnostics even though it does not overflow visually.
+- Consider a future generated-title path for historical sessions whose ACP
+  titles are low-signal prompts rather than deterministic path/session noise.
+
 ### Slice: Composer Runtime Control Chrome
 
 Status: completed in iteration 54.

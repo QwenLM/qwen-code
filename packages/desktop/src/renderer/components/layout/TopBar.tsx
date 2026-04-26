@@ -6,7 +6,7 @@
 
 import { useState, type FormEvent } from 'react';
 import type { DesktopGitBranch, DesktopProject } from '../../api/client.js';
-import { formatGitStatus } from './formatters.js';
+import { formatGitStatus, formatSessionDisplayTitle } from './formatters.js';
 import {
   BranchIcon,
   ChatBubbleIcon,
@@ -432,7 +432,9 @@ function getTopBarTitle(
     return 'Settings';
   }
 
-  return activeSessionTitle || activeProject?.name || 'Qwen Code Desktop';
+  return activeSessionTitle
+    ? formatSessionDisplayTitle(activeSessionTitle)
+    : activeProject?.name || 'Qwen Code Desktop';
 }
 
 function getChangedCount(project: DesktopProject): number {

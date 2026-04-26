@@ -35,6 +35,13 @@ const longPromptToken =
   'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 const commandApprovalPrompt = 'Please exercise command approval.';
 const questionPrompt = `Please ask a user question. ${longPromptToken}`;
+const compactThreadTitle = 'Review README.md after the failing test';
+const noisyThreadTitleLeaks = [
+  '/tmp/',
+  '127.0.0.1',
+  'session-e2e-deadbeef',
+  'desktopE2EThreadTitleNoiseToken',
+];
 
 const consoleErrors = [];
 const failedRequests = [];
@@ -1273,9 +1280,18 @@ async function assertSidebarAppRail(fileName) {
     );
   }
 
+  if (!metrics.sidebarText.includes(compactThreadTitle)) {
+    throw new Error(
+      `Sidebar did not expose the compact thread title: ${metrics.sidebarText}`,
+    );
+  }
+
+  const sidebarLeaks = noisyThreadTitleLeaks.filter((leak) =>
+    metrics.sidebarText.includes(leak),
+  );
   if (
+    sidebarLeaks.length > 0 ||
     metrics.sidebarText.includes('session-e2e') ||
-    metrics.sidebarText.includes('/tmp/') ||
     metrics.sidebarText.includes('Connected to')
   ) {
     throw new Error(
@@ -1441,6 +1457,25 @@ async function assertTopbarContextFidelity(fileName) {
   if (!metrics.hasLongBranch) {
     throw new Error(
       `Topbar did not expose the long branch in DOM text: ${metrics.topbarText}`,
+    );
+  }
+
+  if (!metrics.topbarText.includes(compactThreadTitle)) {
+    throw new Error(
+      `Topbar did not expose the compact thread title: ${metrics.topbarText}`,
+    );
+  }
+
+  const topbarLeaks = noisyThreadTitleLeaks.filter((leak) =>
+    metrics.topbarText.includes(leak),
+  );
+  if (
+    topbarLeaks.length > 0 ||
+    metrics.topbarText.includes('session-e2e') ||
+    metrics.topbarText.includes('Connected to')
+  ) {
+    throw new Error(
+      `Topbar leaked protocol or path noise: ${metrics.topbarText}`,
     );
   }
 

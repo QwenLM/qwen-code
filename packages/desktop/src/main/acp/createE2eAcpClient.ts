@@ -22,6 +22,8 @@ import type {
 } from '../../server/services/sessionService.js';
 
 const E2E_MODEL_ID = 'e2e/qwen-code';
+const E2E_NOISY_SESSION_TITLE =
+  'Review /tmp/qwen-desktop-e2e-workspace/packages/desktop/README.md after the failing test in http://127.0.0.1:47891/session session-e2e-deadbeef desktopE2EThreadTitleNoiseToken_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 const E2E_MODES = [
   {
     id: 'default' as const,
@@ -81,7 +83,7 @@ export class E2eAcpClient implements AcpSessionClient {
     const session: E2eSessionRecord = {
       sessionId: `session-e2e-${this.nextSessionId}`,
       cwd,
-      title: 'E2E desktop task',
+      title: E2E_NOISY_SESSION_TITLE,
       updatedAt: new Date().toISOString(),
     };
     this.nextSessionId += 1;

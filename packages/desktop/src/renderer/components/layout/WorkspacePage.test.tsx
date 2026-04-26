@@ -1458,6 +1458,52 @@ describe('WorkspacePage', () => {
 
     expect(onRevertReviewTarget).toHaveBeenCalledWith({ scope: 'all' });
   });
+
+  it('normalizes noisy session titles in navigation chrome', () => {
+    const noisySession: DesktopSessionSummary = {
+      sessionId: 'session-noisy-1',
+      title:
+        'Review /Users/dragon/Documents/qwen-code/packages/desktop/README.md after the failing test in http://127.0.0.1:47891/session session-e2e-deadbeef desktopE2EThreadTitleNoiseToken_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+      cwd: project.path,
+      updatedAt: '2026-04-25T00:00:01.000Z',
+    };
+    const untitledSession: DesktopSessionSummary = {
+      sessionId: 'session-e2e-deadbeef',
+      cwd: project.path,
+    };
+    const renderedContainer = renderWorkspace({
+      activeSessionId: noisySession.sessionId,
+      sessions: [noisySession, untitledSession],
+    });
+    const sidebarText =
+      renderedContainer.querySelector('[data-testid="project-sidebar"]')
+        ?.textContent ?? '';
+    const topbarTitle =
+      renderedContainer.querySelector('[data-testid="topbar-title"]')
+        ?.textContent ?? '';
+    const firstThreadTitle = renderedContainer.querySelector(
+      '[data-testid="thread-row"] .session-row-title',
+    );
+    const untitledThread = [
+      ...renderedContainer.querySelectorAll('[data-testid="thread-row"]'),
+    ].find((row) => row.textContent?.includes('Untitled thread'));
+
+    expect(sidebarText).toContain('Review README.md after the failing test');
+    expect(sidebarText).toContain('Untitled thread');
+    expect(topbarTitle).toContain('Review README.md after the failing test');
+    expect(firstThreadTitle?.textContent).toContain('Review README.md');
+    expect(untitledThread?.getAttribute('aria-label')).toBe('Untitled thread');
+
+    for (const noisyText of [
+      '/Users/dragon',
+      '127.0.0.1',
+      'session-e2e-deadbeef',
+      'desktopE2EThreadTitleNoiseToken',
+    ]) {
+      expect(sidebarText).not.toContain(noisyText);
+      expect(topbarTitle).not.toContain(noisyText);
+    }
+  });
 });
 
 type WorkspacePageProps = Parameters<typeof WorkspacePage>[0];
