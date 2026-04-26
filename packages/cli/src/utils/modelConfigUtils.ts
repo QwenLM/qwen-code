@@ -95,26 +95,36 @@ export function resolveCliGenerationConfig(
 
   const authType = selectedAuthType;
 
-  // Find modelProvider from settings.modelProviders based on authType and model
-  // Precedence: argv.model > settings.model.name > OPENAI_MODEL > QWEN_MODEL
+  // Resolve the target model based on strict precedence:
+  // argv.model > settings.model.name > OPENAI_MODEL > QWEN_MODEL
+  // Env vars are ONLY considered when neither argv.model nor settings.model.name is set.
+  let resolvedModel: string | undefined;
+  if (argv.model) {
+    resolvedModel = argv.model;
+  } else if (settings.model?.name) {
+    resolvedModel = settings.model.name;
+  } else if (authType === AuthType.USE_OPENAI) {
+    resolvedModel = env['OPENAI_MODEL'] || env['QWEN_MODEL'];
+  }
+
+  // Find a matching provider for the resolved model (for metadata only)
   let modelProvider: ProviderModelConfig | undefined;
-  if (authType && settings.modelProviders) {
+  if (resolvedModel && authType && settings.modelProviders) {
     const providers = settings.modelProviders[authType];
     if (providers && Array.isArray(providers)) {
-      const candidates = [
-        argv.model,
-        settings.model?.name,
-        authType === AuthType.USE_OPENAI ? env['OPENAI_MODEL'] : undefined,
-        authType === AuthType.USE_OPENAI ? env['QWEN_MODEL'] : undefined,
-      ].filter((v): v is string => typeof v === 'string');
-      for (const candidate of candidates) {
-        const found = providers.find((p) => p.id === candidate);
-        if (found) {
-          modelProvider = found;
-          break;
-        }
-      }
+      modelProvider = providers.find((p) => p.id === resolvedModel);
     }
+  }
+
+  // Filter env to prevent OPENAI_MODEL/QWEN_MODEL from overriding higher-priority sources.
+  // Only pass these env vars when we actually resolved the model from them.
+  const filteredEnv = { ...env };
+  if (
+    resolvedModel !== env['OPENAI_MODEL'] &&
+    resolvedModel !== env['QWEN_MODEL']
+  ) {
+    delete filteredEnv['OPENAI_MODEL'];
+    delete filteredEnv['QWEN_MODEL'];
   }
 
   const configSources: ModelConfigSourcesInput = {
@@ -133,7 +143,7 @@ export function resolveCliGenerationConfig(
         | undefined,
     },
     modelProvider,
-    env,
+    env: filteredEnv,
   };
 
   const resolved = resolveModelConfig(configSources);

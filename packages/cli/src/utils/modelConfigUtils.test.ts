@@ -532,7 +532,9 @@ describe('modelConfigUtils', () => {
 
     it('should use custom env when provided', () => {
       const argv = {};
-      const settings = makeMockSettings();
+      const settings = makeMockSettings({
+        model: undefined as unknown as Settings['model'],
+      });
       const selectedAuthType = AuthType.USE_OPENAI;
       const customEnv = {
         OPENAI_API_KEY: 'custom-key',
@@ -964,8 +966,8 @@ describe('modelConfigUtils', () => {
       );
     });
 
-    // Edge Case 5: When settings.model.name is set but doesn't match any modelProvider, try OPENAI_MODEL
-    it('Edge Case 5: fall back to OPENAI_MODEL when settings.model.name matches no provider', () => {
+    // Edge Case 5: settings.model.name does NOT fall back to OPENAI_MODEL when unmatched
+    it('Edge Case 5: settings.model.name should NOT fall back to OPENAI_MODEL when unmatched', () => {
       const argv = {};
       const envProvider: ProviderModelConfig = {
         id: 'env-model',
@@ -983,7 +985,7 @@ describe('modelConfigUtils', () => {
       const selectedAuthType = AuthType.USE_OPENAI;
 
       vi.mocked(resolveModelConfig).mockReturnValue({
-        config: { model: 'env-model', apiKey: '', baseUrl: '' },
+        config: { model: 'non-existent-model', apiKey: '', baseUrl: '' },
         sources: {},
         warnings: [],
       });
@@ -995,12 +997,58 @@ describe('modelConfigUtils', () => {
         env: { OPENAI_MODEL: 'env-model' },
       });
 
-      // Should fall back to OPENAI_MODEL since settings.model.name didn't match
+      // settings.model.name takes precedence even when unmatched - no provider fallback
       expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
         expect.objectContaining({
-          modelProvider: envProvider,
+          modelProvider: undefined,
         }),
       );
+    });
+
+    // Integration test: settings.model.name unmatched + OPENAI_MODEL matched
+    it('Integration: settings.model.name wins over OPENAI_MODEL even when unmatched', () => {
+      const argv = {};
+      const settings = makeMockSettings({
+        model: { name: 'custom-model' },
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'gpt-4',
+              name: 'GPT-4',
+              generationConfig: { samplingParams: { temperature: 0.5 } },
+            },
+          ],
+        },
+      });
+      const selectedAuthType = AuthType.USE_OPENAI;
+
+      // Mock resolveModelConfig to simulate real behavior:
+      // modelProvider.id > cli.model > env > settings.model
+      vi.mocked(resolveModelConfig).mockImplementation(
+        (input: ModelConfigSourcesInput) => {
+          const model =
+            input.modelProvider?.id ||
+            input.cli?.model ||
+            input.env?.['OPENAI_MODEL'] ||
+            input.settings?.model ||
+            '';
+          return {
+            config: { model, apiKey: '', baseUrl: '' },
+            sources: { model: model === 'custom-model' ? 'settings' : 'env' },
+            warnings: [],
+          };
+        },
+      );
+
+      const result = resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType,
+        env: { OPENAI_MODEL: 'gpt-4' },
+      });
+
+      // settings.model.name should be used (no provider found, so modelProvider is undefined)
+      expect(result.model).toBe('custom-model');
     });
   });
 });
