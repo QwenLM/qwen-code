@@ -22,6 +22,109 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Settings Drawer Section Rail
+
+Status: completed in iteration 65.
+
+Goal: make Settings feel like a compact product settings drawer instead of a
+two-column debug/dashboard surface.
+
+User-visible value: users keep the conversation visible behind Settings, can
+jump between Account, Model Providers, Permissions, Tools, Terminal,
+Appearance, and Advanced from a slim internal rail, and still keep runtime
+diagnostics hidden until Advanced Diagnostics is opened.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/SettingsPage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/settings-drawer-section-rail.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Settings opens as a right-aligned drawer no wider than the prior sheet and
+  preserves visible conversation context behind the backdrop.
+- The default Settings body has a compact `Settings sections` navigation rail
+  with entries for Account, Model Providers, Permissions, Tools & MCP,
+  Terminal, Appearance, and Advanced.
+- Clicking the Permissions rail entry scrolls the Permissions section into the
+  settings content without moving document/body scroll.
+- Settings sections render as one compact content column with lighter section
+  chrome instead of a two-column card dashboard.
+- Runtime/server/session diagnostics, local server URLs, ACP IDs, and settings
+  paths remain hidden until `Advanced Diagnostics` is opened.
+- Existing model validation, Coding Plan workflow, composer model switching,
+  terminal, branch, review, and relaunch CDP workflows remain unchanged.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, complete the existing project/thread/review flow, open
+  Settings, assert the section rail and compact one-column drawer geometry,
+  click the Permissions rail entry, verify diagnostics are still hidden, then
+  continue settings validation, Coding Plan, Advanced Diagnostics, terminal,
+  model, branch, and relaunch workflows.
+- E2E assertions: rail entries are visible and accessible, the settings drawer
+  is narrower than the old dashboard-width sheet, content sections sit to the
+  right of the rail in one column, the Permissions link scrolls only the
+  settings content, no local server/session diagnostics appear before Advanced,
+  and no console errors or failed local requests are recorded.
+- Diagnostic artifacts: updated `settings-layout.json`,
+  `settings-page.png`, `compact-settings-overlay.json`,
+  `compact-settings-overlay.png`, Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` using the existing Ralph prompt and
+  docs as requirements rather than asking a blocking question;
+  `frontend-design` for prototype-constrained settings hierarchy and reduced
+  card chrome; `electron-desktop-dev` for renderer changes verified through the
+  real Electron CDP harness.
+
+Notes and decisions:
+
+- This slice keeps Settings as an overlay drawer instead of a primary
+  workbench tab, following the conversation-first contract from `home.jpg`.
+- The rail uses anchors inside the drawer rather than adding new settings
+  routing or server state.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 28 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T21-36-23-530Z/`.
+- Key recorded metrics: `settings-layout.json` recorded the default settings
+  drawer at 620 px wide with a 112 px `Settings sections` rail, 469 px
+  one-column settings sections, 376 px of visible task backdrop, no review
+  drawer, no runtime diagnostics, and no body overflow. The rail navigation
+  artifact recorded clicking `Permissions` scrolled only the drawer content
+  while leaving document scroll at 0. `compact-settings-overlay.json` recorded
+  a 600 px drawer with a 102 px rail, contained one-column sections, and no
+  diagnostic leakage. `summary.json` recorded zero console errors and zero
+  failed local requests.
+
+Next work:
+
+- Continue prototype fidelity by trimming the remaining topbar/sidebar text
+  weight and reducing first-viewport empty-state scale.
+- Consider a follow-up settings slice that adds active-section state to the
+  rail while keeping the implementation local to the drawer.
+
 ### Slice: User Message Bubble Restraint
 
 Status: completed in iteration 64.

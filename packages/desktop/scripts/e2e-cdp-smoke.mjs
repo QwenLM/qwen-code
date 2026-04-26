@@ -221,6 +221,9 @@ async function main() {
   await waitForSelector('[data-testid="settings-page"]');
   await assertSettingsPageLayout('settings-layout.json');
   await saveScreenshot('settings-page.png');
+  await assertSettingsSectionRailNavigation(
+    'settings-section-rail-navigation.json',
+  );
   await setElectronWindowBounds(target.id, compactWindowBounds);
   await assertCompactSettingsOverlayLayout('compact-settings-overlay.json');
   await saveScreenshot('compact-settings-overlay.png');
@@ -6752,8 +6755,7 @@ async function assertSettingsPageLayout(fileName) {
   );
 
   const metrics = await evaluate(`(() => {
-    const rectFor = (selector) => {
-      const element = document.querySelector(selector);
+    const rectForElement = (element) => {
       if (!element) {
         return null;
       }
@@ -6767,6 +6769,8 @@ async function assertSettingsPageLayout(fileName) {
         height: rect.height
       };
     };
+    const rectFor = (selector) =>
+      rectForElement(document.querySelector(selector));
 
     return {
       viewport: {
@@ -6783,9 +6787,13 @@ async function assertSettingsPageLayout(fileName) {
       overlay: rectFor('[data-testid="settings-overlay"]'),
       backdrop: rectFor('.settings-overlay-backdrop'),
       settings: rectFor('[data-testid="settings-page"]'),
+      settingsNav: rectFor('[data-testid="settings-section-nav"]'),
+      settingsSections: rectFor('[data-testid="settings-sections"]'),
       closeButton: rectFor('[data-testid="settings-close-button"]'),
+      accountSection: rectFor('[data-testid="settings-account-section"]'),
       modelConfig: rectFor('[data-testid="model-config"]'),
       permissionsConfig: rectFor('[data-testid="permissions-config"]'),
+      toolsSection: rectFor('[data-testid="settings-tools-section"]'),
       runtimeDiagnostics: rectFor('[data-testid="runtime-diagnostics"]'),
       terminal: rectFor('[data-testid="terminal-drawer"]'),
       activeLabel:
@@ -6816,6 +6824,20 @@ async function assertSettingsPageLayout(fileName) {
           ?.getAttribute('aria-modal') ?? '',
       settingsText:
         document.querySelector('[data-testid="settings-page"]')?.innerText ?? '',
+      navLinks: [
+        ...document.querySelectorAll('[data-testid="settings-section-nav"] a'),
+      ].map((link) => ({
+        label: link.textContent.trim(),
+        ariaLabel: link.getAttribute('aria-label') ?? '',
+        href: link.getAttribute('href') ?? '',
+      })),
+      sectionRects: [
+        ...document.querySelectorAll('[data-testid="settings-sections"] > .settings-section'),
+      ].map((section) => ({
+        id: section.id,
+        testId: section.getAttribute('data-testid') ?? '',
+        rect: rectForElement(section)
+      })),
       buttons: [
         ...document.querySelectorAll(
           '[data-testid="settings-page"] button',
@@ -6840,9 +6862,13 @@ async function assertSettingsPageLayout(fileName) {
     'overlay',
     'backdrop',
     'settings',
+    'settingsNav',
+    'settingsSections',
     'closeButton',
+    'accountSection',
     'modelConfig',
     'permissionsConfig',
+    'toolsSection',
   ].filter((key) => metrics[key] === null);
   if (missing.length > 0) {
     throw new Error(`Missing settings layout rects: ${missing.join(', ')}`);
@@ -6880,8 +6906,8 @@ async function assertSettingsPageLayout(fileName) {
 
   if (
     metrics.settings.width >= metrics.grid.width - 32 ||
-    metrics.settings.width > 820 ||
-    metrics.settings.width < 520
+    metrics.settings.width > 640 ||
+    metrics.settings.width < 500
   ) {
     throw new Error(
       `Settings sheet width is not drawer-like: ${metrics.settings.width}`,
@@ -6938,6 +6964,81 @@ async function assertSettingsPageLayout(fileName) {
     );
   }
 
+  const expectedSettingsLinks = [
+    ['Account', '#settings-account'],
+    ['Model Providers', '#settings-model-providers'],
+    ['Permissions', '#settings-permissions'],
+    ['Tools & MCP', '#settings-tools'],
+    ['Terminal', '#settings-terminal'],
+    ['Appearance', '#settings-appearance'],
+    ['Advanced', '#settings-advanced'],
+  ];
+  if (
+    metrics.navLinks.length !== expectedSettingsLinks.length ||
+    metrics.navLinks.some(
+      (link, index) =>
+        link.label !== expectedSettingsLinks[index][0] ||
+        link.ariaLabel !==
+          `Show ${expectedSettingsLinks[index][0]} settings` ||
+        link.href !== expectedSettingsLinks[index][1],
+    )
+  ) {
+    throw new Error(
+      `Settings rail links are not complete and accessible: ${JSON.stringify(
+        metrics.navLinks,
+      )}`,
+    );
+  }
+
+  if (
+    metrics.settingsNav.width > 130 ||
+    metrics.settingsNav.right > metrics.modelConfig.left - 6 ||
+    metrics.settingsSections.left < metrics.settingsNav.right + 6
+  ) {
+    throw new Error(
+      `Settings section rail is not compact or separated from content: ${JSON.stringify(
+        metrics,
+      )}`,
+    );
+  }
+
+  const expectedSectionIds = [
+    'settings-account',
+    'settings-model-providers',
+    'settings-permissions',
+    'settings-tools',
+    'settings-terminal',
+    'settings-appearance',
+    'settings-advanced',
+  ];
+  if (
+    metrics.sectionRects.length !== expectedSectionIds.length ||
+    metrics.sectionRects.some(
+      (section, index) => section.id !== expectedSectionIds[index],
+    )
+  ) {
+    throw new Error(
+      `Settings sections are not in the expected product order: ${JSON.stringify(
+        metrics.sectionRects,
+      )}`,
+    );
+  }
+
+  const contentLeft = metrics.modelConfig.left;
+  const contentWidth = metrics.modelConfig.width;
+  for (const section of metrics.sectionRects) {
+    if (
+      Math.abs(section.rect.left - contentLeft) > 1 ||
+      Math.abs(section.rect.width - contentWidth) > 1
+    ) {
+      throw new Error(
+        `Settings sections should render as one content column: ${JSON.stringify(
+          metrics.sectionRects,
+        )}`,
+      );
+    }
+  }
+
   for (const expectedSection of [
     'Account',
     'Model Providers',
@@ -6990,6 +7091,137 @@ async function assertSettingsPageLayout(fileName) {
   }
 }
 
+async function assertSettingsSectionRailNavigation(fileName) {
+  const clicked = await evaluate(`(() => {
+    const link = document.querySelector(
+      '[data-testid="settings-section-nav"] a[href="#settings-permissions"]'
+    );
+    if (!link) {
+      return false;
+    }
+    link.click();
+    return true;
+  })()`);
+
+  if (!clicked) {
+    throw new Error('Settings Permissions rail link was not found.');
+  }
+
+  await waitFor(
+    'settings permissions rail navigation',
+    async () =>
+      evaluate(`(() => {
+        const content = document.querySelector('.settings-page-content');
+        const permissions = document.querySelector(
+          '[data-testid="permissions-config"]'
+        );
+        if (!content || !permissions) {
+          return false;
+        }
+        const contentRect = content.getBoundingClientRect();
+        const permissionsRect = permissions.getBoundingClientRect();
+        return (
+          content.scrollTop > 0 &&
+          permissionsRect.top >= contentRect.top - 1 &&
+          permissionsRect.top <= contentRect.bottom - 1
+        );
+      })()`),
+    5_000,
+  );
+
+  const metrics = await evaluate(`(() => {
+    const rectForElement = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const content = document.querySelector('.settings-page-content');
+    const permissions = document.querySelector(
+      '[data-testid="permissions-config"]'
+    );
+    const runtimeDiagnostics = document.querySelector(
+      '[data-testid="runtime-diagnostics"]'
+    );
+    const metrics = {
+      locationHash: window.location.hash,
+      documentScrollTop: document.scrollingElement?.scrollTop ?? 0,
+      contentScrollTop: content?.scrollTop ?? null,
+      content: rectForElement(content),
+      permissions: rectForElement(permissions),
+      runtimeDiagnosticsPresent: runtimeDiagnostics !== null,
+      settingsText:
+        document.querySelector('[data-testid="settings-page"]')?.innerText ?? ''
+    };
+    if (content) {
+      content.scrollTop = 0;
+    }
+    document.querySelector('[data-testid="settings-close-button"]')?.focus();
+    if (window.location.hash) {
+      history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
+    return metrics;
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(metrics, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (
+    metrics.contentScrollTop === null ||
+    metrics.contentScrollTop <= 0 ||
+    metrics.documentScrollTop !== 0
+  ) {
+    throw new Error(
+      `Settings rail should scroll only the drawer content: ${JSON.stringify(
+        metrics,
+      )}`,
+    );
+  }
+
+  if (
+    !metrics.content ||
+    !metrics.permissions ||
+    metrics.permissions.top < metrics.content.top - 1 ||
+    metrics.permissions.top > metrics.content.bottom - 1
+  ) {
+    throw new Error(
+      `Settings rail did not bring Permissions into view: ${JSON.stringify(
+        metrics,
+      )}`,
+    );
+  }
+
+  if (metrics.runtimeDiagnosticsPresent) {
+    throw new Error('Settings rail navigation opened runtime diagnostics.');
+  }
+
+  for (const hiddenDiagnostic of [
+    'Server',
+    'Node',
+    'ACP',
+    'Health',
+    'session-e2e-1',
+    'Settings path',
+  ]) {
+    if (metrics.settingsText.includes(hiddenDiagnostic)) {
+      throw new Error(
+        `Settings rail navigation exposed diagnostic ${hiddenDiagnostic}: ${metrics.settingsText}`,
+      );
+    }
+  }
+}
+
 async function assertCompactSettingsOverlayLayout(fileName) {
   await waitFor(
     'compact settings close button focused',
@@ -7035,10 +7267,13 @@ async function assertCompactSettingsOverlayLayout(fileName) {
       overlay: rectFor('[data-testid="settings-overlay"]'),
       backdrop: rectFor('.settings-overlay-backdrop'),
       settings: rectFor('[data-testid="settings-page"]'),
+      settingsNav: rectFor('[data-testid="settings-section-nav"]'),
+      settingsSections: rectFor('[data-testid="settings-sections"]'),
       settingsContent: rectForElement(settingsContent),
       closeButton: rectFor('[data-testid="settings-close-button"]'),
       modelConfig: rectFor('[data-testid="model-config"]'),
       permissionsConfig: rectForElement(permissions),
+      toolsSection: rectFor('[data-testid="settings-tools-section"]'),
       runtimeDiagnostics: rectFor('[data-testid="runtime-diagnostics"]'),
       terminal: rectFor('[data-testid="terminal-drawer"]'),
       contentClientHeight: settingsContent?.clientHeight ?? null,
@@ -7058,6 +7293,19 @@ async function assertCompactSettingsOverlayLayout(fileName) {
       closeButtonHasIcon:
         document.querySelector('[data-testid="settings-close-button"] svg') !==
         null,
+      navLinks: [
+        ...document.querySelectorAll('[data-testid="settings-section-nav"] a'),
+      ].map((link) => ({
+        label: link.textContent.trim(),
+        ariaLabel: link.getAttribute('aria-label') ?? '',
+        href: link.getAttribute('href') ?? '',
+      })),
+      sectionRects: [
+        ...document.querySelectorAll('[data-testid="settings-sections"] > .settings-section'),
+      ].map((section) => ({
+        id: section.id,
+        rect: rectForElement(section)
+      })),
       settingsText:
         document.querySelector('[data-testid="settings-page"]')?.innerText ?? ''
     };
@@ -7087,10 +7335,13 @@ async function assertCompactSettingsOverlayLayout(fileName) {
     'overlay',
     'backdrop',
     'settings',
+    'settingsNav',
+    'settingsSections',
     'settingsContent',
     'closeButton',
     'modelConfig',
     'permissionsConfig',
+    'toolsSection',
     'terminal',
   ].filter((key) => metrics[key] === null);
   if (missing.length > 0) {
@@ -7149,6 +7400,58 @@ async function assertCompactSettingsOverlayLayout(fileName) {
     throw new Error(
       `Compact settings content is not contained: ${JSON.stringify(metrics)}`,
     );
+  }
+
+  if (
+    metrics.settings.width > 620 ||
+    metrics.settingsNav.width > 120 ||
+    metrics.settingsNav.right > metrics.modelConfig.left - 6 ||
+    metrics.settingsSections.left < metrics.settingsNav.right + 6
+  ) {
+    throw new Error(
+      `Compact settings rail should stay narrow and preserve content: ${JSON.stringify(
+        metrics,
+      )}`,
+    );
+  }
+
+  const expectedSettingsLinks = [
+    ['Account', '#settings-account'],
+    ['Model Providers', '#settings-model-providers'],
+    ['Permissions', '#settings-permissions'],
+    ['Tools & MCP', '#settings-tools'],
+    ['Terminal', '#settings-terminal'],
+    ['Appearance', '#settings-appearance'],
+    ['Advanced', '#settings-advanced'],
+  ];
+  if (
+    metrics.navLinks.length !== expectedSettingsLinks.length ||
+    metrics.navLinks.some(
+      (link, index) =>
+        link.label !== expectedSettingsLinks[index][0] ||
+        link.ariaLabel !==
+          `Show ${expectedSettingsLinks[index][0]} settings` ||
+        link.href !== expectedSettingsLinks[index][1],
+    )
+  ) {
+    throw new Error(
+      `Compact settings rail links are not complete: ${JSON.stringify(
+        metrics.navLinks,
+      )}`,
+    );
+  }
+
+  for (const section of metrics.sectionRects) {
+    if (
+      Math.abs(section.rect.left - metrics.modelConfig.left) > 1 ||
+      Math.abs(section.rect.width - metrics.modelConfig.width) > 1
+    ) {
+      throw new Error(
+        `Compact settings sections are not one content column: ${JSON.stringify(
+          metrics.sectionRects,
+        )}`,
+      );
+    }
   }
 
   if (

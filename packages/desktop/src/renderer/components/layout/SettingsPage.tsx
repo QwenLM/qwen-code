@@ -17,6 +17,16 @@ import type { DesktopApprovalMode } from '../../../shared/desktopProtocol.js';
 import { CloseIcon } from './SidebarIcons.js';
 import type { LoadState } from './types.js';
 
+const settingsSections = [
+  { id: 'settings-account', label: 'Account' },
+  { id: 'settings-model-providers', label: 'Model Providers' },
+  { id: 'settings-permissions', label: 'Permissions' },
+  { id: 'settings-tools', label: 'Tools & MCP' },
+  { id: 'settings-terminal', label: 'Terminal' },
+  { id: 'settings-appearance', label: 'Appearance' },
+  { id: 'settings-advanced', label: 'Advanced' },
+] as const;
+
 export function SettingsPage({
   activeSessionId,
   chatState,
@@ -72,7 +82,22 @@ export function SettingsPage({
         </button>
       </div>
       <div className="settings-page-content">
-        <div className="settings-page-main">
+        <nav
+          aria-label="Settings sections"
+          className="settings-section-nav"
+          data-testid="settings-section-nav"
+        >
+          {settingsSections.map((section) => (
+            <a
+              aria-label={`Show ${section.label} settings`}
+              href={`#${section.id}`}
+              key={section.id}
+            >
+              {section.label}
+            </a>
+          ))}
+        </nav>
+        <div className="settings-page-sections" data-testid="settings-sections">
           <AccountPanel state={settingsState} onAuthenticate={onAuthenticate} />
           <ModelProvidersPanel
             state={settingsState}
@@ -87,8 +112,6 @@ export function SettingsPage({
             onModeChange={onModeChange}
             onModelChange={onModelChange}
           />
-        </div>
-        <div className="settings-page-meta">
           <ToolsPanel chatState={chatState} />
           <TerminalSettingsPanel />
           <AppearancePanel />
@@ -122,7 +145,11 @@ function AccountPanel({
   );
 
   return (
-    <section className="settings-section settings-account">
+    <section
+      className="settings-section settings-account"
+      data-testid="settings-account-section"
+      id="settings-account"
+    >
       <div className="panel-header panel-header-inline">
         <div>
           <h3>Account</h3>
@@ -181,6 +208,7 @@ function ModelProvidersPanel({
     <section
       className="settings-section settings-panel"
       data-testid="model-config"
+      id="settings-model-providers"
     >
       <div className="panel-header panel-header-inline">
         <div>
@@ -341,6 +369,7 @@ function PermissionsPanel({
     <section
       className="settings-section permissions-panel"
       data-testid="permissions-config"
+      id="settings-permissions"
     >
       <div className="panel-header panel-header-inline">
         <div>
@@ -400,7 +429,11 @@ function PermissionsPanel({
 
 function ToolsPanel({ chatState }: { chatState: ChatState }) {
   return (
-    <section className="settings-section">
+    <section
+      className="settings-section"
+      data-testid="settings-tools-section"
+      id="settings-tools"
+    >
       <div className="panel-header panel-header-inline">
         <div>
           <h3>Tools & MCP</h3>
@@ -423,7 +456,11 @@ function ToolsPanel({ chatState }: { chatState: ChatState }) {
 
 function TerminalSettingsPanel() {
   return (
-    <section className="settings-section">
+    <section
+      className="settings-section"
+      data-testid="settings-terminal-section"
+      id="settings-terminal"
+    >
       <div className="panel-header panel-header-inline">
         <div>
           <h3>Terminal</h3>
@@ -446,7 +483,11 @@ function TerminalSettingsPanel() {
 
 function AppearancePanel() {
   return (
-    <section className="settings-section">
+    <section
+      className="settings-section"
+      data-testid="settings-appearance-section"
+      id="settings-appearance"
+    >
       <div className="panel-header panel-header-inline">
         <div>
           <h3>Appearance</h3>
@@ -487,7 +528,11 @@ function AdvancedDiagnosticsPanel({
   settingsState: SettingsState;
 }) {
   return (
-    <section className="settings-section settings-advanced">
+    <section
+      className="settings-section settings-advanced"
+      data-testid="settings-advanced-section"
+      id="settings-advanced"
+    >
       <div className="panel-header panel-header-inline">
         <div>
           <h3>Advanced</h3>

@@ -329,6 +329,50 @@ describe('WorkspacePage', () => {
     expect(
       renderedContainer.querySelector('[data-testid="permissions-config"]'),
     ).toBeTruthy();
+    const settingsSectionNav = renderedContainer.querySelector(
+      '[data-testid="settings-section-nav"]',
+    );
+    expect(settingsSectionNav).toBeTruthy();
+    expect(settingsSectionNav?.getAttribute('aria-label')).toBe(
+      'Settings sections',
+    );
+    expect(
+      [...(settingsSectionNav?.querySelectorAll('a') ?? [])].map((link) =>
+        link.textContent?.trim(),
+      ),
+    ).toEqual([
+      'Account',
+      'Model Providers',
+      'Permissions',
+      'Tools & MCP',
+      'Terminal',
+      'Appearance',
+      'Advanced',
+    ]);
+    expect(
+      settingsSectionNav
+        ?.querySelector('a[href="#settings-permissions"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Show Permissions settings');
+    expect(
+      renderedContainer.querySelector('[data-testid="settings-sections"]'),
+    ).toBeTruthy();
+    expect(renderedContainer.querySelector('.settings-page-meta')).toBeNull();
+    for (const [testId, id] of [
+      ['settings-account-section', 'settings-account'],
+      ['model-config', 'settings-model-providers'],
+      ['permissions-config', 'settings-permissions'],
+      ['settings-tools-section', 'settings-tools'],
+      ['settings-terminal-section', 'settings-terminal'],
+      ['settings-appearance-section', 'settings-appearance'],
+      ['settings-advanced-section', 'settings-advanced'],
+    ] as const) {
+      expect(
+        renderedContainer
+          .querySelector(`[data-testid="${testId}"]`)
+          ?.getAttribute('id'),
+      ).toBe(id);
+    }
     expect(
       renderedContainer.querySelector('[data-testid="review-panel"]'),
     ).toBeNull();

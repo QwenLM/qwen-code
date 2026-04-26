@@ -951,13 +951,13 @@ summary:focus-visible {
 }
 
 .settings-overlay .settings-page {
-  flex: 0 1 min(680px, calc(100vw - 340px));
-  width: min(680px, calc(100vw - 340px));
-  min-width: 520px;
+  flex: 0 1 min(620px, calc(100vw - 360px));
+  width: min(620px, calc(100vw - 360px));
+  min-width: 500px;
   height: 100%;
   border-top: 1px solid rgba(213, 224, 255, 0.12);
   border-left: 1px solid rgba(213, 224, 255, 0.16);
-  border-radius: 12px 0 0 0;
+  border-radius: 10px 0 0 0;
   box-shadow: -20px 0 52px rgba(0, 0, 0, 0.32);
 }
 
@@ -2561,8 +2561,8 @@ textarea:focus {
 
 .settings-form {
   display: grid;
-  gap: 12px;
-  padding: 14px;
+  gap: 10px;
+  padding: 12px;
 }
 
 .settings-form label {
@@ -2601,14 +2601,14 @@ textarea:focus {
   flex-direction: column;
   overflow: hidden;
   background:
-    linear-gradient(90deg, rgba(42, 71, 64, 0.12), transparent 28%),
-    rgba(13, 15, 16, 0.8);
+    linear-gradient(90deg, rgba(85, 166, 255, 0.06), transparent 30%),
+    rgba(12, 15, 16, 0.84);
 }
 
 .settings-page-header {
   flex: 0 0 auto;
-  min-height: 42px;
-  padding: 0 12px 0 14px;
+  min-height: 40px;
+  padding: 0 10px 0 12px;
 }
 
 .settings-close-button {
@@ -2642,11 +2642,55 @@ textarea:focus {
   display: grid;
   width: 100%;
   min-height: 0;
-  grid-template-columns: minmax(300px, 1.08fr) minmax(230px, 0.92fr);
-  gap: 10px;
+  grid-template-columns: 112px minmax(0, 1fr);
+  gap: 8px;
   margin: 0;
   overflow: auto;
-  padding: 12px;
+  padding: 10px;
+  scroll-behavior: smooth;
+}
+
+.settings-section-nav {
+  position: sticky;
+  top: 0;
+  display: grid;
+  align-self: start;
+  gap: 2px;
+  min-width: 0;
+  padding: 3px;
+  border: 1px solid rgba(213, 224, 255, 0.055);
+  border-radius: 7px;
+  background: rgba(238, 244, 239, 0.018);
+}
+
+.settings-section-nav a {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 27px;
+  padding: 0 7px;
+  border-radius: 5px;
+  color: rgba(225, 232, 228, 0.62);
+  font-size: 11px;
+  font-weight: 690;
+  line-height: 1.1;
+  text-decoration: none;
+  transition:
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.settings-section-nav a:hover,
+.settings-section-nav a:focus-visible {
+  background: rgba(85, 166, 255, 0.1);
+  color: #c7e2ff;
+}
+
+.settings-page-sections {
+  display: grid;
+  align-content: start;
+  gap: 9px;
+  min-width: 0;
 }
 
 .settings-page-main {
@@ -2666,9 +2710,10 @@ textarea:focus {
 .settings-section {
   min-width: 0;
   overflow: hidden;
-  border: 1px solid rgba(213, 224, 255, 0.09);
+  scroll-margin-top: 8px;
+  border: 1px solid rgba(213, 224, 255, 0.065);
   border-radius: var(--radius);
-  background: rgba(238, 244, 239, 0.028);
+  background: rgba(238, 244, 239, 0.018);
 }
 
 .panel-header-inline {
@@ -2678,17 +2723,29 @@ textarea:focus {
 .settings-account,
 .settings-panel,
 .permissions-panel {
-  background:
-    linear-gradient(180deg, rgba(85, 166, 255, 0.045), transparent 54%),
-    rgba(238, 244, 239, 0.035);
+  background: rgba(85, 166, 255, 0.028);
+}
+
+.settings-section .panel-header {
+  min-height: 38px;
+  padding: 0 12px;
+}
+
+.settings-section .panel-header h3 {
+  font-size: 12.5px;
+  font-weight: 780;
+}
+
+.settings-section .panel-header span {
+  font-size: 11.5px;
 }
 
 .settings-kv {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 8px;
   margin: 0;
-  padding: 0 14px 14px;
+  padding: 0 12px 12px;
 }
 
 .settings-kv div {
@@ -2718,7 +2775,7 @@ textarea:focus {
 .settings-card-actions {
   display: flex;
   justify-content: flex-end;
-  padding: 0 14px 14px;
+  padding: 0 12px 12px;
 }
 
 .settings-advanced .panel-header-inline {
@@ -3046,7 +3103,9 @@ textarea:focus {
   }
 
   .settings-page-content {
-    grid-template-columns: 1fr;
+    grid-template-columns: 102px minmax(0, 1fr);
+    gap: 8px;
+    padding: 9px;
   }
 }
 
@@ -3131,6 +3190,20 @@ textarea:focus {
     border-right: 0;
     border-left: 0;
     border-radius: 0;
+  }
+
+  .settings-page-content {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-section-nav {
+    position: static;
+    display: flex;
+    overflow-x: auto;
+  }
+
+  .settings-section-nav a {
+    flex: 0 0 auto;
   }
 
   .terminal-drawer-collapsed {
