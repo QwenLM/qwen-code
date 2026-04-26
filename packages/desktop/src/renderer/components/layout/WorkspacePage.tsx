@@ -234,6 +234,7 @@ export function WorkspacePage({
             onModeChange={onModeChange}
             onModelChange={onModelChange}
             onMessageTextChange={onMessageTextChange}
+            onOpenModelSettings={showModelSettings}
             onOpenFileReference={onOpenFileReference}
             onOpenReview={showReview}
             onPermissionResponse={onPermissionResponse}

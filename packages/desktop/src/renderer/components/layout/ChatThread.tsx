@@ -45,6 +45,7 @@ export function ChatThread({
   onModeChange,
   onModelChange,
   onMessageTextChange,
+  onOpenModelSettings,
   onOpenFileReference,
   onOpenReview,
   onPermissionResponse,
@@ -65,6 +66,7 @@ export function ChatThread({
   onModeChange: (mode: DesktopApprovalMode) => void;
   onModelChange: (modelId: string) => void;
   onMessageTextChange: (message: string) => void;
+  onOpenModelSettings: () => void;
   onOpenFileReference: (filePath: string) => void;
   onOpenReview: () => void;
   onPermissionResponse: (requestId: string, optionId: string) => void;
@@ -210,6 +212,16 @@ export function ChatThread({
                 <ChevronDownIcon className="composer-select-chevron" />
               </span>
             </label>
+            <button
+              aria-label="Configure models"
+              className="composer-icon-button composer-model-settings-button"
+              data-testid="composer-model-settings-button"
+              title="Configure models"
+              type="button"
+              onClick={onOpenModelSettings}
+            >
+              <ModelIcon />
+            </button>
           </div>
           <div className="composer-actions">
             {notice ? (

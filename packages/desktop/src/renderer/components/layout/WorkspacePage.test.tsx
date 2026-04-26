@@ -1070,6 +1070,9 @@ describe('WorkspacePage', () => {
     const attachButton = renderedContainer.querySelector(
       '[data-testid="composer-attach-button"]',
     );
+    const modelSettingsButton = renderedContainer.querySelector(
+      '[data-testid="composer-model-settings-button"]',
+    );
     const stopButton = renderedContainer.querySelector(
       'button[aria-label="Stop"]',
     );
@@ -1129,6 +1132,13 @@ describe('WorkspacePage', () => {
     expect(
       renderedContainer.querySelector('#composer-attachment-help')?.textContent,
     ).toContain('Attachments are not available yet.');
+    expect(modelSettingsButton).toBeInstanceOf(HTMLButtonElement);
+    expect(modelSettingsButton?.getAttribute('aria-label')).toBe(
+      'Configure models',
+    );
+    expect(modelSettingsButton?.getAttribute('title')).toBe('Configure models');
+    expect(modelSettingsButton?.querySelector('svg')).toBeTruthy();
+    expect(modelSettingsButton?.textContent?.trim()).toBe('');
     for (const [button, title, className] of [
       [stopButton, 'Stop generation', 'composer-stop-button'],
       [sendButton, 'Send message', 'composer-send-button'],
@@ -1142,6 +1152,39 @@ describe('WorkspacePage', () => {
     }
     expect((stopButton as HTMLButtonElement).disabled).toBe(true);
     expect((sendButton as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('opens model provider settings from the composer shortcut', () => {
+    const renderedContainer = renderWorkspace({
+      activeSessionId: null,
+      isDraftSession: false,
+      sessions: [],
+    });
+
+    act(() => {
+      clickButton(renderedContainer, 'Configure models');
+    });
+
+    const settingsPage = renderedContainer.querySelector(
+      '[data-testid="settings-page"]',
+    );
+    const providerSelect = renderedContainer.querySelector(
+      '[data-testid="settings-provider-select"]',
+    );
+
+    expect(settingsPage).toBeTruthy();
+    expect(settingsPage?.getAttribute('data-initial-section')).toBe(
+      'settings-model-providers',
+    );
+    expect(providerSelect).toBeInstanceOf(HTMLSelectElement);
+    expect(document.activeElement).toBe(providerSelect);
+    expect(
+      renderedContainer.querySelector('[data-testid="chat-thread"]'),
+    ).toBeTruthy();
+    expect(
+      renderedContainer.querySelector('[data-testid="runtime-diagnostics"]'),
+    ).toBeNull();
+    expect(settingsPage?.textContent).not.toContain('sk-desktop-e2e');
   });
 
   it('shows configured settings models in the active composer picker', () => {

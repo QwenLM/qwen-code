@@ -90,6 +90,23 @@ async function main() {
 
   await clickButtonUntilText('Open Project', 'desktop-e2e-workspace');
   await assertProjectComposerReady('project-composer.json');
+  await clickButton('Configure models');
+  await assertComposerModelSettingsShortcut(
+    'composer-model-settings-shortcut.json',
+  );
+  await saveScreenshot('composer-model-settings-shortcut.png');
+  await clickButton('Close Settings');
+  await waitFor(
+    'composer model settings drawer closed',
+    async () =>
+      evaluate(`(() => {
+        return (
+          !document.querySelector('[data-testid="settings-page"]') &&
+          document.querySelector('[data-testid="chat-thread"]') !== null
+        );
+      })()`),
+    5_000,
+  );
   await waitForDirtyTopbarDiffStat();
   await clickButtonUntilText('Open Project', 'desktop-e2e-clean-workspace');
   await assertProjectSwitchCleanState('project-switch-clean-git-status.json');
@@ -973,6 +990,210 @@ async function assertProjectComposerReady(fileName) {
         `Composer action scale regressed: ${JSON.stringify(button)}`,
       );
     }
+  }
+}
+
+async function assertComposerModelSettingsShortcut(fileName) {
+  await waitFor(
+    'composer Configure models opens focused model provider settings',
+    async () =>
+      evaluate(`(() => {
+        const settings = document.querySelector('[data-testid="settings-page"]');
+        const provider = document.querySelector(
+          '[data-testid="settings-provider-select"]'
+        );
+        return (
+          settings?.getAttribute('data-initial-section') ===
+            'settings-model-providers' &&
+          provider !== null &&
+          document.activeElement === provider
+        );
+      })()`),
+    5_000,
+  );
+
+  const snapshot = await evaluate(`(() => {
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        fontSize: Number.parseFloat(style.fontSize),
+        lineHeight: Number.parseFloat(style.lineHeight)
+      };
+    };
+    const overflows = (element) =>
+      Boolean(element && element.scrollWidth > element.clientWidth + 4);
+    const composer = document.querySelector('[data-testid="message-composer"]');
+    const shortcut = document.querySelector(
+      '[data-testid="composer-model-settings-button"]'
+    );
+    const settings = document.querySelector('[data-testid="settings-page"]');
+    const overlay = document.querySelector('[data-testid="settings-overlay"]');
+    const provider = document.querySelector(
+      '[data-testid="settings-provider-select"]'
+    );
+    const modelConfig = document.querySelector('[data-testid="model-config"]');
+    const chatThread = document.querySelector('[data-testid="chat-thread"]');
+    const runtime = document.querySelector('[data-testid="runtime-diagnostics"]');
+    const settingsText = settings?.innerText ?? '';
+    const fieldValues = [...document.querySelectorAll('input, textarea')]
+      .map((field) => field.value ?? '')
+      .join('\\n');
+    return {
+      initialSection:
+        settings?.getAttribute('data-initial-section') ?? null,
+      settingsRole: settings?.getAttribute('role') ?? null,
+      settingsModal: settings?.getAttribute('aria-modal') ?? null,
+      settingsRect: rectFor(settings),
+      overlayRect: rectFor(overlay),
+      modelConfigRect: rectFor(modelConfig),
+      chatThreadRect: rectFor(chatThread),
+      providerLabel: provider?.getAttribute('aria-label') ?? null,
+      providerFocused: document.activeElement === provider,
+      providerRect: rectFor(provider),
+      providerStyle: styleFor(provider),
+      runtimeDiagnosticsPresent: runtime !== null,
+      shortcut: {
+        ariaLabel: shortcut?.getAttribute('aria-label') ?? null,
+        title: shortcut?.getAttribute('title') ?? null,
+        className: shortcut?.className ?? '',
+        hasIcon: shortcut?.querySelector('svg') !== null,
+        directText: [...(shortcut?.childNodes ?? [])]
+          .filter((node) => node.nodeType === Node.TEXT_NODE)
+          .map((node) => node.textContent.trim())
+          .join(''),
+        rect: rectFor(shortcut),
+        style: styleFor(shortcut),
+        overflows: overflows(shortcut)
+      },
+      composerRect: rectFor(composer),
+      composerOverflow: overflows(composer),
+      settingsText,
+      visibleSecret:
+        settingsText.includes('sk-desktop-e2e') ||
+        settingsText.includes('cp-desktop-e2e'),
+      hasAnySecret:
+        settingsText.includes('sk-desktop-e2e') ||
+        settingsText.includes('cp-desktop-e2e') ||
+        fieldValues.includes('sk-desktop-e2e') ||
+        fieldValues.includes('cp-desktop-e2e'),
+      documentOverflow:
+        document.body.scrollWidth > window.innerWidth + 4 ||
+        document.body.scrollHeight > window.innerHeight + 4,
+      settingsOverflow: overflows(settings)
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (snapshot.initialSection !== 'settings-model-providers') {
+    throw new Error(
+      `Composer Configure models should target Model Providers settings: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.settingsRole !== 'dialog' ||
+    snapshot.settingsModal !== 'true' ||
+    !snapshot.settingsRect ||
+    !snapshot.overlayRect ||
+    !snapshot.chatThreadRect
+  ) {
+    throw new Error(
+      `Composer Configure models did not open the settings drawer over conversation: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.providerLabel !== 'Model provider' ||
+    !snapshot.providerFocused ||
+    !snapshot.providerRect ||
+    snapshot.providerStyle?.fontSize > 14.5
+  ) {
+    throw new Error(
+      `Composer Configure models did not focus the compact provider selector: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (!snapshot.modelConfigRect || !snapshot.settingsRect) {
+    throw new Error(
+      `Composer Configure models is missing model provider geometry: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  const modelConfigVisible =
+    snapshot.modelConfigRect.bottom > snapshot.settingsRect.top &&
+    snapshot.modelConfigRect.top < snapshot.settingsRect.bottom;
+  if (!modelConfigVisible) {
+    throw new Error(
+      `Model Providers section is not visible from composer shortcut: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.shortcut.ariaLabel !== 'Configure models' ||
+    snapshot.shortcut.title !== 'Configure models' ||
+    !snapshot.shortcut.className.includes('composer-icon-button') ||
+    !snapshot.shortcut.hasIcon ||
+    snapshot.shortcut.directText !== '' ||
+    !snapshot.shortcut.rect ||
+    snapshot.shortcut.rect.width > 25 ||
+    snapshot.shortcut.rect.height > 25 ||
+    snapshot.shortcut.overflows
+  ) {
+    throw new Error(
+      `Composer Configure models shortcut should stay icon-led and compact: ${JSON.stringify(
+        snapshot.shortcut,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.runtimeDiagnosticsPresent ||
+    snapshot.settingsText.includes('Server URL') ||
+    snapshot.settingsText.includes('ACP Not started') ||
+    snapshot.settingsText.includes('Node') ||
+    snapshot.visibleSecret ||
+    snapshot.hasAnySecret ||
+    snapshot.documentOverflow ||
+    snapshot.settingsOverflow ||
+    snapshot.composerOverflow
+  ) {
+    throw new Error(
+      `Composer Configure models exposed diagnostics, secrets, or overflow: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
   }
 }
 

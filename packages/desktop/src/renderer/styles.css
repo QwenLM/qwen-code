@@ -1868,6 +1868,23 @@ summary:focus-visible {
   color: var(--text);
 }
 
+.composer-icon-button:focus-visible {
+  outline: 0;
+  border-color: rgba(85, 166, 255, 0.58);
+  box-shadow: 0 0 0 2px rgba(85, 166, 255, 0.14);
+}
+
+.composer-model-settings-button {
+  border-color: rgba(85, 166, 255, 0.24);
+  background: rgba(85, 166, 255, 0.075);
+  color: #b7d9ff;
+}
+
+.composer-model-settings-button:not(:disabled):hover {
+  background: rgba(85, 166, 255, 0.14);
+  color: #d7eaff;
+}
+
 .composer-chip,
 .composer-context-note,
 .composer-disabled-reason {

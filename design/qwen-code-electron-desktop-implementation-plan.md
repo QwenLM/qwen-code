@@ -22,6 +22,118 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Composer Model Providers Shortcut
+
+Status: completed in iteration 73.
+
+Goal: make the composer model control center expose a direct, compact route to
+Model Providers settings, especially when a project is open but no thread
+exists yet and runtime model switching is disabled.
+
+User-visible value: users can open a project, type immediately, and still find
+model/provider configuration from the bottom composer without understanding
+session runtime state or hunting through the sidebar.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/composer-model-settings-shortcut.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The composer renders an icon-only `Configure models` affordance beside the
+  model picker with an accessible label, tooltip, and stable test id.
+- The shortcut opens the existing Settings drawer at Model Providers and
+  focuses the provider selector, matching the sidebar Models behavior.
+- The shortcut remains compact, does not add visible text, does not expose
+  secrets or diagnostics, and does not overflow the composer at desktop or
+  compact CDP viewport sizes.
+- Existing composer behavior remains unchanged: project/no-thread typing stays
+  enabled, runtime mode/model selects stay disabled before a thread exists,
+  Send stays disabled for empty input, and active thread model switching still
+  calls `onModelChange`.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project before any thread is selected, assert
+  the composer is enabled, click `Configure models`, assert Settings opens with
+  Model Providers targeted and the provider selector focused, close Settings,
+  then continue the existing project switch, conversation, sidebar, branch,
+  review, settings, terminal, relaunch, and compact viewport workflows.
+- E2E assertions: the composer shortcut is icon-only, 24 px compact, has
+  `aria-label="Configure models"` and `title="Configure models"`, opens
+  `settings-model-providers`, focuses `settings-provider-select`, preserves the
+  chat thread behind the drawer, and records no console errors, failed local
+  requests, secret exposure, diagnostics exposure, or composer overflow.
+- Diagnostic artifacts to collect on failure:
+  `composer-model-settings-shortcut.json`,
+  `composer-model-settings-shortcut.png`, Electron log, and `summary.json`
+  under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` with the prototype as the visual
+  contract and a compact icon-led composer control; `electron-desktop-dev` for
+  renderer behavior verified through component coverage and real Electron CDP.
+
+Notes and decisions:
+
+- This slice reuses the existing Settings drawer and Model Providers section
+  rather than adding a separate model modal. That keeps the first viewport
+  conversation-first while making the composer a more complete task control
+  center.
+- The shortcut remains available as a product-level model configuration route
+  even before a thread exists. Runtime model and permission selects still stay
+  disabled until a session is available because those controls mutate active
+  ACP session state.
+- `frontend-design` guidance was applied by keeping the control icon-only,
+  24 px, subtly accented, and non-textual so it supports the composer without
+  turning the first viewport into a settings dashboard. `electron-desktop-dev`
+  guidance was applied by asserting the real Electron user path through CDP.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 31 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T23-10-46-770Z/`.
+- `git diff --check` passed.
+- Key recorded metrics: `composer-model-settings-shortcut.json` recorded
+  `initialSection: "settings-model-providers"`, `providerFocused: true`, an
+  icon-only `Configure models` shortcut with a 24 px by 24 px rect, no direct
+  text, no composer overflow, no diagnostics, no visible fake secret, and no
+  document/settings overflow.
+
+Self-review:
+
+- The first viewport remains conversation-first; the change adds one compact
+  composer affordance and reuses the existing settings drawer.
+- The shortcut has an accessible label and tooltip, avoids visible text, and
+  does not loosen the session-scoped model/mode mutation rules.
+- No Electron security settings, IPC channels, local server binding, or token
+  checks changed.
+
+Next work:
+
+- Continue the model configuration workflow by making provider validation and
+  saved provider state clearer in the composer/topbar after settings changes.
+- Continue prototype fidelity by checking whether the doubled model icon should
+  become a distinct local settings glyph in a later icon-system pass.
+
 ### Slice: Sidebar Models Settings Entry
 
 Status: completed in iteration 72.
