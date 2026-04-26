@@ -138,6 +138,58 @@ describe('settingsStore', () => {
     });
   });
 
+  it('tracks save progress and clears stale saved status after edits', () => {
+    const settings = createSettings();
+    let state = settingsReducer(createInitialSettingsState(), {
+      type: 'save_start',
+    });
+
+    expect(state.saving).toBe(true);
+    expect(state.error).toBeNull();
+    expect(state.saveStatus).toEqual({ type: 'saving' });
+
+    state = settingsReducer(state, {
+      type: 'save_success',
+      settings,
+    });
+
+    expect(state.saving).toBe(false);
+    expect(state.form.apiKey).toBe('');
+    expect(state.saveStatus).toEqual({ type: 'saved' });
+
+    state = settingsReducer(state, {
+      type: 'set_active_model',
+      model: 'qwen-max',
+    });
+
+    expect(state.form.activeModel).toBe('qwen-max');
+    expect(state.error).toBeNull();
+    expect(state.saveStatus).toEqual({ type: 'idle' });
+  });
+
+  it('tracks save failures and clears them after provider edits', () => {
+    let state = settingsReducer(createInitialSettingsState(), {
+      type: 'save_error',
+      message: 'Failed to update settings.',
+    });
+
+    expect(state.saving).toBe(false);
+    expect(state.error).toBe('Failed to update settings.');
+    expect(state.saveStatus).toEqual({
+      type: 'error',
+      message: 'Failed to update settings.',
+    });
+
+    state = settingsReducer(state, {
+      type: 'set_provider',
+      provider: 'coding-plan',
+    });
+
+    expect(state.form.provider).toBe('coding-plan');
+    expect(state.error).toBeNull();
+    expect(state.saveStatus).toEqual({ type: 'idle' });
+  });
+
   it('validates Coding Plan API keys before saving', () => {
     const state = createInitialSettingsState();
     const form = {

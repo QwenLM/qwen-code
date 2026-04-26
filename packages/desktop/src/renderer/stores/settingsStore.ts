@@ -23,12 +23,19 @@ export interface SettingsState {
   settings: DesktopUserSettings | null;
   form: SettingsFormState;
   error: string | null;
+  saveStatus: SettingsSaveStatus;
 }
 
 export interface SettingsFormValidation {
   valid: boolean;
   reason: string | null;
 }
+
+export type SettingsSaveStatus =
+  | { type: 'idle' }
+  | { type: 'saving' }
+  | { type: 'saved' }
+  | { type: 'error'; message: string };
 
 export type SettingsAction =
   | { type: 'load_start' }
@@ -56,6 +63,7 @@ export function createInitialSettingsState(): SettingsState {
       baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     },
     error: null,
+    saveStatus: { type: 'idle' },
   };
 }
 
@@ -65,7 +73,12 @@ export function settingsReducer(
 ): SettingsState {
   switch (action.type) {
     case 'load_start':
-      return { ...state, loading: true, error: null };
+      return {
+        ...state,
+        loading: true,
+        error: null,
+        saveStatus: { type: 'idle' },
+      };
     case 'load_success':
       return {
         ...state,
@@ -73,11 +86,22 @@ export function settingsReducer(
         settings: action.settings,
         form: formFromSettings(action.settings, state.form),
         error: null,
+        saveStatus: { type: 'idle' },
       };
     case 'load_error':
-      return { ...state, loading: false, error: action.message };
+      return {
+        ...state,
+        loading: false,
+        error: action.message,
+        saveStatus: { type: 'idle' },
+      };
     case 'save_start':
-      return { ...state, saving: true, error: null };
+      return {
+        ...state,
+        saving: true,
+        error: null,
+        saveStatus: { type: 'saving' },
+      };
     case 'save_success':
       return {
         ...state,
@@ -85,28 +109,53 @@ export function settingsReducer(
         settings: action.settings,
         form: { ...formFromSettings(action.settings, state.form), apiKey: '' },
         error: null,
+        saveStatus: { type: 'saved' },
       };
     case 'save_error':
-      return { ...state, saving: false, error: action.message };
+      return {
+        ...state,
+        saving: false,
+        error: action.message,
+        saveStatus: { type: 'error', message: action.message },
+      };
     case 'set_provider':
       return {
         ...state,
+        error: null,
+        saveStatus: { type: 'idle' },
         form: { ...state.form, provider: action.provider },
       };
     case 'set_api_key':
-      return { ...state, form: { ...state.form, apiKey: action.apiKey } };
+      return clearSaveStatus({
+        ...state,
+        form: { ...state.form, apiKey: action.apiKey },
+      });
     case 'set_coding_plan_region':
-      return {
+      return clearSaveStatus({
         ...state,
         form: { ...state.form, codingPlanRegion: action.region },
-      };
+      });
     case 'set_active_model':
-      return { ...state, form: { ...state.form, activeModel: action.model } };
+      return clearSaveStatus({
+        ...state,
+        form: { ...state.form, activeModel: action.model },
+      });
     case 'set_base_url':
-      return { ...state, form: { ...state.form, baseUrl: action.baseUrl } };
+      return clearSaveStatus({
+        ...state,
+        form: { ...state.form, baseUrl: action.baseUrl },
+      });
     default:
       return state;
   }
+}
+
+function clearSaveStatus(state: SettingsState): SettingsState {
+  return {
+    ...state,
+    error: null,
+    saveStatus: { type: 'idle' },
+  };
 }
 
 export function buildSettingsUpdateRequest(

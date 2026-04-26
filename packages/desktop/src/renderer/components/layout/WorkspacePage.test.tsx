@@ -20,7 +20,10 @@ import type {
 } from '../../api/client.js';
 import { chatReducer, createInitialChatState } from '../../stores/chatStore.js';
 import { createInitialModelState } from '../../stores/modelStore.js';
-import { createInitialSettingsState } from '../../stores/settingsStore.js';
+import {
+  createInitialSettingsState,
+  settingsReducer,
+} from '../../stores/settingsStore.js';
 import { WorkspacePage } from './WorkspacePage.js';
 import type { LoadState } from './types.js';
 
@@ -1529,6 +1532,82 @@ describe('WorkspacePage', () => {
     });
 
     expect(onSaveSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows compact saved model provider feedback without secrets', () => {
+    const savedSettingsState = settingsReducer(createInitialSettingsState(), {
+      type: 'save_success',
+      settings: createSettings(),
+    });
+    const renderedContainer = renderWorkspace({
+      settingsState: savedSettingsState,
+    });
+
+    act(() => {
+      clickButton(renderedContainer, 'Settings');
+    });
+
+    const status = renderedContainer.querySelector(
+      '[data-testid="settings-save-status"]',
+    );
+    const saveButton = [...renderedContainer.querySelectorAll('button')].find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    const settingsText =
+      renderedContainer.querySelector('[data-testid="settings-page"]')
+        ?.textContent ?? '';
+    const apiKey = renderedContainer.querySelector(
+      'input[aria-label="Provider API key"]',
+    );
+
+    expect(status).toBeTruthy();
+    expect(status?.getAttribute('role')).toBe('status');
+    expect(status?.classList.contains('settings-save-status-saved')).toBe(true);
+    expect(status?.textContent).toBe(
+      'Saved API key provider · qwen-plus · API key configured',
+    );
+    expect(saveButton?.getAttribute('aria-describedby')).toBe(
+      'settings-save-status',
+    );
+    expect(apiKey).toBeInstanceOf(HTMLInputElement);
+    expect((apiKey as HTMLInputElement).type).toBe('password');
+    expect((apiKey as HTMLInputElement).value).toBe('');
+    expect(settingsText).not.toContain('sk-desktop-e2e');
+  });
+
+  it('shows model provider save failures as inline alerts', () => {
+    const loadedSettingsState = settingsReducer(createInitialSettingsState(), {
+      type: 'load_success',
+      settings: createSettings(),
+    });
+    const failedSettingsState = settingsReducer(loadedSettingsState, {
+      type: 'save_error',
+      message: 'Desktop service unavailable.',
+    });
+    const renderedContainer = renderWorkspace({
+      settingsState: failedSettingsState,
+    });
+
+    act(() => {
+      clickButton(renderedContainer, 'Settings');
+    });
+
+    const status = renderedContainer.querySelector(
+      '[data-testid="settings-save-status"]',
+    );
+    const saveButton = [...renderedContainer.querySelectorAll('button')].find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+
+    expect(status).toBeTruthy();
+    expect(status?.getAttribute('role')).toBe('alert');
+    expect(status?.classList.contains('settings-save-status-error')).toBe(true);
+    expect(status?.textContent).toBe(
+      'Could not save model provider settings: Desktop service unavailable.',
+    );
+    expect(saveButton?.getAttribute('aria-describedby')).toBe(
+      'settings-save-status',
+    );
   });
 
   it('bounds the inline changed-files summary before opening review', () => {

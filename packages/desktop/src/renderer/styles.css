@@ -2761,6 +2761,45 @@ textarea:focus {
   line-height: 1.35;
 }
 
+.settings-save-status {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 24px;
+  flex: 1 1 auto;
+  align-items: center;
+  overflow: hidden;
+  margin: 0;
+  padding: 0 8px;
+  border: 1px solid rgba(213, 224, 255, 0.09);
+  border-radius: 999px;
+  background: rgba(238, 244, 239, 0.028);
+  color: rgba(225, 232, 228, 0.72);
+  font-size: 11px;
+  font-weight: 660;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-save-status-saved {
+  border-color: rgba(117, 217, 156, 0.22);
+  background: rgba(117, 217, 156, 0.065);
+  color: #a9eabd;
+}
+
+.settings-save-status-saving {
+  border-color: rgba(85, 166, 255, 0.24);
+  background: rgba(85, 166, 255, 0.07);
+  color: #b7d9ff;
+}
+
+.settings-save-status-error {
+  border-color: rgba(255, 127, 105, 0.28);
+  background: rgba(255, 127, 105, 0.075);
+  color: #ffb3a5;
+}
+
 .settings-summary {
   margin: 0;
   overflow-wrap: anywhere;

@@ -5,6 +5,7 @@
  */
 
 import { useEffect, useState, type Dispatch } from 'react';
+import type { DesktopUserSettings } from '../../api/client.js';
 import type { ChatState } from '../../stores/chatStore.js';
 import type { ModelState } from '../../stores/modelStore.js';
 import {
@@ -217,6 +218,7 @@ function ModelProvidersPanel({
   const provider = state.form.provider;
   const validation = validateSettingsForm(state.form, state.settings);
   const validationReason = validation.valid ? null : validation.reason;
+  const saveStatus = getModelProviderSaveStatus(state);
   const saveDisabledReason = state.loading
     ? 'Settings are still loading.'
     : state.saving
@@ -225,6 +227,8 @@ function ModelProvidersPanel({
   const saveValidationId = validationReason
     ? 'settings-save-validation'
     : undefined;
+  const saveStatusId = saveStatus ? 'settings-save-status' : undefined;
+  const saveDescribedBy = saveValidationId ?? saveStatusId;
 
   return (
     <section
@@ -338,8 +342,18 @@ function ModelProvidersPanel({
               {validationReason}
             </p>
           ) : null}
+          {!validationReason && saveStatus ? (
+            <p
+              className={`settings-save-status settings-save-status-${saveStatus.kind}`}
+              data-testid="settings-save-status"
+              id="settings-save-status"
+              role={saveStatus.kind === 'error' ? 'alert' : 'status'}
+            >
+              {saveStatus.message}
+            </p>
+          ) : null}
           <button
-            aria-describedby={saveValidationId}
+            aria-describedby={saveDescribedBy}
             className="primary-button"
             disabled={Boolean(saveDisabledReason)}
             title={saveDisabledReason ?? 'Save model provider settings'}
@@ -361,10 +375,74 @@ function ModelProvidersPanel({
             ).toLowerCase()}
           </p>
         ) : null}
-        {state.error ? <p className="error-text">{state.error}</p> : null}
       </div>
     </section>
   );
+}
+
+interface ModelProviderSaveStatus {
+  kind: 'saving' | 'saved' | 'error';
+  message: string;
+}
+
+function getModelProviderSaveStatus(
+  state: SettingsState,
+): ModelProviderSaveStatus | null {
+  if (state.saving || state.saveStatus.type === 'saving') {
+    return {
+      kind: 'saving',
+      message: 'Saving model provider settings...',
+    };
+  }
+
+  if (state.saveStatus.type === 'error') {
+    return {
+      kind: 'error',
+      message: `Could not save model provider settings: ${state.saveStatus.message}`,
+    };
+  }
+
+  if (state.error) {
+    return {
+      kind: 'error',
+      message: `Could not load model provider settings: ${state.error}`,
+    };
+  }
+
+  if (state.saveStatus.type === 'saved' && state.settings) {
+    return {
+      kind: 'saved',
+      message: formatSavedProviderStatus(state.settings),
+    };
+  }
+
+  return null;
+}
+
+function formatSavedProviderStatus(settings: DesktopUserSettings): string {
+  if (settings.provider === 'coding-plan') {
+    return [
+      'Saved Coding Plan provider',
+      formatCodingPlanRegion(settings.codingPlan.region),
+      formatApiKeyState(settings.codingPlan.hasApiKey),
+    ].join(' · ');
+  }
+
+  return [
+    'Saved API key provider',
+    settings.model.name || 'No model',
+    formatApiKeyState(settings.openai.hasApiKey),
+  ].join(' · ');
+}
+
+function formatCodingPlanRegion(
+  region: DesktopUserSettings['codingPlan']['region'],
+): string {
+  return region === 'global' ? 'Global' : 'China';
+}
+
+function formatApiKeyState(hasApiKey: boolean): string {
+  return hasApiKey ? 'API key configured' : 'API key missing';
 }
 
 function PermissionsPanel({

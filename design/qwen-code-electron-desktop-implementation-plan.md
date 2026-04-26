@@ -22,6 +22,126 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Settings Save Status Feedback
+
+Status: completed in iteration 75.
+
+Goal: make model provider Settings save success, saving, and failure states
+explicit in the drawer without exposing provider secrets or adding main
+workbench noise.
+
+User-visible value: after users add or edit a model provider, the Settings
+drawer clearly confirms what provider/model state was saved, and failures
+appear as an inline product message instead of an ambiguous form error.
+
+Expected files:
+
+- `packages/desktop/src/renderer/stores/settingsStore.ts`
+- `packages/desktop/src/renderer/stores/settingsStore.test.ts`
+- `packages/desktop/src/renderer/components/layout/SettingsPage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/settings-save-status-feedback.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Model Providers shows a compact live status row while saving, after a
+  successful save, and after a save failure.
+- Success copy identifies the saved provider and visible model/region context,
+  reports API key state only as configured/missing, and never renders API key
+  values.
+- Editing provider fields clears stale saved/error status so users do not see a
+  previous save confirmation beside unsaved input.
+- Save validation remains inline and compact; disabled Save continues to explain
+  the validation reason.
+- Settings remains drawer-like and conversation-first; no runtime diagnostics,
+  server URLs, ACP IDs, fake secrets, or overflow appear in the default drawer.
+
+Verification:
+
+- Unit/store test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/settingsStore.test.ts`
+- Component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open Settings, exercise invalid provider fields, save a valid
+  API-key provider, verify the inline saved status, switch to Coding Plan, save
+  again, verify the saved Coding Plan status, and continue the existing
+  composer model visibility flow.
+- E2E assertions: the status row uses `role=status` for saving/success and
+  `role=alert` for errors, save status text is compact and contained, saved
+  status clears after field edits, API key inputs remain password fields and
+  are cleared after saving, fake secrets are absent from visible text and DOM
+  field values after save, and no settings/document overflow occurs.
+- Diagnostic artifacts to collect on failure:
+  `settings-save-status-feedback.json`,
+  `settings-coding-plan-provider.json`, screenshot artifacts from the main CDP
+  run, Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` constrained by `home.jpg` to keep
+  feedback as a compact settings drawer row rather than a new banner;
+  `electron-desktop-dev` for component/store coverage plus real Electron CDP
+  verification.
+
+Notes and decisions:
+
+- This slice will not introduce toast infrastructure. The feedback belongs next
+  to the Model Providers form because the prototype keeps the main conversation
+  viewport quiet and control-centered.
+- Save status lives in `settingsStore` instead of being inferred from the
+  current form. This lets Settings distinguish saved, saving, and failed save
+  states while clearing stale messages as soon as a provider field changes.
+- The success copy deliberately says only `API key configured` or
+  `API key missing`; the secret value remains limited to password inputs before
+  save and is cleared from form state after save success.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/settingsStore.test.ts`
+  passed with 10 tests.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 34 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T23-29-32-217Z/`.
+- `settings-save-status-feedback.json` recorded saved API-key status text,
+  role `status`, `aria-describedby="settings-save-status"`, cleared API key
+  field value, no fake secrets, no local server URL, no overflow, and stale
+  status removal after editing the provider model.
+- `settings-coding-plan-provider.json` recorded saved Coding Plan status text
+  `Saved Coding Plan provider · Global · API key configured`, role `status`,
+  no visible fake secrets, cleared API key field value after save, and no
+  document overflow.
+
+Self-review:
+
+- The first viewport remains conversation-first; the new feedback is scoped to
+  the existing Settings drawer and does not introduce a toast, banner, or main
+  canvas status surface.
+- Save validation still owns disabled Save explanations, while successful and
+  failed save attempts use a compact live status row.
+- No Electron main, preload, IPC, local server binding, or token behavior
+  changed.
+
+Next work:
+
+- Continue model configuration polish by shortening raw Coding Plan model
+  labels in the Settings Permissions thread-model select, matching the composer
+  model label restraint.
+- Continue prototype fidelity by reducing remaining uppercase settings key
+  labels where they compete with the drawer section headers.
+
 ### Slice: Draft Composer Saved Model State
 
 Status: completed in iteration 74.

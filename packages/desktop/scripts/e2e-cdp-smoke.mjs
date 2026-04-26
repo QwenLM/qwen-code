@@ -270,6 +270,7 @@ async function main() {
   await assertSettingsValidation('settings-validation.json');
   await clickButton('Save');
   await waitForText('qwen-e2e-cdp');
+  await assertSettingsSaveStatusFeedback('settings-save-status-feedback.json');
   await assertSettingsProductState('settings-product-state.json');
   await assertSettingsCodingPlanWorkflow('settings-coding-plan-provider.json');
   await saveScreenshot('settings-coding-plan-state.png');
@@ -8933,6 +8934,185 @@ async function assertSettingsProductState(fileName) {
   }
 }
 
+async function assertSettingsSaveStatusFeedback(fileName) {
+  await waitFor(
+    'API-key provider saved status',
+    async () => {
+      const snapshot = await readSettingsSaveStatusSnapshot();
+      return (
+        snapshot.statusText ===
+          'Saved API key provider · qwen-e2e-cdp · API key configured' &&
+        snapshot.statusRole === 'status' &&
+        snapshot.apiKeyValue === ''
+      );
+    },
+    5_000,
+  );
+
+  const saved = await readSettingsSaveStatusSnapshot();
+
+  await setFieldByAriaLabel('Provider model', 'qwen-e2e-cdp-draft');
+  await waitFor(
+    'saved status clears after model edit',
+    async () => {
+      const snapshot = await readSettingsSaveStatusSnapshot();
+      return (
+        snapshot.modelValue === 'qwen-e2e-cdp-draft' &&
+        snapshot.statusText === '' &&
+        snapshot.saveDescribedBy === null
+      );
+    },
+    5_000,
+  );
+  const edited = await readSettingsSaveStatusSnapshot();
+
+  await setFieldByAriaLabel('Provider model', 'qwen-e2e-cdp');
+  await waitFor(
+    'provider model restored after save-status check',
+    async () => {
+      const snapshot = await readSettingsSaveStatusSnapshot();
+      return (
+        snapshot.modelValue === 'qwen-e2e-cdp' &&
+        snapshot.statusText === '' &&
+        snapshot.saveDisabled === false
+      );
+    },
+    5_000,
+  );
+  const restored = await readSettingsSaveStatusSnapshot();
+  const snapshots = { saved, edited, restored };
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshots, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (
+    saved.statusText !==
+      'Saved API key provider · qwen-e2e-cdp · API key configured' ||
+    saved.statusRole !== 'status' ||
+    !saved.statusClass.includes('settings-save-status-saved') ||
+    saved.saveDescribedBy !== 'settings-save-status'
+  ) {
+    throw new Error(
+      `API-key save status was not explicit and accessible: ${JSON.stringify(
+        saved,
+      )}`,
+    );
+  }
+
+  if (
+    saved.apiKeyType !== 'password' ||
+    saved.apiKeyValue !== '' ||
+    saved.hasAnySecret ||
+    saved.hasServerUrl ||
+    saved.statusOverflow ||
+    saved.documentOverflow
+  ) {
+    throw new Error(
+      `API-key save status exposed secrets, diagnostics, or overflow: ${JSON.stringify(
+        saved,
+      )}`,
+    );
+  }
+
+  if (
+    edited.statusText !== '' ||
+    edited.statusRole !== null ||
+    edited.saveDescribedBy !== null ||
+    edited.hasAnySecret ||
+    edited.documentOverflow
+  ) {
+    throw new Error(
+      `Editing provider fields should clear stale save status safely: ${JSON.stringify(
+        edited,
+      )}`,
+    );
+  }
+
+  if (
+    restored.modelValue !== 'qwen-e2e-cdp' ||
+    restored.statusText !== '' ||
+    restored.saveDisabled !== false ||
+    restored.hasAnySecret ||
+    restored.documentOverflow
+  ) {
+    throw new Error(
+      `Provider form was not restored after save-status check: ${JSON.stringify(
+        restored,
+      )}`,
+    );
+  }
+}
+
+async function readSettingsSaveStatusSnapshot() {
+  return evaluate(`(() => {
+    const settings = document.querySelector('[data-testid="settings-page"]');
+    const modelConfig = document.querySelector('[data-testid="model-config"]');
+    const status = document.querySelector(
+      '[data-testid="settings-save-status"]'
+    );
+    const saveButton = [...document.querySelectorAll('button')].find(
+      (button) => button.textContent.trim() === 'Save'
+    );
+    const model = document.querySelector(
+      'input[aria-label="Provider model"]'
+    );
+    const apiKey = document.querySelector(
+      'input[aria-label="Provider API key"]'
+    );
+    const settingsText = settings?.innerText ?? '';
+    const fieldValues = [...document.querySelectorAll('input, textarea')]
+      .map((field) => field.value ?? '')
+      .join('\\n');
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const statusRect = rectFor(status);
+    const modelConfigRect = rectFor(modelConfig);
+    return {
+      statusText: status?.textContent.trim() ?? '',
+      statusRole: status?.getAttribute('role') ?? null,
+      statusClass: status?.className ?? '',
+      statusRect,
+      saveDisabled: saveButton?.disabled ?? null,
+      saveDescribedBy: saveButton?.getAttribute('aria-describedby') ?? null,
+      modelValue: model?.value ?? null,
+      apiKeyType: apiKey?.getAttribute('type') ?? null,
+      apiKeyValue: apiKey?.value ?? '',
+      hasAnySecret:
+        settingsText.includes('sk-desktop-e2e') ||
+        settingsText.includes('cp-desktop-e2e') ||
+        fieldValues.includes('sk-desktop-e2e') ||
+        fieldValues.includes('cp-desktop-e2e'),
+      hasServerUrl: /http:\\/\\/127\\.0\\.0\\.1:/u.test(settingsText),
+      statusOverflow:
+        Boolean(status && status.scrollWidth > status.clientWidth + 4) ||
+        Boolean(
+          statusRect &&
+            modelConfigRect &&
+            (statusRect.left < modelConfigRect.left - 1 ||
+              statusRect.right > modelConfigRect.right + 1)
+        ),
+      documentOverflow:
+        document.body.scrollWidth > window.innerWidth + 4 ||
+        document.body.scrollHeight > window.innerHeight + 4
+    };
+  })()`);
+}
+
 async function assertSettingsCodingPlanWorkflow(fileName) {
   const snapshots = {};
 
@@ -9038,6 +9218,31 @@ async function assertSettingsCodingPlanWorkflow(fileName) {
     );
   }
 
+  if (
+    snapshots.saved.saveStatusText !==
+      'Saved Coding Plan provider · Global · API key configured' ||
+    snapshots.saved.saveStatusRole !== 'status' ||
+    !snapshots.saved.saveStatusClass.includes('settings-save-status-saved') ||
+    snapshots.saved.saveDescribedBy !== 'settings-save-status'
+  ) {
+    throw new Error(
+      `Saved Coding Plan status is not explicit and accessible: ${JSON.stringify(
+        snapshots.saved,
+      )}`,
+    );
+  }
+
+  if (
+    snapshots.validation.saveStatusText !== '' ||
+    snapshots.ready.saveStatusText !== ''
+  ) {
+    throw new Error(
+      `Coding Plan edits should clear stale save status before saving: ${JSON.stringify(
+        snapshots,
+      )}`,
+    );
+  }
+
   for (const [name, snapshot] of Object.entries(snapshots)) {
     if (snapshot.visibleSecret || snapshot.documentOverflow) {
       throw new Error(
@@ -9070,6 +9275,9 @@ async function readSettingsCodingPlanSnapshot() {
     const validation = document.querySelector(
       '[data-testid="settings-save-validation"]'
     );
+    const saveStatus = document.querySelector(
+      '[data-testid="settings-save-status"]'
+    );
     const saveButton = [...document.querySelectorAll('button')].find(
       (button) => button.textContent.trim() === 'Save'
     );
@@ -9101,7 +9309,11 @@ async function readSettingsCodingPlanSnapshot() {
       apiKeyType: apiKey?.getAttribute('type') ?? null,
       apiKeyLength: apiKey?.value.length ?? 0,
       validationText: validation?.textContent.trim() ?? '',
+      saveStatusText: saveStatus?.textContent.trim() ?? '',
+      saveStatusRole: saveStatus?.getAttribute('role') ?? null,
+      saveStatusClass: saveStatus?.className ?? '',
       saveDisabled: saveButton?.disabled ?? null,
+      saveDescribedBy: saveButton?.getAttribute('aria-describedby') ?? null,
       settingsProviderText: settingsText,
       codingPlanStatus,
       codingPlanConfigured: codingPlanStatus === 'Configured',
