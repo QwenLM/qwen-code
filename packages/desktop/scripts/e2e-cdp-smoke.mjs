@@ -1967,34 +1967,91 @@ async function assertConversationChangesSummary(fileName) {
     const summary = document.querySelector(
       '[data-testid="conversation-changes-summary"]'
     );
+    const summaryLabel = summary?.querySelector('.conversation-activity-label');
+    const reviewAction = summary?.querySelector(
+      'button[aria-label="Review Changes"]'
+    );
+    const firstRow = summary?.querySelector('.conversation-changes-list li');
+    const firstRowState = firstRow?.querySelector('small');
+    const alphaFromColor = (color) => {
+      if (!color || color === 'transparent') {
+        return 0;
+      }
+
+      const match = color.match(/rgba?\\(([^)]+)\\)/u);
+      if (!match) {
+        return 1;
+      }
+
+      const parts = match[1].split(',').map((part) => part.trim());
+      if (parts.length < 4) {
+        return 1;
+      }
+
+      const alpha = Number(parts[3]);
+      return Number.isFinite(alpha) ? alpha : 1;
+    };
+    const numberFromPixel = (value) => {
+      const number = Number.parseFloat(value);
+      return Number.isFinite(number) ? number : 0;
+    };
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+
+      const style = window.getComputedStyle(element);
+      return {
+        backgroundColor: style.backgroundColor,
+        backgroundAlpha: alphaFromColor(style.backgroundColor),
+        borderColor: style.borderTopColor,
+        borderAlpha: alphaFromColor(style.borderTopColor),
+        borderTopWidth: numberFromPixel(style.borderTopWidth),
+        borderRightWidth: numberFromPixel(style.borderRightWidth),
+        borderBottomWidth: numberFromPixel(style.borderBottomWidth),
+        borderLeftWidth: numberFromPixel(style.borderLeftWidth),
+        borderRadius: style.borderTopLeftRadius,
+        display: style.display,
+        fontSize: numberFromPixel(style.fontSize),
+        fontWeight: numberFromPixel(style.fontWeight),
+        lineHeight: numberFromPixel(style.lineHeight),
+        position: style.position,
+        textTransform: style.textTransform
+      };
+    };
     return {
       bodyHasSessionId: bodyText.includes('session-e2e-1'),
       bodyHasConnectedEvent: bodyText.includes('Connected to session-e2e'),
       bodyHasTurnComplete: bodyText.includes('Turn complete'),
       summaryText: summary?.innerText ?? '',
-      summaryRect: (() => {
-        if (!summary) {
-          return null;
-        }
-        const rect = summary.getBoundingClientRect();
-        return {
-          top: rect.top,
-          right: rect.right,
-          bottom: rect.bottom,
-          left: rect.left,
-          width: rect.width,
-          height: rect.height
-        };
-      })(),
-      hasReviewAction: Boolean(
-        [...(summary?.querySelectorAll('button') ?? [])].some((button) => {
-          const label =
-            button.getAttribute('aria-label') ||
-            button.getAttribute('title') ||
-            button.textContent.trim();
-          return label === 'Review Changes';
-        })
-      ),
+      summaryRect: rectFor(summary),
+      summaryStyle: styleFor(summary),
+      labelText: summaryLabel?.textContent.trim() ?? '',
+      labelStyle: styleFor(summaryLabel),
+      rowStateText: firstRowState?.textContent.trim() ?? '',
+      rowStateStyle: styleFor(firstRowState),
+      actionText: reviewAction?.textContent.trim() ?? '',
+      actionLabel: reviewAction?.getAttribute('aria-label') ?? '',
+      actionTitle: reviewAction?.getAttribute('title') ?? '',
+      actionRect: rectFor(reviewAction),
+      actionStyle: styleFor(reviewAction),
+      actionHasIcon: Boolean(reviewAction?.querySelector('svg')),
+      hasLegacyMessageRole: Boolean(summary?.querySelector('.message-role')),
       hasPendingApprovalCard:
         document.querySelector('[data-testid="conversation-approval-card"]') !== null,
       reviewOpen: Boolean(document.querySelector('[data-testid="review-panel"]'))
@@ -2027,6 +2084,8 @@ async function assertConversationChangesSummary(fileName) {
     'notes.txt',
     '+2',
     '-1',
+    'Modified · Unstaged',
+    'Untracked',
   ]) {
     if (!snapshot.summaryText.includes(expectedText)) {
       throw new Error(
@@ -2035,7 +2094,56 @@ async function assertConversationChangesSummary(fileName) {
     }
   }
 
-  if (!snapshot.hasReviewAction) {
+  for (const legacyText of ['CHANGED FILES', 'MODIFIED · UNSTAGED']) {
+    if (snapshot.summaryText.includes(legacyText)) {
+      throw new Error(
+        `Changed-files summary retained uppercase legacy text ${legacyText}: ${snapshot.summaryText}`,
+      );
+    }
+  }
+
+  if (snapshot.hasLegacyMessageRole) {
+    throw new Error(
+      'Changed-files summary should not use message-role chrome.',
+    );
+  }
+
+  if (
+    snapshot.labelText !== 'Changed files' ||
+    !snapshot.labelStyle ||
+    snapshot.labelStyle.textTransform !== 'none' ||
+    snapshot.labelStyle.fontWeight > 700
+  ) {
+    throw new Error(
+      `Changed-files label is too heavy: ${JSON.stringify({
+        text: snapshot.labelText,
+        style: snapshot.labelStyle,
+      })}`,
+    );
+  }
+
+  if (
+    snapshot.rowStateText !== 'Modified · Unstaged' ||
+    !snapshot.rowStateStyle ||
+    snapshot.rowStateStyle.textTransform !== 'none' ||
+    snapshot.rowStateStyle.fontWeight > 700
+  ) {
+    throw new Error(
+      `Changed-files row state should be title-case and subdued: ${JSON.stringify(
+        {
+          text: snapshot.rowStateText,
+          style: snapshot.rowStateStyle,
+        },
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.actionLabel !== 'Review Changes' ||
+    snapshot.actionTitle !== 'Review Changes' ||
+    snapshot.actionText !== 'Review' ||
+    !snapshot.actionHasIcon
+  ) {
     throw new Error('Changed-files summary is missing its review action.');
   }
 
@@ -2050,12 +2158,44 @@ async function assertConversationChangesSummary(fileName) {
   if (
     !snapshot.summaryRect ||
     snapshot.summaryRect.width < 360 ||
-    snapshot.summaryRect.height > 220
+    snapshot.summaryRect.height > 92
   ) {
     throw new Error(
       `Changed-files summary geometry is unexpected: ${JSON.stringify(
         snapshot.summaryRect,
       )}`,
+    );
+  }
+
+  if (
+    !snapshot.summaryStyle ||
+    snapshot.summaryStyle.backgroundAlpha > 0.025 ||
+    snapshot.summaryStyle.borderTopWidth > 0 ||
+    snapshot.summaryStyle.borderRightWidth > 0 ||
+    snapshot.summaryStyle.borderBottomWidth > 0 ||
+    snapshot.summaryStyle.borderLeftWidth < 1.5 ||
+    snapshot.summaryStyle.borderLeftWidth > 2.5 ||
+    snapshot.summaryStyle.borderRadius !== '0px'
+  ) {
+    throw new Error(
+      `Changed-files summary should render as an inline rail: ${JSON.stringify(
+        snapshot.summaryStyle,
+      )}`,
+    );
+  }
+
+  if (
+    !snapshot.actionRect ||
+    !snapshot.actionStyle ||
+    snapshot.actionRect.height > 28 ||
+    snapshot.actionStyle.backgroundAlpha > 0.1 ||
+    snapshot.actionStyle.borderRadius !== '999px'
+  ) {
+    throw new Error(
+      `Changed-files review action should stay compact: ${JSON.stringify({
+        rect: snapshot.actionRect,
+        style: snapshot.actionStyle,
+      })}`,
     );
   }
 }
@@ -3037,11 +3177,15 @@ async function assertConversationSurfaceFidelity(fileName) {
   }
 
   if (
-    snapshot.summary.style.borderAlpha > 0.14 ||
-    snapshot.summary.style.backgroundAlpha > 0.045
+    snapshot.summary.style.backgroundAlpha > 0.025 ||
+    snapshot.summary.style.borderTopWidth > 0 ||
+    snapshot.summary.style.borderRightWidth > 0 ||
+    snapshot.summary.style.borderBottomWidth > 0 ||
+    snapshot.summary.style.borderLeftWidth < 1.5 ||
+    snapshot.summary.style.borderLeftWidth > 2.5
   ) {
     throw new Error(
-      `Changed-files summary surface is too visually heavy: ${JSON.stringify(
+      `Changed-files summary should render as an inline rail: ${JSON.stringify(
         snapshot.summary.style,
       )}`,
     );

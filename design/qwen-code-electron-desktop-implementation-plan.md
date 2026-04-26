@@ -22,6 +22,107 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Changed Files Summary Inline Fidelity
+
+Status: completed in iteration 49.
+
+Goal: make the conversation changed-files summary read like a compact inline
+result primitive from `home.jpg`, instead of a framed review card competing
+with assistant prose and the composer.
+
+User-visible value: users can see that files changed, scan the affected files,
+and open review from the conversation without the summary becoming a large
+dashboard panel.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/changed-files-summary-inline-fidelity.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Changed-files summary uses a slim inline activity row with a subtle left
+  accent, no full box border, and lower surface weight than the prior card.
+- Summary label and file states use title-case product text instead of
+  uppercase section/status chrome.
+- File rows stay chip-sized, horizontally wrapped, and do not look like nested
+  cards.
+- Review action remains obvious, accessible, and icon-led/compact while opening
+  the existing review drawer only when clicked.
+- Existing hidden-internal-ID behavior, assistant actions, command approval,
+  review safety, settings, terminal, branch, composer, and commit workflows
+  remain unchanged.
+- Default and compact Electron viewports keep the summary inside the
+  conversation timeline, above the composer, with no document overflow.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake project, send a prompt, approve the command,
+  inspect the inline changed-files summary before review opens, click the
+  compact review action, continue the review/settings/terminal/commit smoke,
+  and verify the compact viewport layout.
+- E2E assertions: changed-files summary is unboxed, title-case, compact,
+  left-accented, and contained; the review action is accessible and compact;
+  uppercase legacy summary labels/statuses are absent; no console errors or
+  failed local requests are recorded.
+- Diagnostic artifacts: updated `conversation-changes-summary.json`,
+  `conversation-surface-fidelity.json`, `compact-dense-conversation.json`,
+  screenshots, Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for comparing compact-card,
+  inline-rail, and list-only approaches without user interruption;
+  `frontend-design` for applying the prototype-constrained hierarchy and
+  reducing card weight; `electron-desktop-dev` for renderer changes verified
+  through real Electron CDP interaction.
+
+Notes and decisions:
+
+- `home.jpg` shows changed files as a modest inline result with readable file
+  rows and a compact review affordance. The chosen approach keeps the current
+  functionality but shifts presentation to an inline rail so review remains a
+  supporting surface.
+- No new dependency is needed. The existing local `DiffIcon` supports an
+  icon-led review affordance.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 21 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T18-37-32-960Z/`.
+- Key recorded metrics: changed-files summary rendered as `Changed files`,
+  `2 files changed`, `Modified · Unstaged`, and `Untracked`; uppercase legacy
+  summary text was absent; summary geometry was 820 x 61 px with transparent
+  background, no top/right/bottom border, a 2 px left accent, and 0 px radius;
+  the review action was icon-led, 75.69 x 24 px, and retained `Review Changes`
+  as its accessible label; no console errors or failed local requests were
+  recorded.
+
+Next work:
+
+- Continue prototype fidelity by tightening command approval/question card
+  labels, where `message-role` still creates uppercase tool/question chrome.
+- Consider broader changed-files visual coverage for renamed/binary files and
+  very long localized status labels.
+
 ### Slice: Plan and Tool Activity Label Restraint
 
 Status: completed in iteration 48.

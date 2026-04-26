@@ -989,7 +989,7 @@ function ChangedFilesSummaryCard({
     >
       <div className="conversation-changes-heading">
         <div className="conversation-changes-title">
-          <span className="message-role">Changed files</span>
+          <span className="conversation-activity-label">Changed files</span>
           <strong>
             {files.length} {files.length === 1 ? 'file' : 'files'} changed
           </strong>
@@ -1001,11 +1001,13 @@ function ChangedFilesSummaryCard({
           </span>
           <button
             aria-label="Review Changes"
-            className="secondary-button"
+            className="conversation-changes-review-button"
+            title="Review Changes"
             type="button"
             onClick={onOpenReview}
           >
-            Review Changes
+            <DiffIcon />
+            <span>Review</span>
           </button>
         </div>
       </div>
@@ -1069,12 +1071,18 @@ function formatChangedFileState(file: DesktopGitChangedFile): string {
   }
 
   if (states.length === 1 && states[0] === file.status) {
-    return file.status;
+    return formatChangeStateToken(file.status);
   }
 
   return states.length > 0
-    ? `${file.status} · ${states.join(' + ')}`
-    : file.status;
+    ? `${formatChangeStateToken(file.status)} · ${states
+        .map((state) => formatChangeStateToken(state))
+        .join(' + ')}`
+    : formatChangeStateToken(file.status);
+}
+
+function formatChangeStateToken(state: string): string {
+  return formatActivityStatus(state);
 }
 
 function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {

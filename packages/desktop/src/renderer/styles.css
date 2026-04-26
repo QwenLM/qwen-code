@@ -1311,13 +1311,14 @@ summary:focus-visible {
 
 .conversation-changes-card {
   display: grid;
-  width: min(860px, 100%);
+  width: min(820px, 100%);
   align-self: center;
-  gap: 6px;
-  padding: 7px 9px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: rgba(238, 244, 239, 0.02);
+  gap: 5px;
+  padding: 6px 0 6px 12px;
+  border: 0;
+  border-left: 2px solid rgba(85, 166, 255, 0.24);
+  border-radius: 0;
+  background: transparent;
   color: var(--text-soft);
 }
 
@@ -1335,6 +1336,7 @@ summary:focus-visible {
 .conversation-changes-heading {
   flex-wrap: wrap;
   justify-content: space-between;
+  row-gap: 4px;
 }
 
 .conversation-changes-title {
@@ -1350,7 +1352,7 @@ summary:focus-visible {
   overflow: hidden;
   color: var(--text);
   font-size: 13px;
-  font-weight: 800;
+  font-weight: 760;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1372,7 +1374,7 @@ summary:focus-visible {
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
     monospace;
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 760;
 }
 
 .diff-addition {
@@ -1387,7 +1389,7 @@ summary:focus-visible {
   display: flex;
   min-width: 0;
   flex-wrap: wrap;
-  gap: 5px;
+  gap: 4px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -1395,24 +1397,24 @@ summary:focus-visible {
 
 .conversation-changes-list li {
   max-width: min(220px, 100%);
-  min-height: 21px;
+  min-height: 20px;
   overflow: hidden;
-  padding: 2px 6px;
-  border: 1px solid rgba(226, 232, 222, 0.08);
+  padding: 1px 6px;
+  border: 1px solid rgba(226, 232, 222, 0.075);
   border-radius: 999px;
   background: transparent;
 }
 
 .conversation-changes-list li + li {
-  border-top: 1px solid rgba(226, 232, 222, 0.08);
+  border-top: 1px solid rgba(226, 232, 222, 0.075);
 }
 
 .conversation-changes-list span {
   min-width: 0;
   overflow: hidden;
   color: var(--text-soft);
-  font-size: 10.8px;
-  font-weight: 720;
+  font-size: 10.6px;
+  font-weight: 690;
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1421,16 +1423,36 @@ summary:focus-visible {
 .conversation-changes-list small {
   flex: 0 0 auto;
   color: var(--muted);
-  font-size: 9.5px;
-  font-weight: 820;
-  text-transform: uppercase;
+  font-size: 9.6px;
+  font-weight: 640;
+  text-transform: none;
   white-space: nowrap;
 }
 
-.conversation-changes-meta .secondary-button {
+.conversation-changes-review-button {
+  display: inline-flex;
   min-height: 24px;
+  align-items: center;
+  gap: 5px;
   padding: 0 8px;
+  border: 1px solid rgba(85, 166, 255, 0.16);
+  border-radius: 999px;
+  background: transparent;
+  color: #b7d9ff;
   font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.conversation-changes-review-button svg {
+  width: 13px;
+  height: 13px;
+}
+
+.conversation-changes-review-button:not(:disabled):hover {
+  border-color: rgba(85, 166, 255, 0.32);
+  background: rgba(85, 166, 255, 0.08);
+  color: #d6eaff;
 }
 
 .chat-scroll-anchor {
@@ -2524,6 +2546,10 @@ textarea:focus {
   }
 
   .workspace-grid-review-open .chat-plan {
+    padding: 6px 0 6px 12px;
+  }
+
+  .workspace-grid-review-open .conversation-changes-card {
     padding: 6px 0 6px 12px;
   }
 

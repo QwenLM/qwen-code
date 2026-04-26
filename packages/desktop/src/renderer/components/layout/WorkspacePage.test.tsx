@@ -798,10 +798,22 @@ describe('WorkspacePage', () => {
     expect(rows).toHaveLength(4);
     expect(summary?.textContent).toContain('src/file-0.ts');
     expect(summary?.textContent).toContain('src/file-2.ts');
+    expect(summary?.textContent).toContain('Modified · Unstaged');
     expect(summary?.textContent).toContain('2 more');
+    expect(summary?.textContent).toContain('Open review');
     expect(summary?.textContent).not.toContain('src/file-4.ts');
+    expect(summary?.textContent).not.toContain('CHANGED FILES');
+    expect(summary?.textContent).not.toContain('MODIFIED · UNSTAGED');
+    expect(summary?.querySelector('.message-role')).toBeNull();
     expect(
       summary?.querySelector('button[aria-label="Review Changes"]'),
+    ).toBeTruthy();
+    expect(
+      summary?.querySelector('button[aria-label="Review Changes"]')
+        ?.textContent,
+    ).toContain('Review');
+    expect(
+      summary?.querySelector('button[aria-label="Review Changes"] svg'),
     ).toBeTruthy();
 
     act(() => {
