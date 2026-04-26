@@ -144,7 +144,7 @@ describe('showAuthStatus', () => {
     );
   });
 
-  it('should show Coding Plan when env key is set but codingPlan.region is missing', async () => {
+  it('should show Coding Plan when detected via modelProviders entry (no codingPlan.region)', async () => {
     process.env[CODING_PLAN_ENV_KEY] = 'test-api-key';
 
     vi.mocked(loadSettings).mockReturnValue(
@@ -157,6 +157,15 @@ describe('showAuthStatus', () => {
         model: {
           name: 'qwen3.5-plus',
         },
+        modelProviders: {
+          openai: [
+            {
+              id: 'qwen3.5-plus',
+              envKey: 'BAILIAN_CODING_PLAN_API_KEY',
+              baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+            },
+          ],
+        },
       }),
     );
 
@@ -168,11 +177,11 @@ describe('showAuthStatus', () => {
     expect(writeStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining('API key configured'),
     );
-    expect(writeStdoutLine).not.toHaveBeenCalledWith(
-      expect.stringContaining('OpenAI-compatible Provider'),
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('中国 (China)'),
     );
     expect(writeStdoutLine).not.toHaveBeenCalledWith(
-      expect.stringContaining('Region:'),
+      expect.stringContaining('OpenAI-compatible Provider'),
     );
     expect(process.exit).toHaveBeenCalledWith(0);
   });
@@ -300,6 +309,8 @@ describe('showAuthStatus', () => {
     afterEach(() => {
       delete process.env['OPENAI_API_KEY'];
       delete process.env['CUSTOM_API_KEY'];
+      delete process.env['XUNFEI_API_KEY'];
+      delete process.env[CODING_PLAN_ENV_KEY];
     });
 
     it('should show OpenAI-compatible status with OPENAI_API_KEY', async () => {
@@ -463,6 +474,84 @@ describe('showAuthStatus', () => {
       );
       expect(writeStdoutLine).toHaveBeenCalledWith(
         expect.stringContaining('API key configured'),
+      );
+      expect(process.exit).toHaveBeenCalledWith(0);
+    });
+
+    it('should show Incomplete when explicit envKey is missing even if OPENAI_API_KEY is set', async () => {
+      process.env['OPENAI_API_KEY'] = 'fallback-key';
+
+      vi.mocked(loadSettings).mockReturnValue(
+        createMockSettings({
+          security: {
+            auth: {
+              selectedType: AuthType.USE_OPENAI,
+            },
+          },
+          model: {
+            name: 'custom-model',
+          },
+          modelProviders: {
+            openai: [
+              {
+                id: 'custom-model',
+                envKey: 'CUSTOM_API_KEY',
+                baseUrl: 'https://custom-api.example.com/v1',
+              },
+            ],
+          },
+        }),
+      );
+
+      await showAuthStatus();
+
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('OpenAI-compatible Provider (Incomplete)'),
+      );
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('API key not found'),
+      );
+    });
+
+    it('should show OpenAI-compatible when stale Coding Plan key exists but active model is generic', async () => {
+      process.env[CODING_PLAN_ENV_KEY] = 'stale-coding-plan-key';
+      process.env['XUNFEI_API_KEY'] = 'active-key';
+
+      vi.mocked(loadSettings).mockReturnValue(
+        createMockSettings({
+          security: {
+            auth: {
+              selectedType: AuthType.USE_OPENAI,
+            },
+          },
+          model: {
+            name: 'spark-v4',
+          },
+          modelProviders: {
+            openai: [
+              {
+                id: 'spark-v4',
+                envKey: 'XUNFEI_API_KEY',
+                baseUrl: 'https://spark-api-open.xf-yun.com/v1',
+              },
+            ],
+          },
+        }),
+      );
+
+      await showAuthStatus();
+
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('OpenAI-compatible Provider'),
+      );
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('spark-v4'),
+      );
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('API key configured'),
+      );
+      expect(writeStdoutLine).not.toHaveBeenCalledWith(
+        expect.stringContaining('Alibaba Cloud Coding Plan'),
       );
       expect(process.exit).toHaveBeenCalledWith(0);
     });

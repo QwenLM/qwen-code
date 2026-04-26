@@ -452,23 +452,46 @@ export async function showAuthStatus(): Promise<void> {
       const codingPlanRegion = mergedSettings.codingPlan?.region;
       const modelName = mergedSettings.model?.name;
 
-      // Detect Coding Plan via region OR the presence of its env key
-      const hasCodingPlanKey =
-        !!process.env[CODING_PLAN_ENV_KEY] ||
-        !!mergedSettings.env?.[CODING_PLAN_ENV_KEY];
+      // Resolve the active model's provider config (shared by both paths)
+      const modelProviders = mergedSettings.modelProviders as
+        | ModelProvidersConfig
+        | undefined;
+      const models = modelProviders?.[AuthType.USE_OPENAI];
+      const activeModelConfig = Array.isArray(models)
+        ? (models.find((m) => m.id === modelName) ?? models[0])
+        : undefined;
 
-      if (codingPlanRegion || hasCodingPlanKey) {
+      // Detect Coding Plan via region OR active model matching Coding Plan baseUrl/envKey
+      const detectedCodingPlanRegion =
+        codingPlanRegion ||
+        isCodingPlanConfig(
+          activeModelConfig?.baseUrl,
+          activeModelConfig?.envKey,
+        );
+
+      if (detectedCodingPlanRegion) {
         // --- Coding Plan path ---
         const codingPlanVersion = mergedSettings.codingPlan?.version;
+
+        const hasCodingPlanKey =
+          !!(
+            activeModelConfig?.envKey &&
+            (process.env[activeModelConfig.envKey] ||
+              mergedSettings.env?.[activeModelConfig.envKey])
+          ) ||
+          !!process.env[CODING_PLAN_ENV_KEY] ||
+          !!mergedSettings.env?.[CODING_PLAN_ENV_KEY];
 
         if (hasCodingPlanKey) {
           writeStdoutLine(
             t('✓ Authentication Method: Alibaba Cloud Coding Plan'),
           );
 
-          if (codingPlanRegion) {
+          // Show region from settings or from detected config
+          const displayRegion = codingPlanRegion || detectedCodingPlanRegion;
+          if (displayRegion && displayRegion !== true) {
             const regionDisplay =
-              codingPlanRegion === CodingPlanRegion.CHINA
+              displayRegion === CodingPlanRegion.CHINA
                 ? t('中国 (China) - 阿里云百炼')
                 : t('Global - Alibaba Cloud');
             writeStdoutLine(
@@ -506,23 +529,18 @@ export async function showAuthStatus(): Promise<void> {
         }
       } else {
         // --- Generic OpenAI-compatible provider path ---
-        const modelProviders = mergedSettings.modelProviders as
-          | ModelProvidersConfig
-          | undefined;
-        const models = modelProviders?.[AuthType.USE_OPENAI];
-        const modelConfig = Array.isArray(models)
-          ? (models.find((m) => m.id === modelName) ?? models[0])
-          : undefined;
-
-        const hasApiKey =
-          !!(
-            modelConfig?.envKey &&
-            (process.env[modelConfig.envKey] ||
-              mergedSettings.env?.[modelConfig.envKey])
-          ) ||
-          !!process.env['OPENAI_API_KEY'] ||
-          !!mergedSettings.env?.['OPENAI_API_KEY'] ||
-          !!mergedSettings.security?.auth?.apiKey;
+        // Mirror hasApiKeyForAuth() semantics: explicit envKey → no fallback
+        let hasApiKey: boolean;
+        if (activeModelConfig?.envKey) {
+          hasApiKey =
+            !!process.env[activeModelConfig.envKey] ||
+            !!mergedSettings.env?.[activeModelConfig.envKey];
+        } else {
+          hasApiKey =
+            !!process.env['OPENAI_API_KEY'] ||
+            !!mergedSettings.env?.['OPENAI_API_KEY'] ||
+            !!mergedSettings.security?.auth?.apiKey;
+        }
 
         if (hasApiKey) {
           writeStdoutLine(
@@ -536,7 +554,8 @@ export async function showAuthStatus(): Promise<void> {
           }
 
           const baseUrl =
-            modelConfig?.baseUrl || mergedSettings.security?.auth?.baseUrl;
+            activeModelConfig?.baseUrl ||
+            mergedSettings.security?.auth?.baseUrl;
           if (baseUrl) {
             writeStdoutLine(t('  Base URL: {{baseUrl}}', { baseUrl }));
           }
