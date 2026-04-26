@@ -22,6 +22,120 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Settings Coding Plan Provider Path
+
+Status: completed in iteration 40.
+
+Goal: strengthen the model configuration workflow by making the settings
+provider controls keyboard/focus friendly and verifying the Coding Plan provider
+path end to end.
+
+User-visible value: users can switch from an OpenAI-compatible API-key model
+configuration to Coding Plan from the desktop settings page, see clear
+validation, save the provider without leaking secrets, and still return to the
+composer with configured models available.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/SettingsPage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/stores/settingsStore.test.ts`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/settings-coding-plan-provider.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Settings provider, Coding Plan region, model, base URL, and API-key fields
+  expose stable accessible labels for keyboard and CDP-driven interaction.
+- Switching the provider to Coding Plan replaces API-key model/base-url inputs
+  with a region selector and Coding Plan-specific validation.
+- Saving Coding Plan settings with a fake key and global region succeeds in the
+  real Electron app, clears the secret field, shows Coding Plan as configured,
+  and does not expose fake API keys in visible text, diagnostics, composer, or
+  screenshots.
+- The previously saved API-key model remains available in the composer model
+  picker after the Coding Plan save, preserving the normal switch-model path.
+- Settings still keep runtime/server/ACP diagnostics hidden until Advanced
+  Diagnostics is opened, and no first-viewport conversation/review/terminal
+  layout regressions are introduced.
+
+Verification:
+
+- Unit/component test commands:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/settingsStore.test.ts`
+  and
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, complete the existing open-project/chat/review/API-key settings
+  path, focus the model provider field, switch to Coding Plan, assert
+  Coding Plan validation, select the global region, enter a fake Coding Plan
+  key, save, verify the saved provider state, open Advanced Diagnostics, return
+  to conversation, and switch the composer model to the previously configured
+  API-key model.
+- E2E assertions: provider controls have accessible labels and focus state,
+  Coding Plan validation is specific and contained, saved state reports
+  Coding Plan/global/configured without secret exposure, Advanced Diagnostics
+  does not leak fake keys, composer model switching remains enabled, and no
+  console errors or failed local requests are recorded.
+- Diagnostic artifacts: `settings-coding-plan-provider.json`,
+  `settings-coding-plan-state.png`, updated diagnostics/model-switch JSON,
+  screenshots, Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` to choose the smallest model
+  workflow gap, `frontend-design` for prototype-constrained settings density
+  and accessible control labeling, and `electron-desktop-dev` for renderer
+  changes verified in real Electron through CDP.
+
+Notes and decisions:
+
+- The form remains compact and prototype-aligned; this slice adds accessible
+  field contracts and coverage instead of changing settings into a heavier
+  dashboard.
+- The provider selector keeps native select behavior so keyboard navigation and
+  screen-reader labeling are handled by the platform. Stable `aria-label`
+  attributes and focused CDP assertions make the provider path less brittle.
+- Coding Plan saves preserve non-Coding-Plan provider entries from the existing
+  settings service, so the previously configured API-key model can still be
+  selected from the composer after switching the active provider to Coding Plan.
+- The CDP harness now treats both fake API-key and fake Coding Plan secrets as
+  sensitive in settings diagnostics and composer model-switch assertions.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/settingsStore.test.ts`
+  passed with 8 tests.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 20 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T17-10-44-501Z/`.
+- Key recorded metrics: provider focus active label `Model provider`; Coding
+  Plan validation text `Enter a Coding Plan API key to save this provider.`;
+  provider value `coding-plan`; saved region `global`; Coding Plan key
+  status `Configured`; saved API-key input length `0`; no visible secret,
+  document overflow, console errors, or failed local requests; composer model
+  picker remained enabled and switched to `qwen-e2e-cdp` with the Global Coding
+  Plan model list also available.
+
+Next work:
+
+- Continue settings/model polish by reducing long Coding Plan model option text
+  in compact composer selectors if screenshot review shows crowding.
+- Continue prototype fidelity by checking whether settings should become a
+  lighter overlay instead of a full workbench replacement, while preserving the
+  current two-click model/API-key/permissions path.
+
 ### Completed Slice: Conversation Header Chrome Reduction
 
 Status: completed in iteration 39.

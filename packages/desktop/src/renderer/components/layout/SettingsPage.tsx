@@ -181,6 +181,8 @@ function ModelProvidersPanel({
         <label>
           <span>Provider</span>
           <select
+            aria-label="Model provider"
+            data-testid="settings-provider-select"
             value={provider}
             onChange={(event) =>
               onDispatch({
@@ -198,6 +200,8 @@ function ModelProvidersPanel({
           <label>
             <span>Region</span>
             <select
+              aria-label="Coding Plan region"
+              data-testid="settings-coding-plan-region"
               value={state.form.codingPlanRegion}
               onChange={(event) =>
                 onDispatch({
@@ -215,6 +219,7 @@ function ModelProvidersPanel({
             <label>
               <span>Model</span>
               <input
+                aria-label="Provider model"
                 value={state.form.activeModel}
                 onChange={(event) =>
                   onDispatch({
@@ -227,6 +232,7 @@ function ModelProvidersPanel({
             <label>
               <span>Base URL</span>
               <input
+                aria-label="Provider base URL"
                 value={state.form.baseUrl}
                 onChange={(event) =>
                   onDispatch({
@@ -242,6 +248,7 @@ function ModelProvidersPanel({
         <label>
           <span>API key</span>
           <input
+            aria-label="Provider API key"
             autoComplete="off"
             placeholder={
               provider === 'coding-plan'

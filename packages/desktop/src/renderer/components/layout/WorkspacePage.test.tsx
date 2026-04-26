@@ -547,6 +547,98 @@ describe('WorkspacePage', () => {
     expect(onSaveSettings).not.toHaveBeenCalled();
   });
 
+  it('exposes keyboard-focusable provider controls in model settings', () => {
+    const onSettingsDispatch = vi.fn();
+    const renderedContainer = renderWorkspace({ onSettingsDispatch });
+
+    act(() => {
+      clickButton(renderedContainer, 'Settings');
+    });
+
+    const provider = renderedContainer.querySelector(
+      'select[aria-label="Model provider"]',
+    );
+    const model = renderedContainer.querySelector(
+      'input[aria-label="Provider model"]',
+    );
+    const baseUrl = renderedContainer.querySelector(
+      'input[aria-label="Provider base URL"]',
+    );
+    const apiKey = renderedContainer.querySelector(
+      'input[aria-label="Provider API key"]',
+    );
+
+    expect(provider).toBeInstanceOf(HTMLSelectElement);
+    expect(model).toBeInstanceOf(HTMLInputElement);
+    expect(baseUrl).toBeInstanceOf(HTMLInputElement);
+    expect(apiKey).toBeInstanceOf(HTMLInputElement);
+
+    (provider as HTMLSelectElement).focus();
+    expect(document.activeElement).toBe(provider);
+
+    act(() => {
+      setSelectValue(provider as HTMLSelectElement, 'coding-plan');
+    });
+
+    expect(onSettingsDispatch).toHaveBeenCalledWith({
+      type: 'set_provider',
+      provider: 'coding-plan',
+    });
+  });
+
+  it('renders Coding Plan provider fields with provider-specific validation', () => {
+    const renderedContainer = renderWorkspace({
+      settingsState: {
+        ...createInitialSettingsState(),
+        settings: null,
+        form: {
+          provider: 'coding-plan',
+          apiKey: '',
+          codingPlanRegion: 'global',
+          activeModel: 'qwen-plus',
+          baseUrl: 'https://example.test/v1',
+        },
+      },
+    });
+
+    act(() => {
+      clickButton(renderedContainer, 'Settings');
+    });
+
+    const provider = renderedContainer.querySelector(
+      'select[aria-label="Model provider"]',
+    );
+    const region = renderedContainer.querySelector(
+      'select[aria-label="Coding Plan region"]',
+    );
+    const apiKey = renderedContainer.querySelector(
+      'input[aria-label="Provider API key"]',
+    );
+    const saveButton = [...renderedContainer.querySelectorAll('button')].find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+
+    expect(provider).toBeInstanceOf(HTMLSelectElement);
+    expect((provider as HTMLSelectElement).value).toBe('coding-plan');
+    expect(region).toBeInstanceOf(HTMLSelectElement);
+    expect((region as HTMLSelectElement).value).toBe('global');
+    expect(apiKey).toBeInstanceOf(HTMLInputElement);
+    expect((apiKey as HTMLInputElement).type).toBe('password');
+    expect(
+      renderedContainer.querySelector('input[aria-label="Provider model"]'),
+    ).toBeNull();
+    expect(
+      renderedContainer.querySelector('input[aria-label="Provider base URL"]'),
+    ).toBeNull();
+    expect(
+      renderedContainer.querySelector(
+        '[data-testid="settings-save-validation"]',
+      )?.textContent,
+    ).toContain('Enter a Coding Plan API key');
+    expect(saveButton).toBeInstanceOf(HTMLButtonElement);
+    expect((saveButton as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it('allows settings save when a provider has a saved API key', () => {
     const onSaveSettings = vi.fn();
     const settings = createSettings();

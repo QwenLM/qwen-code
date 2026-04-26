@@ -72,6 +72,25 @@ describe('settingsStore', () => {
     });
   });
 
+  it('builds a Coding Plan settings update request from the form', () => {
+    const state = {
+      ...createInitialSettingsState(),
+      form: {
+        provider: 'coding-plan' as const,
+        apiKey: '  cp-secret  ',
+        codingPlanRegion: 'global' as const,
+        activeModel: 'qwen-plus',
+        baseUrl: 'https://example.test/v1',
+      },
+    };
+
+    expect(buildSettingsUpdateRequest(state.form)).toEqual({
+      provider: 'coding-plan',
+      apiKey: 'cp-secret',
+      codingPlanRegion: 'global',
+    });
+  });
+
   it('validates API-key provider inputs before saving', () => {
     const state = createInitialSettingsState();
 
@@ -136,22 +155,50 @@ describe('settingsStore', () => {
       reason: null,
     });
   });
+
+  it('accepts a saved Coding Plan secret without exposing it in the form', () => {
+    const settings = createSettings({
+      provider: 'coding-plan',
+      codingPlanHasApiKey: true,
+      openAiHasApiKey: false,
+    });
+    const state = settingsReducer(createInitialSettingsState(), {
+      type: 'load_success',
+      settings,
+    });
+
+    expect(state.form).toMatchObject({
+      provider: 'coding-plan',
+      apiKey: '',
+      codingPlanRegion: 'china',
+    });
+    expect(validateSettingsForm(state.form, settings)).toEqual({
+      valid: true,
+      reason: null,
+    });
+  });
 });
 
-function createSettings(): DesktopUserSettings {
+function createSettings(
+  overrides: {
+    provider?: DesktopUserSettings['provider'];
+    codingPlanHasApiKey?: boolean;
+    openAiHasApiKey?: boolean;
+  } = {},
+): DesktopUserSettings {
   return {
     ok: true,
     settingsPath: '/tmp/settings.json',
-    provider: 'api-key',
+    provider: overrides.provider ?? 'api-key',
     selectedAuthType: 'openai',
     model: { name: 'qwen-plus' },
     codingPlan: {
       region: 'china',
-      hasApiKey: false,
+      hasApiKey: overrides.codingPlanHasApiKey ?? false,
       version: null,
     },
     openai: {
-      hasApiKey: true,
+      hasApiKey: overrides.openAiHasApiKey ?? true,
       providers: [
         {
           id: 'qwen-plus',

@@ -180,6 +180,8 @@ async function main() {
   await clickButton('Save');
   await waitForText('qwen-e2e-cdp');
   await assertSettingsProductState('settings-product-state.json');
+  await assertSettingsCodingPlanWorkflow('settings-coding-plan-provider.json');
+  await saveScreenshot('settings-coding-plan-state.png');
   await clickButton('Advanced Diagnostics');
   await waitForSelector('[data-testid="runtime-diagnostics"]');
   await assertSettingsAdvancedDiagnostics('settings-advanced-diagnostics.json');
@@ -4482,7 +4484,9 @@ async function assertSettingsProductState(fileName) {
       apiKeyType: apiKey?.getAttribute('type') ?? null,
       hasSecretText:
         (settings?.innerText ?? '').includes('sk-desktop-e2e') ||
-        (apiKey?.value ?? '').includes('sk-desktop-e2e'),
+        (settings?.innerText ?? '').includes('cp-desktop-e2e') ||
+        (apiKey?.value ?? '').includes('sk-desktop-e2e') ||
+        (apiKey?.value ?? '').includes('cp-desktop-e2e'),
       hasSavedModel: (settings?.innerText ?? '').includes('qwen-e2e-cdp'),
       hasAdvancedDiagnostics:
         document.querySelector('[data-testid="runtime-diagnostics"]') !== null
@@ -4514,6 +4518,187 @@ async function assertSettingsProductState(fileName) {
   }
 }
 
+async function assertSettingsCodingPlanWorkflow(fileName) {
+  const snapshots = {};
+
+  snapshots.focus = await focusFieldByAriaLabel('Model provider');
+  await setFieldByAriaLabel('Model provider', 'coding-plan');
+  await waitForText('Enter a Coding Plan API key to save this provider.');
+  snapshots.validation = await readSettingsCodingPlanSnapshot();
+
+  await setFieldByAriaLabel('Coding Plan region', 'global');
+  await setFieldByAriaLabel('Provider API key', 'cp-desktop-e2e');
+  await waitFor(
+    'Coding Plan save enabled',
+    async () => {
+      const snapshot = await readSettingsCodingPlanSnapshot();
+      return (
+        snapshot.providerValue === 'coding-plan' &&
+        snapshot.regionValue === 'global' &&
+        snapshot.apiKeyLength > 0 &&
+        snapshot.saveDisabled === false &&
+        snapshot.validationText === ''
+      );
+    },
+    5_000,
+  );
+  snapshots.ready = await readSettingsCodingPlanSnapshot();
+
+  await clickButton('Save');
+  await waitFor(
+    'Coding Plan provider saved',
+    async () => {
+      const snapshot = await readSettingsCodingPlanSnapshot();
+      return (
+        snapshot.providerValue === 'coding-plan' &&
+        snapshot.regionValue === 'global' &&
+        snapshot.apiKeyLength === 0 &&
+        snapshot.codingPlanConfigured &&
+        snapshot.settingsProviderText.includes('Coding Plan')
+      );
+    },
+    15_000,
+  );
+  snapshots.saved = await readSettingsCodingPlanSnapshot();
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshots, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (snapshots.focus.activeLabel !== 'Model provider') {
+    throw new Error(
+      `Model provider field did not receive focus: ${JSON.stringify(
+        snapshots.focus,
+      )}`,
+    );
+  }
+
+  if (
+    snapshots.validation.validationText !==
+    'Enter a Coding Plan API key to save this provider.'
+  ) {
+    throw new Error(
+      `Coding Plan validation did not render: ${JSON.stringify(
+        snapshots.validation,
+      )}`,
+    );
+  }
+
+  if (
+    snapshots.validation.hasModelField ||
+    snapshots.validation.hasBaseUrlField ||
+    !snapshots.validation.hasRegionField
+  ) {
+    throw new Error(
+      `Coding Plan provider fields are incorrect: ${JSON.stringify(
+        snapshots.validation,
+      )}`,
+    );
+  }
+
+  if (snapshots.validation.saveDisabled !== true) {
+    throw new Error('Coding Plan save should be disabled without an API key.');
+  }
+
+  if (
+    snapshots.ready.saveDisabled !== false ||
+    snapshots.ready.regionValue !== 'global'
+  ) {
+    throw new Error(
+      `Coding Plan save did not become ready: ${JSON.stringify(
+        snapshots.ready,
+      )}`,
+    );
+  }
+
+  if (
+    snapshots.saved.apiKeyLength !== 0 ||
+    !snapshots.saved.codingPlanConfigured ||
+    snapshots.saved.hasAnySecret
+  ) {
+    throw new Error(
+      `Saved Coding Plan state is unsafe: ${JSON.stringify(snapshots.saved)}`,
+    );
+  }
+
+  for (const [name, snapshot] of Object.entries(snapshots)) {
+    if (snapshot.visibleSecret || snapshot.documentOverflow) {
+      throw new Error(
+        `Coding Plan workflow leaked visible data or overflowed for ${name}: ${JSON.stringify(
+          snapshot,
+        )}`,
+      );
+    }
+  }
+}
+
+async function readSettingsCodingPlanSnapshot() {
+  return evaluate(`(() => {
+    const settings = document.querySelector('[data-testid="settings-page"]');
+    const provider = document.querySelector(
+      'select[aria-label="Model provider"]'
+    );
+    const region = document.querySelector(
+      'select[aria-label="Coding Plan region"]'
+    );
+    const model = document.querySelector(
+      'input[aria-label="Provider model"]'
+    );
+    const baseUrl = document.querySelector(
+      'input[aria-label="Provider base URL"]'
+    );
+    const apiKey = document.querySelector(
+      'input[aria-label="Provider API key"]'
+    );
+    const validation = document.querySelector(
+      '[data-testid="settings-save-validation"]'
+    );
+    const saveButton = [...document.querySelectorAll('button')].find(
+      (button) => button.textContent.trim() === 'Save'
+    );
+    const settingsText = settings?.innerText ?? '';
+    const codingPlanStatus = [...document.querySelectorAll('.settings-kv div')]
+      .find((row) =>
+        row.querySelector('dt')?.textContent.trim() === 'Coding Plan key'
+      )
+      ?.querySelector('dd')
+      ?.textContent.trim() ?? '';
+    const fieldValues = [...document.querySelectorAll('input, textarea')]
+      .map((field) => field.value ?? '')
+      .join('\\n');
+    const visibleSecret =
+      settingsText.includes('sk-desktop-e2e') ||
+      settingsText.includes('cp-desktop-e2e');
+    const hasAnySecret =
+      visibleSecret ||
+      fieldValues.includes('sk-desktop-e2e') ||
+      fieldValues.includes('cp-desktop-e2e');
+    return {
+      providerLabel: provider?.getAttribute('aria-label') ?? null,
+      providerValue: provider?.value ?? null,
+      providerFocused: document.activeElement === provider,
+      hasRegionField: region !== null,
+      regionValue: region?.value ?? null,
+      hasModelField: model !== null,
+      hasBaseUrlField: baseUrl !== null,
+      apiKeyType: apiKey?.getAttribute('type') ?? null,
+      apiKeyLength: apiKey?.value.length ?? 0,
+      validationText: validation?.textContent.trim() ?? '',
+      saveDisabled: saveButton?.disabled ?? null,
+      settingsProviderText: settingsText,
+      codingPlanStatus,
+      codingPlanConfigured: codingPlanStatus === 'Configured',
+      visibleSecret,
+      hasAnySecret,
+      documentOverflow:
+        document.body.scrollWidth > window.innerWidth + 4 ||
+        document.body.scrollHeight > window.innerHeight + 4
+    };
+  })()`);
+}
+
 async function assertSettingsAdvancedDiagnostics(fileName) {
   const snapshot = await evaluate(`(() => {
     const advanced = document.querySelector(
@@ -4531,8 +4716,10 @@ async function assertSettingsAdvancedDiagnostics(fileName) {
       expanded: toggle?.getAttribute('aria-expanded') ?? null,
       hasSecret:
         (advanced?.innerText ?? '').includes('sk-desktop-e2e') ||
+        (advanced?.innerText ?? '').includes('cp-desktop-e2e') ||
         [...document.querySelectorAll('input')].some((input) =>
-          input.value.includes('sk-desktop-e2e')
+          input.value.includes('sk-desktop-e2e') ||
+          input.value.includes('cp-desktop-e2e')
         )
     };
   })()`);
@@ -4642,8 +4829,10 @@ async function assertComposerModelSwitch(fileName, modelId) {
       ),
       hasSecret:
         bodyText.includes('sk-desktop-e2e') ||
+        bodyText.includes('cp-desktop-e2e') ||
         [...document.querySelectorAll('input, textarea')].some((field) =>
-          field.value.includes('sk-desktop-e2e')
+          field.value.includes('sk-desktop-e2e') ||
+          field.value.includes('cp-desktop-e2e')
         ),
       hasServerUrl: /http:\\/\\/127\\.0\\.0\\.1:/u.test(bodyText),
       composerOverflow:
@@ -4797,6 +4986,40 @@ async function setFieldByAriaLabel(label, value) {
   if (!changed) {
     throw new Error(`Field not found: ${label}`);
   }
+}
+
+async function focusFieldByAriaLabel(label) {
+  const snapshot = await evaluate(`(() => {
+    const field = document.querySelector('[aria-label="${escapeSelector(
+      label,
+    )}"]');
+    if (!field) {
+      return null;
+    }
+    field.focus();
+    const rect = field.getBoundingClientRect();
+    return {
+      active: document.activeElement === field,
+      activeLabel:
+        document.activeElement?.getAttribute('aria-label') ?? null,
+      tagName: field.tagName,
+      value: field.value ?? null,
+      rect: {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      }
+    };
+  })()`);
+
+  if (!snapshot?.active) {
+    throw new Error(`Field did not receive focus: ${label}`);
+  }
+
+  return snapshot;
 }
 
 async function setFieldByLabel(label, value) {
