@@ -437,15 +437,29 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const outputPath = path.join(outputDir, `shell-${shellId}.output`);
 
     // Bridge external signal (tool-framework abort, e.g. Ctrl+C) into the
-    // entry's AC so a single source of truth governs cancellation.
+    // entry's AC so a single source of truth governs cancellation. Keep
+    // the handler reference around so we can detach it in the settle
+    // callback — background shells outlive the turn, and a dangling
+    // listener would keep `entryAc` (and transitively `outputStream`)
+    // reachable until the turn signal itself is GC'd.
     const entryAc = new AbortController();
+    const onSignalAbort = () => entryAc.abort();
     if (signal.aborted) {
       entryAc.abort();
     } else {
-      signal.addEventListener('abort', () => entryAc.abort(), { once: true });
+      signal.addEventListener('abort', onSignalAbort, { once: true });
     }
 
     const outputStream = fs.createWriteStream(outputPath, { flags: 'w' });
+    // Without an 'error' listener, a write failure (disk full, permission
+    // change, fs going away) would surface as an uncaught exception and
+    // kill the entire CLI session. Log + drop is the sane default — the
+    // process keeps running, the registry still settles via resultPromise.
+    outputStream.on('error', (err) => {
+      debugLogger.warn(
+        `background shell ${shellId} output write error: ${err.message}`,
+      );
+    });
 
     const startTime = Date.now();
     const entry: BackgroundShellEntry = {
@@ -493,6 +507,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // unblocked immediately.
     void resultPromise.then(
       (result) => {
+        signal.removeEventListener('abort', onSignalAbort);
         outputStream.end();
         const endTime = Date.now();
         if (entryAc.signal.aborted) {
@@ -505,7 +520,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
           result.signal !== null
         ) {
           // Non-zero exit / killed by signal / spawn error all count as failed.
-          // Treating them as `completed` would let `/bashes` (and any future
+          // Treating them as `completed` would let `/tasks` (and any future
           // model-facing notification) misreport a failed `npm test` or
           // `false` command as a success.
           const reason = result.error
@@ -519,6 +534,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         }
       },
       (err) => {
+        signal.removeEventListener('abort', onSignalAbort);
         outputStream.end();
         registry.fail(shellId, getErrorMessage(err), Date.now());
       },

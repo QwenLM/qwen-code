@@ -87,6 +87,7 @@ describe('ShellTool', () => {
     vi.mocked(fs.createWriteStream).mockReturnValue({
       write: vi.fn(),
       end: vi.fn(),
+      on: vi.fn(),
     } as unknown as fs.WriteStream);
 
     shellTool = new ShellTool(mockConfig);
