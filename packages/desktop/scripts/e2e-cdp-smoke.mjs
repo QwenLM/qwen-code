@@ -1751,7 +1751,7 @@ async function assertInlineCommandApproval(fileName) {
     );
   }
 
-  if (snapshot.cardRect.width < 360 || snapshot.cardRect.height > 180) {
+  if (snapshot.cardRect.width < 360 || snapshot.cardRect.height > 130) {
     throw new Error(
       `Inline approval card geometry is unexpected: ${JSON.stringify(
         snapshot.cardRect,
@@ -1898,7 +1898,7 @@ async function assertResolvedToolActivity(fileName) {
     );
   }
 
-  if (snapshot.cardRect.width < 360 || snapshot.cardRect.height > 240) {
+  if (snapshot.cardRect.width < 360 || snapshot.cardRect.height > 180) {
     throw new Error(
       `Resolved tool activity geometry is unexpected: ${JSON.stringify(
         snapshot.cardRect,
@@ -1906,7 +1906,7 @@ async function assertResolvedToolActivity(fileName) {
     );
   }
 
-  if (snapshot.cardRect.height > 175) {
+  if (snapshot.cardRect.height > 130) {
     throw new Error(
       `Resolved tool activity should be compact, not card-like: ${JSON.stringify(
         snapshot.cardRect,

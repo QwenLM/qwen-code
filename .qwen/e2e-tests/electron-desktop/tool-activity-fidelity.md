@@ -6,7 +6,7 @@
   `cd packages/desktop && npm run e2e:cdp`
 - Result: pass
 - Passing artifact directory:
-  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T01-38-24-240Z/`
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T03-18-35-363Z/`
 
 ## Scenario
 
@@ -17,8 +17,8 @@
 4. Wait for the fake ACP resolved tool update.
 5. Assert the resolved tool activity keeps command title, status, command
    input, output summary, and file chip.
-6. Assert the tool activity surface is a compact inline timeline event rather
-   than a heavy framed card.
+6. Assert the tool activity surface is a compact inline timeline rail with
+   dense input/result rows, rather than a heavy framed card.
 7. Continue the existing assistant actions, changed-files summary, review
    drawer, compact layout, settings, terminal, discard safety, and commit smoke
    path.
@@ -36,8 +36,8 @@
 - The container background alpha is `0`.
 - Preview background alpha is `0`.
 - File-chip background alpha is `0.05`, with border alpha `0.16`.
-- The final resolved tool activity height is `167.796875` px, below the
-  compactness guard of 175 px.
+- The final resolved tool activity height is `113.046875` px, below the
+  compactness guard of 130 px and the prior `167.796875` px baseline.
 - Console errors: 0.
 - Failed local network requests: 0.
 
@@ -53,6 +53,9 @@
 - `summary.json`
 
 ## Intermediate Failures
+
+No failures were observed in the 2026-04-26T03-18-35-363Z refinement pass.
+Earlier failures from the first tool-activity fidelity slice:
 
 - `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T01-34-05-965Z/`:
   failed because the new CDP style probe referenced `firstPreview` and

@@ -22,6 +22,108 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Compact Agent Activity Rails
+
+Status: completed in iteration 24.
+
+Goal: make command approvals and resolved tool activity read like compact
+timeline events instead of large dashboard cards, while preserving the
+approval actions, command preview, result summary, file reference, and
+accessibility hooks.
+
+User-visible value: users can see what the agent is doing without losing the
+conversation-first first viewport. Risky command approval remains obvious, but
+it no longer visually dominates assistant prose, changed-file summaries, and
+the composer.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/tool-activity-fidelity.md`
+- `.qwen/e2e-tests/electron-desktop/inline-command-approval-cards.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Resolved tool activity keeps kind, title, status, bounded command input,
+  bounded result output, and file-reference chips.
+- Tool input/result previews render as dense inline rows, not stacked boxed
+  mini panels.
+- Pending command approval keeps the command preview and Approve Once,
+  Approve for Thread, and Deny actions, but uses a slimmer warning rail and
+  compact buttons.
+- The approval rail and resolved tool rail stay inside the timeline and above
+  the composer at the default Electron viewport.
+- Internal ACP/session/tool IDs remain hidden from the main conversation.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, send a prompt, assert the pending
+  approval rail geometry and actions, approve the command, assert the resolved
+  tool rail geometry/content/styles, then continue the existing assistant
+  actions, branch, review, settings, terminal, discard safety, and commit
+  workflows.
+- E2E assertions: pending approval height is below the previous 152.9 px
+  baseline, resolved tool activity height is below the previous 167.8 px
+  baseline, preview backgrounds and borders remain subtle, and no console
+  errors or failed local requests are recorded.
+- Diagnostic artifacts: `inline-command-approval.json`,
+  `inline-command-approval.png`, `resolved-tool-activity.json`,
+  `resolved-tool-activity.png`, Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for choosing the narrow fidelity
+  slice without asking the user for routine product decisions,
+  `frontend-design` for prototype-constrained density and visual hierarchy,
+  and `electron-desktop-dev` for real Electron CDP verification of the
+  renderer workflow.
+
+Notes and decisions:
+
+- Command approvals now use the same rail language as tool activity: subtle
+  left accent, restrained warning tint, and compact action buttons. This keeps
+  the risky decision visible without turning the first viewport into a modal
+  review surface.
+- Tool input and result previews now render as dense label/value rows. The raw
+  preview text remains available through `title` and accessible labels, while
+  internal ACP/session/tool IDs stay out of the main timeline.
+- The CDP harness now treats the previous approval and tool heights as
+  regressions by tightening the default-viewport geometry guards to 130 px.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 15 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T03-18-35-363Z/`.
+- Key recorded metrics: pending approval rail height `109.5234375` px,
+  resolved tool activity height `113.046875` px, resolved tool width `800` px,
+  no legacy `.chat-tool` rows, no document overflow in the carried smoke path,
+  no console errors, and no failed local requests.
+
+Next work:
+
+- Continue prototype fidelity by reducing the oversized user message and plan
+  typography visible above the agent activity rail.
+- Resume the model configuration workflow from the composer model picker once
+  the remaining first-viewport density issues are stable.
+
 ### Completed Slice: Composer and Changed-Files Density Pass
 
 Status: completed in iteration 23.

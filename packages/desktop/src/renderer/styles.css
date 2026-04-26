@@ -1110,10 +1110,10 @@ summary:focus-visible {
 
 .conversation-tool-card {
   display: grid;
-  width: min(820px, 100%);
+  width: min(800px, 100%);
   align-self: center;
-  gap: 6px;
-  padding: 6px 0 6px 14px;
+  gap: 5px;
+  padding: 5px 0 5px 12px;
   border: 0;
   border-left: 2px solid rgba(117, 217, 156, 0.36);
   border-radius: 0;
@@ -1149,6 +1149,16 @@ summary:focus-visible {
   gap: 5px;
 }
 
+.conversation-tool-section {
+  grid-template-columns: 52px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+}
+
+.conversation-tool-section .message-role {
+  padding-top: 1px;
+}
+
 .conversation-tool-heading strong {
   min-width: 0;
   overflow: hidden;
@@ -1176,20 +1186,20 @@ summary:focus-visible {
 }
 
 .conversation-tool-section pre {
-  max-height: 58px;
+  max-height: 38px;
   min-width: 0;
   margin: 0;
   overflow: auto;
-  padding: 5px 0 0;
-  border-top: 1px solid rgba(226, 232, 222, 0.08);
+  padding: 1px 0;
+  border-top: 0;
   border-radius: 0;
   background: transparent;
   color: var(--text-soft);
   font-family:
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
     monospace;
-  font-size: 12px;
-  line-height: 1.45;
+  font-size: 11.5px;
+  line-height: 1.35;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -1202,22 +1212,22 @@ summary:focus-visible {
   display: flex;
   min-width: 0;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 5px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
 .conversation-tool-files li {
-  max-width: 260px;
-  min-height: 22px;
+  max-width: 220px;
+  min-height: 20px;
   overflow: hidden;
-  padding: 3px 7px;
+  padding: 2px 7px;
   border: 1px solid rgba(85, 166, 255, 0.16);
   border-radius: 999px;
   background: rgba(85, 166, 255, 0.05);
   color: #b7d9ff;
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 760;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1353,15 +1363,16 @@ summary:focus-visible {
 
 .conversation-approval-card {
   display: grid;
-  width: min(860px, 100%);
+  width: min(800px, 100%);
   align-self: center;
-  gap: 12px;
-  padding: 12px 14px;
-  border: 1px solid rgba(240, 182, 110, 0.48);
-  border-radius: var(--radius);
+  gap: 8px;
+  padding: 8px 0 8px 12px;
+  border: 0;
+  border-left: 2px solid rgba(240, 182, 110, 0.46);
+  border-radius: 0;
   background:
-    linear-gradient(180deg, rgba(240, 182, 110, 0.1), transparent),
-    var(--warning-soft);
+    linear-gradient(90deg, rgba(240, 182, 110, 0.085), transparent 42%),
+    transparent;
   color: var(--text-soft);
 }
 
@@ -1381,7 +1392,7 @@ summary:focus-visible {
 .conversation-question-list > div {
   display: grid;
   min-width: 0;
-  gap: 6px;
+  gap: 4px;
 }
 
 .conversation-approval-heading strong,
@@ -1389,7 +1400,7 @@ summary:focus-visible {
   min-width: 0;
   overflow: hidden;
   color: var(--text);
-  font-size: 14px;
+  font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1403,19 +1414,19 @@ summary:focus-visible {
 }
 
 .conversation-approval-command {
-  max-height: 82px;
+  max-height: 40px;
   min-width: 0;
   margin: 0;
   overflow: auto;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: rgba(8, 10, 11, 0.36);
-  color: var(--text);
+  padding: 1px 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-soft);
   font-family:
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
     monospace;
-  font-size: 12px;
-  line-height: 1.45;
+  font-size: 11.5px;
+  line-height: 1.35;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -1423,6 +1434,14 @@ summary:focus-visible {
 .conversation-approval-actions {
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.conversation-approval-actions .primary-button,
+.conversation-approval-actions .secondary-button {
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 7px;
+  font-size: 11.5px;
 }
 
 .question-options {
@@ -2338,7 +2357,16 @@ textarea:focus {
   }
 
   .workspace-grid-review-open .conversation-tool-card {
-    padding: 6px 0 6px 12px;
+    padding: 5px 0 5px 12px;
+  }
+
+  .workspace-grid-review-open .conversation-approval-card {
+    padding: 8px 0 8px 12px;
+  }
+
+  .workspace-grid-review-open .conversation-tool-section {
+    grid-template-columns: 48px minmax(0, 1fr);
+    gap: 6px;
   }
 
   .workspace-grid-review-open .composer {

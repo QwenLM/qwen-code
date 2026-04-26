@@ -551,7 +551,9 @@ function ToolActivityCard({
       {inputPreview ? (
         <div className="conversation-tool-section">
           <span className="message-role">Input</span>
-          <pre>{inputPreview}</pre>
+          <pre aria-label="Tool input preview" title={inputPreview}>
+            {inputPreview}
+          </pre>
         </div>
       ) : null}
       {visibleFiles.length > 0 ? (
@@ -567,7 +569,9 @@ function ToolActivityCard({
       {outputPreview ? (
         <div className="conversation-tool-section conversation-tool-output">
           <span className="message-role">Result</span>
-          <pre>{outputPreview}</pre>
+          <pre aria-label="Tool result preview" title={outputPreview}>
+            {outputPreview}
+          </pre>
         </div>
       ) : null}
     </article>
@@ -637,7 +641,13 @@ function CommandApprovalCard({
         <span className="conversation-approval-status">{status}</span>
       </div>
       {inputPreview ? (
-        <pre className="conversation-approval-command">{inputPreview}</pre>
+        <pre
+          aria-label="Command to approve"
+          className="conversation-approval-command"
+          title={inputPreview}
+        >
+          {inputPreview}
+        </pre>
       ) : null}
       <div className="conversation-approval-actions">
         {permission.options.map((option) => (

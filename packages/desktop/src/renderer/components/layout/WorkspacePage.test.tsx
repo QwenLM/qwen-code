@@ -655,6 +655,12 @@ describe('WorkspacePage', () => {
     expect(toolText).toContain('npm test -- WorkspacePage.test.tsx');
     expect(toolText).toContain('tests passed');
     expect(toolText).toContain('src/renderer/WorkspacePage.tsx:42');
+    expect(
+      toolCard?.querySelector('pre[aria-label="Tool input preview"]'),
+    ).toBeTruthy();
+    expect(
+      toolCard?.querySelector('pre[aria-label="Tool result preview"]'),
+    ).toBeTruthy();
     expect(toolText).not.toContain('internal-tool-123');
     expect(toolText).not.toContain('session-should-stay-hidden');
     expect(renderedContainer.querySelector('.chat-tool')).toBeNull();
