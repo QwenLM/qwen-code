@@ -22,6 +22,115 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Settings Permissions Model Label Restraint
+
+Status: completed in iteration 76.
+
+Goal: make the Settings Permissions thread-model selector use the same compact
+Coding Plan model labels as the composer, so raw provider prefixes do not
+compete with the drawer section hierarchy.
+
+User-visible value: users can verify or switch the active thread model from
+Settings without seeing long `ModelStudio Coding Plan` provider prefixes in
+the visible option text; the full provider label remains available as the
+control title for clarity.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/formatters.ts`
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/SettingsPage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/settings-permissions-model-label-restraint.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The Settings Permissions thread-model select renders compact model option
+  text, strips both China and Global Coding Plan prefixes, and truncates long
+  provider/path labels.
+- The selected thread-model control preserves the full raw model label in its
+  `title` attribute and option titles.
+- The composer continues to use the same compact model label behavior.
+- Settings remains drawer-like and conversation-first, with no visible API key,
+  local server URL, raw provider prefix, or overflow in the permissions view.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, save API-key and Coding Plan provider settings, navigate to the
+  Settings Permissions section, inspect the thread-model select labels and
+  titles, then continue the existing draft composer and active composer model
+  switch paths.
+- E2E assertions: Settings Permissions thread-model options include Coding
+  Plan models with compact visible labels, no visible option text includes
+  `ModelStudio Coding Plan`, at least one option title preserves the full
+  Coding Plan label, the control is enabled for the active thread, the drawer
+  does not expose fake secrets or local server URLs, and permissions/settings
+  content stays within the viewport.
+- Diagnostic artifacts to collect on failure:
+  `settings-permissions-model-label-restraint.json`, screenshot artifacts from
+  the main CDP run, Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` with the Ralph prompt and existing
+  plan as fixed product intent; `frontend-design` constrained by `home.jpg` to
+  keep Settings compact and quiet rather than adding a new explanatory banner;
+  `electron-desktop-dev` for component coverage plus real Electron CDP
+  verification.
+
+Notes and decisions:
+
+- Brainstormed alternatives: duplicate the composer label cleanup inside
+  Settings, move all provider metadata into model-store normalization, or share
+  a renderer formatter. The shared formatter is the smallest durable change
+  because it keeps raw provider metadata intact while aligning visible labels
+  across composer and Settings.
+- The visible label is treated as product chrome; the full title stays available
+  for accessibility and disambiguation without polluting the default drawer.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 35 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T23-38-17-611Z/`.
+- `settings-permissions-model-label-restraint.json` recorded enabled Settings
+  thread-model controls, compact Coding Plan labels such as `qwen3.5-plus`,
+  full raw Coding Plan titles preserved on options, no visible raw Coding Plan
+  provider prefix, no fake secrets or local server URL, and no permissions
+  drawer/document overflow.
+
+Self-review:
+
+- The first viewport remains conversation-first; the change only reduces noise
+  inside the existing Settings drawer.
+- Model metadata is not normalized away at the store/API layer, so full provider
+  context remains available for titles and diagnostics.
+- The shared formatter preserves the composer behavior, including path-tail
+  labels and separator-aware truncation.
+- No Electron main, preload, IPC, local server binding, token behavior, or
+  secret handling changed.
+
+Next work:
+
+- Continue prototype fidelity by reducing remaining uppercase/settings key
+  labels that compete with drawer section headers.
+- Continue model workflow polish by making configured provider ordering clearer
+  when API-key and Coding Plan models coexist in the same selector.
+
 ### Slice: Settings Save Status Feedback
 
 Status: completed in iteration 75.

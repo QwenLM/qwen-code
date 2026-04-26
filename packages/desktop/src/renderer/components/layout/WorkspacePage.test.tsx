@@ -1359,6 +1359,73 @@ describe('WorkspacePage', () => {
     );
   });
 
+  it('shortens settings permissions model labels while preserving titles', () => {
+    const onModelChange = vi.fn();
+    const renderedContainer = renderWorkspace({
+      modelState: {
+        ...createInitialModelState(),
+        models: {
+          currentModelId: 'qwen3-coder-next',
+          availableModels: [
+            {
+              modelId: 'provider/very-long-runtime-model',
+              name: 'provider/very-long-runtime-model-name-for-compact-control',
+            },
+            {
+              modelId: 'qwen3.5-plus',
+              name: '[ModelStudio Coding Plan] qwen3.5-plus',
+            },
+            {
+              modelId: 'qwen3-coder-next',
+              name:
+                '[ModelStudio Coding Plan for Global/Intl] ' +
+                'qwen3-coder-next',
+            },
+          ],
+        },
+      },
+      onModelChange,
+    });
+
+    act(() => {
+      clickButton(renderedContainer, 'Settings');
+    });
+
+    const settingsPage = renderedContainer.querySelector(
+      '[data-testid="settings-page"]',
+    );
+    const model = settingsPage?.querySelector(
+      'select[aria-label="Thread model"]',
+    ) as HTMLSelectElement | null;
+
+    expect(model).toBeInstanceOf(HTMLSelectElement);
+    expect(model?.disabled).toBe(false);
+    expect(model?.value).toBe('qwen3-coder-next');
+    expect(model?.getAttribute('title')).toBe(
+      '[ModelStudio Coding Plan for Global/Intl] qwen3-coder-next',
+    );
+    expect(
+      [...(model?.options ?? [])].map((option) => option.textContent),
+    ).toEqual([
+      'very-long-runtime-model-name...',
+      'qwen3.5-plus',
+      'qwen3-coder-next',
+    ]);
+    expect(model?.options[1]?.title).toBe(
+      '[ModelStudio Coding Plan] qwen3.5-plus',
+    );
+    expect(model?.options[2]?.title).toBe(
+      '[ModelStudio Coding Plan for Global/Intl] qwen3-coder-next',
+    );
+    expect(settingsPage?.textContent).not.toContain('[ModelStudio Coding Plan');
+
+    act(() => {
+      setSelectValue(model as HTMLSelectElement, 'qwen3.5-plus');
+    });
+
+    expect(onModelChange).toHaveBeenCalledWith('qwen3.5-plus');
+  });
+
   it('shows inline settings validation before saving a model provider', () => {
     const onSaveSettings = vi.fn();
     const renderedContainer = renderWorkspace({

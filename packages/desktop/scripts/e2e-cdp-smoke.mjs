@@ -274,6 +274,10 @@ async function main() {
   await assertSettingsProductState('settings-product-state.json');
   await assertSettingsCodingPlanWorkflow('settings-coding-plan-provider.json');
   await saveScreenshot('settings-coding-plan-state.png');
+  await assertSettingsPermissionsModelLabelRestraint(
+    'settings-permissions-model-label-restraint.json',
+  );
+  await saveScreenshot('settings-permissions-model-label-restraint.png');
   await clickButton('Advanced Diagnostics');
   await waitForSelector('[data-testid="runtime-diagnostics"]');
   await assertSettingsAdvancedDiagnostics('settings-advanced-diagnostics.json');
@@ -9324,6 +9328,198 @@ async function readSettingsCodingPlanSnapshot() {
         document.body.scrollHeight > window.innerHeight + 4
     };
   })()`);
+}
+
+async function assertSettingsPermissionsModelLabelRestraint(fileName) {
+  const clicked = await evaluate(`(() => {
+    const link = document.querySelector(
+      '[data-testid="settings-section-nav"] a[href="#settings-permissions"]'
+    );
+    link?.click();
+    return link !== null;
+  })()`);
+
+  if (!clicked) {
+    throw new Error('Settings Permissions rail link was not found.');
+  }
+
+  await waitFor(
+    'settings permissions thread model labels',
+    async () =>
+      evaluate(`(() => {
+        const permissions = document.querySelector(
+          '[data-testid="permissions-config"]'
+        );
+        const select = permissions?.querySelector(
+          'select[aria-label="Thread model"]'
+        );
+        return Boolean(
+          select &&
+          !select.disabled &&
+          [...select.options].some((option) =>
+            option.value === 'qwen3.5-plus' ||
+            option.value === 'qwen3-coder-next'
+          )
+        );
+      })()`),
+    10_000,
+  );
+
+  const snapshot = await evaluate(`(() => {
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const overflows = (element) =>
+      Boolean(element && element.scrollWidth > element.clientWidth + 4);
+    const settings = document.querySelector('[data-testid="settings-page"]');
+    const content = document.querySelector(
+      '[data-testid="settings-sections"]'
+    );
+    const permissions = document.querySelector(
+      '[data-testid="permissions-config"]'
+    );
+    const select = permissions?.querySelector(
+      'select[aria-label="Thread model"]'
+    );
+    const bodyText = document.body.innerText;
+    const fieldValues = [...document.querySelectorAll('input, textarea')]
+      .map((field) => field.value ?? '')
+      .join('\\n');
+    const options = select
+      ? [...select.options].map((option) => ({
+          value: option.value,
+          text: option.textContent.trim(),
+          title: option.getAttribute('title') ?? '',
+          selected: option.selected,
+          textLength: option.textContent.trim().length
+        }))
+      : [];
+    return {
+      disabled: select?.disabled ?? null,
+      value: select?.value ?? null,
+      title: select?.getAttribute('title') ?? null,
+      options,
+      codingPlanOptions: options.filter(
+        (option) =>
+          option.value === 'qwen3.5-plus' ||
+          option.value === 'qwen3-coder-next' ||
+          option.value === 'qwen3-coder-plus' ||
+          option.value.startsWith('glm') ||
+          option.value.startsWith('MiniMax') ||
+          option.value.startsWith('kimi')
+      ),
+      hasRawVisibleCodingPlanLabel: options.some((option) =>
+        option.text.includes('ModelStudio Coding Plan')
+      ),
+      hasCodingPlanTitle: options.some((option) =>
+        option.title.includes('ModelStudio Coding Plan')
+      ),
+      hasCompactCodingPlanLabel: options.some(
+        (option) =>
+          option.value === 'qwen3.5-plus' && option.text === 'qwen3.5-plus'
+      ),
+      visibleSecret:
+        bodyText.includes('sk-desktop-e2e') ||
+        bodyText.includes('cp-desktop-e2e'),
+      hasAnySecret:
+        bodyText.includes('sk-desktop-e2e') ||
+        bodyText.includes('cp-desktop-e2e') ||
+        fieldValues.includes('sk-desktop-e2e') ||
+        fieldValues.includes('cp-desktop-e2e'),
+      hasServerUrl: /http:\\/\\/127\\.0\\.0\\.1:/u.test(bodyText),
+      settingsRect: rectFor(settings),
+      contentRect: rectFor(content),
+      permissionsRect: rectFor(permissions),
+      selectRect: rectFor(select),
+      selectOverflow: overflows(select),
+      permissionsOverflow: overflows(permissions),
+      documentOverflow:
+        document.body.scrollWidth > window.innerWidth + 4 ||
+        document.body.scrollHeight > window.innerHeight + 4
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (snapshot.disabled !== false) {
+    throw new Error(
+      `Settings thread model selector should be enabled: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    !snapshot.hasCompactCodingPlanLabel ||
+    snapshot.hasRawVisibleCodingPlanLabel ||
+    !snapshot.hasCodingPlanTitle ||
+    snapshot.codingPlanOptions.length === 0
+  ) {
+    throw new Error(
+      `Settings permissions exposed raw or missing Coding Plan labels: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.codingPlanOptions.some(
+      (option) =>
+        option.text.includes('ModelStudio Coding Plan') ||
+        option.textLength > 32,
+    )
+  ) {
+    throw new Error(
+      `Settings permissions Coding Plan labels are not compact: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.visibleSecret ||
+    snapshot.hasAnySecret ||
+    snapshot.hasServerUrl ||
+    snapshot.documentOverflow ||
+    snapshot.permissionsOverflow ||
+    snapshot.selectOverflow
+  ) {
+    throw new Error(
+      `Settings permissions model labels leaked data or overflowed: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    !snapshot.settingsRect ||
+    !snapshot.permissionsRect ||
+    !snapshot.selectRect ||
+    snapshot.permissionsRect.left < snapshot.settingsRect.left ||
+    snapshot.permissionsRect.right > snapshot.settingsRect.right + 1 ||
+    snapshot.selectRect.right > snapshot.permissionsRect.right + 1
+  ) {
+    throw new Error(
+      `Settings permissions model label geometry regressed: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
 }
 
 async function assertSettingsAdvancedDiagnostics(fileName) {

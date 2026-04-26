@@ -5,9 +5,11 @@
  */
 
 import type { DesktopGitDiff, DesktopProject } from '../../api/client.js';
+import type { DesktopModelInfo } from '../../../shared/desktopProtocol.js';
 
 const MAX_SESSION_DISPLAY_TITLE_LENGTH = 52;
 const MAX_TOPBAR_BRANCH_LABEL_LENGTH = 30;
+const MAX_RUNTIME_MODEL_LABEL_LENGTH = 32;
 
 export interface GitDiffStats {
   additions: number;
@@ -113,6 +115,19 @@ export function formatTopbarBranchLabel(
   return truncateMiddle(normalized, MAX_TOPBAR_BRANCH_LABEL_LENGTH);
 }
 
+export function formatRuntimeModelLabel(model: DesktopModelInfo): string {
+  const label = stripCodingPlanProviderPrefix(formatRuntimeModelTitle(model));
+  const pathTail = label.split('/').pop()?.trim() || label;
+  const compactLabel = pathTail.length < label.length ? pathTail : label;
+
+  return truncateRuntimeLabel(compactLabel, MAX_RUNTIME_MODEL_LABEL_LENGTH);
+}
+
+export function formatRuntimeModelTitle(model: DesktopModelInfo): string {
+  const label = (model.name || model.modelId).trim();
+  return label.length > 0 ? label : model.modelId;
+}
+
 function normalizeSessionTitle(title: string): string {
   return title
     .replace(/`{1,3}([^`]+)`{1,3}/gu, '$1')
@@ -152,12 +167,27 @@ function isSessionIdentifier(value: string): boolean {
   );
 }
 
+function stripCodingPlanProviderPrefix(label: string): string {
+  return label
+    .replace(/^\[ModelStudio Coding Plan(?: for [^\]]+)?\]\s*/u, '')
+    .trim();
+}
+
 function truncateLabel(value: string, maxLength: number): string {
   if (value.length <= maxLength) {
     return value;
   }
 
   return `${value.slice(0, maxLength - 3).trimEnd()}...`;
+}
+
+function truncateRuntimeLabel(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  const truncated = value.slice(0, maxLength - 3).replace(/[\s/_-]+$/u, '');
+  return `${truncated}...`;
 }
 
 function truncateMiddle(value: string, maxLength: number): string {

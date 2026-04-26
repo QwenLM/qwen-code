@@ -15,6 +15,10 @@ import {
   type SettingsState,
 } from '../../stores/settingsStore.js';
 import type { DesktopApprovalMode } from '../../../shared/desktopProtocol.js';
+import {
+  formatRuntimeModelLabel,
+  formatRuntimeModelTitle,
+} from './formatters.js';
 import { CloseIcon } from './SidebarIcons.js';
 import type { LoadState } from './types.js';
 
@@ -464,6 +468,12 @@ function PermissionsPanel({
     modelState.modes?.currentModeId || chatState.mode || 'default';
   const currentModel =
     modelState.models?.currentModelId || chatState.currentModelId || '';
+  const currentModelInfo = modelState.models?.availableModels.find(
+    (model) => model.modelId === currentModel,
+  );
+  const currentModelTitle = currentModelInfo
+    ? formatRuntimeModelTitle(currentModelInfo)
+    : currentModel || 'Unknown';
 
   return (
     <section
@@ -502,13 +512,19 @@ function PermissionsPanel({
           <span>Thread model</span>
           {modelState.models ? (
             <select
+              aria-label="Thread model"
               disabled={!activeSessionId || modelState.savingModel}
+              title={currentModelTitle}
               value={currentModel}
               onChange={(event) => onModelChange(event.target.value)}
             >
               {modelState.models.availableModels.map((model) => (
-                <option key={model.modelId} value={model.modelId}>
-                  {model.name}
+                <option
+                  key={model.modelId}
+                  title={formatRuntimeModelTitle(model)}
+                  value={model.modelId}
+                >
+                  {formatRuntimeModelLabel(model)}
                 </option>
               ))}
             </select>

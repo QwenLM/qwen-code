@@ -20,6 +20,10 @@ import type {
   DesktopPermissionRequest,
 } from '../../../shared/desktopProtocol.js';
 import {
+  formatRuntimeModelLabel,
+  formatRuntimeModelTitle,
+} from './formatters.js';
+import {
   AttachmentIcon,
   ChevronDownIcon,
   CopyIcon,
@@ -192,7 +196,7 @@ export function ChatThread({
             <label
               className="composer-select-label"
               data-testid="composer-model-control"
-              title={formatFullModelLabel(currentModel)}
+              title={formatRuntimeModelTitle(currentModel)}
             >
               <span className="sr-only">Model</span>
               <span className="composer-select-shell">
@@ -200,17 +204,17 @@ export function ChatThread({
                 <select
                   aria-label="Model"
                   disabled={!activeSessionId || !modelState.models}
-                  title={formatFullModelLabel(currentModel)}
+                  title={formatRuntimeModelTitle(currentModel)}
                   value={currentModelId}
                   onChange={(event) => onModelChange(event.target.value)}
                 >
                   {modelOptions.map((model) => (
                     <option
                       key={model.modelId}
-                      title={formatFullModelLabel(model)}
+                      title={formatRuntimeModelTitle(model)}
                       value={model.modelId}
                     >
-                      {formatCompactModelLabel(model)}
+                      {formatRuntimeModelLabel(model)}
                     </option>
                   ))}
                 </select>
@@ -1179,19 +1183,6 @@ function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
   event.currentTarget.form?.requestSubmit();
 }
 
-function formatCompactModelLabel(model: DesktopModelInfo): string {
-  const label = stripCodingPlanProviderPrefix(formatFullModelLabel(model));
-  const pathTail = label.split('/').pop()?.trim() || label;
-  const compactLabel = pathTail.length < label.length ? pathTail : label;
-
-  return formatCompactRuntimeLabel(compactLabel, 32);
-}
-
-function formatFullModelLabel(model: DesktopModelInfo): string {
-  const label = (model.name || model.modelId).trim();
-  return label.length > 0 ? label : model.modelId;
-}
-
 function formatCompactModeLabel(mode: { name: string }): string {
   return formatCompactRuntimeLabel(mode.name, 22);
 }
@@ -1213,12 +1204,6 @@ function formatCompactRuntimeLabel(label: string, maxLength: number): string {
   const truncated = trimmed.slice(0, maxLength - 3).replace(/[\s/_-]+$/u, '');
 
   return `${truncated}...`;
-}
-
-function stripCodingPlanProviderPrefix(label: string): string {
-  return label
-    .replace(/^\[ModelStudio Coding Plan for [^\]]+\]\s*/u, '')
-    .trim();
 }
 
 const fallbackModelOption: DesktopModelInfo = {
