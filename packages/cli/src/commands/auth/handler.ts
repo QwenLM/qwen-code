@@ -605,23 +605,22 @@ async function promptForStandardRegion(): Promise<AlibabaStandardRegion> {
       {
         value: 'cn-beijing' as AlibabaStandardRegion,
         label: t('China (Beijing)'),
-        description: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        description: ALIBABA_STANDARD_API_KEY_ENDPOINTS['cn-beijing'],
       },
       {
         value: 'sg-singapore' as AlibabaStandardRegion,
         label: t('Singapore'),
-        description: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+        description: ALIBABA_STANDARD_API_KEY_ENDPOINTS['sg-singapore'],
       },
       {
         value: 'us-virginia' as AlibabaStandardRegion,
         label: t('US (Virginia)'),
-        description: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+        description: ALIBABA_STANDARD_API_KEY_ENDPOINTS['us-virginia'],
       },
       {
         value: 'cn-hongkong' as AlibabaStandardRegion,
         label: t('China (Hong Kong)'),
-        description:
-          'https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1',
+        description: ALIBABA_STANDARD_API_KEY_ENDPOINTS['cn-hongkong'],
       },
     ],
     t('Select region:'),
@@ -669,7 +668,7 @@ export async function showAuthStatus(): Promise<void> {
       );
       writeStdoutLine(
         t(
-          '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)',
+          '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)\n',
         ),
       );
       writeStdoutLine(t('Or simply run:'));
