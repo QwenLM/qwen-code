@@ -11,6 +11,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   DesktopConnectionStatus,
+  DesktopGitBranch,
   DesktopGitDiff,
   DesktopProject,
   DesktopSessionSummary,
@@ -97,6 +98,9 @@ describe('WorkspacePage', () => {
     expect(
       topbarContext?.querySelectorAll('.topbar-context-item'),
     ).toHaveLength(3);
+    expect(
+      renderedContainer.querySelector('[data-testid="topbar-branch-trigger"]'),
+    ).toBeTruthy();
     expect(topbarContext?.textContent).toContain('Connected');
     expect(topbarContext?.textContent).toContain('main');
     expect(topbarContext?.textContent).toContain('1 modified');
@@ -237,6 +241,49 @@ describe('WorkspacePage', () => {
     );
     expect(advancedDiagnostics?.textContent).toContain('ACP');
     expect(advancedDiagnostics?.textContent).toContain(session.sessionId);
+  });
+
+  it('confirms dirty branch switches from the topbar menu', async () => {
+    const branches: DesktopGitBranch[] = [
+      { name: 'main', current: true },
+      { name: 'feature/safe-switch', current: false },
+    ];
+    const onListProjectBranches = vi.fn(async () => branches);
+    const onCheckoutProjectBranch = vi.fn(async () => undefined);
+    const renderedContainer = renderWorkspace({
+      onListProjectBranches,
+      onCheckoutProjectBranch,
+    });
+
+    await act(async () => {
+      clickButton(renderedContainer, 'Branch main');
+    });
+
+    expect(onListProjectBranches).toHaveBeenCalledTimes(1);
+    expect(
+      renderedContainer.querySelector('[data-testid="branch-menu"]'),
+    ).toBeTruthy();
+    expect(renderedContainer.textContent).toContain('feature/safe-switch');
+
+    await act(async () => {
+      clickButton(renderedContainer, 'Switch to branch feature/safe-switch');
+    });
+
+    expect(
+      renderedContainer.querySelector(
+        '[data-testid="branch-switch-confirmation"]',
+      ),
+    ).toBeTruthy();
+    expect(onCheckoutProjectBranch).not.toHaveBeenCalled();
+
+    await act(async () => {
+      clickButton(renderedContainer, 'Confirm Branch Switch');
+    });
+
+    expect(onCheckoutProjectBranch).toHaveBeenCalledWith('feature/safe-switch');
+    expect(
+      renderedContainer.querySelector('[data-testid="branch-menu"]'),
+    ).toBeNull();
   });
 
   it('keeps the composer enabled for an active project with no thread', () => {
@@ -687,6 +734,8 @@ function renderWorkspace(
     onOpenFileReference: vi.fn(),
     onPermissionResponse: vi.fn(),
     onRefreshProjectGitStatus: vi.fn(),
+    onListProjectBranches: vi.fn(async () => []),
+    onCheckoutProjectBranch: vi.fn(async () => undefined),
     onOpenReviewFile: vi.fn(),
     onRevertReviewTarget: vi.fn(),
     onRunTerminalCommand: vi.fn(),

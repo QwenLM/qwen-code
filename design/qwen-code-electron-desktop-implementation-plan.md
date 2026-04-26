@@ -22,6 +22,130 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Safe Topbar Branch Switching
+
+Status: completed in iteration 20.
+
+Goal: turn the slim topbar branch context into a compact branch menu that lists
+local branches, switches branches through the desktop server, and protects
+dirty worktrees with an explicit confirmation before checkout.
+
+User-visible value: users can answer and change "which branch am I on?" from
+the main workbench without leaving the conversation-first viewport, while
+uncommitted changes are called out before a branch change.
+
+Expected files:
+
+- `packages/desktop/src/server/services/projectService.ts`
+- `packages/desktop/src/server/index.ts`
+- `packages/desktop/src/server/index.test.ts`
+- `packages/desktop/src/renderer/api/client.ts`
+- `packages/desktop/src/renderer/App.tsx`
+- `packages/desktop/src/renderer/components/layout/TopBar.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/components/layout/SidebarIcons.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/branch-switching.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The topbar branch context is a compact accessible control that opens a local
+  branch menu without reintroducing heavy pill styling.
+- The menu lists local branches, marks the current branch, truncates long branch
+  names, and remains contained in the slim topbar area.
+- Choosing a different branch while the project is dirty shows a confirmation
+  explaining that uncommitted changes will remain in the worktree unless Git
+  rejects the checkout.
+- Confirming a switch calls the server checkout route, refreshes Git status and
+  review diff, closes the menu, and updates the topbar branch label.
+- Server branch routes are token protected through the existing local-server
+  auth layer, list only local branch names, validate checkout targets against
+  that local list, and reject unknown branch names.
+
+Verification:
+
+- Unit/server test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/server/index.test.ts src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project on the deliberately long branch,
+  open the branch menu, assert the long branch and `main` are listed, choose
+  `main`, confirm the dirty-worktree branch switch, assert the topbar updates
+  to `main`, assert Git status and diff remain coherent, then continue the
+  existing prompt, approval, review, settings, terminal, discard safety, and
+  commit workflows.
+- E2E assertions: branch menu geometry is bounded; the current branch is marked;
+  dirty confirmation appears before checkout; confirmed checkout updates the
+  topbar and actual repo branch; no console errors or failed local requests are
+  recorded.
+- Diagnostic artifacts: `branch-switch-menu.json`,
+  `branch-switch-confirmation.json`, `branch-switch-result.json`,
+  `branch-switch-menu.png`, Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained compact
+  topbar menu design; `electron-desktop-dev` for server/preload/renderer changes
+  verified in the real Electron app; `brainstorming` applied by choosing the
+  smallest continuation from the prior topbar slice instead of expanding into
+  branch creation or full Git management.
+
+Notes and decisions:
+
+- This slice intentionally supports local branch list and checkout only. Branch
+  creation is left for a later workflow slice so the menu stays focused and the
+  server can validate checkout targets against known local branches.
+- Dirty-state protection is a renderer confirmation before checkout. The server
+  still relies on Git to reject unsafe checkout conflicts and returns the
+  existing `git_error` response if Git cannot switch.
+- The branch menu belongs in the topbar context row because `home.jpg` keeps
+  branch state as compact chrome, not as a large Git dashboard.
+- The first real Electron run exposed a harness timing issue: the menu shell
+  opened before async branch rows loaded. The harness now waits for branch rows
+  before measuring menu geometry.
+- The next passing artifact exposed a real visual issue: the long branch row
+  escaped the 320 px menu. The row CSS now forces width containment, and the CDP
+  harness records `escapedRows: []`.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/server/index.test.ts src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` first failed because the new branch
+  menu assertion ran before branch rows loaded, producing diagnostics at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T02-17-48-367Z/`.
+- After waiting for branch rows, `cd packages/desktop && npm run e2e:cdp`
+  passed but artifact review showed the long branch row escaped the menu. The
+  CSS and harness were tightened instead of accepting the visual drift.
+- After rebuilding, `cd packages/desktop && npm run e2e:cdp` passed with the
+  safe branch-switch path and the existing prompt, approval, review, settings,
+  terminal, discard safety, and commit workflows. A final rebuild and CDP pass
+  after the branch-name parser cleanup and final renderer readiness guard also
+  passed.
+- Passing artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T02-25-14-829Z/`.
+- Key recorded metrics: branch menu width `320`, row widths `298`, no escaped
+  rows, current long branch marked, `main` listed as switch target, dirty
+  confirmation shown, actual repository branch switched to `main`, and dirty
+  status remained `1 modified · 0 staged · 1 untracked`.
+
+Next work:
+
+- Add branch creation from the topbar menu or command palette with the same
+  dirty-worktree protection and server-side branch-name validation.
+- Continue prototype fidelity by reducing the remaining composer height and
+  density drift visible in the branch-switch screenshot.
+
 ### Completed Slice: Slim Topbar Context Prototype Fidelity
 
 Status: completed in iteration 19.

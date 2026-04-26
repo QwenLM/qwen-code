@@ -35,6 +35,11 @@ export interface DesktopProject {
   lastOpenedAt: number;
 }
 
+export interface DesktopGitBranch {
+  name: string;
+  current: boolean;
+}
+
 interface StoredProject {
   id: string;
   name: string;
@@ -94,6 +99,38 @@ export class DesktopProjectService {
 
   async getProjectGitStatus(projectId: string): Promise<DesktopGitStatus> {
     const project = await this.getStoredProject(projectId);
+    return readGitStatus(project.path);
+  }
+
+  async listProjectGitBranches(projectId: string): Promise<DesktopGitBranch[]> {
+    const project = await this.getStoredProject(projectId);
+    return readGitBranches(project.path);
+  }
+
+  async checkoutProjectGitBranch(
+    projectId: string,
+    branchName: string,
+  ): Promise<DesktopGitStatus> {
+    const project = await this.getStoredProject(projectId);
+    const branches = await readGitBranches(project.path);
+    if (!branches.some((branch) => branch.name === branchName)) {
+      throw new DesktopHttpError(
+        400,
+        'git_branch_not_found',
+        'Branch is not a local branch in this project.',
+      );
+    }
+
+    try {
+      await runGit(project.path, ['switch', branchName]);
+    } catch (error) {
+      throw new DesktopHttpError(
+        400,
+        'git_error',
+        error instanceof Error ? error.message : 'Git checkout failed.',
+      );
+    }
+
     return readGitStatus(project.path);
   }
 
@@ -197,6 +234,42 @@ async function readGitStatus(projectPath: string): Promise<DesktopGitStatus> {
       isRepository: false,
       error: error instanceof Error ? error.message : 'Git status unavailable.',
     };
+  }
+}
+
+async function readGitBranches(
+  projectPath: string,
+): Promise<DesktopGitBranch[]> {
+  try {
+    const [status, stdout] = await Promise.all([
+      readGitStatus(projectPath),
+      runGit(projectPath, ['branch', '--format=%(refname:short)']),
+    ]);
+    const branches = stdout
+      .split(/\r?\n/u)
+      .filter((branch) => branch.length > 0)
+      .map((name) => ({
+        name,
+        current: name === status.branch,
+      }));
+
+    return branches.sort((left, right) => {
+      if (left.current) {
+        return -1;
+      }
+
+      if (right.current) {
+        return 1;
+      }
+
+      return left.name.localeCompare(right.name);
+    });
+  } catch (error) {
+    throw new DesktopHttpError(
+      400,
+      'git_error',
+      error instanceof Error ? error.message : 'Git branch list failed.',
+    );
   }
 }
 

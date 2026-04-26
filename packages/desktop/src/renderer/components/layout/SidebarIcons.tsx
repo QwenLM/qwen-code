@@ -176,6 +176,30 @@ export function DiffIcon(props: SidebarIconProps) {
   );
 }
 
+export function BranchIcon(props: SidebarIconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="20"
+      viewBox="0 0 24 24"
+      width="20"
+      {...props}
+    >
+      <path
+        d="M7 6.5v10M17 7.5c0 3.2-2.1 4.5-5 4.5H7"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.7"
+      />
+      <circle cx="7" cy="5.5" r="2" stroke="currentColor" strokeWidth="1.7" />
+      <circle cx="7" cy="18.5" r="2" stroke="currentColor" strokeWidth="1.7" />
+      <circle cx="17" cy="5.5" r="2" stroke="currentColor" strokeWidth="1.7" />
+    </svg>
+  );
+}
+
 export function RefreshIcon(props: SidebarIconProps) {
   return (
     <svg

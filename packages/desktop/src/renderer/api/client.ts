@@ -50,6 +50,18 @@ export interface DesktopProjectList {
   projects: DesktopProject[];
 }
 
+export interface DesktopGitBranch {
+  name: string;
+  current: boolean;
+}
+
+export interface DesktopGitBranchList {
+  ok: true;
+  branches: DesktopGitBranch[];
+  current: string | null;
+  dirty: boolean;
+}
+
 export type DesktopGitChangeStatus =
   | 'added'
   | 'copied'
@@ -255,6 +267,17 @@ export async function getDesktopProjectGitStatus(
   return response.status;
 }
 
+export async function listDesktopProjectGitBranches(
+  serverInfo: DesktopServerInfo,
+  projectId: string,
+): Promise<DesktopGitBranchList> {
+  return getJson(
+    serverInfo,
+    `/api/projects/${encodeURIComponent(projectId)}/git/branches`,
+    isGitBranchList,
+  );
+}
+
 export async function getDesktopProjectGitDiff(
   serverInfo: DesktopServerInfo,
   projectId: string,
@@ -263,6 +286,20 @@ export async function getDesktopProjectGitDiff(
     serverInfo,
     `/api/projects/${encodeURIComponent(projectId)}/git/diff`,
     isGitDiff,
+  );
+}
+
+export async function checkoutDesktopProjectBranch(
+  serverInfo: DesktopServerInfo,
+  projectId: string,
+  branchName: string,
+): Promise<DesktopGitReviewMutation> {
+  return writeJson(
+    serverInfo,
+    `/api/projects/${encodeURIComponent(projectId)}/git/checkout`,
+    'POST',
+    { branchName },
+    isGitReviewMutation,
   );
 }
 
@@ -846,6 +883,32 @@ function isGitStatus(value: unknown): value is DesktopGitStatus {
     typeof candidate.clean === 'boolean' &&
     typeof candidate.isRepository === 'boolean' &&
     (typeof candidate.error === 'string' || candidate.error === undefined)
+  );
+}
+
+function isGitBranch(value: unknown): value is DesktopGitBranch {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Partial<DesktopGitBranch>;
+  return (
+    typeof candidate.name === 'string' && typeof candidate.current === 'boolean'
+  );
+}
+
+function isGitBranchList(value: unknown): value is DesktopGitBranchList {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Partial<DesktopGitBranchList>;
+  return (
+    candidate.ok === true &&
+    Array.isArray(candidate.branches) &&
+    candidate.branches.every(isGitBranch) &&
+    (typeof candidate.current === 'string' || candidate.current === null) &&
+    typeof candidate.dirty === 'boolean'
   );
 }
 

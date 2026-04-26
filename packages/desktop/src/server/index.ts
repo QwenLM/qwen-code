@@ -238,6 +238,36 @@ async function handleRequest(
     return;
   }
 
+  const projectGitBranchesMatch = matchSessionRoute(
+    requestUrl.pathname,
+    /^\/api\/projects\/([^/]+)\/git\/branches$/u,
+  );
+  if (projectGitBranchesMatch) {
+    await handleProjectGitBranchesRoute(
+      request,
+      response,
+      origin,
+      context,
+      projectGitBranchesMatch,
+    );
+    return;
+  }
+
+  const projectGitCheckoutMatch = matchSessionRoute(
+    requestUrl.pathname,
+    /^\/api\/projects\/([^/]+)\/git\/checkout$/u,
+  );
+  if (projectGitCheckoutMatch) {
+    await handleProjectGitCheckoutRoute(
+      request,
+      response,
+      origin,
+      context,
+      projectGitCheckoutMatch,
+    );
+    return;
+  }
+
   const projectGitDiffMatch = matchSessionRoute(
     requestUrl.pathname,
     /^\/api\/projects\/([^/]+)\/git\/diff$/u,
@@ -532,6 +562,53 @@ async function handleProjectGitDiffRoute(
       200,
       await context.gitReviewService.getDiff(projectPath),
     );
+    return;
+  }
+
+  sendMethodNotAllowed(response, origin);
+}
+
+async function handleProjectGitBranchesRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  origin: string | undefined,
+  context: HandlerContext,
+  projectId: string,
+): Promise<void> {
+  if (request.method === 'GET') {
+    const status = await context.projectService.getProjectGitStatus(projectId);
+    sendJson(response, origin, 200, {
+      ok: true,
+      branches: await context.projectService.listProjectGitBranches(projectId),
+      current: status.branch,
+      dirty: !status.clean,
+    });
+    return;
+  }
+
+  sendMethodNotAllowed(response, origin);
+}
+
+async function handleProjectGitCheckoutRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  origin: string | undefined,
+  context: HandlerContext,
+  projectId: string,
+): Promise<void> {
+  if (request.method === 'POST') {
+    const body = await readObjectBody(request);
+    const branchName = getRequiredString(body, 'branchName');
+    const status = await context.projectService.checkoutProjectGitBranch(
+      projectId,
+      branchName,
+    );
+    const projectPath = await context.projectService.getProjectPath(projectId);
+    sendJson(response, origin, 200, {
+      ok: true,
+      status,
+      diff: await context.gitReviewService.getDiff(projectPath),
+    });
     return;
   }
 

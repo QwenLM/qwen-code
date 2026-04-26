@@ -309,6 +309,74 @@ describe('DesktopServer', () => {
     ).resolves.toBe('test commit');
   });
 
+  it('lists local branches and checks out a validated branch', async () => {
+    const projectPath = await createCommittedGitProject();
+    const initialBranch = await runGitOutput(projectPath, [
+      'branch',
+      '--show-current',
+    ]);
+    const featureBranch = 'feature/desktop-branch-switch';
+    const storePath = join(
+      await createTempDirectory('qwen-desktop-store-'),
+      'desktop-projects.json',
+    );
+    await runGit(projectPath, ['checkout', '-b', featureBranch]);
+    await writeFile(join(projectPath, 'tracked.txt'), 'dirty\n', 'utf8');
+
+    const server = await createTestServer(undefined, undefined, storePath);
+    const opened = await postJson(server, '/api/projects/open', {
+      path: projectPath,
+    });
+    const projectId = getProjectId(opened.body);
+    const branches = await getJson(
+      server,
+      `/api/projects/${encodeURIComponent(projectId)}/git/branches`,
+      {
+        Authorization: 'Bearer test-token',
+      },
+    );
+    const switched = await postJson(
+      server,
+      `/api/projects/${encodeURIComponent(projectId)}/git/checkout`,
+      { branchName: initialBranch },
+    );
+    const rejected = await postJson(
+      server,
+      `/api/projects/${encodeURIComponent(projectId)}/git/checkout`,
+      { branchName: 'missing/local-branch' },
+    );
+
+    expect(branches.status).toBe(200);
+    expect(branches.body).toMatchObject({
+      ok: true,
+      current: featureBranch,
+      dirty: true,
+      branches: [
+        { name: featureBranch, current: true },
+        { name: initialBranch, current: false },
+      ],
+    });
+    expect(switched.status).toBe(200);
+    expect(switched.body).toMatchObject({
+      ok: true,
+      status: {
+        branch: initialBranch,
+        modified: 1,
+      },
+      diff: {
+        files: [expect.objectContaining({ path: 'tracked.txt' })],
+      },
+    });
+    await expect(
+      runGitOutput(projectPath, ['branch', '--show-current']),
+    ).resolves.toBe(initialBranch);
+    expect(rejected.status).toBe(400);
+    expect(rejected.body).toMatchObject({
+      ok: false,
+      code: 'git_branch_not_found',
+    });
+  });
+
   it('returns hunk metadata and can stage or revert individual hunks', async () => {
     const projectPath = await createMultiHunkGitProject();
     const storePath = join(

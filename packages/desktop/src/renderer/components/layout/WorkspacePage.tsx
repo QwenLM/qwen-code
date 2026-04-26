@@ -6,6 +6,7 @@
 
 import { useState, type Dispatch, type FormEvent } from 'react';
 import type {
+  DesktopGitBranch,
   DesktopGitDiff,
   DesktopGitReviewTarget,
   DesktopProject,
@@ -54,6 +55,7 @@ export function WorkspacePage({
   onAskUserQuestionResponse,
   onAuthenticate,
   onChooseWorkspace,
+  onCheckoutProjectBranch,
   onClearTerminal,
   onCommit,
   onCommitMessageChange,
@@ -67,6 +69,7 @@ export function WorkspacePage({
   onOpenFileReference,
   onPermissionResponse,
   onRefreshProjectGitStatus,
+  onListProjectBranches,
   onOpenReviewFile,
   onRevertReviewTarget,
   onRunTerminalCommand,
@@ -109,6 +112,7 @@ export function WorkspacePage({
   onAskUserQuestionResponse: (requestId: string, optionId: string) => void;
   onAuthenticate: (methodId: string) => void;
   onChooseWorkspace: () => void;
+  onCheckoutProjectBranch: (branchName: string) => Promise<void>;
   onClearTerminal: () => void;
   onCommit: () => void;
   onCommitMessageChange: (message: string) => void;
@@ -122,6 +126,7 @@ export function WorkspacePage({
   onOpenFileReference: (filePath: string) => void;
   onPermissionResponse: (requestId: string, optionId: string) => void;
   onRefreshProjectGitStatus: () => void;
+  onListProjectBranches: () => Promise<DesktopGitBranch[]>;
   onOpenReviewFile: (filePath: string) => void;
   onRevertReviewTarget: (target: DesktopGitReviewTarget) => void;
   onRunTerminalCommand: () => void;
@@ -192,7 +197,9 @@ export function WorkspacePage({
           isReviewOpen={!isSettingsOpen && isReviewOpen}
           loadState={loadState}
           statusLabel={statusLabel}
+          onCheckoutBranch={onCheckoutProjectBranch}
           onRefreshGitStatus={onRefreshProjectGitStatus}
+          onListBranches={onListProjectBranches}
           onShowReview={toggleReview}
           onShowChat={showConversation}
           onShowSettings={showSettingsPage}

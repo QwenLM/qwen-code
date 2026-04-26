@@ -16,6 +16,7 @@ import {
 } from 'react';
 import {
   authenticateDesktop,
+  checkoutDesktopProjectBranch,
   commitDesktopProjectChanges,
   createDesktopSession,
   getDesktopProjectGitDiff,
@@ -25,6 +26,7 @@ import {
   getDesktopTerminal,
   getDesktopUserSettings,
   killDesktopTerminal,
+  listDesktopProjectGitBranches,
   listDesktopProjects,
   listDesktopSessions,
   loadDesktopSession,
@@ -37,6 +39,7 @@ import {
   stageDesktopProjectChanges,
   updateDesktopUserSettings,
   writeDesktopTerminalInput,
+  type DesktopGitBranch,
   type DesktopGitDiff,
   type DesktopGitReviewTarget,
   type DesktopProject,
@@ -547,6 +550,42 @@ export function App() {
     [activeProject],
   );
 
+  const listProjectBranches = useCallback(async (): Promise<
+    DesktopGitBranch[]
+  > => {
+    if (loadState.state !== 'ready' || !activeProject) {
+      return [];
+    }
+
+    const result = await listDesktopProjectGitBranches(
+      loadState.status.serverInfo,
+      activeProject.id,
+    );
+    return result.branches;
+  }, [activeProject, loadState]);
+
+  const checkoutProjectBranch = useCallback(
+    async (branchName: string): Promise<void> => {
+      if (loadState.state !== 'ready' || !activeProject) {
+        return;
+      }
+
+      try {
+        const result = await checkoutDesktopProjectBranch(
+          loadState.status.serverInfo,
+          activeProject.id,
+          branchName,
+        );
+        applyReviewMutation(result.status, result.diff);
+        setSessionError(null);
+      } catch (error) {
+        setSessionError(getErrorMessage(error));
+        throw error;
+      }
+    },
+    [activeProject, applyReviewMutation, loadState],
+  );
+
   const stageReviewTarget = useCallback(
     async (target: DesktopGitReviewTarget) => {
       if (loadState.state !== 'ready' || !activeProject) {
@@ -991,6 +1030,8 @@ export function App() {
       onOpenFileReference={openReviewFile}
       onPermissionResponse={respondToPermission}
       onRefreshProjectGitStatus={refreshProjectGitStatus}
+      onListProjectBranches={listProjectBranches}
+      onCheckoutProjectBranch={checkoutProjectBranch}
       onOpenReviewFile={openReviewFile}
       onRevertReviewTarget={revertReviewTarget}
       onRunTerminalCommand={runTerminalCommand}

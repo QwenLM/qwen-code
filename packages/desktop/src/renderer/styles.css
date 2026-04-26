@@ -496,7 +496,25 @@ summary:focus-visible {
 .topbar-context {
   justify-content: flex-start;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
+}
+
+.topbar-branch-control {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 186px;
+  gap: 7px;
+}
+
+.topbar-branch-control::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(213, 224, 255, 0.28);
 }
 
 .topbar-context-item {
@@ -511,6 +529,36 @@ summary:focus-visible {
   font-weight: 720;
   line-height: 16px;
   white-space: nowrap;
+}
+
+.topbar-branch-trigger {
+  max-width: 170px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.topbar-branch-trigger:not(:disabled):hover {
+  color: rgba(231, 239, 255, 0.84);
+}
+
+.topbar-branch-trigger svg {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  opacity: 0.72;
+}
+
+.topbar-context-caret {
+  flex: 0 0 auto;
+  width: 5px;
+  height: 5px;
+  margin-left: 1px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-1px) rotate(45deg);
+  opacity: 0.72;
 }
 
 .topbar-context-item:not(:first-child)::before {
@@ -546,6 +594,126 @@ summary:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.topbar-branch-menu {
+  position: absolute;
+  top: 26px;
+  left: 7px;
+  z-index: 30;
+  display: grid;
+  width: min(320px, calc(100vw - 340px));
+  min-width: 260px;
+  max-height: min(430px, calc(100vh - 92px));
+  gap: 8px;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid rgba(213, 224, 255, 0.13);
+  border-radius: 8px;
+  background: rgba(13, 17, 28, 0.98);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.34);
+}
+
+.branch-menu-header,
+.branch-menu-row,
+.branch-menu-actions {
+  display: flex;
+  align-items: center;
+}
+
+.branch-menu-header {
+  justify-content: space-between;
+  gap: 12px;
+  color: rgba(240, 242, 238, 0.9);
+  font-size: 11px;
+  font-weight: 820;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.branch-menu-header em,
+.branch-menu-row em {
+  flex: 0 0 auto;
+  color: rgba(147, 160, 178, 0.88);
+  font-size: 10.5px;
+  font-style: normal;
+  font-weight: 760;
+  text-transform: none;
+}
+
+.branch-menu-list {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.branch-menu-row {
+  justify-content: space-between;
+  width: 100%;
+  min-width: 0;
+  min-height: 30px;
+  gap: 10px;
+  overflow: hidden;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(226, 234, 246, 0.78);
+  font-size: 12px;
+  font-weight: 720;
+  text-align: left;
+}
+
+.branch-menu-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.branch-menu-row:not(:disabled):hover {
+  background: rgba(85, 166, 255, 0.1);
+  color: #d8ebff;
+}
+
+.branch-menu-row-current {
+  background: rgba(85, 166, 255, 0.08);
+  color: #d8ebff;
+}
+
+.branch-switch-confirmation {
+  display: grid;
+  gap: 8px;
+}
+
+.branch-switch-confirmation strong {
+  color: rgba(246, 248, 255, 0.94);
+  font-size: 12.5px;
+  line-height: 1.25;
+}
+
+.branch-switch-confirmation p,
+.branch-menu-status,
+.branch-menu-error {
+  margin: 0;
+  color: rgba(194, 202, 215, 0.76);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.branch-menu-error {
+  color: #ffb3a5;
+}
+
+.branch-menu-actions {
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.branch-menu-actions .primary-button,
+.branch-menu-actions .secondary-button {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 11.5px;
 }
 
 .topbar-actions {

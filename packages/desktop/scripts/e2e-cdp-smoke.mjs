@@ -106,6 +106,16 @@ async function main() {
   await assertSidebarAppRail('sidebar-app-rail.json');
   await assertTopbarContextFidelity('topbar-context-fidelity.json');
   await saveScreenshot('topbar-context-fidelity.png');
+  await clickButton('Branch');
+  await waitForSelector('[data-testid="branch-menu"]');
+  await waitForSelector('[data-testid="branch-menu-row"]');
+  await assertBranchSwitchMenu('branch-switch-menu.json');
+  await saveScreenshot('branch-switch-menu.png');
+  await clickButton('Switch to branch main');
+  await waitForSelector('[data-testid="branch-switch-confirmation"]');
+  await assertBranchSwitchConfirmation('branch-switch-confirmation.json');
+  await clickButton('Confirm Branch Switch');
+  await assertBranchSwitchResult('branch-switch-result.json');
 
   await clickButton('Review Changes');
   await waitForText('README.md');
@@ -271,6 +281,7 @@ async function createGitWorkspace() {
     cwd: dir,
   });
   await execFileP('git', ['config', 'user.name', 'Desktop E2E'], { cwd: dir });
+  await execFileP('git', ['checkout', '-B', 'main'], { cwd: dir });
   await execFileP('git', ['add', '.'], { cwd: dir });
   await execFileP('git', ['commit', '-m', 'initial commit'], { cwd: dir });
   await execFileP('git', ['checkout', '-b', longBranchName], { cwd: dir });
@@ -1013,6 +1024,244 @@ async function assertTopbarContextFidelity(fileName) {
       `Topbar context item escaped the header: ${JSON.stringify(
         escapedContextItems,
       )}`,
+    );
+  }
+}
+
+async function assertBranchSwitchMenu(fileName) {
+  const snapshot = await evaluate(`(() => {
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const menu = document.querySelector('[data-testid="branch-menu"]');
+    const trigger = document.querySelector('[data-testid="topbar-branch-trigger"]');
+    const topbar = document.querySelector('[data-testid="workspace-topbar"]');
+    const rows = [...document.querySelectorAll('[data-testid="branch-menu-row"]')];
+    const rowSnapshots = rows.map((row) => ({
+      label: row.getAttribute('aria-label') || '',
+      checked: row.getAttribute('aria-checked'),
+      disabled: row.disabled,
+      text: row.textContent.trim(),
+      rect: rectFor(row)
+    }));
+    const menuRect = rectFor(menu);
+    const rowEscapesMenu = (row) =>
+      Boolean(
+        row.rect &&
+          menuRect &&
+          (row.rect.left < menuRect.left - 1 ||
+            row.rect.right > menuRect.right + 1)
+      );
+    return {
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight
+      },
+      document: {
+        bodyScrollWidth: document.body.scrollWidth
+      },
+      triggerText: trigger?.textContent.trim() ?? '',
+      triggerExpanded: trigger?.getAttribute('aria-expanded'),
+      menu: menuRect,
+      topbar: rectFor(topbar),
+      rows: rowSnapshots,
+      hasLongBranch: rowSnapshots.some((row) =>
+        row.text.includes(${JSON.stringify(longBranchName)})
+      ),
+      hasMain: rowSnapshots.some((row) => row.text.includes('main')),
+      currentRows: rowSnapshots.filter((row) => row.checked === 'true'),
+      escapedRows: rowSnapshots.filter(rowEscapesMenu),
+      menuContained: Boolean(
+        menuRect &&
+          menuRect.left >= 0 &&
+          menuRect.right <= window.innerWidth &&
+          menuRect.top >= 0 &&
+          menuRect.bottom <= window.innerHeight
+      )
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (snapshot.triggerExpanded !== 'true') {
+    throw new Error('Branch trigger should be expanded while the menu is open.');
+  }
+
+  if (!snapshot.menu || snapshot.menu.width > 330) {
+    throw new Error(
+      `Branch menu should stay compact: ${JSON.stringify(snapshot.menu)}`,
+    );
+  }
+
+  if (!snapshot.menuContained) {
+    throw new Error(
+      `Branch menu escaped the viewport: ${JSON.stringify(snapshot.menu)}`,
+    );
+  }
+
+  if (!snapshot.hasLongBranch || !snapshot.hasMain) {
+    throw new Error(
+      `Branch menu did not list expected branches: ${JSON.stringify(
+        snapshot.rows,
+      )}`,
+    );
+  }
+
+  if (snapshot.escapedRows.length > 0) {
+    throw new Error(
+      `Branch menu rows escaped the menu: ${JSON.stringify(
+        snapshot.escapedRows,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.currentRows.length !== 1 ||
+    !snapshot.currentRows[0].text.includes(longBranchName)
+  ) {
+    throw new Error(
+      `Branch menu should mark the long branch current: ${JSON.stringify(
+        snapshot.currentRows,
+      )}`,
+    );
+  }
+
+  if (snapshot.document.bodyScrollWidth > snapshot.viewport.width + 4) {
+    throw new Error(
+      `Branch menu caused body overflow: ${JSON.stringify(snapshot.document)}`,
+    );
+  }
+}
+
+async function assertBranchSwitchConfirmation(fileName) {
+  const snapshot = await evaluate(`(() => {
+    const confirmation = document.querySelector(
+      '[data-testid="branch-switch-confirmation"]'
+    );
+    const buttons = [...document.querySelectorAll(
+      '[data-testid="branch-menu"] button'
+    )].map((button) => ({
+      label: button.getAttribute('aria-label') || button.textContent.trim(),
+      disabled: button.disabled
+    }));
+    return {
+      text: confirmation?.textContent.trim() ?? '',
+      buttons,
+      hasMenu: document.querySelector('[data-testid="branch-menu"]') !== null
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (!snapshot.hasMenu) {
+    throw new Error('Branch confirmation should remain inside the branch menu.');
+  }
+
+  if (
+    !snapshot.text.includes('Switch branch with local changes?') ||
+    !snapshot.text.includes('Uncommitted changes')
+  ) {
+    throw new Error(
+      `Branch dirty confirmation copy is missing: ${snapshot.text}`,
+    );
+  }
+
+  const buttonLabels = snapshot.buttons.map((button) => button.label);
+  for (const expected of ['Cancel Branch Switch', 'Confirm Branch Switch']) {
+    if (!buttonLabels.some((label) => label.includes(expected))) {
+      throw new Error(
+        `Branch confirmation missing ${expected}: ${buttonLabels.join(', ')}`,
+      );
+    }
+  }
+}
+
+async function assertBranchSwitchResult(fileName) {
+  await waitFor(
+    'branch switch to main',
+    async () => {
+      const ui = await evaluate(`(() => {
+        const trigger = document.querySelector(
+          '[data-testid="topbar-branch-trigger"]'
+        );
+        return {
+          branchText: trigger?.textContent.trim() ?? '',
+          menuOpen: document.querySelector('[data-testid="branch-menu"]') !== null,
+          gitStatusText:
+            document.querySelector('[aria-label^="Git status"]')?.textContent.trim() ??
+            ''
+        };
+      })()`);
+      const { stdout } = await execFileP('git', [
+        '-C',
+        workspaceDir,
+        'branch',
+        '--show-current',
+      ]);
+      return (
+        ui.branchText.includes('main') &&
+        !ui.menuOpen &&
+        stdout.trim() === 'main'
+      );
+    },
+    15_000,
+  );
+
+  const [ui, branch, status] = await Promise.all([
+    evaluate(`(() => {
+      const trigger = document.querySelector('[data-testid="topbar-branch-trigger"]');
+      return {
+        branchText: trigger?.textContent.trim() ?? '',
+        menuOpen: document.querySelector('[data-testid="branch-menu"]') !== null,
+        gitStatusText:
+          document.querySelector('[aria-label^="Git status"]')?.textContent.trim() ??
+          '',
+        bodyHasLongBranch: document.body.innerText.includes(
+          ${JSON.stringify(longBranchName)}
+        )
+      };
+    })()`),
+    execFileP('git', ['-C', workspaceDir, 'branch', '--show-current']),
+    execFileP('git', ['-C', workspaceDir, 'status', '--porcelain=v1']),
+  ]);
+  const snapshot = {
+    ui,
+    branch: branch.stdout.trim(),
+    status: status.stdout,
+  };
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (snapshot.branch !== 'main') {
+    throw new Error(`Expected Git branch main, got ${snapshot.branch}`);
+  }
+
+  if (!snapshot.ui.gitStatusText.includes('1 modified')) {
+    throw new Error(
+      `Branch switch should preserve dirty status in the topbar: ${snapshot.ui.gitStatusText}`,
     );
   }
 }
