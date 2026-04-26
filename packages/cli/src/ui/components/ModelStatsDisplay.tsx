@@ -96,12 +96,14 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
   const hasTool = entries.some(({ metrics }) => metrics.tokens.tool > 0);
   const hasCached = entries.some(({ metrics }) => metrics.tokens.cached > 0);
 
+  const getModelName = (key: string): string => key.split('::')[0];
+
   const hasPricing = entries.some(
     ({ key, metrics }) =>
       calculateCost({
         inputTokens: metrics.tokens.prompt,
         outputTokens: metrics.tokens.candidates,
-        pricing: modelPricing?.[key],
+        pricing: modelPricing?.[getModelName(key)],
       }) != null,
   );
 
@@ -234,7 +236,7 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
               const cost = calculateCost({
                 inputTokens: metrics.tokens.prompt,
                 outputTokens: metrics.tokens.candidates,
-                pricing: modelPricing?.[key],
+                pricing: modelPricing?.[getModelName(key)],
               });
               return cost != null ? `$${cost.toFixed(4)}` : 'N/A';
             })}
