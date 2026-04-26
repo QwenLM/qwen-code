@@ -482,11 +482,13 @@ async function assertProjectComposerReady(fileName) {
     const permission = document.querySelector('select[aria-label="Permission mode"]');
     const model = document.querySelector('select[aria-label="Model"]');
     const composer = document.querySelector('[data-testid="message-composer"]');
+    const attach = document.querySelector('[data-testid="composer-attach-button"]');
     const controlRow = document.querySelector('.composer-control-row');
     const context = document.querySelector('.composer-context');
     const actions = document.querySelector('.composer-actions');
     const chatHeader = document.querySelector('.chat-header');
     const chatStatus = document.querySelector('.chat-status-announcement');
+    attach?.focus();
     const rectFor = (element) => {
       if (!element) {
         return null;
@@ -520,6 +522,21 @@ async function assertProjectComposerReady(fileName) {
       composerRect: rectFor(composer),
       textareaRect: rectFor(textarea),
       textareaStyle: styleFor(textarea),
+      attachControl: {
+        ariaLabel: attach?.getAttribute('aria-label') ?? null,
+        ariaDisabled: attach?.getAttribute('aria-disabled') ?? null,
+        describedBy: attach?.getAttribute('aria-describedby') ?? null,
+        disabled: attach?.disabled ?? null,
+        focused: document.activeElement === attach,
+        hasIcon: attach?.querySelector('svg') !== null,
+        helpText:
+          document.getElementById(
+            attach?.getAttribute('aria-describedby') ?? ''
+          )?.textContent.trim() ?? '',
+        rect: rectFor(attach),
+        text: attach?.textContent.trim() ?? '',
+        title: attach?.getAttribute('title') ?? null
+      },
       controlRowRect: rectFor(controlRow),
       contextRect: rectFor(context),
       actionsRect: rectFor(actions),
@@ -585,6 +602,29 @@ async function assertProjectComposerReady(fileName) {
     throw new Error(
       `Project composer view is missing the accessible chat status: ${snapshot.chatStatusText}`,
     );
+  }
+
+  if (
+    snapshot.attachControl.ariaLabel !== 'Attach files' ||
+    snapshot.attachControl.ariaDisabled !== 'true' ||
+    snapshot.attachControl.disabled !== false ||
+    snapshot.attachControl.describedBy !== 'composer-attachment-help' ||
+    snapshot.attachControl.title !== 'Attachments are not available yet' ||
+    !snapshot.attachControl.helpText.includes(
+      'Attachments are not available yet.',
+    ) ||
+    !snapshot.attachControl.hasIcon ||
+    !snapshot.attachControl.focused
+  ) {
+    throw new Error(
+      `Composer attachment control semantics regressed: ${JSON.stringify(
+        snapshot.attachControl,
+      )}`,
+    );
+  }
+
+  if (snapshot.attachControl.text.includes('+')) {
+    throw new Error('Composer attachment control still exposes + placeholder.');
   }
 
   if (!snapshot.composerRect || !snapshot.textareaRect) {

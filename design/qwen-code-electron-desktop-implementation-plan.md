@@ -22,6 +22,101 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Composer Attachment Affordance
+
+Status: completed in iteration 42.
+
+Goal: replace the disabled visible `+` placeholder in the composer with a
+prototype-aligned icon affordance that is honest about attachment support.
+
+User-visible value: the first viewport keeps the compact Codex-like composer
+shape from `home.jpg` while avoiding a placeholder-looking text control. Users
+can identify the attachment entry point and get a clear unavailable-state
+tooltip without leaving the workbench.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/SidebarIcons.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/composer-attachment-affordance.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The composer attachment control uses a real icon instead of visible `+`
+  placeholder text.
+- The control remains compact, keyboard-focusable, and explicitly unavailable
+  with `aria-disabled` and tooltip/help text until attachment workflow scope is
+  implemented.
+- The control does not submit the composer, open a fake picker, expose debug
+  state, or create first-viewport overflow at default or compact CDP sizes.
+- Existing model, permission, project, branch, send, and stop controls keep
+  their current behavior.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake project, assert the composer is ready before any
+  selected thread, inspect the attachment control semantics and geometry, then
+  continue the existing chat/review/settings/terminal path.
+- E2E assertions: attachment control has accessible label, `aria-disabled`
+  unavailable state, tooltip text, icon-sized geometry, no visible `+`
+  placeholder, composer containment, no overflow, and no console errors or
+  failed local requests.
+- Diagnostic artifacts: updated `project-composer.json`, screenshots, Electron
+  log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for the scoped design choice,
+  `frontend-design` for prototype-constrained compact affordance design, and
+  `electron-desktop-dev` for real Electron CDP verification.
+
+Notes and decisions:
+
+- Attachments remain intentionally unsupported in this slice. The control now
+  presents a real attachment icon and an explicit unavailable state instead of
+  implying that a visible `+` placeholder is wired to a file picker.
+- The control uses `aria-disabled="true"` rather than the native disabled
+  attribute so keyboard/CDP focus can verify the tooltip/help contract while
+  still preventing form submission or fake picker behavior.
+- The icon uses the existing local sidebar icon pattern instead of introducing
+  a new icon dependency for one composer affordance.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 20 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T17-27-14-177Z/`.
+- Key recorded metrics: attachment label `Attach files`, `aria-disabled="true"`,
+  native disabled `false`, focused `true`, icon present, text empty, title
+  `Attachments are not available yet`, help text present, 24x24 px geometry,
+  composer 820x88.09 px, no composer/control/action overflow, and no console
+  errors or failed local requests.
+
+Next work:
+
+- Continue prototype fidelity by checking whether Settings should open as a
+  lighter overlay/drawer while preserving the current two-click model/API-key
+  and permissions path.
+- Continue composer workflow by selecting the first real attachment scope:
+  file picker, drag-and-drop, paste image, or `@file` insertion.
+
 ### Completed Slice: Compact Composer Model Labels
 
 Status: completed in iteration 41.

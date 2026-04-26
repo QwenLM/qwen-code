@@ -150,6 +150,33 @@ export function ChatBubbleIcon(props: SidebarIconProps) {
   );
 }
 
+export function AttachmentIcon(props: SidebarIconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="20"
+      viewBox="0 0 24 24"
+      width="20"
+      {...props}
+    >
+      <path
+        d="m8.2 12.1 5.9-5.9a3.7 3.7 0 0 1 5.2 5.2l-7 7a5.2 5.2 0 0 1-7.4-7.4l7.3-7.3"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.7"
+      />
+      <path
+        d="m8.9 15.4 6.6-6.6"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.7"
+      />
+    </svg>
+  );
+}
+
 export function DiffIcon(props: SidebarIconProps) {
   return (
     <svg

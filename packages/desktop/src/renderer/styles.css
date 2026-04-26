@@ -1530,7 +1530,17 @@ summary:focus-visible {
   line-height: 1;
 }
 
-.composer-icon-button:not(:disabled):hover {
+.composer-icon-button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.composer-icon-button[aria-disabled='true'] {
+  cursor: not-allowed;
+  opacity: 0.66;
+}
+
+.composer-icon-button:not(:disabled):not([aria-disabled='true']):hover {
   background: rgba(238, 244, 239, 0.08);
   color: var(--text);
 }

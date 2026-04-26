@@ -455,6 +455,9 @@ describe('WorkspacePage', () => {
       'select[aria-label="Permission mode"]',
     );
     const model = renderedContainer.querySelector('select[aria-label="Model"]');
+    const attachButton = renderedContainer.querySelector(
+      '[data-testid="composer-attach-button"]',
+    );
 
     expect(textarea.disabled).toBe(false);
     expect(textarea.placeholder).toBe('Ask Qwen Code about example-workspace');
@@ -466,6 +469,19 @@ describe('WorkspacePage', () => {
     expect((permissionMode as HTMLSelectElement).disabled).toBe(true);
     expect(model).toBeInstanceOf(HTMLSelectElement);
     expect((model as HTMLSelectElement).disabled).toBe(true);
+    expect(attachButton).toBeInstanceOf(HTMLButtonElement);
+    expect((attachButton as HTMLButtonElement).disabled).toBe(false);
+    expect(attachButton?.getAttribute('aria-disabled')).toBe('true');
+    expect(attachButton?.getAttribute('aria-describedby')).toBe(
+      'composer-attachment-help',
+    );
+    expect(attachButton?.getAttribute('title')).toBe(
+      'Attachments are not available yet',
+    );
+    expect(attachButton?.textContent).not.toContain('+');
+    expect(
+      renderedContainer.querySelector('#composer-attachment-help')?.textContent,
+    ).toContain('Attachments are not available yet.');
   });
 
   it('shows configured settings models in the active composer picker', () => {

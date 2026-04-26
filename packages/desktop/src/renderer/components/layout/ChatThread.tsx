@@ -18,7 +18,12 @@ import type {
   DesktopModelInfo,
   DesktopPermissionRequest,
 } from '../../../shared/desktopProtocol.js';
-import { CopyIcon, DiffIcon, RefreshIcon } from './SidebarIcons.js';
+import {
+  AttachmentIcon,
+  CopyIcon,
+  DiffIcon,
+  RefreshIcon,
+} from './SidebarIcons.js';
 
 export function ChatThread({
   activeProject,
@@ -117,13 +122,19 @@ export function ChatThread({
           <div className="composer-context" aria-label="Composer context">
             <button
               aria-label="Attach files"
+              aria-describedby="composer-attachment-help"
+              aria-disabled="true"
               className="composer-icon-button"
-              disabled
-              title="Attach files"
+              data-testid="composer-attach-button"
+              title="Attachments are not available yet"
               type="button"
+              onClick={(event) => event.preventDefault()}
             >
-              +
+              <AttachmentIcon />
             </button>
+            <span className="sr-only" id="composer-attachment-help">
+              Attachments are not available yet.
+            </span>
             <span
               className="composer-chip composer-chip-project"
               title={activeProject?.path ?? disabledReason ?? undefined}
