@@ -1026,10 +1026,10 @@ describe('modelConfigUtils', () => {
       // modelProvider.id > cli.model > env > settings.model
       vi.mocked(resolveModelConfig).mockImplementation((input) => {
         const model =
-          input.modelProvider?.id ||
-          input.cli?.model ||
-          input.env?.['OPENAI_MODEL'] ||
-          input.settings?.model ||
+          input?.modelProvider?.id ||
+          input?.cli?.model ||
+          input?.env?.['OPENAI_MODEL'] ||
+          input?.settings?.model ||
           '';
         return {
           config: { model, apiKey: '', baseUrl: '' },
