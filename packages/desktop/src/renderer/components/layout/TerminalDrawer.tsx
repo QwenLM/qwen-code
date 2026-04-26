@@ -10,6 +10,7 @@ import {
   ChevronUpIcon,
   CopyIcon,
   PaperclipIcon,
+  SendIcon,
   StopIcon,
   TerminalIcon,
   TrashIcon,
@@ -109,52 +110,10 @@ export function TerminalDrawer({
           data-testid="terminal-body"
           id="terminal-drawer-body"
         >
-          <div className="terminal-actions" aria-label="Terminal actions">
-            <button
-              aria-label="Copy Output"
-              className="terminal-icon-button"
-              disabled={!terminal}
-              title="Copy Output"
-              type="button"
-              onClick={onCopyOutput}
-            >
-              <CopyIcon />
-              <span className="sr-only">Copy Output</span>
-            </button>
-            <button
-              aria-label="Attach Output"
-              className="terminal-icon-button"
-              disabled={!hasOutput}
-              title="Attach Output to Composer"
-              type="button"
-              onClick={onAttachOutput}
-            >
-              <PaperclipIcon />
-              <span className="sr-only">Attach Output</span>
-            </button>
-            <button
-              aria-label="Clear Terminal"
-              className="terminal-icon-button terminal-icon-button-muted"
-              title="Clear Terminal"
-              type="button"
-              onClick={onClear}
-            >
-              <TrashIcon />
-              <span className="sr-only">Clear Terminal</span>
-            </button>
-            <button
-              aria-label="Kill Terminal"
-              className="terminal-icon-button terminal-icon-button-danger"
-              disabled={terminal?.status !== 'running'}
-              title="Kill Terminal"
-              type="button"
-              onClick={onKill}
-            >
-              <StopIcon />
-              <span className="sr-only">Kill Terminal</span>
-            </button>
-          </div>
-          <div className="terminal-command-row">
+          <div
+            className="terminal-command-row"
+            data-testid="terminal-command-row"
+          >
             <input
               aria-label="Terminal command"
               disabled={!project}
@@ -170,13 +129,66 @@ export function TerminalDrawer({
               }}
             />
             <button
-              className="primary-button"
+              aria-label="Run"
+              className="terminal-submit-button"
+              data-testid="terminal-run-button"
               disabled={!project || command.trim().length === 0}
+              title="Run command"
               type="button"
               onClick={onRun}
             >
-              Run
+              <TerminalIcon />
+              <span className="sr-only">Run</span>
             </button>
+            <div
+              className="terminal-actions"
+              aria-label="Terminal actions"
+              data-testid="terminal-actions"
+            >
+              <button
+                aria-label="Copy Output"
+                className="terminal-icon-button"
+                disabled={!terminal}
+                title="Copy Output"
+                type="button"
+                onClick={onCopyOutput}
+              >
+                <CopyIcon />
+                <span className="sr-only">Copy Output</span>
+              </button>
+              <button
+                aria-label="Attach Output"
+                className="terminal-icon-button"
+                disabled={!hasOutput}
+                title="Attach Output to Composer"
+                type="button"
+                onClick={onAttachOutput}
+              >
+                <PaperclipIcon />
+                <span className="sr-only">Attach Output</span>
+              </button>
+              <button
+                aria-label="Clear Terminal"
+                className="terminal-icon-button terminal-icon-button-muted"
+                title="Clear Terminal"
+                type="button"
+                onClick={onClear}
+              >
+                <TrashIcon />
+                <span className="sr-only">Clear Terminal</span>
+              </button>
+              <button
+                aria-label="Kill Terminal"
+                className="terminal-icon-button terminal-icon-button-danger"
+                disabled={terminal?.status !== 'running'}
+                title="Kill Terminal"
+                type="button"
+                onClick={onKill}
+              >
+                <StopIcon />
+                <span className="sr-only">Kill Terminal</span>
+              </button>
+            </div>
           </div>
           <div className="terminal-input-row">
             <textarea
@@ -187,17 +199,21 @@ export function TerminalDrawer({
                   ? 'Write to running process stdin'
                   : 'Start a running process to send stdin'
               }
-              rows={2}
+              rows={1}
               value={input}
               onChange={(event) => onInputChange(event.target.value)}
             />
             <button
-              className="secondary-button"
+              aria-label="Send Input"
+              className="terminal-submit-button terminal-submit-button-muted"
+              data-testid="terminal-input-button"
               disabled={!canWriteInput || input.trim().length === 0}
+              title="Send input"
               type="button"
               onClick={onWriteInput}
             >
-              Send Input
+              <SendIcon />
+              <span className="sr-only">Send Input</span>
             </button>
           </div>
           <pre className="terminal-output">

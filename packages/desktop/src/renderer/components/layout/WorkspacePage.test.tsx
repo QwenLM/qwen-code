@@ -179,6 +179,19 @@ describe('WorkspacePage', () => {
     expect(
       renderedContainer.querySelector('button[aria-label="Send to AI"]'),
     ).toBeNull();
+    for (const testId of ['terminal-run-button', 'terminal-input-button']) {
+      const button = renderedContainer.querySelector(
+        `[data-testid="${testId}"]`,
+      );
+      expect(button).toBeInstanceOf(HTMLButtonElement);
+      expect(button?.querySelector('svg')).toBeTruthy();
+      expect(button?.querySelector('.sr-only')).toBeTruthy();
+    }
+    expect(
+      renderedContainer
+        .querySelector('[data-testid="terminal-command-row"]')
+        ?.querySelector('[data-testid="terminal-actions"]'),
+    ).toBeTruthy();
 
     act(() => {
       clickButton(renderedContainer, 'Open Changes');

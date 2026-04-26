@@ -208,6 +208,7 @@ async function main() {
     'Terminal command',
     "node -e \"process.stdin.once('data', d => process.stdout.write('stdin:' + d.toString(), () => process.exit(0)))\"",
   );
+  await assertTerminalControlRowsContained('terminal-long-command-layout.json');
   await clickButton('Run');
   await waitForText('[running]');
   await setFieldByAriaLabel('Terminal input', 'desktop-e2e-stdin');
@@ -4286,10 +4287,45 @@ async function assertTerminalExpandedLayout(fileName) {
       composer: rectFor('[data-testid="message-composer"]'),
       terminal: rectFor('[data-testid="terminal-drawer"]'),
       terminalBody: rectFor('[data-testid="terminal-body"]'),
+      terminalCommandRow: rectFor('[data-testid="terminal-command-row"]'),
+      terminalInputRow: rectFor('.terminal-input-row'),
+      terminalActions: rectFor('[data-testid="terminal-actions"]'),
+      terminalRunButton: rectFor('[data-testid="terminal-run-button"]'),
+      terminalInputButton: rectFor('[data-testid="terminal-input-button"]'),
       terminalExpanded:
         document
           .querySelector('[data-testid="terminal-toggle"]')
-          ?.getAttribute('aria-expanded') ?? null
+          ?.getAttribute('aria-expanded') ?? null,
+      terminalControls: (() => {
+        const commandRow = document.querySelector(
+          '[data-testid="terminal-command-row"]',
+        );
+        const actions = document.querySelector(
+          '[data-testid="terminal-actions"]',
+        );
+        const runButton = document.querySelector(
+          '[data-testid="terminal-run-button"]',
+        );
+        const inputButton = document.querySelector(
+          '[data-testid="terminal-input-button"]',
+        );
+        return {
+          actionsParentTestId:
+            actions?.parentElement?.getAttribute('data-testid') ?? null,
+          actionsInCommandRow: Boolean(commandRow?.contains(actions)),
+          runLabel: runButton?.getAttribute('aria-label') ?? null,
+          inputLabel: inputButton?.getAttribute('aria-label') ?? null,
+          runTitle: runButton?.getAttribute('title') ?? null,
+          inputTitle: inputButton?.getAttribute('title') ?? null,
+          runHasIcon: Boolean(runButton?.querySelector('svg')),
+          inputHasIcon: Boolean(inputButton?.querySelector('svg')),
+          runHasSrOnly: Boolean(runButton?.querySelector('.sr-only')),
+          inputHasSrOnly: Boolean(inputButton?.querySelector('.sr-only')),
+          standaloneActionsRow: Boolean(
+            actions?.parentElement?.classList.contains('terminal-body'),
+          )
+        };
+      })()
     };
   })()`);
 
@@ -4305,6 +4341,11 @@ async function assertTerminalExpandedLayout(fileName) {
     'composer',
     'terminal',
     'terminalBody',
+    'terminalCommandRow',
+    'terminalInputRow',
+    'terminalActions',
+    'terminalRunButton',
+    'terminalInputButton',
   ].filter((key) => metrics[key] === null);
   if (missing.length > 0) {
     throw new Error(`Missing expanded terminal rects: ${missing.join(', ')}`);
@@ -4336,6 +4377,57 @@ async function assertTerminalExpandedLayout(fileName) {
     throw new Error(
       `Expanded terminal document should fit one viewport; body scrollHeight=${metrics.document.bodyScrollHeight}, viewport=${metrics.viewport.height}`,
     );
+  }
+
+  if (!metrics.terminalControls.actionsInCommandRow) {
+    throw new Error('Terminal actions should be grouped with the command row.');
+  }
+
+  if (metrics.terminalControls.standaloneActionsRow) {
+    throw new Error('Terminal actions should not consume a standalone row.');
+  }
+
+  if (
+    metrics.terminalControls.runLabel !== 'Run' ||
+    metrics.terminalControls.inputLabel !== 'Send Input' ||
+    !metrics.terminalControls.runTitle ||
+    !metrics.terminalControls.inputTitle ||
+    !metrics.terminalControls.runHasIcon ||
+    !metrics.terminalControls.inputHasIcon ||
+    !metrics.terminalControls.runHasSrOnly ||
+    !metrics.terminalControls.inputHasSrOnly
+  ) {
+    throw new Error(
+      `Terminal submit controls are not compact accessible icon buttons: ${JSON.stringify(
+        metrics.terminalControls,
+      )}`,
+    );
+  }
+
+  for (const [name, rect] of [
+    ['run', metrics.terminalRunButton],
+    ['send input', metrics.terminalInputButton],
+  ]) {
+    if (rect.width > 38 || rect.height > 38) {
+      throw new Error(
+        `Terminal ${name} button should stay compact: ${JSON.stringify(rect)}`,
+      );
+    }
+  }
+
+  for (const [name, rect] of [
+    ['command row', metrics.terminalCommandRow],
+    ['input row', metrics.terminalInputRow],
+    ['actions', metrics.terminalActions],
+  ]) {
+    if (
+      rect.left < metrics.terminalBody.left - 1 ||
+      rect.right > metrics.terminalBody.right + 1
+    ) {
+      throw new Error(
+        `Terminal ${name} overflows the drawer body: ${JSON.stringify(rect)}`,
+      );
+    }
   }
 }
 
@@ -4389,6 +4481,98 @@ async function assertTerminalOutputAttached(fileName) {
     throw new Error(
       'Attaching terminal output should not create an agent approval request.',
     );
+  }
+}
+
+async function assertTerminalControlRowsContained(fileName) {
+  const snapshot = await evaluate(`(() => {
+    const rectFor = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height,
+        scrollWidth: element.scrollWidth,
+        clientWidth: element.clientWidth
+      };
+    };
+    const command = document.querySelector(
+      'input[aria-label="Terminal command"]',
+    );
+
+    return {
+      terminalBody: rectFor('[data-testid="terminal-body"]'),
+      commandRow: rectFor('[data-testid="terminal-command-row"]'),
+      inputRow: rectFor('.terminal-input-row'),
+      actions: rectFor('[data-testid="terminal-actions"]'),
+      commandInput: rectFor('input[aria-label="Terminal command"]'),
+      inputButton: rectFor('[data-testid="terminal-input-button"]'),
+      commandLength: command?.value.length ?? 0
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  const missing = [
+    'terminalBody',
+    'commandRow',
+    'inputRow',
+    'actions',
+    'commandInput',
+    'inputButton',
+  ].filter((key) => snapshot[key] === null);
+  if (missing.length > 0) {
+    throw new Error(`Missing terminal control rects: ${missing.join(', ')}`);
+  }
+
+  if (snapshot.commandLength < 80) {
+    throw new Error(
+      `Terminal long-command check did not receive a long command: ${snapshot.commandLength}`,
+    );
+  }
+
+  for (const [name, rect] of [
+    ['command row', snapshot.commandRow],
+    ['stdin row', snapshot.inputRow],
+    ['actions', snapshot.actions],
+    ['command input', snapshot.commandInput],
+    ['stdin send button', snapshot.inputButton],
+  ]) {
+    if (
+      rect.left < snapshot.terminalBody.left - 1 ||
+      rect.right > snapshot.terminalBody.right + 1
+    ) {
+      throw new Error(
+        `Terminal ${name} is not contained after long command input: ${JSON.stringify(
+          rect,
+        )}`,
+      );
+    }
+  }
+
+  for (const [name, rect] of [
+    ['command row', snapshot.commandRow],
+    ['stdin row', snapshot.inputRow],
+    ['actions', snapshot.actions],
+  ]) {
+    if (rect.scrollWidth > rect.clientWidth + 4) {
+      throw new Error(
+        `Terminal ${name} has horizontal layout overflow after long command input: ${JSON.stringify(
+          rect,
+        )}`,
+      );
+    }
   }
 }
 

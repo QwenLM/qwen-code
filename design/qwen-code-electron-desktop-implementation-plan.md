@@ -22,6 +22,102 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Terminal Expanded Control Density
+
+Status: completed in iteration 47.
+
+Goal: tighten the expanded terminal drawer controls so the drawer remains a
+supporting command surface instead of reading like a large form panel.
+
+User-visible value: users can expand the terminal, run a command, send stdin,
+copy/attach/clear/kill output, and collapse again with less visual weight
+competing with the conversation and composer.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/TerminalDrawer.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/terminal-expanded-control-density.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Expanded terminal Run and Send Input controls are compact icon-led buttons
+  with stable accessible labels and tooltips.
+- Copy, attach, clear, and kill actions stay icon-only, accessible, and grouped
+  with the command row instead of consuming a separate blank toolbar row.
+- Command and stdin rows stay contained with long command text at the default
+  Electron viewport, with no document overflow.
+- Terminal attach/copy/run/stdin/collapse behavior remains unchanged.
+- The conversation remains taller than the expanded terminal drawer.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake project, complete the existing fake approval and
+  review/settings paths, expand the terminal, inspect compact terminal control
+  geometry, run a deterministic command, send stdin to a running command,
+  attach terminal output to the composer, and collapse the terminal.
+- E2E assertions: expanded terminal remains supporting, Run and Send Input are
+  icon-led buttons with contained geometry and accessible labels, the terminal
+  action group is not a standalone row, command/stdin controls do not overflow,
+  attachment does not create an approval request, and no console errors or
+  failed local requests are recorded.
+- Diagnostic artifacts: updated `terminal-expanded-layout.json`,
+  `terminal-long-command-layout.json`, `terminal-expanded.png`,
+  `terminal-attachment.json`, `completed-layout.json`, screenshots, Electron
+  log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for selecting a small fidelity slice
+  without user interruption, `frontend-design` for prototype-constrained
+  terminal density and icon-first controls, and `electron-desktop-dev` for
+  renderer changes verified through real Electron CDP interaction.
+
+Notes and decisions:
+
+- The prototype treats terminal/local controls as supporting chrome below the
+  composer. This slice preserves the existing drawer behavior but removes the
+  extra expanded toolbar row and text-heavy terminal form buttons.
+- The existing local `TerminalIcon` and `SendIcon` are sufficient; no new icon
+  dependency is needed.
+- The expanded drawer keeps the same overall height but gives more of that
+  height to terminal output by removing the separate action row.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 20 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T18-18-56-808Z/`.
+- Key recorded metrics: expanded terminal remained 238 px tall while the
+  conversation remained 500 px tall; command and stdin rows stayed inside the
+  960 px terminal body; Run and Send Input controls were 32 x 32 px with
+  accessible labels, tooltips, icons, and screen-reader text; the terminal
+  action group was inside the command row; a 111-character command stayed
+  contained without row overflow; no console errors or failed local requests
+  were recorded.
+
+Next work:
+
+- Continue message-system polish by reducing `PLAN` and tool activity label
+  weight if screenshot review shows they still compete with assistant prose.
+- Consider compact-viewport coverage for expanded terminal controls if future
+  work changes terminal height or drawer behavior.
+
 ### Slice: Terminal Strip Fidelity
 
 Status: completed in iteration 46.

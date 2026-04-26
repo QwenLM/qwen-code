@@ -2046,31 +2046,43 @@ textarea:focus {
 .terminal-body {
   display: grid;
   min-height: 0;
-  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
-  gap: 7px;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 6px;
   padding-top: 6px;
 }
 
 .terminal-actions,
 .terminal-command-row,
 .terminal-input-row {
-  display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .terminal-actions {
+  display: flex;
+  min-width: 0;
   flex-wrap: nowrap;
   justify-content: flex-end;
 }
 
+.terminal-command-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.terminal-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+}
+
 .terminal-icon-button {
   display: grid;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   place-items: center;
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: 6px;
   background: rgba(238, 244, 239, 0.04);
   color: var(--text-soft);
 }
@@ -2096,24 +2108,52 @@ textarea:focus {
 }
 
 .terminal-icon-button svg {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
 }
 
 .terminal-command-row input {
   min-width: 0;
-  flex: 1;
-}
-
-.terminal-input-row {
-  align-items: stretch;
 }
 
 .terminal-input-row textarea {
   min-width: 0;
-  min-height: 36px;
-  flex: 1;
+  min-height: 32px;
   resize: none;
+}
+
+.terminal-submit-button {
+  display: grid;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid rgba(85, 166, 255, 0.34);
+  border-radius: 7px;
+  background: linear-gradient(180deg, #5faeff, #3d8fe8);
+  color: #071116;
+}
+
+.terminal-submit-button:not(:disabled):hover {
+  border-color: rgba(162, 210, 255, 0.7);
+  background: linear-gradient(180deg, #75bbff, #4899ef);
+}
+
+.terminal-submit-button-muted {
+  border-color: var(--line);
+  background: rgba(238, 244, 239, 0.045);
+  color: var(--text-soft);
+}
+
+.terminal-submit-button-muted:not(:disabled):hover {
+  border-color: rgba(85, 166, 255, 0.28);
+  background: var(--accent-soft);
+  color: #c7e2ff;
+}
+
+.terminal-submit-button svg {
+  width: 15px;
+  height: 15px;
 }
 
 .terminal-output {
