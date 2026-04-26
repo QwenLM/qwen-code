@@ -12,13 +12,11 @@ import { DialogManager } from '../components/DialogManager.js';
 import { Composer } from '../components/Composer.js';
 import { Footer } from '../components/Footer.js';
 import { ExitWarning } from '../components/ExitWarning.js';
-import {
-  getStickyTodoMaxVisibleItems,
-  StickyTodoList,
-} from '../components/StickyTodoList.js';
+import { StickyTodoList } from '../components/StickyTodoList.js';
 import { BtwMessage } from '../components/messages/BtwMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { StreamingState } from '../types.js';
+import { getStickyTodoMaxVisibleItems } from '../utils/todoSnapshot.js';
 
 export const ScreenReaderAppLayout: React.FC = () => {
   const uiState = useUIState();

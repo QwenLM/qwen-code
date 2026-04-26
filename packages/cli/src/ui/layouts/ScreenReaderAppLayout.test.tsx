@@ -40,7 +40,6 @@ vi.mock('../components/messages/BtwMessage.js', () => ({
 }));
 
 vi.mock('../components/StickyTodoList.js', () => ({
-  getStickyTodoMaxVisibleItems: () => 5,
   StickyTodoList: () => <Text>StickyTodoList</Text>,
 }));
 

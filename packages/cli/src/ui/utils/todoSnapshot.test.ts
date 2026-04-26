@@ -7,7 +7,12 @@
 import { describe, expect, it } from 'vitest';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 import { ToolCallStatus } from '../types.js';
-import { getStickyTodos } from './todoSnapshot.js';
+import {
+  getStickyTodoMaxVisibleItems,
+  getStickyTodos,
+  getStickyTodosLayoutKey,
+  getStickyTodosRenderKey,
+} from './todoSnapshot.js';
 
 function makeTodoToolGroup(
   content: string,
@@ -224,5 +229,61 @@ describe('getStickyTodos', () => {
     ] as HistoryItemWithoutId[];
 
     expect(getStickyTodos(history, pendingHistoryItems)).toBeNull();
+  });
+});
+
+describe('sticky todo layout helpers', () => {
+  it('keeps the layout key stable for status-only updates', () => {
+    const pendingTodos = [
+      {
+        id: 'todo-1',
+        content: 'Run focused tests',
+        status: 'pending' as const,
+      },
+    ];
+    const inProgressTodos = [
+      {
+        id: 'todo-1',
+        content: 'Run focused tests',
+        status: 'in_progress' as const,
+      },
+    ];
+
+    expect(getStickyTodosLayoutKey(pendingTodos, 64, 5)).toBe(
+      getStickyTodosLayoutKey(inProgressTodos, 64, 5),
+    );
+    expect(getStickyTodosRenderKey(pendingTodos)).not.toBe(
+      getStickyTodosRenderKey(inProgressTodos),
+    );
+  });
+
+  it('changes the layout key when wrapping-sensitive inputs change', () => {
+    const todos = [
+      {
+        id: 'todo-1',
+        content: 'Run focused tests',
+        status: 'pending' as const,
+      },
+    ];
+
+    expect(getStickyTodosLayoutKey(todos, 64, 5)).not.toBe(
+      getStickyTodosLayoutKey(todos, 40, 5),
+    );
+    expect(getStickyTodosLayoutKey(todos, 64, 5)).not.toBe(
+      getStickyTodosLayoutKey(
+        [{ ...todos[0], content: 'Run focused tests and build' }],
+        64,
+        5,
+      ),
+    );
+    expect(getStickyTodosLayoutKey(todos, 64, 5)).not.toBe(
+      getStickyTodosLayoutKey(todos, 64, 2),
+    );
+  });
+
+  it('derives a bounded sticky todo item count from terminal height', () => {
+    expect(getStickyTodoMaxVisibleItems(8)).toBe(1);
+    expect(getStickyTodoMaxVisibleItems(15)).toBe(3);
+    expect(getStickyTodoMaxVisibleItems(80)).toBe(5);
   });
 });

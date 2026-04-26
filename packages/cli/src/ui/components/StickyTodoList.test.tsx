@@ -6,10 +6,8 @@
 
 import { render } from 'ink-testing-library';
 import { describe, expect, it } from 'vitest';
-import {
-  getStickyTodoMaxVisibleItems,
-  StickyTodoList,
-} from './StickyTodoList.js';
+import { getStickyTodoMaxVisibleItems } from '../utils/todoSnapshot.js';
+import { StickyTodoList } from './StickyTodoList.js';
 import type { TodoItem } from './TodoDisplay.js';
 
 describe('StickyTodoList', () => {

@@ -29,7 +29,7 @@ import {
   UIActionsContext,
   type UIActions,
 } from './contexts/UIActionsContext.js';
-import { ToolCallStatus } from './types.js';
+import { type HistoryItem, ToolCallStatus } from './types.js';
 import { useContext } from 'react';
 import { Box, measureElement } from 'ink';
 
@@ -1351,6 +1351,43 @@ describe('AppContainer State Management', () => {
   describe('Terminal Height Calculation', () => {
     const mockedMeasureElement = measureElement as Mock;
     const mockedUseTerminalSize = useTerminalSize as Mock;
+    const makeTodoHistory = (
+      status: 'pending' | 'in_progress' | 'completed',
+    ): HistoryItem[] => [
+      {
+        type: 'tool_group',
+        id: 1,
+        tools: [
+          {
+            callId: 'todo-1',
+            name: 'TodoWrite',
+            description: 'Update todos',
+            resultDisplay: {
+              type: 'todo_list',
+              todos: [
+                {
+                  id: 'todo-1',
+                  content: 'Run focused tests',
+                  status,
+                },
+              ],
+            },
+            status: ToolCallStatus.Success,
+            confirmationDetails: undefined,
+          },
+        ],
+      },
+      {
+        type: 'gemini',
+        id: 2,
+        text: 'First response after todo',
+      },
+      {
+        type: 'gemini',
+        id: 3,
+        text: 'Second response after todo',
+      },
+    ];
 
     it('should prevent terminal height from being less than 1', () => {
       const resizePtySpy = vi.spyOn(ShellExecutionService, 'resizePty');
@@ -1385,6 +1422,44 @@ describe('AppContainer State Management', () => {
         resizePtySpy.mock.calls[resizePtySpy.mock.calls.length - 1];
       // Check the height argument specifically
       expect(lastCall[2]).toBe(1);
+    });
+
+    it('does not remeasure footer height for sticky todo status-only updates', () => {
+      const historyManager = {
+        history: makeTodoHistory('pending'),
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      };
+      mockedUseHistory.mockReturnValue(historyManager);
+      mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
+      mockedMeasureElement.mockReturnValue({ width: 80, height: 4 });
+
+      const view = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const callsAfterInitialRender = mockedMeasureElement.mock.calls.length;
+
+      historyManager.history = makeTodoHistory('in_progress');
+      view.rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(mockedMeasureElement).toHaveBeenCalledTimes(
+        callsAfterInitialRender,
+      );
     });
   });
 

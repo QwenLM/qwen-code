@@ -20,6 +20,9 @@ interface TodoSnapshotSearchResult {
 type SnapshotSearchResult = TodoSnapshotSearchResult | undefined;
 
 const MIN_HISTORY_ITEMS_AFTER_TODO_BEFORE_STICKY = 2;
+export const STICKY_TODO_MAX_VISIBLE_ITEMS = 5;
+const STICKY_TODO_ROWS_PER_VISIBLE_ITEM = 5;
+
 const STICKY_TODO_STATUS_PRIORITY: Record<TodoItem['status'], number> = {
   in_progress: 0,
   pending: 1,
@@ -137,4 +140,46 @@ export function getOrderedStickyTodos(todos: readonly TodoItem[]): TodoItem[] {
         left.index - right.index,
     )
     .map(({ todo }) => todo);
+}
+
+export function getStickyTodosRenderKey(
+  todos: readonly TodoItem[] | null,
+): string {
+  if (!todos) {
+    return 'null';
+  }
+
+  return JSON.stringify(
+    todos.map((todo) => [todo.id, todo.content, todo.status]),
+  );
+}
+
+export function getStickyTodosLayoutKey(
+  todos: readonly TodoItem[] | null,
+  width: number,
+  maxVisibleItems: number,
+): string {
+  if (!todos) {
+    return 'null';
+  }
+
+  return JSON.stringify({
+    width,
+    maxVisibleItems,
+    todos: todos.map((todo) => [todo.id, todo.content]),
+  });
+}
+
+export function getStickyTodoMaxVisibleItems(terminalHeight: number): number {
+  if (!Number.isFinite(terminalHeight) || terminalHeight <= 0) {
+    return STICKY_TODO_MAX_VISIBLE_ITEMS;
+  }
+
+  return Math.max(
+    1,
+    Math.min(
+      STICKY_TODO_MAX_VISIBLE_ITEMS,
+      Math.floor(terminalHeight / STICKY_TODO_ROWS_PER_VISIBLE_ITEM),
+    ),
+  );
 }

@@ -5,12 +5,16 @@
  */
 
 import type React from 'react';
-import { useMemo } from 'react';
+import { memo, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { t } from '../../i18n/index.js';
 import { Colors } from '../colors.js';
 import { theme } from '../semantic-colors.js';
-import { getOrderedStickyTodos } from '../utils/todoSnapshot.js';
+import {
+  getOrderedStickyTodos,
+  getStickyTodosRenderKey,
+  STICKY_TODO_MAX_VISIBLE_ITEMS,
+} from '../utils/todoSnapshot.js';
 import type { TodoItem } from './TodoDisplay.js';
 
 interface StickyTodoListProps {
@@ -25,33 +29,21 @@ const STATUS_ICONS = {
   completed: '●',
 } as const;
 
-const DEFAULT_MAX_VISIBLE_TODOS = 5;
-const MIN_VISIBLE_TODOS = 1;
-const TERMINAL_ROWS_PER_VISIBLE_TODO = 5;
-
 function clampVisibleTodoCount(value: number): number {
   if (!Number.isFinite(value)) {
-    return DEFAULT_MAX_VISIBLE_TODOS;
+    return STICKY_TODO_MAX_VISIBLE_ITEMS;
   }
 
   return Math.max(
-    MIN_VISIBLE_TODOS,
-    Math.min(DEFAULT_MAX_VISIBLE_TODOS, Math.floor(value)),
+    1,
+    Math.min(STICKY_TODO_MAX_VISIBLE_ITEMS, Math.floor(value)),
   );
 }
 
-export function getStickyTodoMaxVisibleItems(terminalHeight: number): number {
-  if (!Number.isFinite(terminalHeight) || terminalHeight <= 0) {
-    return DEFAULT_MAX_VISIBLE_TODOS;
-  }
-
-  return clampVisibleTodoCount(terminalHeight / TERMINAL_ROWS_PER_VISIBLE_TODO);
-}
-
-export const StickyTodoList: React.FC<StickyTodoListProps> = ({
+const StickyTodoListComponent: React.FC<StickyTodoListProps> = ({
   todos,
   width,
-  maxVisibleItems = DEFAULT_MAX_VISIBLE_TODOS,
+  maxVisibleItems = STICKY_TODO_MAX_VISIBLE_ITEMS,
 }) => {
   const orderedTodos = useMemo(() => getOrderedStickyTodos(todos), [todos]);
   const todoNumberById = useMemo(
@@ -125,3 +117,12 @@ export const StickyTodoList: React.FC<StickyTodoListProps> = ({
     </Box>
   );
 };
+
+export const StickyTodoList = memo(
+  StickyTodoListComponent,
+  (previousProps, nextProps) =>
+    previousProps.width === nextProps.width &&
+    previousProps.maxVisibleItems === nextProps.maxVisibleItems &&
+    getStickyTodosRenderKey(previousProps.todos) ===
+      getStickyTodosRenderKey(nextProps.todos),
+);

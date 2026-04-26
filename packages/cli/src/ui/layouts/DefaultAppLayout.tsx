@@ -11,10 +11,7 @@ import { MainContent } from '../components/MainContent.js';
 import { DialogManager } from '../components/DialogManager.js';
 import { Composer } from '../components/Composer.js';
 import { ExitWarning } from '../components/ExitWarning.js';
-import {
-  getStickyTodoMaxVisibleItems,
-  StickyTodoList,
-} from '../components/StickyTodoList.js';
+import { StickyTodoList } from '../components/StickyTodoList.js';
 import { BtwMessage } from '../components/messages/BtwMessage.js';
 import { AgentTabBar } from '../components/agent-view/AgentTabBar.js';
 import { AgentChatView } from '../components/agent-view/AgentChatView.js';
@@ -24,6 +21,7 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAgentViewState } from '../contexts/AgentViewContext.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { StreamingState } from '../types.js';
+import { getStickyTodoMaxVisibleItems } from '../utils/todoSnapshot.js';
 
 export const DefaultAppLayout: React.FC = () => {
   const uiState = useUIState();
