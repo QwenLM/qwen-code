@@ -14,6 +14,8 @@ import type {
   SessionMetrics,
 } from '../contexts/SessionContext.js';
 import { MAIN_SOURCE } from '@qwen-code/qwen-code-core';
+import { SettingsContext } from '../contexts/SettingsContext.js';
+import type { LoadedSettings } from '../../config/settings.js';
 
 const mainOnly = (core: ModelMetricsCore): ModelMetrics => ({
   ...core,
@@ -31,7 +33,13 @@ vi.mock('../contexts/SessionContext.js', async (importOriginal) => {
 
 const useSessionStatsMock = vi.mocked(SessionContext.useSessionStats);
 
-const renderWithMockedStats = (metrics: SessionMetrics) => {
+const renderWithMockedStats = (
+  metrics: SessionMetrics,
+  modelPricing?: Record<
+    string,
+    { inputPerMillionTokens?: number; outputPerMillionTokens?: number }
+  >,
+) => {
   useSessionStatsMock.mockReturnValue({
     stats: {
       sessionStartTime: new Date(),
@@ -44,7 +52,15 @@ const renderWithMockedStats = (metrics: SessionMetrics) => {
     startNewPrompt: vi.fn(),
   });
 
-  return render(<ModelStatsDisplay />);
+  const mockSettings = {
+    merged: { modelPricing },
+  } as unknown as LoadedSettings;
+
+  return render(
+    <SettingsContext.Provider value={mockSettings}>
+      <ModelStatsDisplay />
+    </SettingsContext.Provider>,
+  );
 };
 
 describe('<ModelStatsDisplay />', () => {

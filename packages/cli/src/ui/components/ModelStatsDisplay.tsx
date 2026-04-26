@@ -17,6 +17,8 @@ import type { ModelMetricsCore } from '../contexts/SessionContext.js';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import { flattenModelsBySource } from '../utils/modelsBySource.js';
 import { t } from '../../i18n/index.js';
+import { useSettings } from '../contexts/SettingsContext.js';
+import { calculateCost } from '../../utils/costCalculator.js';
 
 const METRIC_COL_WIDTH = 28;
 // 28 + 2*24 = 76, fitting the 76-column panel at 80-column terminal width
@@ -65,6 +67,8 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
   const { stats } = useSessionStats();
   const { models } = stats.metrics;
   const entries = flattenModelsBySource(models);
+  const settings = useSettings();
+  const modelPricing = settings.merged.modelPricing;
 
   if (entries.length === 0) {
     return (
@@ -91,6 +95,15 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
   );
   const hasTool = entries.some(({ metrics }) => metrics.tokens.tool > 0);
   const hasCached = entries.some(({ metrics }) => metrics.tokens.cached > 0);
+
+  const hasPricing = entries.some(
+    ({ key, metrics }) =>
+      calculateCost({
+        inputTokens: metrics.tokens.prompt,
+        outputTokens: metrics.tokens.candidates,
+        pricing: modelPricing?.[key],
+      }) != null,
+  );
 
   return (
     <Box
@@ -211,6 +224,23 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
         isSubtle
         values={getModelValues((m) => m.tokens.candidates.toLocaleString())}
       />
+      {hasPricing && (
+        <>
+          <Box height={1} />
+          <StatRow title={t('Cost')} values={[]} isSection />
+          <StatRow
+            title={t('Estimated')}
+            values={entries.map(({ key, metrics }) => {
+              const cost = calculateCost({
+                inputTokens: metrics.tokens.prompt,
+                outputTokens: metrics.tokens.candidates,
+                pricing: modelPricing?.[key],
+              });
+              return cost != null ? `$${cost.toFixed(4)}` : 'N/A';
+            })}
+          />
+        </>
+      )}
     </Box>
   );
 };
