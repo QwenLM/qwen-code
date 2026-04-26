@@ -11,7 +11,10 @@ import { MainContent } from '../components/MainContent.js';
 import { DialogManager } from '../components/DialogManager.js';
 import { Composer } from '../components/Composer.js';
 import { ExitWarning } from '../components/ExitWarning.js';
-import { StickyTodoList } from '../components/StickyTodoList.js';
+import {
+  getStickyTodoMaxVisibleItems,
+  StickyTodoList,
+} from '../components/StickyTodoList.js';
 import { BtwMessage } from '../components/messages/BtwMessage.js';
 import { AgentTabBar } from '../components/agent-view/AgentTabBar.js';
 import { AgentChatView } from '../components/agent-view/AgentChatView.js';
@@ -30,6 +33,9 @@ export const DefaultAppLayout: React.FC = () => {
   const hasAgents = agents.size > 0;
   const isAgentTab = activeView !== 'main' && agents.has(activeView);
   const stickyTodoWidth = Math.min(uiState.mainAreaWidth, 64);
+  const stickyTodoMaxVisibleItems = getStickyTodoMaxVisibleItems(
+    uiState.terminalHeight,
+  );
   const shouldShowStickyTodos =
     uiState.stickyTodos !== null &&
     !uiState.dialogsVisible &&
@@ -81,6 +87,7 @@ export const DefaultAppLayout: React.FC = () => {
                   <StickyTodoList
                     todos={uiState.stickyTodos!}
                     width={stickyTodoWidth}
+                    maxVisibleItems={stickyTodoMaxVisibleItems}
                   />
                 )}
                 {uiState.btwItem && (

@@ -6,7 +6,10 @@
 
 import { render } from 'ink-testing-library';
 import { describe, expect, it } from 'vitest';
-import { StickyTodoList } from './StickyTodoList.js';
+import {
+  getStickyTodoMaxVisibleItems,
+  StickyTodoList,
+} from './StickyTodoList.js';
 import type { TodoItem } from './TodoDisplay.js';
 
 describe('StickyTodoList', () => {
@@ -53,5 +56,52 @@ describe('StickyTodoList', () => {
     expect(output.indexOf('Run cli tests')).toBeLessThan(
       output.indexOf('Summarize results'),
     );
+  });
+
+  it('keeps long todo lists compact with a hidden item summary', () => {
+    const todos: TodoItem[] = [
+      {
+        id: 'active',
+        content:
+          'This active task has a very long description that should not wrap across multiple rows in the sticky panel',
+        status: 'in_progress',
+      },
+      {
+        id: 'pending-1',
+        content: 'Run cli tests',
+        status: 'pending',
+      },
+      {
+        id: 'pending-2',
+        content: 'Run core tests',
+        status: 'pending',
+      },
+      {
+        id: 'done',
+        content: 'Summarize results',
+        status: 'completed',
+      },
+    ];
+
+    const { lastFrame } = render(
+      <StickyTodoList todos={todos} width={42} maxVisibleItems={2} />,
+    );
+    const output = lastFrame() ?? '';
+    const lines = output.split('\n').filter(Boolean);
+
+    expect(output).toContain('Current tasks');
+    expect(output).toContain('This active task has a very long');
+    expect(output).not.toContain('multiple rows in the sticky panel');
+    expect(output).toContain('Run cli tests');
+    expect(output).not.toContain('Run core tests');
+    expect(output).not.toContain('Summarize results');
+    expect(output).toContain('... and 2 more');
+    expect(lines).toHaveLength(6);
+  });
+
+  it('derives a viewport-aware visible item count', () => {
+    expect(getStickyTodoMaxVisibleItems(8)).toBe(1);
+    expect(getStickyTodoMaxVisibleItems(15)).toBe(3);
+    expect(getStickyTodoMaxVisibleItems(80)).toBe(5);
   });
 });

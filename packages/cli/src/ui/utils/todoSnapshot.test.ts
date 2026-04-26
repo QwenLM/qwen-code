@@ -102,11 +102,21 @@ function makeEmptyTodoToolGroup(
   return item;
 }
 
+function makeGeminiHistoryItem(text: string, id: number): HistoryItem {
+  return {
+    type: 'gemini',
+    id,
+    text,
+  };
+}
+
 describe('getStickyTodos', () => {
   it('returns the latest todo snapshot from history', () => {
     const history = [
       makeTodoToolGroup('first task', 1),
       makeTodoToolGroup('latest history task', 2),
+      makeGeminiHistoryItem('First response after todo', 3),
+      makeGeminiHistoryItem('Second response after todo', 4),
     ] as HistoryItem[];
 
     expect(getStickyTodos(history, [])).toEqual([
@@ -118,19 +128,13 @@ describe('getStickyTodos', () => {
     ]);
   });
 
-  it('prefers pending todo snapshots over history', () => {
+  it('does not show sticky todos while a pending todo snapshot is visible', () => {
     const history = [makeTodoToolGroup('history task', 1)] as HistoryItem[];
     const pendingHistoryItems = [
       makeTodoToolGroup('pending task'),
     ] as HistoryItemWithoutId[];
 
-    expect(getStickyTodos(history, pendingHistoryItems)).toEqual([
-      {
-        id: 'todo-pending task',
-        content: 'pending task',
-        status: 'pending',
-      },
-    ]);
+    expect(getStickyTodos(history, pendingHistoryItems)).toBeNull();
   });
 
   it('returns null when the latest todo snapshot clears the list', () => {
@@ -140,6 +144,40 @@ describe('getStickyTodos', () => {
     ] as HistoryItemWithoutId[];
 
     expect(getStickyTodos(history, pendingHistoryItems)).toBeNull();
+  });
+
+  it('keeps sticky todos hidden when the latest history todo is still the newest item', () => {
+    const history = [
+      makeGeminiHistoryItem('Earlier response', 1),
+      makeTodoToolGroup('latest history task', 2),
+    ] as HistoryItem[];
+
+    expect(getStickyTodos(history, [])).toBeNull();
+  });
+
+  it('keeps sticky todos hidden when the latest history todo has only one following item', () => {
+    const history = [
+      makeTodoToolGroup('latest history task', 1),
+      makeGeminiHistoryItem('One response after todo', 2),
+    ] as HistoryItem[];
+
+    expect(getStickyTodos(history, [])).toBeNull();
+  });
+
+  it('shows sticky todos once later history has likely moved the inline todo away', () => {
+    const history = [
+      makeTodoToolGroup('latest history task', 1),
+      makeGeminiHistoryItem('First response after todo', 2),
+      makeGeminiHistoryItem('Second response after todo', 3),
+    ] as HistoryItem[];
+
+    expect(getStickyTodos(history, [])).toEqual([
+      {
+        id: 'todo-latest history task',
+        content: 'latest history task',
+        status: 'pending',
+      },
+    ]);
   });
 
   it('returns null when the latest history todo snapshot is fully completed', () => {
@@ -159,12 +197,14 @@ describe('getStickyTodos', () => {
         ],
         1,
       ),
+      makeGeminiHistoryItem('First response after todo', 2),
+      makeGeminiHistoryItem('Second response after todo', 3),
     ] as HistoryItem[];
 
     expect(getStickyTodos(history, [])).toBeNull();
   });
 
-  it('keeps showing a fully completed pending snapshot until the turn finishes', () => {
+  it('keeps sticky todos hidden for a completed pending snapshot', () => {
     const history = [
       makeTodoToolGroup('older history task', 1),
     ] as HistoryItem[];
@@ -183,17 +223,6 @@ describe('getStickyTodos', () => {
       ]),
     ] as HistoryItemWithoutId[];
 
-    expect(getStickyTodos(history, pendingHistoryItems)).toEqual([
-      {
-        id: 'todo-1',
-        content: 'Run tests',
-        status: 'completed',
-      },
-      {
-        id: 'todo-2',
-        content: 'Summarize results',
-        status: 'completed',
-      },
-    ]);
+    expect(getStickyTodos(history, pendingHistoryItems)).toBeNull();
   });
 });
