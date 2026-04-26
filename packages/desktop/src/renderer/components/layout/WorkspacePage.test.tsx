@@ -199,6 +199,9 @@ describe('WorkspacePage', () => {
       renderedContainer.querySelector('[data-testid="settings-page"]'),
     ).toBeTruthy();
     expect(
+      renderedContainer.querySelector('[data-testid="settings-overlay"]'),
+    ).toBeTruthy();
+    expect(
       renderedContainer.querySelector('[data-testid="model-config"]'),
     ).toBeTruthy();
     expect(
@@ -208,8 +211,16 @@ describe('WorkspacePage', () => {
       renderedContainer.querySelector('[data-testid="review-panel"]'),
     ).toBeNull();
     expect(
+      renderedContainer.querySelector('[data-testid="chat-thread"]'),
+    ).toBeTruthy();
+    expect(
       renderedContainer.querySelector('[data-testid="terminal-drawer"]'),
-    ).toBeNull();
+    ).toBeTruthy();
+    expect(
+      renderedContainer
+        .querySelector('[data-testid="settings-page"]')
+        ?.getAttribute('role'),
+    ).toBe('dialog');
     const settingsText =
       renderedContainer.querySelector('[data-testid="settings-page"]')
         ?.textContent ?? '';
@@ -246,6 +257,23 @@ describe('WorkspacePage', () => {
     );
     expect(advancedDiagnostics?.textContent).toContain('ACP');
     expect(advancedDiagnostics?.textContent).toContain(session.sessionId);
+
+    act(() => {
+      clickButton(renderedContainer, 'Close Settings');
+    });
+
+    expect(
+      renderedContainer.querySelector('[data-testid="settings-page"]'),
+    ).toBeNull();
+    expect(
+      renderedContainer.querySelector('[data-testid="settings-overlay"]'),
+    ).toBeNull();
+    expect(
+      renderedContainer.querySelector('[data-testid="chat-thread"]'),
+    ).toBeTruthy();
+    expect(
+      renderedContainer.querySelector('[data-testid="terminal-drawer"]'),
+    ).toBeTruthy();
   });
 
   it('confirms dirty branch switches from the topbar menu', async () => {

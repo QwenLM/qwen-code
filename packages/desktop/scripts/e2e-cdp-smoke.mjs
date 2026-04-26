@@ -4245,11 +4245,19 @@ async function assertSettingsPageLayout(fileName) {
       grid: rectFor('[data-testid="workspace-grid"]'),
       chat: rectFor('[data-testid="chat-thread"]'),
       review: rectFor('[data-testid="review-panel"]'),
+      overlay: rectFor('[data-testid="settings-overlay"]'),
+      backdrop: rectFor('.settings-overlay-backdrop'),
       settings: rectFor('[data-testid="settings-page"]'),
       modelConfig: rectFor('[data-testid="model-config"]'),
       permissionsConfig: rectFor('[data-testid="permissions-config"]'),
       runtimeDiagnostics: rectFor('[data-testid="runtime-diagnostics"]'),
       terminal: rectFor('[data-testid="terminal-drawer"]'),
+      settingsRole:
+        document.querySelector('[data-testid="settings-page"]')
+          ?.getAttribute('role') ?? '',
+      settingsModal:
+        document.querySelector('[data-testid="settings-page"]')
+          ?.getAttribute('aria-modal') ?? '',
       settingsText:
         document.querySelector('[data-testid="settings-page"]')?.innerText ?? '',
       buttons: [
@@ -4272,6 +4280,9 @@ async function assertSettingsPageLayout(fileName) {
 
   const missing = [
     'grid',
+    'chat',
+    'overlay',
+    'backdrop',
     'settings',
     'modelConfig',
     'permissionsConfig',
@@ -4280,12 +4291,12 @@ async function assertSettingsPageLayout(fileName) {
     throw new Error(`Missing settings layout rects: ${missing.join(', ')}`);
   }
 
-  if (
-    metrics.chat !== null ||
-    metrics.review !== null ||
-    metrics.terminal !== null
-  ) {
-    throw new Error('Settings page should replace chat, review, and terminal.');
+  if (metrics.review !== null) {
+    throw new Error('Settings should close the review drawer behind it.');
+  }
+
+  if (metrics.terminal === null) {
+    throw new Error('Settings should keep the terminal strip mounted.');
   }
 
   if (metrics.document.bodyScrollHeight > metrics.viewport.height + 4) {
@@ -4295,13 +4306,49 @@ async function assertSettingsPageLayout(fileName) {
   }
 
   if (
-    Math.abs(metrics.settings.left - metrics.grid.left) > 1 ||
-    Math.abs(metrics.settings.right - metrics.grid.right) > 1
+    Math.abs(metrics.overlay.left - metrics.grid.left) > 1 ||
+    Math.abs(metrics.overlay.right - metrics.grid.right) > 1 ||
+    Math.abs(metrics.overlay.bottom - metrics.terminal.bottom) > 1
   ) {
-    throw new Error('Settings page does not span the workbench grid.');
+    throw new Error(
+      `Settings overlay is not aligned with the workbench: ${JSON.stringify(
+        metrics,
+      )}`,
+    );
   }
 
-  if (metrics.modelConfig.width < 300) {
+  if (metrics.settings.right < metrics.grid.right - 1) {
+    throw new Error('Settings sheet is not right aligned.');
+  }
+
+  if (
+    metrics.settings.width >= metrics.grid.width - 32 ||
+    metrics.settings.width > 820 ||
+    metrics.settings.width < 520
+  ) {
+    throw new Error(
+      `Settings sheet width is not drawer-like: ${metrics.settings.width}`,
+    );
+  }
+
+  if (
+    metrics.chat.width < metrics.settings.width ||
+    metrics.backdrop.width < 80
+  ) {
+    throw new Error(
+      `Settings overlay no longer preserves visible task context: ${JSON.stringify(
+        metrics,
+      )}`,
+    );
+  }
+
+  if (metrics.settingsRole !== 'dialog' || metrics.settingsModal !== 'true') {
+    throw new Error(
+      `Settings sheet should be a modal dialog: role=${metrics.settingsRole}, modal=${metrics.settingsModal}`,
+    );
+  }
+
+  if (metrics.modelConfig.width < 250) {
     throw new Error(
       `Settings form is too narrow: ${metrics.modelConfig.width}`,
     );
@@ -4362,21 +4409,21 @@ async function assertSettingsPageLayout(fileName) {
 async function assertSettingsValidation(fileName) {
   const snapshots = {};
 
-  await setFieldByLabel('Model', '');
+  await setFieldByAriaLabel('Provider model', '');
   await waitForText('Enter a model name before saving.');
   snapshots.missingModel = await readSettingsValidationSnapshot();
 
-  await setFieldByLabel('Model', 'qwen-e2e-cdp');
-  await setFieldByLabel('Base URL', 'not-a-url');
+  await setFieldByAriaLabel('Provider model', 'qwen-e2e-cdp');
+  await setFieldByAriaLabel('Provider base URL', 'not-a-url');
   await waitForText('Use a valid HTTP(S) base URL.');
   snapshots.invalidBaseUrl = await readSettingsValidationSnapshot();
 
-  await setFieldByLabel('Base URL', 'https://example.invalid/v1');
-  await setFieldByLabel('API key', '');
+  await setFieldByAriaLabel('Provider base URL', 'https://example.invalid/v1');
+  await setFieldByAriaLabel('Provider API key', '');
   await waitForText('Enter an API key to save this provider.');
   snapshots.missingApiKey = await readSettingsValidationSnapshot();
 
-  await setFieldByLabel('API key', 'sk-desktop-e2e');
+  await setFieldByAriaLabel('Provider API key', 'sk-desktop-e2e');
   await waitFor(
     'valid settings save enabled',
     async () => {
@@ -5167,36 +5214,6 @@ async function focusFieldByAriaLabel(label) {
   }
 
   return snapshot;
-}
-
-async function setFieldByLabel(label, value) {
-  const changed = await evaluate(`(() => {
-    const targetLabel = ${JSON.stringify(label)}.toLowerCase();
-    const labelElement = [...document.querySelectorAll('label')]
-      .find((candidate) =>
-        candidate.innerText.trim().toLowerCase().startsWith(targetLabel)
-      );
-    const field = labelElement?.querySelector('input, textarea, select');
-    if (!field) {
-      return false;
-    }
-    setNativeFieldValue(field, ${JSON.stringify(value)});
-    return true;
-
-    function setNativeFieldValue(element, nextValue) {
-      const descriptor = Object.getOwnPropertyDescriptor(
-        element.constructor.prototype,
-        'value'
-      );
-      descriptor?.set?.call(element, nextValue);
-      element.dispatchEvent(new Event('input', { bubbles: true }));
-      element.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-  })()`);
-
-  if (!changed) {
-    throw new Error(`Labeled field not found: ${label}`);
-  }
 }
 
 async function setElectronWindowBounds(targetId, bounds) {

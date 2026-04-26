@@ -152,6 +152,7 @@ export function WorkspacePage({
     sessions.find((session) => session.sessionId === activeSessionId) ?? null;
   const showSettingsPage = () => {
     setWorkspaceView('settings');
+    setIsReviewOpen(false);
   };
   const showConversation = () => {
     setWorkspaceView('chat');
@@ -184,14 +185,7 @@ export function WorkspacePage({
         onSelectSession={onSelectSession}
       />
 
-      <section
-        className={
-          workspaceView === 'settings'
-            ? 'workbench workbench-settings-open'
-            : 'workbench'
-        }
-        aria-label="Workbench"
-      >
+      <section className="workbench" aria-label="Workbench">
         <TopBar
           activeProject={activeProject}
           activeSessionTitle={activeSession?.title || null}
@@ -216,29 +210,27 @@ export function WorkspacePage({
           }
           data-testid="workspace-grid"
         >
-          {!isSettingsOpen ? (
-            <ChatThread
-              activeProject={activeProject}
-              activeSessionId={activeSessionId}
-              chatState={chatState}
-              gitDiff={gitDiff}
-              isDraftSession={isDraftSession}
-              messageText={messageText}
-              modelState={modelState}
-              notice={chatNotice}
-              onAskUserQuestionResponse={onAskUserQuestionResponse}
-              onCopyMessage={onCopyMessage}
-              onModeChange={onModeChange}
-              onModelChange={onModelChange}
-              onMessageTextChange={onMessageTextChange}
-              onOpenFileReference={onOpenFileReference}
-              onOpenReview={showReview}
-              onPermissionResponse={onPermissionResponse}
-              onRetryMessage={onRetryMessage}
-              onSendMessage={onSendMessage}
-              onStopGeneration={onStopGeneration}
-            />
-          ) : null}
+          <ChatThread
+            activeProject={activeProject}
+            activeSessionId={activeSessionId}
+            chatState={chatState}
+            gitDiff={gitDiff}
+            isDraftSession={isDraftSession}
+            messageText={messageText}
+            modelState={modelState}
+            notice={chatNotice}
+            onAskUserQuestionResponse={onAskUserQuestionResponse}
+            onCopyMessage={onCopyMessage}
+            onModeChange={onModeChange}
+            onModelChange={onModelChange}
+            onMessageTextChange={onMessageTextChange}
+            onOpenFileReference={onOpenFileReference}
+            onOpenReview={showReview}
+            onPermissionResponse={onPermissionResponse}
+            onRetryMessage={onRetryMessage}
+            onSendMessage={onSendMessage}
+            onStopGeneration={onStopGeneration}
+          />
 
           {!isSettingsOpen && isReviewOpen ? (
             <ReviewPanel
@@ -254,8 +246,21 @@ export function WorkspacePage({
               onStageTarget={onStageReviewTarget}
             />
           ) : null}
+        </div>
 
-          {isSettingsOpen ? (
+        {isSettingsOpen ? (
+          <div
+            className="settings-overlay"
+            data-testid="settings-overlay"
+            role="presentation"
+          >
+            <button
+              aria-label="Close Settings"
+              className="settings-overlay-backdrop"
+              title="Close Settings"
+              type="button"
+              onClick={showConversation}
+            />
             <SettingsPage
               activeSessionId={activeSessionId}
               chatState={chatState}
@@ -270,30 +275,26 @@ export function WorkspacePage({
               onSaveSettings={onSaveSettings}
               onSettingsDispatch={onSettingsDispatch}
             />
-          ) : null}
-        </div>
-        {isSettingsOpen ? null : (
-          <TerminalDrawer
-            command={terminalCommand}
-            error={terminalError}
-            isExpanded={isTerminalExpanded}
-            input={terminalInput}
-            notice={terminalNotice}
-            project={activeProject}
-            terminal={terminal}
-            onClear={onClearTerminal}
-            onCommandChange={onTerminalCommandChange}
-            onCopyOutput={onCopyTerminalOutput}
-            onKill={onKillTerminal}
-            onInputChange={onTerminalInputChange}
-            onRun={onRunTerminalCommand}
-            onAttachOutput={onAttachTerminalOutput}
-            onToggleExpanded={() =>
-              setIsTerminalExpanded((current) => !current)
-            }
-            onWriteInput={onWriteTerminalInput}
-          />
-        )}
+          </div>
+        ) : null}
+        <TerminalDrawer
+          command={terminalCommand}
+          error={terminalError}
+          isExpanded={isTerminalExpanded}
+          input={terminalInput}
+          notice={terminalNotice}
+          project={activeProject}
+          terminal={terminal}
+          onClear={onClearTerminal}
+          onCommandChange={onTerminalCommandChange}
+          onCopyOutput={onCopyTerminalOutput}
+          onKill={onKillTerminal}
+          onInputChange={onTerminalInputChange}
+          onRun={onRunTerminalCommand}
+          onAttachOutput={onAttachTerminalOutput}
+          onToggleExpanded={() => setIsTerminalExpanded((current) => !current)}
+          onWriteInput={onWriteTerminalInput}
+        />
       </section>
     </main>
   );

@@ -22,6 +22,102 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Settings Overlay Surface
+
+Status: completed in iteration 43.
+
+Goal: make Settings a supporting overlay surface instead of replacing the
+conversation-first workbench.
+
+User-visible value: users can open account/model/permission settings from the
+sidebar or topbar without losing their task context, while Advanced diagnostics
+remain explicitly hidden until requested.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.tsx`
+- `packages/desktop/src/renderer/components/layout/SettingsPage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/settings-overlay-surface.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Opening Settings keeps the conversation and terminal workbench surfaces
+  mounted behind a modal right-side settings sheet.
+- Settings closes from the sheet or the Conversation action without leaving the
+  review drawer open behind it.
+- The settings sheet remains bounded, scrollable, and right-aligned at the
+  default CDP viewport without body overflow.
+- Model provider, Coding Plan, permissions, and Advanced Diagnostics workflows
+  keep their current accessible labels and secret-handling behavior.
+- The default settings view still does not expose server URLs, Node versions,
+  ACP/session IDs, settings paths, or API keys.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, complete the existing open-project/chat/review/commit path,
+  open Settings, verify the overlay geometry and hidden diagnostics, exercise
+  API-key and Coding Plan save paths, open Advanced Diagnostics, close back to
+  Conversation, and continue with composer/terminal checks.
+- E2E assertions: chat and terminal remain mounted while Settings is open,
+  review is closed, settings renders inside a right-side overlay, body does not
+  overflow, secrets and diagnostics stay hidden until requested, model provider
+  workflows persist, and no console errors or failed local requests are
+  recorded.
+- Diagnostic artifacts: updated `settings-layout.json`,
+  `settings-page.png`, Coding Plan/settings diagnostics snapshots, Electron
+  log, and summary JSON under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for selecting a narrow settings
+  surface slice, `frontend-design` for prototype-constrained overlay density
+  and hierarchy, and `electron-desktop-dev` for real Electron CDP verification.
+
+Notes and decisions:
+
+- The prototype favors conversation-first continuity, so Settings will become a
+  sheet over the workbench instead of a third main workbench view.
+- Settings remains modal for focus and safety; review closes when the sheet
+  opens to avoid stacking two supporting surfaces over the conversation.
+- Keeping chat mounted exposed an ambiguous CDP label selector for the settings
+  model field. The harness now targets settings-specific accessible labels such
+  as `Provider model`, `Provider base URL`, and `Provider API key`.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 20 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T17-37-58-777Z/`.
+- Key recorded metrics: default CDP viewport 1240x788, settings overlay
+  996x738 px, right-aligned settings sheet 780x738 px, backdrop 216 px,
+  chat and terminal mounted, review absent, no body overflow, dialog role and
+  modal state present, hidden diagnostics absent by default, and no console
+  errors or failed local requests.
+
+Next work:
+
+- Add compact-viewport settings overlay geometry assertions and consider focus
+  management for keyboard-only settings navigation.
+- Continue prototype fidelity by tightening Settings visual density further:
+  icon-led close/action controls, smaller section headers, and reduced card
+  borders inside the sheet.
+
 ### Completed Slice: Composer Attachment Affordance
 
 Status: completed in iteration 42.

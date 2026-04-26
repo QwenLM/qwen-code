@@ -49,15 +49,23 @@ export function SettingsPage({
     <section
       className="panel settings-page"
       aria-label="Settings"
+      aria-modal="true"
       data-testid="settings-page"
+      role="dialog"
     >
       <div className="panel-header settings-page-header">
         <div>
           <h3>Settings</h3>
           <span>Account, model, permissions, and local tools</span>
         </div>
-        <button className="secondary-button" type="button" onClick={onBack}>
-          Back
+        <button
+          aria-label="Close Settings"
+          className="secondary-button"
+          title="Close Settings"
+          type="button"
+          onClick={onBack}
+        >
+          Close
         </button>
       </div>
       <div className="settings-page-content">

@@ -431,16 +431,13 @@ summary:focus-visible {
 }
 
 .workbench {
+  position: relative;
   display: grid;
   grid-template-rows: 50px minmax(0, 1fr) auto;
   min-width: 0;
   height: 100vh;
   min-height: 0;
   overflow: hidden;
-}
-
-.workbench-settings-open {
-  grid-template-rows: 50px minmax(0, 1fr);
 }
 
 .topbar {
@@ -871,6 +868,40 @@ summary:focus-visible {
 
 .workspace-grid-review-open {
   grid-template-columns: minmax(0, 1fr) minmax(320px, 400px);
+}
+
+.settings-overlay {
+  position: absolute;
+  top: 50px;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 40;
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+  background:
+    linear-gradient(90deg, rgba(4, 8, 20, 0.24), rgba(4, 8, 20, 0.52)),
+    rgba(5, 7, 14, 0.16);
+  backdrop-filter: blur(1.5px);
+}
+
+.settings-overlay-backdrop {
+  flex: 1 1 auto;
+  min-width: 96px;
+  background: transparent;
+  cursor: default;
+}
+
+.settings-overlay .settings-page {
+  flex: 0 1 min(780px, calc(100vw - 340px));
+  width: min(780px, calc(100vw - 340px));
+  min-width: 540px;
+  height: 100%;
+  border-top: 1px solid rgba(213, 224, 255, 0.12);
+  border-left: 1px solid rgba(213, 224, 255, 0.16);
+  border-radius: 12px 0 0 0;
+  box-shadow: -24px 0 64px rgba(0, 0, 0, 0.34);
 }
 
 .panel {
@@ -2165,13 +2196,13 @@ textarea:focus {
 
 .settings-page-content {
   display: grid;
-  width: min(1120px, 100%);
+  width: 100%;
   min-height: 0;
-  grid-template-columns: minmax(340px, 1.08fr) minmax(280px, 0.92fr);
-  gap: 16px;
-  margin: 0 auto;
+  grid-template-columns: minmax(300px, 1.08fr) minmax(230px, 0.92fr);
+  gap: 12px;
+  margin: 0;
   overflow: auto;
-  padding: 18px;
+  padding: 14px;
 }
 
 .settings-page-main {
@@ -2587,6 +2618,22 @@ textarea:focus {
 
   .workspace-grid-review-open {
     grid-template-columns: 1fr;
+  }
+
+  .settings-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+  }
+
+  .settings-overlay-backdrop {
+    display: none;
+  }
+
+  .settings-overlay .settings-page {
+    width: 100%;
+    min-width: 0;
+    border-radius: 0;
   }
 
   .panel-main {
