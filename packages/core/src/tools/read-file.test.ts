@@ -496,6 +496,14 @@ describe('ReadFileTool', () => {
       expect(() => tool.build(params)).not.toThrow();
     });
 
+    it('should treat empty pages parameter as unset', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.txt'),
+        pages: '',
+      };
+      expect(() => tool.build(params)).not.toThrow();
+    });
+
     it('should support offset and limit for text files', async () => {
       const filePath = path.join(tempRootDir, 'paginated.txt');
       const lines = Array.from({ length: 20 }, (_, i) => `Line ${i + 1}`);

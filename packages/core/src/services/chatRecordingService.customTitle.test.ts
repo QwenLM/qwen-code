@@ -50,6 +50,8 @@ describe('ChatRecordingService - recordCustomTitle', () => {
           .mockReturnValue('/test/project/root/.qwen/projects/test-project'),
       },
       getModel: vi.fn().mockReturnValue('qwen-plus'),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      isInteractive: vi.fn().mockReturnValue(false),
       getDebugMode: vi.fn().mockReturnValue(false),
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn().mockReturnValue({
@@ -77,45 +79,52 @@ describe('ChatRecordingService - recordCustomTitle', () => {
     vi.spyOn(fs, 'existsSync').mockReturnValue(false);
 
     chatRecordingService = new ChatRecordingService(mockConfig);
+
+    // writeLine is async; mockResolvedValue lets the writeChain settle on flush.
+    vi.mocked(jsonl.writeLine).mockResolvedValue(undefined);
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it('should record a custom title as a system record', () => {
+  it('should record a custom title as a system record', async () => {
     chatRecordingService.recordCustomTitle('my-feature');
+    await chatRecordingService.flush();
 
-    expect(jsonl.writeLineSync).toHaveBeenCalledOnce();
+    expect(jsonl.writeLine).toHaveBeenCalledOnce();
 
-    const writtenRecord = vi.mocked(jsonl.writeLineSync).mock
+    const writtenRecord = vi.mocked(jsonl.writeLine).mock
       .calls[0][1] as ChatRecord;
     expect(writtenRecord.type).toBe('system');
     expect(writtenRecord.subtype).toBe('custom_title');
     expect(writtenRecord.systemPayload).toEqual({
       customTitle: 'my-feature',
+      titleSource: 'manual',
     });
     expect(writtenRecord.sessionId).toBe('test-session-id');
   });
 
-  it('should maintain parent chain when recording title after other records', () => {
+  it('should maintain parent chain when recording title after other records', async () => {
     chatRecordingService.recordUserMessage([{ text: 'hello' }]);
     chatRecordingService.recordCustomTitle('my-feature');
+    await chatRecordingService.flush();
 
-    expect(jsonl.writeLineSync).toHaveBeenCalledTimes(2);
+    expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
 
-    const userRecord = vi.mocked(jsonl.writeLineSync).mock
+    const userRecord = vi.mocked(jsonl.writeLine).mock
       .calls[0][1] as ChatRecord;
-    const titleRecord = vi.mocked(jsonl.writeLineSync).mock
+    const titleRecord = vi.mocked(jsonl.writeLine).mock
       .calls[1][1] as ChatRecord;
 
     expect(titleRecord.parentUuid).toBe(userRecord.uuid);
   });
 
-  it('should include correct metadata in the record', () => {
+  it('should include correct metadata in the record', async () => {
     chatRecordingService.recordCustomTitle('test-title');
+    await chatRecordingService.flush();
 
-    const writtenRecord = vi.mocked(jsonl.writeLineSync).mock
+    const writtenRecord = vi.mocked(jsonl.writeLine).mock
       .calls[0][1] as ChatRecord;
 
     expect(writtenRecord.cwd).toBe('/test/project/root');
@@ -126,37 +135,46 @@ describe('ChatRecordingService - recordCustomTitle', () => {
   });
 
   describe('finalize', () => {
-    it('should re-append cached custom title to EOF', () => {
+    it('should re-append cached custom title to EOF', async () => {
       chatRecordingService.recordCustomTitle('my-feature');
-      vi.mocked(jsonl.writeLineSync).mockClear();
+      await chatRecordingService.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
 
       chatRecordingService.finalize();
+      await chatRecordingService.flush();
 
-      expect(jsonl.writeLineSync).toHaveBeenCalledOnce();
-      const record = vi.mocked(jsonl.writeLineSync).mock
-        .calls[0][1] as ChatRecord;
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
       expect(record.type).toBe('system');
       expect(record.subtype).toBe('custom_title');
-      expect(record.systemPayload).toEqual({ customTitle: 'my-feature' });
+      expect(record.systemPayload).toEqual({
+        customTitle: 'my-feature',
+        titleSource: 'manual',
+      });
     });
 
-    it('should not write anything when no custom title was set', () => {
+    it('should not write anything when no custom title was set', async () => {
       chatRecordingService.finalize();
+      await chatRecordingService.flush();
 
-      expect(jsonl.writeLineSync).not.toHaveBeenCalled();
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
 
-    it('should re-append the latest title after multiple renames', () => {
+    it('should re-append the latest title after multiple renames', async () => {
       chatRecordingService.recordCustomTitle('first-name');
       chatRecordingService.recordCustomTitle('second-name');
-      vi.mocked(jsonl.writeLineSync).mockClear();
+      await chatRecordingService.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
 
       chatRecordingService.finalize();
+      await chatRecordingService.flush();
 
-      expect(jsonl.writeLineSync).toHaveBeenCalledOnce();
-      const record = vi.mocked(jsonl.writeLineSync).mock
-        .calls[0][1] as ChatRecord;
-      expect(record.systemPayload).toEqual({ customTitle: 'second-name' });
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.systemPayload).toEqual({
+        customTitle: 'second-name',
+        titleSource: 'manual',
+      });
     });
   });
 });

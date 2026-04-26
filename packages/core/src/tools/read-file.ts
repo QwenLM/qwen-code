@@ -265,7 +265,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
       return 'Limit must be a positive number';
     }
 
-    if (params.pages !== undefined) {
+    if (params.pages) {
       const parsed = parsePDFPageRange(params.pages);
       if (!parsed) {
         return `Invalid pages parameter: '${params.pages}'. Use formats like '5' or '1-10'.`;

@@ -161,6 +161,7 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
         availableCommandsCallbackRef.current = callback;
       },
     );
+    onAvailableSkills = vi.fn();
     onAvailableModels = vi.fn();
     onSlashCommandNotification = vi.fn(
       (
@@ -722,6 +723,143 @@ describe('WebViewProvider.attachToView', () => {
         kind: 'switch_mode',
         status: 'failed',
       }),
+    });
+  });
+
+  it('replays available skills to the webview after webviewReady', async () => {
+    let messageHandler:
+      | ((message: { type: string; data?: unknown }) => Promise<void>)
+      | undefined;
+
+    const postMessage = vi.fn();
+    const webview = {
+      options: undefined as unknown,
+      html: '',
+      postMessage,
+      asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
+        toString: () => `webview:${uri.fsPath}`,
+      })),
+      onDidReceiveMessage: vi.fn(
+        (
+          handler: (message: { type: string; data?: unknown }) => Promise<void>,
+        ) => {
+          messageHandler = handler;
+          return { dispose: vi.fn() };
+        },
+      ),
+    };
+
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+
+    await provider.attachToView(
+      {
+        webview,
+        visible: true,
+        onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
+        onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
+      } as never,
+      'qwen-code.chatView.sidebar',
+    );
+
+    const agentManager = (
+      provider as unknown as {
+        agentManager: {
+          onAvailableSkills: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).agentManager;
+    const onAvailableSkills = agentManager.onAvailableSkills.mock
+      .calls[0]?.[0] as ((skills: string[]) => void) | undefined;
+
+    expect(onAvailableSkills).toBeTypeOf('function');
+
+    const skills = ['code-review-expert'];
+    onAvailableSkills?.(skills);
+
+    postMessage.mockClear();
+
+    await messageHandler?.({
+      type: 'webviewReady',
+      data: {},
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'availableSkills',
+      data: { skills },
+    });
+  });
+
+  it('replays available commands to the webview after webviewReady', async () => {
+    let messageHandler:
+      | ((message: { type: string; data?: unknown }) => Promise<void>)
+      | undefined;
+
+    const postMessage = vi.fn();
+    const webview = {
+      options: undefined as unknown,
+      html: '',
+      postMessage,
+      asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
+        toString: () => `webview:${uri.fsPath}`,
+      })),
+      onDidReceiveMessage: vi.fn(
+        (
+          handler: (message: { type: string; data?: unknown }) => Promise<void>,
+        ) => {
+          messageHandler = handler;
+          return { dispose: vi.fn() };
+        },
+      ),
+    };
+
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+
+    await provider.attachToView(
+      {
+        webview,
+        visible: true,
+        onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
+        onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
+      } as never,
+      'qwen-code.chatView.sidebar',
+    );
+
+    const agentManager = (
+      provider as unknown as {
+        agentManager: {
+          onAvailableCommands: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).agentManager;
+    const onAvailableCommands = agentManager.onAvailableCommands.mock
+      .calls[0]?.[0] as
+      | ((commands: Array<{ name: string; description: string }>) => void)
+      | undefined;
+
+    expect(onAvailableCommands).toBeTypeOf('function');
+
+    const commands = [
+      { name: 'skills', description: 'List available skills' },
+      { name: 'compress', description: 'Compress the context' },
+    ];
+    onAvailableCommands?.(commands);
+
+    postMessage.mockClear();
+
+    await messageHandler?.({
+      type: 'webviewReady',
+      data: {},
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'availableCommands',
+      data: { commands },
     });
   });
 });

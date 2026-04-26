@@ -182,7 +182,8 @@ export interface OpenDialogActionReturn {
     | 'delete'
     | 'extensions_manage'
     | 'hooks'
-    | 'mcp';
+    | 'mcp'
+    | 'rewind';
 }
 
 /**

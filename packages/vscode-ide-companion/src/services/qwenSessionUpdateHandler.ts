@@ -201,6 +201,11 @@ export class QwenSessionUpdateHandler {
           if (commands && this.callbacks.onAvailableCommands) {
             this.callbacks.onAvailableCommands(commands);
           }
+
+          const meta = (update as { _meta?: SessionUpdateMeta | null })._meta;
+          if (this.callbacks.onAvailableSkills) {
+            this.callbacks.onAvailableSkills(meta?.availableSkills ?? []);
+          }
         } catch (err) {
           console.warn(
             '[SessionUpdateHandler] Failed to handle available commands update',
