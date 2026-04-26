@@ -20,6 +20,22 @@
  * @returns The normalized proxy URL with protocol prefix, or undefined if input is undefined/empty
  * @throws Error if a SOCKS proxy URL is provided
  */
+/**
+ * Builds a comma-separated NO_PROXY list from the existing `NO_PROXY` /
+ * `no_proxy` environment variable plus localhost variants that should
+ * never be proxied.
+ *
+ * Safe to call in environments where `process.env` may not exist
+ * (e.g. jsdom test runners).
+ */
+export function buildNoProxyList(): string {
+  const env = typeof process !== 'undefined' ? process.env : undefined;
+  const existingNoProxy = env?.['NO_PROXY'] || env?.['no_proxy'] || '';
+  return [existingNoProxy, 'localhost', '127.0.0.1', '::1']
+    .filter(Boolean)
+    .join(',');
+}
+
 export function normalizeProxyUrl(
   proxyUrl: string | undefined,
 ): string | undefined {

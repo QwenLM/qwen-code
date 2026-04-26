@@ -9,6 +9,10 @@ import { buildRuntimeFetchOptions } from './runtimeFetchOptions.js';
 
 type UndiciOptions = Record<string, unknown>;
 
+vi.mock('./proxyUtils.js', () => ({
+  buildNoProxyList: () => 'localhost,127.0.0.1,::1',
+}));
+
 vi.mock('undici', () => {
   class MockAgent {
     options: UndiciOptions;
@@ -17,7 +21,7 @@ vi.mock('undici', () => {
     }
   }
 
-  class MockProxyAgent {
+  class MockEnvHttpProxyAgent {
     options: UndiciOptions;
     constructor(options: UndiciOptions) {
       this.options = options;
@@ -26,7 +30,7 @@ vi.mock('undici', () => {
 
   return {
     Agent: MockAgent,
-    ProxyAgent: MockProxyAgent,
+    EnvHttpProxyAgent: MockEnvHttpProxyAgent,
   };
 });
 
@@ -46,7 +50,7 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     });
   });
 
-  it('uses ProxyAgent with disabled timeouts when proxy is set', () => {
+  it('uses EnvHttpProxyAgent with disabled timeouts when proxy is set', () => {
     const result = buildRuntimeFetchOptions('openai', 'http://proxy.local');
 
     expect(result).toBeDefined();
@@ -56,7 +60,9 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
       result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
     ).fetchOptions?.dispatcher;
     expect(dispatcher?.options).toMatchObject({
-      uri: 'http://proxy.local',
+      httpProxy: 'http://proxy.local',
+      httpsProxy: 'http://proxy.local',
+      noProxy: 'localhost,127.0.0.1,::1',
       headersTimeout: 0,
       bodyTimeout: 0,
     });
@@ -77,7 +83,7 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     });
   });
 
-  it('returns fetchOptions with ProxyAgent for Anthropic with proxy', () => {
+  it('returns fetchOptions with EnvHttpProxyAgent for Anthropic with proxy', () => {
     const result = buildRuntimeFetchOptions('anthropic', 'http://proxy.local');
 
     expect(result).toBeDefined();
@@ -87,7 +93,9 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
       result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
     ).fetchOptions?.dispatcher;
     expect(dispatcher?.options).toMatchObject({
-      uri: 'http://proxy.local',
+      httpProxy: 'http://proxy.local',
+      httpsProxy: 'http://proxy.local',
+      noProxy: 'localhost,127.0.0.1,::1',
       headersTimeout: 0,
       bodyTimeout: 0,
     });

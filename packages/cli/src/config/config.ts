@@ -1152,12 +1152,7 @@ export async function loadCliConfig(
     fileFiltering: settings.context?.fileFiltering,
     checkpointing:
       argv.checkpointing || settings.general?.checkpointing?.enabled,
-    proxy:
-      argv.proxy ||
-      process.env['HTTPS_PROXY'] ||
-      process.env['https_proxy'] ||
-      process.env['HTTP_PROXY'] ||
-      process.env['http_proxy'],
+    proxy: getProxyConfiguration(argv.proxy),
     cwd,
     fileDiscoveryService: fileService,
     bugCommand: settings.advanced?.bugCommand,
@@ -1268,4 +1263,32 @@ export async function loadCliConfig(
   }
 
   return config;
+}
+
+/**
+ * Determines the proxy configuration with proper handling of explicit empty
+ * string overrides.
+ *
+ * - `--proxy=<url>` → returns the URL string
+ * - `--proxy=''`    → returns `false` (explicitly disable proxy)
+ * - not provided    → falls back to proxy environment variables
+ *
+ * @param argvProxy - The proxy value from command line arguments
+ * @returns A proxy URL, `false` to explicitly disable, or `undefined`
+ */
+function getProxyConfiguration(
+  argvProxy: string | undefined,
+): string | false | undefined {
+  // If --proxy was explicitly provided (even as empty string), respect that
+  if (argvProxy !== undefined) {
+    return argvProxy === '' ? false : argvProxy;
+  }
+
+  // Fall back to environment variables in precedence order
+  return (
+    process.env['HTTPS_PROXY'] ||
+    process.env['https_proxy'] ||
+    process.env['HTTP_PROXY'] ||
+    process.env['http_proxy']
+  );
 }

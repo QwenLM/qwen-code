@@ -237,6 +237,16 @@ vi.mock('../ide/ide-client.js', () => ({
 import { BaseLlmClient } from '../core/baseLlmClient.js';
 
 vi.mock('../core/baseLlmClient.js');
+
+const { mockSetGlobalDispatcher, MockEnvHttpProxyAgent } = vi.hoisted(() => ({
+  mockSetGlobalDispatcher: vi.fn(),
+  MockEnvHttpProxyAgent: vi.fn(),
+}));
+
+vi.mock('undici', () => ({
+  EnvHttpProxyAgent: MockEnvHttpProxyAgent,
+  setGlobalDispatcher: (...args: unknown[]) => mockSetGlobalDispatcher(...args),
+}));
 // Mock fireNotificationHook from toolHookTriggers
 vi.mock('../core/toolHookTriggers.js', () => ({
   fireNotificationHook: vi.fn().mockResolvedValue({}),
@@ -1903,6 +1913,104 @@ describe('Model Switching and Config Updates', () => {
 
       expect(config.hasHooksForEvent('Stop')).toBe(false);
       expect(mockHasHooksForEvent).toHaveBeenCalledWith('Stop');
+    });
+  });
+
+  describe('Proxy configuration', () => {
+    const proxyEnvKeys = [
+      'HTTP_PROXY',
+      'http_proxy',
+      'HTTPS_PROXY',
+      'https_proxy',
+      'NO_PROXY',
+      'no_proxy',
+    ];
+    const savedEnv: Record<string, string | undefined> = {};
+
+    beforeEach(() => {
+      for (const key of proxyEnvKeys) {
+        savedEnv[key] = process.env[key];
+        delete process.env[key];
+      }
+      mockSetGlobalDispatcher.mockClear();
+      MockEnvHttpProxyAgent.mockClear();
+    });
+
+    afterEach(() => {
+      for (const key of proxyEnvKeys) {
+        if (savedEnv[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = savedEnv[key];
+        }
+      }
+    });
+
+    it('should not install a proxy dispatcher when no proxy is configured', () => {
+      new Config(baseParams);
+      expect(mockSetGlobalDispatcher).not.toHaveBeenCalled();
+      expect(MockEnvHttpProxyAgent).not.toHaveBeenCalled();
+    });
+
+    it('should install EnvHttpProxyAgent when proxy env vars are set', () => {
+      process.env['HTTPS_PROXY'] = 'http://corp-proxy:8080';
+      new Config(baseParams);
+      expect(MockEnvHttpProxyAgent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          noProxy: expect.stringContaining('localhost'),
+        }),
+      );
+      // Should NOT pass explicit httpProxy/httpsProxy — let agent read from env
+      const opts = MockEnvHttpProxyAgent.mock.calls[0][0];
+      expect(opts.httpProxy).toBeUndefined();
+      expect(opts.httpsProxy).toBeUndefined();
+      expect(mockSetGlobalDispatcher).toHaveBeenCalled();
+    });
+
+    it('should pass explicit httpProxy/httpsProxy when --proxy is provided', () => {
+      new Config({ ...baseParams, proxy: 'http://cli-proxy:9090' });
+      expect(MockEnvHttpProxyAgent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          httpProxy: 'http://cli-proxy:9090',
+          httpsProxy: 'http://cli-proxy:9090',
+          noProxy: expect.stringContaining('localhost'),
+        }),
+      );
+      expect(mockSetGlobalDispatcher).toHaveBeenCalled();
+    });
+
+    it('should override env vars when --proxy is provided', () => {
+      process.env['HTTPS_PROXY'] = 'http://env-proxy:8080';
+      new Config({ ...baseParams, proxy: 'http://cli-proxy:9090' });
+      const opts = MockEnvHttpProxyAgent.mock.calls[0][0];
+      expect(opts.httpProxy).toBe('http://cli-proxy:9090');
+      expect(opts.httpsProxy).toBe('http://cli-proxy:9090');
+    });
+
+    it('should not install a proxy dispatcher when proxy is explicitly disabled (false)', () => {
+      process.env['HTTPS_PROXY'] = 'http://env-proxy:8080';
+      const config = new Config({ ...baseParams, proxy: false });
+      expect(mockSetGlobalDispatcher).not.toHaveBeenCalled();
+      expect(MockEnvHttpProxyAgent).not.toHaveBeenCalled();
+      // getProxy() returns undefined when explicitly disabled
+      expect(config.getProxy()).toBeUndefined();
+    });
+
+    it('should include existing NO_PROXY values in noProxy list', () => {
+      process.env['HTTPS_PROXY'] = 'http://proxy:8080';
+      process.env['NO_PROXY'] = 'internal-llm.company.com';
+      new Config(baseParams);
+      const opts = MockEnvHttpProxyAgent.mock.calls[0][0];
+      expect(opts.noProxy).toContain('internal-llm.company.com');
+      expect(opts.noProxy).toContain('localhost');
+      expect(opts.noProxy).toContain('127.0.0.1');
+      expect(opts.noProxy).toContain('::1');
+    });
+
+    it('should not mutate process.env when --proxy is provided', () => {
+      new Config({ ...baseParams, proxy: 'http://cli-proxy:9090' });
+      expect(process.env['HTTP_PROXY']).toBeUndefined();
+      expect(process.env['HTTPS_PROXY']).toBeUndefined();
     });
   });
 });

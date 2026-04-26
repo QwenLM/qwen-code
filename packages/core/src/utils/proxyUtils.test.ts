@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import { normalizeProxyUrl } from './proxyUtils.js';
+import { describe, it, expect, afterEach } from 'vitest';
+import { buildNoProxyList, normalizeProxyUrl } from './proxyUtils.js';
 
 describe('normalizeProxyUrl', () => {
   it('should return undefined for undefined input', () => {
@@ -101,5 +101,52 @@ describe('normalizeProxyUrl', () => {
     expect(() => normalizeProxyUrl('SOCKS5://proxy.example.com:1080')).toThrow(
       'SOCKS proxy is not supported',
     );
+  });
+});
+
+describe('buildNoProxyList', () => {
+  const savedNoProxy = process.env['NO_PROXY'];
+  const savedNoProxyLower = process.env['no_proxy'];
+
+  afterEach(() => {
+    if (savedNoProxy === undefined) {
+      delete process.env['NO_PROXY'];
+    } else {
+      process.env['NO_PROXY'] = savedNoProxy;
+    }
+    if (savedNoProxyLower === undefined) {
+      delete process.env['no_proxy'];
+    } else {
+      process.env['no_proxy'] = savedNoProxyLower;
+    }
+  });
+
+  it('should include localhost variants when no NO_PROXY env var is set', () => {
+    delete process.env['NO_PROXY'];
+    delete process.env['no_proxy'];
+    const result = buildNoProxyList();
+    expect(result).toBe('localhost,127.0.0.1,::1');
+  });
+
+  it('should prepend existing NO_PROXY values', () => {
+    process.env['NO_PROXY'] = 'internal-llm.company.com,.corp.net';
+    const result = buildNoProxyList();
+    expect(result).toBe(
+      'internal-llm.company.com,.corp.net,localhost,127.0.0.1,::1',
+    );
+  });
+
+  it('should respect lowercase no_proxy', () => {
+    delete process.env['NO_PROXY'];
+    process.env['no_proxy'] = 'local-server';
+    const result = buildNoProxyList();
+    expect(result).toBe('local-server,localhost,127.0.0.1,::1');
+  });
+
+  it('should prefer uppercase NO_PROXY over lowercase no_proxy', () => {
+    process.env['NO_PROXY'] = 'upper-case-host';
+    process.env['no_proxy'] = 'lower-case-host';
+    const result = buildNoProxyList();
+    expect(result).toBe('upper-case-host,localhost,127.0.0.1,::1');
   });
 });

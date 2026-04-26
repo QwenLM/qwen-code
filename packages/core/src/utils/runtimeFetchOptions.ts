@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Agent, ProxyAgent, type Dispatcher } from 'undici';
+import { Agent, EnvHttpProxyAgent, type Dispatcher } from 'undici';
+import { buildNoProxyList } from './proxyUtils.js';
 
 /**
  * JavaScript runtime type
@@ -136,9 +137,16 @@ function buildFetchOptionsWithDispatcher(
   proxyUrl?: string,
 ): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
   try {
+    // When a proxy URL is provided, use EnvHttpProxyAgent instead of the
+    // basic ProxyAgent so that the NO_PROXY environment variable is
+    // respected for model SDK traffic. The proxy URL is passed explicitly
+    // via httpProxy/httpsProxy to override any env vars, while noProxy
+    // ensures that hosts listed in NO_PROXY bypass the proxy.
     const dispatcher = proxyUrl
-      ? new ProxyAgent({
-          uri: proxyUrl,
+      ? new EnvHttpProxyAgent({
+          httpProxy: proxyUrl,
+          httpsProxy: proxyUrl,
+          noProxy: buildNoProxyList(),
           headersTimeout: 0,
           bodyTimeout: 0,
         })
