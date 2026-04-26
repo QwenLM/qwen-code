@@ -70,5 +70,6 @@ Important artifacts:
 
 ## Known Uncovered Risk
 
-This slice covers local branch list and checkout only. Branch creation, remote
-branches, and checkout conflict copy remain future work.
+This slice covers local branch list and checkout only. Remote branches and
+checkout conflict copy remain future work. Branch creation is now covered by
+`.qwen/e2e-tests/electron-desktop/branch-creation.md`.

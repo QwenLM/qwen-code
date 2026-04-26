@@ -303,6 +303,20 @@ export async function checkoutDesktopProjectBranch(
   );
 }
 
+export async function createDesktopProjectGitBranch(
+  serverInfo: DesktopServerInfo,
+  projectId: string,
+  branchName: string,
+): Promise<DesktopGitReviewMutation> {
+  return writeJson(
+    serverInfo,
+    `/api/projects/${encodeURIComponent(projectId)}/git/branches`,
+    'POST',
+    { branchName },
+    isGitReviewMutation,
+  );
+}
+
 export async function stageDesktopProjectChanges(
   serverInfo: DesktopServerInfo,
   projectId: string,

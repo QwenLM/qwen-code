@@ -680,6 +680,59 @@ summary:focus-visible {
   color: #d8ebff;
 }
 
+.branch-create-form {
+  display: grid;
+  min-width: 0;
+  padding-top: 8px;
+  border-top: 1px solid rgba(213, 224, 255, 0.09);
+}
+
+.branch-create-label {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  color: rgba(240, 242, 238, 0.82);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.branch-create-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+  gap: 7px;
+}
+
+.branch-create-input {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid rgba(213, 224, 255, 0.13);
+  border-radius: 6px;
+  outline: none;
+  background: rgba(238, 244, 239, 0.045);
+  color: rgba(238, 243, 255, 0.92);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.branch-create-input::placeholder {
+  color: rgba(147, 160, 178, 0.72);
+}
+
+.branch-create-input:focus {
+  border-color: rgba(99, 190, 255, 0.48);
+  box-shadow: 0 0 0 2px rgba(99, 190, 255, 0.12);
+}
+
+.branch-create-row .secondary-button {
+  min-height: 30px;
+  padding: 0 9px;
+  font-size: 11.5px;
+}
+
 .branch-switch-confirmation {
   display: grid;
   gap: 8px;

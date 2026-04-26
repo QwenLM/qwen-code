@@ -377,6 +377,108 @@ describe('DesktopServer', () => {
     });
   });
 
+  it('creates and switches to validated local branches', async () => {
+    const projectPath = await createCommittedGitProject();
+    const storePath = join(
+      await createTempDirectory('qwen-desktop-store-'),
+      'desktop-projects.json',
+    );
+    await writeFile(join(projectPath, 'tracked.txt'), 'dirty\n', 'utf8');
+
+    const server = await createTestServer(undefined, undefined, storePath);
+    const opened = await postJson(server, '/api/projects/open', {
+      path: projectPath,
+    });
+    const projectId = getProjectId(opened.body);
+    const created = await postJson(
+      server,
+      `/api/projects/${encodeURIComponent(projectId)}/git/branches`,
+      { branchName: 'feature/desktop-branch-create' },
+    );
+    const listed = await getJson(
+      server,
+      `/api/projects/${encodeURIComponent(projectId)}/git/branches`,
+      {
+        Authorization: 'Bearer test-token',
+      },
+    );
+    const duplicate = await postJson(
+      server,
+      `/api/projects/${encodeURIComponent(projectId)}/git/branches`,
+      { branchName: 'feature/desktop-branch-create' },
+    );
+
+    expect(created.status).toBe(200);
+    expect(created.body).toMatchObject({
+      ok: true,
+      status: {
+        branch: 'feature/desktop-branch-create',
+        modified: 1,
+      },
+      diff: {
+        files: [expect.objectContaining({ path: 'tracked.txt' })],
+      },
+    });
+    await expect(
+      runGitOutput(projectPath, ['branch', '--show-current']),
+    ).resolves.toBe('feature/desktop-branch-create');
+    expect(listed.body).toMatchObject({
+      ok: true,
+      current: 'feature/desktop-branch-create',
+      dirty: true,
+      branches: expect.arrayContaining([
+        { name: 'feature/desktop-branch-create', current: true },
+      ]),
+    });
+    expect(duplicate.status).toBe(400);
+    expect(duplicate.body).toMatchObject({
+      ok: false,
+      code: 'git_branch_exists',
+    });
+  });
+
+  it('rejects invalid branch creation names before checkout', async () => {
+    const projectPath = await createCommittedGitProject();
+    const initialBranch = await runGitOutput(projectPath, [
+      'branch',
+      '--show-current',
+    ]);
+    const storePath = join(
+      await createTempDirectory('qwen-desktop-store-'),
+      'desktop-projects.json',
+    );
+
+    const server = await createTestServer(undefined, undefined, storePath);
+    const opened = await postJson(server, '/api/projects/open', {
+      path: projectPath,
+    });
+    const projectId = getProjectId(opened.body);
+
+    for (const branchName of [
+      ' feature/leading-space',
+      'feature/has space',
+      '../escape',
+      '-option-looking',
+      'feature/name.lock',
+    ]) {
+      const rejected = await postJson(
+        server,
+        `/api/projects/${encodeURIComponent(projectId)}/git/branches`,
+        { branchName },
+      );
+
+      expect(rejected.status).toBe(400);
+      expect(rejected.body).toMatchObject({
+        ok: false,
+        code: 'git_branch_invalid',
+      });
+    }
+
+    await expect(
+      runGitOutput(projectPath, ['branch', '--show-current']),
+    ).resolves.toBe(initialBranch);
+  });
+
   it('returns hunk metadata and can stage or revert individual hunks', async () => {
     const projectPath = await createMultiHunkGitProject();
     const storePath = join(

@@ -29,6 +29,7 @@ const defaultWindowBounds = { width: 1240, height: 820 };
 const compactWindowBounds = { width: 960, height: 640 };
 const longBranchName =
   'desktop-e2e/very-long-branch-name-for-topbar-overflow-check';
+const createdBranchName = 'desktop-e2e/new-branch-from-menu';
 
 const consoleErrors = [];
 const failedRequests = [];
@@ -109,7 +110,16 @@ async function main() {
   await clickButton('Branch');
   await waitForSelector('[data-testid="branch-menu"]');
   await waitForSelector('[data-testid="branch-menu-row"]');
-  await assertBranchSwitchMenu('branch-switch-menu.json');
+  await assertBranchSwitchMenu('branch-create-menu.json', longBranchName);
+  await assertBranchCreateValidation('branch-create-validation.json');
+  await saveScreenshot('branch-create-menu.png');
+  await setFieldByAriaLabel('New branch name', createdBranchName);
+  await clickButton('Create Branch');
+  await assertBranchCreateResult('branch-create-result.json');
+  await clickButton('Branch');
+  await waitForSelector('[data-testid="branch-menu"]');
+  await waitForSelector('[data-testid="branch-menu-row"]');
+  await assertBranchSwitchMenu('branch-switch-menu.json', createdBranchName);
   await saveScreenshot('branch-switch-menu.png');
   await clickButton('Switch to branch main');
   await waitForSelector('[data-testid="branch-switch-confirmation"]');
@@ -1028,7 +1038,24 @@ async function assertTopbarContextFidelity(fileName) {
   }
 }
 
-async function assertBranchSwitchMenu(fileName) {
+async function assertBranchSwitchMenu(fileName, expectedCurrentBranch) {
+  await waitFor(
+    `branch menu current row ${expectedCurrentBranch}`,
+    async () =>
+      evaluate(`(() => {
+        const currentRow = [...document.querySelectorAll(
+          '[data-testid="branch-menu-row"]'
+        )].find((row) => row.getAttribute('aria-checked') === 'true');
+        return Boolean(
+          currentRow &&
+            currentRow.textContent.includes(${JSON.stringify(
+              expectedCurrentBranch,
+            )})
+        );
+      })()`),
+    15_000,
+  );
+
   const snapshot = await evaluate(`(() => {
     const rectFor = (element) => {
       if (!element) {
@@ -1045,9 +1072,12 @@ async function assertBranchSwitchMenu(fileName) {
       };
     };
     const menu = document.querySelector('[data-testid="branch-menu"]');
+    const createForm = document.querySelector('[data-testid="branch-create-form"]');
     const trigger = document.querySelector('[data-testid="topbar-branch-trigger"]');
     const topbar = document.querySelector('[data-testid="workspace-topbar"]');
     const rows = [...document.querySelectorAll('[data-testid="branch-menu-row"]')];
+    const createButton = [...document.querySelectorAll('button')]
+      .find((button) => button.textContent.trim().includes('Create Branch'));
     const rowSnapshots = rows.map((row) => ({
       label: row.getAttribute('aria-label') || '',
       checked: row.getAttribute('aria-checked'),
@@ -1079,9 +1109,14 @@ async function assertBranchSwitchMenu(fileName) {
       hasLongBranch: rowSnapshots.some((row) =>
         row.text.includes(${JSON.stringify(longBranchName)})
       ),
+      hasCreatedBranch: rowSnapshots.some((row) =>
+        row.text.includes(${JSON.stringify(createdBranchName)})
+      ),
       hasMain: rowSnapshots.some((row) => row.text.includes('main')),
       currentRows: rowSnapshots.filter((row) => row.checked === 'true'),
       escapedRows: rowSnapshots.filter(rowEscapesMenu),
+      createForm: rectFor(createForm),
+      createButtonDisabled: createButton?.disabled ?? null,
       menuContained: Boolean(
         menuRect &&
           menuRect.left >= 0 &&
@@ -1130,13 +1165,39 @@ async function assertBranchSwitchMenu(fileName) {
     );
   }
 
+  if (snapshot.currentRows.length !== 1) {
+    throw new Error(
+      `Branch menu should mark one branch current: ${JSON.stringify(
+        snapshot.currentRows,
+      )}`,
+    );
+  }
+
+  if (!snapshot.currentRows[0].text.includes(expectedCurrentBranch)) {
+    throw new Error(
+      `Branch menu should mark ${expectedCurrentBranch} current: ${JSON.stringify(
+        snapshot.currentRows,
+      )}`,
+    );
+  }
+
+  if (!snapshot.createForm) {
+    throw new Error('Branch menu is missing the create-branch form.');
+  }
+
+  if (!snapshot.createButtonDisabled) {
+    throw new Error('Empty branch creation should be disabled.');
+  }
+
   if (
-    snapshot.currentRows.length !== 1 ||
-    !snapshot.currentRows[0].text.includes(longBranchName)
+    snapshot.createForm &&
+    snapshot.menu &&
+    (snapshot.createForm.left < snapshot.menu.left - 1 ||
+      snapshot.createForm.right > snapshot.menu.right + 1)
   ) {
     throw new Error(
-      `Branch menu should mark the long branch current: ${JSON.stringify(
-        snapshot.currentRows,
+      `Branch create form escaped the menu: ${JSON.stringify(
+        snapshot.createForm,
       )}`,
     );
   }
@@ -1144,6 +1205,110 @@ async function assertBranchSwitchMenu(fileName) {
   if (snapshot.document.bodyScrollWidth > snapshot.viewport.width + 4) {
     throw new Error(
       `Branch menu caused body overflow: ${JSON.stringify(snapshot.document)}`,
+    );
+  }
+}
+
+async function assertBranchCreateValidation(fileName) {
+  const snapshot = await evaluate(`(() => {
+    const form = document.querySelector('[data-testid="branch-create-form"]');
+    const input = document.querySelector('[aria-label="New branch name"]');
+    const button = [...document.querySelectorAll('button')]
+      .find((candidate) => candidate.textContent.trim().includes('Create Branch'));
+    return {
+      formText: form?.textContent.trim() ?? '',
+      inputValue: input?.value ?? null,
+      buttonDisabled: button?.disabled ?? null
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (snapshot.inputValue !== '') {
+    throw new Error(
+      `New branch input should start empty: ${JSON.stringify(snapshot)}`,
+    );
+  }
+
+  if (snapshot.buttonDisabled !== true) {
+    throw new Error(
+      `Create Branch should be disabled while the branch name is empty: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+}
+
+async function assertBranchCreateResult(fileName) {
+  await waitFor(
+    'branch creation from menu',
+    async () => {
+      const ui = await evaluate(`(() => {
+        const trigger = document.querySelector(
+          '[data-testid="topbar-branch-trigger"]'
+        );
+        return {
+          branchText: trigger?.textContent.trim() ?? '',
+          menuOpen: document.querySelector('[data-testid="branch-menu"]') !== null,
+          gitStatusText:
+            document.querySelector('[aria-label^="Git status"]')?.textContent.trim() ??
+            ''
+        };
+      })()`);
+      const { stdout } = await execFileP('git', [
+        '-C',
+        workspaceDir,
+        'branch',
+        '--show-current',
+      ]);
+      return (
+        ui.branchText.includes(createdBranchName) &&
+        !ui.menuOpen &&
+        stdout.trim() === createdBranchName
+      );
+    },
+    15_000,
+  );
+
+  const [ui, branch, status] = await Promise.all([
+    evaluate(`(() => {
+      const trigger = document.querySelector('[data-testid="topbar-branch-trigger"]');
+      return {
+        branchText: trigger?.textContent.trim() ?? '',
+        menuOpen: document.querySelector('[data-testid="branch-menu"]') !== null,
+        gitStatusText:
+          document.querySelector('[aria-label^="Git status"]')?.textContent.trim() ??
+          ''
+      };
+    })()`),
+    execFileP('git', ['-C', workspaceDir, 'branch', '--show-current']),
+    execFileP('git', ['-C', workspaceDir, 'status', '--porcelain=v1']),
+  ]);
+  const snapshot = {
+    ui,
+    branch: branch.stdout.trim(),
+    status: status.stdout,
+  };
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (snapshot.branch !== createdBranchName) {
+    throw new Error(
+      `Expected Git branch ${createdBranchName}, got ${snapshot.branch}`,
+    );
+  }
+
+  if (!snapshot.ui.gitStatusText.includes('1 modified')) {
+    throw new Error(
+      `Branch creation should preserve dirty status in the topbar: ${snapshot.ui.gitStatusText}`,
     );
   }
 }

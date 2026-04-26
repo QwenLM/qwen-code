@@ -134,6 +134,29 @@ export class DesktopProjectService {
     return readGitStatus(project.path);
   }
 
+  async createProjectGitBranch(
+    projectId: string,
+    branchName: string,
+  ): Promise<DesktopGitStatus> {
+    const project = await this.getStoredProject(projectId);
+    const validatedBranchName = await validateNewBranchName(
+      project.path,
+      branchName,
+    );
+
+    try {
+      await runGit(project.path, ['switch', '-c', validatedBranchName]);
+    } catch (error) {
+      throw new DesktopHttpError(
+        400,
+        'git_error',
+        error instanceof Error ? error.message : 'Git branch creation failed.',
+      );
+    }
+
+    return readGitStatus(project.path);
+  }
+
   async getProjectPath(projectId: string): Promise<string> {
     const project = await this.getStoredProject(projectId);
     return project.path;
@@ -271,6 +294,70 @@ async function readGitBranches(
       error instanceof Error ? error.message : 'Git branch list failed.',
     );
   }
+}
+
+async function validateNewBranchName(
+  projectPath: string,
+  branchName: string,
+): Promise<string> {
+  const trimmed = branchName.trim();
+  if (
+    trimmed.length === 0 ||
+    trimmed !== branchName ||
+    trimmed.length > 160 ||
+    hasWhitespaceOrControl(trimmed) ||
+    trimmed.startsWith('-') ||
+    trimmed.startsWith('/') ||
+    trimmed.endsWith('/') ||
+    trimmed.includes('//') ||
+    trimmed.includes('..') ||
+    trimmed.includes('@{') ||
+    trimmed.includes('\\') ||
+    trimmed.endsWith('.lock')
+  ) {
+    throw new DesktopHttpError(
+      400,
+      'git_branch_invalid',
+      'Branch name is not a valid local branch name.',
+    );
+  }
+
+  try {
+    await runGit(projectPath, ['check-ref-format', '--branch', trimmed]);
+  } catch {
+    throw new DesktopHttpError(
+      400,
+      'git_branch_invalid',
+      'Branch name is not a valid local branch name.',
+    );
+  }
+
+  const branches = await readGitBranches(projectPath);
+  if (branches.some((branch) => branch.name === trimmed)) {
+    throw new DesktopHttpError(
+      400,
+      'git_branch_exists',
+      'A local branch with that name already exists.',
+    );
+  }
+
+  return trimmed;
+}
+
+function hasWhitespaceOrControl(value: string): boolean {
+  for (const char of value) {
+    const codePoint = char.codePointAt(0);
+    if (
+      char.trim().length === 0 ||
+      codePoint === undefined ||
+      codePoint < 32 ||
+      codePoint === 127
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function runGit(cwd: string, args: string[]): Promise<string> {

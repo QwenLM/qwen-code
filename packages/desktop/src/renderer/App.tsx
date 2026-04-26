@@ -18,6 +18,7 @@ import {
   authenticateDesktop,
   checkoutDesktopProjectBranch,
   commitDesktopProjectChanges,
+  createDesktopProjectGitBranch,
   createDesktopSession,
   getDesktopProjectGitDiff,
   getDesktopProjectGitStatus,
@@ -586,6 +587,28 @@ export function App() {
     [activeProject, applyReviewMutation, loadState],
   );
 
+  const createProjectBranch = useCallback(
+    async (branchName: string): Promise<void> => {
+      if (loadState.state !== 'ready' || !activeProject) {
+        return;
+      }
+
+      try {
+        const result = await createDesktopProjectGitBranch(
+          loadState.status.serverInfo,
+          activeProject.id,
+          branchName,
+        );
+        applyReviewMutation(result.status, result.diff);
+        setSessionError(null);
+      } catch (error) {
+        setSessionError(getErrorMessage(error));
+        throw error;
+      }
+    },
+    [activeProject, applyReviewMutation, loadState],
+  );
+
   const stageReviewTarget = useCallback(
     async (target: DesktopGitReviewTarget) => {
       if (loadState.state !== 'ready' || !activeProject) {
@@ -1032,6 +1055,7 @@ export function App() {
       onRefreshProjectGitStatus={refreshProjectGitStatus}
       onListProjectBranches={listProjectBranches}
       onCheckoutProjectBranch={checkoutProjectBranch}
+      onCreateProjectBranch={createProjectBranch}
       onOpenReviewFile={openReviewFile}
       onRevertReviewTarget={revertReviewTarget}
       onRunTerminalCommand={runTerminalCommand}

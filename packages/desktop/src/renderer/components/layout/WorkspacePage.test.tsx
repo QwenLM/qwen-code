@@ -286,6 +286,48 @@ describe('WorkspacePage', () => {
     ).toBeNull();
   });
 
+  it('creates branches from the compact topbar menu', async () => {
+    const branches: DesktopGitBranch[] = [
+      { name: 'main', current: true },
+      { name: 'feature/safe-switch', current: false },
+    ];
+    const onListProjectBranches = vi.fn(async () => branches);
+    const onCreateProjectBranch = vi.fn(async () => undefined);
+    const renderedContainer = renderWorkspace({
+      onListProjectBranches,
+      onCreateProjectBranch,
+    });
+
+    await act(async () => {
+      clickButton(renderedContainer, 'Branch main');
+    });
+
+    const createForm = renderedContainer.querySelector(
+      '[data-testid="branch-create-form"]',
+    );
+    const input = createForm?.querySelector(
+      'input[aria-label="New branch name"]',
+    );
+    const createButton = createForm?.querySelector('button[type="submit"]');
+    expect(input).toBeInstanceOf(HTMLInputElement);
+    expect(createButton).toBeInstanceOf(HTMLButtonElement);
+    expect((createButton as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => {
+      setInputValue(input as HTMLInputElement, 'feature/new-task');
+    });
+    expect((createButton as HTMLButtonElement).disabled).toBe(false);
+
+    await act(async () => {
+      (createButton as HTMLButtonElement).click();
+    });
+
+    expect(onCreateProjectBranch).toHaveBeenCalledWith('feature/new-task');
+    expect(
+      renderedContainer.querySelector('[data-testid="branch-menu"]'),
+    ).toBeNull();
+  });
+
   it('keeps the composer enabled for an active project with no thread', () => {
     const renderedContainer = renderWorkspace({
       activeSessionId: null,
@@ -726,6 +768,7 @@ function renderWorkspace(
     onCommitMessageChange: vi.fn(),
     onCopyMessage: vi.fn(),
     onCopyTerminalOutput: vi.fn(),
+    onCreateProjectBranch: vi.fn(async () => undefined),
     onCreateSession: vi.fn(),
     onKillTerminal: vi.fn(),
     onMessageTextChange: vi.fn(),
@@ -793,6 +836,16 @@ function clickButton(container: HTMLElement, text: string): void {
   }
 
   button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+}
+
+function setInputValue(input: HTMLInputElement, value: string): void {
+  const descriptor = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    'value',
+  );
+  descriptor?.set?.call(input, value);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
 const project: DesktopProject = {

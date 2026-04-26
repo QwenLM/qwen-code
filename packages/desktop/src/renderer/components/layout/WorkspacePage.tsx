@@ -61,6 +61,7 @@ export function WorkspacePage({
   onCommitMessageChange,
   onCopyMessage,
   onCopyTerminalOutput,
+  onCreateProjectBranch,
   onCreateSession,
   onKillTerminal,
   onMessageTextChange,
@@ -118,6 +119,7 @@ export function WorkspacePage({
   onCommitMessageChange: (message: string) => void;
   onCopyMessage: (message: string) => void;
   onCopyTerminalOutput: () => void;
+  onCreateProjectBranch: (branchName: string) => Promise<void>;
   onCreateSession: () => void;
   onKillTerminal: () => void;
   onMessageTextChange: (message: string) => void;
@@ -198,6 +200,7 @@ export function WorkspacePage({
           loadState={loadState}
           statusLabel={statusLabel}
           onCheckoutBranch={onCheckoutProjectBranch}
+          onCreateBranch={onCreateProjectBranch}
           onRefreshGitStatus={onRefreshProjectGitStatus}
           onListBranches={onListProjectBranches}
           onShowReview={toggleReview}

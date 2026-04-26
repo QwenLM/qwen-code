@@ -22,6 +22,135 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Safe Topbar Branch Creation
+
+Status: completed in iteration 21.
+
+Goal: extend the compact topbar branch menu so users can create and switch to a
+new local branch from the current project without leaving the conversation
+workbench.
+
+User-visible value: users can stay in the default "open project -> ask agent ->
+review changes" flow while preparing a clean branch for the task. The branch
+control remains visible and compact in the first viewport, with validation and
+dirty-worktree messaging handled in the menu.
+
+Expected files:
+
+- `packages/desktop/src/server/services/projectService.ts`
+- `packages/desktop/src/server/index.ts`
+- `packages/desktop/src/server/index.test.ts`
+- `packages/desktop/src/renderer/api/client.ts`
+- `packages/desktop/src/renderer/App.tsx`
+- `packages/desktop/src/renderer/components/layout/TopBar.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/branch-creation.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The branch menu includes a compact create-branch form beneath the local branch
+  list, without turning the topbar into a Git dashboard.
+- Branch names are validated before Git runs: empty names, whitespace,
+  path-traversal-looking names, option-looking names, lock suffixes, invalid Git
+  ref names, and duplicate local branch names are rejected with clear messages.
+- Creating a branch calls a token-protected desktop server route, creates and
+  switches to the branch, refreshes Git status and review diff, closes the menu,
+  and updates the topbar branch label.
+- Dirty worktrees are called out in the menu; creation keeps local changes in
+  the worktree and relies on Git to reject conflicting state.
+- Long branch names stay contained in the menu and topbar.
+
+Verification:
+
+- Unit/server test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/server/index.test.ts src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project on the deliberately long branch, open
+  the branch menu, create `desktop-e2e/new-branch-from-menu`, assert the topbar
+  and actual repo branch switch to the new branch, assert the dirty status is
+  preserved, reopen the menu and continue the existing dirty branch-switch path
+  back to `main`, then continue the existing review, settings, terminal,
+  discard safety, and commit workflows.
+- E2E assertions: create form is bounded inside the menu; invalid empty branch
+  submission is disabled or rejected before a request; created branch appears in
+  Git and topbar; no menu row or create form overflows; no console errors or
+  failed local requests are recorded.
+- Diagnostic artifacts: `branch-create-menu.json`,
+  `branch-create-validation.json`, `branch-create-result.json`,
+  `branch-create-menu.png`, Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained compact
+  branch-control design; `electron-desktop-dev` for server/renderer changes
+  verified through real Electron CDP.
+
+Notes and decisions:
+
+- The prototype keeps branch state as slim workbench chrome. Creation therefore
+  belongs as an inline branch-menu affordance rather than a persistent review or
+  Git management panel.
+- This slice creates and switches local branches only. Remote tracking,
+  publishing, and branch deletion are out of scope for this iteration.
+- Server-side validation rejects whitespace/control characters, option-looking
+  names, path-traversal-looking names, lock suffixes, duplicate local branch
+  names, and names that fail `git check-ref-format --branch` before running
+  `git switch -c`.
+- The first CDP run exposed an async harness timing issue after branch creation:
+  the reopened menu briefly rendered the previous branch-list state before the
+  server reload marked the new branch current. The harness now waits for the
+  expected current row before snapshotting menu geometry.
+- Self-review promoted that timing issue into a small product fix: branch rows
+  are cleared at the start of each branch-list load, so reopening the menu shows
+  loading state instead of stale branch rows.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/server/index.test.ts src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed.
+- After replacing the control-character validation regex with an explicit
+  helper, `cd packages/desktop && SHELL=/bin/bash npx vitest run src/server/index.test.ts`
+  passed again.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` first failed on ESLint
+  `no-control-regex`; after the helper cleanup, `cd packages/desktop && npm run lint`
+  passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` first failed at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T02-38-07-376Z/`
+  because the new branch-switch assertion sampled stale branch rows immediately
+  after reopening the menu.
+- After the readiness wait, `cd packages/desktop && npm run e2e:cdp` passed
+  through real Electron with branch creation, dirty branch switching, review,
+  settings, terminal, discard safety, and commit workflows.
+- After the stale-row product fix, `cd packages/desktop && npm run build` and
+  `cd packages/desktop && npm run e2e:cdp` passed again.
+- Passing artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T02-47-05-265Z/`.
+- Key recorded metrics: create menu width `320`, create form width `298`, no
+  escaped branch rows, empty create action disabled, created branch
+  `desktop-e2e/new-branch-from-menu` became the actual repo branch, topbar
+  branch text updated to that branch, dirty status stayed
+  `1 modified · 0 staged · 1 untracked`, and no console errors or failed local
+  requests were recorded.
+
+Next work:
+
+- Add a compact branch-create conflict/error path to the CDP harness by trying
+  a duplicate or invalid branch name in the real menu and asserting the inline
+  validation message stays contained.
+- Continue prototype fidelity by reducing the remaining composer height and
+  changed-files summary weight visible in the latest screenshots.
+
 ### Completed Slice: Safe Topbar Branch Switching
 
 Status: completed in iteration 20.

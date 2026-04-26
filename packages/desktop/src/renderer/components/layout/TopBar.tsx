@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState } from 'react';
+import { useState, type FormEvent } from 'react';
 import type { DesktopGitBranch, DesktopProject } from '../../api/client.js';
 import { formatGitStatus } from './formatters.js';
 import {
@@ -24,6 +24,7 @@ export function TopBar({
   isReviewOpen,
   loadState,
   onCheckoutBranch,
+  onCreateBranch,
   onListBranches,
   onRefreshGitStatus,
   onShowReview,
@@ -37,6 +38,7 @@ export function TopBar({
   isReviewOpen: boolean;
   loadState: LoadState;
   onCheckoutBranch: (branchName: string) => Promise<void>;
+  onCreateBranch: (branchName: string) => Promise<void>;
   onListBranches: () => Promise<DesktopGitBranch[]>;
   onRefreshGitStatus: () => void;
   onShowReview: () => void;
@@ -86,6 +88,7 @@ export function TopBar({
             canSwitchBranch={canSwitchBranch}
             isDirty={Boolean(activeProject && !activeProject.gitStatus.clean)}
             onCheckoutBranch={onCheckoutBranch}
+            onCreateBranch={onCreateBranch}
             onListBranches={onListBranches}
           />
           <span
@@ -171,6 +174,7 @@ function BranchMenu({
   canSwitchBranch,
   isDirty,
   onCheckoutBranch,
+  onCreateBranch,
   onListBranches,
 }: {
   activeBranch: string | null;
@@ -178,11 +182,14 @@ function BranchMenu({
   canSwitchBranch: boolean;
   isDirty: boolean;
   onCheckoutBranch: (branchName: string) => Promise<void>;
+  onCreateBranch: (branchName: string) => Promise<void>;
   onListBranches: () => Promise<DesktopGitBranch[]>;
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const [branches, setBranches] = useState<DesktopGitBranch[]>([]);
+  const [newBranchName, setNewBranchName] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
   const [isSwitching, setIsSwitching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pendingBranch, setPendingBranch] = useState<string | null>(null);
@@ -190,11 +197,13 @@ function BranchMenu({
   const closeMenu = () => {
     setIsOpen(false);
     setPendingBranch(null);
+    setNewBranchName('');
     setError(null);
   };
 
   const loadBranches = async () => {
     setIsLoading(true);
+    setBranches([]);
     setError(null);
     try {
       setBranches(await onListBranches());
@@ -242,6 +251,25 @@ function BranchMenu({
       setError(getErrorMessage(checkoutError));
     } finally {
       setIsSwitching(false);
+    }
+  };
+
+  const createBranch = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const branchName = newBranchName;
+    if (branchName.trim().length === 0 || isCreating || isSwitching) {
+      return;
+    }
+
+    setIsCreating(true);
+    setError(null);
+    try {
+      await onCreateBranch(branchName);
+      closeMenu();
+    } catch (createError) {
+      setError(getErrorMessage(createError));
+    } finally {
+      setIsCreating(false);
     }
   };
 
@@ -336,6 +364,40 @@ function BranchMenu({
                   </button>
                 ))}
               </div>
+              <form
+                className="branch-create-form"
+                data-testid="branch-create-form"
+                onSubmit={(event) => void createBranch(event)}
+              >
+                <label className="branch-create-label">
+                  <span>New branch</span>
+                  <div className="branch-create-row">
+                    <input
+                      aria-label="New branch name"
+                      className="branch-create-input"
+                      disabled={isCreating || isSwitching}
+                      placeholder="feature/task-name"
+                      type="text"
+                      value={newBranchName}
+                      onChange={(event) => {
+                        setNewBranchName(event.currentTarget.value);
+                        setError(null);
+                      }}
+                    />
+                    <button
+                      className="secondary-button"
+                      disabled={
+                        newBranchName.trim().length === 0 ||
+                        isCreating ||
+                        isSwitching
+                      }
+                      type="submit"
+                    >
+                      Create Branch
+                    </button>
+                  </div>
+                </label>
+              </form>
             </>
           )}
 

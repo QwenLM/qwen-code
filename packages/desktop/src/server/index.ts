@@ -586,6 +586,22 @@ async function handleProjectGitBranchesRoute(
     return;
   }
 
+  if (request.method === 'POST') {
+    const body = await readObjectBody(request);
+    const branchName = getRequiredString(body, 'branchName');
+    const status = await context.projectService.createProjectGitBranch(
+      projectId,
+      branchName,
+    );
+    const projectPath = await context.projectService.getProjectPath(projectId);
+    sendJson(response, origin, 200, {
+      ok: true,
+      status,
+      diff: await context.gitReviewService.getDiff(projectPath),
+    });
+    return;
+  }
+
   sendMethodNotAllowed(response, origin);
 }
 
