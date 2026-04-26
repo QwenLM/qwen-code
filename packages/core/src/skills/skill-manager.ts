@@ -183,6 +183,7 @@ export class SkillManager {
       const skill = await this.findSkillByNameAtLevel(name, level);
       if (skill) {
         debugLogger.debug(`Found skill ${name} at ${level} level`);
+        return this.resolveExtends(skill);
       } else {
         debugLogger.debug(`Skill ${name} not found at ${level} level`);
       }
@@ -193,21 +194,21 @@ export class SkillManager {
     const projectSkill = await this.findSkillByNameAtLevel(name, 'project');
     if (projectSkill) {
       debugLogger.debug(`Found skill ${name} at project level`);
-      return projectSkill;
+      return this.resolveExtends(projectSkill);
     }
 
     // Try user level
     const userSkill = await this.findSkillByNameAtLevel(name, 'user');
     if (userSkill) {
       debugLogger.debug(`Found skill ${name} at user level`);
-      return userSkill;
+      return this.resolveExtends(userSkill);
     }
 
     // Try extension level
     const extensionSkill = await this.findSkillByNameAtLevel(name, 'extension');
     if (extensionSkill) {
       debugLogger.debug(`Found skill ${name} at extension level`);
-      return extensionSkill;
+      return this.resolveExtends(extensionSkill);
     }
 
     // Try bundled level (lowest precedence)
@@ -220,6 +221,38 @@ export class SkillManager {
       );
     }
     return bundledSkill;
+  }
+
+  /**
+   * Resolves `extends: bundled` by merging the skill body with its bundled base.
+   * The extending skill's body is appended to the bundled skill's body.
+   */
+  private async resolveExtends(skill: SkillConfig): Promise<SkillConfig> {
+    if (skill.extends !== 'bundled') {
+      return skill;
+    }
+
+    const bundledSkill = await this.findSkillByNameAtLevel(
+      skill.name,
+      'bundled',
+    );
+    if (!bundledSkill) {
+      throw new SkillError(
+        `Cannot extend: bundled skill "${skill.name}" not found`,
+        SkillErrorCode.NOT_FOUND,
+        skill.name,
+      );
+    }
+
+    debugLogger.debug(
+      `Resolving extends: merging "${skill.name}" with bundled base`,
+    );
+
+    return {
+      ...skill,
+      body: bundledSkill.body + '\n\n' + skill.body,
+      extends: undefined,
+    };
   }
 
   /**
@@ -475,6 +508,18 @@ export class SkillManager {
         whenToUse,
         disableModelInvocation,
       };
+
+      // Extract optional extends field
+      const extendsRaw = frontmatter['extends'];
+      if (extendsRaw !== undefined) {
+        if (extendsRaw === 'bundled') {
+          config.extends = 'bundled';
+        } else {
+          throw new Error(
+            `Invalid "extends" value: "${String(extendsRaw)}". Only "bundled" is supported.`,
+          );
+        }
+      }
 
       // Validate the parsed configuration
       const validation = this.validateConfig(config);
