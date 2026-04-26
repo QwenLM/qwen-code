@@ -83,11 +83,16 @@ export function ChatThread({
   const modeOptions = modelState.modes?.availableModes ?? fallbackModeOptions;
   const currentMode =
     modeOptions.find((mode) => mode.id === currentModeId) ?? fallbackModeOption;
+  const configuredModelOptions = modelState.configuredModels;
   const currentModelId =
-    modelState.models?.currentModelId ?? fallbackModelOption.modelId;
+    modelState.models?.currentModelId ??
+    configuredModelOptions[0]?.modelId ??
+    fallbackModelOption.modelId;
   const modelOptions = modelState.models?.availableModels.length
     ? modelState.models.availableModels
-    : [fallbackModelOption];
+    : configuredModelOptions.length > 0
+      ? configuredModelOptions
+      : [fallbackModelOption];
   const currentModel =
     modelOptions.find((model) => model.modelId === currentModelId) ??
     fallbackModelOption;

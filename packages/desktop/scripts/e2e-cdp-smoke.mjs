@@ -279,6 +279,13 @@ async function main() {
 
   await clickButton('Conversation');
   await waitForSelector('[data-testid="terminal-drawer"]');
+  await clickButton('New Thread');
+  await assertDraftComposerSavedModelState(
+    'draft-composer-saved-model-state.json',
+    'qwen-e2e-cdp',
+  );
+  await saveScreenshot('draft-composer-saved-model-state.png');
+  await clickFirstThreadRow();
   await assertComposerModelSwitch('composer-model-switch.json', 'qwen-e2e-cdp');
   await clickButton('Expand Terminal');
   await waitForSelector('[data-testid="terminal-body"]');
@@ -9168,6 +9175,185 @@ async function assertSettingsAdvancedDiagnostics(fileName) {
   if (snapshot.hasSecret) {
     throw new Error('Advanced diagnostics exposed the fake API key.');
   }
+}
+
+async function assertDraftComposerSavedModelState(fileName, savedModelId) {
+  await waitFor(
+    'draft composer configured model options',
+    async () =>
+      evaluate(`(() => {
+        const select = document.querySelector('select[aria-label="Model"]');
+        return Boolean(
+          select &&
+          select.disabled &&
+          [...select.options].length > 0 &&
+          [...select.options].some(
+            (option) => option.value === ${JSON.stringify(savedModelId)}
+          )
+        );
+      })()`),
+    10_000,
+  );
+
+  const snapshot = await evaluate(`(() => {
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const overflows = (element) =>
+      Boolean(element && element.scrollWidth > element.clientWidth + 4);
+    const select = document.querySelector('select[aria-label="Model"]');
+    const permission = document.querySelector(
+      'select[aria-label="Permission mode"]'
+    );
+    const composer = document.querySelector('[data-testid="message-composer"]');
+    const chat = document.querySelector('[data-testid="chat-thread"]');
+    const modelControl = document.querySelector(
+      '[data-testid="composer-model-control"]'
+    );
+    const bodyText = document.body.innerText;
+    const options = select
+      ? [...select.options].map((option) => ({
+          value: option.value,
+          text: option.textContent.trim(),
+          title: option.getAttribute('title') ?? '',
+          selected: option.selected
+        }))
+      : [];
+    const selected = options.find((option) => option.selected) ?? null;
+    return {
+      disabled: select?.disabled ?? null,
+      permissionDisabled: permission?.disabled ?? null,
+      value: select?.value ?? null,
+      title: select?.getAttribute('title') ?? null,
+      options,
+      selected,
+      hasSavedModel: options.some(
+        (option) => option.value === ${JSON.stringify(savedModelId)}
+      ),
+      hasDefaultModel:
+        (select?.value ?? '') === 'default' ||
+        options.some((option) => option.text === 'Default model'),
+      hasRawCodingPlanLabel: options.some((option) =>
+        option.text.includes('ModelStudio Coding Plan')
+      ),
+      hasNewThreadNotice: bodyText.includes('New thread'),
+      hasSecret:
+        bodyText.includes('sk-desktop-e2e') ||
+        bodyText.includes('cp-desktop-e2e') ||
+        [...document.querySelectorAll('input, textarea')].some((field) =>
+          field.value.includes('sk-desktop-e2e') ||
+          field.value.includes('cp-desktop-e2e')
+        ),
+      hasServerUrl: /http:\\/\\/127\\.0\\.0\\.1:/u.test(bodyText),
+      composerRect: rectFor(composer),
+      chatRect: rectFor(chat),
+      modelControlRect: rectFor(modelControl),
+      selectRect: rectFor(select),
+      composerOverflow: overflows(composer),
+      modelControlOverflow: overflows(modelControl),
+      documentOverflow:
+        document.body.scrollWidth > window.innerWidth + 4 ||
+        document.body.scrollHeight > window.innerHeight + 4
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (snapshot.disabled !== true || snapshot.permissionDisabled !== true) {
+    throw new Error(
+      `Draft composer runtime selectors should stay disabled: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    !snapshot.hasSavedModel ||
+    snapshot.hasDefaultModel ||
+    !snapshot.selected ||
+    snapshot.selected.value === 'default'
+  ) {
+    throw new Error(
+      `Draft composer did not show saved configured models: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (snapshot.hasRawCodingPlanLabel) {
+    throw new Error(
+      `Draft composer exposed raw Coding Plan labels: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (!snapshot.hasNewThreadNotice) {
+    throw new Error('Draft composer should keep the New thread notice visible.');
+  }
+
+  if (
+    snapshot.hasSecret ||
+    snapshot.hasServerUrl ||
+    snapshot.documentOverflow ||
+    snapshot.composerOverflow ||
+    snapshot.modelControlOverflow
+  ) {
+    throw new Error(
+      `Draft composer saved model state leaked data or overflowed: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    !snapshot.composerRect ||
+    !snapshot.chatRect ||
+    snapshot.composerRect.bottom > snapshot.chatRect.bottom + 1 ||
+    !snapshot.modelControlRect ||
+    !snapshot.selectRect ||
+    snapshot.modelControlRect.width > 128 ||
+    snapshot.modelControlRect.height > 25 ||
+    snapshot.selectRect.height > 25
+  ) {
+    throw new Error(
+      `Draft composer saved model geometry regressed: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+}
+
+async function clickFirstThreadRow() {
+  await waitFor(
+    'saved thread row',
+    async () =>
+      evaluate(
+        `document.querySelector('[data-testid="thread-row"]') !== null`,
+      ),
+    10_000,
+  );
+
+  await evaluate(`(() => {
+    const row = document.querySelector('[data-testid="thread-row"]');
+    row?.click();
+    return true;
+  })()`);
 }
 
 async function assertComposerModelSwitch(fileName, modelId) {

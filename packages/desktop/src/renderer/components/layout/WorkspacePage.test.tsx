@@ -1154,6 +1154,53 @@ describe('WorkspacePage', () => {
     expect((sendButton as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it('shows saved provider models in the draft composer picker', () => {
+    const renderedContainer = renderWorkspace({
+      activeSessionId: null,
+      isDraftSession: true,
+      modelState: {
+        ...createInitialModelState(),
+        configuredModels: [
+          {
+            modelId: 'qwen-e2e-cdp',
+            name: 'qwen-e2e-cdp',
+            description: 'Configured in desktop settings',
+          },
+          {
+            modelId: 'qwen3-coder-next',
+            name:
+              '[ModelStudio Coding Plan for Global/Intl] ' + 'qwen3-coder-next',
+            description: 'Coding Plan global model',
+          },
+        ],
+      },
+      sessions: [],
+    });
+    const model = renderedContainer.querySelector(
+      'select[aria-label="Model"]',
+    ) as HTMLSelectElement | null;
+
+    expect(model).toBeInstanceOf(HTMLSelectElement);
+    expect(model?.disabled).toBe(true);
+    expect(model?.value).toBe('qwen-e2e-cdp');
+    expect(model?.getAttribute('title')).toBe('qwen-e2e-cdp');
+    expect([...(model?.options ?? [])].map((option) => option.value)).toEqual([
+      'qwen-e2e-cdp',
+      'qwen3-coder-next',
+    ]);
+    expect(model?.options[0]?.textContent).toBe('qwen-e2e-cdp');
+    expect(model?.options[1]?.textContent).toBe('qwen3-coder-next');
+    expect(model?.options[1]?.title).toBe(
+      '[ModelStudio Coding Plan for Global/Intl] qwen3-coder-next',
+    );
+    expect(renderedContainer.textContent).toContain('New thread');
+    expect(renderedContainer.textContent).toContain('qwen-e2e-cdp');
+    expect(renderedContainer.textContent).not.toContain('Default model');
+    expect(renderedContainer.textContent).not.toContain(
+      '[ModelStudio Coding Plan',
+    );
+  });
+
   it('opens model provider settings from the composer shortcut', () => {
     const renderedContainer = renderWorkspace({
       activeSessionId: null,

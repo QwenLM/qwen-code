@@ -22,6 +22,118 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Draft Composer Saved Model State
+
+Status: completed in iteration 74.
+
+Goal: make the project-scoped composer reflect saved Model Providers state
+before a thread exists, instead of showing the ambiguous `Default model` while
+the runtime model selector is intentionally disabled.
+
+User-visible value: after users configure a provider/model from Settings, the
+bottom composer still communicates which saved model will seed the next thread.
+Users can open a project, see the saved model context, and type immediately
+without mistaking the disabled runtime picker for missing configuration.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/draft-composer-saved-model-state.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- When no thread is active but desktop settings have configured models, the
+  composer model select remains disabled but displays the saved configured
+  model options instead of `Default model`.
+- Runtime mode/model selectors remain disabled until a session exists; the
+  change must not imply that users can mutate ACP session state before the
+  session is created.
+- The composer stays compact, icon-led, and contained at desktop and compact
+  CDP sizes, with no new visible diagnostics, API keys, server URLs, ACP UUIDs,
+  or raw long Coding Plan prefixes.
+- Existing active-thread model switching still uses session runtime state and
+  still calls `onModelChange`.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, save model provider settings through the existing Settings
+  workflow, return to Conversation, create a draft new thread, assert the
+  disabled composer model picker is populated from saved configured models,
+  select an existing thread again, then continue the existing active-thread
+  model switch and terminal workflows.
+- E2E assertions: the draft composer model select is disabled, has at least one
+  saved configured option, does not display `Default model`, contains the saved
+  `qwen-e2e-cdp` option, strips raw Coding Plan prefixes from option text,
+  does not leak fake secrets or local server URLs, and does not overflow the
+  composer.
+- Diagnostic artifacts to collect on failure:
+  `draft-composer-saved-model-state.json`, screenshot artifacts from the main
+  CDP run, Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` with the Ralph prompt as fixed
+  product intent; `frontend-design` constrained by `home.jpg` to avoid adding
+  a new heavy chip; `electron-desktop-dev` for component coverage plus real
+  Electron CDP verification.
+
+Notes and decisions:
+
+- Brainstormed alternatives: add a new provider status chip, surface provider
+  state in the topbar, or reuse the existing compact model picker. The picker
+  reuse is the smallest product-faithful option because `home.jpg` keeps model
+  context in the composer and avoids extra topbar/status noise.
+- The draft picker remains disabled because it is still a session-runtime
+  mutation control. The selected/options state now comes from
+  `modelState.configuredModels` when no ACP session runtime exists, so the
+  composer communicates saved provider state without loosening session
+  lifecycle rules.
+- The CDP harness selects an existing thread after checking the draft composer
+  instead of sending a new prompt. The fake ACP intentionally emits command
+  approvals for every prompt, and leaving an extra approval pending would mask
+  the terminal attach workflow being tested later.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 32 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T23-19-45-738Z/`.
+- `draft-composer-saved-model-state.json` recorded disabled runtime selectors,
+  selected saved Coding Plan model `qwen3.5-plus`, saved configured option
+  `qwen-e2e-cdp`, no `Default model`, no raw Coding Plan label in option text,
+  no fake secrets, no local server URL, and no composer/model-control/document
+  overflow.
+
+Self-review:
+
+- The first viewport remains composer/conversation-first and does not add a
+  new status chip, drawer, or diagnostic surface.
+- Active-thread model switching still uses session runtime state and existing
+  `onModelChange`; only the no-runtime display fallback changed.
+- No Electron security, IPC, local server, or token behavior changed.
+
+Next work:
+
+- Continue model configuration workflow by making Settings save success/failure
+  feedback more explicit without exposing provider secrets.
+- Continue prototype fidelity by checking whether the model settings icon
+  should become a distinct provider/settings glyph in a later icon pass.
+
 ### Slice: Composer Model Providers Shortcut
 
 Status: completed in iteration 73.
