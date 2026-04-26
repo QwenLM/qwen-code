@@ -1321,6 +1321,25 @@ function mergeConsecutiveAssistantMessages(
         // Combine tool calls
         const combinedToolCalls = [...lastToolCalls, ...currentToolCalls];
 
+        // Combine reasoning_content. Without this merge, the second message's
+        // reasoning would be silently dropped, which can cause DeepSeek thinking
+        // mode to reject the next request with HTTP 400 (issue #3619). The
+        // merge typically fires when cleanOrphanedToolCalls removes the tool
+        // message between two assistant turns, leaving them adjacent.
+        const lastReasoning =
+          'reasoning_content' in lastMessage
+            ? ((lastMessage as ExtendedChatCompletionAssistantMessageParam)
+                .reasoning_content ?? '')
+            : '';
+        const currentReasoning =
+          'reasoning_content' in message
+            ? ((message as ExtendedChatCompletionAssistantMessageParam)
+                .reasoning_content ?? '')
+            : '';
+        const combinedReasoning = [lastReasoning, currentReasoning]
+          .filter(Boolean)
+          .join('');
+
         // Update the last message with combined data
         (
           lastMessage as OpenAI.Chat.ChatCompletionMessageParam & {
@@ -1335,6 +1354,11 @@ function mergeConsecutiveAssistantMessages(
               tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
             }
           ).tool_calls = combinedToolCalls;
+        }
+        if (combinedReasoning) {
+          (
+            lastMessage as ExtendedChatCompletionAssistantMessageParam
+          ).reasoning_content = combinedReasoning;
         }
 
         continue; // Skip adding the current message since it's been merged

@@ -2019,6 +2019,145 @@ describe('OpenAIContentConverter', () => {
       expect(messages).toHaveLength(1);
       expect(messages[0].content).toBe('FirstSecond');
     });
+
+    it('should preserve reasoning_content when merging two consecutive assistant messages (issue #3619)', () => {
+      // Without this merge, the second message's reasoning_content is silently
+      // dropped, causing DeepSeek thinking mode to reject the next request
+      // with HTTP 400. This typically fires when cleanOrphanedToolCalls
+      // removes the tool message between two assistant turns.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              { text: 'thinking step 1', thought: true },
+              { text: 'visible 1' },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [
+              { text: 'thinking step 2', thought: true },
+              { text: 'visible 2' },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      expect(messages).toHaveLength(1);
+      expect(messages[0].role).toBe('assistant');
+      expect(messages[0].content).toBe('visible 1visible 2');
+      expect(
+        (messages[0] as { reasoning_content?: string }).reasoning_content,
+      ).toBe('thinking step 1thinking step 2');
+    });
+
+    it('should preserve reasoning_content when only the second assistant has it (regression for #3619)', () => {
+      // This is the highest-value regression: previously the second message's
+      // reasoning_content was silently dropped during merge, leaving the
+      // resulting assistant turn with no reasoning_content at all — exactly
+      // what triggers DeepSeek thinking mode 400.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ text: 'visible 1' }],
+          },
+          {
+            role: 'model',
+            parts: [
+              { text: 'late thought', thought: true },
+              { text: 'visible 2' },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      expect(messages).toHaveLength(1);
+      expect(messages[0].content).toBe('visible 1visible 2');
+      expect(
+        (messages[0] as { reasoning_content?: string }).reasoning_content,
+      ).toBe('late thought');
+    });
+
+    it('should keep reasoning_content from one side when only one assistant has it', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              { text: 'only thought', thought: true },
+              { text: 'visible 1' },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [{ text: 'visible 2' }],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      expect(messages).toHaveLength(1);
+      expect(messages[0].content).toBe('visible 1visible 2');
+      expect(
+        (messages[0] as { reasoning_content?: string }).reasoning_content,
+      ).toBe('only thought');
+    });
+
+    it('should preserve reasoning_content across three consecutive assistant messages', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              { text: 'r1', thought: true },
+              { text: 't1' },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [{ text: 't2' }],
+          },
+          {
+            role: 'model',
+            parts: [
+              { text: 'r3', thought: true },
+              { text: 't3' },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      expect(messages).toHaveLength(1);
+      expect(messages[0].content).toBe('t1t2t3');
+      expect(
+        (messages[0] as { reasoning_content?: string }).reasoning_content,
+      ).toBe('r1r3');
+    });
   });
 });
 
