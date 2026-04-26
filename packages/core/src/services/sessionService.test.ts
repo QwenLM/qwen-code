@@ -930,7 +930,8 @@ describe('SESSION_TITLE_MAX_LENGTH', () => {
   });
 
   it('handles edge case: empty title', () => {
-    expect(''.length).toBe(0);
-    expect(200).toBeGreaterThan(0);
+    const emptyTitle = '';
+    expect(emptyTitle.length).toBe(0);
+    expect(emptyTitle.length).toBeLessThanOrEqual(200);
   });
 });

@@ -437,24 +437,25 @@ describe('ChatRecordingService', () => {
     it('is exported as a type from the module', async () => {
       // Regression: NotificationRecordPayload must be importable by
       // downstream packages (e.g. acp-integration).
+      // Types are erased at runtime, so we verify the module loads correctly.
       const module = await import('../../src/services/chatRecordingService.js');
       expect(module).toBeDefined();
     });
 
     it('has correct structure with displayText field', () => {
-      const payload: Record<string, unknown> = {
+      const payload: { displayText?: string } = {
         displayText: 'Test notification',
       };
       expect(payload.displayText).toBe('Test notification');
     });
 
     it('handles edge case: empty displayText', () => {
-      const payload: Record<string, unknown> = { displayText: '' };
+      const payload: { displayText?: string } = { displayText: '' };
       expect(payload.displayText).toBe('');
     });
 
     it('handles edge case: special characters in displayText', () => {
-      const payload: Record<string, unknown> = {
+      const payload: { displayText?: string } = {
         displayText: 'Alert: "quotes" & ampersands',
       };
       expect(payload.displayText).toContain('quotes');
