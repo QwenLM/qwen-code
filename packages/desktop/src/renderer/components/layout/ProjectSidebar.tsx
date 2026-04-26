@@ -9,6 +9,7 @@ import type {
   DesktopSessionSummary,
 } from '../../api/client.js';
 import {
+  BranchIcon,
   FolderIcon,
   FolderPlusIcon,
   NewThreadIcon,
@@ -148,40 +149,119 @@ function ProjectList({
       aria-label="Projects"
       data-testid="project-list"
     >
-      {projects.map((project) => (
-        <button
-          className={
-            project.id === activeProjectId
-              ? 'project-row project-row-active'
-              : 'project-row'
-          }
-          key={project.id}
-          onClick={() => onSelect(project.id)}
-          type="button"
-        >
-          <FolderIcon className="project-row-icon" />
-          <span className="project-row-copy">
-            <span>{project.name}</span>
-            <small>{formatProjectMeta(project)}</small>
-          </span>
-        </button>
-      ))}
+      {projects.map((project) => {
+        const meta = getProjectMeta(project);
+        return (
+          <button
+            aria-label={formatProjectAriaLabel(project, meta)}
+            className={
+              project.id === activeProjectId
+                ? 'project-row project-row-active'
+                : 'project-row'
+            }
+            data-testid="project-row"
+            key={project.id}
+            onClick={() => onSelect(project.id)}
+            title={formatProjectTitle(project, meta)}
+            type="button"
+          >
+            <FolderIcon className="project-row-icon" />
+            <span className="project-row-copy">
+              <span className="project-row-name" data-testid="project-row-name">
+                {project.name}
+              </span>
+              <span className="project-row-meta" data-testid="project-row-meta">
+                <span
+                  className="project-row-branch"
+                  data-testid="project-row-branch"
+                  title={meta.branchTitle}
+                >
+                  {meta.isRepository ? <BranchIcon /> : null}
+                  <span>{meta.branchLabel}</span>
+                </span>
+                {meta.dirtyLabel ? (
+                  <span
+                    className="project-row-dirty"
+                    data-testid="project-row-dirty"
+                    title={meta.dirtyTitle ?? undefined}
+                  >
+                    {meta.dirtyLabel}
+                  </span>
+                ) : null}
+              </span>
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }
 
-function formatProjectMeta(project: DesktopProject): string {
+interface ProjectMeta {
+  branchLabel: string;
+  branchTitle: string;
+  dirtyLabel: string | null;
+  dirtyTitle: string | null;
+  isRepository: boolean;
+}
+
+function getProjectMeta(project: DesktopProject): ProjectMeta {
   const status = project.gitStatus;
   const changes = status.modified + status.staged + status.untracked;
-  const branch = project.gitBranch || 'No Git branch';
 
   if (!status.isRepository) {
-    return 'No Git repository';
+    return {
+      branchLabel: 'No Git',
+      branchTitle: 'No Git repository',
+      dirtyLabel: null,
+      dirtyTitle: null,
+      isRepository: false,
+    };
   }
 
-  if (changes > 0) {
-    return `${branch} · ${changes} changes`;
+  const branch = project.gitBranch || status.branch || 'No branch';
+
+  return {
+    branchLabel: shortenBranchLabel(branch),
+    branchTitle: branch,
+    dirtyLabel: changes > 0 ? `${changes} dirty` : null,
+    dirtyTitle:
+      changes > 0
+        ? `${status.modified} modified · ${status.staged} staged · ${status.untracked} untracked`
+        : null,
+    isRepository: true,
+  };
+}
+
+function formatProjectAriaLabel(
+  project: DesktopProject,
+  meta: ProjectMeta,
+): string {
+  const parts = [project.name, meta.branchLabel];
+  if (meta.dirtyLabel) {
+    parts.push(meta.dirtyLabel);
   }
 
-  return branch;
+  return parts.join(', ');
+}
+
+function formatProjectTitle(
+  project: DesktopProject,
+  meta: ProjectMeta,
+): string {
+  const parts = [project.name, meta.branchTitle];
+  if (meta.dirtyTitle) {
+    parts.push(meta.dirtyTitle);
+  }
+
+  return parts.join(' · ');
+}
+
+function shortenBranchLabel(branch: string): string {
+  const maxLength = 22;
+  if (branch.length <= maxLength) {
+    return branch;
+  }
+
+  return `${branch.slice(0, maxLength - 3).trimEnd()}...`;
 }

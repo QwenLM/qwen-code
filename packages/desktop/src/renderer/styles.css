@@ -344,6 +344,7 @@ summary:focus-visible {
 }
 
 .project-row-copy,
+.project-row-name,
 .session-row-title {
   min-width: 0;
   overflow: hidden;
@@ -351,11 +352,10 @@ summary:focus-visible {
 
 .project-row-copy {
   display: grid;
-  gap: 1px;
+  gap: 2px;
 }
 
-.project-row-copy span,
-.project-row-copy small,
+.project-row-name,
 .session-row-title,
 .session-row-meta {
   min-width: 0;
@@ -364,18 +364,59 @@ summary:focus-visible {
   white-space: nowrap;
 }
 
-.project-row-copy span,
+.project-row-name,
 .session-row-title {
   font-size: 11.5px;
   font-weight: 650;
   line-height: 1.2;
 }
 
-.project-row-copy small {
+.project-row-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  line-height: 1;
+}
+
+.project-row-branch,
+.project-row-dirty {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 3px;
   color: rgba(225, 232, 228, 0.48);
   font-size: 9.2px;
   font-weight: 680;
   letter-spacing: 0;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.project-row-branch {
+  flex: 1 1 auto;
+}
+
+.project-row-branch svg {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  color: rgba(155, 171, 255, 0.66);
+}
+
+.project-row-branch span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.project-row-dirty {
+  flex: 0 0 auto;
+  max-width: 54px;
+  color: rgba(240, 199, 112, 0.72);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .session-row-trailing {

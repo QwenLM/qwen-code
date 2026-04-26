@@ -22,6 +22,102 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Sidebar Project Meta Restraint
+
+Status: completed in iteration 56.
+
+Goal: make sidebar project rows read like compact navigation entries rather
+than concatenated Git diagnostics by splitting branch and dirty state into
+bounded metadata chips.
+
+User-visible value: the project browser stays close to `home.jpg`: project
+names remain the primary scan target, branch context is still visible, dirty
+state is compact, and long branch names do not make project rows feel like raw
+debug output.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ProjectSidebar.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/sidebar-project-meta-restraint.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Project rows expose project name, shortened branch label, and dirty count as
+  separate DOM elements with accessible names and titles.
+- Long branch names are shortened in the visible sidebar text while the
+  topbar branch workflow remains unchanged.
+- Clean repositories show a quiet branch label without a dirty badge; non-Git
+  folders show `No Git`.
+- Sidebar rows stay within existing compact height, typography, and horizontal
+  overflow thresholds at default and compact Electron sizes.
+- Existing project selection, thread selection, settings footer, composer,
+  branch, review, terminal, and settings workflows remain unchanged.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake project on a long branch with dirty changes,
+  inspect sidebar project row metrics, then continue the existing composer,
+  branch, review, settings, terminal, and follow-up send workflows.
+- E2E assertions: project row metadata is structured, short, accessible,
+  contains a branch label and dirty badge, does not expose the raw long branch
+  in visible sidebar text, and records no console errors or failed local
+  requests.
+- Diagnostic artifacts: updated `sidebar-app-rail.json`, screenshots,
+  Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for choosing the small structured
+  metadata slice; `frontend-design` for prototype-constrained sidebar density;
+  and `electron-desktop-dev` for real Electron CDP verification of renderer
+  behavior.
+
+Notes and decisions:
+
+- This slice keeps the full branch available in the project-row title while
+  shortening the visible sidebar label. The topbar remains the place for the
+  richer branch workflow.
+- Dirty state uses a compact `N dirty` badge in the project row; the detailed
+  modified/staged/untracked counts remain in the badge title and topbar.
+- Project row metadata now has stable DOM hooks so future CDP checks do not
+  need to infer project/branch/dirty state from concatenated row text.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 25 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T19-47-14-573Z/`.
+- Key recorded metrics: `sidebar-app-rail.json` recorded the active project row
+  as `desktop-e2e-workspace-YmMYZZ, desktop-e2e/very-lo..., 2 dirty`, preserved
+  the full long branch in the branch title, kept project metadata from
+  overflowing, kept sidebar width at 244px, and recorded no sidebar region
+  overflow; `summary.json` recorded zero console errors and zero failed local
+  requests.
+
+Next work:
+
+- Continue prototype fidelity by tightening topbar context truncation: the
+  long branch and dirty summary are still understandable but visually crowded
+  in the topbar at default width.
+- Consider adding a sidebar project overflow affordance for reveal path,
+  refresh Git, and project removal without exposing full paths by default.
+
 ### Slice: Thread Title Noise Restraint
 
 Status: completed in iteration 55.

@@ -1087,14 +1087,39 @@ async function assertSidebarAppRail(fileName) {
         overflows: overflows(row)
       };
     });
+    const projectRows = [
+      ...document.querySelectorAll('[data-testid="project-row"]')
+    ].map((row) => {
+      const name = row.querySelector('[data-testid="project-row-name"]');
+      const branch = row.querySelector('[data-testid="project-row-branch"]');
+      const dirty = row.querySelector('[data-testid="project-row-dirty"]');
+      return {
+        text: row.textContent.trim(),
+        label: row.getAttribute('aria-label') || '',
+        title: row.getAttribute('title') || '',
+        className: row.className,
+        nameText: name?.textContent.trim() ?? '',
+        branchText: branch?.textContent.trim() ?? '',
+        branchTitle: branch?.getAttribute('title') || '',
+        branchHasIcon: branch?.querySelector('svg') !== null,
+        dirtyText: dirty?.textContent.trim() ?? null,
+        dirtyTitle: dirty?.getAttribute('title') || null,
+        branchRect: rectFor(branch),
+        dirtyRect: rectFor(dirty),
+        branchStyle: styleFor(branch),
+        dirtyStyle: styleFor(dirty),
+        branchOverflows: overflows(branch),
+        dirtyOverflows: overflows(dirty)
+      };
+    });
     const headingStyles = [
       ...document.querySelectorAll('.sidebar-section-heading h2')
     ].map((heading) => styleFor(heading));
     const projectTitleStyles = [
-      ...document.querySelectorAll('.project-row-copy span')
+      ...document.querySelectorAll('.project-row-name')
     ].map((title) => styleFor(title));
     const projectMetaStyles = [
-      ...document.querySelectorAll('.project-row-copy small')
+      ...document.querySelectorAll('.project-row-branch, .project-row-dirty')
     ].map((meta) => styleFor(meta));
     const threadTitleStyles = [
       ...document.querySelectorAll('.session-row-title')
@@ -1124,6 +1149,7 @@ async function assertSidebarAppRail(fileName) {
         footerSettings?.textContent.trim() ||
         '',
       rows,
+      projectRows,
       headingStyles,
       projectTitleStyles,
       projectMetaStyles,
@@ -1277,6 +1303,72 @@ async function assertSidebarAppRail(fileName) {
         oversizedThreadTitles,
         oversizedThreadMeta,
       })}`,
+    );
+  }
+
+  if (metrics.projectRows.length === 0) {
+    throw new Error('Sidebar project rows were not recorded.');
+  }
+
+  const activeProjectRow =
+    metrics.projectRows.find((row) =>
+      row.nameText.includes('desktop-e2e-workspace'),
+    ) ?? metrics.projectRows[0];
+
+  if (
+    !activeProjectRow.branchText ||
+    !activeProjectRow.branchTitle ||
+    !activeProjectRow.branchHasIcon
+  ) {
+    throw new Error(
+      `Sidebar project branch metadata is not structured: ${JSON.stringify(
+        activeProjectRow,
+      )}`,
+    );
+  }
+
+  if (activeProjectRow.branchTitle !== longBranchName) {
+    throw new Error(
+      `Sidebar project row should preserve the full branch in its title: ${JSON.stringify(
+        activeProjectRow,
+      )}`,
+    );
+  }
+
+  if (
+    activeProjectRow.text.includes(longBranchName) ||
+    activeProjectRow.label.includes(longBranchName) ||
+    activeProjectRow.branchText.includes(longBranchName) ||
+    activeProjectRow.branchText.length > 22
+  ) {
+    throw new Error(
+      `Sidebar project row exposed an oversized branch label: ${JSON.stringify(
+        activeProjectRow,
+      )}`,
+    );
+  }
+
+  if (
+    activeProjectRow.dirtyText !== '2 dirty' ||
+    activeProjectRow.dirtyTitle !==
+      '1 modified · 0 staged · 1 untracked'
+  ) {
+    throw new Error(
+      `Sidebar project dirty metadata regressed: ${JSON.stringify(
+        activeProjectRow,
+      )}`,
+    );
+  }
+
+  if (activeProjectRow.branchOverflows || activeProjectRow.dirtyOverflows) {
+    throw new Error(
+      `Sidebar project metadata overflowed: ${JSON.stringify(activeProjectRow)}`,
+    );
+  }
+
+  if (metrics.sidebarText.includes(longBranchName)) {
+    throw new Error(
+      `Sidebar visible text leaked the raw long branch: ${metrics.sidebarText}`,
     );
   }
 

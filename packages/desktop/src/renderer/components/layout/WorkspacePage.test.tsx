@@ -318,6 +318,74 @@ describe('WorkspacePage', () => {
     ).toBeTruthy();
   });
 
+  it('keeps sidebar project metadata compact and structured', () => {
+    const longBranchName =
+      'desktop-e2e/very-long-branch-name-for-topbar-overflow-check';
+    const dirtyProject: DesktopProject = {
+      ...project,
+      gitBranch: longBranchName,
+      gitStatus: {
+        ...project.gitStatus,
+        branch: longBranchName,
+        modified: 12,
+        staged: 2,
+        untracked: 3,
+        clean: false,
+      },
+    };
+    const cleanProject: DesktopProject = {
+      ...project,
+      id: 'project-clean',
+      name: 'clean-workspace',
+      gitStatus: {
+        ...project.gitStatus,
+        clean: true,
+        modified: 0,
+        staged: 0,
+        untracked: 0,
+      },
+    };
+    const renderedContainer = renderWorkspace({
+      activeProject: dirtyProject,
+      activeProjectId: dirtyProject.id,
+      projects: [dirtyProject, cleanProject],
+    });
+    const projectRows = renderedContainer.querySelectorAll(
+      '[data-testid="project-row"]',
+    );
+    const dirtyRow = projectRows[0];
+    const cleanRow = projectRows[1];
+    const dirtyBranch = dirtyRow?.querySelector(
+      '[data-testid="project-row-branch"]',
+    );
+    const dirtyBadge = dirtyRow?.querySelector(
+      '[data-testid="project-row-dirty"]',
+    );
+
+    expect(projectRows).toHaveLength(2);
+    expect(dirtyRow?.getAttribute('aria-label')).toBe(
+      'example-workspace, desktop-e2e/very-lo..., 17 dirty',
+    );
+    expect(dirtyRow?.getAttribute('title')).toBe(
+      'example-workspace · ' +
+        longBranchName +
+        ' · 12 modified · 2 staged · 3 untracked',
+    );
+    expect(dirtyRow?.textContent).toContain('example-workspace');
+    expect(dirtyRow?.textContent).toContain('desktop-e2e/very-lo...');
+    expect(dirtyRow?.textContent).toContain('17 dirty');
+    expect(dirtyRow?.textContent).not.toContain(longBranchName);
+    expect(dirtyBranch?.getAttribute('title')).toBe(longBranchName);
+    expect(dirtyBranch?.querySelector('svg')).toBeTruthy();
+    expect(dirtyBadge?.getAttribute('title')).toBe(
+      '12 modified · 2 staged · 3 untracked',
+    );
+    expect(cleanRow?.textContent).toContain('main');
+    expect(
+      cleanRow?.querySelector('[data-testid="project-row-dirty"]'),
+    ).toBeNull();
+  });
+
   it('confirms dirty branch switches from the topbar menu', async () => {
     const branches: DesktopGitBranch[] = [
       { name: 'main', current: true },
