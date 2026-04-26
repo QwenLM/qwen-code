@@ -1522,6 +1522,19 @@ export const AppContainer = (props: AppContainerProps) => {
     needsRestart: ideNeedsRestart,
     restartReason: ideTrustRestartReason,
   } = useIdeTrustListener();
+  const {
+    isFeedbackDialogOpen,
+    openFeedbackDialog,
+    closeFeedbackDialog,
+    temporaryCloseFeedbackDialog,
+    submitFeedback,
+  } = useFeedbackDialog({
+    config,
+    settings,
+    streamingState,
+    history: historyManager.history,
+    sessionStats,
+  });
   const dialogsVisible =
     showWelcomeBackDialog ||
     shouldShowIdePrompt ||
@@ -1558,6 +1571,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const shouldShowStickyTodos =
     stickyTodos !== null &&
     !dialogsVisible &&
+    !isFeedbackDialogOpen &&
     streamingState !== StreamingState.WaitingForConfirmation;
   const [controlsHeight, setControlsHeight] = useState(0);
 
@@ -2211,20 +2225,6 @@ export const AppContainer = (props: AppContainerProps) => {
   ]);
 
   const nightly = props.version.includes('nightly');
-
-  const {
-    isFeedbackDialogOpen,
-    openFeedbackDialog,
-    closeFeedbackDialog,
-    temporaryCloseFeedbackDialog,
-    submitFeedback,
-  } = useFeedbackDialog({
-    config,
-    settings,
-    streamingState,
-    history: historyManager.history,
-    sessionStats,
-  });
 
   const uiState: UIState = useMemo(
     () => ({
