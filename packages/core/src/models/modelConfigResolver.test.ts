@@ -185,6 +185,114 @@ describe('modelConfigResolver', () => {
         expect(result.warnings).toHaveLength(1);
         expect(result.warnings[0]).toContain('unsupported-model');
       });
+
+      it('QWEN_CODE_API_TIMEOUT_MS applies in Qwen OAuth path', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.QWEN_OAUTH,
+          cli: {},
+          settings: {},
+          env: {
+            QWEN_CODE_API_TIMEOUT_MS: '45000',
+          },
+        });
+
+        expect(result.config.timeout).toBe(45000);
+        expect(result.sources['timeout']).toBeDefined();
+        expect(result.sources['timeout'].kind).toBe('env');
+        expect(result.sources['timeout'].envKey).toBe(
+          'QWEN_CODE_API_TIMEOUT_MS',
+        );
+        expect(result.config.model).toBe(DEFAULT_QWEN_MODEL);
+      });
+
+      it('modelProvider timeout takes precedence over QWEN_CODE_API_TIMEOUT_MS in OAuth', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.QWEN_OAUTH,
+          cli: {},
+          settings: {},
+          env: {
+            QWEN_CODE_API_TIMEOUT_MS: '45000',
+          },
+          modelProvider: {
+            id: 'qwen-oauth',
+            name: 'Qwen OAuth',
+            generationConfig: {
+              timeout: 120000,
+            },
+          },
+        });
+
+        expect(result.config.timeout).toBe(120000);
+        expect(result.sources['timeout'].kind).toBe('modelProviders');
+      });
+
+      it('invalid QWEN_CODE_API_TIMEOUT_MS ignored in OAuth path', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.QWEN_OAUTH,
+          cli: {},
+          settings: {},
+          env: {
+            QWEN_CODE_API_TIMEOUT_MS: 'not-a-number',
+          },
+        });
+
+        expect(result.config.timeout).toBeUndefined();
+      });
+
+      it('negative QWEN_CODE_API_TIMEOUT_MS ignored in OAuth path', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.QWEN_OAUTH,
+          cli: {},
+          settings: {},
+          env: {
+            QWEN_CODE_API_TIMEOUT_MS: '-100',
+          },
+        });
+
+        expect(result.config.timeout).toBeUndefined();
+      });
+
+      it('zero QWEN_CODE_API_TIMEOUT_MS ignored in OAuth path', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.QWEN_OAUTH,
+          cli: {},
+          settings: {},
+          env: {
+            QWEN_CODE_API_TIMEOUT_MS: '0',
+          },
+        });
+
+        expect(result.config.timeout).toBeUndefined();
+      });
+
+      it('QWEN_CODE_API_TIMEOUT_MS works with float value in OAuth', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.QWEN_OAUTH,
+          cli: {},
+          settings: {},
+          env: {
+            QWEN_CODE_API_TIMEOUT_MS: '12345.67',
+          },
+        });
+
+        expect(result.config.timeout).toBe(12345);
+      });
+
+      it('QWEN_CODE_API_TIMEOUT_MS works with proxy in OAuth path', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.QWEN_OAUTH,
+          cli: {},
+          settings: {},
+          env: {
+            QWEN_CODE_API_TIMEOUT_MS: '60000',
+          },
+          proxy: 'http://proxy.example.com:8080',
+        });
+
+        expect(result.config.timeout).toBe(60000);
+        expect(result.config.proxy).toBe('http://proxy.example.com:8080');
+        expect(result.sources['timeout'].kind).toBe('env');
+      });
     });
 
     describe('Anthropic auth type', () => {
