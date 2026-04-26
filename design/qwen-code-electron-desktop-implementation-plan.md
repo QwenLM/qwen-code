@@ -22,6 +22,122 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Inline Tool Activity Prototype Fidelity
+
+Status: completed in iteration 17.
+
+Goal: reduce the remaining dashboard-card treatment around resolved tool
+activity so command/tool progress reads like a compact inline timeline event,
+closer to the activity rows in `home.jpg`.
+
+User-visible value: users can scan agent work without a large framed tool
+result crowding the conversation or competing with assistant prose, changed
+files, and the composer.
+
+Expected files:
+
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/tool-activity-fidelity.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Resolved tool activity keeps the existing semantic content and file chip.
+- Tool activity no longer has a full card border or opaque card background;
+  only a subtle timeline accent remains.
+- Tool input/output previews are compact and less visually heavy than the
+  previous dark boxed card treatment.
+- File chips stay compact, readable, and width-bounded.
+- Existing approval, assistant action, changed-files, review, settings,
+  terminal, and commit workflows continue to pass in the real Electron CDP
+  smoke.
+
+Verification:
+
+- Unit/component test command: no component logic change expected.
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake project, send a prompt, approve the fake command
+  request, wait for the resolved tool activity, assert semantic content and
+  compact visual style metrics, capture screenshot/JSON artifacts, then
+  continue the existing assistant, changed-files, review, settings, terminal,
+  review safety, and commit workflow.
+- E2E assertions: tool activity has no top/right/bottom border frame, uses a
+  subtle left timeline accent, has transparent or near-transparent background,
+  keeps preview backgrounds subdued, stays shorter than the prior heavy card,
+  and does not leak internal tool/session IDs.
+- Diagnostic artifacts: `resolved-tool-activity.json`,
+  `resolved-tool-activity.png`, plus existing CDP screenshots, Electron log,
+  and summary JSON under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained visual
+  hierarchy and density; `electron-desktop-dev` for renderer/CDP real Electron
+  verification; `brainstorming` applied by selecting the smallest fidelity
+  continuation from recorded next-work items instead of expanding scope.
+
+Notes and decisions:
+
+- `frontend-design` is applied with the Ralph constraint that `home.jpg` wins:
+  the goal is restrained, desktop-native density rather than a new visual
+  direction.
+- `electron-desktop-dev` requires this CSS-only renderer polish to be verified
+  in a real Electron window through the CDP harness because the risk is visual
+  hierarchy, overflow, and first-viewport usability.
+- This slice intentionally avoids changing tool timeline data shaping; it only
+  adjusts the presentation and executable layout/style assertions.
+- Resolved tool activity now uses a transparent container with a 2 px left
+  timeline accent, subdued preview separators, and lighter file chips. This
+  keeps the semantic command/result/file information without reintroducing a
+  full bordered card.
+- The first CDP run exposed a harness bug in the new style probe
+  (`firstPreview`/`fileChip` were referenced before declaration); this was
+  fixed before rerunning.
+- The second CDP run showed the visual direction was correct but the activity
+  row was still 177.8 px tall against the 175 px compactness target. The CSS
+  spacing was tightened instead of loosening the assertion.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` first failed with a style-probe
+  `ReferenceError`, producing diagnostics at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T01-34-05-965Z/`.
+- `cd packages/desktop && npm run e2e:cdp` then failed because the compact tool
+  activity height was still `177.796875`, producing diagnostics at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T01-34-47-802Z/`.
+- After tightening the tool activity spacing,
+  `cd packages/desktop && npm run e2e:cdp` passed after launch through real
+  Electron over CDP, including the new inline tool activity style assertions
+  and the existing assistant, compact layout, review, settings, terminal,
+  review safety, and commit workflows.
+- After a self-review cleanup removed two accidental unused style-probe
+  declarations from the command-approval assertion, the same
+  `cd packages/desktop && npm run e2e:cdp` command passed again.
+- Passing artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T01-38-24-240Z/`.
+- Key recorded metrics: tool activity height was `167.796875`, background
+  alpha was `0`, top/right/bottom border widths were `0`, left border width was
+  `2` with alpha `0.36`, preview background alpha was `0`, and file-chip
+  background alpha was `0.05`.
+
+Next work:
+
+- Continue prototype fidelity by reducing remaining visual heaviness in the
+  changed-files summary and sidebar/topbar typography visible in the current
+  CDP screenshots.
+- Add focused long branch/model/project-name CDP coverage with review open,
+  since compact review and composer chips rely on truncation to avoid overflow.
+
 ### Completed Slice: Conversation Surface Prototype Fidelity
 
 Status: completed in iteration 16.

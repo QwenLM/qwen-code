@@ -834,6 +834,8 @@ async function assertResolvedToolActivity(fileName) {
     );
     const timeline = document.querySelector('.chat-timeline');
     const composer = document.querySelector('[data-testid="message-composer"]');
+    const firstPreview = card?.querySelector('.conversation-tool-section pre');
+    const fileChip = card?.querySelector('.conversation-tool-files li');
     const rectFor = (element) => {
       if (!element) {
         return null;
@@ -848,13 +850,58 @@ async function assertResolvedToolActivity(fileName) {
         height: rect.height
       };
     };
+    const alphaFromColor = (color) => {
+      if (!color || color === 'transparent') {
+        return 0;
+      }
+
+      const match = color.match(/rgba?\\(([^)]+)\\)/u);
+      if (!match) {
+        return 1;
+      }
+
+      const parts = match[1].split(',').map((part) => part.trim());
+      if (parts.length < 4) {
+        return 1;
+      }
+
+      const alpha = Number(parts[3]);
+      return Number.isFinite(alpha) ? alpha : 1;
+    };
+    const numberFromPixel = (value) => {
+      const number = Number.parseFloat(value);
+      return Number.isFinite(number) ? number : 0;
+    };
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+
+      const style = window.getComputedStyle(element);
+      return {
+        backgroundColor: style.backgroundColor,
+        backgroundAlpha: alphaFromColor(style.backgroundColor),
+        borderTopColor: style.borderTopColor,
+        borderTopAlpha: alphaFromColor(style.borderTopColor),
+        borderLeftColor: style.borderLeftColor,
+        borderLeftAlpha: alphaFromColor(style.borderLeftColor),
+        borderTopWidth: numberFromPixel(style.borderTopWidth),
+        borderRightWidth: numberFromPixel(style.borderRightWidth),
+        borderBottomWidth: numberFromPixel(style.borderBottomWidth),
+        borderLeftWidth: numberFromPixel(style.borderLeftWidth),
+        borderRadius: style.borderTopLeftRadius
+      };
+    };
     return {
       bodyText: document.body.innerText,
       cardText: card?.innerText ?? '',
       cardRect: rectFor(card),
+      cardStyle: styleFor(card),
       timelineRect: rectFor(timeline),
       composerRect: rectFor(composer),
       legacyToolRows: document.querySelectorAll('.chat-tool').length,
+      previewStyle: styleFor(firstPreview),
+      fileChipStyle: styleFor(fileChip),
       fileChipText:
         document.querySelector('.conversation-tool-files')?.innerText ?? ''
     };
@@ -910,6 +957,71 @@ async function assertResolvedToolActivity(fileName) {
     throw new Error(
       `Resolved tool activity geometry is unexpected: ${JSON.stringify(
         snapshot.cardRect,
+      )}`,
+    );
+  }
+
+  if (snapshot.cardRect.height > 175) {
+    throw new Error(
+      `Resolved tool activity should be compact, not card-like: ${JSON.stringify(
+        snapshot.cardRect,
+      )}`,
+    );
+  }
+
+  if (!snapshot.cardStyle || !snapshot.previewStyle || !snapshot.fileChipStyle) {
+    throw new Error(
+      `Resolved tool activity styles are missing: ${JSON.stringify(snapshot)}`,
+    );
+  }
+
+  if (
+    snapshot.cardStyle.borderTopWidth !== 0 ||
+    snapshot.cardStyle.borderRightWidth !== 0 ||
+    snapshot.cardStyle.borderBottomWidth !== 0
+  ) {
+    throw new Error(
+      `Resolved tool activity should not have a full card border: ${JSON.stringify(
+        snapshot.cardStyle,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.cardStyle.borderLeftWidth < 1 ||
+    snapshot.cardStyle.borderLeftWidth > 2 ||
+    snapshot.cardStyle.borderLeftAlpha > 0.5
+  ) {
+    throw new Error(
+      `Resolved tool activity accent should stay subtle: ${JSON.stringify(
+        snapshot.cardStyle,
+      )}`,
+    );
+  }
+
+  if (snapshot.cardStyle.backgroundAlpha > 0.04) {
+    throw new Error(
+      `Resolved tool activity background is too heavy: ${JSON.stringify(
+        snapshot.cardStyle,
+      )}`,
+    );
+  }
+
+  if (snapshot.previewStyle.backgroundAlpha > 0.08) {
+    throw new Error(
+      `Resolved tool activity preview background is too heavy: ${JSON.stringify(
+        snapshot.previewStyle,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.fileChipStyle.backgroundAlpha > 0.07 ||
+    snapshot.fileChipStyle.borderTopAlpha > 0.2
+  ) {
+    throw new Error(
+      `Resolved tool activity file chip is too heavy: ${JSON.stringify(
+        snapshot.fileChipStyle,
       )}`,
     );
   }

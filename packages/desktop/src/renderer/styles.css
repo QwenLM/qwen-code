@@ -838,32 +838,29 @@ summary:focus-visible {
 
 .conversation-tool-card {
   display: grid;
-  width: min(860px, 100%);
+  width: min(820px, 100%);
   align-self: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-left: 2px solid rgba(117, 217, 156, 0.34);
-  border-radius: var(--radius);
-  background: rgba(238, 244, 239, 0.025);
+  gap: 6px;
+  padding: 6px 0 6px 14px;
+  border: 0;
+  border-left: 2px solid rgba(117, 217, 156, 0.36);
+  border-radius: 0;
+  background: transparent;
   color: var(--text-soft);
 }
 
 .conversation-tool-card-running {
-  border-color: var(--line);
   border-left-color: rgba(85, 166, 255, 0.42);
-  background: rgba(85, 166, 255, 0.045);
+  background: transparent;
 }
 
 .conversation-tool-card-complete {
-  border-color: var(--line);
-  border-left-color: rgba(117, 217, 156, 0.38);
+  border-left-color: rgba(117, 217, 156, 0.36);
 }
 
 .conversation-tool-card-danger {
-  border-color: var(--line);
   border-left-color: rgba(255, 127, 105, 0.46);
-  background: rgba(255, 127, 105, 0.055);
+  background: rgba(255, 127, 105, 0.035);
 }
 
 .conversation-tool-heading {
@@ -884,8 +881,8 @@ summary:focus-visible {
   min-width: 0;
   overflow: hidden;
   color: var(--text);
-  font-size: 14px;
-  font-weight: 800;
+  font-size: 13px;
+  font-weight: 760;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -893,7 +890,7 @@ summary:focus-visible {
 .conversation-tool-status {
   flex: 0 0 auto;
   color: #a9eabd;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 820;
   text-transform: uppercase;
 }
@@ -907,14 +904,15 @@ summary:focus-visible {
 }
 
 .conversation-tool-section pre {
-  max-height: 72px;
+  max-height: 58px;
   min-width: 0;
   margin: 0;
   overflow: auto;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: rgba(8, 10, 11, 0.3);
-  color: var(--text);
+  padding: 5px 0 0;
+  border-top: 1px solid rgba(226, 232, 222, 0.08);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-soft);
   font-family:
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
     monospace;
@@ -940,12 +938,12 @@ summary:focus-visible {
 
 .conversation-tool-files li {
   max-width: 260px;
-  min-height: 24px;
+  min-height: 22px;
   overflow: hidden;
-  padding: 4px 8px;
-  border: 1px solid rgba(85, 166, 255, 0.2);
+  padding: 3px 7px;
+  border: 1px solid rgba(85, 166, 255, 0.16);
   border-radius: 999px;
-  background: rgba(85, 166, 255, 0.08);
+  background: rgba(85, 166, 255, 0.05);
   color: #b7d9ff;
   font-size: 11px;
   font-weight: 760;
@@ -2045,6 +2043,10 @@ textarea:focus {
 
   .workspace-grid-review-open .chat-message-assistant {
     padding: 2px 0 0;
+  }
+
+  .workspace-grid-review-open .conversation-tool-card {
+    padding: 6px 0 6px 12px;
   }
 
   .workspace-grid-review-open .composer {
