@@ -71,12 +71,18 @@ import { type ContextState, templateString } from './agent-headless.js';
  * Tools that must never be available to subagents (including forked agents).
  * - AgentTool prevents recursive subagent spawning.
  * - Cron tools are session-scoped and should only run from the main session.
+ * - TaskStop and SendMessage are parent-side control-plane tools for managing
+ *   background subagents; subagents have no agent IDs to manage natively, so
+ *   exposing them only widens the surface for cross-agent interference if an
+ *   ID leaks via prompt or transcript.
  */
 export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
+  ToolNames.TASK_STOP,
+  ToolNames.SEND_MESSAGE,
 ]);
 
 /**
