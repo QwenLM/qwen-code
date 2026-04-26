@@ -800,6 +800,101 @@ describe('loadCliConfig', () => {
       expect(config.getProxy()).toBe('http://localhost:7890');
     });
   });
+
+  describe('Insecure / TLS-skip configuration (#3535)', () => {
+    const insecureEnvVars = [
+      'QWEN_TLS_INSECURE',
+      'NODE_TLS_REJECT_UNAUTHORIZED',
+    ];
+    const original: { [key: string]: string | undefined } = {};
+
+    beforeEach(() => {
+      for (const key of insecureEnvVars) {
+        original[key] = process.env[key];
+        delete process.env[key];
+      }
+    });
+
+    afterEach(() => {
+      for (const key of insecureEnvVars) {
+        if (original[key] !== undefined) {
+          process.env[key] = original[key];
+        } else {
+          delete process.env[key];
+        }
+      }
+    });
+
+    it('defaults to false', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getInsecure()).toBe(false);
+    });
+
+    it('honors --insecure flag', async () => {
+      process.argv = ['node', 'script.js', '--insecure'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getInsecure()).toBe(true);
+    });
+
+    it('honors QWEN_TLS_INSECURE=1', async () => {
+      vi.stubEnv('QWEN_TLS_INSECURE', '1');
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getInsecure()).toBe(true);
+    });
+
+    it('honors NODE_TLS_REJECT_UNAUTHORIZED=0 (matches Claude Code/Node convention)', async () => {
+      vi.stubEnv('NODE_TLS_REJECT_UNAUTHORIZED', '0');
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getInsecure()).toBe(true);
+    });
+
+    it('ignores QWEN_TLS_INSECURE=0 / arbitrary values', async () => {
+      vi.stubEnv('QWEN_TLS_INSECURE', '0');
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getInsecure()).toBe(false);
+    });
+
+    it('ignores NODE_TLS_REJECT_UNAUTHORIZED=1', async () => {
+      vi.stubEnv('NODE_TLS_REJECT_UNAUTHORIZED', '1');
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getInsecure()).toBe(false);
+    });
+
+    it('--insecure overrides explicit env=0', async () => {
+      vi.stubEnv('QWEN_TLS_INSECURE', '0');
+      process.argv = ['node', 'script.js', '--insecure'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getInsecure()).toBe(true);
+    });
+
+    it('--no-insecure forces verification on even with QWEN_TLS_INSECURE=1', async () => {
+      vi.stubEnv('QWEN_TLS_INSECURE', '1');
+      process.argv = ['node', 'script.js', '--no-insecure'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getInsecure()).toBe(false);
+    });
+
+    it('--no-insecure overrides NODE_TLS_REJECT_UNAUTHORIZED=0', async () => {
+      vi.stubEnv('NODE_TLS_REJECT_UNAUTHORIZED', '0');
+      process.argv = ['node', 'script.js', '--no-insecure'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getInsecure()).toBe(false);
+    });
+  });
 });
 
 describe('loadCliConfig telemetry', () => {

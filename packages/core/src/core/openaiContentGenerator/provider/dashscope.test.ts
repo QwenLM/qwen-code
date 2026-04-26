@@ -69,6 +69,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         enableCacheControl: true,
       }),
       getProxy: vi.fn().mockReturnValue(undefined),
+      getInsecure: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     provider = new DashScopeOpenAICompatibleProvider(

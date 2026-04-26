@@ -51,10 +51,10 @@ export class DefaultOpenAICompatibleProvider
     const defaultHeaders = this.buildHeaders();
     // Configure fetch options to ensure user-configured timeout works as expected
     // bodyTimeout is always disabled (0) to let OpenAI SDK timeout control the request
-    const runtimeOptions = buildRuntimeFetchOptions(
-      'openai',
-      this.cliConfig.getProxy(),
-    );
+    const runtimeOptions = buildRuntimeFetchOptions('openai', {
+      proxyUrl: this.cliConfig.getProxy(),
+      insecure: this.cliConfig.getInsecure(),
+    });
     return new OpenAI({
       apiKey,
       baseURL: baseUrl,

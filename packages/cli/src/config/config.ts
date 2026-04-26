@@ -136,6 +136,7 @@ export interface CliArgs {
   openaiBaseUrl: string | undefined;
   openaiLoggingDir: string | undefined;
   proxy: string | undefined;
+  insecure: boolean | undefined;
   includeDirectories: string[] | undefined;
   screenReader: boolean | undefined;
   inputFormat?: string | undefined;
@@ -161,6 +162,35 @@ export interface CliArgs {
   jsonFd?: number | undefined;
   jsonFile?: string | undefined;
   inputFile?: string | undefined;
+}
+
+/**
+ * Resolve the effective TLS-insecure setting from (in order):
+ *   1. ``--insecure`` / ``--no-insecure`` CLI flag (any explicit value wins),
+ *   2. ``QWEN_TLS_INSECURE`` env var (truthy: ``1``, ``true``, ``yes``,
+ *      case-insensitive),
+ *   3. ``NODE_TLS_REJECT_UNAUTHORIZED=0`` for parity with Node's legacy
+ *      ``http`` stack and Claude Code -- undici (used by ``fetch``)
+ *      otherwise ignores this env var, leaving users surprised that the
+ *      flag they set "for everything" silently does nothing here (#3535).
+ *
+ * ``cliFlag`` is tri-state: ``undefined`` means the user passed neither
+ * ``--insecure`` nor ``--no-insecure``, in which case we fall through to
+ * the env-var checks. An explicit ``false`` (``--no-insecure``) forces
+ * verification on regardless of env, since the CLI is documented to win.
+ */
+function resolveInsecureFlag(cliFlag: boolean | undefined): boolean {
+  if (cliFlag !== undefined) {
+    return cliFlag;
+  }
+  const qwenEnv = process.env['QWEN_TLS_INSECURE']?.trim().toLowerCase();
+  if (qwenEnv === '1' || qwenEnv === 'true' || qwenEnv === 'yes') {
+    return true;
+  }
+  if (process.env['NODE_TLS_REJECT_UNAUTHORIZED']?.trim() === '0') {
+    return true;
+  }
+  return false;
 }
 
 function normalizeOutputFormat(
@@ -272,6 +302,19 @@ export async function parseArguments(): Promise<CliArgs> {
       'proxy',
       'Use the "proxy" setting in settings.json instead. This flag will be removed in a future version.',
     )
+    .option('insecure', {
+      type: 'boolean',
+      description:
+        'Skip TLS certificate verification for outbound HTTPS requests. ' +
+        'Use for self-signed dev/lab endpoints. ' +
+        'Pass --no-insecure to force verification on, overriding env vars. ' +
+        'Equivalent env vars (lower precedence): ' +
+        'QWEN_TLS_INSECURE=1 or NODE_TLS_REJECT_UNAUTHORIZED=0.',
+      // No default so yargs reports ``undefined`` when neither --insecure
+      // nor --no-insecure is passed. That preserves three distinct states
+      // (true / false / undefined), which lets the resolver below treat
+      // an explicit ``--no-insecure`` as the highest-precedence override.
+    })
     .option('chat-recording', {
       type: 'boolean',
       description:
@@ -1158,6 +1201,7 @@ export async function loadCliConfig(
       process.env['https_proxy'] ||
       process.env['HTTP_PROXY'] ||
       process.env['http_proxy'],
+    insecure: resolveInsecureFlag(argv.insecure),
     cwd,
     fileDiscoveryService: fileService,
     bugCommand: settings.advanced?.bugCommand,

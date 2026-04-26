@@ -92,4 +92,81 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
       bodyTimeout: 0,
     });
   });
+
+  describe('insecure flag (#3535)', () => {
+    it('omits connect option when insecure is unset', () => {
+      const result = buildRuntimeFetchOptions('openai');
+      const dispatcher = (
+        result as {
+          fetchOptions?: { dispatcher?: { options?: UndiciOptions } };
+        }
+      ).fetchOptions?.dispatcher;
+      expect(dispatcher?.options).not.toHaveProperty('connect');
+    });
+
+    it('forwards rejectUnauthorized: false to undici Agent', () => {
+      const result = buildRuntimeFetchOptions('openai', { insecure: true });
+      const dispatcher = (
+        result as {
+          fetchOptions?: { dispatcher?: { options?: UndiciOptions } };
+        }
+      ).fetchOptions?.dispatcher;
+      expect(dispatcher?.options).toMatchObject({
+        connect: { rejectUnauthorized: false },
+        headersTimeout: 0,
+        bodyTimeout: 0,
+      });
+    });
+
+    it('forwards rejectUnauthorized: false to undici ProxyAgent', () => {
+      const result = buildRuntimeFetchOptions('openai', {
+        proxyUrl: 'http://proxy.local',
+        insecure: true,
+      });
+      const dispatcher = (
+        result as {
+          fetchOptions?: { dispatcher?: { options?: UndiciOptions } };
+        }
+      ).fetchOptions?.dispatcher;
+      expect(dispatcher?.options).toMatchObject({
+        uri: 'http://proxy.local',
+        connect: { rejectUnauthorized: false },
+        headersTimeout: 0,
+        bodyTimeout: 0,
+      });
+    });
+
+    it('treats a bare proxy-URL string identically to legacy callers', () => {
+      const stringResult = buildRuntimeFetchOptions(
+        'openai',
+        'http://proxy.local',
+      );
+      const objectResult = buildRuntimeFetchOptions('openai', {
+        proxyUrl: 'http://proxy.local',
+      });
+      const stringDispatcher = (
+        stringResult as {
+          fetchOptions?: { dispatcher?: { options?: UndiciOptions } };
+        }
+      ).fetchOptions?.dispatcher?.options;
+      const objectDispatcher = (
+        objectResult as {
+          fetchOptions?: { dispatcher?: { options?: UndiciOptions } };
+        }
+      ).fetchOptions?.dispatcher?.options;
+      expect(stringDispatcher).toEqual(objectDispatcher);
+    });
+
+    it('also threads insecure into Anthropic builders', () => {
+      const result = buildRuntimeFetchOptions('anthropic', { insecure: true });
+      const dispatcher = (
+        result as {
+          fetchOptions?: { dispatcher?: { options?: UndiciOptions } };
+        }
+      ).fetchOptions?.dispatcher;
+      expect(dispatcher?.options).toMatchObject({
+        connect: { rejectUnauthorized: false },
+      });
+    });
+  });
 });

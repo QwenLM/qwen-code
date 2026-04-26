@@ -66,10 +66,10 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const baseURL = contentGeneratorConfig.baseUrl;
     // Configure runtime options to ensure user-configured timeout works as expected
     // bodyTimeout is always disabled (0) to let Anthropic SDK timeout control the request
-    const runtimeOptions = buildRuntimeFetchOptions(
-      'anthropic',
-      this.cliConfig.getProxy(),
-    );
+    const runtimeOptions = buildRuntimeFetchOptions('anthropic', {
+      proxyUrl: this.cliConfig.getProxy(),
+      insecure: this.cliConfig.getInsecure(),
+    });
 
     this.client = new Anthropic({
       apiKey: contentGeneratorConfig.apiKey,
