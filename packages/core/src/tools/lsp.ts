@@ -1166,7 +1166,7 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
         ? ` [${location.serverName}]`
         : '';
 
-    return `${filePath}:${(start.line ?? 0) + 1}:${(start.character ?? 0) + 1}${serverSuffix}`;
+    return `${this.normalizeDisplayPath(filePath)}:${(start.line ?? 0) + 1}:${(start.character ?? 0) + 1}${serverSuffix}`;
   }
 
   private formatLocationWithoutServer(
@@ -1181,7 +1181,7 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
     }
     const line = (range.start.line ?? 0) + 1;
     const character = (range.start.character ?? 0) + 1;
-    return `${filePath}:${line}:${character}`;
+    return `${this.normalizeDisplayPath(filePath)}:${line}:${character}`;
   }
 
   private formatCallHierarchyItemLine(
@@ -1226,9 +1226,15 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       filePath = fileURLToPath(uri);
     }
     if (path.isAbsolute(filePath)) {
-      return path.relative(workspaceRoot, filePath) || '.';
+      return this.normalizeDisplayPath(
+        path.relative(workspaceRoot, filePath) || '.',
+      );
     }
-    return filePath;
+    return this.normalizeDisplayPath(filePath);
+  }
+
+  private normalizeDisplayPath(filePath: string): string {
+    return filePath.replace(/\\/g, '/');
   }
 
   private formatJsonSection(label: string, data: unknown): string {

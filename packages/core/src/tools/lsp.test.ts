@@ -367,6 +367,29 @@ describe('LspTool', () => {
         expect(result.llmContent).toContain('1.');
       });
 
+      it('normalizes Windows-style separators in formatted locations', async () => {
+        const client = createMockClient();
+        const tool = createTool(client);
+        const filePath = resolvePath('src\\calculator.py');
+        const definition: LspDefinition = {
+          ...createLocation(filePath, 21, 6),
+          serverName: 'pylsp',
+        };
+        (client.definitions as Mock).mockResolvedValue([definition]);
+
+        const invocation = tool.build({
+          operation: 'goToDefinition',
+          filePath: 'src/calculator.py',
+          line: 22,
+          character: 7,
+        });
+        const result = await invocation.execute(abortSignal);
+
+        expect(result.returnDisplay).toContain(
+          '1. src/calculator.py:22:7 [pylsp]',
+        );
+      });
+
       it('handles empty results', async () => {
         const client = createMockClient();
         const tool = createTool(client);
