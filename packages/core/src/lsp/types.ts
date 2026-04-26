@@ -358,6 +358,11 @@ export interface LspClient {
     edit: LspWorkspaceEdit,
     serverName?: string,
   ): Promise<boolean>;
+
+  /**
+   * Get a point-in-time snapshot of LSP server connection status.
+   */
+  getStatusSnapshot?(): LspStatusSnapshot;
 }
 
 // ============================================================================
@@ -473,6 +478,78 @@ export type LspServerStatus =
   | 'FAILED';
 
 /**
+ * Detailed status for one configured LSP server.
+ */
+export interface LspServerStatusDetail {
+  /** Server name */
+  name: string;
+  /** Current server status */
+  status: LspServerStatus;
+  /** Languages handled by this server */
+  languages: string[];
+  /** Transport used to connect to the server */
+  transport: LspServerConfig['transport'];
+  /** Command used to start the server, when applicable */
+  command?: string;
+  /** Command arguments, when applicable */
+  args?: string[];
+  /** Root URI used during initialization */
+  rootUri?: string;
+  /** Workspace folder used during initialization */
+  workspaceFolder?: string;
+  /** Process id for stdio servers, when available */
+  pid?: number;
+  /** Whether the server has completed warm-up */
+  warmedUp?: boolean;
+  /** Number of restart attempts already used */
+  restartAttempts?: number;
+  /** Last error message, when failed */
+  error?: string;
+  /** Recent stderr output from the server process, when available */
+  stderrTail?: string;
+  /** Exit code from the server process, when available */
+  exitCode?: number | null;
+  /** Exit signal from the server process, when available */
+  exitSignal?: string | null;
+}
+
+/**
+ * Point-in-time LSP connection status exposed to UI and debug logs.
+ */
+export interface LspStatusSnapshot {
+  /** Whether LSP is enabled for this Config */
+  enabled: boolean;
+  /** Number of configured servers */
+  configuredServers: number;
+  /** Number of ready servers */
+  readyServers: number;
+  /** Number of failed servers */
+  failedServers: number;
+  /** Number of servers currently starting */
+  inProgressServers: number;
+  /** Number of servers not started yet */
+  notStartedServers: number;
+  /** Detailed per-server status */
+  servers: LspServerStatusDetail[];
+  /** Initialization error captured before client creation */
+  initializationError?: string;
+  /** Status could not be read from the active LSP client */
+  statusUnavailable?: boolean;
+}
+
+/**
+ * Process-level diagnostics captured from a spawned LSP server.
+ */
+export interface LspProcessDiagnostics {
+  /** Recent stderr output from the server process */
+  stderrTail: string;
+  /** Exit code from the server process, when available */
+  exitCode?: number | null;
+  /** Exit signal from the server process, when available */
+  exitSignal?: string | null;
+}
+
+/**
  * Handle for managing an LSP server instance.
  */
 export interface LspServerHandle {
@@ -492,6 +569,8 @@ export interface LspServerHandle {
   stopRequested?: boolean;
   /** Number of restart attempts */
   restartAttempts?: number;
+  /** Process-level diagnostics from the server */
+  processDiagnostics?: LspProcessDiagnostics;
   /** Lock to prevent concurrent startup attempts */
   startingPromise?: Promise<void>;
 }
@@ -514,6 +593,8 @@ export interface LspConnectionResult {
   connection: LspConnectionInterface;
   /** Server process (for stdio transport) */
   process?: ChildProcess;
+  /** Process-level diagnostics from the server */
+  processDiagnostics?: LspProcessDiagnostics;
   /** Shutdown the connection gracefully */
   shutdown: () => Promise<void>;
   /** Force exit the connection */

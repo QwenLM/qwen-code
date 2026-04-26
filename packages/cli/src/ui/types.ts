@@ -162,6 +162,7 @@ export type HistoryItemAbout = HistoryItemBase & {
     memoryUsage: string;
     baseUrl?: string;
     gitCommit?: string;
+    lspStatus?: string;
   };
 };
 
@@ -556,6 +557,7 @@ export type Message =
         memoryUsage: string;
         baseUrl?: string;
         gitCommit?: string;
+        lspStatus?: string;
       };
       content?: string; // Optional content, not really used for ABOUT
     }

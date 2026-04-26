@@ -26,6 +26,7 @@ import type {
   LspLocation,
   LspRange,
   LspReference,
+  LspStatusSnapshot,
   LspSymbolInformation,
   LspWorkspaceEdit,
 } from './types.js';
@@ -255,5 +256,12 @@ export class NativeLspClient implements LspClient {
     serverName?: string,
   ): Promise<boolean> {
     return this.service.applyWorkspaceEdit(edit, serverName);
+  }
+
+  /**
+   * Get a point-in-time status snapshot for UI and debug logging.
+   */
+  getStatusSnapshot(): LspStatusSnapshot {
+    return this.service.getStatusSnapshot();
   }
 }

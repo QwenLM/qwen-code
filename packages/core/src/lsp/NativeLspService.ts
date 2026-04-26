@@ -39,6 +39,7 @@ import type {
   LspConnectionInterface,
   LspServerHandle,
   LspServerStatus,
+  LspStatusSnapshot,
   NativeLspServiceOptions,
 } from './types.js';
 import * as path from 'path';
@@ -169,6 +170,68 @@ export class NativeLspService {
    */
   getStatus(): Map<string, LspServerStatus> {
     return this.serverManager.getStatus();
+  }
+
+  /**
+   * Get detailed LSP server status for UI and debug logging.
+   */
+  getStatusSnapshot(): LspStatusSnapshot {
+    const servers = Array.from(this.serverManager.getHandles().entries()).map(
+      ([name, handle]) => {
+        const error =
+          handle.error instanceof Error
+            ? handle.error.message
+            : handle.error
+              ? String(handle.error)
+              : undefined;
+
+        return {
+          name,
+          status: handle.status,
+          languages: handle.config.languages,
+          transport: handle.config.transport,
+          ...(handle.config.command ? { command: handle.config.command } : {}),
+          ...(handle.config.args ? { args: handle.config.args } : {}),
+          ...(handle.config.rootUri ? { rootUri: handle.config.rootUri } : {}),
+          ...(handle.config.workspaceFolder
+            ? { workspaceFolder: handle.config.workspaceFolder }
+            : {}),
+          ...(handle.process?.pid ? { pid: handle.process.pid } : {}),
+          ...(handle.warmedUp !== undefined
+            ? { warmedUp: handle.warmedUp }
+            : {}),
+          ...(handle.restartAttempts !== undefined
+            ? { restartAttempts: handle.restartAttempts }
+            : {}),
+          ...(handle.processDiagnostics?.stderrTail
+            ? { stderrTail: handle.processDiagnostics.stderrTail }
+            : {}),
+          ...(handle.processDiagnostics?.exitCode !== undefined
+            ? { exitCode: handle.processDiagnostics.exitCode }
+            : {}),
+          ...(handle.processDiagnostics?.exitSignal !== undefined
+            ? { exitSignal: handle.processDiagnostics.exitSignal }
+            : {}),
+          ...(error ? { error } : {}),
+        };
+      },
+    );
+
+    return {
+      enabled: true,
+      configuredServers: servers.length,
+      readyServers: servers.filter((server) => server.status === 'READY')
+        .length,
+      failedServers: servers.filter((server) => server.status === 'FAILED')
+        .length,
+      inProgressServers: servers.filter(
+        (server) => server.status === 'IN_PROGRESS',
+      ).length,
+      notStartedServers: servers.filter(
+        (server) => server.status === 'NOT_STARTED',
+      ).length,
+      servers,
+    };
   }
 
   /**

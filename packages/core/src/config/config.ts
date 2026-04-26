@@ -50,7 +50,7 @@ import { setGeminiMdFilename } from '../memory/const.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
-import type { LspClient } from '../lsp/types.js';
+import type { LspClient, LspStatusSnapshot } from '../lsp/types.js';
 
 // Other modules
 import { ideContextStore } from '../ide/ideContext.js';
@@ -584,6 +584,7 @@ export class Config {
   private mcpServers: Record<string, MCPServerConfig> | undefined;
   private readonly lspEnabled: boolean;
   private lspClient?: LspClient;
+  private lspInitializationError?: string;
   private readonly allowedMcpServers?: string[];
   private excludedMcpServers?: string[];
   private sessionSubagents: SubagentConfig[];
@@ -1769,6 +1770,50 @@ export class Config {
     return this.lspClient;
   }
 
+  getLspStatusSnapshot(): LspStatusSnapshot {
+    if (!this.isLspEnabled()) {
+      return this.createLspStatusSnapshot(false);
+    }
+
+    const clientSnapshot = this.lspClient?.getStatusSnapshot?.();
+    if (clientSnapshot) {
+      return {
+        ...clientSnapshot,
+        enabled: true,
+        initializationError:
+          this.lspInitializationError ?? clientSnapshot.initializationError,
+      };
+    }
+
+    if (this.lspClient) {
+      return {
+        ...this.createLspStatusSnapshot(true),
+        statusUnavailable: true,
+      };
+    }
+
+    return this.createLspStatusSnapshot(
+      true,
+      this.lspInitializationError ?? 'LSP client is not initialized',
+    );
+  }
+
+  private createLspStatusSnapshot(
+    enabled: boolean,
+    initializationError?: string,
+  ): LspStatusSnapshot {
+    return {
+      enabled,
+      configuredServers: 0,
+      readyServers: 0,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [],
+      ...(initializationError ? { initializationError } : {}),
+    };
+  }
+
   /**
    * Allows wiring an LSP client after Config construction but before initialize().
    */
@@ -1777,6 +1822,14 @@ export class Config {
       throw new Error('Cannot set LSP client after initialization');
     }
     this.lspClient = client;
+  }
+
+  setLspInitializationError(error: Error | string | undefined): void {
+    if (this.initialized) {
+      throw new Error('Cannot set LSP status after initialization');
+    }
+    this.lspInitializationError =
+      error instanceof Error ? error.message : error;
   }
 
   getSessionSubagents(): SubagentConfig[] {
