@@ -101,6 +101,7 @@ async function main() {
   await setFieldByAriaLabel('Message', '');
   await assertConversationChangesSummary('conversation-changes-summary.json');
   await waitForSelector('[data-testid="thread-list"]');
+  await assertSidebarAppRail('sidebar-app-rail.json');
 
   await clickButton('Review Changes');
   await waitForText('README.md');
@@ -419,6 +420,8 @@ async function assertWorkbenchLandmarks() {
     return [
       'desktop-workspace',
       'project-sidebar',
+      'sidebar-app-actions',
+      'sidebar-footer-settings',
       'workspace-topbar',
       'workspace-grid',
       'chat-thread',
@@ -617,6 +620,172 @@ async function assertRalphWorkspaceLayout(fileName) {
       `Sidebar list rows should not stretch vertically: ${JSON.stringify(
         oversizedRows,
       )}`,
+    );
+  }
+}
+
+async function assertSidebarAppRail(fileName) {
+  const metrics = await evaluate(`(() => {
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const overflows = (element) =>
+      Boolean(element && element.scrollWidth > element.clientWidth + 4);
+    const sidebar = document.querySelector('[data-testid="project-sidebar"]');
+    const appActions = document.querySelector('[data-testid="sidebar-app-actions"]');
+    const footerSettings = document.querySelector(
+      '[data-testid="sidebar-footer-settings"]'
+    );
+    const projectList = document.querySelector('[data-testid="project-list"]');
+    const threadList = document.querySelector('[data-testid="thread-list"]');
+    const rowSelector =
+      '.sidebar-action-row, .project-row, .session-row';
+    const rows = [...document.querySelectorAll(rowSelector)].map((row) => {
+      const label =
+        row.getAttribute('aria-label') ||
+        row.getAttribute('title') ||
+        row.textContent.trim();
+      return {
+        label,
+        text: row.textContent.trim(),
+        rect: rectFor(row),
+        scrollWidth: row.scrollWidth,
+        clientWidth: row.clientWidth,
+        overflows: overflows(row)
+      };
+    });
+
+    return {
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight
+      },
+      sidebar: rectFor(sidebar),
+      appActions: rectFor(appActions),
+      footerSettings: rectFor(footerSettings),
+      projectList: rectFor(projectList),
+      threadList: rectFor(threadList),
+      hasLegacyToolbar: document.querySelector('.sidebar-toolbar') !== null,
+      appActionLabels: appActions
+        ? [...appActions.querySelectorAll('button')].map(
+            (button) => button.getAttribute('aria-label') || ''
+          )
+        : [],
+      footerLabel:
+        footerSettings?.getAttribute('aria-label') ||
+        footerSettings?.textContent.trim() ||
+        '',
+      rows,
+      sidebarText: sidebar?.innerText ?? '',
+      overflows: {
+        sidebar: overflows(sidebar),
+        appActions: overflows(appActions),
+        projectList: overflows(projectList),
+        threadList: overflows(threadList),
+        footerSettings: overflows(footerSettings)
+      }
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(metrics, null, 2)}\n`,
+    'utf8',
+  );
+
+  const missing = [
+    'sidebar',
+    'appActions',
+    'footerSettings',
+    'projectList',
+    'threadList',
+  ].filter((key) => metrics[key] === null);
+  if (missing.length > 0) {
+    throw new Error(`Missing sidebar app rail rects: ${missing.join(', ')}`);
+  }
+
+  if (metrics.hasLegacyToolbar) {
+    throw new Error('Sidebar should not render the old project toolbar.');
+  }
+
+  for (const expectedLabel of ['New Thread', 'Open Project', 'Models']) {
+    if (!metrics.appActionLabels.includes(expectedLabel)) {
+      throw new Error(
+        `Sidebar app actions missing ${expectedLabel}: ${metrics.appActionLabels.join(
+          ', ',
+        )}`,
+      );
+    }
+  }
+
+  if (metrics.footerLabel !== 'Settings') {
+    throw new Error(
+      `Sidebar footer label should be Settings: ${metrics.footerLabel}`,
+    );
+  }
+
+  if (metrics.sidebar.width < 236 || metrics.sidebar.width > 320) {
+    throw new Error(
+      `Sidebar width is no longer compact: ${metrics.sidebar.width}`,
+    );
+  }
+
+  if (metrics.appActions.top > metrics.sidebar.top + 24) {
+    throw new Error('Sidebar app actions are not pinned near the top.');
+  }
+
+  if (metrics.footerSettings.bottom > metrics.sidebar.bottom + 1) {
+    throw new Error('Sidebar Settings footer overflows the sidebar.');
+  }
+
+  if (metrics.footerSettings.top < metrics.threadList.bottom - 1) {
+    throw new Error(
+      'Sidebar Settings should stay below the project/thread browser.',
+    );
+  }
+
+  const tallRows = metrics.rows.filter((row) => row.rect.height > 44);
+  if (tallRows.length > 0) {
+    throw new Error(
+      `Sidebar rows are too tall for the compact rail: ${JSON.stringify(
+        tallRows,
+      )}`,
+    );
+  }
+
+  const overflowingRows = metrics.rows.filter((row) => row.overflows);
+  if (overflowingRows.length > 0) {
+    throw new Error(
+      `Sidebar rows overflow horizontally: ${JSON.stringify(overflowingRows)}`,
+    );
+  }
+
+  if (Object.values(metrics.overflows).some(Boolean)) {
+    throw new Error(
+      `Sidebar rail regions overflow horizontally: ${JSON.stringify(
+        metrics.overflows,
+      )}`,
+    );
+  }
+
+  if (
+    metrics.sidebarText.includes('session-e2e') ||
+    metrics.sidebarText.includes('/tmp/') ||
+    metrics.sidebarText.includes('Connected to')
+  ) {
+    throw new Error(
+      `Sidebar leaked protocol or path noise: ${metrics.sidebarText}`,
     );
   }
 }

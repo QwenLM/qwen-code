@@ -50,44 +50,49 @@ export function ProjectSidebar({
       aria-label="Projects and threads"
       data-testid="project-sidebar"
     >
-      <div className="sidebar-toolbar">
-        <h1>Projects</h1>
-        <div className="sidebar-toolbar-actions">
-          <button
-            aria-label="Settings"
-            className="sidebar-icon-button"
-            title="Settings"
-            type="button"
-            onClick={onOpenSettings}
-          >
-            <SlidersIcon />
-            <span className="sr-only">Settings</span>
-          </button>
-          <button
-            aria-label="New Thread"
-            className="sidebar-icon-button"
-            disabled={loadState.state !== 'ready' || !activeProject}
-            title="New Thread"
-            type="button"
-            onClick={onCreateSession}
-          >
-            <NewThreadIcon />
-            <span className="sr-only">New Thread</span>
-          </button>
-          <button
-            aria-label="Open Project"
-            className="sidebar-icon-button"
-            title="Open Project"
-            type="button"
-            onClick={onChooseWorkspace}
-          >
-            <FolderPlusIcon />
-            <span className="sr-only">Open Project</span>
-          </button>
-        </div>
-      </div>
+      <nav
+        className="sidebar-app-actions"
+        aria-label="Workspace actions"
+        data-testid="sidebar-app-actions"
+      >
+        <button
+          aria-label="New Thread"
+          className="sidebar-action-row"
+          disabled={loadState.state !== 'ready' || !activeProject}
+          title="New Thread"
+          type="button"
+          onClick={onCreateSession}
+        >
+          <NewThreadIcon />
+          <span>New Thread</span>
+        </button>
+        <button
+          aria-label="Open Project"
+          className="sidebar-action-row"
+          title="Open Project"
+          type="button"
+          onClick={onChooseWorkspace}
+        >
+          <FolderPlusIcon />
+          <span>Open Project</span>
+        </button>
+        <button
+          aria-label="Models"
+          className="sidebar-action-row"
+          title="Models"
+          type="button"
+          onClick={onOpenSettings}
+        >
+          <SlidersIcon />
+          <span>Models</span>
+        </button>
+      </nav>
 
       <section className="sidebar-section project-navigator">
+        <div className="sidebar-section-heading">
+          <h2>Projects</h2>
+          <span>{projects.length}</span>
+        </div>
         <ProjectList
           activeProjectId={activeProjectId}
           projects={projects}
@@ -107,6 +112,19 @@ export function ProjectSidebar({
           onSelect={onSelectSession}
         />
       </section>
+      <div className="sidebar-footer">
+        <button
+          aria-label="Settings"
+          className="sidebar-action-row sidebar-footer-action"
+          data-testid="sidebar-footer-settings"
+          title="Settings"
+          type="button"
+          onClick={onOpenSettings}
+        >
+          <SlidersIcon />
+          <span>Settings</span>
+        </button>
+      </div>
     </aside>
   );
 }

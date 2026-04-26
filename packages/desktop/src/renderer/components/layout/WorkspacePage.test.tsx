@@ -47,6 +47,7 @@ describe('WorkspacePage', () => {
     for (const testId of [
       'desktop-workspace',
       'project-sidebar',
+      'sidebar-app-actions',
       'workspace-topbar',
       'workspace-grid',
       'chat-thread',
@@ -64,9 +65,18 @@ describe('WorkspacePage', () => {
     expect(
       renderedContainer.querySelector('[data-testid="settings-page"]'),
     ).toBeNull();
+    expect(renderedContainer.querySelector('.sidebar-toolbar')).toBeNull();
+    expect(
+      renderedContainer.querySelector(
+        '[data-testid="sidebar-footer-settings"]',
+      ),
+    ).toBeTruthy();
 
     expect(renderedContainer.textContent).toContain('example-workspace');
     expect(renderedContainer.textContent).toContain('main');
+    expect(renderedContainer.textContent).toContain('New Thread');
+    expect(renderedContainer.textContent).toContain('Open Project');
+    expect(renderedContainer.textContent).toContain('Models');
     expect(
       renderedContainer.querySelector('[data-testid="project-sidebar"]')
         ?.textContent,

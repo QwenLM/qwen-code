@@ -22,6 +22,103 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Sidebar App Rail Prototype Fidelity
+
+Status: completed in iteration 18.
+
+Goal: make the left sidebar read more like the `home.jpg` prototype by moving
+primary app actions into compact top rows, pinning Settings to the bottom, and
+tightening project/thread row density without exposing raw paths or prompt
+noise.
+
+User-visible value: users get a clearer desktop-native navigation rail: start
+a thread, open a project, reach model/settings, scan projects, scan threads,
+and find Settings at the expected persistent bottom position.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ProjectSidebar.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `.qwen/e2e-tests/electron-desktop/sidebar-app-rail-fidelity.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Sidebar primary actions render as compact icon+label rows at the top.
+- Settings is available as a persistent bottom row and no longer competes in
+  the top project toolbar.
+- Project and thread rows stay compact, active rows keep a subtle left accent,
+  and long project/thread/model labels remain truncated.
+- Thread rows do not show raw full paths or protocol/session IDs.
+- Real Electron CDP coverage records sidebar geometry and fails if the
+  navigation loses the top action group or bottom Settings placement.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake project, send/approve the prompt, assert the
+  populated sidebar app rail layout, continue the existing review/settings/
+  terminal/commit smoke, and capture first-viewport screenshots and JSON
+  metrics.
+- E2E assertions: top app action rows include New Thread/Open Project/Models,
+  bottom Settings is visually below the project/thread lists, rows stay under
+  the compact height limit, sidebar width remains compact at desktop and
+  compact widths, and no sidebar row overflows horizontally.
+- Diagnostic artifacts: `sidebar-app-rail.json`, `initial-workspace.png`,
+  `completed-workspace.png`, Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained
+  information hierarchy and density; `electron-desktop-dev` for real Electron
+  CDP verification; `brainstorming` applied by selecting the smallest recorded
+  fidelity gap, using the prototype over a new visual direction.
+
+Notes and decisions:
+
+- The slice keeps the existing local server, preload, IPC, ACP, review, and
+  settings behavior unchanged; this is a renderer layout and style fidelity
+  pass.
+- `frontend-design` is applied with the Ralph constraint that `home.jpg` wins:
+  the sidebar should become quieter and more navigational, not more decorative.
+- `electron-desktop-dev` applies because sidebar layout and navigation order
+  must be verified in the real Electron shell with actual viewport geometry.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed after launching real
+  Electron over CDP, opening the fake project, sending/approving the fake ACP
+  prompt, checking the new sidebar app rail metrics, and completing the
+  existing review, settings, terminal, discard safety, and commit workflows.
+- Passing artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T01-46-17-523Z/`.
+- Key recorded metrics: sidebar width `272`, top app action rows
+  `32` px high, project row `39.75` px high, thread row `36` px high, bottom
+  Settings row `32` px high, no legacy sidebar toolbar, no sidebar overflows,
+  and no console errors or failed local requests.
+
+Next work:
+
+- Continue prototype fidelity by reducing the remaining topbar/status pill
+  weight and making the title/action cluster closer to the slim `home.jpg`
+  header.
+- Add focused long branch/model/project-name CDP coverage with review open,
+  since compact review and composer chips rely on truncation to avoid overflow.
+
 ### Completed Slice: Inline Tool Activity Prototype Fidelity
 
 Status: completed in iteration 17.
