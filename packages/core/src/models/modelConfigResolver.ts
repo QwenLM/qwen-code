@@ -231,11 +231,10 @@ export function resolveModelConfig(
   let apiKeyEnvKey: string | undefined;
   if (authType && modelProvider?.envKey) {
     apiKeyEnvKey = modelProvider.envKey;
-    sources['apiKeyEnvKey'] = modelProvidersSource(
-      authType,
-      modelProvider.id,
-      'envKey',
-    );
+    sources['apiKeyEnvKey'] = {
+      ...modelProvidersSource(authType, modelProvider.id, 'envKey'),
+      envKey: modelProvider.envKey,
+    };
   }
 
   // ---- Generation Config (from settings or modelProvider) ----
@@ -246,6 +245,24 @@ export function resolveModelConfig(
     modelProvider?.id,
     sources,
   );
+
+  // ---- Env override: QWEN_CODE_API_TIMEOUT_MS ----
+  // Precedence: modelProvider > env > settings > default (CLI doesn't set timeout)
+  const modelProviderSetTimeout =
+    modelProvider?.generationConfig?.timeout !== undefined;
+  if (!modelProviderSetTimeout) {
+    const envTimeout = env['QWEN_CODE_API_TIMEOUT_MS'];
+    if (envTimeout !== undefined) {
+      const parsed = Number(envTimeout);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        generationConfig.timeout = Math.floor(parsed);
+        sources['timeout'] = {
+          kind: 'env',
+          envKey: 'QWEN_CODE_API_TIMEOUT_MS',
+        };
+      }
+    }
+  }
 
   // Build final config
   const config: ContentGeneratorConfig = {
@@ -324,6 +341,24 @@ function resolveQwenOAuthConfig(
     resolvedModel,
     sources,
   );
+
+  // ---- Env override: QWEN_CODE_API_TIMEOUT_MS ----
+  // Precedence: modelProvider > env > settings > default
+  const modelProviderSetTimeoutOAuth =
+    modelProvider?.generationConfig?.timeout !== undefined;
+  if (!modelProviderSetTimeoutOAuth) {
+    const envTimeoutOAuth = input.env['QWEN_CODE_API_TIMEOUT_MS'];
+    if (envTimeoutOAuth !== undefined) {
+      const parsed = Number(envTimeoutOAuth);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        generationConfig.timeout = Math.floor(parsed);
+        sources['timeout'] = {
+          kind: 'env',
+          envKey: 'QWEN_CODE_API_TIMEOUT_MS',
+        };
+      }
+    }
+  }
 
   const config: ContentGeneratorConfig = {
     authType: AuthType.QWEN_OAUTH,
