@@ -103,7 +103,7 @@ function getPreconnectTargetUrl(
 ): string | undefined {
   // 1. Use the resolved base URL from model config (already incorporates
   //    modelProviders > cli > env > settings priority chain)
-  if (resolvedBaseUrl) {
+  if (resolvedBaseUrl && /^https?:\/\//i.test(resolvedBaseUrl)) {
     if (isDefaultBaseUrl(resolvedBaseUrl)) {
       return resolvedBaseUrl;
     }
