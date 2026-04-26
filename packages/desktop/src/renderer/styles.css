@@ -678,7 +678,7 @@ summary:focus-visible {
   display: flex;
   min-height: 0;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
   overflow: auto;
   padding: 10px 18px 18px;
 }
@@ -688,10 +688,10 @@ summary:focus-visible {
   display: grid;
   width: min(860px, 100%);
   gap: 8px;
-  padding: 12px 14px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: rgba(238, 244, 239, 0.04);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .chat-message {
@@ -699,15 +699,23 @@ summary:focus-visible {
 }
 
 .chat-message-user {
-  width: min(620px, 86%);
+  width: min(560px, 82%);
   align-self: flex-end;
-  border-color: rgba(240, 182, 110, 0.38);
-  background: var(--warning-soft);
+  padding: 10px 12px;
+  border: 1px solid rgba(240, 182, 110, 0.26);
+  border-radius: var(--radius);
+  background: rgba(240, 182, 110, 0.1);
+}
+
+.chat-message-assistant {
+  padding: 2px 0 0;
 }
 
 .chat-message-thinking {
-  border-color: rgba(85, 166, 255, 0.32);
-  background: var(--accent-soft);
+  padding: 10px 12px;
+  border: 1px solid rgba(85, 166, 255, 0.22);
+  border-radius: var(--radius);
+  background: rgba(85, 166, 255, 0.08);
 }
 
 .chat-message p,
@@ -795,6 +803,8 @@ summary:focus-visible {
 
 .chat-plan {
   align-self: center;
+  padding: 8px 0 8px 14px;
+  border-left: 2px solid rgba(85, 166, 255, 0.28);
 }
 
 .chat-plan ol {
@@ -831,31 +841,29 @@ summary:focus-visible {
   width: min(860px, 100%);
   align-self: center;
   gap: 10px;
-  padding: 12px 14px;
-  border: 1px solid rgba(117, 217, 156, 0.22);
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 2px solid rgba(117, 217, 156, 0.34);
   border-radius: var(--radius);
-  background:
-    linear-gradient(180deg, rgba(117, 217, 156, 0.07), transparent),
-    rgba(238, 244, 239, 0.035);
+  background: rgba(238, 244, 239, 0.025);
   color: var(--text-soft);
 }
 
 .conversation-tool-card-running {
-  border-color: rgba(85, 166, 255, 0.26);
-  background:
-    linear-gradient(180deg, rgba(85, 166, 255, 0.08), transparent),
-    rgba(238, 244, 239, 0.035);
+  border-color: var(--line);
+  border-left-color: rgba(85, 166, 255, 0.42);
+  background: rgba(85, 166, 255, 0.045);
 }
 
 .conversation-tool-card-complete {
-  border-color: rgba(117, 217, 156, 0.26);
+  border-color: var(--line);
+  border-left-color: rgba(117, 217, 156, 0.38);
 }
 
 .conversation-tool-card-danger {
-  border-color: rgba(255, 127, 105, 0.34);
-  background:
-    linear-gradient(180deg, rgba(255, 127, 105, 0.08), transparent),
-    rgba(238, 244, 239, 0.035);
+  border-color: var(--line);
+  border-left-color: rgba(255, 127, 105, 0.46);
+  background: rgba(255, 127, 105, 0.055);
 }
 
 .conversation-tool-heading {
@@ -949,13 +957,11 @@ summary:focus-visible {
   display: grid;
   width: min(860px, 100%);
   align-self: center;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid rgba(85, 166, 255, 0.2);
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
   border-radius: var(--radius);
-  background:
-    linear-gradient(180deg, rgba(85, 166, 255, 0.08), transparent),
-    rgba(238, 244, 239, 0.035);
+  background: rgba(238, 244, 239, 0.025);
   color: var(--text-soft);
 }
 
@@ -1013,18 +1019,24 @@ summary:focus-visible {
 
 .conversation-changes-list {
   display: grid;
-  gap: 1px;
+  gap: 0;
   margin: 0;
   padding: 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
   list-style: none;
 }
 
 .conversation-changes-list li {
-  min-height: 30px;
+  min-height: 27px;
   justify-content: space-between;
-  padding: 5px 8px;
-  border-radius: 6px;
-  background: rgba(8, 10, 11, 0.24);
+  padding: 4px 4px;
+  border-radius: 0;
+  background: transparent;
+}
+
+.conversation-changes-list li + li {
+  border-top: 1px solid rgba(226, 232, 222, 0.07);
 }
 
 .conversation-changes-list span {
@@ -1048,6 +1060,11 @@ summary:focus-visible {
 
 .conversation-changes-actions {
   justify-content: flex-end;
+}
+
+.conversation-changes-actions .secondary-button {
+  min-height: 30px;
+  padding: 0 10px;
 }
 
 .chat-scroll-anchor {
@@ -2017,12 +2034,17 @@ textarea:focus {
     padding: 8px 10px 12px;
   }
 
-  .workspace-grid-review-open .chat-message,
+  .workspace-grid-review-open .chat-message-user,
+  .workspace-grid-review-open .chat-message-thinking,
   .workspace-grid-review-open .chat-plan,
   .workspace-grid-review-open .conversation-tool-card,
   .workspace-grid-review-open .conversation-changes-card,
   .workspace-grid-review-open .conversation-approval-card {
     padding: 10px;
+  }
+
+  .workspace-grid-review-open .chat-message-assistant {
+    padding: 2px 0 0;
   }
 
   .workspace-grid-review-open .composer {

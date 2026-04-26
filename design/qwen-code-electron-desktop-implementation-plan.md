@@ -22,6 +22,109 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Conversation Surface Prototype Fidelity
+
+Status: completed in iteration 16.
+
+Goal: reduce the remaining boxed/dashboard treatment in the conversation
+timeline so assistant prose reads as the main workbench surface, while changed
+files and tool/activity summaries remain compact supporting surfaces.
+
+User-visible value: the first viewport moves closer to `home.jpg`: the
+conversation feels like a coding-agent timeline instead of stacked cards, with
+less border noise and a lighter inline review entry point.
+
+Expected files:
+
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/conversation-surface-fidelity.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Assistant messages no longer render as visibly framed cards.
+- User prompts remain readable as compact right-aligned bubbles.
+- Changed-files summary and tool/activity surfaces retain accessible
+  landmarks/actions but use subtler borders, backgrounds, and tighter density.
+- Existing assistant file-reference, action-row, changed-files, review,
+  settings, and terminal flows continue to pass.
+- Real Electron CDP coverage records computed surface styles and geometry, and
+  fails if assistant messages regain a visible card frame or if the changed
+  files summary becomes visually heavy again.
+
+Verification:
+
+- Unit/component test command: no component logic change expected.
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake project, send a prompt, approve the fake command
+  request, wait for the dense assistant response and changed-files summary,
+  assert assistant action/file chips, assert conversation surface computed
+  styles and geometry, capture screenshot/JSON artifacts, then continue the
+  existing compact, review, settings, and terminal workflow.
+- E2E assertions: assistant message border widths are zero and background is
+  transparent, user message remains a compact bubble, changed-files summary
+  uses subtle border/background alpha and stays shorter than the previous
+  dashboard-like card, action buttons remain compact, and console
+  errors/failed local requests are absent.
+- Diagnostic artifacts: `conversation-surface-fidelity.json`,
+  `conversation-surface-fidelity.png`, plus existing CDP screenshots, Electron
+  log, and summary JSON under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained visual
+  hierarchy and density; `electron-desktop-dev` for renderer/CDP real Electron
+  verification; `brainstorming` applied by choosing the smallest fidelity
+  slice from the recorded next-work items instead of introducing new product
+  scope.
+
+Notes and decisions:
+
+- `frontend-design` was applied with the extra Ralph constraint that
+  `home.jpg` wins over inventing a new visual direction. The slice removes the
+  remaining assistant message frame instead of adding a new card treatment, and
+  keeps changed-files/tool summaries as quieter supporting inline surfaces.
+- `electron-desktop-dev` was applied by extending the real Electron CDP smoke
+  path with computed-style and geometry assertions, not just visual inspection.
+- The unframed assistant message still uses compact action icon buttons and
+  file chips so the timeline remains actionable without becoming a dashboard.
+- Changed-files summary rows now read more like a compact inline table: no
+  nested row cards, subtler background, and a 30 px review action.
+- Iteration 15 left this slice uncommitted after starting a CDP run that did
+  not reach the new fidelity assertion. Iteration 16 reran the full verification
+  and recorded the passing artifacts below.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed after launch through real
+  Electron over CDP, including the new conversation surface fidelity assertion
+  and the existing compact conversation, compact review, settings, terminal,
+  review safety, and commit workflows.
+- Passing artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T01-26-44-948Z/`.
+- Key recorded metrics: assistant message border widths were all `0`,
+  assistant background alpha was `0`, changed-files summary background alpha
+  was `0.024`, changed-files summary border alpha was `0.11`, changed-files
+  summary height was `153.5`, and the document scroll width stayed equal to the
+  `1240` px viewport.
+
+Next work:
+
+- Continue prototype fidelity by reducing remaining visual heaviness in tool
+  result cards and topbar/sidebar typography visible in the current CDP
+  screenshots.
+- Add focused long branch/model/project-name CDP coverage with review open,
+  since compact review and composer chips now rely on truncation to avoid
+  overflow.
+
 ### Completed Slice: Compact Review Drawer CDP Coverage
 
 Status: completed in iteration 14.

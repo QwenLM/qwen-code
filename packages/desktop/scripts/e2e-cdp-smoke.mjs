@@ -86,6 +86,8 @@ async function main() {
   await saveScreenshot('resolved-tool-activity.png');
   await assertAssistantMessageActions('assistant-message-actions.json');
   await saveScreenshot('assistant-message-actions.png');
+  await assertConversationSurfaceFidelity('conversation-surface-fidelity.json');
+  await saveScreenshot('conversation-surface-fidelity.png');
   await setElectronWindowBounds(target.id, compactWindowBounds);
   await assertCompactDenseConversationLayout(
     'compact-dense-conversation.json',
@@ -1130,6 +1132,242 @@ async function assertAssistantMessageActions(fileName) {
         `Assistant file chip escaped the message: ${JSON.stringify(chipRect)}`,
       );
     }
+  }
+}
+
+async function assertConversationSurfaceFidelity(fileName) {
+  await waitForSelector('[data-testid="conversation-changes-summary"]');
+  const snapshot = await evaluate(`(() => {
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const alphaFromColor = (color) => {
+      if (!color || color === 'transparent') {
+        return 0;
+      }
+
+      const match = color.match(/rgba?\\(([^)]+)\\)/u);
+      if (!match) {
+        return 1;
+      }
+
+      const parts = match[1].split(',').map((part) => part.trim());
+      if (parts.length < 4) {
+        return 1;
+      }
+
+      const alpha = Number(parts[3]);
+      return Number.isFinite(alpha) ? alpha : 1;
+    };
+    const numberFromPixel = (value) => {
+      const number = Number.parseFloat(value);
+      return Number.isFinite(number) ? number : 0;
+    };
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+
+      const style = window.getComputedStyle(element);
+      return {
+        backgroundColor: style.backgroundColor,
+        backgroundAlpha: alphaFromColor(style.backgroundColor),
+        borderColor: style.borderTopColor,
+        borderAlpha: alphaFromColor(style.borderTopColor),
+        borderTopWidth: numberFromPixel(style.borderTopWidth),
+        borderRightWidth: numberFromPixel(style.borderRightWidth),
+        borderBottomWidth: numberFromPixel(style.borderBottomWidth),
+        borderLeftWidth: numberFromPixel(style.borderLeftWidth),
+        borderRadius: style.borderTopLeftRadius
+      };
+    };
+    const assistantMessage = [
+      ...document.querySelectorAll('[data-testid="assistant-message"]')
+    ].find((candidate) =>
+      candidate.innerText.includes('E2E fake ACP response received')
+    );
+    const userMessage = document.querySelector('.chat-message-user');
+    const summary = document.querySelector(
+      '[data-testid="conversation-changes-summary"]'
+    );
+    const summaryAction = summary?.querySelector(
+      'button[aria-label="Review Changes"]'
+    );
+    const firstSummaryRow = summary?.querySelector(
+      '.conversation-changes-list li'
+    );
+    const timeline = document.querySelector('.chat-timeline');
+    const actionButtons = assistantMessage
+      ? [
+          ...assistantMessage.querySelectorAll(
+            '[data-testid="assistant-message-actions"] button'
+          )
+        ]
+      : [];
+
+    return {
+      assistant: {
+        rect: rectFor(assistantMessage),
+        style: styleFor(assistantMessage)
+      },
+      user: {
+        rect: rectFor(userMessage),
+        style: styleFor(userMessage)
+      },
+      summary: {
+        rect: rectFor(summary),
+        style: styleFor(summary),
+        actionRect: rectFor(summaryAction),
+        rowStyle: styleFor(firstSummaryRow)
+      },
+      timeline: rectFor(timeline),
+      actionButtons: actionButtons.map((button) => ({
+        label: button.getAttribute('aria-label') || '',
+        rect: rectFor(button),
+        style: styleFor(button)
+      })),
+      document: {
+        viewportWidth: window.innerWidth,
+        scrollWidth: document.documentElement.scrollWidth
+      }
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (
+    !snapshot.assistant.rect ||
+    !snapshot.assistant.style ||
+    !snapshot.user.rect ||
+    !snapshot.user.style ||
+    !snapshot.summary.rect ||
+    !snapshot.summary.style ||
+    !snapshot.summary.actionRect ||
+    !snapshot.summary.rowStyle ||
+    !snapshot.timeline
+  ) {
+    throw new Error(
+      `Conversation surface fidelity metrics are missing: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  const assistantBorders = [
+    snapshot.assistant.style.borderTopWidth,
+    snapshot.assistant.style.borderRightWidth,
+    snapshot.assistant.style.borderBottomWidth,
+    snapshot.assistant.style.borderLeftWidth,
+  ];
+  if (assistantBorders.some((width) => width > 0)) {
+    throw new Error(
+      `Assistant message should render as unframed timeline prose: ${JSON.stringify(
+        snapshot.assistant.style,
+      )}`,
+    );
+  }
+
+  if (snapshot.assistant.style.backgroundAlpha > 0.02) {
+    throw new Error(
+      `Assistant message background is too card-like: ${JSON.stringify(
+        snapshot.assistant.style,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.assistant.rect.left < snapshot.timeline.left ||
+    snapshot.assistant.rect.right > snapshot.timeline.right + 1
+  ) {
+    throw new Error('Assistant message escaped the conversation timeline.');
+  }
+
+  if (
+    snapshot.user.rect.width > 620 ||
+    snapshot.user.style.backgroundAlpha < 0.05 ||
+    snapshot.user.style.borderTopWidth < 1
+  ) {
+    throw new Error(
+      `User prompt bubble lost compact bubble treatment: ${JSON.stringify(
+        snapshot.user,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.summary.style.borderAlpha > 0.14 ||
+    snapshot.summary.style.backgroundAlpha > 0.045
+  ) {
+    throw new Error(
+      `Changed-files summary surface is too visually heavy: ${JSON.stringify(
+        snapshot.summary.style,
+      )}`,
+    );
+  }
+
+  if (snapshot.summary.rect.height > 158) {
+    throw new Error(
+      `Changed-files summary should stay compact: ${JSON.stringify(
+        snapshot.summary.rect,
+      )}`,
+    );
+  }
+
+  if (snapshot.summary.rowStyle.backgroundAlpha > 0.04) {
+    throw new Error(
+      `Changed-files rows should not look like nested cards: ${JSON.stringify(
+        snapshot.summary.rowStyle,
+      )}`,
+    );
+  }
+
+  if (snapshot.summary.actionRect.height > 34) {
+    throw new Error(
+      `Changed-files action is too tall: ${JSON.stringify(
+        snapshot.summary.actionRect,
+      )}`,
+    );
+  }
+
+  for (const button of snapshot.actionButtons) {
+    if (!button.rect || !button.style) {
+      throw new Error(
+        `Assistant action button metrics are missing: ${JSON.stringify(
+          button,
+        )}`,
+      );
+    }
+
+    if (button.rect.width > 32 || button.rect.height > 32) {
+      throw new Error(
+        `Assistant action button should remain compact: ${JSON.stringify(
+          button,
+        )}`,
+      );
+    }
+  }
+
+  if (snapshot.document.scrollWidth > snapshot.document.viewportWidth + 4) {
+    throw new Error(
+      `Conversation surface introduced horizontal document overflow: ${JSON.stringify(
+        snapshot.document,
+      )}`,
+    );
   }
 }
 
