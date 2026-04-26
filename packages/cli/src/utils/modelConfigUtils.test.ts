@@ -1024,21 +1024,19 @@ describe('modelConfigUtils', () => {
 
       // Mock resolveModelConfig to simulate real behavior:
       // modelProvider.id > cli.model > env > settings.model
-      vi.mocked(resolveModelConfig).mockImplementation(
-        (input: ModelConfigSourcesInput) => {
-          const model =
-            input.modelProvider?.id ||
-            input.cli?.model ||
-            input.env?.['OPENAI_MODEL'] ||
-            input.settings?.model ||
-            '';
-          return {
-            config: { model, apiKey: '', baseUrl: '' },
-            sources: { model: model === 'custom-model' ? 'settings' : 'env' },
-            warnings: [],
-          };
-        },
-      );
+      vi.mocked(resolveModelConfig).mockImplementation((input) => {
+        const model =
+          input.modelProvider?.id ||
+          input.cli?.model ||
+          input.env?.['OPENAI_MODEL'] ||
+          input.settings?.model ||
+          '';
+        return {
+          config: { model, apiKey: '', baseUrl: '' },
+          sources: { model: model === 'custom-model' ? 'settings' : 'env' },
+          warnings: [],
+        };
+      });
 
       const result = resolveCliGenerationConfig({
         argv,
