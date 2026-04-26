@@ -40,6 +40,10 @@ export function TopBar({
 }) {
   const title = getTopBarTitle(activeView, activeSessionTitle, activeProject);
   const projectLabel = activeProject?.name ?? 'No project selected';
+  const branchLabel = activeProject?.gitBranch || 'No Git branch';
+  const gitStatusLabel = activeProject
+    ? formatGitStatus(activeProject.gitStatus)
+    : 'No project';
   const changedCount = activeProject ? getChangedCount(activeProject) : 0;
   const reviewLabel = isReviewOpen ? 'Close Changes' : 'Open Changes';
 
@@ -49,18 +53,37 @@ export function TopBar({
       aria-label="Workspace status"
       data-testid="workspace-topbar"
     >
-      <div className="topbar-title-stack">
-        <div className="topbar-title">
-          <h2>{title}</h2>
-          <span>{projectLabel}</span>
+      <div className="topbar-title-stack" data-testid="topbar-title-stack">
+        <div className="topbar-title" data-testid="topbar-title">
+          <h2 title={title}>{title}</h2>
+          <span title={projectLabel}>{projectLabel}</span>
         </div>
-        <div className="topbar-meta">
-          <span>{statusLabel}</span>
-          <span>{activeProject?.gitBranch || 'No Git branch'}</span>
-          <span>
-            {activeProject
-              ? formatGitStatus(activeProject.gitStatus)
-              : 'No project'}
+        <div
+          className="topbar-context"
+          aria-label="Project context"
+          data-testid="topbar-context"
+        >
+          <span
+            className={`topbar-context-item topbar-context-${loadState.state}`}
+            aria-label={`Connection ${statusLabel}`}
+            title={`Connection: ${statusLabel}`}
+          >
+            <span className="topbar-context-dot" aria-hidden="true" />
+            <span className="topbar-context-text">{statusLabel}</span>
+          </span>
+          <span
+            className="topbar-context-item"
+            aria-label={`Branch ${branchLabel}`}
+            title={`Branch: ${branchLabel}`}
+          >
+            <span className="topbar-context-text">{branchLabel}</span>
+          </span>
+          <span
+            className="topbar-context-item"
+            aria-label={`Git status ${gitStatusLabel}`}
+            title={`Git status: ${gitStatusLabel}`}
+          >
+            <span className="topbar-context-text">{gitStatusLabel}</span>
           </span>
         </div>
       </div>

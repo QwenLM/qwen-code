@@ -85,6 +85,25 @@ describe('WorkspacePage', () => {
     expect(renderedContainer.textContent).toContain('Idle');
     expect(renderedContainer.textContent).toContain('No recent command');
     expect(renderedContainer.textContent).not.toContain('No terminal output');
+    const topbar = renderedContainer.querySelector(
+      '[data-testid="workspace-topbar"]',
+    );
+    const topbarContext = renderedContainer.querySelector(
+      '[data-testid="topbar-context"]',
+    );
+    expect(topbar).toBeTruthy();
+    expect(topbarContext).toBeTruthy();
+    expect(topbar?.querySelector('.topbar-meta')).toBeNull();
+    expect(
+      topbarContext?.querySelectorAll('.topbar-context-item'),
+    ).toHaveLength(3);
+    expect(topbarContext?.textContent).toContain('Connected');
+    expect(topbarContext?.textContent).toContain('main');
+    expect(topbarContext?.textContent).toContain('1 modified');
+    expect(
+      topbar?.querySelector('[data-testid="topbar-runtime-status"]')
+        ?.textContent,
+    ).toContain('Ready');
     expect(
       renderedContainer.querySelector('[data-testid="terminal-body"]'),
     ).toBeNull();

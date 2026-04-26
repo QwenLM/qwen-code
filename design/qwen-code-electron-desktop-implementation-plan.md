@@ -22,6 +22,114 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Slim Topbar Context Prototype Fidelity
+
+Status: completed in iteration 19.
+
+Goal: make the workbench top bar closer to the slim `home.jpg` header by
+reducing heavy status-pill treatment, keeping project/runtime/branch context
+single-line, and proving long branch names do not overflow when review is
+opened.
+
+User-visible value: users can scan thread title, project, connection state,
+branch, dirty state, and core actions without the header competing with the
+conversation or clipping into unreadable pill fragments.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/TopBar.tsx`
+- `packages/desktop/src/renderer/components/layout/StatusPill.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `.qwen/e2e-tests/electron-desktop/topbar-context-fidelity.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Topbar project/runtime/branch/git context renders as a lightweight context
+  row, not three heavy bordered pills.
+- Runtime status remains visible and accessible but is compact enough to fit
+  the action cluster.
+- Long branch/project/thread/model labels are truncated within their regions
+  and do not create horizontal overflow in the default or compact review
+  viewport.
+- Real Electron CDP coverage records topbar geometry, context item style
+  weight, action sizes, long branch visibility, and overflow state.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, create/open the fake project on a deliberately long branch,
+  send/approve the prompt, assert the slim topbar context metrics, open review
+  at default and compact widths, and continue the existing review/settings/
+  terminal/commit smoke.
+- E2E assertions: topbar height remains slim, context items have no heavy
+  bordered-pill frame, action buttons remain compact, long branch text is
+  present in DOM but contained visually, and topbar/composer/review do not
+  overflow in compact review.
+- Diagnostic artifacts: `topbar-context-fidelity.json`,
+  `topbar-context-fidelity.png`, `compact-review-drawer.json`, Electron log,
+  and summary JSON under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained
+  density and visual hierarchy; `electron-desktop-dev` for real Electron CDP
+  verification; `brainstorming` applied by selecting the smallest recorded
+  continuation from the prior slice's next-work item.
+
+Notes and decisions:
+
+- The slice leaves branch switching behavior unchanged; it only improves and
+  verifies how long current-branch context is displayed.
+- The prototype wins over a new art direction: context should read as quiet
+  desktop chrome, with the conversation remaining visually dominant.
+- The first real Electron CDP run exposed that the deliberately long branch
+  pushed the compact composer to `158.890625` px, above the existing density
+  limit. The fix tightened compact composer control widths and kept default
+  compact composer controls on one row, instead of weakening the assertion.
+- Narrow review mode still allows composer controls to wrap, because that
+  drawer width is smaller and already has separate containment coverage.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` first failed before the new topbar
+  assertion because long branch text made the compact composer height
+  `158.890625`; diagnostics were saved at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T01-57-32-569Z/`.
+- After tightening compact composer widths,
+  `cd packages/desktop && npm run build && npm run e2e:cdp` passed after
+  launching real Electron over CDP, opening the fake project on the long
+  branch, sending/approving the fake ACP prompt, asserting topbar context
+  fidelity, and completing the existing compact review, review safety,
+  settings, terminal, discard safety, and commit workflows.
+- Passing artifacts:
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T01-58-44-613Z/`.
+- Key recorded metrics: topbar height `54`, context row height `16`, context
+  item background alpha `0`, context border widths `0`, action buttons
+  `30x30`, runtime status `71.2578125x30`, long branch present in DOM text,
+  no topbar/body overflow, and compact composer height `126.890625` with the
+  long branch visible and truncated.
+
+Next work:
+
+- Turn the branch context into a safe branch menu/dropdown with dirty-state
+  protection and server-side branch list/checkout tests.
+- Continue prototype fidelity by reducing the remaining changed-files summary
+  card weight so it reads more like an inline conversation result.
+
 ### Completed Slice: Sidebar App Rail Prototype Fidelity
 
 Status: completed in iteration 18.

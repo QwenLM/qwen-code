@@ -27,6 +27,8 @@ const artifactRoot = join(
 );
 const defaultWindowBounds = { width: 1240, height: 820 };
 const compactWindowBounds = { width: 960, height: 640 };
+const longBranchName =
+  'desktop-e2e/very-long-branch-name-for-topbar-overflow-check';
 
 const consoleErrors = [];
 const failedRequests = [];
@@ -102,6 +104,8 @@ async function main() {
   await assertConversationChangesSummary('conversation-changes-summary.json');
   await waitForSelector('[data-testid="thread-list"]');
   await assertSidebarAppRail('sidebar-app-rail.json');
+  await assertTopbarContextFidelity('topbar-context-fidelity.json');
+  await saveScreenshot('topbar-context-fidelity.png');
 
   await clickButton('Review Changes');
   await waitForText('README.md');
@@ -269,6 +273,7 @@ async function createGitWorkspace() {
   await execFileP('git', ['config', 'user.name', 'Desktop E2E'], { cwd: dir });
   await execFileP('git', ['add', '.'], { cwd: dir });
   await execFileP('git', ['commit', '-m', 'initial commit'], { cwd: dir });
+  await execFileP('git', ['checkout', '-b', longBranchName], { cwd: dir });
   await writeFile(join(dir, 'README.md'), '# Desktop E2E\n\nchanged\n', 'utf8');
   await writeFile(join(dir, 'notes.txt'), 'review me\n', 'utf8');
   return dir;
@@ -786,6 +791,228 @@ async function assertSidebarAppRail(fileName) {
   ) {
     throw new Error(
       `Sidebar leaked protocol or path noise: ${metrics.sidebarText}`,
+    );
+  }
+}
+
+async function assertTopbarContextFidelity(fileName) {
+  const metrics = await evaluate(`(() => {
+    const longBranchName = ${JSON.stringify(longBranchName)};
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const alphaFromColor = (color) => {
+      if (!color || color === 'transparent') {
+        return 0;
+      }
+      const match = color.match(/rgba?\\(([^)]+)\\)/u);
+      if (!match) {
+        return 1;
+      }
+      const parts = match[1].split(',').map((part) => part.trim());
+      if (parts.length < 4) {
+        return 1;
+      }
+      return Number.parseFloat(parts[3]);
+    };
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        backgroundAlpha: alphaFromColor(style.backgroundColor),
+        borderTopWidth: Number.parseFloat(style.borderTopWidth),
+        borderRightWidth: Number.parseFloat(style.borderRightWidth),
+        borderBottomWidth: Number.parseFloat(style.borderBottomWidth),
+        borderLeftWidth: Number.parseFloat(style.borderLeftWidth),
+        borderTopAlpha: alphaFromColor(style.borderTopColor)
+      };
+    };
+    const escapes = (inner, outer) =>
+      Boolean(
+        inner &&
+          outer &&
+          (inner.left < outer.left - 1 ||
+            inner.right > outer.right + 1 ||
+            inner.top < outer.top - 1 ||
+            inner.bottom > outer.bottom + 1)
+      );
+    const topbar = document.querySelector('[data-testid="workspace-topbar"]');
+    const titleStack = document.querySelector('[data-testid="topbar-title-stack"]');
+    const title = document.querySelector('[data-testid="topbar-title"]');
+    const context = document.querySelector('[data-testid="topbar-context"]');
+    const runtimeStatus = document.querySelector(
+      '[data-testid="topbar-runtime-status"]'
+    );
+    const topbarRect = rectFor(topbar);
+    const contextRect = rectFor(context);
+    const actionRects = [
+      ...document.querySelectorAll(
+        '[data-testid="workspace-topbar"] .topbar-icon-button'
+      )
+    ].map((button) => ({
+      label: button.getAttribute('aria-label') || '',
+      rect: rectFor(button)
+    }));
+    const contextItems = [
+      ...document.querySelectorAll('.topbar-context-item')
+    ].map((item) => ({
+      label: item.getAttribute('aria-label') || '',
+      text: item.textContent.trim(),
+      rect: rectFor(item),
+      style: styleFor(item),
+      escapesTopbar: escapes(rectFor(item), topbarRect),
+      escapesContext: escapes(rectFor(item), contextRect)
+    }));
+
+    return {
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight
+      },
+      document: {
+        bodyScrollWidth: document.body.scrollWidth,
+        bodyScrollHeight: document.body.scrollHeight
+      },
+      topbar: topbarRect,
+      titleStack: rectFor(titleStack),
+      title: rectFor(title),
+      context: contextRect,
+      runtimeStatus: rectFor(runtimeStatus),
+      runtimeStatusText: runtimeStatus?.textContent.trim() ?? '',
+      runtimeStatusStyle: styleFor(runtimeStatus),
+      topbarText: topbar?.textContent ?? '',
+      contextText: context?.textContent ?? '',
+      contextItems,
+      actionRects,
+      hasLegacyMeta: document.querySelector('.topbar-meta') !== null,
+      hasSegmentedTabs: document.querySelector('.topbar-nav') !== null,
+      hasLongBranch: topbar?.textContent.includes(longBranchName) ?? false,
+      containment: {
+        titleStackInTopbar: !escapes(rectFor(titleStack), topbarRect),
+        contextInTopbar: !escapes(contextRect, topbarRect),
+        runtimeInTopbar: !escapes(rectFor(runtimeStatus), topbarRect),
+        actionsInTopbar: actionRects.every((action) =>
+          !escapes(action.rect, topbarRect)
+        )
+      }
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(metrics, null, 2)}\n`,
+    'utf8',
+  );
+
+  const missing = [
+    'topbar',
+    'titleStack',
+    'title',
+    'context',
+    'runtimeStatus',
+  ].filter((key) => metrics[key] === null);
+  if (missing.length > 0) {
+    throw new Error(`Missing topbar fidelity rects: ${missing.join(', ')}`);
+  }
+
+  if (metrics.hasLegacyMeta || metrics.hasSegmentedTabs) {
+    throw new Error('Topbar should not render legacy meta pills or tabs.');
+  }
+
+  if (metrics.topbar.height < 48 || metrics.topbar.height > 58) {
+    throw new Error(`Topbar is no longer slim: ${metrics.topbar.height}`);
+  }
+
+  if (metrics.document.bodyScrollWidth > metrics.viewport.width + 4) {
+    throw new Error(
+      `Topbar fidelity caused horizontal body overflow: ${JSON.stringify(
+        metrics.document,
+      )}`,
+    );
+  }
+
+  if (!metrics.hasLongBranch) {
+    throw new Error(
+      `Topbar did not expose the long branch in DOM text: ${metrics.topbarText}`,
+    );
+  }
+
+  const labels = metrics.contextItems.map((item) => item.label);
+  for (const expectedLabel of ['Connection', 'Branch', 'Git status']) {
+    if (!labels.some((label) => label.startsWith(expectedLabel))) {
+      throw new Error(
+        `Topbar context is missing ${expectedLabel}; labels=${labels.join(
+          ', ',
+        )}`,
+      );
+    }
+  }
+
+  const heavyContextItems = metrics.contextItems.filter(
+    (item) =>
+      item.rect.height > 20 ||
+      item.style.backgroundAlpha > 0.025 ||
+      item.style.borderTopWidth > 0 ||
+      item.style.borderRightWidth > 0 ||
+      item.style.borderBottomWidth > 0 ||
+      item.style.borderLeftWidth > 0,
+  );
+  if (heavyContextItems.length > 0) {
+    throw new Error(
+      `Topbar context should not use heavy bordered pills: ${JSON.stringify(
+        heavyContextItems,
+      )}`,
+    );
+  }
+
+  if (metrics.runtimeStatus.height > 32 || metrics.runtimeStatus.width > 76) {
+    throw new Error(
+      `Runtime status should stay compact: ${JSON.stringify(
+        metrics.runtimeStatus,
+      )}`,
+    );
+  }
+
+  const oversizedActions = metrics.actionRects.filter(
+    (action) => action.rect.width > 34 || action.rect.height > 34,
+  );
+  if (oversizedActions.length > 0) {
+    throw new Error(
+      `Topbar actions should stay icon-sized: ${JSON.stringify(
+        oversizedActions,
+      )}`,
+    );
+  }
+
+  if (Object.values(metrics.containment).some((contained) => !contained)) {
+    throw new Error(
+      `Topbar elements escaped the header: ${JSON.stringify(
+        metrics.containment,
+      )}`,
+    );
+  }
+
+  const escapedContextItems = metrics.contextItems.filter(
+    (item) => item.escapesTopbar,
+  );
+  if (escapedContextItems.length > 0) {
+    throw new Error(
+      `Topbar context item escaped the header: ${JSON.stringify(
+        escapedContextItems,
+      )}`,
     );
   }
 }
