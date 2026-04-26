@@ -725,3 +725,39 @@ describe('modelConfigUtils', () => {
     });
   });
 });
+
+it('should not use env-matched provider when settings.model.name is set but unmatched', () => {
+  // Regression: when settings.model.name is set but doesn't match any
+  // provider, the code should NOT fall through to OPENAI_MODEL/QWEN_MODEL.
+  // The env-matched provider should only supply metadata when no model is requested.
+  const mockSettings = makeMockSettings({
+    modelProviders: {
+      [AuthType.USE_OPENAI]: [{ id: 'gpt-4', model: 'gpt-4' }],
+    },
+    model: { name: 'custom-model-not-in-providers' },
+  });
+  const selectedAuthType = AuthType.USE_OPENAI;
+  process.env['OPENAI_MODEL'] = 'gpt-4';
+
+  vi.mocked(resolveModelConfig).mockReturnValue({
+    config: { model: 'custom-model-not-in-providers', apiKey: '', baseUrl: '' },
+    sources: {},
+    warnings: [],
+  });
+
+  const result = resolveCliGenerationConfig({
+    argv: {},
+    settings: mockSettings,
+    selectedAuthType,
+  });
+
+  // Should use settings.model.name, not fall through to OPENAI_MODEL
+  expect(result.model).toBe('custom-model-not-in-providers');
+  expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
+    expect.objectContaining({
+      modelProvider: undefined, // No provider found for custom model
+    }),
+  );
+
+  delete process.env['OPENAI_MODEL'];
+});
