@@ -176,9 +176,7 @@ async function main() {
   await waitForSelector('[data-testid="settings-page"]');
   await assertSettingsPageLayout('settings-layout.json');
   await saveScreenshot('settings-page.png');
-  await setFieldByLabel('Model', 'qwen-e2e-cdp');
-  await setFieldByLabel('Base URL', 'https://example.invalid/v1');
-  await setFieldByLabel('API key', 'sk-desktop-e2e');
+  await assertSettingsValidation('settings-validation.json');
   await clickButton('Save');
   await waitForText('qwen-e2e-cdp');
   await assertSettingsProductState('settings-product-state.json');
@@ -4056,6 +4054,157 @@ async function assertSettingsPageLayout(fileName) {
       )}`,
     );
   }
+}
+
+async function assertSettingsValidation(fileName) {
+  const snapshots = {};
+
+  await setFieldByLabel('Model', '');
+  await waitForText('Enter a model name before saving.');
+  snapshots.missingModel = await readSettingsValidationSnapshot();
+
+  await setFieldByLabel('Model', 'qwen-e2e-cdp');
+  await setFieldByLabel('Base URL', 'not-a-url');
+  await waitForText('Use a valid HTTP(S) base URL.');
+  snapshots.invalidBaseUrl = await readSettingsValidationSnapshot();
+
+  await setFieldByLabel('Base URL', 'https://example.invalid/v1');
+  await setFieldByLabel('API key', '');
+  await waitForText('Enter an API key to save this provider.');
+  snapshots.missingApiKey = await readSettingsValidationSnapshot();
+
+  await setFieldByLabel('API key', 'sk-desktop-e2e');
+  await waitFor(
+    'valid settings save enabled',
+    async () => {
+      const snapshot = await readSettingsValidationSnapshot();
+      return (
+        snapshot.saveDisabled === false &&
+        snapshot.validationText === '' &&
+        snapshot.apiKeyLength > 0
+      );
+    },
+    5_000,
+  );
+  snapshots.valid = await readSettingsValidationSnapshot();
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshots, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (
+    snapshots.missingModel.validationText !==
+    'Enter a model name before saving.'
+  ) {
+    throw new Error(
+      `Missing-model validation did not render: ${JSON.stringify(
+        snapshots.missingModel,
+      )}`,
+    );
+  }
+
+  if (
+    snapshots.invalidBaseUrl.validationText !==
+    'Use a valid HTTP(S) base URL.'
+  ) {
+    throw new Error(
+      `Invalid-base-URL validation did not render: ${JSON.stringify(
+        snapshots.invalidBaseUrl,
+      )}`,
+    );
+  }
+
+  if (
+    snapshots.missingApiKey.validationText !==
+    'Enter an API key to save this provider.'
+  ) {
+    throw new Error(
+      `Missing-API-key validation did not render: ${JSON.stringify(
+        snapshots.missingApiKey,
+      )}`,
+    );
+  }
+
+  for (const [name, snapshot] of Object.entries(snapshots)) {
+    const shouldBeDisabled = name !== 'valid';
+    if (snapshot.saveDisabled !== shouldBeDisabled) {
+      throw new Error(
+        `Unexpected Save disabled state for ${name}: ${JSON.stringify(
+          snapshot,
+        )}`,
+      );
+    }
+
+    if (snapshot.hasSecretText) {
+      throw new Error(
+        `Settings validation exposed the fake API key in visible text for ${name}.`,
+      );
+    }
+
+    if (snapshot.validationOverflow || snapshot.documentOverflow) {
+      throw new Error(
+        `Settings validation overflowed for ${name}: ${JSON.stringify(
+          snapshot,
+        )}`,
+      );
+    }
+  }
+}
+
+async function readSettingsValidationSnapshot() {
+  return evaluate(`(() => {
+    const settings = document.querySelector('[data-testid="settings-page"]');
+    const modelConfig = document.querySelector('[data-testid="model-config"]');
+    const validation = document.querySelector(
+      '[data-testid="settings-save-validation"]'
+    );
+    const saveButton = [...document.querySelectorAll('button')].find(
+      (button) => button.textContent.trim() === 'Save'
+    );
+    const apiKey = [...document.querySelectorAll('label')]
+      .find((candidate) =>
+        candidate.innerText.trim().toLowerCase().startsWith('api key')
+      )
+      ?.querySelector('input');
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const settingsRect = rectFor(settings);
+    const modelConfigRect = rectFor(modelConfig);
+    const validationRect = rectFor(validation);
+    return {
+      validationText: validation?.textContent.trim() ?? '',
+      saveDisabled: saveButton?.disabled ?? null,
+      saveDescribedBy: saveButton?.getAttribute('aria-describedby') ?? null,
+      apiKeyType: apiKey?.getAttribute('type') ?? null,
+      apiKeyLength: apiKey?.value.length ?? 0,
+      hasSecretText: (settings?.innerText ?? '').includes('sk-desktop-e2e'),
+      validationOverflow:
+        validationRect !== null &&
+        modelConfigRect !== null &&
+        (validationRect.left < modelConfigRect.left - 1 ||
+          validationRect.right > modelConfigRect.right + 1),
+      documentOverflow:
+        document.body.scrollWidth > window.innerWidth + 4 ||
+        document.body.scrollHeight > window.innerHeight + 4,
+      settingsWidth: settingsRect?.width ?? null,
+      modelConfigWidth: modelConfigRect?.width ?? null,
+      validationWidth: validationRect?.width ?? null
+    };
+  })()`);
 }
 
 async function assertSettingsProductState(fileName) {

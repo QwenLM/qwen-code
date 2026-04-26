@@ -65,6 +65,7 @@ import {
   buildSettingsUpdateRequest,
   createInitialSettingsState,
   settingsReducer,
+  validateSettingsForm,
 } from './stores/settingsStore.js';
 import { WorkspacePage } from './components/layout/WorkspacePage.js';
 import type { LoadState } from './components/layout/types.js';
@@ -844,6 +845,18 @@ export function App() {
       return;
     }
 
+    const validation = validateSettingsForm(
+      settingsState.form,
+      settingsState.settings,
+    );
+    if (!validation.valid) {
+      dispatchSettings({
+        type: 'save_error',
+        message: validation.reason ?? 'Settings are incomplete.',
+      });
+      return;
+    }
+
     dispatchSettings({ type: 'save_start' });
     try {
       const settings = await updateDesktopUserSettings(
@@ -855,7 +868,7 @@ export function App() {
     } catch (error) {
       dispatchSettings({ type: 'save_error', message: getErrorMessage(error) });
     }
-  }, [loadState, settingsState.form]);
+  }, [loadState, settingsState.form, settingsState.settings]);
 
   const authenticate = useCallback(
     async (methodId: string) => {

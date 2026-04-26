@@ -9,6 +9,7 @@ import {
   buildSettingsUpdateRequest,
   createInitialSettingsState,
   settingsReducer,
+  validateSettingsForm,
 } from './settingsStore.js';
 import type { DesktopUserSettings } from '../api/client.js';
 
@@ -46,6 +47,93 @@ describe('settingsStore', () => {
       modelProviders: {
         'qwen-max': 'https://example.test/v1',
       },
+    });
+  });
+
+  it('trims API-key model settings before saving', () => {
+    const state = {
+      ...createInitialSettingsState(),
+      form: {
+        provider: 'api-key' as const,
+        apiKey: '  secret  ',
+        codingPlanRegion: 'china' as const,
+        activeModel: '  qwen-max  ',
+        baseUrl: '  https://example.test/v1  ',
+      },
+    };
+
+    expect(buildSettingsUpdateRequest(state.form)).toEqual({
+      provider: 'api-key',
+      apiKey: 'secret',
+      activeModel: 'qwen-max',
+      modelProviders: {
+        'qwen-max': 'https://example.test/v1',
+      },
+    });
+  });
+
+  it('validates API-key provider inputs before saving', () => {
+    const state = createInitialSettingsState();
+
+    expect(
+      validateSettingsForm(
+        { ...state.form, activeModel: '   ', apiKey: 'secret' },
+        null,
+      ),
+    ).toEqual({
+      valid: false,
+      reason: 'Enter a model name before saving.',
+    });
+    expect(
+      validateSettingsForm(
+        { ...state.form, baseUrl: 'ftp://example.test', apiKey: 'secret' },
+        null,
+      ),
+    ).toEqual({
+      valid: false,
+      reason: 'Use a valid HTTP(S) base URL.',
+    });
+    expect(validateSettingsForm(state.form, null)).toEqual({
+      valid: false,
+      reason: 'Enter an API key to save this provider.',
+    });
+    expect(
+      validateSettingsForm({ ...state.form, apiKey: 'secret' }, null),
+    ).toEqual({
+      valid: true,
+      reason: null,
+    });
+  });
+
+  it('accepts saved provider secrets without exposing them in the form', () => {
+    const settings = createSettings();
+    const state = settingsReducer(createInitialSettingsState(), {
+      type: 'load_success',
+      settings,
+    });
+
+    expect(state.form.apiKey).toBe('');
+    expect(validateSettingsForm(state.form, settings)).toEqual({
+      valid: true,
+      reason: null,
+    });
+  });
+
+  it('validates Coding Plan API keys before saving', () => {
+    const state = createInitialSettingsState();
+    const form = {
+      ...state.form,
+      provider: 'coding-plan' as const,
+      apiKey: '',
+    };
+
+    expect(validateSettingsForm(form, null)).toEqual({
+      valid: false,
+      reason: 'Enter a Coding Plan API key to save this provider.',
+    });
+    expect(validateSettingsForm({ ...form, apiKey: 'secret' }, null)).toEqual({
+      valid: true,
+      reason: null,
     });
   });
 });

@@ -16,6 +16,7 @@ import type {
   DesktopProject,
   DesktopSessionSummary,
   DesktopTerminal,
+  DesktopUserSettings,
 } from '../../api/client.js';
 import { chatReducer, createInitialChatState } from '../../stores/chatStore.js';
 import { createInitialModelState } from '../../stores/modelStore.js';
@@ -498,6 +499,89 @@ describe('WorkspacePage', () => {
     });
 
     expect(onModelChange).toHaveBeenCalledWith('qwen-e2e-cdp');
+  });
+
+  it('shows inline settings validation before saving a model provider', () => {
+    const onSaveSettings = vi.fn();
+    const renderedContainer = renderWorkspace({
+      onSaveSettings,
+      settingsState: {
+        ...createInitialSettingsState(),
+        settings: null,
+        form: {
+          provider: 'api-key',
+          apiKey: '',
+          codingPlanRegion: 'china',
+          activeModel: 'qwen-plus',
+          baseUrl: 'https://example.test/v1',
+        },
+      },
+    });
+
+    act(() => {
+      clickButton(renderedContainer, 'Settings');
+    });
+
+    const validation = renderedContainer.querySelector(
+      '[data-testid="settings-save-validation"]',
+    );
+    const saveButton = [...renderedContainer.querySelectorAll('button')].find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+
+    expect(validation?.textContent).toContain('Enter an API key');
+    expect(saveButton).toBeInstanceOf(HTMLButtonElement);
+    expect((saveButton as HTMLButtonElement).disabled).toBe(true);
+    expect(saveButton?.getAttribute('aria-describedby')).toBe(
+      'settings-save-validation',
+    );
+
+    act(() => {
+      (saveButton as HTMLButtonElement).click();
+    });
+
+    expect(onSaveSettings).not.toHaveBeenCalled();
+  });
+
+  it('allows settings save when a provider has a saved API key', () => {
+    const onSaveSettings = vi.fn();
+    const settings = createSettings();
+    const renderedContainer = renderWorkspace({
+      onSaveSettings,
+      settingsState: {
+        ...createInitialSettingsState(),
+        settings,
+        form: {
+          provider: 'api-key',
+          apiKey: '',
+          codingPlanRegion: 'china',
+          activeModel: 'qwen-plus',
+          baseUrl: 'https://example.test/v1',
+        },
+      },
+    });
+
+    act(() => {
+      clickButton(renderedContainer, 'Settings');
+    });
+
+    const saveButton = [...renderedContainer.querySelectorAll('button')].find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+
+    expect(
+      renderedContainer.querySelector(
+        '[data-testid="settings-save-validation"]',
+      ),
+    ).toBeNull();
+    expect(saveButton).toBeInstanceOf(HTMLButtonElement);
+    expect((saveButton as HTMLButtonElement).disabled).toBe(false);
+
+    act(() => {
+      (saveButton as HTMLButtonElement).click();
+    });
+
+    expect(onSaveSettings).toHaveBeenCalledTimes(1);
   });
 
   it('bounds the inline changed-files summary before opening review', () => {
@@ -1153,3 +1237,29 @@ const readyLoadState: LoadState = {
   state: 'ready',
   status: readyStatus,
 };
+
+function createSettings(): DesktopUserSettings {
+  return {
+    ok: true,
+    settingsPath: '/tmp/settings.json',
+    provider: 'api-key',
+    selectedAuthType: 'openai',
+    model: { name: 'qwen-plus' },
+    codingPlan: {
+      region: 'china',
+      hasApiKey: false,
+      version: null,
+    },
+    openai: {
+      hasApiKey: true,
+      providers: [
+        {
+          id: 'qwen-plus',
+          name: 'Qwen Plus',
+          baseUrl: 'https://example.test/v1',
+          envKey: 'OPENAI_API_KEY',
+        },
+      ],
+    },
+  };
+}

@@ -25,6 +25,11 @@ export interface SettingsState {
   error: string | null;
 }
 
+export interface SettingsFormValidation {
+  valid: boolean;
+  reason: string | null;
+}
+
 export type SettingsAction =
   | { type: 'load_start' }
   | { type: 'load_success'; settings: DesktopUserSettings }
@@ -107,22 +112,75 @@ export function settingsReducer(
 export function buildSettingsUpdateRequest(
   form: SettingsFormState,
 ): UpdateDesktopSettingsRequest {
+  const apiKey = form.apiKey.trim() || undefined;
+
   if (form.provider === 'coding-plan') {
     return {
       provider: 'coding-plan',
-      apiKey: form.apiKey || undefined,
+      apiKey,
       codingPlanRegion: form.codingPlanRegion,
     };
   }
 
+  const activeModel = form.activeModel.trim();
+  const baseUrl = form.baseUrl.trim();
+
   return {
     provider: 'api-key',
-    apiKey: form.apiKey || undefined,
-    activeModel: form.activeModel,
+    apiKey,
+    activeModel,
     modelProviders: {
-      [form.activeModel]: form.baseUrl,
+      [activeModel]: baseUrl,
     },
   };
+}
+
+export function validateSettingsForm(
+  form: SettingsFormState,
+  settings: DesktopUserSettings | null,
+): SettingsFormValidation {
+  if (form.provider === 'coding-plan') {
+    if (
+      !hasIncomingOrSavedSecret(form.apiKey, settings?.codingPlan.hasApiKey)
+    ) {
+      return {
+        valid: false,
+        reason: 'Enter a Coding Plan API key to save this provider.',
+      };
+    }
+
+    return { valid: true, reason: null };
+  }
+
+  if (form.activeModel.trim().length === 0) {
+    return {
+      valid: false,
+      reason: 'Enter a model name before saving.',
+    };
+  }
+
+  if (form.baseUrl.trim().length === 0) {
+    return {
+      valid: false,
+      reason: 'Enter an HTTP(S) base URL before saving.',
+    };
+  }
+
+  if (!isHttpBaseUrl(form.baseUrl)) {
+    return {
+      valid: false,
+      reason: 'Use a valid HTTP(S) base URL.',
+    };
+  }
+
+  if (!hasIncomingOrSavedSecret(form.apiKey, settings?.openai.hasApiKey)) {
+    return {
+      valid: false,
+      reason: 'Enter an API key to save this provider.',
+    };
+  }
+
+  return { valid: true, reason: null };
 }
 
 function formFromSettings(
@@ -143,4 +201,20 @@ function formFromSettings(
       settings.model.name || firstProvider?.id || current.activeModel,
     baseUrl: firstProvider?.baseUrl || current.baseUrl,
   };
+}
+
+function hasIncomingOrSavedSecret(
+  incomingSecret: string,
+  hasSavedSecret: boolean | undefined,
+): boolean {
+  return incomingSecret.trim().length > 0 || hasSavedSecret === true;
+}
+
+function isHttpBaseUrl(value: string): boolean {
+  try {
+    const url = new URL(value.trim());
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
 }

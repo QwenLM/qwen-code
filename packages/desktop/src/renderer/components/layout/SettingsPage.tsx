@@ -7,10 +7,11 @@
 import { useState, type Dispatch } from 'react';
 import type { ChatState } from '../../stores/chatStore.js';
 import type { ModelState } from '../../stores/modelStore.js';
-import type {
-  SettingsAction,
-  SettingsFormState,
-  SettingsState,
+import {
+  validateSettingsForm,
+  type SettingsAction,
+  type SettingsFormState,
+  type SettingsState,
 } from '../../stores/settingsStore.js';
 import type { DesktopApprovalMode } from '../../../shared/desktopProtocol.js';
 import type { LoadState } from './types.js';
@@ -154,6 +155,16 @@ function ModelProvidersPanel({
   state: SettingsState;
 }) {
   const provider = state.form.provider;
+  const validation = validateSettingsForm(state.form, state.settings);
+  const validationReason = validation.valid ? null : validation.reason;
+  const saveDisabledReason = state.loading
+    ? 'Settings are still loading.'
+    : state.saving
+      ? 'Saving settings.'
+      : validationReason;
+  const saveValidationId = validationReason
+    ? 'settings-save-validation'
+    : undefined;
 
   return (
     <section
@@ -250,9 +261,20 @@ function ModelProvidersPanel({
         </label>
 
         <div className="settings-actions">
+          {validationReason ? (
+            <p
+              className="settings-validation error-text"
+              data-testid="settings-save-validation"
+              id="settings-save-validation"
+            >
+              {validationReason}
+            </p>
+          ) : null}
           <button
+            aria-describedby={saveValidationId}
             className="primary-button"
-            disabled={state.loading || state.saving}
+            disabled={Boolean(saveDisabledReason)}
+            title={saveDisabledReason ?? 'Save model provider settings'}
             type="button"
             onClick={onSave}
           >

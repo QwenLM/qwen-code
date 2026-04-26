@@ -22,6 +22,107 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Settings Model Validation Feedback
+
+Status: completed in iteration 28.
+
+Goal: make model provider setup fail early in the Settings surface with compact
+inline validation, so users understand why Save is unavailable before a request
+hits the desktop server.
+
+User-visible value: users adding an API-key model configuration see specific,
+contained reasons for missing model, invalid base URL, or missing API key
+states. The Save action only enables when the active provider form is valid,
+and saved secrets still never render back into the DOM.
+
+Expected files:
+
+- `packages/desktop/src/renderer/stores/settingsStore.ts`
+- `packages/desktop/src/renderer/stores/settingsStore.test.ts`
+- `packages/desktop/src/renderer/components/layout/SettingsPage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/model-configuration-workflow.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- API-key settings trim model and base URL before saving.
+- Save is disabled with a clear inline reason when the API-key provider has no
+  model, an invalid HTTP(S) base URL, or no new/saved API key.
+- Coding Plan settings keep the region control compact and require a new or
+  saved API key before Save enables.
+- The validation message is contained inside the settings card and does not
+  expose typed or saved secrets.
+- Existing successful model save and composer model-switch behavior continues
+  through the real Electron CDP path.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/settingsStore.test.ts src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, complete the existing composer, review, and commit path, open
+  Settings, clear model/base URL/API key fields to assert inline validation and
+  disabled Save states, then enter a valid fake model/base URL/API key, save,
+  return to Conversation, and switch to the saved model from the composer.
+- E2E assertions: invalid settings states keep Save disabled with visible
+  reason text, the validation card stays within Settings without body overflow,
+  valid input re-enables Save, the fake API key is absent from settings text and
+  artifacts, and no console errors or failed local requests are recorded.
+- Diagnostic artifacts: `settings-validation.json`,
+  `settings-product-state.json`, `composer-model-switch.json`,
+  `settings-page.png`, Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `frontend-design` for prototype-constrained inline
+  validation that keeps Settings dense and readable; `electron-desktop-dev` for
+  renderer changes and real Electron CDP verification.
+
+Notes and decisions:
+
+- This slice keeps Settings as the existing full workbench page. Converting it
+  to a drawer or modal is a separate fidelity pass.
+- Validation stays client-side for immediate feedback while the desktop server
+  remains the authority for persisted settings and secret handling.
+- Save calls are guarded in `App` as well as disabled in the form, so a stale
+  or programmatic click still gets the same validation message instead of
+  sending an incomplete request.
+- API-key model and base URL values are trimmed before the update request is
+  built. The API key input is also trimmed when sent, but saved secrets are
+  still cleared from the form after persistence.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/settingsStore.test.ts src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 24 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed with no warnings after the
+  dependency fix.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T03-56-02-534Z/`.
+- Key recorded validation metrics: missing model, invalid base URL, and missing
+  API key each disabled Save with inline reasons; valid input enabled Save;
+  the validation row stayed inside the 500 px model card; no document overflow;
+  fake API key visible text exposure was false; console errors and failed local
+  requests were both zero.
+
+Next work:
+
+- Continue model configuration by adding keyboard-focused coverage for the
+  provider selector and Coding Plan path.
+- Continue prototype fidelity by exploring whether Settings should open as a
+  narrower supporting surface instead of replacing the full workbench.
+
 ### Completed Slice: Composer Model Provider Promotion
 
 Status: completed in iteration 27.

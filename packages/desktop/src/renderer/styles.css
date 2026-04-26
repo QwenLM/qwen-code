@@ -2119,8 +2119,19 @@ textarea:focus {
 
 .settings-actions {
   display: flex;
+  align-items: center;
   gap: 8px;
+  min-width: 0;
   justify-content: flex-end;
+}
+
+.settings-validation {
+  min-width: 0;
+  flex: 1;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .settings-summary {

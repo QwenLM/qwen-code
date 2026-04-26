@@ -6,7 +6,7 @@
   `cd packages/desktop && npm run e2e:cdp`
 - Result: pass
 - Artifact directory:
-  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T03-47-01-812Z/`
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T03-56-02-534Z/`
 
 ## Scenario
 
@@ -15,17 +15,24 @@
 2. Open the fake project, type a first composer prompt, create a thread, and
    approve the fake command request.
 3. Complete the existing review, discard-cancel safety, stage, and commit path.
-4. Open Settings, save `qwen-e2e-cdp` with a fake API key and base URL, and
-   assert the saved model is visible without exposing the secret.
-5. Return to Conversation and select `qwen-e2e-cdp` from the composer model
+4. Open Settings, clear model/base URL/API key fields to assert inline
+   validation and disabled Save states, then enter `qwen-e2e-cdp` with a fake
+   API key and base URL.
+5. Save the valid provider and assert the saved model is visible without
+   exposing the secret.
+6. Return to Conversation and select `qwen-e2e-cdp` from the composer model
    picker.
-6. Continue through terminal expand, command execution, attach-to-composer, and
+7. Continue through terminal expand, command execution, attach-to-composer, and
    send verification.
 
 ## Assertions
 
 - The Settings default view includes product sections and keeps diagnostics
   behind Advanced.
+- The Settings model provider form disables Save with inline reasons for an
+  empty model, invalid base URL, and missing API key.
+- The validation row stays contained in the model card and does not create body
+  overflow.
 - The API key input remains `type="password"` and is cleared after save.
 - The fake API key is absent from settings text, composer text, input values,
   advanced diagnostics, and the model-switch artifact.
@@ -42,6 +49,7 @@
 ## Artifacts
 
 - `settings-page.png`
+- `settings-validation.json`
 - `settings-product-state.json`
 - `settings-advanced-diagnostics.json`
 - `composer-model-switch.json`
@@ -50,6 +58,7 @@
 
 ## Known Uncovered Risk
 
-The harness verifies the API-key model save and active-session model switch
-using fake ACP. It does not yet cover Coding Plan model switching, invalid API
-key validation, or keyboard-only navigation through the model picker.
+The harness verifies the API-key model validation/save and active-session model
+switch using fake ACP. It does not yet cover Coding Plan model switching,
+server-side invalid API key rejection, or keyboard-only navigation through the
+model picker.
