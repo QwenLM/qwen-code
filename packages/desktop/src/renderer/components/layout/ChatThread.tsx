@@ -672,9 +672,13 @@ function CommandApprovalCard({
   requestId: string;
 }) {
   const toolCall = permission.toolCall;
-  const title = toolCall.title || toolCall.kind || 'Command approval';
+  const title =
+    toolCall.title || formatToolKindTitle(toolCall.kind) || 'Command approval';
+  const kind = formatToolKindTitle(toolCall.kind) ?? 'Approval';
   const inputPreview = formatToolInput(toolCall.rawInput);
-  const status = toolCall.status || 'waiting for approval';
+  const status = formatPendingPromptStatus(
+    toolCall.status || 'waiting for approval',
+  );
 
   return (
     <section
@@ -684,7 +688,7 @@ function CommandApprovalCard({
     >
       <div className="conversation-approval-heading">
         <div>
-          <span className="message-role">{toolCall.kind || 'approval'}</span>
+          <span className="conversation-prompt-label">{kind}</span>
           <strong>{title}</strong>
         </div>
         <span className="conversation-approval-status">{status}</span>
@@ -736,15 +740,17 @@ function AskUserQuestionCard({
     >
       <div className="conversation-approval-heading">
         <div>
-          <span className="message-role">question</span>
+          <span className="conversation-prompt-label">Question</span>
           <strong>Input needed</strong>
         </div>
-        <span className="conversation-approval-status">waiting</span>
+        <span className="conversation-approval-status">Waiting</span>
       </div>
       <div className="conversation-question-list">
         {questionRequest.questions.map((item) => (
           <div key={`${item.header}-${item.question}`}>
-            <span className="message-role">{item.header}</span>
+            <span className="conversation-question-label">
+              {formatQuestionHeader(item.header)}
+            </span>
             <strong>{item.question}</strong>
             {item.options.length > 0 ? (
               <ul className="question-options">
@@ -891,6 +897,28 @@ function formatToolKindTitle(kind: string | undefined): string | null {
   }
 
   return formatActivityStatus(kind);
+}
+
+function formatPendingPromptStatus(status: string): string {
+  const normalized = status.replace(/[-_]+/gu, ' ').trim().toLowerCase();
+  if (normalized === 'pending' || normalized === 'waiting for approval') {
+    return 'Needs approval';
+  }
+
+  return formatActivityStatus(status);
+}
+
+function formatQuestionHeader(header: string): string {
+  const trimmed = header.trim();
+  if (!trimmed) {
+    return 'Question';
+  }
+
+  if (trimmed === trimmed.toUpperCase() || trimmed === trimmed.toLowerCase()) {
+    return formatActivityStatus(trimmed);
+  }
+
+  return trimmed;
 }
 
 function formatActivityStatus(value: string): string {

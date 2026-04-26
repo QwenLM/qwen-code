@@ -22,6 +22,104 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Pending Prompt Card Label Restraint
+
+Status: completed in iteration 50.
+
+Goal: make command approval and ask-user-question cards read like compact
+conversation task prompts, not debugger cards with uppercase role chrome.
+
+User-visible value: when the agent needs permission or input, users can
+understand the requested action quickly without `execute`, `question`,
+`pending`, or question headers competing with the command/question content.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/src/main/acp/createE2eAcpClient.ts`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/pending-prompt-card-label-restraint.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Command approval card title, kind, and status use title-case product
+  language with no visible `.message-role` chrome.
+- Ask-user-question card uses the same restrained label system for card status
+  and individual question headers.
+- Approval/question cards remain compact inline rails with accessible actions,
+  stay inside the conversation timeline, and do not overlap the composer.
+- Existing approval responses, ask-user-question responses, assistant actions,
+  changed-file summary, review, settings, terminal, branch, and commit flows
+  remain unchanged.
+- Default and compact Electron viewports show no document overflow, console
+  errors, or failed local requests.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake project, send a prompt that triggers command
+  approval, assert restrained pending approval labels, approve it, send a
+  prompt that triggers an ask-user-question request, assert restrained question
+  labels, submit it, then continue the existing review/settings/terminal
+  workflow.
+- E2E assertions: pending prompt cards have title-case labels and status text,
+  no uppercase legacy labels, no `.message-role` elements, compact geometry, no
+  permission strip/protocol leak, and no browser console errors or failed local
+  requests.
+- Diagnostic artifacts: new `inline-question-card.json`, updated
+  `inline-command-approval.json`, screenshots, Electron log, and summary JSON
+  under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for the narrow autonomous design
+  choice; `frontend-design` for applying `home.jpg`-style compact hierarchy
+  without inventing a new visual direction; `electron-desktop-dev` for real
+  Electron CDP verification of both pending prompt paths.
+
+Notes and decisions:
+
+- The existing inline approval rail already matches the first-viewport
+  direction better than a large modal or strip. This slice keeps that layout
+  and only reduces the last visible debugger labels.
+- The fake ACP client adds a deterministic ask-user-question branch keyed by
+  prompt text so CDP can exercise the UI without live credentials.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 22 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T18-46-47-262Z/`.
+- Key recorded metrics: approval card rendered `Execute`,
+  `Needs approval`, `Run desktop E2E command`, and `printf desktop-e2e`;
+  question card rendered `Question`, `Input needed`, `Waiting`, `Choice`, and
+  `Pick the next review focus`; both cards had no `.message-role` chrome, no
+  uppercase legacy labels, no protocol leaks, label weights at or below 680,
+  and no console errors or failed local requests.
+
+Next work:
+
+- Continue conversation fidelity by making the visible user/assistant role
+  treatment fully consistent in body text and screenshots; `ASSISTANT MESSAGE`
+  still appears in raw `innerText` diagnostics even though the label is
+  screen-reader-only in the rendered UI.
+- Consider visual coverage for multi-question ask-user prompts and long
+  option labels at compact viewport widths.
+
 ### Slice: Changed Files Summary Inline Fidelity
 
 Status: completed in iteration 49.

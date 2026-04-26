@@ -936,8 +936,19 @@ describe('WorkspacePage', () => {
     );
 
     expect(approvalCard).toBeTruthy();
+    expect(approvalCard?.textContent).toContain('Execute');
+    expect(approvalCard?.textContent).toContain('Needs approval');
     expect(approvalCard?.textContent).toContain('Run tests');
     expect(approvalCard?.textContent).toContain('npm test');
+    expect(approvalCard?.textContent).not.toContain('EXECUTE');
+    expect(approvalCard?.textContent).not.toContain('PENDING');
+    expect(approvalCard?.querySelector('.message-role')).toBeNull();
+    expect(
+      approvalCard?.querySelector('.conversation-prompt-label')?.textContent,
+    ).toBe('Execute');
+    expect(
+      approvalCard?.querySelector('.conversation-approval-status')?.textContent,
+    ).toBe('Needs approval');
     expect(renderedContainer.querySelector('.permission-strip')).toBeNull();
     expect(renderedContainer.textContent).not.toContain('Permission requested');
 
@@ -948,6 +959,69 @@ describe('WorkspacePage', () => {
     expect(onPermissionResponse).toHaveBeenCalledWith(
       'permission-1',
       'approve_once',
+    );
+  });
+
+  it('renders ask-user-question prompts with restrained product labels', () => {
+    const onAskUserQuestionResponse = vi.fn();
+    const chatState = chatReducer(createInitialChatState(), {
+      type: 'server_message',
+      message: {
+        type: 'ask_user_question',
+        requestId: 'question-1',
+        request: {
+          sessionId: session.sessionId,
+          questions: [
+            {
+              header: 'CHOICE',
+              question: 'Pick a branch strategy',
+              multiSelect: false,
+              options: [
+                {
+                  label: 'Create branch',
+                  description: 'Create a focused branch for this work.',
+                },
+              ],
+            },
+          ],
+          metadata: { source: 'test' },
+        },
+      },
+    });
+
+    const renderedContainer = renderWorkspace({
+      chatState,
+      onAskUserQuestionResponse,
+    });
+    const questionCard = renderedContainer.querySelector(
+      '[data-testid="conversation-question-card"]',
+    );
+    const questionText = questionCard?.textContent ?? '';
+
+    expect(questionCard).toBeTruthy();
+    expect(questionText).toContain('Question');
+    expect(questionText).toContain('Input needed');
+    expect(questionText).toContain('Waiting');
+    expect(questionText).toContain('Choice');
+    expect(questionText).toContain('Pick a branch strategy');
+    expect(questionText).toContain('Create branch');
+    expect(questionText).not.toContain('QUESTION');
+    expect(questionText).not.toContain('WAITING');
+    expect(questionCard?.querySelector('.message-role')).toBeNull();
+    expect(
+      questionCard?.querySelector('.conversation-prompt-label')?.textContent,
+    ).toBe('Question');
+    expect(
+      questionCard?.querySelector('.conversation-question-label')?.textContent,
+    ).toBe('Choice');
+
+    act(() => {
+      clickButton(renderedContainer, 'Submit Question');
+    });
+
+    expect(onAskUserQuestionResponse).toHaveBeenCalledWith(
+      'question-1',
+      'proceed_once',
     );
   });
 

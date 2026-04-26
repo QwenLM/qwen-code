@@ -114,6 +114,7 @@ export class E2eAcpClient implements AcpSessionClient {
   }
 
   async prompt(sessionId: string, prompt: string): Promise<PromptResponse> {
+    const normalizedPrompt = prompt.toLowerCase();
     this.emit(sessionId, {
       sessionUpdate: 'plan',
       entries: [
@@ -129,6 +130,60 @@ export class E2eAcpClient implements AcpSessionClient {
         },
       ],
     });
+
+    if (normalizedPrompt.includes('ask a user question')) {
+      const question = await this.onPermissionRequest({
+        sessionId,
+        toolCall: {
+          toolCallId: 'e2e-user-question',
+          title: 'Ask for task direction',
+          status: 'pending',
+          rawInput: {
+            questions: [
+              {
+                header: 'CHOICE',
+                question: 'Pick the next review focus',
+                multiSelect: false,
+                options: [
+                  {
+                    label: 'Review changes',
+                    description: 'Open the review drawer next.',
+                  },
+                  {
+                    label: 'Continue task',
+                    description: 'Keep working in the conversation.',
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        options: [
+          {
+            optionId: 'proceed_once',
+            name: 'Submit',
+            kind: 'allow_once',
+          },
+          {
+            optionId: 'cancel',
+            name: 'Cancel',
+            kind: 'reject_once',
+          },
+        ],
+      });
+
+      this.emit(sessionId, {
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'text',
+          text:
+            `E2E fake ACP question response recorded: ${prompt}\n\n` +
+            `Question outcome: ${question.outcome.outcome}.`,
+        },
+      });
+
+      return { stopReason: 'end_turn' };
+    }
 
     const permission = await this.onPermissionRequest({
       sessionId,

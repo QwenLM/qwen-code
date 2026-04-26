@@ -91,6 +91,13 @@ async function main() {
   await saveScreenshot('assistant-message-actions.png');
   await assertConversationSurfaceFidelity('conversation-surface-fidelity.json');
   await saveScreenshot('conversation-surface-fidelity.png');
+  await setFieldByAriaLabel('Message', 'Please ask a user question.');
+  await clickButton('Send');
+  await waitForText('Pick the next review focus');
+  await assertInlineQuestionCard('inline-question-card.json');
+  await saveScreenshot('inline-question-card.png');
+  await clickButton('Submit Question');
+  await waitForText('E2E fake ACP question response recorded');
   await setElectronWindowBounds(target.id, compactWindowBounds);
   await assertCompactDenseConversationLayout(
     'compact-dense-conversation.json',
@@ -2228,6 +2235,23 @@ async function assertInlineCommandApproval(fileName) {
         button.getAttribute('title') ||
         button.textContent.trim()
     );
+    const numberFromPixel = (value) => {
+      const number = Number.parseFloat(value);
+      return Number.isFinite(number) ? number : 0;
+    };
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        fontSize: numberFromPixel(style.fontSize),
+        fontWeight: numberFromPixel(style.fontWeight),
+        textTransform: style.textTransform
+      };
+    };
+    const promptLabel = card?.querySelector('.conversation-prompt-label');
+    const statusLabel = card?.querySelector('.conversation-approval-status');
     return {
       bodyText: document.body.innerText,
       cardText: card?.innerText ?? '',
@@ -2235,6 +2259,11 @@ async function assertInlineCommandApproval(fileName) {
       cardRect: rectFor(card),
       timelineRect: rectFor(timeline),
       composerRect: rectFor(composer),
+      promptLabelText: promptLabel?.textContent.trim() ?? '',
+      promptLabelStyle: styleFor(promptLabel),
+      statusLabelText: statusLabel?.textContent.trim() ?? '',
+      statusLabelStyle: styleFor(statusLabel),
+      hasLegacyMessageRole: Boolean(card?.querySelector('.message-role')),
       hasPermissionStrip: document.querySelector('.permission-strip') !== null,
       hasRequestEvent: document.body.innerText.includes('Permission requested')
     };
@@ -2248,15 +2277,58 @@ async function assertInlineCommandApproval(fileName) {
 
   const cardText = snapshot.cardText.toLowerCase();
   for (const expectedText of [
+    'execute',
     'run desktop e2e command',
     'printf desktop-e2e',
-    'pending',
+    'needs approval',
   ]) {
     if (!cardText.includes(expectedText)) {
       throw new Error(
         `Inline approval card is missing ${expectedText}: ${snapshot.cardText}`,
       );
     }
+  }
+
+  if (
+    snapshot.promptLabelText !== 'Execute' ||
+    snapshot.statusLabelText !== 'Needs approval'
+  ) {
+    throw new Error(
+      `Inline approval labels should use title-case product language: ${JSON.stringify(
+        {
+          prompt: snapshot.promptLabelText,
+          status: snapshot.statusLabelText,
+        },
+      )}`,
+    );
+  }
+
+  for (const legacyLabel of ['EXECUTE', 'PENDING', 'NEEDS APPROVAL']) {
+    if (snapshot.cardText.includes(legacyLabel)) {
+      throw new Error(
+        `Inline approval card should not show uppercase legacy label ${legacyLabel}: ${snapshot.cardText}`,
+      );
+    }
+  }
+
+  if (snapshot.hasLegacyMessageRole) {
+    throw new Error('Inline approval card should not use message-role chrome.');
+  }
+
+  if (
+    !snapshot.promptLabelStyle ||
+    !snapshot.statusLabelStyle ||
+    snapshot.promptLabelStyle.textTransform !== 'none' ||
+    snapshot.statusLabelStyle.textTransform !== 'none' ||
+    snapshot.promptLabelStyle.fontWeight > 700 ||
+    snapshot.statusLabelStyle.fontWeight > 700
+  ) {
+    throw new Error(
+      `Inline approval labels are too heavy: ${JSON.stringify({
+        prompt: snapshot.promptLabelStyle,
+        status: snapshot.statusLabelStyle,
+      })}`,
+    );
   }
 
   for (const expectedAction of ['Approve Once', 'Approve for Thread', 'Deny']) {
@@ -2302,6 +2374,181 @@ async function assertInlineCommandApproval(fileName) {
 
   if (snapshot.cardRect.bottom > snapshot.composerRect.top) {
     throw new Error('Inline approval card overlaps the composer.');
+  }
+}
+
+async function assertInlineQuestionCard(fileName) {
+  await waitForSelector('[data-testid="conversation-question-card"]');
+  const snapshot = await evaluate(`(() => {
+    const card = document.querySelector(
+      '[data-testid="conversation-question-card"]'
+    );
+    const timeline = document.querySelector('.chat-timeline');
+    const composer = document.querySelector('[data-testid="message-composer"]');
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const numberFromPixel = (value) => {
+      const number = Number.parseFloat(value);
+      return Number.isFinite(number) ? number : 0;
+    };
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        fontSize: numberFromPixel(style.fontSize),
+        fontWeight: numberFromPixel(style.fontWeight),
+        textTransform: style.textTransform
+      };
+    };
+    const buttons = [...(card?.querySelectorAll('button') ?? [])].map(
+      (button) =>
+        button.getAttribute('aria-label') ||
+        button.getAttribute('title') ||
+        button.textContent.trim()
+    );
+    const promptLabel = card?.querySelector('.conversation-prompt-label');
+    const statusLabel = card?.querySelector('.conversation-approval-status');
+    const questionLabel = card?.querySelector('.conversation-question-label');
+    return {
+      bodyText: document.body.innerText,
+      cardText: card?.innerText ?? '',
+      buttons,
+      cardRect: rectFor(card),
+      timelineRect: rectFor(timeline),
+      composerRect: rectFor(composer),
+      promptLabelText: promptLabel?.textContent.trim() ?? '',
+      promptLabelStyle: styleFor(promptLabel),
+      statusLabelText: statusLabel?.textContent.trim() ?? '',
+      statusLabelStyle: styleFor(statusLabel),
+      questionLabelText: questionLabel?.textContent.trim() ?? '',
+      questionLabelStyle: styleFor(questionLabel),
+      hasLegacyMessageRole: Boolean(card?.querySelector('.message-role')),
+      hasRawQuestionProtocol: document.body.innerText.includes('ask_user_question')
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  const cardText = snapshot.cardText.toLowerCase();
+  for (const expectedText of [
+    'question',
+    'input needed',
+    'waiting',
+    'choice',
+    'pick the next review focus',
+    'review changes',
+    'continue task',
+  ]) {
+    if (!cardText.includes(expectedText)) {
+      throw new Error(
+        `Inline question card is missing ${expectedText}: ${snapshot.cardText}`,
+      );
+    }
+  }
+
+  if (
+    snapshot.promptLabelText !== 'Question' ||
+    snapshot.statusLabelText !== 'Waiting' ||
+    snapshot.questionLabelText !== 'Choice'
+  ) {
+    throw new Error(
+      `Inline question labels should use restrained product language: ${JSON.stringify(
+        {
+          prompt: snapshot.promptLabelText,
+          status: snapshot.statusLabelText,
+          question: snapshot.questionLabelText,
+        },
+      )}`,
+    );
+  }
+
+  for (const legacyLabel of ['QUESTION', 'WAITING', 'CHOICE']) {
+    if (snapshot.cardText.includes(legacyLabel)) {
+      throw new Error(
+        `Inline question card should not show uppercase legacy label ${legacyLabel}: ${snapshot.cardText}`,
+      );
+    }
+  }
+
+  for (const expectedAction of ['Cancel Question', 'Submit Question']) {
+    if (!snapshot.buttons.includes(expectedAction)) {
+      throw new Error(
+        `Inline question card missing action ${expectedAction}; buttons=${snapshot.buttons.join(
+          ', ',
+        )}`,
+      );
+    }
+  }
+
+  if (snapshot.hasLegacyMessageRole) {
+    throw new Error('Inline question card should not use message-role chrome.');
+  }
+
+  if (snapshot.hasRawQuestionProtocol) {
+    throw new Error('Ask-user-question protocol name leaked into the body.');
+  }
+
+  if (
+    !snapshot.promptLabelStyle ||
+    !snapshot.statusLabelStyle ||
+    !snapshot.questionLabelStyle ||
+    snapshot.promptLabelStyle.textTransform !== 'none' ||
+    snapshot.statusLabelStyle.textTransform !== 'none' ||
+    snapshot.questionLabelStyle.textTransform !== 'none' ||
+    snapshot.promptLabelStyle.fontWeight > 700 ||
+    snapshot.statusLabelStyle.fontWeight > 700 ||
+    snapshot.questionLabelStyle.fontWeight > 700
+  ) {
+    throw new Error(
+      `Inline question labels are too heavy: ${JSON.stringify({
+        prompt: snapshot.promptLabelStyle,
+        status: snapshot.statusLabelStyle,
+        question: snapshot.questionLabelStyle,
+      })}`,
+    );
+  }
+
+  if (!snapshot.cardRect || !snapshot.timelineRect || !snapshot.composerRect) {
+    throw new Error(
+      `Inline question geometry is missing: ${JSON.stringify(snapshot)}`,
+    );
+  }
+
+  if (snapshot.cardRect.width < 360 || snapshot.cardRect.height > 170) {
+    throw new Error(
+      `Inline question card geometry is unexpected: ${JSON.stringify(
+        snapshot.cardRect,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.cardRect.left < snapshot.timelineRect.left ||
+    snapshot.cardRect.right > snapshot.timelineRect.right + 1
+  ) {
+    throw new Error('Inline question card should stay inside the timeline.');
+  }
+
+  if (snapshot.cardRect.bottom > snapshot.composerRect.top) {
+    throw new Error('Inline question card overlaps the composer.');
   }
 }
 
