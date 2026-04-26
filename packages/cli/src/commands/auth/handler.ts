@@ -489,7 +489,7 @@ export async function showAuthStatus(): Promise<void> {
 
           // Show region from settings or from detected config
           const displayRegion = codingPlanRegion || detectedCodingPlanRegion;
-          if (displayRegion && displayRegion !== true) {
+          if (displayRegion) {
             const regionDisplay =
               displayRegion === CodingPlanRegion.CHINA
                 ? t('中国 (China) - 阿里云百炼')
