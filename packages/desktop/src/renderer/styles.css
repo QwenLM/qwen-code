@@ -1060,13 +1060,19 @@ summary:focus-visible {
 }
 
 .chat-message-user {
-  width: min(520px, 78%);
+  width: fit-content;
+  max-width: min(560px, 78%);
   align-self: flex-end;
   gap: 0;
   padding: 8px 10px;
-  border: 1px solid rgba(240, 182, 110, 0.26);
+  border: 1px solid rgba(85, 166, 255, 0.28);
   border-radius: var(--radius);
-  background: rgba(240, 182, 110, 0.1);
+  background-color: rgba(85, 166, 255, 0.08);
+  background-image: linear-gradient(
+    180deg,
+    rgba(132, 116, 255, 0.075),
+    rgba(85, 166, 255, 0.045)
+  );
 }
 
 .chat-message-assistant {

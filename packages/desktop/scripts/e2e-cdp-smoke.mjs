@@ -3957,18 +3957,21 @@ async function assertConversationSurfaceFidelity(fileName) {
         return 0;
       }
 
-      const match = color.match(/rgba?\\(([^)]+)\\)/u);
-      if (!match) {
-        return 1;
-      }
-
-      const parts = match[1].split(',').map((part) => part.trim());
+      const parts = color.match(/[\\d.]+/gu)?.map(Number) ?? [];
       if (parts.length < 4) {
         return 1;
       }
 
-      const alpha = Number(parts[3]);
+      const alpha = parts[3];
       return Number.isFinite(alpha) ? alpha : 1;
+    };
+    const rgbFromColor = (color) => {
+      const parts = color?.match(/[\\d.]+/gu)?.map(Number) ?? [];
+      return {
+        red: Number.isFinite(parts[0]) ? parts[0] : 0,
+        green: Number.isFinite(parts[1]) ? parts[1] : 0,
+        blue: Number.isFinite(parts[2]) ? parts[2] : 0
+      };
     };
     const numberFromPixel = (value) => {
       const number = Number.parseFloat(value);
@@ -3982,8 +3985,10 @@ async function assertConversationSurfaceFidelity(fileName) {
       const style = window.getComputedStyle(element);
       return {
         backgroundColor: style.backgroundColor,
+        backgroundRgb: rgbFromColor(style.backgroundColor),
         backgroundAlpha: alphaFromColor(style.backgroundColor),
         borderColor: style.borderTopColor,
+        borderRgb: rgbFromColor(style.borderTopColor),
         borderAlpha: alphaFromColor(style.borderTopColor),
         borderTopWidth: numberFromPixel(style.borderTopWidth),
         borderRightWidth: numberFromPixel(style.borderRightWidth),
@@ -4338,13 +4343,16 @@ async function assertConversationSurfaceFidelity(fileName) {
     throw new Error('Assistant message escaped the conversation timeline.');
   }
 
+  const userBorderRgb = snapshot.user.style.borderRgb;
   if (
-    snapshot.user.rect.width > 620 ||
+    snapshot.user.rect.width > 380 ||
     snapshot.user.style.backgroundAlpha < 0.05 ||
-    snapshot.user.style.borderTopWidth < 1
+    snapshot.user.style.borderTopWidth < 1 ||
+    userBorderRgb.blue < 180 ||
+    userBorderRgb.blue <= userBorderRgb.red
   ) {
     throw new Error(
-      `User prompt bubble lost compact bubble treatment: ${JSON.stringify(
+      `User prompt bubble lost compact blue accent treatment: ${JSON.stringify(
         snapshot.user,
       )}`,
     );

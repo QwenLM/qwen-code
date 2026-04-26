@@ -22,6 +22,103 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: User Message Bubble Restraint
+
+Status: completed in iteration 64.
+
+Goal: make user prompt messages in the main conversation feel like compact
+prototype-aligned message bubbles instead of fixed-width amber cards.
+
+User-visible value: short prompts no longer occupy a wide warning-colored card,
+so the conversation reads closer to `home.jpg`: user input is still distinct
+and right aligned, but assistant prose, activity rows, and changed-file
+summaries remain the visual priority.
+
+Expected files:
+
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/user-message-bubble-restraint.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Short user messages size to their text content up to a bounded max width,
+  rather than always occupying the previous 520 px bubble.
+- User bubbles use the Qwen blue/violet accent family rather than warning/amber
+  styling reserved for approvals or risk.
+- User bubbles remain right aligned, accessible as `User message`, and do not
+  render visible role labels.
+- Long user prompts still wrap inside the compact viewport without escaping the
+  conversation timeline or causing horizontal overflow.
+- Existing assistant actions, changed-files summary, command approval, review,
+  settings, terminal, branch, model, and relaunch CDP workflows remain
+  unchanged.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the dirty fake project, send the command-approval prompt,
+  assert the short user bubble geometry and accent styling, send a long prompt
+  in the compact viewport, and continue the existing review, settings,
+  terminal, model, branch, and relaunch workflows.
+- E2E assertions: the short user bubble is content-sized below the fixed card
+  threshold, has blue/violet accent border and background alpha, keeps compact
+  height/type scale, and long-prompt user messages remain contained in compact
+  layout with no body overflow.
+- Diagnostic artifacts: updated `conversation-surface-fidelity.json`,
+  `conversation-surface-fidelity.png`, `compact-dense-conversation.json`,
+  `compact-dense-conversation.png`, Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` to select this smallest remaining
+  prototype-fidelity slice; `frontend-design` to align message treatment with
+  the prototype instead of inventing a new visual direction; and
+  `electron-desktop-dev` for renderer CSS verified through the real Electron
+  CDP harness.
+
+Notes and decisions:
+
+- Keep the semantic message structure unchanged; this slice changes only the
+  visual treatment and executable geometry assertions.
+- Preserve the warning color family for command approval and validation states,
+  where amber carries user-risk meaning.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 28 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T21-14-20-745Z/`.
+- Key recorded metrics: `conversation-surface-fidelity.json` recorded the
+  short user prompt bubble at 238.078 px wide and 37.234 px tall, with
+  `rgba(85, 166, 255, 0.08)` background, `rgba(85, 166, 255, 0.28)` border,
+  accessible label `User message`, and no role-label chrome.
+  `compact-dense-conversation.json` recorded the long user prompt contained in
+  the compact timeline at 531.953 px wide with no user-message overflow and
+  body scroll width equal to the 960 px viewport. `summary.json` recorded zero
+  console errors and zero failed local requests.
+
+Next work:
+
+- Continue prototype fidelity by trimming the remaining topbar/sidebar type
+  weight or making settings overlay section chrome less card-heavy.
+- Consider a follow-up visual pass on conversation activity spacing so the
+  user bubble, tool rail, changed-files rail, and composer sit closer to the
+  density in `home.jpg`.
+
 ### Slice: Review Drawer Chrome Restraint
 
 Status: completed in iteration 63.
