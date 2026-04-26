@@ -146,6 +146,10 @@ async function main() {
   await assertConversationChangesSummary('conversation-changes-summary.json');
   await waitForSelector('[data-testid="thread-list"]');
   await assertSidebarAppRail('sidebar-app-rail.json');
+  await clickButton('Search');
+  await waitForSelector('[data-testid="sidebar-search"]');
+  await assertSidebarSearchFilter('sidebar-search-filter.json');
+  await saveScreenshot('sidebar-search-filter.png');
   await assertTopbarContextFidelity('topbar-context-fidelity.json');
   await saveScreenshot('topbar-context-fidelity.png');
   await clickButton('Branch');
@@ -1404,6 +1408,9 @@ async function assertSidebarAppRail(fileName) {
     const footerSettings = document.querySelector(
       '[data-testid="sidebar-footer-settings"]'
     );
+    const headingOpenProject = document.querySelector(
+      '.sidebar-heading-icon-button[aria-label="Open Project"]'
+    );
     const projectList = document.querySelector('[data-testid="project-list"]');
     const threadList = document.querySelector('[data-testid="thread-list"]');
     const activeProjectGroup = document.querySelector(
@@ -1481,6 +1488,13 @@ async function assertSidebarAppRail(fileName) {
       sidebar: rectFor(sidebar),
       appActions: rectFor(appActions),
       footerSettings: rectFor(footerSettings),
+      headingOpenProject: {
+        rect: rectFor(headingOpenProject),
+        ariaLabel: headingOpenProject?.getAttribute('aria-label') ?? '',
+        title: headingOpenProject?.getAttribute('title') ?? '',
+        hasIcon: headingOpenProject?.querySelector('svg') !== null,
+        directText: headingOpenProject?.textContent.trim() ?? ''
+      },
       projectList: rectFor(projectList),
       threadList: rectFor(threadList),
       activeProjectGroup: rectFor(activeProjectGroup),
@@ -1527,6 +1541,7 @@ async function assertSidebarAppRail(fileName) {
     'sidebar',
     'appActions',
     'footerSettings',
+    'headingOpenProject',
     'projectList',
     'threadList',
     'activeProjectGroup',
@@ -1567,7 +1582,7 @@ async function assertSidebarAppRail(fileName) {
     );
   }
 
-  for (const expectedLabel of ['New Thread', 'Open Project', 'Models']) {
+  for (const expectedLabel of ['New Thread', 'Search', 'Models']) {
     if (!metrics.appActionLabels.includes(expectedLabel)) {
       throw new Error(
         `Sidebar app actions missing ${expectedLabel}: ${metrics.appActionLabels.join(
@@ -1575,6 +1590,22 @@ async function assertSidebarAppRail(fileName) {
         )}`,
       );
     }
+  }
+
+  if (
+    metrics.headingOpenProject.ariaLabel !== 'Open Project' ||
+    metrics.headingOpenProject.title !== 'Open Project' ||
+    !metrics.headingOpenProject.hasIcon ||
+    metrics.headingOpenProject.directText !== '' ||
+    !metrics.headingOpenProject.rect ||
+    metrics.headingOpenProject.rect.width > 22 ||
+    metrics.headingOpenProject.rect.height > 22
+  ) {
+    throw new Error(
+      `Sidebar Open Project should be an icon-led heading action: ${JSON.stringify(
+        metrics.headingOpenProject,
+      )}`,
+    );
   }
 
   if (metrics.footerLabel !== 'Settings') {
@@ -1843,6 +1874,273 @@ async function assertSidebarAppRail(fileName) {
       `Sidebar leaked protocol or path noise: ${metrics.sidebarText}`,
     );
   }
+}
+
+async function assertSidebarSearchFilter(fileName) {
+  await waitFor(
+    'sidebar search input focus',
+    async () =>
+      evaluate(`(() => {
+        const input = document.querySelector(
+          'input[aria-label="Search projects and threads"]'
+        );
+        return Boolean(input && document.activeElement === input);
+      })()`),
+    5_000,
+  );
+
+  await setFieldByAriaLabel('Search projects and threads', 'Review README');
+  await waitFor(
+    'sidebar search filtered to active thread',
+    async () =>
+      evaluate(`(() => {
+        const rows = [...document.querySelectorAll('[data-testid="thread-row"]')];
+        const sidebar = document.querySelector('[data-testid="project-sidebar"]');
+        return (
+          rows.length === 1 &&
+          rows[0]?.textContent.includes(${JSON.stringify(compactThreadTitle)}) &&
+          sidebar?.innerText.includes(${JSON.stringify(compactThreadTitle)}) &&
+          !sidebar?.innerText.includes('desktop-e2e-clean-workspace')
+        );
+      })()`),
+    10_000,
+  );
+
+  const filtered = await captureSidebarSearchSnapshot();
+
+  await clickButton('Clear Search');
+  await waitFor(
+    'sidebar search clear restores grouped browser',
+    async () =>
+      evaluate(`(() => {
+        const input = document.querySelector(
+          'input[aria-label="Search projects and threads"]'
+        );
+        const projectRows = document.querySelectorAll('[data-testid="project-row"]');
+        const threadRows = document.querySelectorAll('[data-testid="thread-row"]');
+        const sidebar = document.querySelector('[data-testid="project-sidebar"]');
+        return Boolean(
+          input &&
+            input.value === '' &&
+            projectRows.length >= 2 &&
+            threadRows.length >= 1 &&
+            sidebar?.innerText.includes('desktop-e2e-clean-workspace') &&
+            sidebar?.innerText.includes(${JSON.stringify(compactThreadTitle)})
+        );
+      })()`),
+    10_000,
+  );
+
+  const cleared = await captureSidebarSearchSnapshot();
+
+  await clickButton('Search');
+  await waitFor(
+    'sidebar search closed',
+    async () =>
+      evaluate(
+        `(() => !document.querySelector('[data-testid="sidebar-search"]'))()`,
+      ),
+    5_000,
+  );
+
+  const closed = await evaluate(`(() => ({
+    searchOpen: document.querySelector('[data-testid="sidebar-search"]') !== null,
+    appActionLabels: [
+      ...document.querySelectorAll('[data-testid="sidebar-app-actions"] button')
+    ].map((button) => button.getAttribute('aria-label') || ''),
+    sidebarText:
+      document.querySelector('[data-testid="project-sidebar"]')?.innerText ?? ''
+  }))()`);
+
+  const snapshot = { filtered, cleared, closed };
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (
+    !filtered.search ||
+    filtered.search.inputValue !== 'Review README' ||
+    !filtered.search.inputFocused ||
+    filtered.search.buttonPressed !== 'true' ||
+    filtered.search.rect.height > 32 ||
+    filtered.search.inputRect.height > 24 ||
+    filtered.search.style.fontSize > 11
+  ) {
+    throw new Error(
+      `Sidebar search input did not stay focused, active, and compact: ${JSON.stringify(
+        filtered.search,
+      )}`,
+    );
+  }
+
+  if (
+    filtered.projectRows.length !== 1 ||
+    !filtered.projectRows[0]?.active ||
+    !filtered.projectRows[0]?.text.includes('desktop-e2e-workspace') ||
+    filtered.threadRows.length !== 1 ||
+    filtered.threadRows[0]?.threadTitle !== compactThreadTitle ||
+    filtered.sidebarText.includes('desktop-e2e-clean-workspace')
+  ) {
+    throw new Error(
+      `Sidebar search did not isolate the matching active thread: ${JSON.stringify(
+        {
+          projectRows: filtered.projectRows,
+          threadRows: filtered.threadRows,
+          sidebarText: filtered.sidebarText,
+        },
+      )}`,
+    );
+  }
+
+  if (Object.values(filtered.overflows).some(Boolean)) {
+    throw new Error(
+      `Sidebar search regions overflowed while filtered: ${JSON.stringify(
+        filtered.overflows,
+      )}`,
+    );
+  }
+
+  const filteredLeaks = noisyThreadTitleLeaks.filter((leak) =>
+    filtered.sidebarText.includes(leak),
+  );
+  if (
+    filteredLeaks.length > 0 ||
+    filtered.sidebarText.includes('session-e2e') ||
+    filtered.sidebarText.includes('Connected to')
+  ) {
+    throw new Error(
+      `Sidebar search leaked protocol or path noise: ${filtered.sidebarText}`,
+    );
+  }
+
+  if (
+    cleared.search?.inputValue !== '' ||
+    cleared.projectRows.length < 2 ||
+    !cleared.sidebarText.includes('desktop-e2e-clean-workspace') ||
+    !cleared.sidebarText.includes(compactThreadTitle)
+  ) {
+    throw new Error(
+      `Clearing sidebar search did not restore the grouped browser: ${JSON.stringify(
+        cleared,
+      )}`,
+    );
+  }
+
+  if (
+    closed.searchOpen ||
+    !closed.appActionLabels.includes('Search') ||
+    !closed.sidebarText.includes(compactThreadTitle)
+  ) {
+    throw new Error(
+      `Closing sidebar search did not restore the app rail: ${JSON.stringify(
+        closed,
+      )}`,
+    );
+  }
+}
+
+async function captureSidebarSearchSnapshot() {
+  return evaluate(`(() => {
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        fontSize: Number.parseFloat(style.fontSize),
+        fontWeight: Number.parseFloat(style.fontWeight),
+        lineHeight: Number.parseFloat(style.lineHeight)
+      };
+    };
+    const overflows = (element) =>
+      Boolean(element && element.scrollWidth > element.clientWidth + 4);
+    const sidebar = document.querySelector('[data-testid="project-sidebar"]');
+    const search = document.querySelector('[data-testid="sidebar-search"]');
+    const input = document.querySelector(
+      'input[aria-label="Search projects and threads"]'
+    );
+    const searchButton = document.querySelector(
+      '[data-testid="sidebar-app-actions"] button[aria-label="Search"]'
+    );
+    const clearButton = search?.querySelector('button[aria-label="Clear Search"]');
+    const projectRows = [
+      ...document.querySelectorAll('[data-testid="project-row"]')
+    ].map((row) => ({
+      text: row.textContent.trim(),
+      label: row.getAttribute('aria-label') || '',
+      active: row.classList.contains('project-row-active'),
+      rect: rectFor(row),
+      overflows: overflows(row),
+      style: styleFor(row)
+    }));
+    const threadRows = [
+      ...document.querySelectorAll('[data-testid="thread-row"]')
+    ].map((row) => ({
+      text: row.textContent.trim(),
+      threadTitle:
+        row.querySelector('.session-row-title')?.textContent.trim() ?? '',
+      active: row.classList.contains('session-row-active'),
+      rect: rectFor(row),
+      overflows: overflows(row),
+      style: styleFor(row)
+    }));
+
+    return {
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight
+      },
+      document: {
+        bodyScrollWidth: document.body.scrollWidth,
+        bodyScrollHeight: document.body.scrollHeight
+      },
+      sidebar: rectFor(sidebar),
+      search: search
+        ? {
+            rect: rectFor(search),
+            inputRect: rectFor(input),
+            inputValue: input?.value ?? null,
+            inputFocused: document.activeElement === input,
+            buttonPressed: searchButton?.getAttribute('aria-pressed') ?? null,
+            clearDisabled: clearButton?.disabled ?? null,
+            style: styleFor(input)
+          }
+        : null,
+      appActionLabels: [
+        ...document.querySelectorAll('[data-testid="sidebar-app-actions"] button')
+      ].map((button) => button.getAttribute('aria-label') || ''),
+      headingOpenProjectHasIcon:
+        document.querySelector(
+          '.sidebar-heading-icon-button[aria-label="Open Project"] svg'
+        ) !== null,
+      projectRows,
+      threadRows,
+      sidebarText: sidebar?.innerText ?? '',
+      overflows: {
+        sidebar: overflows(sidebar),
+        search: overflows(search),
+        input: overflows(input),
+        projectRows: projectRows.some((row) => row.overflows),
+        threadRows: threadRows.some((row) => row.overflows)
+      }
+    };
+  })()`);
 }
 
 async function assertTopbarContextFidelity(fileName) {

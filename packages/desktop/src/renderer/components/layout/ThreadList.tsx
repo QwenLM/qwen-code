@@ -12,6 +12,7 @@ export function ThreadList({
   activeSessionId,
   ariaLabel = 'Threads',
   className,
+  emptyLabel = 'No sessions',
   isDraftSession,
   sessions,
   onSelect,
@@ -19,6 +20,7 @@ export function ThreadList({
   activeSessionId: string | null;
   ariaLabel?: string;
   className?: string;
+  emptyLabel?: string;
   isDraftSession: boolean;
   sessions: DesktopSessionSummary[];
   onSelect: (sessionId: string) => void;
@@ -30,7 +32,7 @@ export function ThreadList({
       data-testid="thread-list"
     >
       {!isDraftSession && sessions.length === 0 ? (
-        <div className="empty-row">No sessions</div>
+        <div className="empty-row">{emptyLabel}</div>
       ) : null}
       {isDraftSession ? (
         <div

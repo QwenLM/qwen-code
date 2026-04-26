@@ -22,6 +22,115 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Sidebar Search and Project Heading Actions
+
+Status: completed in iteration 70.
+
+Goal: make the left sidebar closer to `home.jpg` by adding a real app-level
+Search entry and moving project-opening affordance into the project browser
+heading as a compact icon action.
+
+User-visible value: users can filter recent projects and the active project's
+threads without leaving the workbench, while the top app actions read more like
+New Thread, Search, and Models instead of mixing project management into the
+global action rail.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ProjectSidebar.tsx`
+- `packages/desktop/src/renderer/components/layout/ThreadList.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/sidebar-search-project-heading-actions.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Sidebar app actions are `New Thread`, `Search`, and `Models`; `Open Project`
+  remains available as an icon-led action in the Projects heading.
+- Clicking Search toggles a compact search field labelled
+  `Search projects and threads` and focuses it.
+- Search filters recent project rows by name/path/branch/dirty metadata and
+  filters the active project's visible thread rows by normalized thread title
+  or model/time metadata.
+- Empty filtered states use compact muted rows and do not expose raw paths,
+  local endpoints, ACP/session IDs, or debug text in visible sidebar chrome.
+- The grouped active project/thread hierarchy, compact row heights, pinned
+  footer Settings action, composer, branch, review, settings, terminal, relaunch,
+  and compact viewport workflows remain unchanged.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open both fake Git projects, return to the dirty project,
+  create the fake ACP thread, toggle sidebar Search, filter to the active
+  thread, clear the filter, then continue the existing branch, review, settings,
+  terminal, relaunch, and compact viewport workflows.
+- E2E assertions: Search appears in the app action rail; Open Project appears
+  as an icon-led Projects heading action; the search input is focused after
+  toggling; filtering hides nonmatching project rows and keeps the matching
+  compact thread visible without overflow or protocol/path leaks; clearing
+  restores the grouped browser; no console errors or failed local requests are
+  recorded.
+- Diagnostic artifacts: updated `sidebar-app-rail.json`,
+  `sidebar-search-filter.json`, screenshots, Electron log, and `summary.json`
+  under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` using the Ralph prompt and current
+  plan as the fixed requirements source; `frontend-design` with the prototype
+  as the visual contract and search as a compact desktop-native sidebar
+  affordance; `electron-desktop-dev` for renderer behavior verified through
+  component coverage and real Electron CDP.
+
+Notes and decisions:
+
+- Search is implemented locally in the renderer because the current session
+  list only contains the active project's sessions; this still improves the
+  project/thread browser without introducing a new server index.
+- `Open Project` moved from the app action rail into the Projects heading as an
+  icon-led action, matching the prototype's app-level Search shape while
+  preserving the normal open-project workflow.
+- The search input uses native `type="search"` semantics with appearance reset
+  so it stays a 28 px compact row in Electron instead of adopting platform
+  search-field height.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 29 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T22-43-42-259Z/`.
+- Key recorded metrics: `sidebar-app-rail.json` recorded app actions
+  `New Thread`, `Search`, and `Models`, a 20 px icon-led Open Project heading
+  action, a 244 px sidebar, no row overflow, and the active thread nested under
+  the active project. `sidebar-search-filter.json` recorded the focused
+  `Search projects and threads` input at 28 px container height and 22 px input
+  height, filtering to one active project row and the
+  `Review README.md after the failing test` thread, then restoring both recent
+  project rows after Clear Search. `summary.json` recorded zero console errors
+  and zero failed local requests.
+
+Next work:
+
+- Continue prototype fidelity by adding active-section/search state polish such
+  as keyboard Escape-to-close and clearer no-match text if search becomes a
+  more central navigation feature.
+- Longer term, add a cross-project session index so inactive project groups can
+  show and search their own recent thread previews.
+
 ### Slice: Active Project Thread Grouping
 
 Status: completed in iteration 69.

@@ -149,6 +149,11 @@ summary:focus-visible {
   color: rgba(247, 249, 255, 0.96);
 }
 
+.sidebar-action-row-active {
+  background: rgba(85, 166, 255, 0.08);
+  color: rgba(213, 230, 255, 0.96);
+}
+
 .sidebar-action-row svg {
   display: block;
   width: 13px;
@@ -203,11 +208,103 @@ summary:focus-visible {
   align-items: center;
   justify-content: space-between;
   min-height: 18px;
-  padding: 2px 6px 0;
+  gap: 8px;
+  padding: 2px 4px 0 6px;
 }
 
 .sidebar-section-heading span {
   color: rgba(225, 232, 228, 0.38);
+}
+
+.sidebar-heading-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+}
+
+.sidebar-heading-icon-button {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 5px;
+  background: transparent;
+  color: rgba(225, 232, 228, 0.48);
+  transition:
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.sidebar-heading-icon-button:not(:disabled):hover {
+  background: rgba(213, 224, 255, 0.07);
+  color: rgba(235, 242, 255, 0.86);
+}
+
+.sidebar-heading-icon-button svg {
+  width: 12px;
+  height: 12px;
+}
+
+.sidebar-search {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 22px;
+  align-items: center;
+  min-height: 28px;
+  gap: 3px;
+  margin: 0 2px 3px 0;
+  padding: 2px 3px 2px 4px;
+  border: 1px solid rgba(213, 224, 255, 0.1);
+  border-radius: 7px;
+  background: rgba(238, 244, 239, 0.035);
+}
+
+.sidebar-search-icon {
+  width: 12px;
+  height: 12px;
+  justify-self: center;
+  color: rgba(155, 171, 255, 0.68);
+}
+
+.sidebar-search input {
+  min-height: 0;
+  width: 100%;
+  min-width: 0;
+  height: 22px;
+  padding: 0 2px;
+  border: 0;
+  appearance: none;
+  outline: none;
+  background: transparent;
+  color: rgba(238, 243, 255, 0.9);
+  font-size: 10.8px;
+  font-weight: 560;
+  letter-spacing: 0;
+  line-height: 22px;
+}
+
+.sidebar-search input::placeholder {
+  color: rgba(225, 232, 228, 0.34);
+}
+
+.sidebar-search-clear {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 5px;
+  background: transparent;
+  color: rgba(225, 232, 228, 0.5);
+}
+
+.sidebar-search-clear:not(:disabled):hover {
+  background: rgba(213, 224, 255, 0.07);
+  color: rgba(247, 249, 255, 0.86);
+}
+
+.sidebar-search-clear svg {
+  width: 12px;
+  height: 12px;
 }
 
 .empty-row,

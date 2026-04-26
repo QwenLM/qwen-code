@@ -96,8 +96,20 @@ describe('WorkspacePage', () => {
     expect(renderedContainer.textContent).toContain('example-workspace');
     expect(renderedContainer.textContent).toContain('main');
     expect(renderedContainer.textContent).toContain('New Thread');
-    expect(renderedContainer.textContent).toContain('Open Project');
+    expect(renderedContainer.textContent).toContain('Search');
     expect(renderedContainer.textContent).toContain('Models');
+    expect(
+      renderedContainer.querySelector(
+        '.sidebar-heading-icon-button[aria-label="Open Project"]',
+      ),
+    ).toBeTruthy();
+    expect(
+      [
+        ...renderedContainer.querySelectorAll(
+          '[data-testid="sidebar-app-actions"] button',
+        ),
+      ].map((button) => button.getAttribute('aria-label')),
+    ).toEqual(['New Thread', 'Search', 'Models']);
     expect(
       renderedContainer.querySelector('[data-testid="project-sidebar"]')
         ?.textContent,
@@ -531,6 +543,90 @@ describe('WorkspacePage', () => {
     expect(
       cleanRow?.querySelector('[data-testid="project-row-dirty"]'),
     ).toBeNull();
+  });
+
+  it('filters sidebar projects and active project threads from Search', () => {
+    const onChooseWorkspace = vi.fn();
+    const cleanProject: DesktopProject = {
+      ...project,
+      id: 'project-clean',
+      name: 'clean-workspace',
+      path: '/tmp/clean-workspace',
+      gitStatus: {
+        ...project.gitStatus,
+        clean: true,
+        modified: 0,
+        staged: 0,
+        untracked: 0,
+      },
+    };
+    const reviewSession: DesktopSessionSummary = {
+      sessionId: 'session-review',
+      title: 'Review README docs',
+      cwd: project.path,
+      models: { currentModelId: 'qwen-review-model', availableModels: [] },
+      updatedAt: '2026-04-25T00:00:01.000Z',
+    };
+    const renderedContainer = renderWorkspace({
+      onChooseWorkspace,
+      projects: [project, cleanProject],
+      sessions: [session, reviewSession],
+    });
+
+    act(() => {
+      clickButton(renderedContainer, 'Search');
+    });
+
+    const searchInput = renderedContainer.querySelector(
+      'input[aria-label="Search projects and threads"]',
+    );
+    expect(searchInput).toBeInstanceOf(HTMLInputElement);
+    expect(document.activeElement).toBe(searchInput);
+    expect(
+      renderedContainer
+        .querySelector('button[aria-label="Search"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+
+    act(() => {
+      setInputValue(searchInput as HTMLInputElement, 'review');
+    });
+
+    const sidebarText =
+      renderedContainer.querySelector('[data-testid="project-sidebar"]')
+        ?.textContent ?? '';
+    const threadRows = renderedContainer.querySelectorAll(
+      '[data-testid="thread-row"]',
+    );
+
+    expect(threadRows).toHaveLength(1);
+    expect(threadRows[0]?.textContent).toContain('Review README docs');
+    expect(sidebarText).toContain('example-workspace');
+    expect(sidebarText).toContain('Review README docs');
+    expect(sidebarText).not.toContain('Fix parser test');
+    expect(sidebarText).not.toContain('clean-workspace');
+
+    act(() => {
+      clickButton(renderedContainer, 'Clear Search');
+    });
+
+    expect((searchInput as HTMLInputElement).value).toBe('');
+    expect(
+      renderedContainer.querySelectorAll('[data-testid="project-row"]'),
+    ).toHaveLength(2);
+    expect(
+      renderedContainer.querySelectorAll('[data-testid="thread-row"]'),
+    ).toHaveLength(2);
+
+    act(() => {
+      (
+        renderedContainer.querySelector(
+          '.sidebar-heading-icon-button[aria-label="Open Project"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+
+    expect(onChooseWorkspace).toHaveBeenCalledTimes(1);
   });
 
   it('keeps topbar project context compact and structured', () => {
