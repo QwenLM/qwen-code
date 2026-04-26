@@ -2169,6 +2169,11 @@ async function assertAssistantMessageActions(fileName) {
             )
           ].map((chip) => rectFor(chip))
         : [],
+      actionButtonRects: actions
+        ? [...actions.querySelectorAll('button')].map((button) =>
+            rectFor(button)
+          )
+        : [],
       messageRect: rectFor(message),
       actionsRect: rectFor(actions),
       timelineRect: rectFor(timeline),
@@ -2270,7 +2275,7 @@ async function assertAssistantMessageActions(fileName) {
     );
   }
 
-  if (snapshot.actionsRect.height > 40) {
+  if (snapshot.actionsRect.height > 30) {
     throw new Error(
       `Assistant action row is too tall: ${JSON.stringify(
         snapshot.actionsRect,
@@ -2303,9 +2308,9 @@ async function assertAssistantMessageActions(fileName) {
       throw new Error('Assistant file chip geometry is missing.');
     }
 
-    if (chipRect.width > 282) {
+    if (chipRect.width > 222 || chipRect.height > 23) {
       throw new Error(
-        `Assistant file chip is too wide: ${JSON.stringify(chipRect)}`,
+        `Assistant file chip is too large: ${JSON.stringify(chipRect)}`,
       );
     }
 
@@ -2317,6 +2322,20 @@ async function assertAssistantMessageActions(fileName) {
     ) {
       throw new Error(
         `Assistant file chip escaped the message: ${JSON.stringify(chipRect)}`,
+      );
+    }
+  }
+
+  for (const actionRect of snapshot.actionButtonRects) {
+    if (!actionRect) {
+      throw new Error('Assistant action button geometry is missing.');
+    }
+
+    if (actionRect.width > 26 || actionRect.height > 26) {
+      throw new Error(
+        `Assistant action button should stay icon-sized: ${JSON.stringify(
+          actionRect,
+        )}`,
       );
     }
   }
@@ -2403,6 +2422,7 @@ async function assertConversationSurfaceFidelity(fileName) {
     const firstSummaryRow = summary?.querySelector(
       '.conversation-changes-list li'
     );
+    const firstSummaryRowLabel = firstSummaryRow?.querySelector('span');
     const timeline = document.querySelector('.chat-timeline');
     const composer = document.querySelector('[data-testid="message-composer"]');
     const composerTextarea = composer?.querySelector(
@@ -2446,7 +2466,9 @@ async function assertConversationSurfaceFidelity(fileName) {
         rect: rectFor(summary),
         style: styleFor(summary),
         actionRect: rectFor(summaryAction),
-        rowStyle: styleFor(firstSummaryRow)
+        rowRect: rectFor(firstSummaryRow),
+        rowStyle: styleFor(firstSummaryRow),
+        rowLabelStyle: styleFor(firstSummaryRowLabel)
       },
       timeline: rectFor(timeline),
       composer: {
@@ -2486,7 +2508,9 @@ async function assertConversationSurfaceFidelity(fileName) {
     !snapshot.summary.rect ||
     !snapshot.summary.style ||
     !snapshot.summary.actionRect ||
+    !snapshot.summary.rowRect ||
     !snapshot.summary.rowStyle ||
+    !snapshot.summary.rowLabelStyle ||
     !snapshot.timeline ||
     !snapshot.composer.rect ||
     !snapshot.composer.textareaRect
@@ -2592,7 +2616,7 @@ async function assertConversationSurfaceFidelity(fileName) {
     );
   }
 
-  if (snapshot.summary.rect.height > 112) {
+  if (snapshot.summary.rect.height > 100) {
     throw new Error(
       `Changed-files summary should stay compact: ${JSON.stringify(
         snapshot.summary.rect,
@@ -2608,7 +2632,20 @@ async function assertConversationSurfaceFidelity(fileName) {
     );
   }
 
-  if (snapshot.summary.actionRect.height > 32) {
+  if (
+    snapshot.summary.rowRect.height > 26 ||
+    snapshot.summary.rowLabelStyle.fontSize > 11.2
+  ) {
+    throw new Error(
+      `Changed-files rows should stay chip-sized: ${JSON.stringify({
+        rect: snapshot.summary.rowRect,
+        rowStyle: snapshot.summary.rowStyle,
+        labelStyle: snapshot.summary.rowLabelStyle,
+      })}`,
+    );
+  }
+
+  if (snapshot.summary.actionRect.height > 28) {
     throw new Error(
       `Changed-files action is too tall: ${JSON.stringify(
         snapshot.summary.actionRect,
@@ -2641,7 +2678,7 @@ async function assertConversationSurfaceFidelity(fileName) {
       );
     }
 
-    if (button.rect.width > 32 || button.rect.height > 32) {
+    if (button.rect.width > 26 || button.rect.height > 26) {
       throw new Error(
         `Assistant action button should remain compact: ${JSON.stringify(
           button,
@@ -3008,7 +3045,7 @@ async function assertCompactDenseConversationLayout(fileName) {
     );
   }
 
-  if (snapshot.summary && snapshot.summary.height > 112) {
+  if (snapshot.summary && snapshot.summary.height > 100) {
     throw new Error(
       `Compact changed-files summary should stay compact: ${snapshot.summary.height}`,
     );
@@ -3078,9 +3115,9 @@ async function assertCompactDenseConversationLayout(fileName) {
       throw new Error('Compact assistant chip geometry is missing.');
     }
 
-    if (chipRect.width > 282) {
+    if (chipRect.width > 222 || chipRect.height > 24) {
       throw new Error(
-        `Compact assistant chip is too wide: ${JSON.stringify(chipRect)}`,
+        `Compact assistant chip is too large: ${JSON.stringify(chipRect)}`,
       );
     }
 
@@ -3103,7 +3140,7 @@ async function assertCompactDenseConversationLayout(fileName) {
       throw new Error('Compact assistant action geometry is missing.');
     }
 
-    if (actionRect.width > 40 || actionRect.height > 40) {
+    if (actionRect.width > 28 || actionRect.height > 28) {
       throw new Error(
         `Compact assistant action is too large: ${JSON.stringify(actionRect)}`,
       );

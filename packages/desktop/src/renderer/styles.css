@@ -1012,7 +1012,7 @@ summary:focus-visible {
   display: flex;
   min-width: 0;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 4px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -1034,15 +1034,16 @@ summary:focus-visible {
 .message-file-references button,
 .message-file-reference-overflow {
   display: inline-flex;
-  max-width: min(280px, 100%);
-  min-height: 24px;
+  max-width: min(220px, 100%);
+  min-height: 20px;
   align-items: center;
   overflow: hidden;
-  padding: 3px 8px;
+  padding: 2px 6px;
   border-radius: 999px;
   color: #b7d9ff;
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 760;
+  line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1062,21 +1063,21 @@ summary:focus-visible {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
-  min-height: 28px;
+  gap: 4px;
+  min-height: 24px;
 }
 
 .message-action-button {
   display: grid;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   place-items: center;
-  border-radius: 7px;
+  border-radius: 6px;
 }
 
 .message-action-button svg {
-  width: 16px;
-  height: 16px;
+  width: 13px;
+  height: 13px;
 }
 
 .chat-plan {
@@ -1245,8 +1246,8 @@ summary:focus-visible {
   display: grid;
   width: min(860px, 100%);
   align-self: center;
-  gap: 8px;
-  padding: 9px 10px;
+  gap: 6px;
+  padding: 7px 9px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: rgba(238, 244, 239, 0.02);
@@ -1261,7 +1262,7 @@ summary:focus-visible {
 .conversation-changes-list li {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .conversation-changes-heading {
@@ -1274,14 +1275,14 @@ summary:focus-visible {
   flex: 1 1 auto;
   min-width: 0;
   align-items: baseline;
-  gap: 8px;
+  gap: 6px;
 }
 
 .conversation-changes-heading strong {
   min-width: 0;
   overflow: hidden;
   color: var(--text);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 800;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1292,18 +1293,18 @@ summary:focus-visible {
   flex: 0 0 auto;
   align-items: center;
   flex-wrap: nowrap;
-  gap: 8px;
+  gap: 6px;
 }
 
 .conversation-diff-stat {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   font-family:
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
     monospace;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 800;
 }
 
@@ -1319,17 +1320,17 @@ summary:focus-visible {
   display: flex;
   min-width: 0;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 5px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
 .conversation-changes-list li {
-  max-width: min(280px, 100%);
-  min-height: 24px;
+  max-width: min(220px, 100%);
+  min-height: 21px;
   overflow: hidden;
-  padding: 3px 7px;
+  padding: 2px 6px;
   border: 1px solid rgba(226, 232, 222, 0.08);
   border-radius: 999px;
   background: transparent;
@@ -1343,8 +1344,9 @@ summary:focus-visible {
   min-width: 0;
   overflow: hidden;
   color: var(--text-soft);
-  font-size: 12px;
+  font-size: 10.8px;
   font-weight: 720;
+  line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1352,15 +1354,16 @@ summary:focus-visible {
 .conversation-changes-list small {
   flex: 0 0 auto;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 820;
   text-transform: uppercase;
   white-space: nowrap;
 }
 
 .conversation-changes-meta .secondary-button {
-  min-height: 28px;
-  padding: 0 9px;
+  min-height: 24px;
+  padding: 0 8px;
+  font-size: 11px;
 }
 
 .chat-scroll-anchor {

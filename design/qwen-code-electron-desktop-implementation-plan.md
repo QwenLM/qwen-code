@@ -22,6 +22,110 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Assistant Control Density Pass
+
+Status: completed in iteration 37.
+
+Goal: reduce the remaining visual weight of assistant file-reference chips,
+assistant message action buttons, and the inline changed-files summary so the
+first viewport stays closer to the compact conversation tooling shown in
+`home.jpg`.
+
+User-visible value: users can scan assistant prose, file references, changed
+files, and the composer with less toolbar/card noise. The controls remain
+clickable and accessible, but no longer read like large dashboard buttons.
+
+Expected files:
+
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/assistant-control-density.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Assistant file-reference chips are shorter, narrower, and use a smaller
+  workbench type scale while preserving labels, overflow count, and click
+  targets.
+- Assistant message action buttons are compact icon controls with accessible
+  labels and do not add a tall row under each assistant message.
+- The inline changed-files summary uses a tighter title, diff stat, file chip,
+  and Review Changes action treatment without looking like nested cards.
+- The compact `960x640` viewport keeps assistant chips/actions and the
+  changed-files summary contained without horizontal overflow.
+- No behavior changes, raw ACP/session IDs, server URLs, or secrets are
+  introduced into the main conversation.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, send a prompt, approve the command,
+  wait for assistant prose/file chips/actions and the changed-files summary,
+  assert default and compact viewport geometry, then continue the existing
+  branch, review, settings, terminal, discard safety, and commit workflows.
+- E2E assertions: assistant action row/button heights stay below the previous
+  28 px button baseline, file-reference chips stay below the previous 24 px
+  height and use narrower max widths, changed-file summary action/row heights
+  stay below previous baselines, the compact viewport has no element overflow,
+  and no console errors or failed local requests are recorded.
+- Diagnostic artifacts: `assistant-message-actions.json`,
+  `assistant-message-actions.png`, `conversation-surface-fidelity.json`,
+  `conversation-surface-fidelity.png`, `compact-dense-conversation.json`,
+  `compact-dense-conversation.png`, Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for choosing the smallest fidelity
+  slice without asking routine product questions, `frontend-design` for
+  prototype-constrained density and hierarchy, and `electron-desktop-dev` for
+  real Electron CDP verification of renderer changes.
+
+Notes and decisions:
+
+- The prototype remains the visual contract. This slice intentionally avoids
+  changing message parsing, file-opening behavior, retry/copy behavior, or the
+  review flow.
+- The controls stay text-readable where file names matter, but their scale is
+  lowered to match the supporting-surface role of chips and icon actions.
+- The first CDP run failed at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T16-41-05-929Z/`
+  because the new changed-files row font assertion measured the inherited
+  `<li>` style instead of the rendered row label. The harness now records both
+  row container and label styles, and asserts the visible label.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed before and
+  after the harness assertion correction.
+- `git diff --check` passed before and after the harness assertion correction.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 18 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T16-41-41-762Z/`.
+- Key recorded metrics: assistant file chips `20` px tall with max width
+  `220` px, assistant action buttons `24x24`, action row `24` px tall,
+  changed-files summary `67` px tall, Review Changes action `24` px tall,
+  changed-file row `21` px tall with `10.8` px label text, compact viewport
+  file chips `20` px tall, compact assistant actions `24x24`, no document/body
+  overflow, no console errors, and no failed local requests.
+
+Next work:
+
+- Continue prototype fidelity by reducing the remaining oversized sidebar and
+  composer typography where it still visually outweighs the conversation in
+  screenshots.
+- Continue settings/model polish by adding keyboard-focused coverage for the
+  provider selector and Coding Plan path.
+
 ### Completed Slice: Settings Model Validation Feedback
 
 Status: completed in iteration 28.
