@@ -2122,6 +2122,55 @@ describe('OpenAIContentConverter', () => {
       ).toBe('only thought');
     });
 
+    it('should preserve reasoning_content through the realistic #3619 trigger pattern (orphaned tool_call between reasoning turns)', () => {
+      // Realistic #3619 trigger: model_1 has reasoning + visible text + an
+      // orphaned tool_call (no matching tool response). cleanOrphanedToolCalls
+      // strips the tool_call but keeps the message because content is
+      // non-empty. That leaves model_1 adjacent to model_2, and the merge
+      // must carry both reasoning blocks across so the next request to
+      // DeepSeek thinking mode keeps reasoning_content populated.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              { text: 'plan', thought: true },
+              { text: 'visible 1' },
+              {
+                functionCall: { id: 'call_orphan', name: 'tool_x', args: {} },
+              },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [
+              { text: 'replan', thought: true },
+              { text: 'visible 2' },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      expect(messages).toHaveLength(1);
+      const merged = messages[0] as {
+        role: string;
+        content: string | null;
+        reasoning_content?: string;
+        tool_calls?: unknown[];
+      };
+      expect(merged.role).toBe('assistant');
+      expect(merged.content).toBe('visible 1visible 2');
+      expect(merged.reasoning_content).toBe('planreplan');
+      // The orphaned tool_call was stripped by cleanOrphanedToolCalls.
+      expect(merged.tool_calls).toBeUndefined();
+    });
+
     it('should use empty string instead of null for content when merged result has reasoning but no visible text (issue #3499)', () => {
       // Two reasoning-only assistant turns merge to content='' (Ollama
       // compatibility), not null. processContent enforces this for single
