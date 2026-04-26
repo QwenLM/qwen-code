@@ -4824,6 +4824,22 @@ async function assertComposerModelSwitch(fileName, modelId) {
       value: select?.value ?? null,
       options,
       selected,
+      hasRawCodingPlanLabel: options.some((option) =>
+        option.text.includes('ModelStudio Coding Plan')
+      ),
+      codingPlanOptions: options
+        .filter(
+          (option) =>
+            option.value.startsWith('qwen3') ||
+            option.value.startsWith('glm') ||
+            option.value.startsWith('MiniMax') ||
+            option.value.startsWith('kimi')
+        )
+        .map((option) => ({
+          value: option.value,
+          text: option.text,
+          textLength: option.text.length
+        })),
       hasSavedModel: options.some(
         (option) => option.value === ${JSON.stringify(modelId)}
       ),
@@ -4844,6 +4860,62 @@ async function assertComposerModelSwitch(fileName, modelId) {
     };
   })()`);
 
+  const longCodingPlanModelId = 'qwen3-coder-next';
+  if (
+    snapshot.options.some(
+      (option) => option.value === longCodingPlanModelId,
+    )
+  ) {
+    await setFieldByAriaLabel('Model', longCodingPlanModelId);
+    await waitFor(
+      'composer long Coding Plan model switch',
+      async () =>
+        evaluate(`(() => {
+          const select = document.querySelector('select[aria-label="Model"]');
+          return Boolean(select && select.value === ${JSON.stringify(
+            longCodingPlanModelId,
+          )});
+        })()`),
+      15_000,
+    );
+    snapshot.longCodingPlanSelection = await evaluate(`(() => {
+      const select = document.querySelector('select[aria-label="Model"]');
+      const selected = select
+        ? [...select.options].find((option) => option.selected)
+        : null;
+      const composer = document.querySelector('[data-testid="message-composer"]');
+      const chat = document.querySelector('[data-testid="chat-thread"]');
+      return {
+        value: select?.value ?? null,
+        selectTitle: select?.getAttribute('title') ?? null,
+        selectedText: selected?.textContent.trim() ?? null,
+        selectedTitle: selected?.getAttribute('title') ?? null,
+        contained:
+          Boolean(composer && chat) &&
+          composer.getBoundingClientRect().bottom <=
+            chat.getBoundingClientRect().bottom + 1,
+        composerOverflow:
+          Boolean(composer) && composer.scrollWidth > composer.clientWidth + 4
+      };
+    })()`);
+    await setFieldByAriaLabel('Model', modelId);
+    await waitFor(
+      'composer configured model restored',
+      async () =>
+        evaluate(`(() => {
+          const select = document.querySelector('select[aria-label="Model"]');
+          return Boolean(select && select.value === ${JSON.stringify(modelId)});
+        })()`),
+      15_000,
+    );
+    snapshot.restoredValue = await evaluate(
+      `document.querySelector('select[aria-label="Model"]')?.value ?? null`,
+    );
+  } else {
+    snapshot.longCodingPlanSelection = null;
+    snapshot.restoredValue = snapshot.value;
+  }
+
   await writeFile(
     join(artifactDir, fileName),
     `${JSON.stringify(snapshot, null, 2)}\n`,
@@ -4857,6 +4929,41 @@ async function assertComposerModelSwitch(fileName, modelId) {
   if (!snapshot.hasSavedModel || snapshot.value !== modelId) {
     throw new Error(
       `Composer did not switch to configured model: ${JSON.stringify(snapshot)}`,
+    );
+  }
+
+  if (snapshot.hasRawCodingPlanLabel) {
+    throw new Error(
+      `Composer exposed raw Coding Plan labels: ${JSON.stringify(snapshot)}`,
+    );
+  }
+
+  if (!snapshot.longCodingPlanSelection) {
+    throw new Error(
+      `Composer did not expose the long Coding Plan model option: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.longCodingPlanSelection.value !== longCodingPlanModelId ||
+    typeof snapshot.longCodingPlanSelection.selectedText !== 'string' ||
+    snapshot.longCodingPlanSelection.selectedText.includes(
+      'ModelStudio Coding Plan',
+    ) ||
+    typeof snapshot.longCodingPlanSelection.selectedTitle !== 'string' ||
+    !snapshot.longCodingPlanSelection.selectedTitle.includes(
+      'ModelStudio Coding Plan',
+    ) ||
+    !snapshot.longCodingPlanSelection.contained ||
+    snapshot.longCodingPlanSelection.composerOverflow ||
+    snapshot.restoredValue !== modelId
+  ) {
+    throw new Error(
+      `Composer long Coding Plan model switch failed: ${JSON.stringify(
+        snapshot,
+      )}`,
     );
   }
 

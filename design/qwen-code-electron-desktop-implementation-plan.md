@@ -22,6 +22,108 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Compact Composer Model Labels
+
+Status: completed in iteration 41.
+
+Goal: make the composer model picker stay compact when Coding Plan or other
+providers return long, prefixed model display names.
+
+User-visible value: users can switch between configured API-key models and
+Coding Plan models from the bottom composer without raw provider prefixes
+crowding the control or making the first viewport feel like a settings/debug
+surface.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/stores/modelStore.ts`
+- `packages/desktop/src/renderer/stores/modelStore.test.ts`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/composer-model-labels.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Composer model options keep their exact `value` model IDs while displaying a
+  short label suitable for the compact composer control.
+- Coding Plan labels like `[ModelStudio Coding Plan for Global/Intl]
+qwen3-coder-next` render as the model name without the provider prefix.
+- Full model names remain available as native `title` text and no API keys,
+  server URLs, internal IDs, or new debug state appear in the conversation.
+- The real Electron CDP path switches to a long Coding Plan model option, then
+  back to the configured API-key model, with no composer overflow.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  and
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/modelStore.test.ts`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, complete the carried open-project/chat/review/settings path,
+  save Coding Plan settings, return to the composer, assert Coding Plan model
+  option labels are compact, switch to `qwen3-coder-next`, assert containment,
+  and switch back to `qwen-e2e-cdp`.
+- E2E assertions: composer model select is enabled, model IDs are preserved,
+  no option text includes the raw `ModelStudio Coding Plan` prefix, long model
+  switching updates the selected value, the composer remains contained in the
+  chat panel, and no console errors or failed local requests are recorded.
+- Diagnostic artifacts: `composer-model-switch.json`, updated screenshots,
+  Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for selecting this narrow fidelity
+  gap, `frontend-design` for prototype-constrained compact control labeling,
+  and `electron-desktop-dev` for real Electron CDP verification.
+
+Notes and decisions:
+
+- The composer now strips verbose Coding Plan provider prefixes from visible
+  model option labels while preserving the exact model IDs used by the runtime.
+- The native select and option `title` values keep the full model label when
+  richer metadata is available, so compact display does not erase provider
+  context.
+- The first CDP run exposed a metadata regression after switching to a Coding
+  Plan model: the runtime confirmation could return only `name: modelId`.
+  `modelStore` now preserves richer metadata already known to the renderer when
+  applying a saved model response.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 20 tests.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/modelStore.test.ts`
+  passed with 6 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T17-21-12-541Z/`.
+- Key recorded metrics: composer model picker enabled; selected configured
+  model `qwen-e2e-cdp`; Coding Plan option labels omit `ModelStudio Coding
+Plan`; long model `qwen3-coder-next` selected with compact visible text and
+  full title `[ModelStudio Coding Plan for Global/Intl] qwen3-coder-next`;
+  restored value `qwen-e2e-cdp`; no composer overflow, visible secret, local
+  server URL, console errors, or failed local requests.
+
+Next work:
+
+- Continue prototype fidelity by checking whether Settings should open as a
+  lighter overlay/drawer while keeping the current two-click model/API-key and
+  permissions path.
+- Continue composer polish by replacing the disabled attachment `+` placeholder
+  with an icon-led affordance and explicit disabled tooltip once attachment
+  workflow scope is selected.
+
 ### Completed Slice: Settings Coding Plan Provider Path
 
 Status: completed in iteration 40.

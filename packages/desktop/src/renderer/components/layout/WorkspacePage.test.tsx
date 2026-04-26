@@ -482,6 +482,13 @@ describe('WorkspacePage', () => {
               name: 'qwen-e2e-cdp',
               description: 'Configured in desktop settings',
             },
+            {
+              modelId: 'qwen3-coder-next',
+              name:
+                '[ModelStudio Coding Plan for Global/Intl] ' +
+                'qwen3-coder-next',
+              description: 'Coding Plan global model',
+            },
           ],
         },
       },
@@ -494,8 +501,15 @@ describe('WorkspacePage', () => {
     expect((model as HTMLSelectElement).value).toBe('e2e/qwen-code');
     expect(
       [...(model as HTMLSelectElement).options].map((option) => option.value),
-    ).toEqual(['e2e/qwen-code', 'qwen-e2e-cdp']);
+    ).toEqual(['e2e/qwen-code', 'qwen-e2e-cdp', 'qwen3-coder-next']);
     expect(renderedContainer.textContent).toContain('qwen-e2e-cdp');
+    expect(renderedContainer.textContent).toContain('qwen3-coder-next');
+    expect(renderedContainer.textContent).not.toContain(
+      '[ModelStudio Coding Plan',
+    );
+    expect((model as HTMLSelectElement).options[2]?.title).toBe(
+      '[ModelStudio Coding Plan for Global/Intl] qwen3-coder-next',
+    );
     expect(renderedContainer.textContent).not.toContain('sk-desktop-e2e');
 
     act(() => {

@@ -125,6 +125,44 @@ describe('modelStore', () => {
       withNewSettings.models?.availableModels.map((model) => model.modelId),
     ).toEqual(['e2e/qwen-code', 'qwen-new']);
   });
+
+  it('preserves richer model metadata after saving a compact runtime model', () => {
+    const loaded = modelReducer(createInitialModelState(), {
+      type: 'session_runtime_loaded',
+      models: {
+        currentModelId: 'e2e/qwen-code',
+        availableModels: [
+          { modelId: 'e2e/qwen-code', name: 'Qwen Code E2E' },
+          {
+            modelId: 'qwen3-coder-next',
+            name:
+              '[ModelStudio Coding Plan for Global/Intl] ' + 'qwen3-coder-next',
+            description: 'Coding Plan global model',
+          },
+        ],
+      },
+    });
+
+    const saved = modelReducer(loaded, {
+      type: 'model_saved',
+      models: {
+        currentModelId: 'qwen3-coder-next',
+        availableModels: [
+          { modelId: 'e2e/qwen-code', name: 'Qwen Code E2E' },
+          { modelId: 'qwen3-coder-next', name: 'qwen3-coder-next' },
+        ],
+      },
+    });
+
+    const codingPlanModel = saved.models?.availableModels.find(
+      (model) => model.modelId === 'qwen3-coder-next',
+    );
+    expect(saved.models?.currentModelId).toBe('qwen3-coder-next');
+    expect(codingPlanModel?.name).toBe(
+      '[ModelStudio Coding Plan for Global/Intl] qwen3-coder-next',
+    );
+    expect(codingPlanModel?.description).toBe('Coding Plan global model');
+  });
 });
 
 function createSettings(model: string): DesktopUserSettings {

@@ -15,6 +15,7 @@ import type { ModelState } from '../../stores/modelStore.js';
 import type {
   DesktopApprovalMode,
   DesktopAskUserQuestionRequest,
+  DesktopModelInfo,
   DesktopPermissionRequest,
 } from '../../../shared/desktopProtocol.js';
 import { CopyIcon, DiffIcon, RefreshIcon } from './SidebarIcons.js';
@@ -72,6 +73,9 @@ export function ChatThread({
   const modelOptions = modelState.models?.availableModels.length
     ? modelState.models.availableModels
     : [fallbackModelOption];
+  const currentModel =
+    modelOptions.find((model) => model.modelId === currentModelId) ??
+    fallbackModelOption;
 
   return (
     <section
@@ -151,12 +155,17 @@ export function ChatThread({
               <select
                 aria-label="Model"
                 disabled={!activeSessionId || !modelState.models}
+                title={formatFullModelLabel(currentModel)}
                 value={currentModelId}
                 onChange={(event) => onModelChange(event.target.value)}
               >
                 {modelOptions.map((model) => (
-                  <option key={model.modelId} value={model.modelId}>
-                    {model.name || model.modelId}
+                  <option
+                    key={model.modelId}
+                    title={formatFullModelLabel(model)}
+                    value={model.modelId}
+                  >
+                    {formatCompactModelLabel(model)}
                   </option>
                 ))}
               </select>
@@ -1022,7 +1031,28 @@ function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
   event.currentTarget.form?.requestSubmit();
 }
 
-const fallbackModelOption = {
+function formatCompactModelLabel(model: DesktopModelInfo): string {
+  const label = stripCodingPlanProviderPrefix(formatFullModelLabel(model));
+  const pathTail = label.split('/').pop()?.trim() || label;
+  const compactLabel = pathTail.length < label.length ? pathTail : label;
+
+  return compactLabel.length > 32
+    ? `${compactLabel.slice(0, 29)}...`
+    : compactLabel;
+}
+
+function formatFullModelLabel(model: DesktopModelInfo): string {
+  const label = (model.name || model.modelId).trim();
+  return label.length > 0 ? label : model.modelId;
+}
+
+function stripCodingPlanProviderPrefix(label: string): string {
+  return label
+    .replace(/^\[ModelStudio Coding Plan for [^\]]+\]\s*/u, '')
+    .trim();
+}
+
+const fallbackModelOption: DesktopModelInfo = {
   modelId: 'default',
   name: 'Default model',
 };

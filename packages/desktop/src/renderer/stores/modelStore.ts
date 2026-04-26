@@ -82,7 +82,10 @@ export function modelReducer(
       return {
         ...state,
         savingModel: false,
-        models: mergeConfiguredModels(action.models, state.configuredModels),
+        models: mergeConfiguredModels(
+          preserveKnownModelMetadata(action.models, state.models),
+          state.configuredModels,
+        ),
         error: null,
       };
     case 'mode_save_start':
@@ -177,6 +180,39 @@ function removeConfiguredModels(
         model.modelId === models.currentModelId ||
         !configuredIds.has(model.modelId),
     ),
+  };
+}
+
+function preserveKnownModelMetadata(
+  models: DesktopSessionModelState,
+  previousModels: DesktopSessionModelState | null,
+): DesktopSessionModelState {
+  if (!previousModels) {
+    return models;
+  }
+
+  const previousById = new Map(
+    previousModels.availableModels.map((model) => [model.modelId, model]),
+  );
+
+  return {
+    ...models,
+    availableModels: models.availableModels.map((model) => {
+      const previous = previousById.get(model.modelId);
+      if (!previous) {
+        return model;
+      }
+
+      return {
+        ...model,
+        name:
+          model.name && model.name !== model.modelId
+            ? model.name
+            : previous.name,
+        description: model.description ?? previous.description,
+        _meta: model._meta ?? previous._meta,
+      };
+    }),
   };
 }
 
