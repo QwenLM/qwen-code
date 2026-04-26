@@ -82,7 +82,7 @@ summary:focus-visible {
 
 .desktop-shell {
   display: grid;
-  grid-template-columns: 252px minmax(0, 1fr);
+  grid-template-columns: 244px minmax(0, 1fr);
   width: 100%;
   height: 100vh;
   overflow: hidden;
@@ -96,9 +96,9 @@ summary:focus-visible {
   height: 100vh;
   min-height: 0;
   flex-direction: column;
-  gap: 7px;
+  gap: 6px;
   overflow: hidden;
-  padding: 10px 8px;
+  padding: 9px 7px;
   border-right: 1px solid var(--line);
   background:
     linear-gradient(180deg, rgba(20, 26, 51, 0.98), rgba(13, 17, 32, 0.98)),
@@ -128,16 +128,16 @@ summary:focus-visible {
 
 .sidebar-action-row {
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr);
+  grid-template-columns: 18px minmax(0, 1fr);
   align-items: center;
-  min-height: 28px;
-  gap: 7px;
-  padding: 0 7px;
+  min-height: 26px;
+  gap: 6px;
+  padding: 0 6px;
   border-radius: 6px;
   background: transparent;
   color: rgba(225, 232, 242, 0.72);
-  font-size: 12px;
-  font-weight: 660;
+  font-size: 11.5px;
+  font-weight: 650;
   letter-spacing: 0;
   text-align: left;
   transition:
@@ -152,8 +152,8 @@ summary:focus-visible {
 
 .sidebar-action-row svg {
   display: block;
-  width: 14px;
-  height: 14px;
+  width: 13px;
+  height: 13px;
   justify-self: center;
 }
 
@@ -193,7 +193,7 @@ summary:focus-visible {
 .sidebar-section-heading span {
   margin: 0;
   color: var(--text-soft);
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 800;
   letter-spacing: 0;
   text-transform: uppercase;
@@ -203,8 +203,8 @@ summary:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 20px;
-  padding: 3px 7px 0;
+  min-height: 18px;
+  padding: 2px 6px 0;
 }
 
 .sidebar-section-heading span {
@@ -213,10 +213,10 @@ summary:focus-visible {
 
 .empty-row,
 .workspace-path {
-  min-height: 30px;
-  padding: 7px 2px;
+  min-height: 28px;
+  padding: 6px 2px;
   color: rgba(225, 232, 228, 0.52);
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 650;
 }
 
@@ -276,7 +276,7 @@ summary:focus-visible {
 }
 
 .project-list {
-  max-height: 120px;
+  max-height: 112px;
 }
 
 .session-list {
@@ -289,12 +289,12 @@ summary:focus-visible {
   display: grid;
   align-items: center;
   width: 100%;
-  min-height: 32px;
+  min-height: 30px;
   border: 0;
   border-radius: 6px;
   background: transparent;
   color: rgba(233, 238, 235, 0.86);
-  font-size: 12px;
+  font-size: 11.5px;
   text-align: left;
   transition:
     background 140ms ease,
@@ -302,14 +302,14 @@ summary:focus-visible {
 }
 
 .project-row {
-  grid-template-columns: 21px minmax(0, 1fr);
-  padding: 3px 7px 3px 5px;
+  grid-template-columns: 19px minmax(0, 1fr);
+  padding: 2px 6px 2px 5px;
 }
 
 .session-row {
   grid-template-columns: minmax(0, 1fr) auto;
-  column-gap: 6px;
-  padding: 4px 7px 4px 24px;
+  column-gap: 5px;
+  padding: 3px 6px 3px 22px;
 }
 
 .project-row-active,
@@ -338,8 +338,8 @@ summary:focus-visible {
 
 .project-row-icon {
   justify-self: start;
-  width: 14px;
-  height: 14px;
+  width: 13px;
+  height: 13px;
   margin-left: 0;
   color: rgba(225, 232, 228, 0.82);
 }
@@ -367,14 +367,14 @@ summary:focus-visible {
 
 .project-row-copy span,
 .session-row-title {
-  font-size: 12px;
-  font-weight: 660;
-  line-height: 1.22;
+  font-size: 11.5px;
+  font-weight: 650;
+  line-height: 1.2;
 }
 
 .project-row-copy small {
   color: rgba(225, 232, 228, 0.48);
-  font-size: 9.5px;
+  font-size: 9.2px;
   font-weight: 680;
   letter-spacing: 0;
 }
@@ -383,15 +383,15 @@ summary:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
-  min-width: 28px;
-  gap: 5px;
+  min-width: 26px;
+  gap: 4px;
   color: rgba(225, 232, 228, 0.52);
   font-weight: 760;
 }
 
 .session-open-icon {
-  width: 13px;
-  height: 13px;
+  width: 12px;
+  height: 12px;
   color: rgba(225, 232, 228, 0.48);
 }
 
@@ -400,17 +400,17 @@ summary:focus-visible {
 }
 
 .session-ring {
-  width: 12px;
-  height: 12px;
-  border: 2px solid rgba(225, 232, 228, 0.2);
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid rgba(225, 232, 228, 0.2);
   border-top-color: rgba(225, 232, 228, 0.5);
   border-radius: 999px;
 }
 
 .session-row-meta {
-  max-width: 44px;
+  max-width: 40px;
   color: rgba(225, 232, 228, 0.54);
-  font-size: 9.5px;
+  font-size: 9.2px;
   font-weight: 720;
   line-height: 1;
 }
@@ -1474,26 +1474,27 @@ summary:focus-visible {
 
 .composer {
   display: grid;
-  width: min(900px, calc(100% - 36px));
+  width: min(820px, calc(100% - 48px));
   justify-self: center;
-  gap: 7px;
-  margin: 0 0 12px;
-  padding: 8px;
-  border: 1px solid var(--line-strong);
+  gap: 5px;
+  margin: 0 0 10px;
+  padding: 7px;
+  border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface-glass);
-  box-shadow: 0 14px 42px rgba(0, 0, 0, 0.26);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.22);
 }
 
 .composer textarea {
   width: 100%;
-  min-height: 46px;
+  min-height: 40px;
   padding: 3px 2px;
   resize: none;
   border: 0;
   background: transparent;
   color: var(--text);
-  line-height: 1.4;
+  font-size: 13px;
+  line-height: 1.35;
 }
 
 .composer textarea:focus {
@@ -1510,7 +1511,7 @@ summary:focus-visible {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
 }
 
 .composer-control-row {
@@ -1519,20 +1520,20 @@ summary:focus-visible {
 
 .composer-context {
   flex: 1;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
 .composer-icon-button {
   display: grid;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   flex: 0 0 auto;
   place-items: center;
-  border: 1px solid var(--line-strong);
-  border-radius: 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
   background: rgba(238, 244, 239, 0.045);
   color: var(--text-soft);
-  font-size: 16px;
+  font-size: 14px;
   line-height: 1;
 }
 
@@ -1546,27 +1547,27 @@ summary:focus-visible {
 .composer-disabled-reason {
   display: inline-flex;
   min-width: 0;
-  max-width: 180px;
-  min-height: 28px;
+  max-width: 128px;
+  min-height: 24px;
   align-items: center;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 999px;
   color: var(--text-soft);
-  font-size: 12px;
-  font-weight: 760;
+  font-size: 11px;
+  font-weight: 730;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .composer-chip,
 .composer-context-note {
-  padding: 0 10px;
+  padding: 0 8px;
   background: rgba(238, 244, 239, 0.035);
 }
 
 .composer-chip-project {
-  max-width: 220px;
+  max-width: 172px;
   color: var(--text);
 }
 
@@ -1580,7 +1581,7 @@ summary:focus-visible {
   border-color: rgba(240, 182, 110, 0.36);
   background: var(--warning-soft);
   color: #f4d095;
-  padding: 0 9px;
+  padding: 0 8px;
 }
 
 .composer-select-label {
@@ -1589,16 +1590,16 @@ summary:focus-visible {
 }
 
 .composer-select-label select {
-  width: auto;
-  min-width: 122px;
-  max-width: 178px;
-  min-height: 28px;
+  width: 118px;
+  min-width: 0;
+  max-width: 142px;
+  min-height: 24px;
   overflow: hidden;
-  padding: 0 28px 0 10px;
+  padding: 0 24px 0 8px;
   border-radius: 999px;
   color: var(--text-soft);
-  font-size: 12px;
-  font-weight: 760;
+  font-size: 11px;
+  font-weight: 730;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1628,14 +1629,15 @@ textarea:focus {
 
 .composer-actions {
   flex: 0 0 auto;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   justify-content: flex-end;
 }
 
 .composer-actions .primary-button,
 .composer-actions .secondary-button {
-  min-height: 30px;
-  padding: 0 10px;
+  min-height: 26px;
+  padding: 0 8px;
+  font-size: 11.5px;
 }
 
 .runtime-row,
@@ -2281,7 +2283,7 @@ textarea:focus {
 
 @media (max-width: 960px) {
   .desktop-shell {
-    grid-template-columns: 236px minmax(0, 1fr);
+    grid-template-columns: 232px minmax(0, 1fr);
   }
 
   .workspace-grid-review-open {
@@ -2293,21 +2295,21 @@ textarea:focus {
   }
 
   .composer {
-    width: min(900px, calc(100% - 28px));
-    gap: 6px;
-    margin-bottom: 12px;
-    padding: 8px;
+    width: min(820px, calc(100% - 24px));
+    gap: 5px;
+    margin-bottom: 10px;
+    padding: 7px;
   }
 
   .composer textarea {
-    min-height: 44px;
+    min-height: 38px;
     padding: 3px 2px;
   }
 
   .composer-control-row,
   .composer-context,
   .composer-actions {
-    gap: 6px;
+    gap: 5px;
   }
 
   .composer-context,
@@ -2316,40 +2318,41 @@ textarea:focus {
   }
 
   .composer-icon-button {
-    width: 26px;
-    height: 26px;
-    font-size: 15px;
+    width: 24px;
+    height: 24px;
+    font-size: 14px;
   }
 
   .composer-chip,
   .composer-context-note,
   .composer-disabled-reason {
-    max-width: 104px;
-    min-height: 26px;
-    font-size: 11px;
+    max-width: 96px;
+    min-height: 24px;
+    font-size: 10.8px;
   }
 
   .composer-chip,
   .composer-context-note {
-    padding: 0 8px;
+    padding: 0 7px;
   }
 
   .composer-chip-project {
-    max-width: 144px;
+    max-width: 132px;
   }
 
   .composer-select-label select {
-    min-width: 92px;
-    max-width: 124px;
-    min-height: 26px;
-    padding: 0 24px 0 8px;
-    font-size: 11px;
+    width: 96px;
+    min-width: 88px;
+    max-width: 112px;
+    min-height: 24px;
+    padding: 0 22px 0 7px;
+    font-size: 10.8px;
   }
 
   .composer-actions .primary-button,
   .composer-actions .secondary-button {
-    min-height: 28px;
-    padding: 0 9px;
+    min-height: 26px;
+    padding: 0 8px;
   }
 
   .workspace-grid-review-open .panel-main {
@@ -2401,16 +2404,16 @@ textarea:focus {
 
   .workspace-grid-review-open .composer {
     width: calc(100% - 20px);
-    gap: 6px;
+    gap: 5px;
     margin-bottom: 10px;
-    padding: 8px;
+    padding: 7px;
   }
 
   .workspace-grid-review-open .composer textarea {
-    height: 44px;
-    min-height: 44px;
+    height: 38px;
+    min-height: 38px;
     overflow: auto;
-    padding: 5px 7px;
+    padding: 4px 6px;
   }
 
   .workspace-grid-review-open .composer-control-row,
@@ -2429,37 +2432,38 @@ textarea:focus {
   }
 
   .workspace-grid-review-open .composer-icon-button {
-    width: 26px;
-    height: 26px;
+    width: 24px;
+    height: 24px;
   }
 
   .workspace-grid-review-open .composer-chip,
   .workspace-grid-review-open .composer-context-note,
   .workspace-grid-review-open .composer-disabled-reason {
-    max-width: 100px;
-    min-height: 26px;
+    max-width: 94px;
+    min-height: 24px;
   }
 
   .workspace-grid-review-open .composer-chip,
   .workspace-grid-review-open .composer-context-note {
-    padding: 0 7px;
+    padding: 0 6px;
   }
 
   .workspace-grid-review-open .composer-chip-project {
-    max-width: 128px;
+    max-width: 116px;
   }
 
   .workspace-grid-review-open .composer-select-label select {
-    min-width: 92px;
-    max-width: 116px;
-    min-height: 26px;
-    padding: 0 22px 0 7px;
+    width: 90px;
+    min-width: 86px;
+    max-width: 108px;
+    min-height: 24px;
+    padding: 0 20px 0 6px;
   }
 
   .workspace-grid-review-open .composer-actions .primary-button,
   .workspace-grid-review-open .composer-actions .secondary-button {
-    min-height: 28px;
-    padding: 0 8px;
+    min-height: 26px;
+    padding: 0 7px;
   }
 
   .workspace-grid-review-open .panel-review .review-summary {

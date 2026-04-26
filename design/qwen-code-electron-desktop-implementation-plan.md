@@ -22,6 +22,113 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Sidebar and Composer Control Density
+
+Status: completed in iteration 38.
+
+Goal: reduce the remaining oversized supporting controls in the sidebar and
+bottom composer so the first viewport reads closer to the compact workbench in
+`home.jpg`, with the conversation remaining visually dominant.
+
+User-visible value: users see a quieter navigation rail and a less bulky task
+composer. Project/thread rows, model/permission controls, and send/stop actions
+remain readable and accessible without making the UI feel like a dashboard.
+
+Expected files:
+
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/sidebar-composer-density.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Sidebar app actions, project rows, thread rows, and footer settings use a
+  tighter type scale and row height while preserving accessible labels,
+  tooltips, active state, relative age, and no horizontal overflow.
+- The default composer is narrower, shorter, and uses compact chips, selects,
+  attach, Stop, and Send controls without hiding project, branch, permission,
+  model, or new-thread context.
+- The compact `960x640` viewport keeps sidebar rows and composer controls
+  contained with no shell, topbar, timeline, composer, context, or action
+  overflow.
+- The review-open compact path keeps the composer bounded and does not crush the
+  conversation.
+- No behavior changes, raw ACP/session IDs, full paths, server URLs, or secrets
+  are introduced into the main workbench.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, assert project-scoped composer
+  density before a thread exists, send a prompt, approve the fake command, assert
+  conversation/composer/sidebar density at default and compact viewports, then
+  continue the existing branch, review, settings, terminal, discard safety, and
+  commit workflows.
+- E2E assertions: default sidebar width stays under the prior 252 px baseline,
+  sidebar row/action text stays under the prior 12 px visual scale, default
+  composer width and height stay under prior baselines, composer controls stay
+  below 26 px, compact viewport has no relevant overflow, and no console errors
+  or failed local requests are recorded.
+- Diagnostic artifacts: `project-composer.json`, `sidebar-app-rail.json`,
+  `conversation-surface-fidelity.json`, `compact-dense-conversation.json`,
+  `compact-review-drawer.json`, screenshots, Electron log, and summary JSON
+  under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for selecting the smallest fidelity
+  slice without interrupting the autonomous loop, `frontend-design` for
+  prototype-constrained density and hierarchy, and `electron-desktop-dev` for
+  renderer changes verified in real Electron through CDP.
+
+Notes and decisions:
+
+- The prototype wins over inventing a new style. This slice only changes
+  density, width, and CSS hierarchy; it does not alter thread creation, model
+  switching, settings, review, branch, or terminal behavior.
+- The composer remains a two-row task control center, but its frame and controls
+  are scaled down so it no longer dominates the lower third of the workbench.
+- The first CDP run failed at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T16-51-45-127Z/`
+  because the long-branch pre-thread composer still wrapped the model selector
+  onto a second control row. The CSS now constrains default composer chip/select
+  widths and keeps default composer controls on one row while allowing the
+  review-open compact layout to wrap when necessary.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed before and
+  after the composer wrap correction.
+- `git diff --check` passed before and after the composer wrap correction.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 18 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed before and after the composer
+  wrap correction.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T16-52-52-008Z/`.
+- Key recorded metrics: default sidebar `244` px wide, compact sidebar `232`
+  px wide, sidebar app/footer rows `26` px tall, project/thread rows `30` px
+  tall, sidebar title text `11.5` px, sidebar metadata `9.2` px, pre-thread
+  composer `820x88.09`, compact conversation composer `704x88.09`, compact
+  review composer `404x112`, composer chips/selects `24` px tall, Stop/Send
+  `26` px tall, no relevant overflow, no console errors, and no failed local
+  requests.
+
+Next work:
+
+- Continue prototype fidelity by reducing the remaining main conversation header
+  and message typography weight where it still looks larger than `home.jpg`.
+- Continue settings/model polish by adding keyboard-focused coverage for the
+  provider selector and Coding Plan path.
+
 ### Completed Slice: Assistant Control Density Pass
 
 Status: completed in iteration 37.

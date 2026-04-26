@@ -479,12 +479,75 @@ async function assertProjectComposerReady(fileName) {
     const textarea = document.querySelector('textarea[aria-label="Message"]');
     const permission = document.querySelector('select[aria-label="Permission mode"]');
     const model = document.querySelector('select[aria-label="Model"]');
+    const composer = document.querySelector('[data-testid="message-composer"]');
+    const controlRow = document.querySelector('.composer-control-row');
+    const context = document.querySelector('.composer-context');
+    const actions = document.querySelector('.composer-actions');
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        fontSize: Number.parseFloat(style.fontSize),
+        lineHeight: Number.parseFloat(style.lineHeight)
+      };
+    };
+    const overflows = (element) =>
+      Boolean(element && element.scrollWidth > element.clientWidth + 4);
     return {
-      composerText: document.querySelector('[data-testid="message-composer"]')?.textContent.trim() ?? '',
+      composerText: composer?.textContent.trim() ?? '',
       placeholder: textarea?.placeholder ?? null,
       textareaDisabled: textarea?.disabled ?? null,
+      composerRect: rectFor(composer),
+      textareaRect: rectFor(textarea),
+      textareaStyle: styleFor(textarea),
+      controlRowRect: rectFor(controlRow),
+      contextRect: rectFor(context),
+      actionsRect: rectFor(actions),
+      iconButtonRects: [...document.querySelectorAll('.composer-icon-button')]
+        .map((button) => rectFor(button)),
+      chipRects: [...document.querySelectorAll(
+        '.composer-chip, .composer-context-note, .composer-disabled-reason'
+      )].map((chip) => ({
+        text: chip.textContent.trim(),
+        rect: rectFor(chip),
+        style: styleFor(chip)
+      })),
+      selectRects: [...document.querySelectorAll('.composer-select-label select')]
+        .map((select) => ({
+          label: select.getAttribute('aria-label') || '',
+          rect: rectFor(select),
+          style: styleFor(select)
+        })),
+      actionButtonRects: [...document.querySelectorAll('.composer-actions button')]
+        .map((button) => ({
+          label: button.getAttribute('aria-label') || button.textContent.trim(),
+          rect: rectFor(button),
+          style: styleFor(button)
+        })),
       permissionDisabled: permission?.disabled ?? null,
       modelDisabled: model?.disabled ?? null,
+      overflows: {
+        composer: overflows(composer),
+        controlRow: overflows(controlRow),
+        context: overflows(context),
+        actions: overflows(actions)
+      },
       bodyHasStartTask: document.body.innerText.includes('Start a task in desktop-e2e-workspace'),
       bodyHasNewThread: document.body.innerText.includes('New thread')
     };
@@ -506,6 +569,92 @@ async function assertProjectComposerReady(fileName) {
     throw new Error(
       'Project composer runtime selectors should stay disabled before a session exists.',
     );
+  }
+
+  if (!snapshot.composerRect || !snapshot.textareaRect) {
+    throw new Error(
+      `Project composer density metrics are missing: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (snapshot.composerRect.width > 840 || snapshot.composerRect.height > 94) {
+    throw new Error(
+      `Project composer should stay compact before a thread exists: ${JSON.stringify(
+        snapshot.composerRect,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.textareaRect.height > 44 ||
+    snapshot.textareaStyle?.fontSize > 13.2
+  ) {
+    throw new Error(
+      `Project composer textarea scale regressed: ${JSON.stringify({
+        rect: snapshot.textareaRect,
+        style: snapshot.textareaStyle,
+      })}`,
+    );
+  }
+
+  for (const [key, hasOverflow] of Object.entries(snapshot.overflows)) {
+    if (hasOverflow) {
+      throw new Error(`Project composer overflowed: ${key}`);
+    }
+  }
+
+  for (const rect of snapshot.iconButtonRects) {
+    if (!rect || rect.width > 25 || rect.height > 25) {
+      throw new Error(
+        `Composer attach control should stay icon-sized: ${JSON.stringify(
+          rect,
+        )}`,
+      );
+    }
+  }
+
+  for (const chip of snapshot.chipRects) {
+    if (!chip.rect || !chip.style) {
+      throw new Error(
+        `Composer chip metrics are missing: ${JSON.stringify(chip)}`,
+      );
+    }
+
+    if (chip.rect.height > 25 || chip.style.fontSize > 11.2) {
+      throw new Error(
+        `Composer chip scale regressed: ${JSON.stringify(chip)}`,
+      );
+    }
+  }
+
+  for (const select of snapshot.selectRects) {
+    if (!select.rect || !select.style) {
+      throw new Error(
+        `Composer select metrics are missing: ${JSON.stringify(select)}`,
+      );
+    }
+
+    if (select.rect.height > 25 || select.style.fontSize > 11.2) {
+      throw new Error(
+        `Composer select scale regressed: ${JSON.stringify(select)}`,
+      );
+    }
+  }
+
+  for (const button of snapshot.actionButtonRects) {
+    if (!button.rect || !button.style) {
+      throw new Error(
+        `Composer action metrics are missing: ${JSON.stringify(button)}`,
+      );
+    }
+
+    if (button.rect.height > 27 || button.style.fontSize > 11.7) {
+      throw new Error(
+        `Composer action scale regressed: ${JSON.stringify(button)}`,
+      );
+    }
   }
 }
 
@@ -592,7 +741,7 @@ async function assertRalphWorkspaceLayout(fileName) {
     );
   }
 
-  if (metrics.sidebar.width < 236 || metrics.sidebar.width > 320) {
+  if (metrics.sidebar.width < 238 || metrics.sidebar.width > 248) {
     throw new Error(`Unexpected sidebar width: ${metrics.sidebar.width}`);
   }
 
@@ -792,7 +941,7 @@ async function assertSidebarAppRail(fileName) {
     );
   }
 
-  if (metrics.sidebar.width < 236 || metrics.sidebar.width > 260) {
+  if (metrics.sidebar.width < 238 || metrics.sidebar.width > 248) {
     throw new Error(
       `Sidebar width is no longer compact: ${metrics.sidebar.width}`,
     );
@@ -814,15 +963,15 @@ async function assertSidebarAppRail(fileName) {
 
   const tallRows = metrics.rows.filter((row) => {
     if (row.className.includes('sidebar-action-row')) {
-      return row.rect.height > 30;
+      return row.rect.height > 28;
     }
     if (row.className.includes('session-row')) {
-      return row.rect.height > 34;
+      return row.rect.height > 32;
     }
     if (row.className.includes('project-row')) {
-      return row.rect.height > 38;
+      return row.rect.height > 34;
     }
-    return row.rect.height > 38;
+    return row.rect.height > 34;
   });
   if (tallRows.length > 0) {
     throw new Error(
@@ -848,7 +997,7 @@ async function assertSidebarAppRail(fileName) {
   }
 
   const oversizedRowText = metrics.rows.filter(
-    (row) => row.style && row.style.fontSize > 12.5,
+    (row) => row.style && row.style.fontSize > 11.75,
   );
   if (oversizedRowText.length > 0) {
     throw new Error(
@@ -857,7 +1006,7 @@ async function assertSidebarAppRail(fileName) {
   }
 
   const oversizedHeadings = metrics.headingStyles.filter(
-    (style) => style && style.fontSize > 10.5,
+    (style) => style && style.fontSize > 9.75,
   );
   if (oversizedHeadings.length > 0) {
     throw new Error(
@@ -868,16 +1017,16 @@ async function assertSidebarAppRail(fileName) {
   }
 
   const oversizedProjectTitles = metrics.projectTitleStyles.filter(
-    (style) => style && style.fontSize > 12.5,
+    (style) => style && style.fontSize > 11.75,
   );
   const oversizedProjectMeta = metrics.projectMetaStyles.filter(
-    (style) => style && style.fontSize > 10,
+    (style) => style && style.fontSize > 9.5,
   );
   const oversizedThreadTitles = metrics.threadTitleStyles.filter(
-    (style) => style && style.fontSize > 12.5,
+    (style) => style && style.fontSize > 11.75,
   );
   const oversizedThreadMeta = metrics.threadMetaStyles.filter(
-    (style) => style && style.fontSize > 10,
+    (style) => style && style.fontSize > 9.5,
   );
   if (
     oversizedProjectTitles.length > 0 ||
@@ -2653,7 +2802,7 @@ async function assertConversationSurfaceFidelity(fileName) {
     );
   }
 
-  if (snapshot.composer.rect.height > 116) {
+  if (snapshot.composer.rect.width > 840 || snapshot.composer.rect.height > 94) {
     throw new Error(
       `Composer should stay compact in the default conversation view: ${JSON.stringify(
         snapshot.composer.rect,
@@ -2661,7 +2810,7 @@ async function assertConversationSurfaceFidelity(fileName) {
     );
   }
 
-  if (snapshot.composer.textareaRect.height > 54) {
+  if (snapshot.composer.textareaRect.height > 44) {
     throw new Error(
       `Composer textarea should stay short in the default conversation view: ${JSON.stringify(
         snapshot.composer.textareaRect,
@@ -2966,7 +3115,7 @@ async function assertCompactDenseConversationLayout(fileName) {
     );
   }
 
-  if (snapshot.sidebar.width < 232 || snapshot.sidebar.width > 264) {
+  if (snapshot.sidebar.width < 228 || snapshot.sidebar.width > 236) {
     throw new Error(
       `Compact sidebar width should stay narrow: ${snapshot.sidebar.width}`,
     );
@@ -3051,7 +3200,7 @@ async function assertCompactDenseConversationLayout(fileName) {
     );
   }
 
-  if (snapshot.composer.height > 118) {
+  if (snapshot.composer.height > 96) {
     throw new Error(
       `Compact composer should not crowd the conversation: ${snapshot.composer.height}`,
     );
@@ -3559,7 +3708,7 @@ async function assertCompactReviewDrawerLayout(fileName) {
     throw new Error('Compact review should not render settings or tab chrome.');
   }
 
-  if (metrics.sidebar.width < 232 || metrics.sidebar.width > 264) {
+  if (metrics.sidebar.width < 228 || metrics.sidebar.width > 236) {
     throw new Error(
       `Compact review sidebar width should stay narrow: ${metrics.sidebar.width}`,
     );
@@ -3628,7 +3777,7 @@ async function assertCompactReviewDrawerLayout(fileName) {
     );
   }
 
-  if (metrics.composer.height > 176) {
+  if (metrics.composer.height > 142) {
     throw new Error(
       `Compact review composer should stay bounded: ${metrics.composer.height}`,
     );
@@ -3636,7 +3785,7 @@ async function assertCompactReviewDrawerLayout(fileName) {
 
   if (
     metrics.composerTextareaHeight === null ||
-    metrics.composerTextareaHeight > 62
+    metrics.composerTextareaHeight > 44
   ) {
     throw new Error(
       `Compact review textarea should stay short: ${metrics.composerTextareaHeight}`,
