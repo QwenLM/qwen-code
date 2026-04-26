@@ -104,7 +104,13 @@ describe('WorkspacePage', () => {
     ).toBeTruthy();
     expect(topbarContext?.textContent).toContain('Connected');
     expect(topbarContext?.textContent).toContain('main');
-    expect(topbarContext?.textContent).toContain('1 modified');
+    expect(topbarContext?.textContent).toContain('1 dirty');
+    expect(topbarContext?.textContent).not.toContain('1 modified');
+    expect(
+      renderedContainer
+        .querySelector('[data-testid="topbar-git-status"]')
+        ?.getAttribute('title'),
+    ).toBe('Git status: 1 modified · 0 staged · 0 untracked');
     expect(
       topbar?.querySelector('[data-testid="topbar-runtime-status"]')
         ?.textContent,
@@ -384,6 +390,58 @@ describe('WorkspacePage', () => {
     expect(
       cleanRow?.querySelector('[data-testid="project-row-dirty"]'),
     ).toBeNull();
+  });
+
+  it('keeps topbar project context compact and structured', () => {
+    const longBranchName =
+      'desktop-e2e/very-long-branch-name-for-topbar-overflow-check';
+    const dirtyProject: DesktopProject = {
+      ...project,
+      gitBranch: longBranchName,
+      gitStatus: {
+        ...project.gitStatus,
+        branch: longBranchName,
+        modified: 12,
+        staged: 2,
+        untracked: 3,
+        clean: false,
+      },
+    };
+    const renderedContainer = renderWorkspace({
+      activeProject: dirtyProject,
+      activeProjectId: dirtyProject.id,
+      projects: [dirtyProject],
+    });
+    const topbarContext = renderedContainer.querySelector(
+      '[data-testid="topbar-context"]',
+    );
+    const branchTrigger = renderedContainer.querySelector(
+      '[data-testid="topbar-branch-trigger"]',
+    );
+    const gitStatus = renderedContainer.querySelector(
+      '[data-testid="topbar-git-status"]',
+    );
+    const branchText = branchTrigger?.textContent ?? '';
+
+    expect(branchText).toContain('...');
+    expect(branchText.length).toBeLessThanOrEqual(30);
+    expect(branchText).not.toContain(longBranchName);
+    expect(branchTrigger?.getAttribute('title')).toBe(
+      `Branch: ${longBranchName}`,
+    );
+    expect(branchTrigger?.getAttribute('aria-label')).toBe(
+      `Branch ${longBranchName}`,
+    );
+    expect(gitStatus?.textContent).toBe('15 dirty · 2 staged');
+    expect(gitStatus?.getAttribute('title')).toBe(
+      'Git status: 12 modified · 2 staged · 3 untracked',
+    );
+    expect(gitStatus?.getAttribute('aria-label')).toBe(
+      'Git status 15 dirty · 2 staged: 12 modified · 2 staged · 3 untracked',
+    );
+    expect(topbarContext?.textContent).not.toContain(longBranchName);
+    expect(topbarContext?.textContent).not.toContain('12 modified');
+    expect(topbarContext?.textContent).not.toContain('3 untracked');
   });
 
   it('confirms dirty branch switches from the topbar menu', async () => {

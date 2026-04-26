@@ -7,6 +7,7 @@
 import type { DesktopProject } from '../../api/client.js';
 
 const MAX_SESSION_DISPLAY_TITLE_LENGTH = 52;
+const MAX_TOPBAR_BRANCH_LABEL_LENGTH = 30;
 
 export function formatGitStatus(status: DesktopProject['gitStatus']): string {
   if (!status.isRepository) {
@@ -20,6 +21,31 @@ export function formatGitStatus(status: DesktopProject['gitStatus']): string {
   return `${status.modified} modified · ${status.staged} staged · ${status.untracked} untracked`;
 }
 
+export function formatGitStatusSummary(
+  status: DesktopProject['gitStatus'],
+): string {
+  if (!status.isRepository) {
+    return 'No Git';
+  }
+
+  if (status.clean) {
+    return 'Clean';
+  }
+
+  const dirtyCount = status.modified + status.untracked;
+  const parts: string[] = [];
+
+  if (dirtyCount > 0) {
+    parts.push(`${dirtyCount} dirty`);
+  }
+
+  if (status.staged > 0) {
+    parts.push(`${status.staged} staged`);
+  }
+
+  return parts.length > 0 ? parts.join(' · ') : 'Dirty';
+}
+
 export function formatSessionDisplayTitle(
   title: string | null | undefined,
 ): string {
@@ -30,6 +56,13 @@ export function formatSessionDisplayTitle(
   }
 
   return truncateLabel(normalized, MAX_SESSION_DISPLAY_TITLE_LENGTH);
+}
+
+export function formatTopbarBranchLabel(
+  branch: string | null | undefined,
+): string {
+  const normalized = branch?.trim() || 'No branch';
+  return truncateMiddle(normalized, MAX_TOPBAR_BRANCH_LABEL_LENGTH);
 }
 
 function normalizeSessionTitle(title: string): string {
@@ -76,4 +109,18 @@ function truncateLabel(value: string, maxLength: number): string {
   }
 
   return `${value.slice(0, maxLength - 3).trimEnd()}...`;
+}
+
+function truncateMiddle(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  const preservedLength = maxLength - 3;
+  const startLength = Math.ceil(preservedLength * 0.58);
+  const endLength = preservedLength - startLength;
+
+  return `${value.slice(0, startLength).trimEnd()}...${value
+    .slice(-endLength)
+    .trimStart()}`;
 }

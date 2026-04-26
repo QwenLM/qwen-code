@@ -542,7 +542,7 @@ summary:focus-visible {
   display: inline-flex;
   align-items: center;
   min-width: 0;
-  max-width: 186px;
+  max-width: 170px;
   gap: 7px;
 }
 
@@ -570,7 +570,7 @@ summary:focus-visible {
 }
 
 .topbar-branch-trigger {
-  max-width: 170px;
+  max-width: 154px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -632,6 +632,10 @@ summary:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.topbar-git-status {
+  max-width: 118px;
 }
 
 .topbar-branch-menu {

@@ -6,7 +6,12 @@
 
 import { useState, type FormEvent } from 'react';
 import type { DesktopGitBranch, DesktopProject } from '../../api/client.js';
-import { formatGitStatus, formatSessionDisplayTitle } from './formatters.js';
+import {
+  formatGitStatus,
+  formatGitStatusSummary,
+  formatSessionDisplayTitle,
+  formatTopbarBranchLabel,
+} from './formatters.js';
 import {
   BranchIcon,
   ChatBubbleIcon,
@@ -48,9 +53,15 @@ export function TopBar({
 }) {
   const title = getTopBarTitle(activeView, activeSessionTitle, activeProject);
   const projectLabel = activeProject?.name ?? 'No project selected';
-  const branchLabel = activeProject?.gitBranch || 'No Git branch';
-  const gitStatusLabel = activeProject
+  const fullBranchLabel = activeProject?.gitBranch || 'No Git branch';
+  const branchLabel = activeProject?.gitStatus.isRepository
+    ? formatTopbarBranchLabel(fullBranchLabel)
+    : fullBranchLabel;
+  const gitStatusTitle = activeProject
     ? formatGitStatus(activeProject.gitStatus)
+    : 'No project';
+  const gitStatusLabel = activeProject
+    ? formatGitStatusSummary(activeProject.gitStatus)
     : 'No project';
   const changedCount = activeProject ? getChangedCount(activeProject) : 0;
   const reviewLabel = isReviewOpen ? 'Close Changes' : 'Open Changes';
@@ -86,15 +97,17 @@ export function TopBar({
             activeBranch={activeProject?.gitBranch ?? null}
             branchLabel={branchLabel}
             canSwitchBranch={canSwitchBranch}
+            fullBranchLabel={fullBranchLabel}
             isDirty={Boolean(activeProject && !activeProject.gitStatus.clean)}
             onCheckoutBranch={onCheckoutBranch}
             onCreateBranch={onCreateBranch}
             onListBranches={onListBranches}
           />
           <span
-            className="topbar-context-item"
-            aria-label={`Git status ${gitStatusLabel}`}
-            title={`Git status: ${gitStatusLabel}`}
+            className="topbar-context-item topbar-git-status"
+            aria-label={`Git status ${gitStatusLabel}: ${gitStatusTitle}`}
+            data-testid="topbar-git-status"
+            title={`Git status: ${gitStatusTitle}`}
           >
             <span className="topbar-context-text">{gitStatusLabel}</span>
           </span>
@@ -172,6 +185,7 @@ function BranchMenu({
   activeBranch,
   branchLabel,
   canSwitchBranch,
+  fullBranchLabel,
   isDirty,
   onCheckoutBranch,
   onCreateBranch,
@@ -180,6 +194,7 @@ function BranchMenu({
   activeBranch: string | null;
   branchLabel: string;
   canSwitchBranch: boolean;
+  fullBranchLabel: string;
   isDirty: boolean;
   onCheckoutBranch: (branchName: string) => Promise<void>;
   onCreateBranch: (branchName: string) => Promise<void>;
@@ -289,14 +304,14 @@ function BranchMenu({
       <button
         aria-expanded={isOpen}
         aria-haspopup="menu"
-        aria-label={`Branch ${branchLabel}`}
+        aria-label={`Branch ${fullBranchLabel}`}
         className="topbar-context-item topbar-branch-trigger"
         data-testid="topbar-branch-trigger"
         disabled={!canSwitchBranch}
         title={
           canSwitchBranch
-            ? `Branch: ${branchLabel}`
-            : `Branch switching unavailable: ${branchLabel}`
+            ? `Branch: ${fullBranchLabel}`
+            : `Branch switching unavailable: ${fullBranchLabel}`
         }
         type="button"
         onClick={toggleMenu}

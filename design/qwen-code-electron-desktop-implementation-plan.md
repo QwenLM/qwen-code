@@ -22,6 +22,107 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Topbar Context Meta Restraint
+
+Status: completed in iteration 57.
+
+Goal: make the topbar project context read like compact workbench chrome by
+shortening the visible branch label and replacing verbose modified/staged/
+untracked text with a bounded status summary.
+
+User-visible value: the first viewport moves closer to `home.jpg`: current
+thread, project, branch, and dirty state remain visible, but long branch names
+and Git diagnostics no longer crowd the slim topbar or compete with the
+conversation.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/TopBar.tsx`
+- `packages/desktop/src/renderer/components/layout/formatters.ts`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/topbar-context-meta-restraint.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Topbar branch context shows a shortened visible label for long branch names
+  while preserving the full branch in title/accessible metadata and in the
+  branch menu.
+- Topbar Git status shows compact visible labels such as `2 dirty`,
+  `2 staged`, `Clean`, or `No Git`, while preserving the full modified/staged/
+  untracked breakdown in title/accessible metadata.
+- Branch switching, branch creation, review drawer, settings overlay, terminal
+  drawer, composer first-send, model/permission controls, and dirty status
+  refresh workflows remain unchanged.
+- Default, compact, and review-open Electron viewports keep the topbar slim,
+  icon-led, and free of horizontal overflow.
+- The main conversation remains the dominant first-viewport surface; no new
+  dashboard-style Git panel or heavy pill chrome is introduced.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake project on a deliberately long branch with dirty
+  changes, inspect topbar context metrics, create and switch branches, cancel a
+  discard, stage and commit changes, and continue the existing review,
+  settings, terminal, model, and composer workflows.
+- E2E assertions: visible topbar context omits the raw long branch and verbose
+  Git breakdown, full branch/status details remain available in title/aria
+  metadata, topbar items stay bounded with no heavy pill chrome, and no console
+  errors or failed local requests are recorded.
+- Diagnostic artifacts: updated `topbar-context-fidelity.json`,
+  `topbar-context-fidelity.png`, branch result JSON, review screenshots,
+  Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for choosing the narrow
+  label-formatting slice; `frontend-design` for prototype-constrained topbar
+  density; and `electron-desktop-dev` for real Electron CDP verification of
+  renderer behavior.
+
+Notes and decisions:
+
+- The prototype favors compact branch chrome in the topbar, so full branch
+  names stay in hover/accessibility metadata and the branch menu instead of
+  remaining visible in the topbar context row.
+- Git status detail remains available without turning the topbar into a full
+  Git diagnostics row; the review drawer remains the detailed Git surface.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 26 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T19-56-51-507Z/`.
+- Key recorded metrics: `topbar-context-fidelity.json` recorded
+  `visibleHasLongBranch: false`, branch trigger text
+  `desktop-e2e/very...rflow-check`, branch title/aria preserving the full long
+  branch, visible Git status `2 dirty`, detailed Git status metadata
+  `1 modified · 0 staged · 1 untracked`, a 50 px topbar, no document overflow,
+  and no heavy context pill chrome. `summary.json` recorded zero console errors
+  and zero failed local requests.
+
+Next work:
+
+- Continue prototype fidelity by replacing the visible topbar dirty label with
+  a compact diff-count affordance when line-level added/deleted counts are
+  available.
+- Consider moving Refresh Git behind a lower-weight overflow or review-drawer
+  action once the topbar action cluster has a dedicated files/diff affordance.
+
 ### Slice: Sidebar Project Meta Restraint
 
 Status: completed in iteration 56.

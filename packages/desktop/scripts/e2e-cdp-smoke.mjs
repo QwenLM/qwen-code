@@ -163,9 +163,14 @@ async function main() {
     'discard confirmation canceled with changes intact',
     async () =>
       evaluate(`(() => {
+        const gitStatus = document.querySelector(
+          '[data-testid="topbar-git-status"]'
+        );
         return (
           !document.querySelector('[data-testid="discard-confirmation"]') &&
-          document.body.innerText.includes('1 modified · 0 staged · 1 untracked')
+          gitStatus?.textContent.trim() === '2 dirty' &&
+          gitStatus?.getAttribute('title') ===
+            'Git status: 1 modified · 0 staged · 1 untracked'
         );
       })()`),
     10_000,
@@ -180,7 +185,7 @@ async function main() {
   await clickButton('Add Comment');
   await waitForText('Review note from E2E');
   await clickButton('Stage All');
-  await waitForText('0 modified · 2 staged · 0 untracked');
+  await waitForText('2 staged');
   await waitForText('ADDED · 1 HUNK');
   await setFieldByAriaLabel('Commit message', 'desktop e2e commit');
   await clickButton('Commit');
@@ -1453,6 +1458,10 @@ async function assertTopbarContextFidelity(fileName) {
     const titleStack = document.querySelector('[data-testid="topbar-title-stack"]');
     const title = document.querySelector('[data-testid="topbar-title"]');
     const context = document.querySelector('[data-testid="topbar-context"]');
+    const branchTrigger = document.querySelector(
+      '[data-testid="topbar-branch-trigger"]'
+    );
+    const gitStatus = document.querySelector('[data-testid="topbar-git-status"]');
     const runtimeStatus = document.querySelector(
       '[data-testid="topbar-runtime-status"]'
     );
@@ -1498,10 +1507,22 @@ async function assertTopbarContextFidelity(fileName) {
       topbarText: topbar?.textContent ?? '',
       contextText: context?.textContent ?? '',
       contextItems,
+      branchTrigger: {
+        text: branchTrigger?.textContent.trim() ?? '',
+        title: branchTrigger?.getAttribute('title') ?? '',
+        ariaLabel: branchTrigger?.getAttribute('aria-label') ?? '',
+        rect: rectFor(branchTrigger)
+      },
+      gitStatus: {
+        text: gitStatus?.textContent.trim() ?? '',
+        title: gitStatus?.getAttribute('title') ?? '',
+        ariaLabel: gitStatus?.getAttribute('aria-label') ?? '',
+        rect: rectFor(gitStatus)
+      },
       actionRects,
       hasLegacyMeta: document.querySelector('.topbar-meta') !== null,
       hasSegmentedTabs: document.querySelector('.topbar-nav') !== null,
-      hasLongBranch: topbar?.textContent.includes(longBranchName) ?? false,
+      visibleHasLongBranch: topbar?.textContent.includes(longBranchName) ?? false,
       containment: {
         titleStackInTopbar: !escapes(rectFor(titleStack), topbarRect),
         contextInTopbar: !escapes(contextRect, topbarRect),
@@ -1546,9 +1567,45 @@ async function assertTopbarContextFidelity(fileName) {
     );
   }
 
-  if (!metrics.hasLongBranch) {
+  if (metrics.visibleHasLongBranch) {
     throw new Error(
-      `Topbar did not expose the long branch in DOM text: ${metrics.topbarText}`,
+      `Topbar visible text leaked the raw long branch: ${metrics.topbarText}`,
+    );
+  }
+
+  if (
+    !metrics.branchTrigger.title.includes(longBranchName) ||
+    !metrics.branchTrigger.ariaLabel.includes(longBranchName)
+  ) {
+    throw new Error(
+      `Topbar branch metadata lost the full branch: ${JSON.stringify(
+        metrics.branchTrigger,
+      )}`,
+    );
+  }
+
+  if (
+    metrics.branchTrigger.text.includes(longBranchName) ||
+    metrics.branchTrigger.text.length > 30
+  ) {
+    throw new Error(
+      `Topbar branch trigger is not compact: ${JSON.stringify(
+        metrics.branchTrigger,
+      )}`,
+    );
+  }
+
+  if (
+    metrics.contextText.includes('modified ·') ||
+    metrics.contextText.includes('untracked') ||
+    metrics.gitStatus.text !== '2 dirty' ||
+    !metrics.gitStatus.title.includes('1 modified · 0 staged · 1 untracked') ||
+    !metrics.gitStatus.ariaLabel.includes('1 modified · 0 staged · 1 untracked')
+  ) {
+    throw new Error(
+      `Topbar Git status should be compact but preserve details: ${JSON.stringify(
+        metrics.gitStatus,
+      )}`,
     );
   }
 
@@ -2021,12 +2078,15 @@ async function assertBranchCreateResult(fileName) {
         const trigger = document.querySelector(
           '[data-testid="topbar-branch-trigger"]'
         );
+        const gitStatus = document.querySelector('[data-testid="topbar-git-status"]');
         return {
           branchText: trigger?.textContent.trim() ?? '',
+          branchTitle: trigger?.getAttribute('title') ?? '',
+          branchAriaLabel: trigger?.getAttribute('aria-label') ?? '',
           menuOpen: document.querySelector('[data-testid="branch-menu"]') !== null,
-          gitStatusText:
-            document.querySelector('[aria-label^="Git status"]')?.textContent.trim() ??
-            ''
+          gitStatusText: gitStatus?.textContent.trim() ?? '',
+          gitStatusTitle: gitStatus?.getAttribute('title') ?? '',
+          gitStatusAriaLabel: gitStatus?.getAttribute('aria-label') ?? ''
         };
       })()`);
       const { stdout } = await execFileP('git', [
@@ -2036,7 +2096,7 @@ async function assertBranchCreateResult(fileName) {
         '--show-current',
       ]);
       return (
-        ui.branchText.includes(createdBranchName) &&
+        ui.branchTitle.includes(createdBranchName) &&
         !ui.menuOpen &&
         stdout.trim() === createdBranchName
       );
@@ -2047,12 +2107,15 @@ async function assertBranchCreateResult(fileName) {
   const [ui, branch, status] = await Promise.all([
     evaluate(`(() => {
       const trigger = document.querySelector('[data-testid="topbar-branch-trigger"]');
+      const gitStatus = document.querySelector('[data-testid="topbar-git-status"]');
       return {
         branchText: trigger?.textContent.trim() ?? '',
+        branchTitle: trigger?.getAttribute('title') ?? '',
+        branchAriaLabel: trigger?.getAttribute('aria-label') ?? '',
         menuOpen: document.querySelector('[data-testid="branch-menu"]') !== null,
-        gitStatusText:
-          document.querySelector('[aria-label^="Git status"]')?.textContent.trim() ??
-          ''
+        gitStatusText: gitStatus?.textContent.trim() ?? '',
+        gitStatusTitle: gitStatus?.getAttribute('title') ?? '',
+        gitStatusAriaLabel: gitStatus?.getAttribute('aria-label') ?? ''
       };
     })()`),
     execFileP('git', ['-C', workspaceDir, 'branch', '--show-current']),
@@ -2076,9 +2139,14 @@ async function assertBranchCreateResult(fileName) {
     );
   }
 
-  if (!snapshot.ui.gitStatusText.includes('1 modified')) {
+  if (
+    snapshot.ui.gitStatusText !== '2 dirty' ||
+    !snapshot.ui.gitStatusTitle.includes('1 modified · 0 staged · 1 untracked')
+  ) {
     throw new Error(
-      `Branch creation should preserve dirty status in the topbar: ${snapshot.ui.gitStatusText}`,
+      `Branch creation should preserve dirty status in the topbar: ${JSON.stringify(
+        snapshot.ui,
+      )}`,
     );
   }
 }
@@ -2138,12 +2206,15 @@ async function assertBranchSwitchResult(fileName) {
         const trigger = document.querySelector(
           '[data-testid="topbar-branch-trigger"]'
         );
+        const gitStatus = document.querySelector('[data-testid="topbar-git-status"]');
         return {
           branchText: trigger?.textContent.trim() ?? '',
+          branchTitle: trigger?.getAttribute('title') ?? '',
+          branchAriaLabel: trigger?.getAttribute('aria-label') ?? '',
           menuOpen: document.querySelector('[data-testid="branch-menu"]') !== null,
-          gitStatusText:
-            document.querySelector('[aria-label^="Git status"]')?.textContent.trim() ??
-            ''
+          gitStatusText: gitStatus?.textContent.trim() ?? '',
+          gitStatusTitle: gitStatus?.getAttribute('title') ?? '',
+          gitStatusAriaLabel: gitStatus?.getAttribute('aria-label') ?? ''
         };
       })()`);
       const { stdout } = await execFileP('git', [
@@ -2164,12 +2235,15 @@ async function assertBranchSwitchResult(fileName) {
   const [ui, branch, status] = await Promise.all([
     evaluate(`(() => {
       const trigger = document.querySelector('[data-testid="topbar-branch-trigger"]');
+      const gitStatus = document.querySelector('[data-testid="topbar-git-status"]');
       return {
         branchText: trigger?.textContent.trim() ?? '',
+        branchTitle: trigger?.getAttribute('title') ?? '',
+        branchAriaLabel: trigger?.getAttribute('aria-label') ?? '',
         menuOpen: document.querySelector('[data-testid="branch-menu"]') !== null,
-        gitStatusText:
-          document.querySelector('[aria-label^="Git status"]')?.textContent.trim() ??
-          '',
+        gitStatusText: gitStatus?.textContent.trim() ?? '',
+        gitStatusTitle: gitStatus?.getAttribute('title') ?? '',
+        gitStatusAriaLabel: gitStatus?.getAttribute('aria-label') ?? '',
         bodyHasLongBranch: document.body.innerText.includes(
           ${JSON.stringify(longBranchName)}
         )
@@ -2194,9 +2268,14 @@ async function assertBranchSwitchResult(fileName) {
     throw new Error(`Expected Git branch main, got ${snapshot.branch}`);
   }
 
-  if (!snapshot.ui.gitStatusText.includes('1 modified')) {
+  if (
+    snapshot.ui.gitStatusText !== '2 dirty' ||
+    !snapshot.ui.gitStatusTitle.includes('1 modified · 0 staged · 1 untracked')
+  ) {
     throw new Error(
-      `Branch switch should preserve dirty status in the topbar: ${snapshot.ui.gitStatusText}`,
+      `Branch switch should preserve dirty status in the topbar: ${JSON.stringify(
+        snapshot.ui,
+      )}`,
     );
   }
 }
