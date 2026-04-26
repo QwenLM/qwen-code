@@ -1933,18 +1933,59 @@ async function assertSidebarSearchFilter(fileName) {
 
   const cleared = await captureSidebarSearchSnapshot();
 
-  await clickButton('Search');
+  await setFieldByAriaLabel(
+    'Search projects and threads',
+    'no-sidebar-match',
+  );
   await waitFor(
-    'sidebar search closed',
+    'sidebar search empty state',
     async () =>
-      evaluate(
-        `(() => !document.querySelector('[data-testid="sidebar-search"]'))()`,
-      ),
+      evaluate(`(() => {
+        const emptyState = document.querySelector(
+          '[data-testid="sidebar-search-empty"]'
+        );
+        return (
+          emptyState?.textContent.trim() ===
+            'No matching projects or threads' &&
+          document.querySelectorAll('[data-testid="project-row"]').length ===
+            0 &&
+          document.querySelectorAll('[data-testid="thread-row"]').length === 0
+        );
+      })()`),
+    10_000,
+  );
+
+  const noMatch = await captureSidebarSearchSnapshot();
+
+  await pressKey('Escape');
+  await waitFor(
+    'sidebar search closed by Escape',
+    async () =>
+      evaluate(`(() => {
+        const searchButton = document.querySelector(
+          '[data-testid="sidebar-app-actions"] button[aria-label="Search"]'
+        );
+        const sidebar = document.querySelector('[data-testid="project-sidebar"]');
+        return (
+          !document.querySelector('[data-testid="sidebar-search"]') &&
+          searchButton?.getAttribute('aria-pressed') === 'false' &&
+          document.querySelectorAll('[data-testid="project-row"]').length >= 2 &&
+          document.querySelectorAll('[data-testid="thread-row"]').length >= 1 &&
+          sidebar?.innerText.includes('desktop-e2e-clean-workspace') &&
+          sidebar?.innerText.includes(${JSON.stringify(compactThreadTitle)})
+        );
+      })()`),
     5_000,
   );
 
   const closed = await evaluate(`(() => ({
     searchOpen: document.querySelector('[data-testid="sidebar-search"]') !== null,
+    buttonPressed:
+      document
+        .querySelector('[data-testid="sidebar-app-actions"] button[aria-label="Search"]')
+        ?.getAttribute('aria-pressed') ?? null,
+    projectRowCount: document.querySelectorAll('[data-testid="project-row"]').length,
+    threadRowCount: document.querySelectorAll('[data-testid="thread-row"]').length,
     appActionLabels: [
       ...document.querySelectorAll('[data-testid="sidebar-app-actions"] button')
     ].map((button) => button.getAttribute('aria-label') || ''),
@@ -1952,7 +1993,7 @@ async function assertSidebarSearchFilter(fileName) {
       document.querySelector('[data-testid="project-sidebar"]')?.innerText ?? ''
   }))()`);
 
-  const snapshot = { filtered, cleared, closed };
+  const snapshot = { filtered, cleared, noMatch, closed };
   await writeFile(
     join(artifactDir, fileName),
     `${JSON.stringify(snapshot, null, 2)}\n`,
@@ -2029,7 +2070,39 @@ async function assertSidebarSearchFilter(fileName) {
   }
 
   if (
+    noMatch.search?.inputValue !== 'no-sidebar-match' ||
+    noMatch.emptyRows.length !== 1 ||
+    noMatch.emptyRows[0]?.text !== 'No matching projects or threads' ||
+    noMatch.projectRows.length !== 0 ||
+    noMatch.threadRows.length !== 0 ||
+    noMatch.sidebarText.includes('No matching threads') ||
+    Object.values(noMatch.overflows).some(Boolean)
+  ) {
+    throw new Error(
+      `Sidebar search no-match state is not concise and contained: ${JSON.stringify(
+        noMatch,
+      )}`,
+    );
+  }
+
+  const noMatchLeaks = noisyThreadTitleLeaks.filter((leak) =>
+    noMatch.sidebarText.includes(leak),
+  );
+  if (
+    noMatchLeaks.length > 0 ||
+    noMatch.sidebarText.includes('session-e2e') ||
+    noMatch.sidebarText.includes('Connected to')
+  ) {
+    throw new Error(
+      `Sidebar no-match state leaked protocol or path noise: ${noMatch.sidebarText}`,
+    );
+  }
+
+  if (
     closed.searchOpen ||
+    closed.buttonPressed !== 'false' ||
+    closed.projectRowCount < 2 ||
+    closed.threadRowCount < 1 ||
     !closed.appActionLabels.includes('Search') ||
     !closed.sidebarText.includes(compactThreadTitle)
   ) {
@@ -2100,6 +2173,14 @@ async function captureSidebarSearchSnapshot() {
       overflows: overflows(row),
       style: styleFor(row)
     }));
+    const emptyRows = [...document.querySelectorAll('.empty-row')].map(
+      (row) => ({
+        text: row.textContent.trim(),
+        rect: rectFor(row),
+        overflows: overflows(row),
+        style: styleFor(row)
+      })
+    );
 
     return {
       viewport: {
@@ -2131,13 +2212,15 @@ async function captureSidebarSearchSnapshot() {
         ) !== null,
       projectRows,
       threadRows,
+      emptyRows,
       sidebarText: sidebar?.innerText ?? '',
       overflows: {
         sidebar: overflows(sidebar),
         search: overflows(search),
         input: overflows(input),
         projectRows: projectRows.some((row) => row.overflows),
-        threadRows: threadRows.some((row) => row.overflows)
+        threadRows: threadRows.some((row) => row.overflows),
+        emptyRows: emptyRows.some((row) => row.overflows)
       }
     };
   })()`);
@@ -8922,6 +9005,20 @@ async function clickButton(text) {
 
   if (!clicked) {
     throw new Error(`Button not found or disabled: ${text}`);
+  }
+}
+
+async function pressKey(key) {
+  const code = key === 'Escape' ? 'Escape' : key;
+  const windowsVirtualKeyCode = key === 'Escape' ? 27 : 0;
+
+  for (const type of ['keyDown', 'keyUp']) {
+    await cdp.send('Input.dispatchKeyEvent', {
+      type,
+      key,
+      code,
+      windowsVirtualKeyCode,
+    });
   }
 }
 

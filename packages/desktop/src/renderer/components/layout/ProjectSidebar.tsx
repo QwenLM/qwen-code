@@ -62,14 +62,18 @@ export function ProjectSidebar({
     searchInputRef.current?.select();
   }, [isSearchOpen]);
 
-  const toggleSearch = () => {
-    setIsSearchOpen((current) => {
-      if (current) {
-        setSearchQuery('');
-      }
+  const closeSearch = () => {
+    setSearchQuery('');
+    setIsSearchOpen(false);
+  };
 
-      return !current;
-    });
+  const toggleSearch = () => {
+    if (isSearchOpen) {
+      closeSearch();
+      return;
+    }
+
+    setIsSearchOpen(true);
   };
 
   return (
@@ -148,6 +152,15 @@ export function ProjectSidebar({
               type="search"
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key !== 'Escape') {
+                  return;
+                }
+
+                event.preventDefault();
+                event.stopPropagation();
+                closeSearch();
+              }}
             />
             <button
               aria-label="Clear Search"
@@ -274,16 +287,25 @@ function ProjectBrowser({
         aria-label="Projects"
         data-testid="project-list"
       >
-        <div className="empty-row">No matching projects</div>
-        <ThreadList
-          activeSessionId={activeSessionId}
-          ariaLabel="Threads"
-          className="project-thread-list"
-          emptyLabel="No matching threads"
-          isDraftSession={false}
-          sessions={[]}
-          onSelect={onSelectSession}
-        />
+        <div
+          className="empty-row sidebar-search-empty"
+          data-testid="sidebar-search-empty"
+        >
+          {normalizedQuery
+            ? 'No matching projects or threads'
+            : 'No matching projects'}
+        </div>
+        {normalizedQuery ? null : (
+          <ThreadList
+            activeSessionId={activeSessionId}
+            ariaLabel="Threads"
+            className="project-thread-list"
+            emptyLabel="No matching threads"
+            isDraftSession={false}
+            sessions={[]}
+            onSelect={onSelectSession}
+          />
+        )}
       </div>
     );
   }

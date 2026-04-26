@@ -22,6 +22,109 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Sidebar Search Escape and Empty State
+
+Status: completed in iteration 71.
+
+Goal: make sidebar search feel like a polished navigation control by allowing
+Escape to close it and by replacing duplicate empty rows with a single compact
+no-results state when a filter matches neither projects nor active-project
+threads.
+
+User-visible value: users can leave search with the expected keyboard gesture
+and get a concise no-results message that does not expose paths, protocol
+details, or debug state.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ProjectSidebar.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/sidebar-search-escape-empty-state.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Pressing Escape while the sidebar search input is focused closes search,
+  clears the query, updates the Search action pressed state, and restores the
+  grouped project/thread browser.
+- A query with no project or active-thread matches renders one compact
+  `No matching projects or threads` row and does not render a duplicate
+  no-matching-threads row.
+- The no-results row remains muted, compact, non-overflowing, and does not
+  contain raw paths, local endpoints, ACP/session IDs, or server URLs.
+- Existing Search toggle, Clear Search, project filtering, active-thread
+  filtering, Open Project, branch, review, settings, terminal, relaunch, and
+  compact viewport workflows remain unchanged.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open both fake Git projects, create the fake ACP thread, toggle
+  Search, filter to the active thread, clear it, filter to a no-match token,
+  press Escape, assert the grouped browser is restored, then continue the
+  existing branch, review, settings, terminal, relaunch, and compact viewport
+  workflows.
+- E2E assertions: the no-match state contains exactly one compact
+  `No matching projects or threads` empty row with no diagnostic leakage;
+  Escape closes search and clears `aria-pressed`; restored rows do not overflow;
+  no console errors or failed local requests are recorded.
+- Diagnostic artifacts: updated `sidebar-search-filter.json`,
+  `sidebar-search-filter.png`, Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` using the Ralph prompt, current
+  implementation plan, and prototype as fixed requirements without blocking on
+  a user question; `frontend-design` with the prototype as the visual contract
+  and keyboard search polish as compact desktop navigation behavior;
+  `electron-desktop-dev` for renderer behavior verified through component
+  coverage and real Electron CDP.
+
+Notes and decisions:
+
+- Escape closes search rather than only clearing the current query because the
+  sidebar action is a transient navigation mode; the Clear Search icon remains
+  the explicit query-only reset.
+- A fully unmatched search renders one combined empty row instead of separate
+  project and thread empty rows, keeping the grouped browser compact and closer
+  to the prototype's low-noise sidebar.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 29 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T22-51-05-931Z/`.
+- Key recorded metrics: `sidebar-search-filter.json` recorded the no-match
+  search value `no-sidebar-match`, exactly one
+  `No matching projects or threads` row at 26 px tall, zero project/thread rows
+  while filtered, no overflow, and no protocol/path leakage. The same artifact
+  recorded Escape closing search, `aria-pressed="false"`, two project rows and
+  one active thread row restored. `summary.json` recorded zero console errors
+  and zero failed local requests.
+
+Next work:
+
+- Continue prototype fidelity by reducing the remaining sidebar app-action text
+  prominence and exploring a narrower icon-led rail if it can be done without
+  hurting discoverability.
+- Longer term, add a cross-project session index so sidebar search can show
+  thread matches under inactive projects instead of only filtering active
+  project sessions.
+
 ### Slice: Sidebar Search and Project Heading Actions
 
 Status: completed in iteration 70.

@@ -446,6 +446,11 @@ summary:focus-visible {
   font-size: 10.4px;
 }
 
+.sidebar-search-empty {
+  min-height: 26px;
+  padding: 5px 6px;
+}
+
 .project-row-active,
 .session-row-active {
   background: rgba(213, 224, 255, 0.062);

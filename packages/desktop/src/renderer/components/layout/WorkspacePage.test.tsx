@@ -619,6 +619,46 @@ describe('WorkspacePage', () => {
     ).toHaveLength(2);
 
     act(() => {
+      setInputValue(searchInput as HTMLInputElement, 'no-sidebar-match');
+    });
+
+    const emptyRows = renderedContainer.querySelectorAll('.empty-row');
+    expect(emptyRows).toHaveLength(1);
+    expect(
+      renderedContainer.querySelector('[data-testid="sidebar-search-empty"]')
+        ?.textContent,
+    ).toBe('No matching projects or threads');
+    expect(
+      renderedContainer.querySelector('[data-testid="project-sidebar"]')
+        ?.textContent,
+    ).not.toContain('No matching threads');
+
+    act(() => {
+      (searchInput as HTMLInputElement).dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          key: 'Escape',
+        }),
+      );
+    });
+
+    expect(
+      renderedContainer.querySelector('[data-testid="sidebar-search"]'),
+    ).toBeNull();
+    expect(
+      renderedContainer
+        .querySelector('button[aria-label="Search"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('false');
+    expect(
+      renderedContainer.querySelectorAll('[data-testid="project-row"]'),
+    ).toHaveLength(2);
+    expect(
+      renderedContainer.querySelectorAll('[data-testid="thread-row"]'),
+    ).toHaveLength(2);
+
+    act(() => {
       (
         renderedContainer.querySelector(
           '.sidebar-heading-icon-button[aria-label="Open Project"]',
