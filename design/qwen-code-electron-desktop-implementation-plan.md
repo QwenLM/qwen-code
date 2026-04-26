@@ -22,6 +22,108 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Project Switch Diff Stat Isolation
+
+Status: completed in iteration 59.
+
+Goal: harden the multi-project workflow so compact topbar diff stats are scoped
+to the active project when a user opens or switches recent projects.
+
+User-visible value: opening a clean second project after reviewing a dirty
+project no longer risks showing stale `+N -M` change counts in the slim topbar;
+switching back restores the dirty project's own diff summary.
+
+Expected files:
+
+- `packages/desktop/src/main/native/dialogs.ts`
+- `packages/desktop/src/main/native/e2eSelectDirectory.ts`
+- `packages/desktop/src/main/native/e2eSelectDirectory.test.ts`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/project-switch-diff-stat-isolation.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- E2E-only directory selection can provide more than one deterministic project
+  path without changing production dialog behavior.
+- The real Electron CDP harness opens a dirty project, verifies the topbar
+  `+2 -1` diff stat, opens a clean second project, and asserts the topbar shows
+  clean project Git state with no stale diff stat or changed-files summary.
+- The same harness switches back to the dirty project from the sidebar and
+  asserts the dirty project's `+2 -1` stat and metadata return.
+- Sidebar project rows remain compact for both recent projects, and the first
+  viewport stays conversation-first with no horizontal overflow.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/main/native/e2eSelectDirectory.test.ts src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the dirty fake project, verify the compact diff stat, open
+  a clean fake project through the same Open Project control, assert no stale
+  diff state is visible, switch back through the sidebar, and continue the
+  existing branch, review, settings, terminal, model, and composer workflows.
+- E2E assertions: clean project topbar status is `Clean`, no topbar diff stat
+  node is rendered, no conversation changed-files summary remains from the
+  previous project, returning to the dirty project restores `+2 -1` with full
+  metadata, and no console errors or failed local requests are recorded.
+- Diagnostic artifacts: `project-switch-clean-git-status.json`,
+  `project-switch-dirty-git-status.json`, updated topbar/sidebar/layout
+  screenshots, Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` to select the narrow hardening
+  slice; `frontend-design` to preserve prototype-constrained compact project
+  chrome; and `electron-desktop-dev` for real Electron CDP verification of the
+  user workflow.
+
+Notes and decisions:
+
+- Use an E2E-only multi-directory selector instead of weakening the production
+  native dialog path. The selector repeats the final provided directory so the
+  existing single-project E2E behavior remains compatible.
+- Keep the production project-switching code unchanged unless the new harness
+  exposes a real stale-state bug; `App` already clears `gitDiff` on project
+  selection and workspace opening, so this slice primarily locks that behavior
+  down in real Electron.
+- The first CDP attempt placed the project-switch check after conversation
+  activity, which correctly reset chat state and broke a later compact-review
+  assertion. The harness now performs the two-project switch before sending the
+  first prompt, preserving coverage without erasing the rest of the workflow.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/main/native/e2eSelectDirectory.test.ts src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 33 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T20-20-30-259Z/`.
+- Key recorded metrics: `project-switch-clean-git-status.json` recorded the
+  clean project as active with topbar status `Clean`, no topbar diff-stat node,
+  no conversation changed-files summary, two recent project rows, and no
+  document overflow. `project-switch-dirty-git-status.json` recorded switching
+  back to the dirty project with `+2 -1`, full Git metadata containing
+  `1 modified · 0 staged · 1 untracked · Diff +2 -1`, and the changed-files
+  summary restored. `summary.json` recorded zero console errors and zero failed
+  local requests.
+
+Next work:
+
+- Add restart-persistence coverage for multiple recent projects so the sidebar
+  ordering and active project recovery stay aligned after app relaunch.
+- Continue prototype fidelity by reducing remaining topbar action chrome and
+  evaluating whether Refresh Git should live in the review drawer or an
+  overflow action.
+
 ### Slice: Topbar Diff Stat Affordance
 
 Status: completed in iteration 58.

@@ -5,12 +5,13 @@
  */
 
 import { dialog, type BrowserWindow, type OpenDialogOptions } from 'electron';
+import { getE2eSelectedDirectory } from './e2eSelectDirectory.js';
 
 export async function selectDirectory(
   owner: BrowserWindow | null,
 ): Promise<string | null> {
-  const e2eDirectory = process.env['QWEN_DESKTOP_TEST_SELECT_DIRECTORY'];
-  if (process.env['QWEN_DESKTOP_E2E'] === '1' && e2eDirectory) {
+  const e2eDirectory = getE2eSelectedDirectory();
+  if (e2eDirectory) {
     return e2eDirectory;
   }
 

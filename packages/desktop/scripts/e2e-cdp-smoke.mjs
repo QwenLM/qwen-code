@@ -51,11 +51,13 @@ let browserCdp;
 let cdp;
 let artifactDir;
 let workspaceDir;
+let cleanWorkspaceDir;
 
 async function main() {
   await assertBuiltDesktop();
   artifactDir = await createArtifactDir();
   workspaceDir = await createGitWorkspace();
+  cleanWorkspaceDir = await createCleanGitWorkspace();
   const homeDir = await mkdtemp(join(tmpdir(), 'qwen-desktop-e2e-home-'));
   const runtimeDir = await mkdtemp(join(tmpdir(), 'qwen-desktop-e2e-runtime-'));
   const userDataDir = await mkdtemp(
@@ -68,7 +70,7 @@ async function main() {
     homeDir,
     runtimeDir,
     userDataDir,
-    workspaceDir,
+    workspaceDirs: [workspaceDir, cleanWorkspaceDir],
   });
 
   const target = await waitForCdpTarget(cdpPort);
@@ -90,6 +92,13 @@ async function main() {
 
   await clickButtonUntilText('Open Project', 'desktop-e2e-workspace');
   await assertProjectComposerReady('project-composer.json');
+  await waitForDirtyTopbarDiffStat();
+  await clickButtonUntilText('Open Project', 'desktop-e2e-clean-workspace');
+  await assertProjectSwitchCleanState('project-switch-clean-git-status.json');
+  await saveScreenshot('project-switch-clean-git-status.png');
+  await clickButton('desktop-e2e-workspace');
+  await assertProjectSwitchDirtyState('project-switch-dirty-git-status.json');
+  await saveScreenshot('project-switch-dirty-git-status.png');
   await setFieldByAriaLabel('Message', commandApprovalPrompt);
   await clickButton('Send');
   await waitForText('Approve Once');
@@ -273,6 +282,7 @@ async function main() {
       {
         ok: true,
         workspaceDir,
+        cleanWorkspaceDir,
         consoleErrors,
         failedRequests,
       },
@@ -325,6 +335,31 @@ async function createGitWorkspace() {
   await execFileP('git', ['checkout', '-b', longBranchName], { cwd: dir });
   await writeFile(join(dir, 'README.md'), '# Desktop E2E\n\nchanged\n', 'utf8');
   await writeFile(join(dir, 'notes.txt'), 'review me\n', 'utf8');
+  return dir;
+}
+
+async function createCleanGitWorkspace() {
+  const dir = await mkdtemp(join(tmpdir(), 'desktop-e2e-clean-workspace-'));
+  await writeFile(
+    join(dir, 'README.md'),
+    '# Desktop E2E Clean\n\ninitial\n',
+    'utf8',
+  );
+  await writeFile(
+    join(dir, 'package.json'),
+    `${JSON.stringify({ name: 'desktop-e2e-clean-workspace' }, null, 2)}\n`,
+    'utf8',
+  );
+  await execFileP('git', ['init'], { cwd: dir });
+  await execFileP('git', ['config', 'user.email', 'desktop-e2e@example.test'], {
+    cwd: dir,
+  });
+  await execFileP('git', ['config', 'user.name', 'Desktop E2E'], { cwd: dir });
+  await execFileP('git', ['checkout', '-B', 'main'], { cwd: dir });
+  await execFileP('git', ['add', '.'], { cwd: dir });
+  await execFileP('git', ['commit', '-m', 'initial clean commit'], {
+    cwd: dir,
+  });
   return dir;
 }
 
@@ -383,7 +418,7 @@ function launchDesktopApp({
   homeDir,
   runtimeDir,
   userDataDir,
-  workspaceDir,
+  workspaceDirs,
 }) {
   const logStream = createWriteStream(join(artifactDir, 'electron.log'));
   const child = spawn(electronPath, ['.'], {
@@ -396,7 +431,7 @@ function launchDesktopApp({
       QWEN_DESKTOP_E2E: '1',
       QWEN_DESKTOP_E2E_FAKE_ACP: '1',
       QWEN_DESKTOP_E2E_USER_DATA_DIR: userDataDir,
-      QWEN_DESKTOP_TEST_SELECT_DIRECTORY: workspaceDir,
+      QWEN_DESKTOP_TEST_SELECT_DIRECTORY: JSON.stringify(workspaceDirs),
       ELECTRON_ENABLE_LOGGING: '1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -1753,6 +1788,251 @@ async function assertTopbarContextFidelity(fileName) {
       )}`,
     );
   }
+}
+
+async function assertProjectSwitchCleanState(fileName) {
+  await waitFor(
+    'clean project selected without stale diff stat',
+    async () =>
+      evaluate(`(() => {
+        const activeProject = [...document.querySelectorAll(
+          '[data-testid="project-row"]'
+        )].find((row) => row.classList.contains('project-row-active'));
+        const gitStatus = document.querySelector(
+          '[data-testid="topbar-git-status"]'
+        );
+        const projectLabel = document.querySelector(
+          '[data-testid="topbar-title"] span'
+        );
+        return Boolean(
+          activeProject?.textContent.includes('desktop-e2e-clean-workspace') &&
+            projectLabel?.textContent.includes('desktop-e2e-clean-workspace') &&
+            gitStatus?.textContent.trim() === 'Clean' &&
+            !gitStatus.querySelector('[data-testid="topbar-diff-stat"]') &&
+            !document.querySelector('[data-testid="conversation-changes-summary"]')
+        );
+      })()`),
+    15_000,
+  );
+
+  const snapshot = await captureProjectSwitchSnapshot(fileName);
+  const activeProject = snapshot.ui.projectRows.find((row) => row.active);
+
+  if (!activeProject?.name.includes('desktop-e2e-clean-workspace')) {
+    throw new Error(
+      `Clean project should be active after opening the second workspace: ${JSON.stringify(
+        snapshot.ui.projectRows,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.ui.gitStatusText !== 'Clean' ||
+    snapshot.ui.hasTopbarDiffStat ||
+    snapshot.ui.hasConversationChangesSummary
+  ) {
+    throw new Error(
+      `Clean project leaked stale dirty state: ${JSON.stringify(snapshot.ui)}`,
+    );
+  }
+
+  if (!snapshot.ui.topbarProject.includes('desktop-e2e-clean-workspace')) {
+    throw new Error(
+      `Topbar should identify the clean project: ${JSON.stringify(snapshot.ui)}`,
+    );
+  }
+
+  if (snapshot.cleanGitStatus.trim() !== '') {
+    throw new Error(
+      `Clean workspace should remain clean:\n${snapshot.cleanGitStatus}`,
+    );
+  }
+
+  if (snapshot.ui.document.bodyScrollWidth > snapshot.ui.viewport.width + 4) {
+    throw new Error(
+      `Project switch caused horizontal overflow: ${JSON.stringify(
+        snapshot.ui.document,
+      )}`,
+    );
+  }
+}
+
+async function waitForDirtyTopbarDiffStat() {
+  await waitFor(
+    'dirty project topbar diff stat',
+    async () =>
+      evaluate(`(() => {
+        const gitStatus = document.querySelector(
+          '[data-testid="topbar-git-status"]'
+        );
+        return Boolean(
+          gitStatus?.textContent.trim() === '+2 -1' &&
+            gitStatus?.querySelector('[data-testid="topbar-diff-stat"]')
+        );
+      })()`),
+    15_000,
+  );
+}
+
+async function assertProjectSwitchDirtyState(fileName) {
+  await waitFor(
+    'dirty project selected with restored diff stat',
+    async () =>
+      evaluate(`(() => {
+        const activeProject = [...document.querySelectorAll(
+          '[data-testid="project-row"]'
+        )].find((row) => row.classList.contains('project-row-active'));
+        const gitStatus = document.querySelector(
+          '[data-testid="topbar-git-status"]'
+        );
+        const projectLabel = document.querySelector(
+          '[data-testid="topbar-title"] span'
+        );
+        return Boolean(
+          activeProject?.textContent.includes('desktop-e2e-workspace') &&
+            !activeProject?.textContent.includes('desktop-e2e-clean-workspace') &&
+            projectLabel?.textContent.includes('desktop-e2e-workspace') &&
+            gitStatus?.textContent.trim() === '+2 -1' &&
+            gitStatus?.querySelector('[data-testid="topbar-diff-stat"]') &&
+            document.querySelector('[data-testid="conversation-changes-summary"]')
+        );
+      })()`),
+    15_000,
+  );
+
+  const snapshot = await captureProjectSwitchSnapshot(fileName);
+  const activeProject = snapshot.ui.projectRows.find((row) => row.active);
+
+  if (
+    !activeProject?.name.includes('desktop-e2e-workspace') ||
+    activeProject.name.includes('desktop-e2e-clean-workspace')
+  ) {
+    throw new Error(
+      `Dirty project should be active after sidebar switch: ${JSON.stringify(
+        snapshot.ui.projectRows,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.ui.gitStatusText !== '+2 -1' ||
+    !snapshot.ui.gitStatusTitle.includes(
+      '1 modified · 0 staged · 1 untracked',
+    ) ||
+    !snapshot.ui.gitStatusTitle.includes('Diff +2 -1') ||
+    !snapshot.ui.hasTopbarDiffStat ||
+    !snapshot.ui.hasConversationChangesSummary
+  ) {
+    throw new Error(
+      `Dirty project diff state was not restored: ${JSON.stringify(
+        snapshot.ui,
+      )}`,
+    );
+  }
+
+  if (!snapshot.dirtyGitStatus.includes('README.md')) {
+    throw new Error(
+      `Dirty workspace should still include README.md changes:\n${snapshot.dirtyGitStatus}`,
+    );
+  }
+}
+
+async function captureProjectSwitchSnapshot(fileName) {
+  const [ui, dirtyStatus, cleanStatus] = await Promise.all([
+    evaluate(`(() => {
+      const rectFor = (element) => {
+        if (!element) {
+          return null;
+        }
+        const rect = element.getBoundingClientRect();
+        return {
+          top: rect.top,
+          right: rect.right,
+          bottom: rect.bottom,
+          left: rect.left,
+          width: rect.width,
+          height: rect.height
+        };
+      };
+      const topbar = document.querySelector('[data-testid="workspace-topbar"]');
+      const gitStatus = document.querySelector('[data-testid="topbar-git-status"]');
+      const diffStat = gitStatus?.querySelector('[data-testid="topbar-diff-stat"]');
+      const title = document.querySelector('[data-testid="topbar-title"]');
+      const rows = [...document.querySelectorAll('[data-testid="project-row"]')]
+        .map((row) => ({
+          label: row.getAttribute('aria-label') || '',
+          title: row.getAttribute('title') || '',
+          text: row.textContent.trim(),
+          active: row.classList.contains('project-row-active'),
+          name:
+            row
+              .querySelector('[data-testid="project-row-name"]')
+              ?.textContent.trim() ?? '',
+          branch:
+            row
+              .querySelector('[data-testid="project-row-branch"]')
+              ?.textContent.trim() ?? '',
+          dirty:
+            row
+              .querySelector('[data-testid="project-row-dirty"]')
+              ?.textContent.trim() ?? null,
+          rect: rectFor(row)
+        }));
+
+      return {
+        viewport: {
+          width: window.innerWidth,
+          height: window.innerHeight
+        },
+        document: {
+          bodyScrollWidth: document.body.scrollWidth,
+          bodyScrollHeight: document.body.scrollHeight
+        },
+        topbar: rectFor(topbar),
+        topbarTitle: title?.querySelector('h2')?.textContent.trim() ?? '',
+        topbarProject: title?.querySelector('span')?.textContent.trim() ?? '',
+        gitStatusText: gitStatus?.textContent.trim() ?? '',
+        gitStatusTitle: gitStatus?.getAttribute('title') ?? '',
+        gitStatusAria: gitStatus?.getAttribute('aria-label') ?? '',
+        hasTopbarDiffStat: diffStat !== null,
+        hasConversationChangesSummary:
+          document.querySelector('[data-testid="conversation-changes-summary"]') !== null,
+        projectRows: rows,
+        activeProjectCount: rows.filter((row) => row.active).length
+      };
+    })()`),
+    execFileP('git', ['-C', workspaceDir, 'status', '--porcelain=v1']),
+    execFileP('git', ['-C', cleanWorkspaceDir, 'status', '--porcelain=v1']),
+  ]);
+  const snapshot = {
+    ui,
+    dirtyGitStatus: dirtyStatus.stdout,
+    cleanGitStatus: cleanStatus.stdout,
+  };
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (snapshot.ui.projectRows.length < 2) {
+    throw new Error(
+      `Project switch should show both recent projects: ${JSON.stringify(
+        snapshot.ui.projectRows,
+      )}`,
+    );
+  }
+
+  if (snapshot.ui.activeProjectCount !== 1) {
+    throw new Error(
+      `Exactly one project should be active: ${JSON.stringify(
+        snapshot.ui.projectRows,
+      )}`,
+    );
+  }
+
+  return snapshot;
 }
 
 async function assertBranchSwitchMenu(fileName, expectedCurrentBranch) {
@@ -7414,6 +7694,21 @@ async function writeDiagnostics(error) {
     await writeCommandOutput('git-diff.txt', 'git', [
       '-C',
       workspaceDir,
+      'diff',
+    ]);
+  }
+
+  if (cleanWorkspaceDir) {
+    await writeCommandOutput('git-status-clean.txt', 'git', [
+      '-C',
+      cleanWorkspaceDir,
+      'status',
+      '--porcelain=v1',
+      '--branch',
+    ]);
+    await writeCommandOutput('git-diff-clean.txt', 'git', [
+      '-C',
+      cleanWorkspaceDir,
       'diff',
     ]);
   }
