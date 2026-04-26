@@ -1742,11 +1742,49 @@ textarea:focus {
   justify-content: flex-end;
 }
 
-.composer-actions .primary-button,
-.composer-actions .secondary-button {
-  min-height: 26px;
-  padding: 0 8px;
-  font-size: 11.5px;
+.composer-action-button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(238, 244, 239, 0.045);
+  color: var(--text-soft);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.16);
+}
+
+.composer-action-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.composer-action-button:not(:disabled):hover {
+  border-color: rgba(85, 166, 255, 0.34);
+  background: rgba(238, 244, 239, 0.075);
+  color: var(--text);
+}
+
+.composer-send-button {
+  width: 30px;
+  height: 30px;
+  border-color: rgba(85, 166, 255, 0.54);
+  background: linear-gradient(180deg, #7ec2ff 0%, #5678ff 100%);
+  color: #061019;
+  box-shadow:
+    0 10px 26px rgba(85, 166, 255, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.26);
+}
+
+.composer-send-button:not(:disabled):hover {
+  border-color: rgba(151, 211, 255, 0.7);
+  background: linear-gradient(180deg, #9ad0ff 0%, #6386ff 100%);
+  color: #061019;
+}
+
+.composer-stop-button {
+  color: rgba(225, 232, 228, 0.7);
 }
 
 .runtime-row,
@@ -2527,10 +2565,14 @@ textarea:focus {
     font-size: 10.8px;
   }
 
-  .composer-actions .primary-button,
-  .composer-actions .secondary-button {
-    min-height: 26px;
-    padding: 0 8px;
+  .composer-action-button {
+    width: 28px;
+    height: 28px;
+  }
+
+  .composer-send-button {
+    width: 30px;
+    height: 30px;
   }
 
   .workspace-grid-review-open .panel-main {
@@ -2638,10 +2680,14 @@ textarea:focus {
     padding: 0 20px 0 6px;
   }
 
-  .workspace-grid-review-open .composer-actions .primary-button,
-  .workspace-grid-review-open .composer-actions .secondary-button {
-    min-height: 26px;
-    padding: 0 7px;
+  .workspace-grid-review-open .composer-action-button {
+    width: 28px;
+    height: 28px;
+  }
+
+  .workspace-grid-review-open .composer-send-button {
+    width: 30px;
+    height: 30px;
   }
 
   .workspace-grid-review-open .panel-review .review-summary {

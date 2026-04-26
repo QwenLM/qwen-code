@@ -528,6 +528,12 @@ describe('WorkspacePage', () => {
     const attachButton = renderedContainer.querySelector(
       '[data-testid="composer-attach-button"]',
     );
+    const stopButton = renderedContainer.querySelector(
+      'button[aria-label="Stop"]',
+    );
+    const sendButton = renderedContainer.querySelector(
+      'button[aria-label="Send"]',
+    );
 
     expect(textarea.disabled).toBe(false);
     expect(textarea.placeholder).toBe('Ask Qwen Code about example-workspace');
@@ -552,6 +558,19 @@ describe('WorkspacePage', () => {
     expect(
       renderedContainer.querySelector('#composer-attachment-help')?.textContent,
     ).toContain('Attachments are not available yet.');
+    for (const [button, title, className] of [
+      [stopButton, 'Stop generation', 'composer-stop-button'],
+      [sendButton, 'Send message', 'composer-send-button'],
+    ] as const) {
+      expect(button).toBeInstanceOf(HTMLButtonElement);
+      expect(button?.getAttribute('title')).toBe(title);
+      expect(button?.querySelector('svg')).toBeTruthy();
+      expect(button?.querySelector('.sr-only')).toBeTruthy();
+      expect(button?.classList.contains('composer-action-button')).toBe(true);
+      expect(button?.classList.contains(className)).toBe(true);
+    }
+    expect((stopButton as HTMLButtonElement).disabled).toBe(true);
+    expect((sendButton as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('shows configured settings models in the active composer picker', () => {
@@ -865,6 +884,12 @@ describe('WorkspacePage', () => {
         onSendMessage,
       });
       const textarea = getMessageTextArea(renderedContainer);
+      const sendButton = renderedContainer.querySelector(
+        'button[aria-label="Send"]',
+      );
+
+      expect(sendButton).toBeInstanceOf(HTMLButtonElement);
+      expect((sendButton as HTMLButtonElement).disabled).toBe(false);
 
       act(() => {
         textarea.dispatchEvent(

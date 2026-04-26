@@ -575,6 +575,15 @@ async function assertProjectComposerReady(fileName) {
       actionButtonRects: [...document.querySelectorAll('.composer-actions button')]
         .map((button) => ({
           label: button.getAttribute('aria-label') || button.textContent.trim(),
+          title: button.getAttribute('title') || '',
+          className: button.className,
+          hasIcon: button.querySelector('svg') !== null,
+          hasSrOnly: button.querySelector('.sr-only') !== null,
+          directText: [...button.childNodes]
+            .filter((node) => node.nodeType === Node.TEXT_NODE)
+            .map((node) => node.textContent.trim())
+            .join(''),
+          disabled: button.disabled,
           rect: rectFor(button),
           style: styleFor(button)
         })),
@@ -716,6 +725,41 @@ async function assertProjectComposerReady(fileName) {
     }
   }
 
+  const actionByLabel = new Map(
+    snapshot.actionButtonRects.map((button) => [button.label, button]),
+  );
+  const stopAction = actionByLabel.get('Stop');
+  const sendAction = actionByLabel.get('Send');
+  if (!stopAction || !sendAction) {
+    throw new Error(
+      `Composer actions are missing Stop/Send controls: ${JSON.stringify(
+        snapshot.actionButtonRects,
+      )}`,
+    );
+  }
+
+  for (const [label, expected] of [
+    ['Stop', { title: 'Stop generation', disabled: true }],
+    ['Send', { title: 'Send message', disabled: true }],
+  ]) {
+    const button = actionByLabel.get(label);
+    if (
+      !button ||
+      button.title !== expected.title ||
+      button.disabled !== expected.disabled ||
+      !button.hasIcon ||
+      !button.hasSrOnly ||
+      button.directText !== '' ||
+      !button.className.includes('composer-action-button')
+    ) {
+      throw new Error(
+        `Composer ${label} control is not icon-led and accessible: ${JSON.stringify(
+          button,
+        )}`,
+      );
+    }
+  }
+
   for (const button of snapshot.actionButtonRects) {
     if (!button.rect || !button.style) {
       throw new Error(
@@ -723,7 +767,7 @@ async function assertProjectComposerReady(fileName) {
       );
     }
 
-    if (button.rect.height > 27 || button.style.fontSize > 11.7) {
+    if (button.rect.width > 32 || button.rect.height > 32) {
       throw new Error(
         `Composer action scale regressed: ${JSON.stringify(button)}`,
       );
@@ -3161,6 +3205,21 @@ async function assertConversationSurfaceFidelity(fileName) {
     const composerTextarea = composer?.querySelector(
       'textarea[aria-label="Message"]'
     );
+    const composerActionButtons = [
+      ...document.querySelectorAll('.composer-actions button')
+    ].map((button) => ({
+      label: button.getAttribute('aria-label') || button.textContent.trim(),
+      title: button.getAttribute('title') || '',
+      className: button.className,
+      hasIcon: button.querySelector('svg') !== null,
+      hasSrOnly: button.querySelector('.sr-only') !== null,
+      directText: [...button.childNodes]
+        .filter((node) => node.nodeType === Node.TEXT_NODE)
+        .map((node) => node.textContent.trim())
+        .join(''),
+      disabled: button.disabled,
+      rect: rectFor(button)
+    }));
     const actionButtons = assistantMessage
       ? [
           ...assistantMessage.querySelectorAll(
@@ -3223,7 +3282,8 @@ async function assertConversationSurfaceFidelity(fileName) {
       timelineText: timeline?.innerText ?? '',
       composer: {
         rect: rectFor(composer),
-        textareaRect: rectFor(composerTextarea)
+        textareaRect: rectFor(composerTextarea),
+        actionButtons: composerActionButtons
       },
       actionButtons: actionButtons.map((button) => ({
         label: button.getAttribute('aria-label') || '',
@@ -3516,6 +3576,11 @@ async function assertConversationSurfaceFidelity(fileName) {
     );
   }
 
+  assertComposerActionButtons(snapshot.composer.actionButtons, {
+    sendDisabled: true,
+    stopDisabled: true,
+  });
+
   for (const button of snapshot.actionButtons) {
     if (!button.rect || !button.style) {
       throw new Error(
@@ -3551,6 +3616,40 @@ async function assertConversationSurfaceFidelity(fileName) {
         snapshot.document,
       )}`,
     );
+  }
+}
+
+function assertComposerActionButtons(
+  actionButtons,
+  { sendDisabled, stopDisabled },
+) {
+  const actionByLabel = new Map(
+    actionButtons.map((button) => [button.label, button]),
+  );
+
+  for (const [label, expected] of [
+    ['Stop', { title: 'Stop generation', disabled: stopDisabled }],
+    ['Send', { title: 'Send message', disabled: sendDisabled }],
+  ]) {
+    const button = actionByLabel.get(label);
+    if (
+      !button ||
+      button.title !== expected.title ||
+      button.disabled !== expected.disabled ||
+      !button.hasIcon ||
+      !button.hasSrOnly ||
+      button.directText !== '' ||
+      !button.className.includes('composer-action-button') ||
+      !button.rect ||
+      button.rect.width > 32 ||
+      button.rect.height > 32
+    ) {
+      throw new Error(
+        `Composer ${label} control is not compact and icon-led: ${JSON.stringify(
+          button,
+        )}`,
+      );
+    }
   }
 }
 
@@ -3634,6 +3733,21 @@ async function assertCompactDenseConversationLayout(fileName) {
       '[data-testid="conversation-changes-summary"]'
     );
     const composer = document.querySelector('[data-testid="message-composer"]');
+    const composerActionButtons = [
+      ...document.querySelectorAll('.composer-actions button')
+    ].map((button) => ({
+      label: button.getAttribute('aria-label') || button.textContent.trim(),
+      title: button.getAttribute('title') || '',
+      className: button.className,
+      hasIcon: button.querySelector('svg') !== null,
+      hasSrOnly: button.querySelector('.sr-only') !== null,
+      directText: [...button.childNodes]
+        .filter((node) => node.nodeType === Node.TEXT_NODE)
+        .map((node) => node.textContent.trim())
+        .join(''),
+      disabled: button.disabled,
+      rect: rectFor(button)
+    }));
     const terminal = document.querySelector('[data-testid="terminal-drawer"]');
     const terminalBody = document.querySelector('[data-testid="terminal-body"]');
     const terminalToggle = document.querySelector(
@@ -3746,6 +3860,7 @@ async function assertCompactDenseConversationLayout(fileName) {
       actions: rectFor(actions),
       summary: rectFor(summary),
       composer: composerRect,
+      composerActionButtons,
       terminal: rectFor(terminal),
       terminalToggle: rectFor(terminalToggle),
       terminalProject: rectFor(terminalProject),
@@ -4131,6 +4246,11 @@ async function assertCompactDenseConversationLayout(fileName) {
     );
   }
 
+  assertComposerActionButtons(snapshot.composerActionButtons, {
+    sendDisabled: true,
+    stopDisabled: true,
+  });
+
   if (!snapshot.messageContained) {
     throw new Error('Dense assistant message escaped the compact timeline.');
   }
@@ -4285,6 +4405,20 @@ async function assertReviewDrawerLayout(fileName) {
         height: rect.height
       };
     };
+    const rectForElement = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
 
     return {
       viewport: {
@@ -4314,6 +4448,21 @@ async function assertReviewDrawerLayout(fileName) {
         label: button.getAttribute('aria-label') || '',
         width: button.getBoundingClientRect().width,
         height: button.getBoundingClientRect().height
+      })),
+      composerActionButtons: [
+        ...document.querySelectorAll('.composer-actions button')
+      ].map((button) => ({
+        label: button.getAttribute('aria-label') || button.textContent.trim(),
+        title: button.getAttribute('title') || '',
+        className: button.className,
+        hasIcon: button.querySelector('svg') !== null,
+        hasSrOnly: button.querySelector('.sr-only') !== null,
+        directText: [...button.childNodes]
+          .filter((node) => node.nodeType === Node.TEXT_NODE)
+          .map((node) => node.textContent.trim())
+          .join(''),
+        disabled: button.disabled,
+        rect: rectForElement(button)
       })),
       hasSegmentedTabs: document.querySelector('.topbar-nav') !== null
     };
@@ -4403,6 +4552,11 @@ async function assertReviewDrawerLayout(fileName) {
     );
   }
 
+  assertComposerActionButtons(metrics.composerActionButtons, {
+    sendDisabled: true,
+    stopDisabled: true,
+  });
+
   if (metrics.document.bodyScrollHeight > metrics.viewport.height + 4) {
     throw new Error(
       `Review drawer document should fit one viewport; body scrollHeight=${metrics.document.bodyScrollHeight}, viewport=${metrics.viewport.height}`,
@@ -4431,6 +4585,20 @@ async function assertCompactReviewDrawerLayout(fileName) {
   const metrics = await evaluate(`(() => {
     const rectFor = (selector) => {
       const element = document.querySelector(selector);
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const rectForElement = (element) => {
       if (!element) {
         return null;
       }
@@ -4528,6 +4696,21 @@ async function assertCompactReviewDrawerLayout(fileName) {
         label: button.getAttribute('aria-label') || '',
         width: button.getBoundingClientRect().width,
         height: button.getBoundingClientRect().height
+      })),
+      composerActionButtons: [
+        ...document.querySelectorAll('.composer-actions button')
+      ].map((button) => ({
+        label: button.getAttribute('aria-label') || button.textContent.trim(),
+        title: button.getAttribute('title') || '',
+        className: button.className,
+        hasIcon: button.querySelector('svg') !== null,
+        hasSrOnly: button.querySelector('.sr-only') !== null,
+        directText: [...button.childNodes]
+          .filter((node) => node.nodeType === Node.TEXT_NODE)
+          .map((node) => node.textContent.trim())
+          .join(''),
+        disabled: button.disabled,
+        rect: rectForElement(button)
       })),
       reviewButtons,
       changedFileRows,
@@ -4726,6 +4909,11 @@ async function assertCompactReviewDrawerLayout(fileName) {
       `Compact review textarea should stay short: ${metrics.composerTextareaHeight}`,
     );
   }
+
+  assertComposerActionButtons(metrics.composerActionButtons, {
+    sendDisabled: true,
+    stopDisabled: true,
+  });
 
   for (const [key, contained] of Object.entries(metrics.containment)) {
     if (!contained) {

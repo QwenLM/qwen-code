@@ -24,6 +24,8 @@ import {
   CopyIcon,
   DiffIcon,
   RefreshIcon,
+  SendIcon,
+  StopIcon,
 } from './SidebarIcons.js';
 
 export function ChatThread({
@@ -194,19 +196,25 @@ export function ChatThread({
               <span className="composer-context-note">New thread</span>
             ) : null}
             <button
-              className="secondary-button"
+              aria-label="Stop"
+              className="composer-action-button composer-stop-button"
               disabled={!chatState.streaming}
+              title="Stop generation"
               type="button"
               onClick={onStopGeneration}
             >
-              Stop
+              <StopIcon />
+              <span className="sr-only">Stop</span>
             </button>
             <button
-              className="primary-button"
+              aria-label="Send"
+              className="composer-action-button composer-send-button"
               disabled={!canCompose || messageText.trim().length === 0}
+              title="Send message"
               type="submit"
             >
-              Send
+              <SendIcon />
+              <span className="sr-only">Send</span>
             </button>
           </div>
         </div>

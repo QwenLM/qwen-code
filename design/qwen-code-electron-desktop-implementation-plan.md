@@ -22,6 +22,105 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Composer Send/Stop Icon Density
+
+Status: completed in iteration 53.
+
+Goal: make the composer send and stop controls read as compact icon-led task
+controls, matching the `home.jpg` control-center shape more closely without
+changing send, stop, or keyboard behavior.
+
+User-visible value: the bottom composer gives more space to project, branch,
+permission, and model context while the primary send/stop affordances feel like
+desktop-native tool controls instead of text-heavy form buttons.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/composer-send-stop-icon-density.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Composer Stop and Send controls render as icon-led buttons with stable
+  `aria-label`, `title`, icon, and screen-reader text.
+- Stop remains disabled unless generation is streaming; Send remains disabled
+  with an empty message or no project and still submits normally through click
+  and Enter.
+- Composer action controls stay within compact geometry at default, compact,
+  and review-open Electron viewports without horizontal overflow.
+- Existing attachment, permission mode, model picker, project/branch chips,
+  new-thread indicator, retry draft, terminal attach, settings, branch, review,
+  and approval workflows remain unchanged.
+- No visible text button chrome or oversized button geometry is introduced in
+  the first viewport.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, inspect the project-scoped composer before a thread exists,
+  send the first prompt through the icon-led Send control, approve the fake
+  command, inspect the populated conversation and compact viewport composer,
+  attach terminal output and send a follow-up prompt through the same control.
+- E2E assertions: composer action buttons expose accessible labels and
+  tooltips, contain icons plus `.sr-only` text, keep bounded icon geometry, do
+  not rely on visible text button width, do not overflow composer rows, and no
+  console errors or failed local requests are recorded.
+- Diagnostic artifacts: updated `project-composer.json`,
+  `conversation-surface-fidelity.json`, `compact-dense-conversation.json`,
+  review/terminal screenshots, Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for the narrow autonomous design
+  choice among hiding Stop, keeping text buttons, or using icon-led controls;
+  `frontend-design` for prototype-constrained composer hierarchy; and
+  `electron-desktop-dev` for real Electron CDP verification of renderer
+  behavior.
+
+Notes and decisions:
+
+- The preferred implementation keeps both controls present and accessible.
+  Hiding Stop until streaming would reduce chrome, but it would shift action
+  layout between idle and running states. Compact icon-led controls preserve a
+  stable control row while reducing visual weight.
+- No new icon dependency is needed; the local `SendIcon` and `StopIcon` match
+  the existing desktop icon style.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 22 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T19-13-34-084Z/`.
+- Key recorded metrics: `project-composer.json` recorded Stop as
+  `28 x 28` and Send as `30 x 30`, both with `aria-label`, `title`, icon,
+  `.sr-only` text, empty direct text nodes, and disabled idle state;
+  default, compact, and compact review snapshots recorded no composer,
+  composer-context, or composer-actions overflow; `summary.json` recorded zero
+  console errors and zero failed local requests.
+
+Next work:
+
+- Continue composer fidelity by replacing the native select chrome with a
+  compact, icon-led model/permission control that remains keyboard accessible.
+- Add compact containment coverage for very long localized permission/model
+  labels now that action buttons no longer consume text-button width.
+
 ### Slice: Compact Conversation Text Containment
 
 Status: completed in iteration 52.
