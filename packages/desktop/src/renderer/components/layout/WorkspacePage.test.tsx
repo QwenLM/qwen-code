@@ -73,6 +73,25 @@ describe('WorkspacePage', () => {
         '[data-testid="sidebar-footer-settings"]',
       ),
     ).toBeTruthy();
+    expect(
+      [
+        ...renderedContainer.querySelectorAll('.sidebar-section-heading h2'),
+      ].map((heading) => heading.textContent),
+    ).toEqual(['Projects']);
+    expect(
+      renderedContainer
+        .querySelector('[data-testid="project-list"]')
+        ?.contains(
+          renderedContainer.querySelector('[data-testid="thread-list"]'),
+        ),
+    ).toBe(true);
+    expect(
+      renderedContainer
+        .querySelector('[data-testid="sidebar-active-project-group"]')
+        ?.contains(
+          renderedContainer.querySelector('[data-testid="thread-list"]'),
+        ),
+    ).toBe(true);
 
     expect(renderedContainer.textContent).toContain('example-workspace');
     expect(renderedContainer.textContent).toContain('main');
@@ -83,6 +102,10 @@ describe('WorkspacePage', () => {
       renderedContainer.querySelector('[data-testid="project-sidebar"]')
         ?.textContent,
     ).not.toContain('src/index.ts');
+    expect(
+      renderedContainer.querySelector('[data-testid="project-sidebar"]')
+        ?.textContent,
+    ).not.toContain('Threads');
     expect(renderedContainer.textContent).toContain('Terminal');
     expect(renderedContainer.textContent).toContain('Idle');
     expect(renderedContainer.textContent).toContain('No recent command');

@@ -22,6 +22,104 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Active Project Thread Grouping
+
+Status: completed in iteration 69.
+
+Goal: make the populated sidebar read as a grouped project/thread browser like
+`home.jpg`, instead of separate Projects and Threads blocks that repeat context
+and make the active task feel disconnected from its project.
+
+User-visible value: recent projects stay visible, while the active project's
+threads sit directly beneath that project row with compact indentation and no
+extra `Threads` band competing with the project hierarchy.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ProjectSidebar.tsx`
+- `packages/desktop/src/renderer/components/layout/ThreadList.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/sidebar-active-project-thread-grouping.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The sidebar uses one project browser section, with the active project's
+  thread list nested under the active project row.
+- Recent inactive project rows remain selectable and keep compact branch/dirty
+  metadata.
+- The existing `project-list` and `thread-list` landmarks remain available for
+  component tests and real Electron CDP checks.
+- Thread rows remain compact, titles stay normalized, and no raw branch names,
+  local URLs, session IDs, full paths, or debug protocol text appear in visible
+  sidebar chrome.
+- The footer settings action remains pinned at the bottom without overlapping
+  the grouped browser at desktop and compact viewport sizes.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open both fake Git projects, switch back to the dirty project,
+  create the fake ACP thread, inspect the populated sidebar hierarchy, then
+  continue the existing composer, branch, review, settings, terminal, relaunch,
+  and compact viewport workflows.
+- E2E assertions: `thread-list` is contained by the active project group inside
+  `project-list`; no standalone Threads section heading is visible; project and
+  thread rows stay compact and contained; the active compact thread title is
+  visible without endpoint/path/protocol leaks; no console errors or failed
+  local requests are recorded.
+- Diagnostic artifacts: updated `sidebar-app-rail.json`,
+  `topbar-context-fidelity.json`, screenshots, Electron log, and `summary.json`
+  under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` using the Ralph prompt, current
+  implementation memory, and `home.jpg` as the requirements source without a
+  blocking user question; `frontend-design` with the prototype as the visual
+  contract and grouped navigation as the design direction; `electron-desktop-dev`
+  for renderer behavior verified through component coverage and real Electron
+  CDP.
+
+Notes and decisions:
+
+- This slice groups only the active project's loaded sessions because the
+  current renderer receives session summaries for the active project, not a
+  cross-project thread index.
+- The grouped structure keeps existing project/session callbacks and test IDs,
+  limiting behavioral risk while moving the visible hierarchy closer to the
+  prototype.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 28 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T22-24-04-149Z/`.
+- Key recorded metrics: `sidebar-app-rail.json` recorded a single `Projects`
+  heading, `threadListInsideProjectList: true`,
+  `threadListInsideActiveProject: true`, a 244 px sidebar, a 28 px active
+  thread row, no horizontal row overflow, zero console errors, and zero failed
+  local requests.
+
+Next work:
+
+- Continue populated-sidebar fidelity by adding lightweight per-project thread
+  previews once a cross-project session index is available.
+- Consider tightening remaining sidebar row text weight and project-row
+  metadata spacing against `home.jpg` after the grouped hierarchy settles.
+
 ### Slice: Thread Title Local Endpoint Tail Restraint
 
 Status: completed in iteration 68.

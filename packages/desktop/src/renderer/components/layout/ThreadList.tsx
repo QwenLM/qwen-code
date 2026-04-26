@@ -10,25 +10,28 @@ import { OpenThreadIcon } from './SidebarIcons.js';
 
 export function ThreadList({
   activeSessionId,
+  ariaLabel = 'Threads',
+  className,
   isDraftSession,
   sessions,
   onSelect,
 }: {
   activeSessionId: string | null;
+  ariaLabel?: string;
+  className?: string;
   isDraftSession: boolean;
   sessions: DesktopSessionSummary[];
   onSelect: (sessionId: string) => void;
 }) {
-  if (!isDraftSession && sessions.length === 0) {
-    return <div className="empty-row">No sessions</div>;
-  }
-
   return (
     <div
-      className="session-list"
-      aria-label="Threads"
+      className={className ? `session-list ${className}` : 'session-list'}
+      aria-label={ariaLabel}
       data-testid="thread-list"
     >
+      {!isDraftSession && sessions.length === 0 ? (
+        <div className="empty-row">No sessions</div>
+      ) : null}
       {isDraftSession ? (
         <div
           className="session-row session-row-active session-row-draft"

@@ -94,23 +94,14 @@ export function ProjectSidebar({
           <h2>Projects</h2>
           <span>{projects.length}</span>
         </div>
-        <ProjectList
+        <ProjectBrowser
           activeProjectId={activeProjectId}
-          projects={projects}
-          onSelect={onSelectProject}
-        />
-      </section>
-
-      <section className="sidebar-section sidebar-section-fill">
-        <div className="sidebar-section-heading">
-          <h2>Threads</h2>
-          <span>{isDraftSession ? sessions.length + 1 : sessions.length}</span>
-        </div>
-        <ThreadList
           activeSessionId={activeSessionId}
           isDraftSession={isDraftSession}
+          projects={projects}
           sessions={sessions}
-          onSelect={onSelectSession}
+          onSelect={onSelectProject}
+          onSelectSession={onSelectSession}
         />
       </section>
       <div className="sidebar-footer">
@@ -130,67 +121,123 @@ export function ProjectSidebar({
   );
 }
 
-function ProjectList({
+function ProjectBrowser({
   activeProjectId,
+  activeSessionId,
+  isDraftSession,
   projects,
+  sessions,
   onSelect,
+  onSelectSession,
 }: {
   activeProjectId: string | null;
+  activeSessionId: string | null;
+  isDraftSession: boolean;
   projects: DesktopProject[];
+  sessions: DesktopSessionSummary[];
   onSelect: (projectId: string) => void;
+  onSelectSession: (sessionId: string) => void;
 }) {
   if (projects.length === 0) {
-    return <div className="empty-row">No folder selected</div>;
+    return (
+      <div
+        className="project-list project-list-grouped"
+        aria-label="Projects"
+        data-testid="project-list"
+      >
+        <div className="empty-row">No folder selected</div>
+        <ThreadList
+          activeSessionId={activeSessionId}
+          ariaLabel="Threads"
+          className="project-thread-list"
+          isDraftSession={false}
+          sessions={[]}
+          onSelect={onSelectSession}
+        />
+      </div>
+    );
   }
 
   return (
     <div
-      className="project-list"
+      className="project-list project-list-grouped"
       aria-label="Projects"
       data-testid="project-list"
     >
       {projects.map((project) => {
         const meta = getProjectMeta(project);
+        const isActiveProject = project.id === activeProjectId;
         return (
-          <button
-            aria-label={formatProjectAriaLabel(project, meta)}
+          <div
             className={
-              project.id === activeProjectId
-                ? 'project-row project-row-active'
-                : 'project-row'
+              isActiveProject
+                ? 'sidebar-project-group sidebar-project-group-active'
+                : 'sidebar-project-group'
             }
-            data-testid="project-row"
+            data-testid={
+              isActiveProject
+                ? 'sidebar-active-project-group'
+                : 'sidebar-project-group'
+            }
             key={project.id}
-            onClick={() => onSelect(project.id)}
-            title={formatProjectTitle(project, meta)}
-            type="button"
           >
-            <FolderIcon className="project-row-icon" />
-            <span className="project-row-copy">
-              <span className="project-row-name" data-testid="project-row-name">
-                {project.name}
-              </span>
-              <span className="project-row-meta" data-testid="project-row-meta">
+            <button
+              aria-label={formatProjectAriaLabel(project, meta)}
+              className={
+                isActiveProject
+                  ? 'project-row project-row-active'
+                  : 'project-row'
+              }
+              data-testid="project-row"
+              onClick={() => onSelect(project.id)}
+              title={formatProjectTitle(project, meta)}
+              type="button"
+            >
+              <FolderIcon className="project-row-icon" />
+              <span className="project-row-copy">
                 <span
-                  className="project-row-branch"
-                  data-testid="project-row-branch"
-                  title={meta.branchTitle}
+                  className="project-row-name"
+                  data-testid="project-row-name"
                 >
-                  {meta.isRepository ? <BranchIcon /> : null}
-                  <span>{meta.branchLabel}</span>
+                  {project.name}
                 </span>
-                {meta.dirtyLabel ? (
+                <span
+                  className="project-row-meta"
+                  data-testid="project-row-meta"
+                >
                   <span
-                    className="project-row-dirty"
-                    data-testid="project-row-dirty"
-                    title={meta.dirtyTitle ?? undefined}
+                    className="project-row-branch"
+                    data-testid="project-row-branch"
+                    title={meta.branchTitle}
                   >
-                    {meta.dirtyLabel}
+                    {meta.isRepository ? <BranchIcon /> : null}
+                    <span>{meta.branchLabel}</span>
                   </span>
-                ) : null}
+                  {meta.dirtyLabel ? (
+                    <span
+                      className="project-row-dirty"
+                      data-testid="project-row-dirty"
+                      title={meta.dirtyTitle ?? undefined}
+                    >
+                      {meta.dirtyLabel}
+                    </span>
+                  ) : null}
+                </span>
               </span>
-            </span>
-          </button>
+            </button>
+            {isActiveProject ? (
+              <div className="project-thread-group">
+                <ThreadList
+                  activeSessionId={activeSessionId}
+                  ariaLabel={`Threads in ${project.name}`}
+                  className="project-thread-list"
+                  isDraftSession={isDraftSession}
+                  sessions={sessions}
+                  onSelect={onSelectSession}
+                />
+              </div>
+            ) : null}
+          </div>
         );
       })}
     </div>

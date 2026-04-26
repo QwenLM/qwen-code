@@ -185,7 +185,7 @@ summary:focus-visible {
 }
 
 .project-navigator {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
 }
 
 .sidebar-section h2,
@@ -275,11 +275,38 @@ summary:focus-visible {
 }
 
 .project-list {
-  max-height: 112px;
+  flex: 1;
 }
 
 .session-list {
   flex: 1;
+}
+
+.project-list-grouped {
+  gap: 3px;
+}
+
+.sidebar-project-group {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.sidebar-project-group-active {
+  padding-bottom: 2px;
+}
+
+.project-thread-group {
+  display: grid;
+  min-width: 0;
+  margin: 1px 0 5px 12px;
+  padding-left: 6px;
+  border-left: 1px solid rgba(213, 224, 255, 0.08);
+}
+
+.project-thread-group .session-list {
+  overflow: visible;
+  padding: 0;
 }
 
 .project-row,
@@ -309,6 +336,17 @@ summary:focus-visible {
   grid-template-columns: minmax(0, 1fr) auto;
   column-gap: 5px;
   padding: 3px 6px 3px 22px;
+}
+
+.project-thread-group .session-row {
+  min-height: 28px;
+  padding: 3px 5px 3px 10px;
+}
+
+.project-thread-group .empty-row {
+  min-height: 24px;
+  padding: 4px 6px;
+  font-size: 10.4px;
 }
 
 .project-row-active,

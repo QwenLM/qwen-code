@@ -1406,6 +1406,9 @@ async function assertSidebarAppRail(fileName) {
     );
     const projectList = document.querySelector('[data-testid="project-list"]');
     const threadList = document.querySelector('[data-testid="thread-list"]');
+    const activeProjectGroup = document.querySelector(
+      '[data-testid="sidebar-active-project-group"]'
+    );
     const rowSelector =
       '.sidebar-action-row, .project-row, .session-row';
     const rows = [...document.querySelectorAll(rowSelector)].map((row) => {
@@ -1454,6 +1457,9 @@ async function assertSidebarAppRail(fileName) {
     const headingStyles = [
       ...document.querySelectorAll('.sidebar-section-heading h2')
     ].map((heading) => styleFor(heading));
+    const headingLabels = [
+      ...document.querySelectorAll('.sidebar-section-heading h2')
+    ].map((heading) => heading.textContent.trim());
     const projectTitleStyles = [
       ...document.querySelectorAll('.project-row-name')
     ].map((title) => styleFor(title));
@@ -1477,7 +1483,13 @@ async function assertSidebarAppRail(fileName) {
       footerSettings: rectFor(footerSettings),
       projectList: rectFor(projectList),
       threadList: rectFor(threadList),
+      activeProjectGroup: rectFor(activeProjectGroup),
       hasLegacyToolbar: document.querySelector('.sidebar-toolbar') !== null,
+      headingLabels,
+      threadListInsideProjectList: Boolean(projectList?.contains(threadList)),
+      threadListInsideActiveProject: Boolean(
+        activeProjectGroup?.contains(threadList)
+      ),
       appActionLabels: appActions
         ? [...appActions.querySelectorAll('button')].map(
             (button) => button.getAttribute('aria-label') || ''
@@ -1517,6 +1529,7 @@ async function assertSidebarAppRail(fileName) {
     'footerSettings',
     'projectList',
     'threadList',
+    'activeProjectGroup',
   ].filter((key) => metrics[key] === null);
   if (missing.length > 0) {
     throw new Error(`Missing sidebar app rail rects: ${missing.join(', ')}`);
@@ -1524,6 +1537,34 @@ async function assertSidebarAppRail(fileName) {
 
   if (metrics.hasLegacyToolbar) {
     throw new Error('Sidebar should not render the old project toolbar.');
+  }
+
+  if (
+    metrics.headingLabels.length !== 1 ||
+    metrics.headingLabels[0] !== 'Projects'
+  ) {
+    throw new Error(
+      `Sidebar should use one grouped project browser heading: ${JSON.stringify(
+        metrics.headingLabels,
+      )}`,
+    );
+  }
+
+  if (
+    !metrics.threadListInsideProjectList ||
+    !metrics.threadListInsideActiveProject
+  ) {
+    throw new Error(
+      `Sidebar thread list should be nested under the active project: ${JSON.stringify(
+        {
+          threadListInsideProjectList: metrics.threadListInsideProjectList,
+          threadListInsideActiveProject: metrics.threadListInsideActiveProject,
+          activeProjectGroup: metrics.activeProjectGroup,
+          projectList: metrics.projectList,
+          threadList: metrics.threadList,
+        },
+      )}`,
+    );
   }
 
   for (const expectedLabel of ['New Thread', 'Open Project', 'Models']) {
