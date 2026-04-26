@@ -22,6 +22,113 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Conversation Message Typography Density Pass
+
+Status: completed in iteration 25.
+
+Goal: reduce the remaining oversized message and plan typography in the first
+viewport so assistant prose, user prompts, plan rows, tool activity, changed
+files, and composer controls share the compact conversation-first hierarchy
+shown in `home.jpg`.
+
+User-visible value: users can scan more agent context above the composer
+without the user bubble, plan rows, or assistant prose reading like large
+dashboard cards. The conversation remains the main surface while activity rails
+and changed-file summaries stay secondary.
+
+Expected files:
+
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/conversation-message-density.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Regular message prose uses a tighter desktop workbench type scale while
+  remaining readable.
+- The user prompt bubble is shorter and no longer spends vertical space on a
+  redundant role label.
+- Plan rows use compact status labels and spacing without overflowing the
+  timeline.
+- Compact `960x640` conversation screenshots show the assistant message,
+  file chips, actions, changed-files summary, composer, and terminal strip
+  contained in the first viewport.
+- No ACP/session/internal IDs are introduced in the main conversation.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, send a prompt, approve the command,
+  assert the user bubble, assistant prose, plan rows, changed-files summary, and
+  compact viewport geometry, then continue the existing assistant actions,
+  branch, review, settings, terminal, discard safety, and commit workflows.
+- E2E assertions: message paragraph font sizes remain below the previous 14 px
+  default, user prompt height is bounded, plan item type and line height stay
+  compact, compact assistant message height is bounded, and no console errors or
+  failed local requests are recorded.
+- Diagnostic artifacts: `conversation-surface-fidelity.json`,
+  `conversation-surface-fidelity.png`, `compact-dense-conversation.json`,
+  `compact-dense-conversation.png`, Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for choosing a narrow prototype
+  fidelity slice without asking for routine product decisions,
+  `frontend-design` for prototype-constrained density and hierarchy, and
+  `electron-desktop-dev` for real Electron CDP verification.
+
+Notes and decisions:
+
+- The user prompt bubble no longer renders the redundant uppercase role label.
+  This removes debug-style chrome from the main conversation and saves vertical
+  space without hiding any task content.
+- Message prose now uses a 13 px workbench type scale with tighter line height.
+  The screenshot still reads comfortably, but the assistant response no longer
+  dominates the first viewport like a large card.
+- Plan rows were compacted, then adjusted after screenshot review because the
+  first pass let `IN_PROGRESS` visually collide with the row text. The final
+  CSS keeps a fixed label gutter and margin while preserving the ordered list
+  markers.
+- The CDP harness now measures actual rendered font size, line height, user
+  bubble height, hidden user-role display, plan row density, and compact
+  assistant message height.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed before and after the plan-label spacing fix.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 15 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed before and after the spacing
+  fix.
+- `cd packages/desktop && npm run e2e:cdp` first passed at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T03-26-40-440Z/`.
+  Screenshot review found the plan status/text spacing issue, so the CSS was
+  fixed and the full CDP smoke passed again at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T03-27-41-142Z/`.
+- Key recorded metrics from the final pass: assistant paragraph font `13` px
+  and line height `19.24` px, user prompt height `37.234375` px with user role
+  `display: none`, plan item font `12` px and line height `16.32` px, plan
+  block height `68.625` px, default assistant message height `163.9375` px,
+  compact assistant message height `213.171875` px, no document overflow, no
+  console errors, and no failed local requests.
+
+Next work:
+
+- Continue prototype fidelity by reducing the heavy sidebar/topbar typography
+  and icon button scale visible in the latest screenshots.
+- Resume the model configuration workflow from the composer model picker once
+  the first-viewport density issues are stable.
+
 ### Completed Slice: Compact Agent Activity Rails
 
 Status: completed in iteration 24.

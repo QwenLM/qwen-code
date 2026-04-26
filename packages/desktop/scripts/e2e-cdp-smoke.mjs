@@ -2246,7 +2246,11 @@ async function assertConversationSurfaceFidelity(fileName) {
         borderRightWidth: numberFromPixel(style.borderRightWidth),
         borderBottomWidth: numberFromPixel(style.borderBottomWidth),
         borderLeftWidth: numberFromPixel(style.borderLeftWidth),
-        borderRadius: style.borderTopLeftRadius
+        borderRadius: style.borderTopLeftRadius,
+        display: style.display,
+        fontSize: numberFromPixel(style.fontSize),
+        fontWeight: style.fontWeight,
+        lineHeight: numberFromPixel(style.lineHeight)
       };
     };
     const assistantMessage = [
@@ -2255,6 +2259,11 @@ async function assertConversationSurfaceFidelity(fileName) {
       candidate.innerText.includes('E2E fake ACP response received')
     );
     const userMessage = document.querySelector('.chat-message-user');
+    const assistantParagraph = assistantMessage?.querySelector('p');
+    const userRole = userMessage?.querySelector('.message-role');
+    const userParagraph = userMessage?.querySelector('p');
+    const plan = document.querySelector('.chat-plan');
+    const planItem = plan?.querySelector('li');
     const summary = document.querySelector(
       '[data-testid="conversation-changes-summary"]'
     );
@@ -2285,6 +2294,23 @@ async function assertConversationSurfaceFidelity(fileName) {
       user: {
         rect: rectFor(userMessage),
         style: styleFor(userMessage)
+      },
+      assistantParagraph: {
+        rect: rectFor(assistantParagraph),
+        style: styleFor(assistantParagraph)
+      },
+      userRole: {
+        rect: rectFor(userRole),
+        style: styleFor(userRole)
+      },
+      userParagraph: {
+        rect: rectFor(userParagraph),
+        style: styleFor(userParagraph)
+      },
+      plan: {
+        rect: rectFor(plan),
+        itemRect: rectFor(planItem),
+        itemStyle: styleFor(planItem)
       },
       summary: {
         rect: rectFor(summary),
@@ -2320,6 +2346,13 @@ async function assertConversationSurfaceFidelity(fileName) {
     !snapshot.assistant.style ||
     !snapshot.user.rect ||
     !snapshot.user.style ||
+    !snapshot.assistantParagraph.rect ||
+    !snapshot.assistantParagraph.style ||
+    !snapshot.userParagraph.rect ||
+    !snapshot.userParagraph.style ||
+    !snapshot.plan.rect ||
+    !snapshot.plan.itemRect ||
+    !snapshot.plan.itemStyle ||
     !snapshot.summary.rect ||
     !snapshot.summary.style ||
     !snapshot.summary.actionRect ||
@@ -2332,6 +2365,48 @@ async function assertConversationSurfaceFidelity(fileName) {
       `Conversation surface fidelity metrics are missing: ${JSON.stringify(
         snapshot,
       )}`,
+    );
+  }
+
+  if (
+    snapshot.assistantParagraph.style.fontSize > 13.5 ||
+    snapshot.assistantParagraph.style.lineHeight > 20
+  ) {
+    throw new Error(
+      `Assistant prose type scale is too large: ${JSON.stringify(
+        snapshot.assistantParagraph.style,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.userParagraph.style.fontSize > 13.5 ||
+    snapshot.userParagraph.style.lineHeight > 20 ||
+    snapshot.user.rect.height > 54
+  ) {
+    throw new Error(
+      `User prompt bubble should stay compact: ${JSON.stringify({
+        rect: snapshot.user.rect,
+        paragraph: snapshot.userParagraph.style,
+      })}`,
+    );
+  }
+
+  if (snapshot.userRole.style?.display !== 'none') {
+    throw new Error(
+      `User prompt should not spend vertical space on a role label: ${JSON.stringify(
+        snapshot.userRole.style,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.plan.itemStyle.fontSize > 12.5 ||
+    snapshot.plan.itemStyle.lineHeight > 17 ||
+    snapshot.plan.rect.height > 96
+  ) {
+    throw new Error(
+      `Plan rows should stay compact: ${JSON.stringify(snapshot.plan)}`,
     );
   }
 
@@ -2474,6 +2549,21 @@ async function assertCompactDenseConversationLayout(fileName) {
 
   await waitForSelector('[data-testid="assistant-file-references"]');
   const snapshot = await evaluate(`(() => {
+    const numberFromPixel = (value) => {
+      const number = Number.parseFloat(value);
+      return Number.isFinite(number) ? number : 0;
+    };
+    const typeStyleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+
+      const style = window.getComputedStyle(element);
+      return {
+        fontSize: numberFromPixel(style.fontSize),
+        lineHeight: numberFromPixel(style.lineHeight)
+      };
+    };
     const rectFor = (element) => {
       if (!element) {
         return null;
@@ -2524,6 +2614,9 @@ async function assertCompactDenseConversationLayout(fileName) {
     const fileReferences = message?.querySelector(
       '[data-testid="assistant-file-references"]'
     );
+    const messageParagraph = message?.querySelector('p');
+    const plan = document.querySelector('.chat-plan');
+    const planItem = plan?.querySelector('li');
     const actions = message?.querySelector(
       '[data-testid="assistant-message-actions"]'
     );
@@ -2568,6 +2661,9 @@ async function assertCompactDenseConversationLayout(fileName) {
       chat: rectFor(document.querySelector('[data-testid="chat-thread"]')),
       timeline: timelineRect,
       message: messageRect,
+      messageParagraphStyle: typeStyleFor(messageParagraph),
+      plan: rectFor(plan),
+      planItemStyle: typeStyleFor(planItem),
       fileReferences: rectFor(fileReferences),
       actions: rectFor(actions),
       summary: rectFor(summary),
@@ -2655,6 +2751,43 @@ async function assertCompactDenseConversationLayout(fileName) {
   if (missing.length > 0) {
     throw new Error(
       `Missing compact dense conversation rects: ${missing.join(', ')}`,
+    );
+  }
+
+  if (!snapshot.messageParagraphStyle || !snapshot.planItemStyle) {
+    throw new Error(
+      `Compact conversation type metrics are missing: ${JSON.stringify({
+        messageParagraphStyle: snapshot.messageParagraphStyle,
+        planItemStyle: snapshot.planItemStyle,
+      })}`,
+    );
+  }
+
+  if (
+    snapshot.messageParagraphStyle.fontSize > 13.5 ||
+    snapshot.messageParagraphStyle.lineHeight > 20
+  ) {
+    throw new Error(
+      `Compact assistant prose type scale is too large: ${JSON.stringify(
+        snapshot.messageParagraphStyle,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.planItemStyle.fontSize > 12.5 ||
+    snapshot.planItemStyle.lineHeight > 17
+  ) {
+    throw new Error(
+      `Compact plan row type scale is too large: ${JSON.stringify(
+        snapshot.planItemStyle,
+      )}`,
+    );
+  }
+
+  if (snapshot.message.height > 218) {
+    throw new Error(
+      `Compact assistant message should stay dense: ${snapshot.message.height}`,
     );
   }
 

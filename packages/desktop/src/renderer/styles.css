@@ -114,8 +114,8 @@ summary:focus-visible {
 .eyebrow,
 .message-role {
   color: var(--muted);
-  font-size: 11px;
-  font-weight: 800;
+  font-size: 10.5px;
+  font-weight: 780;
   letter-spacing: 0;
   text-transform: uppercase;
 }
@@ -959,7 +959,7 @@ summary:focus-visible {
 .chat-plan {
   display: grid;
   width: min(860px, 100%);
-  gap: 8px;
+  gap: 7px;
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -971,12 +971,17 @@ summary:focus-visible {
 }
 
 .chat-message-user {
-  width: min(560px, 82%);
+  width: min(520px, 78%);
   align-self: flex-end;
-  padding: 10px 12px;
+  gap: 0;
+  padding: 8px 10px;
   border: 1px solid rgba(240, 182, 110, 0.26);
   border-radius: var(--radius);
   background: rgba(240, 182, 110, 0.1);
+}
+
+.chat-message-user .message-role {
+  display: none;
 }
 
 .chat-message-assistant {
@@ -997,8 +1002,8 @@ summary:focus-visible {
 
 .chat-message p {
   color: var(--text);
-  font-size: 14px;
-  line-height: 1.55;
+  font-size: 13px;
+  line-height: 1.48;
   white-space: pre-wrap;
 }
 
@@ -1075,28 +1080,30 @@ summary:focus-visible {
 
 .chat-plan {
   align-self: center;
-  padding: 8px 0 8px 14px;
+  width: min(820px, 100%);
+  padding: 6px 0 6px 12px;
   border-left: 2px solid rgba(85, 166, 255, 0.28);
 }
 
 .chat-plan ol {
   display: grid;
-  gap: 8px;
-  padding-left: 18px;
+  gap: 5px;
+  padding-left: 16px;
 }
 
 .chat-plan li {
   color: var(--text-soft);
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: 12px;
+  line-height: 1.36;
 }
 
 .chat-plan li span {
   display: inline-block;
-  min-width: 84px;
+  min-width: 88px;
+  margin-right: 8px;
   color: var(--muted);
-  font-size: 11px;
-  font-weight: 820;
+  font-size: 10.5px;
+  font-weight: 800;
   text-transform: uppercase;
 }
 
@@ -2350,6 +2357,14 @@ textarea:focus {
   .workspace-grid-review-open .conversation-changes-card,
   .workspace-grid-review-open .conversation-approval-card {
     padding: 10px;
+  }
+
+  .workspace-grid-review-open .chat-message-user {
+    padding: 8px 10px;
+  }
+
+  .workspace-grid-review-open .chat-plan {
+    padding: 6px 0 6px 12px;
   }
 
   .workspace-grid-review-open .chat-message-assistant {
