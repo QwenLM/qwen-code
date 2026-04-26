@@ -477,6 +477,65 @@ describe('WorkspacePage', () => {
     ).toBeTruthy();
   });
 
+  it('opens model provider settings from the sidebar Models action', () => {
+    const renderedContainer = renderWorkspace();
+    const modelsButton = renderedContainer.querySelector(
+      '[data-testid="sidebar-app-actions"] button[aria-label="Models"]',
+    );
+    const settingsButton = renderedContainer.querySelector(
+      '[data-testid="sidebar-footer-settings"]',
+    );
+    const modelsIcon = modelsButton?.querySelector('svg')?.innerHTML ?? '';
+    const settingsIcon = settingsButton?.querySelector('svg')?.innerHTML ?? '';
+
+    expect(modelsButton).toBeInstanceOf(HTMLButtonElement);
+    expect(settingsButton).toBeInstanceOf(HTMLButtonElement);
+    expect(modelsIcon).not.toBe('');
+    expect(settingsIcon).not.toBe('');
+    expect(modelsIcon).not.toBe(settingsIcon);
+
+    act(() => {
+      clickButton(renderedContainer, 'Models');
+    });
+
+    const settingsPage = renderedContainer.querySelector(
+      '[data-testid="settings-page"]',
+    );
+    const providerSelect = renderedContainer.querySelector(
+      '[data-testid="settings-provider-select"]',
+    );
+
+    expect(settingsPage).toBeTruthy();
+    expect(settingsPage?.getAttribute('data-initial-section')).toBe(
+      'settings-model-providers',
+    );
+    expect(providerSelect).toBeInstanceOf(HTMLSelectElement);
+    expect(document.activeElement).toBe(providerSelect);
+    expect(
+      renderedContainer.querySelector('[data-testid="runtime-diagnostics"]'),
+    ).toBeNull();
+
+    act(() => {
+      clickButton(renderedContainer, 'Close Settings');
+    });
+
+    act(() => {
+      clickButton(renderedContainer, 'Settings');
+    });
+
+    const generalSettingsPage = renderedContainer.querySelector(
+      '[data-testid="settings-page"]',
+    );
+    const closeButton = renderedContainer.querySelector(
+      '[data-testid="settings-close-button"]',
+    );
+
+    expect(generalSettingsPage?.getAttribute('data-initial-section')).toBe(
+      'settings-account',
+    );
+    expect(document.activeElement).toBe(closeButton);
+  });
+
   it('keeps sidebar project metadata compact and structured', () => {
     const longBranchName =
       'desktop-e2e/very-long-branch-name-for-topbar-overflow-check';

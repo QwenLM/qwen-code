@@ -22,6 +22,111 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Sidebar Models Settings Entry
+
+Status: completed in iteration 72.
+
+Goal: make the sidebar `Models` app action behave like a product-level model
+configuration entry by opening Settings directly at Model Providers, while the
+footer/topbar Settings actions continue opening the general settings dialog.
+
+User-visible value: users can get from the first-viewport sidebar to provider,
+API key, and model configuration in one click without hunting through the
+settings rail, while the main workbench remains conversation-first.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ProjectSidebar.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.tsx`
+- `packages/desktop/src/renderer/components/layout/SettingsPage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/sidebar-models-settings-entry.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Clicking sidebar `Models` opens the settings drawer with the Model Providers
+  section as the active entry target and focuses the provider selector.
+- Clicking footer/topbar `Settings` still opens the general Settings dialog and
+  focuses the compact close control.
+- The Models app action uses the model icon language instead of sharing the
+  generic settings/sliders glyph.
+- The settings drawer remains right-aligned, keeps conversation context visible,
+  does not expose API keys/secrets, and does not open Advanced Diagnostics by
+  default.
+- Existing sidebar search, project grouping, branch, review, composer,
+  terminal, relaunch, and settings validation workflows remain unchanged.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, click sidebar Models, assert Settings
+  opens with Model Providers targeted and the provider selector focused, close
+  Settings, then continue the existing sidebar search, branch, review,
+  settings, terminal, relaunch, and compact viewport workflows.
+- E2E assertions: sidebar Models remains one of the app actions with an icon;
+  Settings records the model provider target without exposing secrets or
+  diagnostics; the provider selector is focused and visible; closing Settings
+  restores the conversation; the regular Settings entry still focuses Close
+  Settings; no console errors or failed local requests are recorded.
+- Diagnostic artifacts to collect on failure: `sidebar-models-settings-entry.json`,
+  `sidebar-models-settings-entry.png`, Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` using the Ralph prompt and current
+  plan as fixed requirements; `frontend-design` with the prototype as the
+  constraint and a compact model-entry workflow; `electron-desktop-dev` for
+  renderer behavior verified through component coverage and real Electron CDP.
+
+Notes and decisions:
+
+- This slice keeps Settings as the existing drawer rather than introducing a
+  new model modal, because the current settings IA already has a Model
+  Providers section and the product gap is entry/focus, not a new surface.
+- The general Settings path uses an explicit wrapper so React click events
+  cannot accidentally become a section id. Only the sidebar Models path passes
+  `settings-model-providers`.
+- The sidebar Models entry now uses the existing `ModelIcon`, leaving the
+  footer Settings action on the generic sliders/settings glyph so the two
+  commands no longer read as duplicates.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 30 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T23-01-50-592Z/`.
+- Root `npm run build` passed; the existing vscode companion lint warnings
+  remained warnings only.
+- Root `npm run typecheck` passed.
+- Key recorded metrics: `sidebar-models-settings-entry.json` recorded
+  `initialSection: "settings-model-providers"`, `providerFocused: true`,
+  Model Providers visible inside the 620 px settings drawer, an icon-led
+  sidebar Models button with no direct text node overflow, no runtime
+  diagnostics, no visible secret, no retained fake secret value, and no failed
+  local requests or console errors in `summary.json`.
+
+Next work:
+
+- Continue tightening the model configuration workflow by making the composer
+  model picker offer a clear route into Model Providers when no session model
+  options are available or provider validation blocks sending.
+- Continue prototype fidelity by reducing the remaining sidebar app-action text
+  prominence if later screenshots show it still competing with project/thread
+  navigation.
+
 ### Slice: Sidebar Search Escape and Empty State
 
 Status: completed in iteration 71.

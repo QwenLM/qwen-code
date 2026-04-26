@@ -146,6 +146,22 @@ async function main() {
   await assertConversationChangesSummary('conversation-changes-summary.json');
   await waitForSelector('[data-testid="thread-list"]');
   await assertSidebarAppRail('sidebar-app-rail.json');
+  await clickButton('Models');
+  await waitForSelector('[data-testid="settings-page"]');
+  await assertSidebarModelsSettingsEntry('sidebar-models-settings-entry.json');
+  await saveScreenshot('sidebar-models-settings-entry.png');
+  await clickButton('Close Settings');
+  await waitFor(
+    'sidebar Models settings drawer closed',
+    async () =>
+      evaluate(`(() => {
+        return (
+          !document.querySelector('[data-testid="settings-page"]') &&
+          document.querySelector('[data-testid="chat-thread"]') !== null
+        );
+      })()`),
+    5_000,
+  );
   await clickButton('Search');
   await waitForSelector('[data-testid="sidebar-search"]');
   await assertSidebarSearchFilter('sidebar-search-filter.json');
@@ -1872,6 +1888,202 @@ async function assertSidebarAppRail(fileName) {
   ) {
     throw new Error(
       `Sidebar leaked protocol or path noise: ${metrics.sidebarText}`,
+    );
+  }
+}
+
+async function assertSidebarModelsSettingsEntry(fileName) {
+  await waitFor(
+    'sidebar Models opens focused model provider settings',
+    async () =>
+      evaluate(`(() => {
+        const settings = document.querySelector('[data-testid="settings-page"]');
+        const provider = document.querySelector(
+          '[data-testid="settings-provider-select"]'
+        );
+        return (
+          settings?.getAttribute('data-initial-section') ===
+            'settings-model-providers' &&
+          provider !== null &&
+          document.activeElement === provider
+        );
+      })()`),
+    5_000,
+  );
+
+  const snapshot = await evaluate(`(() => {
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        fontSize: Number.parseFloat(style.fontSize),
+        lineHeight: Number.parseFloat(style.lineHeight)
+      };
+    };
+    const overflows = (element) =>
+      Boolean(element && element.scrollWidth > element.clientWidth + 4);
+    const modelsButton = document.querySelector(
+      '[data-testid="sidebar-app-actions"] button[aria-label="Models"]'
+    );
+    const settings = document.querySelector('[data-testid="settings-page"]');
+    const overlay = document.querySelector('[data-testid="settings-overlay"]');
+    const provider = document.querySelector(
+      '[data-testid="settings-provider-select"]'
+    );
+    const modelConfig = document.querySelector('[data-testid="model-config"]');
+    const account = document.querySelector(
+      '[data-testid="settings-account-section"]'
+    );
+    const runtime = document.querySelector('[data-testid="runtime-diagnostics"]');
+    const settingsText = settings?.innerText ?? '';
+    const fieldValues = [...document.querySelectorAll('input, textarea')]
+      .map((field) => field.value ?? '')
+      .join('\\n');
+    return {
+      initialSection:
+        settings?.getAttribute('data-initial-section') ?? null,
+      settingsRole: settings?.getAttribute('role') ?? null,
+      settingsModal: settings?.getAttribute('aria-modal') ?? null,
+      settingsRect: rectFor(settings),
+      overlayRect: rectFor(overlay),
+      modelConfigRect: rectFor(modelConfig),
+      accountRect: rectFor(account),
+      providerLabel: provider?.getAttribute('aria-label') ?? null,
+      providerFocused: document.activeElement === provider,
+      providerValue: provider?.value ?? null,
+      providerRect: rectFor(provider),
+      providerStyle: styleFor(provider),
+      runtimeDiagnosticsPresent: runtime !== null,
+      modelsButton: {
+        ariaLabel: modelsButton?.getAttribute('aria-label') ?? null,
+        title: modelsButton?.getAttribute('title') ?? null,
+        hasIcon: modelsButton?.querySelector('svg') !== null,
+        directText: [...(modelsButton?.childNodes ?? [])]
+          .filter((node) => node.nodeType === Node.TEXT_NODE)
+          .map((node) => node.textContent.trim())
+          .join(''),
+        rect: rectFor(modelsButton),
+        overflows: overflows(modelsButton)
+      },
+      settingsText,
+      visibleSecret:
+        settingsText.includes('sk-desktop-e2e') ||
+        settingsText.includes('cp-desktop-e2e'),
+      hasAnySecret:
+        settingsText.includes('sk-desktop-e2e') ||
+        settingsText.includes('cp-desktop-e2e') ||
+        fieldValues.includes('sk-desktop-e2e') ||
+        fieldValues.includes('cp-desktop-e2e'),
+      documentOverflow:
+        document.body.scrollWidth > window.innerWidth + 4 ||
+        document.body.scrollHeight > window.innerHeight + 4,
+      settingsOverflow: overflows(settings)
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (snapshot.initialSection !== 'settings-model-providers') {
+    throw new Error(
+      `Models should target Model Providers settings: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.settingsRole !== 'dialog' ||
+    snapshot.settingsModal !== 'true' ||
+    !snapshot.settingsRect ||
+    !snapshot.overlayRect
+  ) {
+    throw new Error(
+      `Models settings entry did not open the settings drawer: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.providerLabel !== 'Model provider' ||
+    !snapshot.providerFocused ||
+    !snapshot.providerRect ||
+    snapshot.providerStyle?.fontSize > 14.5
+  ) {
+    throw new Error(
+      `Models settings entry did not focus the compact provider selector: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (!snapshot.modelConfigRect || !snapshot.settingsRect) {
+    throw new Error(
+      `Models settings entry is missing model provider geometry: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  const modelConfigVisible =
+    snapshot.modelConfigRect.bottom > snapshot.settingsRect.top &&
+    snapshot.modelConfigRect.top < snapshot.settingsRect.bottom;
+  if (!modelConfigVisible) {
+    throw new Error(
+      `Model Providers section is not visible after Models entry: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.modelsButton.ariaLabel !== 'Models' ||
+    snapshot.modelsButton.title !== 'Models' ||
+    !snapshot.modelsButton.hasIcon ||
+    snapshot.modelsButton.directText !== '' ||
+    snapshot.modelsButton.overflows
+  ) {
+    throw new Error(
+      `Sidebar Models action should stay icon-led and compact: ${JSON.stringify(
+        snapshot.modelsButton,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.runtimeDiagnosticsPresent ||
+    snapshot.settingsText.includes('Server URL') ||
+    snapshot.settingsText.includes('ACP Not started') ||
+    snapshot.settingsText.includes('Node') ||
+    snapshot.visibleSecret ||
+    snapshot.hasAnySecret ||
+    snapshot.documentOverflow ||
+    snapshot.settingsOverflow
+  ) {
+    throw new Error(
+      `Models settings entry exposed diagnostics, secrets, or overflow: ${JSON.stringify(
+        snapshot,
+      )}`,
     );
   }
 }

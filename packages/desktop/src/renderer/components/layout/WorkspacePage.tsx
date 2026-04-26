@@ -23,7 +23,7 @@ import type { DesktopApprovalMode } from '../../../shared/desktopProtocol.js';
 import { ChatThread } from './ChatThread.js';
 import { ProjectSidebar } from './ProjectSidebar.js';
 import { ReviewPanel } from './ReviewPanel.js';
-import { SettingsPage } from './SettingsPage.js';
+import { SettingsPage, type SettingsSectionId } from './SettingsPage.js';
 import { TerminalDrawer } from './TerminalDrawer.js';
 import { TopBar } from './TopBar.js';
 import type { LoadState } from './types.js';
@@ -148,11 +148,20 @@ export function WorkspacePage({
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('chat');
   const [isReviewOpen, setIsReviewOpen] = useState(false);
   const [isTerminalExpanded, setIsTerminalExpanded] = useState(false);
+  const [settingsInitialSectionId, setSettingsInitialSectionId] =
+    useState<SettingsSectionId>('settings-account');
   const activeSession =
     sessions.find((session) => session.sessionId === activeSessionId) ?? null;
-  const showSettingsPage = () => {
+  const showSettingsPage = (initialSectionId: SettingsSectionId) => {
+    setSettingsInitialSectionId(initialSectionId);
     setWorkspaceView('settings');
     setIsReviewOpen(false);
+  };
+  const showGeneralSettings = () => {
+    showSettingsPage('settings-account');
+  };
+  const showModelSettings = () => {
+    showSettingsPage('settings-model-providers');
   };
   const showConversation = () => {
     setWorkspaceView('chat');
@@ -180,7 +189,8 @@ export function WorkspacePage({
         sessions={sessions}
         onChooseWorkspace={onChooseWorkspace}
         onCreateSession={onCreateSession}
-        onOpenSettings={showSettingsPage}
+        onOpenModelSettings={showModelSettings}
+        onOpenSettings={showGeneralSettings}
         onSelectProject={onSelectProject}
         onSelectSession={onSelectSession}
       />
@@ -199,7 +209,7 @@ export function WorkspacePage({
           onListBranches={onListProjectBranches}
           onShowReview={toggleReview}
           onShowChat={showConversation}
-          onShowSettings={showSettingsPage}
+          onShowSettings={showGeneralSettings}
         />
 
         <div
@@ -265,6 +275,7 @@ export function WorkspacePage({
             <SettingsPage
               activeSessionId={activeSessionId}
               chatState={chatState}
+              initialSectionId={settingsInitialSectionId}
               loadState={loadState}
               modelState={modelState}
               sessionError={sessionError}

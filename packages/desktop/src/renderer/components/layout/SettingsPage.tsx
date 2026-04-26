@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, type Dispatch } from 'react';
+import { useEffect, useState, type Dispatch } from 'react';
 import type { ChatState } from '../../stores/chatStore.js';
 import type { ModelState } from '../../stores/modelStore.js';
 import {
@@ -27,9 +27,12 @@ const settingsSections = [
   { id: 'settings-advanced', label: 'Advanced' },
 ] as const;
 
+export type SettingsSectionId = (typeof settingsSections)[number]['id'];
+
 export function SettingsPage({
   activeSessionId,
   chatState,
+  initialSectionId = 'settings-account',
   loadState,
   modelState,
   sessionError,
@@ -43,6 +46,7 @@ export function SettingsPage({
 }: {
   activeSessionId: string | null;
   chatState: ChatState;
+  initialSectionId?: SettingsSectionId;
   loadState: LoadState;
   modelState: ModelState;
   sessionError: string | null;
@@ -56,11 +60,30 @@ export function SettingsPage({
 }) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
+  useEffect(() => {
+    const section = document.getElementById(initialSectionId);
+    if (typeof section?.scrollIntoView === 'function') {
+      section.scrollIntoView({ block: 'start', inline: 'nearest' });
+    }
+
+    const focusTarget =
+      initialSectionId === 'settings-model-providers'
+        ? document.querySelector<HTMLSelectElement>(
+            '[data-testid="settings-provider-select"]',
+          )
+        : document.querySelector<HTMLButtonElement>(
+            '[data-testid="settings-close-button"]',
+          );
+
+    focusTarget?.focus({ preventScroll: true });
+  }, [initialSectionId]);
+
   return (
     <section
       className="panel settings-page"
       aria-label="Settings"
       aria-modal="true"
+      data-initial-section={initialSectionId}
       data-testid="settings-page"
       role="dialog"
     >
@@ -71,7 +94,6 @@ export function SettingsPage({
         </div>
         <button
           aria-label="Close Settings"
-          autoFocus
           className="settings-close-button"
           data-testid="settings-close-button"
           title="Close Settings"

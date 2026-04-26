@@ -14,6 +14,7 @@ import {
   CloseIcon,
   FolderIcon,
   FolderPlusIcon,
+  ModelIcon,
   NewThreadIcon,
   SearchIcon,
   SlidersIcon,
@@ -32,6 +33,7 @@ export function ProjectSidebar({
   sessions,
   onChooseWorkspace,
   onCreateSession,
+  onOpenModelSettings,
   onOpenSettings,
   onSelectProject,
   onSelectSession,
@@ -45,6 +47,7 @@ export function ProjectSidebar({
   sessions: DesktopSessionSummary[];
   onChooseWorkspace: () => void;
   onCreateSession: () => void;
+  onOpenModelSettings: () => void;
   onOpenSettings: () => void;
   onSelectProject: (projectId: string) => void;
   onSelectSession: (sessionId: string) => void;
@@ -118,9 +121,9 @@ export function ProjectSidebar({
           className="sidebar-action-row"
           title="Models"
           type="button"
-          onClick={onOpenSettings}
+          onClick={onOpenModelSettings}
         >
-          <SlidersIcon />
+          <ModelIcon />
           <span>Models</span>
         </button>
       </nav>
