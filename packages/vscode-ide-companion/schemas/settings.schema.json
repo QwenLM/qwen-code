@@ -354,6 +354,10 @@
               "description": "Maximum number of retries for failed requests.",
               "type": "number"
             },
+            "requestConcurrency": {
+              "description": "Maximum number of concurrent in-flight requests against this model. Useful when the upstream returns 429 \"Too many concurrent requests for this model\". 0 / unset means unlimited. Falls back to QWEN_REQUEST_CONCURRENCY env var.",
+              "type": "number"
+            },
             "enableCacheControl": {
               "description": "Enable cache control for DashScope providers.",
               "type": "boolean",

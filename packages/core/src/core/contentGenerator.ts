@@ -14,6 +14,8 @@ import type {
 } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { LoggingContentGenerator } from './loggingContentGenerator/index.js';
+import { RateLimitedContentGenerator } from './rateLimitedContentGenerator.js';
+import { ConcurrencyLimiter } from '../utils/concurrencyLimiter.js';
 import type {
   ConfigSource,
   ConfigSourceKind,
@@ -83,6 +85,13 @@ export type ContentGeneratorConfig = {
   timeout?: number; // Timeout configuration in milliseconds
   maxRetries?: number; // Maximum retries for rate-limit errors
   retryErrorCodes?: number[]; // Additional error codes that trigger rate-limit retry
+  /**
+   * Maximum number of concurrent in-flight requests against the model API.
+   * Use this when the upstream returns ``429 Too many concurrent requests``
+   * for the configured model -- excess callers wait FIFO instead of erroring
+   * (#3409). ``0`` / ``undefined`` / negative => no limit (default).
+   */
+  requestConcurrency?: number;
   enableCacheControl?: boolean; // Enable cache control for DashScope providers
   samplingParams?: {
     top_p?: number;
@@ -356,5 +365,43 @@ export async function createContentGenerator(
     );
   }
 
-  return new LoggingContentGenerator(baseGenerator, config, generatorConfig);
+  // Apply per-provider concurrency limit (#3409) before logging so rate-limit
+  // back-pressure is visible to the logger as ``in flight`` time, not as a
+  // separate phase outside of the request span.
+  const limit = resolveRequestConcurrency(generatorConfig.requestConcurrency);
+  const wrapped =
+    limit > 0
+      ? new RateLimitedContentGenerator(
+          baseGenerator,
+          new ConcurrencyLimiter(limit),
+        )
+      : baseGenerator;
+
+  return new LoggingContentGenerator(wrapped, config, generatorConfig);
+}
+
+/**
+ * Resolve the effective request-concurrency cap from (in order):
+ *   1. ``ContentGeneratorConfig.requestConcurrency`` (provider-level setting),
+ *   2. ``QWEN_REQUEST_CONCURRENCY`` env var.
+ * Anything <= 0, NaN, or otherwise non-numeric is treated as "unlimited" (0).
+ */
+function resolveRequestConcurrency(configured: number | undefined): number {
+  const fromConfig = normalizeConcurrency(configured);
+  if (fromConfig > 0) {
+    return fromConfig;
+  }
+  const envRaw = process.env['QWEN_REQUEST_CONCURRENCY'];
+  if (envRaw === undefined) {
+    return 0;
+  }
+  const parsed = Number.parseInt(envRaw.trim(), 10);
+  return normalizeConcurrency(parsed);
+}
+
+function normalizeConcurrency(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) {
+    return 0;
+  }
+  return Math.floor(value);
 }
