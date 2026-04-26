@@ -992,6 +992,9 @@ describe('WorkspacePage', () => {
     const assistantMessage = renderedContainer.querySelector(
       '[data-testid="assistant-message"]',
     );
+    const assistantRole = assistantMessage?.querySelector(
+      '.message-role-assistant',
+    );
     const actionRow = renderedContainer.querySelector(
       '[data-testid="assistant-message-actions"]',
     );
@@ -1000,7 +1003,13 @@ describe('WorkspacePage', () => {
     );
 
     expect(assistantMessage?.textContent).toContain('README.md:1');
+    expect(assistantRole).toBeTruthy();
+    expect(assistantRole?.classList.contains('sr-only')).toBe(true);
+    expect(assistantRole?.textContent).toBe('Assistant message');
     expect(actionRow).toBeTruthy();
+    for (const action of actionRow?.querySelectorAll('button') ?? []) {
+      expect(action.querySelector('svg')).toBeTruthy();
+    }
     expect(fileReferences?.textContent).toContain('README.md:1');
     expect(fileReferences?.textContent).toContain(
       'packages/desktop/src/renderer/App.tsx:12',

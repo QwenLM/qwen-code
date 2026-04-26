@@ -1048,7 +1048,6 @@ summary:focus-visible {
 }
 
 .message-file-references button,
-.message-action-button,
 .message-file-reference-overflow {
   border: 1px solid var(--line);
   background: rgba(238, 244, 239, 0.035);
@@ -1096,7 +1095,10 @@ summary:focus-visible {
   width: 24px;
   height: 24px;
   place-items: center;
+  border: 1px solid transparent;
   border-radius: 6px;
+  background: transparent;
+  color: rgba(225, 232, 228, 0.58);
 }
 
 .message-action-button svg {

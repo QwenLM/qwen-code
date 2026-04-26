@@ -2608,7 +2608,8 @@ async function assertConversationSurfaceFidelity(fileName) {
         display: style.display,
         fontSize: numberFromPixel(style.fontSize),
         fontWeight: style.fontWeight,
-        lineHeight: numberFromPixel(style.lineHeight)
+        lineHeight: numberFromPixel(style.lineHeight),
+        position: style.position
       };
     };
     const assistantMessage = [
@@ -2617,6 +2618,7 @@ async function assertConversationSurfaceFidelity(fileName) {
       candidate.innerText.includes('E2E fake ACP response received')
     );
     const userMessage = document.querySelector('.chat-message-user');
+    const assistantRole = assistantMessage?.querySelector('.message-role');
     const assistantParagraph = assistantMessage?.querySelector('p');
     const userRole = userMessage?.querySelector('.message-role');
     const userParagraph = userMessage?.querySelector('p');
@@ -2665,6 +2667,11 @@ async function assertConversationSurfaceFidelity(fileName) {
       assistantParagraph: {
         rect: rectFor(assistantParagraph),
         style: styleFor(assistantParagraph)
+      },
+      assistantRole: {
+        rect: rectFor(assistantRole),
+        style: styleFor(assistantRole),
+        text: assistantRole?.textContent.trim() ?? ''
       },
       userRole: {
         rect: rectFor(userRole),
@@ -2717,6 +2724,8 @@ async function assertConversationSurfaceFidelity(fileName) {
     !snapshot.user.style ||
     !snapshot.assistantParagraph.rect ||
     !snapshot.assistantParagraph.style ||
+    !snapshot.assistantRole.rect ||
+    !snapshot.assistantRole.style ||
     !snapshot.userParagraph.rect ||
     !snapshot.userParagraph.style ||
     !snapshot.plan.rect ||
@@ -2791,6 +2800,19 @@ async function assertConversationSurfaceFidelity(fileName) {
     throw new Error(
       `User prompt should not spend vertical space on a role label: ${JSON.stringify(
         snapshot.userRole.style,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.assistantRole.text !== 'Assistant message' ||
+    snapshot.assistantRole.style.position !== 'absolute' ||
+    snapshot.assistantRole.rect.width > 2 ||
+    snapshot.assistantRole.rect.height > 2
+  ) {
+    throw new Error(
+      `Assistant role label should stay screen-reader-only: ${JSON.stringify(
+        snapshot.assistantRole,
       )}`,
     );
   }
@@ -2926,6 +2948,17 @@ async function assertConversationSurfaceFidelity(fileName) {
         )}`,
       );
     }
+
+    if (
+      button.style.backgroundAlpha > 0.02 ||
+      button.style.borderAlpha > 0.08
+    ) {
+      throw new Error(
+        `Assistant action button idle chrome is too heavy: ${JSON.stringify(
+          button,
+        )}`,
+      );
+    }
   }
 
   if (snapshot.document.scrollWidth > snapshot.document.viewportWidth + 4) {
@@ -2969,7 +3002,8 @@ async function assertCompactDenseConversationLayout(fileName) {
       const style = window.getComputedStyle(element);
       return {
         fontSize: numberFromPixel(style.fontSize),
-        lineHeight: numberFromPixel(style.lineHeight)
+        lineHeight: numberFromPixel(style.lineHeight),
+        position: style.position
       };
     };
     const rectFor = (element) => {
@@ -3025,6 +3059,7 @@ async function assertCompactDenseConversationLayout(fileName) {
       '[data-testid="assistant-file-references"]'
     );
     const messageParagraph = message?.querySelector('p');
+    const assistantRole = message?.querySelector('.message-role-assistant');
     const plan = document.querySelector('.chat-plan');
     const planItem = plan?.querySelector('li');
     const actions = message?.querySelector(
@@ -3074,6 +3109,11 @@ async function assertCompactDenseConversationLayout(fileName) {
       timeline: timelineRect,
       message: messageRect,
       messageParagraphStyle: typeStyleFor(messageParagraph),
+      assistantRole: {
+        rect: rectFor(assistantRole),
+        style: typeStyleFor(assistantRole),
+        text: assistantRole?.textContent.trim() ?? ''
+      },
       plan: rectFor(plan),
       planItemStyle: typeStyleFor(planItem),
       fileReferences: rectFor(fileReferences),
@@ -3155,6 +3195,7 @@ async function assertCompactDenseConversationLayout(fileName) {
     'chat',
     'timeline',
     'message',
+    'assistantRole',
     'fileReferences',
     'actions',
     'composer',
@@ -3172,6 +3213,14 @@ async function assertCompactDenseConversationLayout(fileName) {
         messageParagraphStyle: snapshot.messageParagraphStyle,
         planItemStyle: snapshot.planItemStyle,
       })}`,
+    );
+  }
+
+  if (!snapshot.assistantRole.rect || !snapshot.assistantRole.style) {
+    throw new Error(
+      `Compact assistant role metrics are missing: ${JSON.stringify(
+        snapshot.assistantRole,
+      )}`,
     );
   }
 
@@ -3207,6 +3256,19 @@ async function assertCompactDenseConversationLayout(fileName) {
     throw new Error(
       `Compact assistant prose type scale is too large: ${JSON.stringify(
         snapshot.messageParagraphStyle,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.assistantRole.text !== 'Assistant message' ||
+    snapshot.assistantRole.style.position !== 'absolute' ||
+    snapshot.assistantRole.rect.width > 2 ||
+    snapshot.assistantRole.rect.height > 2
+  ) {
+    throw new Error(
+      `Compact assistant role label should stay screen-reader-only: ${JSON.stringify(
+        snapshot.assistantRole,
       )}`,
     );
   }

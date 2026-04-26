@@ -373,7 +373,15 @@ function TimelineItem({
           item.role === 'assistant' ? 'assistant-message' : undefined
         }
       >
-        <div className="message-role">{item.role}</div>
+        <div
+          className={
+            item.role === 'assistant'
+              ? 'message-role message-role-assistant sr-only'
+              : 'message-role'
+          }
+        >
+          {item.role === 'assistant' ? 'Assistant message' : item.role}
+        </div>
         <p>{item.text}</p>
         {fileReferences.length > 0 ? (
           <ul

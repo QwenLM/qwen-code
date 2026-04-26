@@ -22,6 +22,103 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Assistant Message Chrome Reduction
+
+Status: completed in iteration 45.
+
+Goal: make assistant responses read as unframed conversation prose instead of
+generic chat cards with repeated visible role labels and boxed action chrome.
+
+User-visible value: users can scan the task timeline more like the `home.jpg`
+prototype, with assistant text as the main content and copy/retry/review
+controls present but visually secondary.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/assistant-message-chrome.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Assistant messages keep an accessible role label but do not show a visible
+  uppercase `ASSISTANT` label in the main timeline.
+- Assistant copy, retry, and open-changes actions remain icon-only, accessible,
+  keyboard-focusable, and compact while losing the default boxed idle chrome.
+- User prompt bubbles, plan rows, tool cards, command approval cards, file
+  chips, changed-files summary, composer, review drawer, settings overlay, and
+  terminal workflows continue to behave as before.
+- Default and compact Electron viewports keep the conversation dominant with no
+  horizontal overflow, hidden internal IDs, server URLs, or secrets.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake project, send a prompt, approve the fake command,
+  inspect the assistant response, action row, file chips, and changed-files
+  summary at the default viewport, then repeat compact conversation geometry
+  checks before continuing the existing branch, review, settings, and terminal
+  paths.
+- E2E assertions: assistant role label is screen-reader-only, action buttons
+  have accessible labels and icon geometry while idle backgrounds/borders are
+  nearly invisible, conversation prose remains unframed, compact layout stays
+  contained, and no console errors or failed local requests are recorded.
+- Diagnostic artifacts: updated `conversation-surface-fidelity.json`,
+  `conversation-surface-fidelity.png`, `compact-dense-conversation.json`,
+  `compact-dense-conversation.png`, Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for selecting a narrow fidelity
+  slice under the autonomous loop constraints, `frontend-design` for
+  prototype-constrained hierarchy and action-control restraint, and
+  `electron-desktop-dev` for renderer changes verified through real Electron
+  CDP interaction.
+
+Notes and decisions:
+
+- The prototype prioritizes assistant prose and subtle inline actions, so this
+  slice hides only the repeated assistant role label. Tool, plan, approval, and
+  diagnostic labels remain visible where they identify a distinct activity
+  primitive.
+- The existing local icon set is reused; no new icon dependency is needed for
+  this visual refinement.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 20 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T17-55-54-656Z/`.
+- Key recorded metrics: assistant role text `Assistant message` remains present
+  for assistive technology but is positioned offscreen at 1x1 px in default
+  and compact viewports; assistant action buttons remain 24x24 px with idle
+  background alpha 0 and border alpha 0; compact assistant message height
+  dropped to 180.17 px; no horizontal overflow, console errors, or failed local
+  requests were recorded.
+
+Next work:
+
+- Continue prototype fidelity by tightening the collapsed terminal strip height
+  and weight so it reads as a supporting status row rather than a competing
+  bottom panel.
+- Continue message-system polish by reducing `PLAN` and tool activity label
+  weight if screenshot review shows they still compete with assistant prose.
+
 ### Slice: Compact Settings Overlay Fidelity
 
 Status: completed in iteration 44.
