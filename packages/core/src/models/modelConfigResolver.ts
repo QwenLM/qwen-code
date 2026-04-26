@@ -247,6 +247,24 @@ export function resolveModelConfig(
     sources,
   );
 
+  // ---- Env override: QWEN_CODE_API_TIMEOUT_MS ----
+  // Precedence: modelProvider > env > settings > default (CLI doesn't set timeout)
+  const modelProviderSetTimeout =
+    modelProvider?.generationConfig?.timeout !== undefined;
+  if (!modelProviderSetTimeout) {
+    const envTimeout = env['QWEN_CODE_API_TIMEOUT_MS'];
+    if (envTimeout !== undefined) {
+      const parsed = Number(envTimeout);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        generationConfig.timeout = parsed;
+        sources['timeout'] = {
+          kind: 'env',
+          envKey: 'QWEN_CODE_API_TIMEOUT_MS',
+        };
+      }
+    }
+  }
+
   // Build final config
   const config: ContentGeneratorConfig = {
     authType,

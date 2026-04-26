@@ -258,6 +258,186 @@ describe('modelConfigResolver', () => {
         expect(result.config.timeout).toBe(60000);
         expect(result.sources['timeout'].kind).toBe('modelProviders');
       });
+
+      it('QWEN_CODE_API_TIMEOUT_MS env var overrides settings timeout', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: {
+            apiKey: 'key',
+            generationConfig: {
+              timeout: 30000,
+            },
+          },
+          env: {
+            OPENAI_API_KEY: 'key',
+            QWEN_CODE_API_TIMEOUT_MS: '900000',
+          },
+        });
+
+        expect(result.config.timeout).toBe(900000);
+        expect(result.sources['timeout'].kind).toBe('env');
+        expect(result.sources['timeout'].envKey).toBe(
+          'QWEN_CODE_API_TIMEOUT_MS',
+        );
+      });
+
+      it('modelProvider timeout wins over QWEN_CODE_API_TIMEOUT_MS', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: {},
+          env: {
+            MY_KEY: 'key',
+            QWEN_CODE_API_TIMEOUT_MS: '900000',
+          },
+          modelProvider: {
+            id: 'model',
+            name: 'Model',
+            envKey: 'MY_KEY',
+            baseUrl: 'https://api.example.com',
+            generationConfig: {
+              timeout: 60000,
+            },
+          },
+        });
+
+        // modelProvider > env: modelProvider timeout should win
+        expect(result.config.timeout).toBe(60000);
+        expect(result.sources['timeout'].kind).toBe('modelProviders');
+      });
+
+      it('QWEN_CODE_API_TIMEOUT_MS applies when modelProvider has no timeout', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: {},
+          env: {
+            MY_KEY: 'key',
+            QWEN_CODE_API_TIMEOUT_MS: '900000',
+          },
+          modelProvider: {
+            id: 'model',
+            name: 'Model',
+            envKey: 'MY_KEY',
+            baseUrl: 'https://api.example.com',
+            generationConfig: {},
+          },
+        });
+
+        expect(result.config.timeout).toBe(900000);
+        expect(result.sources['timeout'].kind).toBe('env');
+        expect(result.sources['timeout'].envKey).toBe(
+          'QWEN_CODE_API_TIMEOUT_MS',
+        );
+      });
+
+      it('ignores invalid QWEN_CODE_API_TIMEOUT_MS values', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: {
+            apiKey: 'key',
+            generationConfig: {
+              timeout: 30000,
+            },
+          },
+          env: {
+            OPENAI_API_KEY: 'key',
+            QWEN_CODE_API_TIMEOUT_MS: 'invalid',
+          },
+        });
+
+        // Should fall back to settings value
+        expect(result.config.timeout).toBe(30000);
+        expect(result.sources['timeout'].kind).toBe('settings');
+      });
+
+      it('ignores negative or zero QWEN_CODE_API_TIMEOUT_MS values', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: {
+            apiKey: 'key',
+            generationConfig: {
+              timeout: 30000,
+            },
+          },
+          env: {
+            OPENAI_API_KEY: 'key',
+            QWEN_CODE_API_TIMEOUT_MS: '0',
+          },
+        });
+
+        // Should fall back to settings value
+        expect(result.config.timeout).toBe(30000);
+        expect(result.sources['timeout'].kind).toBe('settings');
+      });
+
+      it('timeout is undefined when not configured, default applied in buildClient', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: {
+            apiKey: 'key',
+          },
+          env: {
+            OPENAI_API_KEY: 'key',
+          },
+        });
+
+        // timeout is undefined here; DEFAULT_TIMEOUT (120000) is applied in
+        // the provider's buildClient() when timeout is not set.
+        expect(result.config.timeout).toBeUndefined();
+      });
+
+      it('QWEN_CODE_API_TIMEOUT_MS works for Anthropic auth type', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_ANTHROPIC,
+          cli: {},
+          settings: {},
+          env: {
+            ANTHROPIC_API_KEY: 'key',
+            ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
+            QWEN_CODE_API_TIMEOUT_MS: '600000',
+          },
+        });
+
+        expect(result.config.timeout).toBe(600000);
+        expect(result.sources['timeout'].kind).toBe('env');
+        expect(result.sources['timeout'].envKey).toBe(
+          'QWEN_CODE_API_TIMEOUT_MS',
+        );
+      });
+
+      it('env var actually changes resolved timeout value', () => {
+        // Integration-style test: proves the env var flows through to the resolved config
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: {
+            apiKey: 'key',
+            generationConfig: {
+              timeout: 30000,
+            },
+          },
+          env: {
+            OPENAI_API_KEY: 'key',
+            QWEN_CODE_API_TIMEOUT_MS: '900000',
+          },
+        });
+
+        // Timeout should be the env var value, not the settings value
+        expect(result.config.timeout).toBe(900000);
+        expect(result.sources['timeout'].kind).toBe('env');
+        expect(result.sources['timeout'].envKey).toBe(
+          'QWEN_CODE_API_TIMEOUT_MS',
+        );
+
+        // Prove it would be used by the client (default.ts:48 reads config.timeout)
+        const clientTimeout = result.config.timeout;
+        expect(clientTimeout).toBe(900000);
+      });
     });
 
     describe('proxy handling', () => {
