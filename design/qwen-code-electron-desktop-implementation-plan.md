@@ -22,6 +22,109 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Settings Label Chrome Restraint
+
+Status: completed in iteration 77.
+
+Goal: reduce the remaining uppercase form and key/value labels in the Settings
+drawer so the overlay reads as compact product settings instead of a debug
+dashboard.
+
+User-visible value: users can scan model, account, permission, tools,
+terminal, and appearance settings without loud uppercase field chrome competing
+with the section titles or the conversation behind the drawer.
+
+Expected files:
+
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/settings-label-chrome-restraint.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Settings form labels render in normal case with compact weight and no CSS
+  uppercase transform.
+- Settings key/value labels render in normal case with compact weight and no
+  CSS uppercase transform.
+- Review comment labels keep their existing uppercase treatment; this slice is
+  scoped to Settings.
+- Settings remains a right-side supporting drawer with conversation visible
+  behind it, no default diagnostics, no fake secrets, no local server URL, and
+  no overflow at the default and compact CDP viewports.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open Settings from the workbench, inspect the computed styles
+  for Settings form labels and key/value labels, continue compact Settings,
+  validation, Coding Plan, Permissions model labels, composer, terminal, branch,
+  review, and relaunch paths.
+- E2E assertions: Settings label samples report `text-transform: none`, compact
+  font weights, expected visible label text such as `Provider`, `API key`, and
+  `Coding Plan key`, no hidden diagnostics or secrets in the default drawer, and
+  no document/settings overflow.
+- Diagnostic artifacts to collect on failure:
+  `settings-layout.json`, `settings-page.png`, `compact-settings-overlay.json`,
+  `settings-validation.json`, `settings-label-chrome-restraint.json`, Electron
+  log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` using the Ralph prompt and existing
+  next-work notes to choose the smallest fidelity slice; `frontend-design`
+  constrained by `home.jpg` to reduce label noise without inventing a new
+  visual direction; `electron-desktop-dev` for real Electron CDP computed-style
+  verification.
+
+Notes and decisions:
+
+- Brainstormed alternatives: rename labels in JSX, introduce a new Settings
+  field component, or scope the visual restraint in CSS. CSS is the smallest
+  safe slice because the labels already carry the right product text and tests
+  can assert the real computed style in Electron.
+- This slice intentionally leaves terminal/review/diff uppercase status labels
+  alone; those surfaces have separate density and activity semantics.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 35 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T23-47-10-706Z/`.
+- `settings-label-chrome-restraint.json` recorded all Settings form labels and
+  key/value labels with `textTransform: "none"`, `fontWeight: 680`,
+  `fontSize: 11.5`, no label overflow, no fake secrets, no local server URL,
+  and no document overflow.
+
+Self-review:
+
+- The first viewport and Settings overlay move closer to `home.jpg` by reducing
+  uppercase debug chrome without adding new cards, banners, or explanatory
+  text.
+- The change is renderer CSS plus CDP verification only; Electron main,
+  preload, IPC, local server binding, token handling, and secret persistence
+  are untouched.
+- Review comment labels remain scoped to their existing uppercase rule, so the
+  slice does not change review/terminal/diff activity semantics.
+
+Next work:
+
+- Continue prototype fidelity by reducing remaining uppercase status chrome in
+  supporting surfaces where it competes with thread content.
+- Continue model workflow polish by making configured provider ordering clearer
+  when API-key and Coding Plan models coexist in the same selector.
+
 ### Slice: Settings Permissions Model Label Restraint
 
 Status: completed in iteration 76.

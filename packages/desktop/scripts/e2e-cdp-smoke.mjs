@@ -259,6 +259,9 @@ async function main() {
   await clickButton('Settings');
   await waitForSelector('[data-testid="settings-page"]');
   await assertSettingsPageLayout('settings-layout.json');
+  await assertSettingsLabelChromeRestraint(
+    'settings-label-chrome-restraint.json',
+  );
   await saveScreenshot('settings-page.png');
   await assertSettingsSectionRailNavigation(
     'settings-section-rail-navigation.json',
@@ -8293,6 +8296,113 @@ async function assertSettingsPageLayout(fileName) {
     throw new Error(
       `Settings page is missing Advanced Diagnostics action; buttons=${metrics.buttons.join(
         ', ',
+      )}`,
+    );
+  }
+}
+
+async function assertSettingsLabelChromeRestraint(fileName) {
+  const snapshot = await evaluate(`(() => {
+    const settings = document.querySelector('[data-testid="settings-page"]');
+    const readLabel = (element) => {
+      const style = window.getComputedStyle(element);
+      return {
+        text: element.textContent.trim(),
+        textTransform: style.textTransform,
+        fontWeight: Number.parseFloat(style.fontWeight),
+        fontSize: Number.parseFloat(style.fontSize),
+        overflows: element.scrollWidth > element.clientWidth + 4
+      };
+    };
+    const formLabels = settings
+      ? [...settings.querySelectorAll('.settings-form label > span')].map(
+          readLabel,
+        )
+      : [];
+    const keyLabels = settings
+      ? [...settings.querySelectorAll('.settings-kv dt')].map(readLabel)
+      : [];
+    const settingsText = settings?.innerText ?? '';
+    const fieldValues = [...document.querySelectorAll('input, textarea')]
+      .map((field) => field.value ?? '')
+      .join('\\n');
+    return {
+      formLabels,
+      keyLabels,
+      formLabelTexts: formLabels.map((label) => label.text),
+      keyLabelTexts: keyLabels.map((label) => label.text),
+      hasSecret:
+        settingsText.includes('sk-desktop-e2e') ||
+        settingsText.includes('cp-desktop-e2e') ||
+        fieldValues.includes('sk-desktop-e2e') ||
+        fieldValues.includes('cp-desktop-e2e'),
+      hasServerUrl: /http:\\/\\/127\\.0\\.0\\.1:/u.test(settingsText),
+      documentOverflow:
+        document.body.scrollWidth > window.innerWidth + 4 ||
+        document.body.scrollHeight > window.innerHeight + 4
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  const missingFormLabels = [
+    'Provider',
+    'Model',
+    'Base URL',
+    'API key',
+    'Permission mode',
+    'Thread model',
+  ].filter((label) => !snapshot.formLabelTexts.includes(label));
+  if (missingFormLabels.length > 0) {
+    throw new Error(
+      `Settings form labels are missing: ${missingFormLabels.join(', ')}`,
+    );
+  }
+
+  const missingKeyLabels = [
+    'Auth',
+    'API key',
+    'Coding Plan key',
+    'Commands',
+    'Skills',
+    'Shell',
+    'Output',
+    'Theme',
+    'Density',
+  ].filter((label) => !snapshot.keyLabelTexts.includes(label));
+  if (missingKeyLabels.length > 0) {
+    throw new Error(
+      `Settings key labels are missing: ${missingKeyLabels.join(', ')}`,
+    );
+  }
+
+  const noisyLabels = [...snapshot.formLabels, ...snapshot.keyLabels].filter(
+    (label) =>
+      label.textTransform !== 'none' ||
+      label.fontWeight > 700 ||
+      label.fontSize > 12 ||
+      label.overflows,
+  );
+  if (noisyLabels.length > 0) {
+    throw new Error(
+      `Settings labels still read as heavy debug chrome: ${JSON.stringify(
+        noisyLabels,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.hasSecret ||
+    snapshot.hasServerUrl ||
+    snapshot.documentOverflow
+  ) {
+    throw new Error(
+      `Settings label snapshot leaked data or overflowed: ${JSON.stringify(
+        snapshot,
       )}`,
     );
   }
