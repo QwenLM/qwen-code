@@ -667,6 +667,17 @@ async function assertSidebarAppRail(fileName) {
     };
     const overflows = (element) =>
       Boolean(element && element.scrollWidth > element.clientWidth + 4);
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        fontSize: Number.parseFloat(style.fontSize),
+        fontWeight: Number.parseFloat(style.fontWeight),
+        lineHeight: Number.parseFloat(style.lineHeight)
+      };
+    };
     const sidebar = document.querySelector('[data-testid="project-sidebar"]');
     const appActions = document.querySelector('[data-testid="sidebar-app-actions"]');
     const footerSettings = document.querySelector(
@@ -684,12 +695,29 @@ async function assertSidebarAppRail(fileName) {
       return {
         label,
         text: row.textContent.trim(),
+        className: row.className,
         rect: rectFor(row),
+        style: styleFor(row),
         scrollWidth: row.scrollWidth,
         clientWidth: row.clientWidth,
         overflows: overflows(row)
       };
     });
+    const headingStyles = [
+      ...document.querySelectorAll('.sidebar-section-heading h2')
+    ].map((heading) => styleFor(heading));
+    const projectTitleStyles = [
+      ...document.querySelectorAll('.project-row-copy span')
+    ].map((title) => styleFor(title));
+    const projectMetaStyles = [
+      ...document.querySelectorAll('.project-row-copy small')
+    ].map((meta) => styleFor(meta));
+    const threadTitleStyles = [
+      ...document.querySelectorAll('.session-row-title')
+    ].map((title) => styleFor(title));
+    const threadMetaStyles = [
+      ...document.querySelectorAll('.session-row-meta')
+    ].map((meta) => styleFor(meta));
 
     return {
       viewport: {
@@ -712,6 +740,11 @@ async function assertSidebarAppRail(fileName) {
         footerSettings?.textContent.trim() ||
         '',
       rows,
+      headingStyles,
+      projectTitleStyles,
+      projectMetaStyles,
+      threadTitleStyles,
+      threadMetaStyles,
       sidebarText: sidebar?.innerText ?? '',
       overflows: {
         sidebar: overflows(sidebar),
@@ -760,7 +793,7 @@ async function assertSidebarAppRail(fileName) {
     );
   }
 
-  if (metrics.sidebar.width < 236 || metrics.sidebar.width > 320) {
+  if (metrics.sidebar.width < 236 || metrics.sidebar.width > 260) {
     throw new Error(
       `Sidebar width is no longer compact: ${metrics.sidebar.width}`,
     );
@@ -780,7 +813,18 @@ async function assertSidebarAppRail(fileName) {
     );
   }
 
-  const tallRows = metrics.rows.filter((row) => row.rect.height > 44);
+  const tallRows = metrics.rows.filter((row) => {
+    if (row.className.includes('sidebar-action-row')) {
+      return row.rect.height > 30;
+    }
+    if (row.className.includes('session-row')) {
+      return row.rect.height > 34;
+    }
+    if (row.className.includes('project-row')) {
+      return row.rect.height > 38;
+    }
+    return row.rect.height > 38;
+  });
   if (tallRows.length > 0) {
     throw new Error(
       `Sidebar rows are too tall for the compact rail: ${JSON.stringify(
@@ -801,6 +845,54 @@ async function assertSidebarAppRail(fileName) {
       `Sidebar rail regions overflow horizontally: ${JSON.stringify(
         metrics.overflows,
       )}`,
+    );
+  }
+
+  const oversizedRowText = metrics.rows.filter(
+    (row) => row.style && row.style.fontSize > 12.5,
+  );
+  if (oversizedRowText.length > 0) {
+    throw new Error(
+      `Sidebar row typography regressed: ${JSON.stringify(oversizedRowText)}`,
+    );
+  }
+
+  const oversizedHeadings = metrics.headingStyles.filter(
+    (style) => style && style.fontSize > 10.5,
+  );
+  if (oversizedHeadings.length > 0) {
+    throw new Error(
+      `Sidebar heading typography regressed: ${JSON.stringify(
+        oversizedHeadings,
+      )}`,
+    );
+  }
+
+  const oversizedProjectTitles = metrics.projectTitleStyles.filter(
+    (style) => style && style.fontSize > 12.5,
+  );
+  const oversizedProjectMeta = metrics.projectMetaStyles.filter(
+    (style) => style && style.fontSize > 10,
+  );
+  const oversizedThreadTitles = metrics.threadTitleStyles.filter(
+    (style) => style && style.fontSize > 12.5,
+  );
+  const oversizedThreadMeta = metrics.threadMetaStyles.filter(
+    (style) => style && style.fontSize > 10,
+  );
+  if (
+    oversizedProjectTitles.length > 0 ||
+    oversizedProjectMeta.length > 0 ||
+    oversizedThreadTitles.length > 0 ||
+    oversizedThreadMeta.length > 0
+  ) {
+    throw new Error(
+      `Sidebar project/thread text scale regressed: ${JSON.stringify({
+        oversizedProjectTitles,
+        oversizedProjectMeta,
+        oversizedThreadTitles,
+        oversizedThreadMeta,
+      })}`,
     );
   }
 
@@ -857,7 +949,10 @@ async function assertTopbarContextFidelity(fileName) {
         borderRightWidth: Number.parseFloat(style.borderRightWidth),
         borderBottomWidth: Number.parseFloat(style.borderBottomWidth),
         borderLeftWidth: Number.parseFloat(style.borderLeftWidth),
-        borderTopAlpha: alphaFromColor(style.borderTopColor)
+        borderTopAlpha: alphaFromColor(style.borderTopColor),
+        fontSize: Number.parseFloat(style.fontSize),
+        fontWeight: Number.parseFloat(style.fontWeight),
+        lineHeight: Number.parseFloat(style.lineHeight)
       };
     };
     const escapes = (inner, outer) =>
@@ -909,6 +1004,8 @@ async function assertTopbarContextFidelity(fileName) {
       topbar: topbarRect,
       titleStack: rectFor(titleStack),
       title: rectFor(title),
+      titleHeadingStyle: styleFor(title?.querySelector('h2')),
+      titleProjectStyle: styleFor(title?.querySelector('span')),
       context: contextRect,
       runtimeStatus: rectFor(runtimeStatus),
       runtimeStatusText: runtimeStatus?.textContent.trim() ?? '',
@@ -952,7 +1049,7 @@ async function assertTopbarContextFidelity(fileName) {
     throw new Error('Topbar should not render legacy meta pills or tabs.');
   }
 
-  if (metrics.topbar.height < 48 || metrics.topbar.height > 58) {
+  if (metrics.topbar.height < 46 || metrics.topbar.height > 52) {
     throw new Error(`Topbar is no longer slim: ${metrics.topbar.height}`);
   }
 
@@ -998,16 +1095,50 @@ async function assertTopbarContextFidelity(fileName) {
     );
   }
 
-  if (metrics.runtimeStatus.height > 32 || metrics.runtimeStatus.width > 76) {
+  if (metrics.titleHeadingStyle?.fontSize > 13.5) {
+    throw new Error(
+      `Topbar title typography regressed: ${JSON.stringify(
+        metrics.titleHeadingStyle,
+      )}`,
+    );
+  }
+
+  if (metrics.titleProjectStyle?.fontSize > 11) {
+    throw new Error(
+      `Topbar project typography regressed: ${JSON.stringify(
+        metrics.titleProjectStyle,
+      )}`,
+    );
+  }
+
+  const oversizedContextText = metrics.contextItems.filter(
+    (item) => item.style.fontSize > 10.75,
+  );
+  if (oversizedContextText.length > 0) {
+    throw new Error(
+      `Topbar context typography regressed: ${JSON.stringify(
+        oversizedContextText,
+      )}`,
+    );
+  }
+
+  if (
+    metrics.runtimeStatus.height > 29 ||
+    metrics.runtimeStatus.width > 72 ||
+    metrics.runtimeStatusStyle.fontSize > 10.75
+  ) {
     throw new Error(
       `Runtime status should stay compact: ${JSON.stringify(
-        metrics.runtimeStatus,
+        {
+          rect: metrics.runtimeStatus,
+          style: metrics.runtimeStatusStyle,
+        },
       )}`,
     );
   }
 
   const oversizedActions = metrics.actionRects.filter(
-    (action) => action.rect.width > 34 || action.rect.height > 34,
+    (action) => action.rect.width > 29 || action.rect.height > 29,
   );
   if (oversizedActions.length > 0) {
     throw new Error(

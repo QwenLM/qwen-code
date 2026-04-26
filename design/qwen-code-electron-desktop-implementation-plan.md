@@ -22,6 +22,116 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Sidebar and Topbar Chrome Density Pass
+
+Status: completed in iteration 26.
+
+Goal: tighten the remaining oversized sidebar and topbar chrome so the first
+viewport reads closer to the compact `home.jpg` workbench instead of a heavy
+dashboard shell.
+
+User-visible value: users get more room for the conversation and task surfaces,
+while project, thread, branch, model, review, refresh, and settings controls
+remain visible, readable, and safely contained.
+
+Expected files:
+
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/sidebar-topbar-density.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The desktop sidebar is narrower and uses shorter app action, project, and
+  thread rows without horizontal overflow.
+- Sidebar app action, project, thread, section, and footer typography moves to a
+  restrained workbench scale while preserving readable labels and accessible
+  button names.
+- The topbar height, action buttons, runtime pill, and status text are slimmer
+  and remain contained with a deliberately long branch name.
+- The topbar no longer increases body scroll width or hides conversation,
+  review, settings, terminal, branch, or Git status actions.
+- No raw project paths, ACP/session IDs, or debug state are introduced into the
+  main sidebar or topbar text.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, send a prompt, approve the command,
+  wait for the assistant result, then assert sidebar and topbar chrome geometry
+  at the default viewport before continuing the existing branch, review,
+  settings, terminal, discard safety, and commit workflows.
+- E2E assertions: sidebar width is below the previous 272 px baseline, top app
+  action rows are below the previous 32 px baseline, project/thread rows are
+  below the previous 39.75/36 px baselines, section headings and row text use a
+  smaller font scale, topbar height is below the previous 54 px baseline,
+  action buttons are below the previous 30 px baseline, runtime status is below
+  the previous 30 px height, long branch/status text remains contained, and no
+  console errors or failed local requests are recorded.
+- Diagnostic artifacts: `sidebar-app-rail.json`,
+  `topbar-context-fidelity.json`, `topbar-context-fidelity.png`, Electron log,
+  and summary JSON under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for choosing the narrow prototype
+  fidelity slice without asking for routine product decisions,
+  `frontend-design` for prototype-constrained density and hierarchy, and
+  `electron-desktop-dev` for real Electron CDP verification.
+
+Notes and decisions:
+
+- The prototype remains the constraint: this pass should refine density and
+  hierarchy, not introduce a new navigation model, new routes, or new branding.
+- This slice deliberately avoids workflow logic so model configuration can
+  resume after the first-viewport chrome is less visually dominant.
+- The sidebar grid now uses a 252 px rail, 28 px app/footer actions, and
+  roughly 32 px project/thread rows. Project/thread button parents now carry
+  the same 12 px font scale as the visible row titles so inherited styles do
+  not regress unnoticed.
+- The topbar now uses a 50 px workbench row, 28 px icon buttons, a 28 px runtime
+  status pill, and 10.5 px context text. Long branch and Git status text remain
+  in the DOM for accessibility but are visually contained.
+- The CDP harness now records sidebar/topbar font metrics as well as geometry,
+  so future fidelity work cannot accidentally reintroduce the heavier 272 px
+  sidebar, 54 px topbar, 32 px action rows, or 30 px topbar buttons.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 15 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed after the final CSS fix.
+- `cd packages/desktop && npm run e2e:cdp` first failed at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T03-35-53-527Z/`
+  because project/thread row button parents still inherited the root 14 px font
+  even though the visible labels were compact. The CSS now sets the row parent
+  font size explicitly.
+- `cd packages/desktop && npm run e2e:cdp` then passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T03-36-28-286Z/`.
+- Key recorded metrics from the passing run: sidebar width `252` px, app/footer
+  action rows `28` px tall, project row `32.6328125` px tall, thread row `32`
+  px tall, sidebar row font `12` px, sidebar heading font `10` px, topbar height
+  `50` px, topbar action buttons `28x28`, runtime status
+  `65.6328125x28`, topbar context font `10.5` px, no document overflow, no
+  console errors, and no failed local requests.
+
+Next work:
+
+- Resume the model configuration workflow from the composer model picker and
+  settings entry now that the first-viewport chrome is less visually dominant.
+- Continue prototype fidelity by reducing remaining message/file chip button
+  weight only where screenshots show it crowding the conversation.
+
 ### Completed Slice: Conversation Message Typography Density Pass
 
 Status: completed in iteration 25.

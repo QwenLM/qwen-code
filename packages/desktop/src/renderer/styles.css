@@ -82,7 +82,7 @@ summary:focus-visible {
 
 .desktop-shell {
   display: grid;
-  grid-template-columns: 272px minmax(0, 1fr);
+  grid-template-columns: 252px minmax(0, 1fr);
   width: 100%;
   height: 100vh;
   overflow: hidden;
@@ -96,9 +96,9 @@ summary:focus-visible {
   height: 100vh;
   min-height: 0;
   flex-direction: column;
-  gap: 9px;
+  gap: 7px;
   overflow: hidden;
-  padding: 12px 10px;
+  padding: 10px 8px;
   border-right: 1px solid var(--line);
   background:
     linear-gradient(180deg, rgba(20, 26, 51, 0.98), rgba(13, 17, 32, 0.98)),
@@ -123,21 +123,21 @@ summary:focus-visible {
 .sidebar-app-actions {
   display: grid;
   gap: 2px;
-  padding-bottom: 4px;
+  padding-bottom: 3px;
 }
 
 .sidebar-action-row {
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: 20px minmax(0, 1fr);
   align-items: center;
-  min-height: 32px;
-  gap: 8px;
-  padding: 0 8px;
+  min-height: 28px;
+  gap: 7px;
+  padding: 0 7px;
   border-radius: 6px;
   background: transparent;
   color: rgba(225, 232, 242, 0.72);
-  font-size: 13px;
-  font-weight: 680;
+  font-size: 12px;
+  font-weight: 660;
   letter-spacing: 0;
   text-align: left;
   transition:
@@ -152,8 +152,8 @@ summary:focus-visible {
 
 .sidebar-action-row svg {
   display: block;
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   justify-self: center;
 }
 
@@ -193,7 +193,7 @@ summary:focus-visible {
 .sidebar-section-heading span {
   margin: 0;
   color: var(--text-soft);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 800;
   letter-spacing: 0;
   text-transform: uppercase;
@@ -203,8 +203,8 @@ summary:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 22px;
-  padding: 4px 8px 0;
+  min-height: 20px;
+  padding: 3px 7px 0;
 }
 
 .sidebar-section-heading span {
@@ -213,11 +213,11 @@ summary:focus-visible {
 
 .empty-row,
 .workspace-path {
-  min-height: 34px;
-  padding: 8px 2px;
+  min-height: 30px;
+  padding: 7px 2px;
   color: rgba(225, 232, 228, 0.52);
-  font-size: 13px;
-  font-weight: 680;
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .workspace-path {
@@ -289,11 +289,12 @@ summary:focus-visible {
   display: grid;
   align-items: center;
   width: 100%;
-  min-height: 36px;
+  min-height: 32px;
   border: 0;
   border-radius: 6px;
   background: transparent;
   color: rgba(233, 238, 235, 0.86);
+  font-size: 12px;
   text-align: left;
   transition:
     background 140ms ease,
@@ -301,14 +302,14 @@ summary:focus-visible {
 }
 
 .project-row {
-  grid-template-columns: 24px minmax(0, 1fr);
-  padding: 5px 8px 5px 6px;
+  grid-template-columns: 21px minmax(0, 1fr);
+  padding: 3px 7px 3px 5px;
 }
 
 .session-row {
   grid-template-columns: minmax(0, 1fr) auto;
-  column-gap: 7px;
-  padding: 5px 8px 5px 28px;
+  column-gap: 6px;
+  padding: 4px 7px 4px 24px;
 }
 
 .project-row-active,
@@ -320,8 +321,8 @@ summary:focus-visible {
 .project-row-active::before,
 .session-row-active::before {
   position: absolute;
-  top: 7px;
-  bottom: 7px;
+  top: 6px;
+  bottom: 6px;
   left: 0;
   width: 2px;
   border-radius: 999px;
@@ -337,8 +338,8 @@ summary:focus-visible {
 
 .project-row-icon {
   justify-self: start;
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   margin-left: 0;
   color: rgba(225, 232, 228, 0.82);
 }
@@ -351,7 +352,7 @@ summary:focus-visible {
 
 .project-row-copy {
   display: grid;
-  gap: 2px;
+  gap: 1px;
 }
 
 .project-row-copy span,
@@ -366,14 +367,14 @@ summary:focus-visible {
 
 .project-row-copy span,
 .session-row-title {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 660;
-  line-height: 1.25;
+  line-height: 1.22;
 }
 
 .project-row-copy small {
   color: rgba(225, 232, 228, 0.48);
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 680;
   letter-spacing: 0;
 }
@@ -382,15 +383,15 @@ summary:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
-  min-width: 32px;
-  gap: 6px;
+  min-width: 28px;
+  gap: 5px;
   color: rgba(225, 232, 228, 0.52);
   font-weight: 760;
 }
 
 .session-open-icon {
-  width: 15px;
-  height: 15px;
+  width: 13px;
+  height: 13px;
   color: rgba(225, 232, 228, 0.48);
 }
 
@@ -399,17 +400,17 @@ summary:focus-visible {
 }
 
 .session-ring {
-  width: 13px;
-  height: 13px;
+  width: 12px;
+  height: 12px;
   border: 2px solid rgba(225, 232, 228, 0.2);
   border-top-color: rgba(225, 232, 228, 0.5);
   border-radius: 999px;
 }
 
 .session-row-meta {
-  max-width: 48px;
+  max-width: 44px;
   color: rgba(225, 232, 228, 0.54);
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 720;
   line-height: 1;
 }
@@ -417,7 +418,7 @@ summary:focus-visible {
 .sidebar-footer {
   flex: 0 0 auto;
   margin-top: auto;
-  padding-top: 6px;
+  padding-top: 5px;
   border-top: 1px solid rgba(213, 224, 255, 0.08);
 }
 
@@ -431,7 +432,7 @@ summary:focus-visible {
 
 .workbench {
   display: grid;
-  grid-template-rows: 54px minmax(0, 1fr) auto;
+  grid-template-rows: 50px minmax(0, 1fr) auto;
   min-width: 0;
   height: 100vh;
   min-height: 0;
@@ -439,16 +440,16 @@ summary:focus-visible {
 }
 
 .workbench-settings-open {
-  grid-template-rows: 54px minmax(0, 1fr);
+  grid-template-rows: 50px minmax(0, 1fr);
 }
 
 .topbar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   min-height: 0;
-  padding: 0 16px 0 20px;
+  padding: 0 14px 0 18px;
   border-bottom: 1px solid var(--line);
   background: rgba(13, 16, 17, 0.74);
 }
@@ -456,22 +457,22 @@ summary:focus-visible {
 .topbar-title-stack {
   display: grid;
   min-width: 0;
-  gap: 3px;
+  gap: 2px;
 }
 
 .topbar-title {
   display: flex;
   align-items: baseline;
   min-width: 0;
-  gap: 10px;
+  gap: 8px;
 }
 
 .topbar-title h2 {
   min-width: 0;
   overflow: hidden;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 780;
-  line-height: 1.15;
+  line-height: 1.12;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -480,8 +481,8 @@ summary:focus-visible {
   min-width: 0;
   overflow: hidden;
   color: var(--muted);
-  font-size: 11.5px;
-  font-weight: 700;
+  font-size: 10.5px;
+  font-weight: 680;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -490,7 +491,7 @@ summary:focus-visible {
 .topbar-actions {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
 }
 
 .topbar-context {
@@ -522,12 +523,12 @@ summary:focus-visible {
   align-items: center;
   min-width: 0;
   max-width: 168px;
-  gap: 5px;
+  gap: 4px;
   overflow: hidden;
   color: rgba(215, 225, 218, 0.58);
-  font-size: 11px;
-  font-weight: 720;
-  line-height: 16px;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 15px;
   white-space: nowrap;
 }
 
@@ -545,8 +546,8 @@ summary:focus-visible {
 
 .topbar-branch-trigger svg {
   flex: 0 0 auto;
-  width: 13px;
-  height: 13px;
+  width: 12px;
+  height: 12px;
   opacity: 0.72;
 }
 
@@ -572,8 +573,8 @@ summary:focus-visible {
 
 .topbar-context-dot {
   flex: 0 0 auto;
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   border-radius: 999px;
   background: rgba(117, 217, 156, 0.88);
   box-shadow: 0 0 0 3px rgba(117, 217, 156, 0.08);
@@ -598,7 +599,7 @@ summary:focus-visible {
 
 .topbar-branch-menu {
   position: absolute;
-  top: 26px;
+  top: 24px;
   left: 7px;
   z-index: 30;
   display: grid;
@@ -778,8 +779,8 @@ summary:focus-visible {
 .topbar-icon-button {
   position: relative;
   display: grid;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   place-items: center;
   border: 1px solid rgba(213, 224, 255, 0.12);
   border-radius: 7px;
@@ -799,8 +800,8 @@ summary:focus-visible {
 }
 
 .topbar-icon-button svg {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
 }
 
 .topbar-action-badge {
@@ -828,22 +829,22 @@ summary:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 62px;
-  min-height: 30px;
-  gap: 6px;
-  padding: 0 9px;
+  min-width: 58px;
+  min-height: 28px;
+  gap: 5px;
+  padding: 0 8px;
   border: 1px solid rgba(213, 224, 255, 0.14);
   border-radius: 999px;
   color: var(--text-soft);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 820;
   text-transform: uppercase;
 }
 
 .status-pill-dot {
   flex: 0 0 auto;
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   border-radius: 999px;
   background: currentColor;
   opacity: 0.92;
