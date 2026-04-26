@@ -42,7 +42,7 @@ Same rules as `chat-save.md` and `chat-resume.md`.
 - Delete the key `{{name}}` from the index object.
 - Write updated JSON back to `.qwen/chat-index.json`.
 
-### 5. Confirm
+### 6. Confirm
 
 - Output: `Session "{{name}}" removed from saved sessions index.`
 - Add note: `This only removes the saved name reference. The actual session history file is NOT deleted.`
