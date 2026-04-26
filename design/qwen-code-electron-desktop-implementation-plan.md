@@ -22,6 +22,109 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Composer Runtime Control Chrome
+
+Status: completed in iteration 54.
+
+Goal: replace the default-looking composer permission/model select chrome with
+compact, icon-led runtime controls that preserve native keyboard behavior and
+stay contained with long mode/model labels.
+
+User-visible value: the bottom composer reads more like the `home.jpg` task
+control center: attachment, project, branch, permission, model, stop, and send
+are all compact controls in one stable row without raw provider prefixes or
+native form chrome dominating the first viewport.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/SidebarIcons.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/composer-runtime-control-chrome.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Permission and model selectors render inside compact composer control shells
+  with leading icons, custom chevrons, stable `aria-label`, `title`, and native
+  `<select>` behavior.
+- Long permission/model names are shortened in the visible option text while
+  preserving the full label in `title`; Coding Plan provider prefixes remain
+  hidden in the composer.
+- Select controls stay within compact geometry at default, compact, and
+  review-open Electron viewports without horizontal overflow.
+- Composer send, stop, attachment, project/branch chips, first-send thread
+  creation, model switching, permission switching, terminal attach, review, and
+  settings workflows remain unchanged.
+- The change follows prototype-constrained `frontend-design` guidance: refine
+  density and hierarchy instead of inventing a new visual direction.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, inspect the project composer before a thread exists, send the
+  first prompt, switch to a configured model including a long Coding Plan model,
+  inspect default/compact/review-open composer geometry, and continue the
+  existing review, settings, branch, terminal, and composer workflows.
+- E2E assertions: runtime controls expose icons and custom chevrons, preserve
+  native selects and accessible labels, keep full titles for selected options,
+  hide raw Coding Plan provider prefixes in visible composer labels, remain
+  bounded in compact viewports, and record no console errors or failed local
+  requests.
+- Diagnostic artifacts: updated `project-composer.json`,
+  `composer-model-switch.json`, `conversation-surface-fidelity.json`,
+  `compact-dense-conversation.json`, `compact-review-drawer.json`, screenshots,
+  Electron log, and summary JSON under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` to choose the small native-select
+  wrapper approach over custom dropdowns or a larger settings rewrite;
+  `frontend-design` for prototype-constrained composer density; and
+  `electron-desktop-dev` for real Electron CDP verification of renderer
+  behavior.
+
+Notes and decisions:
+
+- The chosen approach keeps native `<select>` controls rather than building a
+  custom combobox. That preserves keyboard and screen-reader behavior while
+  removing the visual weight of default select chrome.
+- Model/provider configuration remains out of scope for this slice; this is a
+  first-viewport fidelity and containment pass.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 23 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T19-27-40-383Z/`.
+- Key recorded metrics: `project-composer.json` recorded permission/model
+  runtime controls at `124 x 24` with leading icons, custom chevrons, native
+  select labels, and full titles; `compact-dense-conversation.json` recorded
+  both runtime controls at `106 x 24`; `compact-review-drawer.json` recorded
+  both runtime controls under `100 x 25`; `summary.json` recorded zero console
+  errors and zero failed local requests.
+
+Next work:
+
+- Continue composer fidelity by making the permission/model controls reachable
+  from settings without leaving the main workbench flow.
+- Add a focused searchable model picker only when the model list grows beyond
+  what native select can handle comfortably.
+
 ### Slice: Composer Send/Stop Icon Density
 
 Status: completed in iteration 53.

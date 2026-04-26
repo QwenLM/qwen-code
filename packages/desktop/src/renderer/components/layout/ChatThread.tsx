@@ -21,10 +21,13 @@ import type {
 } from '../../../shared/desktopProtocol.js';
 import {
   AttachmentIcon,
+  ChevronDownIcon,
   CopyIcon,
   DiffIcon,
+  ModelIcon,
   RefreshIcon,
   SendIcon,
+  SlidersIcon,
   StopIcon,
 } from './SidebarIcons.js';
 
@@ -76,6 +79,8 @@ export function ChatThread({
     : 'Open a project to start';
   const currentModeId = modelState.modes?.currentModeId ?? 'default';
   const modeOptions = modelState.modes?.availableModes ?? fallbackModeOptions;
+  const currentMode =
+    modeOptions.find((mode) => mode.id === currentModeId) ?? fallbackModeOption;
   const currentModelId =
     modelState.models?.currentModelId ?? fallbackModelOption.modelId;
   const modelOptions = modelState.models?.availableModels.length
@@ -147,42 +152,63 @@ export function ChatThread({
             <span className="composer-chip">
               {activeProject?.gitBranch || 'No branch'}
             </span>
-            <label className="composer-select-label">
+            <label
+              className="composer-select-label"
+              data-testid="composer-mode-control"
+              title={formatModeTitle(currentMode)}
+            >
               <span className="sr-only">Permission mode</span>
-              <select
-                aria-label="Permission mode"
-                disabled={!activeSessionId || !modelState.modes}
-                value={currentModeId}
-                onChange={(event) =>
-                  onModeChange(event.target.value as DesktopApprovalMode)
-                }
-              >
-                {modeOptions.map((mode) => (
-                  <option key={mode.id} value={mode.id}>
-                    {mode.name}
-                  </option>
-                ))}
-              </select>
+              <span className="composer-select-shell">
+                <SlidersIcon className="composer-select-leading-icon" />
+                <select
+                  aria-label="Permission mode"
+                  disabled={!activeSessionId || !modelState.modes}
+                  title={formatModeTitle(currentMode)}
+                  value={currentModeId}
+                  onChange={(event) =>
+                    onModeChange(event.target.value as DesktopApprovalMode)
+                  }
+                >
+                  {modeOptions.map((mode) => (
+                    <option
+                      key={mode.id}
+                      title={formatModeTitle(mode)}
+                      value={mode.id}
+                    >
+                      {formatCompactModeLabel(mode)}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDownIcon className="composer-select-chevron" />
+              </span>
             </label>
-            <label className="composer-select-label">
+            <label
+              className="composer-select-label"
+              data-testid="composer-model-control"
+              title={formatFullModelLabel(currentModel)}
+            >
               <span className="sr-only">Model</span>
-              <select
-                aria-label="Model"
-                disabled={!activeSessionId || !modelState.models}
-                title={formatFullModelLabel(currentModel)}
-                value={currentModelId}
-                onChange={(event) => onModelChange(event.target.value)}
-              >
-                {modelOptions.map((model) => (
-                  <option
-                    key={model.modelId}
-                    title={formatFullModelLabel(model)}
-                    value={model.modelId}
-                  >
-                    {formatCompactModelLabel(model)}
-                  </option>
-                ))}
-              </select>
+              <span className="composer-select-shell">
+                <ModelIcon className="composer-select-leading-icon" />
+                <select
+                  aria-label="Model"
+                  disabled={!activeSessionId || !modelState.models}
+                  title={formatFullModelLabel(currentModel)}
+                  value={currentModelId}
+                  onChange={(event) => onModelChange(event.target.value)}
+                >
+                  {modelOptions.map((model) => (
+                    <option
+                      key={model.modelId}
+                      title={formatFullModelLabel(model)}
+                      value={model.modelId}
+                    >
+                      {formatCompactModelLabel(model)}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDownIcon className="composer-select-chevron" />
+              </span>
             </label>
           </div>
           <div className="composer-actions">
@@ -1129,14 +1155,35 @@ function formatCompactModelLabel(model: DesktopModelInfo): string {
   const pathTail = label.split('/').pop()?.trim() || label;
   const compactLabel = pathTail.length < label.length ? pathTail : label;
 
-  return compactLabel.length > 32
-    ? `${compactLabel.slice(0, 29)}...`
-    : compactLabel;
+  return formatCompactRuntimeLabel(compactLabel, 32);
 }
 
 function formatFullModelLabel(model: DesktopModelInfo): string {
   const label = (model.name || model.modelId).trim();
   return label.length > 0 ? label : model.modelId;
+}
+
+function formatCompactModeLabel(mode: { name: string }): string {
+  return formatCompactRuntimeLabel(mode.name, 22);
+}
+
+function formatModeTitle(mode: { name: string; description?: string }): string {
+  const name = mode.name.trim();
+  const description = mode.description?.trim();
+
+  return description ? `${name} - ${description}` : name;
+}
+
+function formatCompactRuntimeLabel(label: string, maxLength: number): string {
+  const trimmed = label.trim();
+
+  if (trimmed.length <= maxLength) {
+    return trimmed;
+  }
+
+  const truncated = trimmed.slice(0, maxLength - 3).replace(/[\s/_-]+$/u, '');
+
+  return `${truncated}...`;
 }
 
 function stripCodingPlanProviderPrefix(label: string): string {
@@ -1150,10 +1197,10 @@ const fallbackModelOption: DesktopModelInfo = {
   name: 'Default model',
 };
 
-const fallbackModeOptions = [
-  {
-    id: 'default' as const,
-    name: 'Ask before run',
-    description: 'Ask before running commands.',
-  },
-];
+const fallbackModeOption = {
+  id: 'default' as const,
+  name: 'Ask before run',
+  description: 'Ask before running commands.',
+};
+
+const fallbackModeOptions = [fallbackModeOption];

@@ -390,6 +390,33 @@ export function PaperclipIcon(props: SidebarIconProps) {
   );
 }
 
+export function ModelIcon(props: SidebarIconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="20"
+      viewBox="0 0 24 24"
+      width="20"
+      {...props}
+    >
+      <path
+        d="M12 4.7 18.3 8.3v7.4L12 19.3l-6.3-3.6V8.3L12 4.7Z"
+        stroke="currentColor"
+        strokeLinejoin="round"
+        strokeWidth="1.7"
+      />
+      <path
+        d="m8.7 10.1 3.3 1.9 3.3-1.9M12 12v3.8"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.7"
+      />
+    </svg>
+  );
+}
+
 export function SendIcon(props: SidebarIconProps) {
   return (
     <svg

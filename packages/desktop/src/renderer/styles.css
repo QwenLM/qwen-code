@@ -1695,22 +1695,66 @@ summary:focus-visible {
 
 .composer-select-label {
   display: inline-flex;
+  flex: 0 1 auto;
   min-width: 0;
 }
 
-.composer-select-label select {
-  width: 118px;
+.composer-select-shell {
+  position: relative;
+  display: inline-flex;
+  width: 124px;
   min-width: 0;
-  max-width: 142px;
-  min-height: 24px;
-  overflow: hidden;
-  padding: 0 24px 0 8px;
-  border-radius: 999px;
+  align-items: center;
   color: var(--text-soft);
+}
+
+.composer-select-leading-icon,
+.composer-select-chevron {
+  position: absolute;
+  z-index: 1;
+  width: 13px;
+  height: 13px;
+  pointer-events: none;
+}
+
+.composer-select-leading-icon {
+  left: 8px;
+  opacity: 0.82;
+}
+
+.composer-select-chevron {
+  right: 7px;
+  opacity: 0.68;
+}
+
+.composer-select-label select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 24px;
+  appearance: none;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(238, 244, 239, 0.04);
+  color: var(--text-soft);
+  cursor: pointer;
   font-size: 11px;
   font-weight: 730;
+  line-height: 1;
+  padding: 0 23px 0 27px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.composer-select-label select:focus {
+  border-color: rgba(85, 166, 255, 0.58);
+  box-shadow: 0 0 0 2px rgba(85, 166, 255, 0.14);
+}
+
+.composer-select-label select:disabled {
+  cursor: default;
+  opacity: 0.68;
 }
 
 select,
@@ -2556,12 +2600,16 @@ textarea:focus {
     max-width: 132px;
   }
 
+  .composer-select-shell {
+    width: 106px;
+  }
+
   .composer-select-label select {
-    width: 96px;
-    min-width: 88px;
-    max-width: 112px;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
     min-height: 24px;
-    padding: 0 22px 0 7px;
+    padding: 0 21px 0 25px;
     font-size: 10.8px;
   }
 
@@ -2672,12 +2720,16 @@ textarea:focus {
     max-width: 116px;
   }
 
+  .workspace-grid-review-open .composer-select-shell {
+    width: 98px;
+  }
+
   .workspace-grid-review-open .composer-select-label select {
-    width: 90px;
-    min-width: 86px;
-    max-width: 108px;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
     min-height: 24px;
-    padding: 0 20px 0 6px;
+    padding: 0 20px 0 24px;
   }
 
   .workspace-grid-review-open .composer-action-button {

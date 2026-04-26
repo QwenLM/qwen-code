@@ -524,7 +524,13 @@ describe('WorkspacePage', () => {
     const permissionMode = renderedContainer.querySelector(
       'select[aria-label="Permission mode"]',
     );
+    const permissionControl = renderedContainer.querySelector(
+      '[data-testid="composer-mode-control"]',
+    );
     const model = renderedContainer.querySelector('select[aria-label="Model"]');
+    const modelControl = renderedContainer.querySelector(
+      '[data-testid="composer-model-control"]',
+    );
     const attachButton = renderedContainer.querySelector(
       '[data-testid="composer-attach-button"]',
     );
@@ -543,8 +549,28 @@ describe('WorkspacePage', () => {
     expect(renderedContainer.textContent).toContain('New thread');
     expect(permissionMode).toBeInstanceOf(HTMLSelectElement);
     expect((permissionMode as HTMLSelectElement).disabled).toBe(true);
+    expect(permissionMode?.getAttribute('title')).toBe(
+      'Ask before run - Ask before running commands.',
+    );
+    expect(permissionControl?.getAttribute('title')).toBe(
+      'Ask before run - Ask before running commands.',
+    );
+    expect(
+      permissionControl?.querySelector('.composer-select-leading-icon'),
+    ).toBeTruthy();
+    expect(
+      permissionControl?.querySelector('.composer-select-chevron'),
+    ).toBeTruthy();
     expect(model).toBeInstanceOf(HTMLSelectElement);
     expect((model as HTMLSelectElement).disabled).toBe(true);
+    expect(model?.getAttribute('title')).toBe('Default model');
+    expect(modelControl?.getAttribute('title')).toBe('Default model');
+    expect(
+      modelControl?.querySelector('.composer-select-leading-icon'),
+    ).toBeTruthy();
+    expect(
+      modelControl?.querySelector('.composer-select-chevron'),
+    ).toBeTruthy();
     expect(attachButton).toBeInstanceOf(HTMLButtonElement);
     expect((attachButton as HTMLButtonElement).disabled).toBe(false);
     expect(attachButton?.getAttribute('aria-disabled')).toBe('true');
@@ -622,6 +648,77 @@ describe('WorkspacePage', () => {
     });
 
     expect(onModelChange).toHaveBeenCalledWith('qwen-e2e-cdp');
+  });
+
+  it('shortens long composer runtime labels while preserving full titles', () => {
+    const renderedContainer = renderWorkspace({
+      modelState: {
+        ...createInitialModelState(),
+        modes: {
+          currentModeId: 'auto-edit',
+          availableModes: [
+            {
+              id: 'default',
+              name: 'Ask before run',
+              description: 'Ask before running commands.',
+            },
+            {
+              id: 'auto-edit',
+              name: 'Auto edit with long localized permission label for compact',
+              description: 'Allow edits while keeping approvals visible.',
+            },
+          ],
+        },
+        models: {
+          currentModelId: 'provider/very-long-runtime-model',
+          availableModels: [
+            {
+              modelId: 'provider/very-long-runtime-model',
+              name: 'provider/very-long-runtime-model-name-for-compact-control',
+            },
+            {
+              modelId: 'qwen3-coder-next',
+              name:
+                '[ModelStudio Coding Plan for Global/Intl] ' +
+                'qwen3-coder-next',
+            },
+          ],
+        },
+      },
+    });
+    const permissionMode = renderedContainer.querySelector(
+      'select[aria-label="Permission mode"]',
+    ) as HTMLSelectElement | null;
+    const model = renderedContainer.querySelector(
+      'select[aria-label="Model"]',
+    ) as HTMLSelectElement | null;
+
+    expect(permissionMode).toBeInstanceOf(HTMLSelectElement);
+    expect(model).toBeInstanceOf(HTMLSelectElement);
+    expect(permissionMode?.getAttribute('title')).toBe(
+      'Auto edit with long localized permission label for compact - ' +
+        'Allow edits while keeping approvals visible.',
+    );
+    expect(model?.getAttribute('title')).toBe(
+      'provider/very-long-runtime-model-name-for-compact-control',
+    );
+    expect(permissionMode?.options[1]?.textContent).toBe(
+      'Auto edit with long...',
+    );
+    expect(permissionMode?.options[1]?.title).toBe(
+      'Auto edit with long localized permission label for compact - ' +
+        'Allow edits while keeping approvals visible.',
+    );
+    expect(model?.options[0]?.textContent).toBe(
+      'very-long-runtime-model-name...',
+    );
+    expect(model?.options[1]?.textContent).toBe('qwen3-coder-next');
+    expect(model?.options[1]?.title).toBe(
+      '[ModelStudio Coding Plan for Global/Intl] qwen3-coder-next',
+    );
+    expect(renderedContainer.textContent).not.toContain(
+      '[ModelStudio Coding Plan',
+    );
   });
 
   it('shows inline settings validation before saving a model provider', () => {

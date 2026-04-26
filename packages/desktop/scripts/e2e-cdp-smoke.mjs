@@ -569,9 +569,32 @@ async function assertProjectComposerReady(fileName) {
       selectRects: [...document.querySelectorAll('.composer-select-label select')]
         .map((select) => ({
           label: select.getAttribute('aria-label') || '',
+          title: select.getAttribute('title') || '',
           rect: rectFor(select),
           style: styleFor(select)
         })),
+      selectControls: [...document.querySelectorAll(
+        '[data-testid="composer-mode-control"], [data-testid="composer-model-control"]'
+      )].map((control) => {
+        const shell = control.querySelector('.composer-select-shell');
+        const select = control.querySelector('select');
+        return {
+          testId: control.getAttribute('data-testid') || '',
+          title: control.getAttribute('title') || '',
+          selectLabel: select?.getAttribute('aria-label') || '',
+          selectTitle: select?.getAttribute('title') || '',
+          hasLeadingIcon:
+            shell?.querySelector('.composer-select-leading-icon') !== null,
+          hasChevron:
+            shell?.querySelector('.composer-select-chevron') !== null,
+          rect: rectFor(shell),
+          selectRect: rectFor(select),
+          style: styleFor(select),
+          optionTexts: select
+            ? [...select.options].map((option) => option.textContent.trim())
+            : []
+        };
+      }),
       actionButtonRects: [...document.querySelectorAll('.composer-actions button')]
         .map((button) => ({
           label: button.getAttribute('aria-label') || button.textContent.trim(),
@@ -721,6 +744,41 @@ async function assertProjectComposerReady(fileName) {
     if (select.rect.height > 25 || select.style.fontSize > 11.2) {
       throw new Error(
         `Composer select scale regressed: ${JSON.stringify(select)}`,
+      );
+    }
+  }
+
+  if (snapshot.selectControls.length !== 2) {
+    throw new Error(
+      `Composer runtime controls are missing: ${JSON.stringify(
+        snapshot.selectControls,
+      )}`,
+    );
+  }
+
+  for (const control of snapshot.selectControls) {
+    if (
+      !control.title ||
+      control.title !== control.selectTitle ||
+      !control.hasLeadingIcon ||
+      !control.hasChevron ||
+      !control.rect ||
+      !control.selectRect ||
+      !control.style
+    ) {
+      throw new Error(
+        `Composer runtime control shell regressed: ${JSON.stringify(control)}`,
+      );
+    }
+
+    if (
+      control.rect.width > 128 ||
+      control.rect.height > 25 ||
+      control.selectRect.height > 25 ||
+      control.style.fontSize > 11.2
+    ) {
+      throw new Error(
+        `Composer runtime control scale regressed: ${JSON.stringify(control)}`,
       );
     }
   }
@@ -3220,6 +3278,21 @@ async function assertConversationSurfaceFidelity(fileName) {
       disabled: button.disabled,
       rect: rectFor(button)
     }));
+    const composerSelectControls = [
+      ...document.querySelectorAll('.composer-select-shell')
+    ].map((shell) => {
+      const select = shell.querySelector('select');
+      return {
+        label: select?.getAttribute('aria-label') || '',
+        title: select?.getAttribute('title') || '',
+        hasLeadingIcon:
+          shell.querySelector('.composer-select-leading-icon') !== null,
+        hasChevron: shell.querySelector('.composer-select-chevron') !== null,
+        rect: rectFor(shell),
+        selectRect: rectFor(select),
+        style: styleFor(select)
+      };
+    });
     const actionButtons = assistantMessage
       ? [
           ...assistantMessage.querySelectorAll(
@@ -3283,7 +3356,8 @@ async function assertConversationSurfaceFidelity(fileName) {
       composer: {
         rect: rectFor(composer),
         textareaRect: rectFor(composerTextarea),
-        actionButtons: composerActionButtons
+        actionButtons: composerActionButtons,
+        selectControls: composerSelectControls
       },
       actionButtons: actionButtons.map((button) => ({
         label: button.getAttribute('aria-label') || '',
@@ -3581,6 +3655,44 @@ async function assertConversationSurfaceFidelity(fileName) {
     stopDisabled: true,
   });
 
+  if (snapshot.composer.selectControls.length !== 2) {
+    throw new Error(
+      `Conversation composer runtime controls are missing: ${JSON.stringify(
+        snapshot.composer.selectControls,
+      )}`,
+    );
+  }
+
+  for (const control of snapshot.composer.selectControls) {
+    if (
+      !control.title ||
+      !control.hasLeadingIcon ||
+      !control.hasChevron ||
+      !control.rect ||
+      !control.selectRect ||
+      !control.style
+    ) {
+      throw new Error(
+        `Conversation composer runtime control shell regressed: ${JSON.stringify(
+          control,
+        )}`,
+      );
+    }
+
+    if (
+      control.rect.width > 128 ||
+      control.rect.height > 25 ||
+      control.selectRect.height > 25 ||
+      control.style.fontSize > 11.2
+    ) {
+      throw new Error(
+        `Conversation composer runtime control scale regressed: ${JSON.stringify(
+          control,
+        )}`,
+      );
+    }
+  }
+
   for (const button of snapshot.actionButtons) {
     if (!button.rect || !button.style) {
       throw new Error(
@@ -3748,6 +3860,21 @@ async function assertCompactDenseConversationLayout(fileName) {
       disabled: button.disabled,
       rect: rectFor(button)
     }));
+    const composerSelectControls = [
+      ...document.querySelectorAll('.composer-select-shell')
+    ].map((shell) => {
+      const select = shell.querySelector('select');
+      return {
+        label: select?.getAttribute('aria-label') || '',
+        title: select?.getAttribute('title') || '',
+        hasLeadingIcon:
+          shell.querySelector('.composer-select-leading-icon') !== null,
+        hasChevron: shell.querySelector('.composer-select-chevron') !== null,
+        rect: rectFor(shell),
+        selectRect: rectFor(select),
+        style: typeStyleFor(select)
+      };
+    });
     const terminal = document.querySelector('[data-testid="terminal-drawer"]');
     const terminalBody = document.querySelector('[data-testid="terminal-body"]');
     const terminalToggle = document.querySelector(
@@ -3861,6 +3988,7 @@ async function assertCompactDenseConversationLayout(fileName) {
       summary: rectFor(summary),
       composer: composerRect,
       composerActionButtons,
+      composerSelectControls,
       terminal: rectFor(terminal),
       terminalToggle: rectFor(terminalToggle),
       terminalProject: rectFor(terminalProject),
@@ -4250,6 +4378,44 @@ async function assertCompactDenseConversationLayout(fileName) {
     sendDisabled: true,
     stopDisabled: true,
   });
+
+  if (snapshot.composerSelectControls.length !== 2) {
+    throw new Error(
+      `Compact composer runtime controls are missing: ${JSON.stringify(
+        snapshot.composerSelectControls,
+      )}`,
+    );
+  }
+
+  for (const control of snapshot.composerSelectControls) {
+    if (
+      !control.title ||
+      !control.hasLeadingIcon ||
+      !control.hasChevron ||
+      !control.rect ||
+      !control.selectRect ||
+      !control.style
+    ) {
+      throw new Error(
+        `Compact composer runtime control shell regressed: ${JSON.stringify(
+          control,
+        )}`,
+      );
+    }
+
+    if (
+      control.rect.width > 108 ||
+      control.rect.height > 25 ||
+      control.selectRect.height > 25 ||
+      control.style.fontSize > 11.2
+    ) {
+      throw new Error(
+        `Compact composer runtime control scale regressed: ${JSON.stringify(
+          control,
+        )}`,
+      );
+    }
+  }
 
   if (!snapshot.messageContained) {
     throw new Error('Dense assistant message escaped the compact timeline.');
@@ -4712,6 +4878,22 @@ async function assertCompactReviewDrawerLayout(fileName) {
         disabled: button.disabled,
         rect: rectForElement(button)
       })),
+      composerSelectControls: [
+        ...document.querySelectorAll('.composer-select-shell')
+      ].map((shell) => {
+        const select = shell.querySelector('select');
+        const style = select ? window.getComputedStyle(select) : null;
+        return {
+          label: select?.getAttribute('aria-label') || '',
+          title: select?.getAttribute('title') || '',
+          hasLeadingIcon:
+            shell.querySelector('.composer-select-leading-icon') !== null,
+          hasChevron: shell.querySelector('.composer-select-chevron') !== null,
+          rect: rectForElement(shell),
+          selectRect: rectForElement(select),
+          fontSize: style ? Number.parseFloat(style.fontSize) : null
+        };
+      }),
       reviewButtons,
       changedFileRows,
       composerTextareaHeight:
@@ -4914,6 +5096,44 @@ async function assertCompactReviewDrawerLayout(fileName) {
     sendDisabled: true,
     stopDisabled: true,
   });
+
+  if (metrics.composerSelectControls.length !== 2) {
+    throw new Error(
+      `Compact review composer runtime controls are missing: ${JSON.stringify(
+        metrics.composerSelectControls,
+      )}`,
+    );
+  }
+
+  for (const control of metrics.composerSelectControls) {
+    if (
+      !control.title ||
+      !control.hasLeadingIcon ||
+      !control.hasChevron ||
+      !control.rect ||
+      !control.selectRect ||
+      control.fontSize === null
+    ) {
+      throw new Error(
+        `Compact review composer runtime control shell regressed: ${JSON.stringify(
+          control,
+        )}`,
+      );
+    }
+
+    if (
+      control.rect.width > 100 ||
+      control.rect.height > 25 ||
+      control.selectRect.height > 25 ||
+      control.fontSize > 11.2
+    ) {
+      throw new Error(
+        `Compact review composer runtime control scale regressed: ${JSON.stringify(
+          control,
+        )}`,
+      );
+    }
+  }
 
   for (const [key, contained] of Object.entries(metrics.containment)) {
     if (!contained) {
