@@ -483,6 +483,8 @@ async function assertProjectComposerReady(fileName) {
     const controlRow = document.querySelector('.composer-control-row');
     const context = document.querySelector('.composer-context');
     const actions = document.querySelector('.composer-actions');
+    const chatHeader = document.querySelector('.chat-header');
+    const chatStatus = document.querySelector('.chat-status-announcement');
     const rectFor = (element) => {
       if (!element) {
         return null;
@@ -542,6 +544,8 @@ async function assertProjectComposerReady(fileName) {
         })),
       permissionDisabled: permission?.disabled ?? null,
       modelDisabled: model?.disabled ?? null,
+      chatHeaderPresent: chatHeader !== null,
+      chatStatusText: chatStatus?.textContent.trim() ?? '',
       overflows: {
         composer: overflows(composer),
         controlRow: overflows(controlRow),
@@ -568,6 +572,16 @@ async function assertProjectComposerReady(fileName) {
   if (snapshot.permissionDisabled !== true || snapshot.modelDisabled !== true) {
     throw new Error(
       'Project composer runtime selectors should stay disabled before a session exists.',
+    );
+  }
+
+  if (snapshot.chatHeaderPresent) {
+    throw new Error('Project composer view should not render a chat header.');
+  }
+
+  if (!snapshot.chatStatusText.includes('Conversation')) {
+    throw new Error(
+      `Project composer view is missing the accessible chat status: ${snapshot.chatStatusText}`,
     );
   }
 
@@ -2565,6 +2579,9 @@ async function assertConversationSurfaceFidelity(fileName) {
     const summary = document.querySelector(
       '[data-testid="conversation-changes-summary"]'
     );
+    const chat = document.querySelector('[data-testid="chat-thread"]');
+    const chatHeader = document.querySelector('.chat-header');
+    const chatStatus = document.querySelector('.chat-status-announcement');
     const summaryAction = summary?.querySelector(
       'button[aria-label="Review Changes"]'
     );
@@ -2586,6 +2603,11 @@ async function assertConversationSurfaceFidelity(fileName) {
       : [];
 
     return {
+      chat: {
+        rect: rectFor(chat),
+        headerPresent: chatHeader !== null,
+        statusText: chatStatus?.textContent.trim() ?? ''
+      },
       assistant: {
         rect: rectFor(assistantMessage),
         style: styleFor(assistantMessage)
@@ -2660,6 +2682,7 @@ async function assertConversationSurfaceFidelity(fileName) {
     !snapshot.summary.rowRect ||
     !snapshot.summary.rowStyle ||
     !snapshot.summary.rowLabelStyle ||
+    !snapshot.chat.rect ||
     !snapshot.timeline ||
     !snapshot.composer.rect ||
     !snapshot.composer.textareaRect
@@ -2667,6 +2690,29 @@ async function assertConversationSurfaceFidelity(fileName) {
     throw new Error(
       `Conversation surface fidelity metrics are missing: ${JSON.stringify(
         snapshot,
+      )}`,
+    );
+  }
+
+  if (snapshot.chat.headerPresent) {
+    throw new Error('Conversation canvas should not render a visible header.');
+  }
+
+  if (!snapshot.chat.statusText.includes('Conversation')) {
+    throw new Error(
+      `Conversation canvas is missing the accessible status text: ${snapshot.chat.statusText}`,
+    );
+  }
+
+  const timelineOffset = snapshot.timeline.top - snapshot.chat.rect.top;
+  if (timelineOffset < -1 || timelineOffset > 4) {
+    throw new Error(
+      `Conversation timeline should start directly below the topbar: ${JSON.stringify(
+        {
+          chat: snapshot.chat.rect,
+          timeline: snapshot.timeline,
+          timelineOffset,
+        },
       )}`,
     );
   }
@@ -2917,6 +2963,8 @@ async function assertCompactDenseConversationLayout(fileName) {
     const terminalToggle = document.querySelector(
       '[data-testid="terminal-toggle"]'
     );
+    const chatHeader = document.querySelector('.chat-header');
+    const chatStatus = document.querySelector('.chat-status-announcement');
 
     const preScroll = {
       summaryRect: rectFor(summary),
@@ -2975,6 +3023,8 @@ async function assertCompactDenseConversationLayout(fileName) {
       topbar: rectFor(document.querySelector('[data-testid="workspace-topbar"]')),
       grid: rectFor(document.querySelector('[data-testid="workspace-grid"]')),
       chat: rectFor(document.querySelector('[data-testid="chat-thread"]')),
+      chatHeaderPresent: chatHeader !== null,
+      chatStatusText: chatStatus?.textContent.trim() ?? '',
       timeline: timelineRect,
       message: messageRect,
       messageParagraphStyle: typeStyleFor(messageParagraph),
@@ -3076,6 +3126,31 @@ async function assertCompactDenseConversationLayout(fileName) {
         messageParagraphStyle: snapshot.messageParagraphStyle,
         planItemStyle: snapshot.planItemStyle,
       })}`,
+    );
+  }
+
+  if (snapshot.chatHeaderPresent) {
+    throw new Error(
+      'Compact dense conversation should not render a chat header.',
+    );
+  }
+
+  if (!snapshot.chatStatusText.includes('Conversation')) {
+    throw new Error(
+      `Compact dense conversation is missing the accessible status text: ${snapshot.chatStatusText}`,
+    );
+  }
+
+  const compactTimelineOffset = snapshot.timeline.top - snapshot.chat.top;
+  if (compactTimelineOffset < -1 || compactTimelineOffset > 4) {
+    throw new Error(
+      `Compact conversation timeline should start directly below the topbar: ${JSON.stringify(
+        {
+          chat: snapshot.chat,
+          timeline: snapshot.timeline,
+          compactTimelineOffset,
+        },
+      )}`,
     );
   }
 

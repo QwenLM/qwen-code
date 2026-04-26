@@ -880,7 +880,7 @@ summary:focus-visible {
 
 .panel-main {
   display: grid;
-  grid-template-rows: 46px minmax(0, 1fr) auto auto;
+  grid-template-rows: minmax(0, 1fr) auto;
   background:
     linear-gradient(90deg, rgba(42, 71, 64, 0.11), transparent 22%),
     rgba(13, 15, 16, 0.74);
@@ -924,13 +924,6 @@ summary:focus-visible {
 .panel-header span {
   color: var(--muted);
   font-size: 12px;
-}
-
-.chat-header {
-  max-width: 940px;
-  width: min(940px, calc(100% - 36px));
-  justify-self: center;
-  border-bottom: 0;
 }
 
 .conversation-empty {
@@ -2356,11 +2349,7 @@ textarea:focus {
   }
 
   .workspace-grid-review-open .panel-main {
-    grid-template-rows: 42px minmax(0, 1fr) auto auto;
-  }
-
-  .workspace-grid-review-open .chat-header {
-    width: min(100%, calc(100% - 24px));
+    grid-template-rows: minmax(0, 1fr) auto;
   }
 
   .workspace-grid-review-open .chat-timeline {

@@ -22,6 +22,107 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Completed Slice: Conversation Header Chrome Reduction
+
+Status: completed in iteration 39.
+
+Goal: remove the redundant visible `Conversation` panel header from the main
+canvas so the timeline begins directly under the slim topbar, matching the
+conversation-first first viewport in `home.jpg`.
+
+User-visible value: users get more useful agent context above the composer and
+less debug-style chrome. Current thread, project, branch, model, permission, and
+runtime state remain visible in the topbar and composer instead of being
+repeated as a secondary panel title.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/conversation-header-chrome.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The main conversation no longer renders a visible `.chat-header` or duplicate
+  `Conversation`/connection row under the topbar.
+- A screen-reader-only live status remains for streaming/connection changes.
+- The timeline starts within a small padding distance of the chat panel top in
+  default and compact Electron viewports.
+- Composer, changed-files summary, assistant actions, review drawer, settings,
+  branch, terminal, and commit workflows continue to pass.
+- No ACP/session/internal IDs, server URLs, secrets, or new debug state are
+  introduced into the main workbench.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the fake Git project, assert the pre-thread composer and
+  headerless chat canvas, send a prompt, approve the fake command, assert the
+  default and compact conversation geometry, then continue the existing branch,
+  review, settings, terminal, discard safety, and commit workflows.
+- E2E assertions: `.chat-header` is absent, the screen-reader status exists,
+  timeline top is close to chat top, compact viewport preserves containment and
+  no overflow, and no console errors or failed local requests are recorded.
+- Diagnostic artifacts: `conversation-surface-fidelity.json`,
+  `compact-dense-conversation.json`, screenshots, Electron log, and summary JSON
+  under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` for choosing this narrow fidelity
+  slice without interrupting the autonomous loop, `frontend-design` for
+  prototype-constrained hierarchy and density, and `electron-desktop-dev` for
+  real Electron CDP verification of renderer changes.
+
+Notes and decisions:
+
+- The visible `Conversation`/connection panel row was removed instead of merely
+  shrinking it. Topbar and composer controls already carry the current thread,
+  project, branch, model, permission, and runtime state.
+- A screen-reader-only live region remains in the chat panel so streaming and
+  connection state changes are still announced without spending first-viewport
+  space on duplicate chrome.
+- The CDP harness now guards the pre-thread project composer, default
+  conversation, and compact conversation against reintroducing `.chat-header`.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 18 tests after correcting the new assertion to avoid pinning the
+  fixture-specific `idle` connection state.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T17-00-29-581Z/`.
+- Key recorded metrics: `.chat-header` absent in project, default, and compact
+  conversation paths; accessible chat status text recorded as
+  `Conversation idle` before thread creation and `Conversation connected` after
+  the fake ACP session connects; default timeline top `50` equals chat top
+  `50`; compact timeline top `50` equals compact chat top `50`; default
+  timeline height increased to `585.90625` px while composer stayed
+  `820x88.09375`; compact timeline height increased to `405.90625` px while
+  composer stayed `704x88.09375`; no document/body overflow, no console errors,
+  and no failed local requests.
+
+Next work:
+
+- Continue prototype fidelity with a focused pass on remaining assistant action
+  button and changed-file summary border weight only if screenshot review shows
+  crowding.
+- Continue settings/model polish by adding keyboard-focused coverage for the
+  provider selector and Coding Plan path.
+
 ### Completed Slice: Sidebar and Composer Control Density
 
 Status: completed in iteration 38.
@@ -124,8 +225,6 @@ Verification results:
 
 Next work:
 
-- Continue prototype fidelity by reducing the remaining main conversation header
-  and message typography weight where it still looks larger than `home.jpg`.
 - Continue settings/model polish by adding keyboard-focused coverage for the
   provider selector and Coding Plan path.
 

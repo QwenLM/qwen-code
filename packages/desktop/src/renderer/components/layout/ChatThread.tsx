@@ -79,9 +79,8 @@ export function ChatThread({
       aria-label="AI conversation thread"
       data-testid="chat-thread"
     >
-      <div className="panel-header chat-header">
-        <h3>Conversation</h3>
-        <span>{chatState.streaming ? 'Streaming' : chatState.connection}</span>
+      <div className="chat-status-announcement sr-only" aria-live="polite">
+        Conversation {chatState.streaming ? 'streaming' : chatState.connection}
       </div>
       <ChatTimeline
         activeProject={activeProject}

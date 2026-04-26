@@ -118,6 +118,10 @@ describe('WorkspacePage', () => {
         ?.getAttribute('aria-expanded'),
     ).toBe('false');
     expect(renderedContainer.querySelector('.topbar-nav')).toBeNull();
+    expect(renderedContainer.querySelector('.chat-header')).toBeNull();
+    expect(
+      renderedContainer.querySelector('.chat-status-announcement')?.textContent,
+    ).toContain('Conversation');
     expect(
       renderedContainer.querySelector('button[aria-label="Open Changes"]'),
     ).toBeTruthy();
