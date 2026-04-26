@@ -196,7 +196,6 @@ export function WorkspacePage({
           statusLabel={statusLabel}
           onCheckoutBranch={onCheckoutProjectBranch}
           onCreateBranch={onCreateProjectBranch}
-          onRefreshGitStatus={onRefreshProjectGitStatus}
           onListBranches={onListProjectBranches}
           onShowReview={toggleReview}
           onShowChat={showConversation}
@@ -243,6 +242,7 @@ export function WorkspacePage({
               onCommit={onCommit}
               onCommitMessageChange={onCommitMessageChange}
               onOpenFile={onOpenReviewFile}
+              onRefreshGitStatus={onRefreshProjectGitStatus}
               onRevertTarget={onRevertReviewTarget}
               onStageTarget={onStageReviewTarget}
             />

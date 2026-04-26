@@ -22,6 +22,102 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Review Drawer Git Refresh Relocation
+
+Status: completed in iteration 60.
+
+Goal: demote manual Git refresh from the primary topbar action cluster into the
+supporting review drawer, keeping the first viewport closer to `home.jpg` and
+reducing always-visible chrome around the conversation.
+
+User-visible value: the topbar stays focused on conversation, review, settings,
+runtime, branch, and compact diff state, while users still have a discoverable
+Refresh Git action when they are inspecting changes.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/TopBar.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.tsx`
+- `packages/desktop/src/renderer/components/layout/ReviewPanel.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/review-drawer-git-refresh-relocation.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The topbar no longer renders a `Refresh Git` icon button in default or
+  review-open layouts.
+- The review drawer header renders an icon-only `Refresh Git` action with
+  accessible label, tooltip, and compact dimensions.
+- Clicking the review drawer refresh action calls the existing Git refresh
+  handler; no server, IPC, or Git service contract changes are required.
+- Conversation and composer remain dominant, and review-open desktop and compact
+  viewports do not overflow horizontally or vertically.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open the dirty fake project, inspect default topbar action
+  labels, open the review drawer, assert `Refresh Git` lives in the drawer
+  header rather than the topbar, then continue the existing branch, staging,
+  commit, settings, terminal, compact viewport, and composer workflows.
+- E2E assertions: topbar action labels exclude `Refresh Git`, review drawer
+  button labels include `Refresh Git`, all review buttons remain compact, topbar
+  height stays slim, and no console errors or failed local requests are
+  recorded.
+- Diagnostic artifacts: updated review drawer layout JSON, compact review
+  layout JSON, topbar/context screenshots, Electron log, and `summary.json`
+  under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` to evaluate the narrowest
+  prototype-fidelity action relocation; `frontend-design` to keep the change
+  constrained by the prototype's conversation-first chrome; and
+  `electron-desktop-dev` for renderer changes verified through the real
+  Electron CDP harness.
+
+Notes and decisions:
+
+- Keep the existing refresh handler and project Git state flow unchanged. This
+  slice changes only where the user invokes the action.
+- The review drawer is the correct home for manual refresh because it is where
+  users inspect branch/file counts and review diffs; the topbar keeps the
+  compact status output.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `git diff --check` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 28 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-26T20-29-42-195Z/`.
+- Key recorded metrics: `review-drawer-layout.json` recorded topbar actions as
+  `Conversation`, `Close Changes`, and `Settings`, with `Refresh Git` present
+  in review drawer buttons at 28 px. `compact-review-drawer.json` recorded the
+  same action placement at 960x608, a 50 px topbar, 304 px review drawer,
+  424 px conversation, no overflow, and all containment checks passing.
+  `summary.json` recorded zero console errors and zero failed local requests.
+
+Next work:
+
+- Continue prototype fidelity by reviewing whether the review drawer's text
+  actions (`Discard All`, `Stage All`, per-file/hunk actions) should become
+  denser icon+tooltip controls without weakening destructive-action safety.
+- Add restart-persistence coverage for multiple recent projects so sidebar
+  ordering and active project recovery stay aligned after app relaunch.
+
 ### Slice: Project Switch Diff Stat Isolation
 
 Status: completed in iteration 59.

@@ -1014,6 +1014,13 @@ summary:focus-visible {
   font-size: 12px;
 }
 
+.panel-header-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
 .conversation-empty {
   display: grid;
   min-height: 0;

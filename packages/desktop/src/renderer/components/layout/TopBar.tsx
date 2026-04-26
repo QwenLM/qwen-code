@@ -22,7 +22,6 @@ import {
   BranchIcon,
   ChatBubbleIcon,
   DiffIcon,
-  RefreshIcon,
   SlidersIcon,
 } from './SidebarIcons.js';
 import { StatusPill } from './StatusPill.js';
@@ -38,7 +37,6 @@ export function TopBar({
   onCheckoutBranch,
   onCreateBranch,
   onListBranches,
-  onRefreshGitStatus,
   onShowReview,
   onShowChat,
   onShowSettings,
@@ -53,7 +51,6 @@ export function TopBar({
   onCheckoutBranch: (branchName: string) => Promise<void>;
   onCreateBranch: (branchName: string) => Promise<void>;
   onListBranches: () => Promise<DesktopGitBranch[]>;
-  onRefreshGitStatus: () => void;
   onShowReview: () => void;
   onShowChat: () => void;
   onShowSettings: () => void;
@@ -176,17 +173,6 @@ export function TopBar({
             {changedCount > 0 ? changedCount : ''}
           </span>
           <span className="sr-only">Changes</span>
-        </button>
-        <button
-          aria-label="Refresh Git"
-          className="topbar-icon-button"
-          disabled={!activeProject}
-          title="Refresh Git"
-          type="button"
-          onClick={onRefreshGitStatus}
-        >
-          <RefreshIcon />
-          <span className="sr-only">Refresh Git</span>
         </button>
         <button
           aria-label="Settings"

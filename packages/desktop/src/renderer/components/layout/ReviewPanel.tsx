@@ -12,7 +12,7 @@ import type {
   DesktopGitReviewTarget,
   DesktopProject,
 } from '../../api/client.js';
-import { CloseIcon } from './SidebarIcons.js';
+import { CloseIcon, RefreshIcon } from './SidebarIcons.js';
 
 type RequestDiscard = (
   target: DesktopGitReviewTarget,
@@ -35,6 +35,7 @@ export function ReviewPanel({
   onCommit,
   onCommitMessageChange,
   onOpenFile,
+  onRefreshGitStatus,
   onRevertTarget,
   onStageTarget,
 }: {
@@ -46,6 +47,7 @@ export function ReviewPanel({
   onCommit: () => void;
   onCommitMessageChange: (message: string) => void;
   onOpenFile: (filePath: string) => void;
+  onRefreshGitStatus: () => void;
   onRevertTarget: (target: DesktopGitReviewTarget) => void;
   onStageTarget: (target: DesktopGitReviewTarget) => void;
 }) {
@@ -57,18 +59,32 @@ export function ReviewPanel({
     >
       <div className="panel-header">
         <h3>Changes</h3>
-        {onClose ? (
+        <div className="panel-header-actions">
           <button
-            aria-label="Close Changes"
+            aria-label="Refresh Git"
             className="topbar-icon-button"
-            title="Close Changes"
+            data-testid="review-refresh-git"
+            disabled={!activeProject}
+            title="Refresh Git"
             type="button"
-            onClick={onClose}
+            onClick={onRefreshGitStatus}
           >
-            <CloseIcon />
-            <span className="sr-only">Close Changes</span>
+            <RefreshIcon />
+            <span className="sr-only">Refresh Git</span>
           </button>
-        ) : null}
+          {onClose ? (
+            <button
+              aria-label="Close Changes"
+              className="topbar-icon-button"
+              title="Close Changes"
+              type="button"
+              onClick={onClose}
+            >
+              <CloseIcon />
+              <span className="sr-only">Close Changes</span>
+            </button>
+          ) : null}
+        </div>
       </div>
       <ReviewSummary
         commitMessage={commitMessage}

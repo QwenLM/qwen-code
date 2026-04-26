@@ -5133,6 +5133,16 @@ async function assertReviewDrawerLayout(fileName) {
         width: button.getBoundingClientRect().width,
         height: button.getBoundingClientRect().height
       })),
+      reviewButtons: Array.from(
+        document.querySelectorAll('[data-testid="review-panel"] button')
+      ).map((button) => ({
+        label:
+          button.getAttribute('aria-label') ||
+          button.getAttribute('title') ||
+          button.textContent.trim(),
+        width: button.getBoundingClientRect().width,
+        height: button.getBoundingClientRect().height
+      })),
       composerActionButtons: [
         ...document.querySelectorAll('.composer-actions button')
       ].map((button) => ({
@@ -5176,12 +5186,7 @@ async function assertReviewDrawerLayout(fileName) {
   }
 
   const labels = metrics.topbarActions.map((action) => action.label);
-  for (const expectedLabel of [
-    'Conversation',
-    'Close Changes',
-    'Refresh Git',
-    'Settings',
-  ]) {
+  for (const expectedLabel of ['Conversation', 'Close Changes', 'Settings']) {
     if (!labels.includes(expectedLabel)) {
       throw new Error(
         `Missing compact topbar action ${expectedLabel}; labels=${labels.join(
@@ -5189,6 +5194,22 @@ async function assertReviewDrawerLayout(fileName) {
         )}`,
       );
     }
+  }
+  if (labels.includes('Refresh Git')) {
+    throw new Error(
+      `Refresh Git should live in the review drawer, not the topbar: ${labels.join(
+        ', ',
+      )}`,
+    );
+  }
+
+  const reviewLabels = metrics.reviewButtons.map((button) => button.label);
+  if (!reviewLabels.includes('Refresh Git')) {
+    throw new Error(
+      `Review drawer should expose Refresh Git; labels=${reviewLabels.join(
+        ', ',
+      )}`,
+    );
   }
 
   const oversizedActions = metrics.topbarActions.filter(
@@ -5539,12 +5560,7 @@ async function assertCompactReviewDrawerLayout(fileName) {
   }
 
   const topbarLabels = metrics.topbarActions.map((action) => action.label);
-  for (const expectedLabel of [
-    'Conversation',
-    'Close Changes',
-    'Refresh Git',
-    'Settings',
-  ]) {
+  for (const expectedLabel of ['Conversation', 'Close Changes', 'Settings']) {
     if (!topbarLabels.includes(expectedLabel)) {
       throw new Error(
         `Compact review missing topbar action ${expectedLabel}: ${topbarLabels.join(
@@ -5552,6 +5568,13 @@ async function assertCompactReviewDrawerLayout(fileName) {
         )}`,
       );
     }
+  }
+  if (topbarLabels.includes('Refresh Git')) {
+    throw new Error(
+      `Compact review should keep Refresh Git out of the topbar: ${topbarLabels.join(
+        ', ',
+      )}`,
+    );
   }
 
   const oversizedTopbarActions = metrics.topbarActions.filter(
@@ -5685,6 +5708,7 @@ async function assertCompactReviewDrawerLayout(fileName) {
 
   const labels = metrics.reviewButtons.map((button) => button.label);
   for (const expectedLabel of [
+    'Refresh Git',
     'Discard All',
     'Stage All',
     'Open',

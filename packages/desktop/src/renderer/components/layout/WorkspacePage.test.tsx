@@ -144,6 +144,9 @@ describe('WorkspacePage', () => {
       renderedContainer.querySelector('button[aria-label="Open Changes"]'),
     ).toBeTruthy();
     expect(
+      topbar?.querySelector('button[aria-label="Refresh Git"]'),
+    ).toBeNull();
+    expect(
       renderedContainer.querySelector(
         '[data-testid="conversation-changes-summary"]',
       ),
@@ -158,6 +161,9 @@ describe('WorkspacePage', () => {
 
     expect(
       renderedContainer.querySelector('[data-testid="review-panel"]'),
+    ).toBeTruthy();
+    expect(
+      renderedContainer.querySelector('[data-testid="review-refresh-git"]'),
     ).toBeTruthy();
     expect(
       renderedContainer.querySelector('[data-testid="chat-thread"]'),
@@ -480,6 +486,45 @@ describe('WorkspacePage', () => {
     expect(gitStatus?.querySelector('[data-testid="topbar-diff-stat"]')).toBe(
       null,
     );
+  });
+
+  it('moves Git refresh from the topbar into the review drawer', () => {
+    const onRefreshProjectGitStatus = vi.fn();
+    const renderedContainer = renderWorkspace({ onRefreshProjectGitStatus });
+    const topbar = renderedContainer.querySelector(
+      '[data-testid="workspace-topbar"]',
+    );
+
+    expect(
+      topbar?.querySelector('button[aria-label="Refresh Git"]'),
+    ).toBeNull();
+    expect(
+      renderedContainer.querySelector('[data-testid="review-refresh-git"]'),
+    ).toBeNull();
+
+    act(() => {
+      clickButton(renderedContainer, 'Open Changes');
+    });
+
+    const refreshButton = renderedContainer.querySelector(
+      '[data-testid="review-refresh-git"]',
+    );
+    expect(refreshButton).toBeInstanceOf(HTMLButtonElement);
+    expect(refreshButton?.getAttribute('aria-label')).toBe('Refresh Git');
+    expect(refreshButton?.getAttribute('title')).toBe('Refresh Git');
+    expect(refreshButton?.querySelector('svg')).toBeTruthy();
+    expect(refreshButton?.querySelector('.sr-only')?.textContent).toBe(
+      'Refresh Git',
+    );
+    expect(
+      topbar?.querySelector('button[aria-label="Refresh Git"]'),
+    ).toBeNull();
+
+    act(() => {
+      (refreshButton as HTMLButtonElement).click();
+    });
+
+    expect(onRefreshProjectGitStatus).toHaveBeenCalledTimes(1);
   });
 
   it('confirms dirty branch switches from the topbar menu', async () => {
