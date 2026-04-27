@@ -1,3 +1,4 @@
+<!-- TODO: remove this test comment -->
 <div align="center">
 
 [![npm version](https://img.shields.io/npm/v/@qwen-code/qwen-code.svg)](https://www.npmjs.com/package/@qwen-code/qwen-code)

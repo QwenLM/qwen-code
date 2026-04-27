@@ -5,7 +5,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { access, open, readFile, stat } from 'node:fs/promises';
+import { access, lstat, open, readFile, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import type { Hunk } from 'diff';
@@ -65,6 +65,15 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
   if (!isGitRepository(cwd)) return null;
   if (await isInTransientGitState(cwd)) return null;
 
+  // Pin every git invocation (and on-disk file probe) to the repo root.
+  // `git diff` already emits repo-root-relative paths regardless of cwd, but
+  // `git ls-files --others` is scoped to cwd — running both from the same
+  // root keeps the path keys consistent and ensures untracked files in
+  // sibling directories aren't silently dropped when /diff is invoked from
+  // a subdirectory of the worktree.
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return null;
+
   // Shortstat probe + untracked scan run in parallel — both are needed
   // regardless of which path we take, and shortstat is O(1) memory so it can
   // short-circuit huge generated workspaces before we pay the per-file
@@ -72,7 +81,7 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
   // list so the fast path only has to count NUL bytes instead of allocating
   // a full path array.
   const [shortstatOut, untrackedOut] = await Promise.all([
-    runGit(['--no-optional-locks', 'diff', 'HEAD', '--shortstat'], cwd),
+    runGit(['--no-optional-locks', 'diff', 'HEAD', '--shortstat'], gitRoot),
     runGit(
       [
         '--no-optional-locks',
@@ -81,7 +90,7 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
         '--others',
         '--exclude-standard',
       ],
-      cwd,
+      gitRoot,
     ),
   ]);
   const untrackedCount = countNulDelimited(untrackedOut);
@@ -107,7 +116,7 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
 
   const numstatOut = await runGit(
     ['--no-optional-locks', 'diff', 'HEAD', '--numstat', '-z'],
-    cwd,
+    gitRoot,
   );
   if (numstatOut == null) return null;
 
@@ -127,7 +136,9 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
     // already filled the per-file map.
     const countable = untrackedPaths.slice(0, MAX_FILES);
     const countableStats = await Promise.all(
-      countable.map((relPath) => countUntrackedLines(path.join(cwd, relPath))),
+      countable.map((relPath) =>
+        countUntrackedLines(path.join(gitRoot, relPath)),
+      ),
     );
     for (const s of countableStats) stats.linesAdded += s.added;
 
@@ -162,8 +173,15 @@ export async function fetchGitDiffHunks(
 ): Promise<Map<string, Hunk[]>> {
   if (!isGitRepository(cwd)) return new Map();
   if (await isInTransientGitState(cwd)) return new Map();
+  // Run from the repo root so hunk keys are repo-root-relative regardless of
+  // which subdirectory the caller is in.
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return new Map();
 
-  const diffOut = await runGit(['--no-optional-locks', 'diff', 'HEAD'], cwd);
+  const diffOut = await runGit(
+    ['--no-optional-locks', 'diff', 'HEAD'],
+    gitRoot,
+  );
   if (diffOut == null) return new Map();
   return parseGitDiff(diffOut);
 }
@@ -446,10 +464,24 @@ interface UntrackedLineStats {
  * unreadable file can't block the whole command. `truncated` is set when
  * `fstat(size) > bytesRead`, so the UI can mark partial counts honestly
  * instead of silently under-reporting a 10 MB log as `+20k`.
+ *
+ * Uses `lstat` before `open` to gate on regular files only — git's
+ * `ls-files --others` can list FIFOs (whose `open()` would block forever
+ * waiting on a writer) and symlinks (whose target may live outside the
+ * worktree). Symlinks and non-regular files render as binary `~` rows.
  */
 async function countUntrackedLines(
   absPath: string,
 ): Promise<UntrackedLineStats> {
+  let st;
+  try {
+    st = await lstat(absPath);
+  } catch {
+    return { added: 0, isBinary: false, truncated: false };
+  }
+  if (!st.isFile()) {
+    return { added: 0, isBinary: true, truncated: false };
+  }
   let fh;
   try {
     fh = await open(absPath, 'r');

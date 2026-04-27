@@ -738,6 +738,103 @@ describe('fetchGitDiff untracked with special filenames', () => {
   });
 });
 
+describe('fetchGitDiff invocation from a subdirectory', () => {
+  it('returns repo-wide changes with consistent repo-root-relative path keys', async () => {
+    // Reproduces wenshao Critical (PR #3491 line 63): when /diff was invoked
+    // from a subdir, `git diff --numstat` emitted repo-root-relative keys but
+    // `ls-files --others` was scoped to cwd, so untracked files outside the
+    // subdir were silently dropped and the path basis was inconsistent.
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdiff-sub-'));
+    try {
+      await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+      await execFileAsync('git', ['config', 'user.email', 't@e.com'], {
+        cwd: repo,
+      });
+      await execFileAsync('git', ['config', 'user.name', 'T'], { cwd: repo });
+      await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+        cwd: repo,
+      });
+      await fs.mkdir(path.join(repo, 'sub'), { recursive: true });
+      await fs.writeFile(path.join(repo, 'sub', 'tracked.txt'), 'x\n');
+      await fs.writeFile(path.join(repo, 'rootkeep.txt'), 'k\n');
+      await execFileAsync('git', ['add', '.'], { cwd: repo });
+      await execFileAsync('git', ['commit', '-q', '-m', 'init'], { cwd: repo });
+
+      // Modify a tracked file inside the subdir.
+      await fs.writeFile(path.join(repo, 'sub', 'tracked.txt'), 'y\n');
+      // Add an untracked file in a sibling location at the repo root.
+      await fs.writeFile(path.join(repo, 'rootnew.txt'), 'fresh\n');
+      // And one in the subdir for good measure.
+      await fs.writeFile(path.join(repo, 'sub', 'subnew.txt'), 'a\nb\n');
+
+      // Invoke fetchGitDiff with cwd pointing at the SUBDIR, not the root.
+      const result = await fetchGitDiff(path.join(repo, 'sub'));
+      expect(result).not.toBeNull();
+      const keys = [...result!.perFileStats.keys()].sort();
+      // All path keys must be repo-root-relative (not "tracked.txt" or
+      // "subnew.txt" alone). And the root-level untracked file must be
+      // present even though we asked from sub/.
+      expect(keys).toEqual([
+        'rootnew.txt',
+        'sub/subnew.txt',
+        'sub/tracked.txt',
+      ]);
+      expect(result!.stats.filesCount).toBe(3);
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('fetchGitDiff special filetypes among untracked files', () => {
+  it('marks untracked symlinks as binary and never follows them', async () => {
+    // Reproduces wenshao Critical (PR #3491 line 455): without an lstat
+    // gate, `open()` would dereference an untracked symlink and read its
+    // target — which can live outside the worktree.
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdiff-lnk-'));
+    try {
+      await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+      await execFileAsync('git', ['config', 'user.email', 't@e.com'], {
+        cwd: repo,
+      });
+      await execFileAsync('git', ['config', 'user.name', 'T'], { cwd: repo });
+      await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+        cwd: repo,
+      });
+      await fs.writeFile(path.join(repo, 'seed.txt'), 'x\n');
+      await execFileAsync('git', ['add', '.'], { cwd: repo });
+      await execFileAsync('git', ['commit', '-q', '-m', 'init'], { cwd: repo });
+
+      // Create an outside-worktree target with content that, if followed,
+      // would push linesAdded up. The lstat gate means we never read it.
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
+      try {
+        await fs.writeFile(
+          path.join(outside, 'secret.txt'),
+          'one\ntwo\nthree\n',
+        );
+        await fs.symlink(
+          path.join(outside, 'secret.txt'),
+          path.join(repo, 'link.txt'),
+        );
+
+        const result = await fetchGitDiff(repo);
+        expect(result).not.toBeNull();
+        const entry = result!.perFileStats.get('link.txt');
+        expect(entry).toBeDefined();
+        expect(entry?.isBinary).toBe(true);
+        expect(entry?.isUntracked).toBe(true);
+        // No content from the symlink target leaked into the totals.
+        expect(result!.stats.linesAdded).toBe(0);
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('fetchGitDiff untracked counting', () => {
   let repo: string;
   beforeEach(async () => {
