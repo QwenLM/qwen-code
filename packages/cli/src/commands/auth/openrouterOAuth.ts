@@ -67,6 +67,7 @@ export interface PkcePair {
 export interface OpenRouterOAuthSession {
   callbackUrl: string;
   codeVerifier: string;
+  state: string;
   authorizationUrl: string;
 }
 
@@ -110,12 +111,14 @@ export function createPkcePair(): PkcePair {
 export function buildOpenRouterAuthorizationUrl(params: {
   callbackUrl: string;
   codeChallenge: string;
+  state: string;
   codeChallengeMethod?: 'S256';
   limit?: number;
 }): string {
   const url = new URL(OPENROUTER_OAUTH_AUTHORIZE_URL);
   url.searchParams.set('callback_url', params.callbackUrl);
   url.searchParams.set('code_challenge', params.codeChallenge);
+  url.searchParams.set('state', params.state);
   url.searchParams.set(
     'code_challenge_method',
     params.codeChallengeMethod || OPENROUTER_CODE_CHALLENGE_METHOD,
@@ -126,16 +129,23 @@ export function buildOpenRouterAuthorizationUrl(params: {
   return url.toString();
 }
 
+export function createOAuthState(): string {
+  return toBase64Url(randomBytes(32));
+}
+
 export function createOpenRouterOAuthSession(
   callbackUrl = OPENROUTER_OAUTH_CALLBACK_URL,
   pkcePair = createPkcePair(),
+  state = createOAuthState(),
 ): OpenRouterOAuthSession {
   return {
     callbackUrl,
     codeVerifier: pkcePair.codeVerifier,
+    state,
     authorizationUrl: buildOpenRouterAuthorizationUrl({
       callbackUrl,
       codeChallenge: pkcePair.codeChallenge,
+      state,
       codeChallengeMethod: OPENROUTER_CODE_CHALLENGE_METHOD,
     }),
   };
@@ -144,6 +154,7 @@ export function createOpenRouterOAuthSession(
 export function startOAuthCallbackListener(
   callbackUrl = OPENROUTER_OAUTH_CALLBACK_URL,
   timeoutMs = OPENROUTER_OAUTH_TIMEOUT_MS,
+  expectedState?: string,
 ): OAuthCallbackListener {
   const parsedUrl = new URL(callbackUrl);
   if (parsedUrl.protocol !== 'http:') {
@@ -221,6 +232,18 @@ export function startOAuthCallbackListener(
       void finish(
         'reject',
         new Error(`OpenRouter authorization failed: ${error}`),
+      );
+      return;
+    }
+
+    const callbackState = requestUrl.searchParams.get('state');
+    if (expectedState && callbackState !== expectedState) {
+      res.statusCode = 400;
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.end('Invalid OAuth state.');
+      void finish(
+        'reject',
+        new Error('Invalid OAuth state from OpenRouter callback.'),
       );
       return;
     }
@@ -641,6 +664,7 @@ export async function runOpenRouterOAuthLogin(
   const {
     callbackUrl: effectiveCallbackUrl,
     codeVerifier,
+    state,
     authorizationUrl: authUrl,
   } = session;
 
@@ -651,7 +675,11 @@ export async function runOpenRouterOAuthLogin(
   const signalTarget = deps.signalTarget || process;
   const abortSignal = deps.abortSignal;
 
-  const listener = startListener(effectiveCallbackUrl);
+  const listener = startListener(
+    effectiveCallbackUrl,
+    OPENROUTER_OAUTH_TIMEOUT_MS,
+    state,
+  );
   let cleanupSignalHandlers = () => {};
   let cleanupAbortListener = () => {};
   try {

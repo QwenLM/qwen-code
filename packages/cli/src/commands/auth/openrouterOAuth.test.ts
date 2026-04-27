@@ -10,6 +10,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import {
   buildOpenRouterAuthorizationUrl,
   createOpenRouterOAuthSession,
+  createOAuthState,
   createPkcePair,
   exchangeAuthCodeForApiKey,
   fetchOpenRouterModels,
@@ -50,6 +51,7 @@ describe('openrouterOAuth', () => {
     const url = buildOpenRouterAuthorizationUrl({
       callbackUrl: 'http://localhost:3000/openrouter/callback',
       codeChallenge: 'challenge123',
+      state: 'state-123',
       codeChallengeMethod: 'S256',
       limit: 100,
     });
@@ -62,8 +64,16 @@ describe('openrouterOAuth', () => {
       'http://localhost:3000/openrouter/callback',
     );
     expect(parsed.searchParams.get('code_challenge')).toBe('challenge123');
+    expect(parsed.searchParams.get('state')).toBe('state-123');
     expect(parsed.searchParams.get('code_challenge_method')).toBe('S256');
     expect(parsed.searchParams.get('limit')).toBe('100');
+  });
+
+  it('creates a random OAuth state token', () => {
+    const state = createOAuthState();
+
+    expect(state).toMatch(/^[A-Za-z0-9\-_]+$/);
+    expect(state.length).toBeGreaterThan(20);
   });
 
   it('exchanges auth code for API key', async () => {
@@ -119,13 +129,14 @@ describe('openrouterOAuth', () => {
     const listener = startOAuthCallbackListener(
       'http://localhost:3100/openrouter/callback',
       5000,
+      'state-123',
     );
     await listener.ready;
 
     const codePromise = listener.waitForCode;
     await new Promise<void>((resolve, reject) => {
       const req = request(
-        'http://localhost:3100/openrouter/callback?code=fast-code-123',
+        'http://localhost:3100/openrouter/callback?code=fast-code-123&state=state-123',
         (res) => {
           res.resume();
           res.on('end', resolve);
@@ -138,6 +149,33 @@ describe('openrouterOAuth', () => {
     await expect(codePromise).resolves.toBe('fast-code-123');
   });
 
+  it('rejects callback codes with mismatched OAuth state', async () => {
+    const listener = startOAuthCallbackListener(
+      'http://localhost:3101/openrouter/callback',
+      5000,
+      'expected-state',
+    );
+    await listener.ready;
+
+    const codePromise = await expect(listener.waitForCode).rejects.toThrow(
+      'Invalid OAuth state',
+    );
+    await new Promise<void>((resolve, reject) => {
+      const req = request(
+        'http://localhost:3101/openrouter/callback?code=fast-code-123&state=wrong-state',
+        (res) => {
+          expect(res.statusCode).toBe(400);
+          res.resume();
+          res.on('end', resolve);
+        },
+      );
+      req.on('error', reject);
+      req.end();
+    });
+
+    await codePromise;
+  }, 15_000);
+
   it('creates a reusable OAuth session for manual fallback links', () => {
     const session = createOpenRouterOAuthSession(
       'http://localhost:3000/openrouter/callback',
@@ -145,13 +183,16 @@ describe('openrouterOAuth', () => {
         codeVerifier: 'verifier-123',
         codeChallenge: 'challenge-123',
       },
+      'state-123',
     );
 
     expect(session).toEqual({
       callbackUrl: 'http://localhost:3000/openrouter/callback',
       codeVerifier: 'verifier-123',
+      state: 'state-123',
       authorizationUrl: expect.stringContaining('code_challenge=challenge-123'),
     });
+    expect(session.authorizationUrl).toContain('state=state-123');
   });
 
   it('returns OAuth result without waiting for slow listener close', async () => {
@@ -175,7 +216,7 @@ describe('openrouterOAuth', () => {
       'http://localhost:3000/openrouter/callback',
       {
         openBrowser,
-        startListener: () => listener,
+        startListener: vi.fn(() => listener),
         exchangeApiKey,
         now: () => 1000,
       },
@@ -188,6 +229,38 @@ describe('openrouterOAuth', () => {
     });
     expect(listener.close).toHaveBeenCalled();
     resolveClose();
+  });
+
+  it('passes the session state to the OAuth callback listener', async () => {
+    const listener = {
+      ready: Promise.resolve(),
+      waitForCode: Promise.resolve('auth-code-123'),
+      close: vi.fn(async () => undefined),
+    };
+    const openBrowser = vi.fn(async () => ({}) as never);
+    const startListener = vi.fn(() => listener);
+    const exchangeApiKey = vi.fn(async () => ({
+      apiKey: 'or-key-123',
+      userId: 'user-1',
+    }));
+
+    await runOpenRouterOAuthLogin('http://localhost:3000/openrouter/callback', {
+      openBrowser,
+      startListener,
+      exchangeApiKey,
+      session: {
+        callbackUrl: 'http://localhost:3000/openrouter/callback',
+        codeVerifier: 'verifier-123',
+        state: 'state-123',
+        authorizationUrl: 'https://openrouter.ai/auth?state=state-123',
+      },
+    });
+
+    expect(startListener).toHaveBeenCalledWith(
+      'http://localhost:3000/openrouter/callback',
+      expect.any(Number),
+      'state-123',
+    );
   });
 
   it('records wait and exchange timings during OAuth login', async () => {

@@ -40,8 +40,9 @@ vi.mock('../../commands/auth/openrouterOAuth.js', () => ({
   createOpenRouterOAuthSession: vi.fn(() => ({
     callbackUrl: 'http://localhost:3000/openrouter/callback',
     codeVerifier: 'test-verifier',
+    state: 'test-state',
     authorizationUrl:
-      'https://openrouter.ai/auth?callback_url=http%3A%2F%2Flocalhost%3A3000%2Fopenrouter%2Fcallback&code_challenge=test-challenge',
+      'https://openrouter.ai/auth?callback_url=http%3A%2F%2Flocalhost%3A3000%2Fopenrouter%2Fcallback&code_challenge=test-challenge&state=test-state',
   })),
   applyOpenRouterModelsConfiguration: vi.fn(async () => ({
     updatedConfigs: [
@@ -123,6 +124,10 @@ describe('useAuthCommand', () => {
       useAuthCommand(settings as never, config as never, addItem),
     );
 
+    act(() => {
+      result.current.openAuthDialog();
+    });
+
     await act(async () => {
       void result.current.handleOpenRouterSubmit();
       await Promise.resolve();
@@ -153,7 +158,31 @@ describe('useAuthCommand', () => {
     expect(abortSignal?.aborted).toBe(true);
     expect(result.current.isAuthenticating).toBe(false);
     expect(result.current.externalAuthState).toBe(null);
+    expect(result.current.pendingAuthType).toBe(AuthType.USE_OPENAI);
     expect(result.current.isAuthDialogOpen).toBe(true);
+  });
+
+  it('cleans up UI state when OpenRouter OAuth rejects with AbortError', async () => {
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+    vi.mocked(runOpenRouterOAuthLogin).mockRejectedValueOnce(
+      new DOMException('OpenRouter OAuth cancelled.', 'AbortError'),
+    );
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+
+    await act(async () => {
+      await result.current.handleOpenRouterSubmit();
+    });
+
+    expect(result.current.isAuthenticating).toBe(false);
+    expect(result.current.externalAuthState).toBe(null);
+    expect(result.current.pendingAuthType).toBeUndefined();
+    expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(addItem).not.toHaveBeenCalled();
   });
 
   it('adds /model and /manage-models guidance after OpenRouter auth succeeds', async () => {

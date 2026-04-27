@@ -712,6 +712,10 @@ export const useAuthCommand = (
     } catch (error) {
       setOpenRouterAuthAbortController(null);
       if (error instanceof DOMException && error.name === 'AbortError') {
+        setExternalAuthState(null);
+        setPendingAuthType(undefined);
+        setIsAuthenticating(false);
+        setIsAuthDialogOpen(true);
         return;
       }
       handleAuthFailure(error);
