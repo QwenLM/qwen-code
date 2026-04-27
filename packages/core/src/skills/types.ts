@@ -82,6 +82,12 @@ export interface SkillConfig {
   extensionName?: string;
 
   /**
+   * Argument hint shown after the slash command name in completion menus.
+   * Parsed from the `argument-hint` frontmatter field in SKILL.md.
+   */
+  argumentHint?: string;
+
+  /**
    * Describes when to invoke this skill — shown to the model in the SkillTool
    * description so it can decide whether to use it. Parsed from the
    * `when_to_use` frontmatter field in SKILL.md.

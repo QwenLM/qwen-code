@@ -981,7 +981,7 @@ export class Session implements SessionContext {
         (cmd) => ({
           name: cmd.name,
           description: cmd.description,
-          input: null,
+          input: cmd.argumentHint ? { hint: cmd.argumentHint } : null,
         }),
       );
 
