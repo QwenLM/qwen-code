@@ -3781,6 +3781,18 @@ async function assertTopbarContextFidelity(fileName) {
             inner.top < outer.top - 1 ||
             inner.bottom > outer.bottom + 1)
       );
+    const verticalOverlap = (first, second) => {
+      if (!first || !second) {
+        return 0;
+      }
+      return Math.max(
+        0,
+        Math.min(first.bottom, second.bottom) -
+          Math.max(first.top, second.top),
+      );
+    };
+    const centerY = (rect) =>
+      rect ? rect.top + rect.height / 2 : Number.NaN;
     const topbar = document.querySelector('[data-testid="workspace-topbar"]');
     const titleStack = document.querySelector('[data-testid="topbar-title-stack"]');
     const title = document.querySelector('[data-testid="topbar-title"]');
@@ -3845,6 +3857,11 @@ async function assertTopbarContextFidelity(fileName) {
       titleHeadingStyle: styleFor(title?.querySelector('h2')),
       titleProjectStyle: styleFor(title?.querySelector('span')),
       context: contextRect,
+      rowAlignment: {
+        centerDelta: Math.abs(centerY(rectFor(title)) - centerY(contextRect)),
+        verticalOverlap: verticalOverlap(rectFor(title), contextRect),
+        stackHeight: rectFor(titleStack)?.height ?? 0,
+      },
       runtimeStatus: rectFor(runtimeStatus),
       runtimeStatusText: runtimeStatus?.textContent.trim() ?? '',
       runtimeStatusStyle: styleFor(runtimeStatus),
@@ -3910,6 +3927,18 @@ async function assertTopbarContextFidelity(fileName) {
 
   if (metrics.topbar.height < 46 || metrics.topbar.height > 52) {
     throw new Error(`Topbar is no longer slim: ${metrics.topbar.height}`);
+  }
+
+  if (
+    metrics.rowAlignment.centerDelta > 3 ||
+    metrics.rowAlignment.verticalOverlap < 10 ||
+    metrics.rowAlignment.stackHeight > 22
+  ) {
+    throw new Error(
+      `Topbar title and context should share one desktop row: ${JSON.stringify(
+        metrics.rowAlignment,
+      )}`,
+    );
   }
 
   if (metrics.document.bodyScrollWidth > metrics.viewport.width + 4) {
@@ -4706,6 +4735,10 @@ async function assertBranchSwitchMenu(fileName, expectedCurrentBranch) {
           (row.rect.left < menuRect.left - 1 ||
             row.rect.right > menuRect.right + 1)
       );
+    const menuHitTarget =
+      menuRect && menuRect.width > 24 && menuRect.height > 24
+        ? document.elementFromPoint(menuRect.left + 12, menuRect.top + 12)
+        : null;
     return {
       viewport: {
         width: window.innerWidth,
@@ -4735,6 +4768,9 @@ async function assertBranchSwitchMenu(fileName, expectedCurrentBranch) {
       escapedRows: rowSnapshots.filter(rowEscapesMenu),
       createForm: rectFor(createForm),
       createButtonDisabled: createButton?.disabled ?? null,
+      menuHitTestVisible: Boolean(
+        menu && menuHitTarget && menu.contains(menuHitTarget)
+      ),
       menuContained: Boolean(
         menuRect &&
           menuRect.left >= 0 &&
@@ -4760,6 +4796,14 @@ async function assertBranchSwitchMenu(fileName, expectedCurrentBranch) {
   if (!snapshot.menu || snapshot.menu.width > 330) {
     throw new Error(
       `Branch menu should stay compact: ${JSON.stringify(snapshot.menu)}`,
+    );
+  }
+
+  if (!snapshot.menuHitTestVisible) {
+    throw new Error(
+      `Branch menu should be visually hit-testable, not clipped: ${JSON.stringify(
+        snapshot.menu,
+      )}`,
     );
   }
 

@@ -22,6 +22,117 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Single-Line Topbar Context Alignment
+
+Status: completed in iteration 91.
+
+Goal: make the topbar title, project, connection, branch, and diff context read
+as one slim desktop chrome row at normal desktop width, matching `home.jpg`
+more closely without losing compact overflow behavior.
+
+User-visible value: the first viewport feels less like a two-line status panel
+and more like a desktop workbench title bar. Users still see the active thread,
+project, connection, branch, and diff state, but the conversation gets clearer
+visual priority.
+
+Expected files:
+
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/topbar-single-line-context.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- At the default CDP viewport, `topbar-title` and `topbar-context` align on the
+  same visual row inside the 46-52 px topbar.
+- Thread title, project name, connection status, branch control, and diff stat
+  stay visible, compact, and non-overflowing.
+- Long project and branch names still truncate visibly while preserving full
+  metadata in titles/accessible labels.
+- Existing branch switching, review drawer, settings overlay, composer,
+  terminal, and commit paths remain unchanged.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data,
+  open the fake Git project, send and approve the deterministic prompt, assert
+  the default topbar title/context geometry, then continue the existing model,
+  settings, terminal, review, branch, discard safety, compact viewport, and
+  commit smoke paths.
+- E2E assertions: topbar remains slim; title/context are row-aligned at normal
+  width; title/context/actions/status stay contained; no long branch leaks into
+  visible text; diff details stay available through title/aria labels; no
+  console errors or failed local requests are recorded.
+- Diagnostic artifacts to collect on failure:
+  `topbar-context-fidelity.json`, `topbar-context-fidelity.png`,
+  `compact-review-drawer.json`, Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` selected the smallest visual
+  fidelity follow-up from iteration 90's next-work notes; `frontend-design`,
+  constrained by `home.jpg`, keeps the title bar dense and tool-like rather
+  than adding a new visual direction; and `electron-desktop-dev` requires real
+  Electron CDP geometry checks because this slice changes renderer CSS.
+
+Notes and decisions:
+
+- The slice is CSS plus harness assertion only. It does not change React state,
+  branch behavior, review/settings/terminal behavior, local server routes,
+  preload IPC, Git operations, credential handling, or ACP transport.
+- Compact/mobile media rules may still wrap the topbar; the single-line
+  contract is for the normal desktop viewport used by the primary workbench.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 40 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T02-29-07-726Z/`.
+- `topbar-context-fidelity.json` recorded a 50 px topbar with the title stack
+  at `15` px tall, title/context center delta `0`, vertical overlap `14`, no
+  visible long-branch leak, no body overflow, and all topbar elements
+  contained.
+- `compact-review-drawer.json` recorded the compact review viewport with a
+  50 px topbar, `28 x 28` topbar actions, no topbar/review/composer overflow,
+  and the conversation still wider than the review drawer.
+- `branch-create-menu.json` recorded the branch menu as contained and
+  visually hit-testable, covering the branch popover clipping regression found
+  during self-review.
+- `summary.json` recorded zero console errors and zero failed local requests.
+- `git diff --check` passed.
+
+Self-review:
+
+- The first viewport moves closer to `home.jpg` by turning the topbar identity
+  and context into a single desktop chrome row while keeping the existing slim
+  50 px header.
+- The change is CSS plus CDP assertion coverage only. No Electron main/preload
+  security settings, local server routes, token handling, settings
+  persistence, Git operations, terminal behavior, or ACP workflow changed.
+- Long branch/project values remain visibly truncated, with full values still
+  preserved in titles and accessible labels.
+- The branch menu remains visible because the final CSS keeps popover overflow
+  visible while truncating only the individual topbar labels.
+
+Next work:
+
+- Continue prototype fidelity by reducing no-project empty-space weight and
+  checking the default sidebar/topbar text scale against `home.jpg`.
+- Continue normal workflow hardening by improving model/provider save error
+  visibility in the settings drawer.
+
 ### Slice: Topbar Action Chrome Restraint
 
 Status: completed in iteration 90.

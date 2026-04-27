@@ -636,20 +636,27 @@ summary:focus-visible {
 }
 
 .topbar-title-stack {
-  display: grid;
+  display: flex;
+  align-items: center;
   min-width: 0;
-  gap: 2px;
+  gap: 10px;
+  overflow: visible;
 }
 
 .topbar-title {
   display: flex;
   align-items: baseline;
+  flex: 0 1 auto;
   min-width: 0;
+  max-width: min(52%, 520px);
   gap: 8px;
+  overflow: hidden;
 }
 
 .topbar-title h2 {
+  flex: 0 1 auto;
   min-width: 0;
+  max-width: min(34vw, 360px);
   overflow: hidden;
   font-size: 12.5px;
   font-weight: 700;
@@ -659,7 +666,9 @@ summary:focus-visible {
 }
 
 .topbar-title span {
+  flex: 1 2 auto;
   min-width: 0;
+  max-width: 180px;
   overflow: hidden;
   color: var(--muted);
   font-size: 10.2px;
@@ -676,6 +685,7 @@ summary:focus-visible {
 }
 
 .topbar-context {
+  flex: 1 1 auto;
   justify-content: flex-start;
   min-width: 0;
   overflow: visible;
@@ -3573,6 +3583,21 @@ textarea:focus {
     grid-template-columns: 1fr;
     gap: 10px;
     padding: 14px;
+  }
+
+  .topbar-title-stack {
+    display: grid;
+    gap: 2px;
+    overflow: visible;
+  }
+
+  .topbar-title {
+    max-width: 100%;
+  }
+
+  .topbar-title h2,
+  .topbar-title span {
+    max-width: none;
   }
 
   .topbar-actions,
