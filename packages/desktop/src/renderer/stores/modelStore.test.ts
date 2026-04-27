@@ -88,6 +88,80 @@ describe('modelStore', () => {
     ]);
   });
 
+  it('enriches compact runtime models with configured provider metadata', () => {
+    const withSettings = modelReducer(createInitialModelState(), {
+      type: 'settings_models_loaded',
+      settings: {
+        ...createSettings('qwen-e2e-cdp'),
+        openai: {
+          hasApiKey: false,
+          providers: [
+            {
+              id: 'qwen-e2e-cdp',
+              name: 'qwen-e2e-cdp',
+              baseUrl: 'https://example.invalid/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
+      },
+    });
+    const loaded = modelReducer(withSettings, {
+      type: 'session_runtime_loaded',
+      models: {
+        currentModelId: 'qwen-e2e-cdp',
+        availableModels: [
+          { modelId: 'e2e/qwen-code', name: 'Qwen Code E2E' },
+          { modelId: 'qwen-e2e-cdp', name: 'qwen-e2e-cdp' },
+        ],
+      },
+    });
+
+    expect(
+      loaded.models?.availableModels.find(
+        (model) => model.modelId === 'qwen-e2e-cdp',
+      ),
+    ).toEqual({
+      modelId: 'qwen-e2e-cdp',
+      name: 'qwen-e2e-cdp',
+      description: 'Saved API key provider',
+      _meta: {
+        desktopProvider: 'api-key',
+        desktopProviderHasApiKey: false,
+      },
+    });
+  });
+
+  it('refreshes stale provider key metadata from saved settings', () => {
+    const withSettings = modelReducer(createInitialModelState(), {
+      type: 'settings_models_loaded',
+      settings: createSettings('qwen-e2e-cdp'),
+    });
+    const loaded = modelReducer(withSettings, {
+      type: 'session_runtime_loaded',
+      models: {
+        currentModelId: 'qwen-e2e-cdp',
+        availableModels: [
+          {
+            modelId: 'qwen-e2e-cdp',
+            name: 'qwen-e2e-cdp',
+            _meta: {
+              desktopProvider: 'api-key',
+              desktopProviderHasApiKey: false,
+              runtimeField: 'kept',
+            },
+          },
+        ],
+      },
+    });
+
+    expect(loaded.models?.availableModels[0]?._meta).toEqual({
+      desktopProvider: 'api-key',
+      desktopProviderHasApiKey: true,
+      runtimeField: 'kept',
+    });
+  });
+
   it('keeps configured settings models available across session resets', () => {
     const withSettings = modelReducer(createInitialModelState(), {
       type: 'settings_models_loaded',

@@ -22,6 +22,136 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Draft Runtime Controls Apply On First Send
+
+Status: completed in iteration 87.
+
+Goal: let users choose the draft thread's permission mode and saved model from
+the compact composer before the first message, then apply those runtime choices
+when the lazy-created session starts.
+
+User-visible value: opening a project feels composer-first and predictable; the
+model and permission controls visible in the composer are not inert before a
+thread exists.
+
+Expected files:
+
+- `packages/desktop/src/renderer/App.tsx`
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/stores/modelStore.ts`
+- `packages/desktop/src/renderer/stores/modelStore.test.ts`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/draft-runtime-controls-apply-on-send.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- With an active project and no selected thread, the permission mode control is
+  enabled and offers the compact default draft modes.
+- With saved provider models, the draft model control is enabled, keeps provider
+  grouping/health metadata, and does not expose API keys or diagnostics.
+- Changing draft mode/model updates the composer immediately without opening
+  Settings or creating a session.
+- Sending the first prompt creates a session, applies the selected draft mode
+  and model before the prompt is sent, and the active composer reflects those
+  applied values.
+- Existing active-session model/mode switching behavior stays unchanged.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: seed saved provider models in the isolated E2E HOME,
+  launch real Electron with fake ACP, open a project with no selected thread,
+  assert draft mode/model controls are enabled and compact, switch the draft
+  permission mode to Auto Edit, send the first prompt, assert the active
+  session composer shows the saved provider model and Auto Edit mode, then
+  continue the existing approval, settings, branch, review, terminal, relaunch,
+  and commit paths.
+- E2E assertions: draft controls are enabled only when a project is active,
+  option labels remain compact and provider-grouped, selected draft values
+  persist through lazy session creation, the prompt reaches fake ACP after the
+  runtime calls, no fake secrets/server URLs appear in normal conversation, no
+  composer overflow occurs, and zero unexpected console errors or failed local
+  requests are recorded.
+- Diagnostic artifacts to collect on failure:
+  `draft-runtime-controls.json`, `draft-runtime-controls-applied.json`,
+  `draft-composer-saved-model-state.json`, Electron log, screenshots, and
+  `summary.json` under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` selected enabling the existing
+  compact draft controls over adding a larger preflight panel or Settings
+  detour; `frontend-design`, constrained by `home.jpg`, keeps the composer as
+  a dense task control strip; and `electron-desktop-dev` requires real
+  Electron CDP interaction because the slice depends on session creation,
+  renderer state, local server routes, and fake ACP ordering.
+
+Notes and decisions:
+
+- Brainstormed alternatives: keep selectors disabled and show explanatory copy,
+  add a pre-send configuration dialog, or enable the existing compact composer
+  controls and apply their choices during lazy session creation. The existing
+  controls are the smallest prototype-faithful path because they preserve the
+  first viewport and make visible composer state truthful.
+- During the first CDP run, Settings > Permissions exposed a stale saved-model
+  provider key state after the draft-selected provider model was later
+  configured. The fix lets saved provider metadata from current Settings
+  refresh duplicate compact ACP model records while preserving unrelated
+  runtime metadata.
+- The slice intentionally does not add new model provider persistence, live
+  credential validation, attachment support, new ACP routes, or a larger
+  Settings information architecture change.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/modelStore.test.ts src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 49 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T01-46-03-770Z/`.
+- `draft-runtime-controls.json` recorded enabled draft permission/model
+  controls, default mode, selected `qwen-e2e-cdp`, missing-key provider
+  metadata, 124 x 24 px runtime controls, no overflow, no secrets, and no local
+  server URL leakage.
+- `draft-runtime-controls-applied.json` recorded the first-send session with
+  `auto-edit` permission mode and `qwen-e2e-cdp` model applied while the inline
+  command approval was visible, with no `New thread` notice remaining and no
+  overflow/secrets/server URL leakage.
+- `summary.json` recorded zero console errors and zero failed local requests.
+
+Self-review:
+
+- The first viewport remains conversation-first and prototype-aligned; the
+  change makes the existing compact composer controls truthful instead of
+  adding a larger panel.
+- Draft runtime state stays renderer-local until lazy session creation; no new
+  IPC, preload, local server routes, credentials, or Electron security settings
+  were added.
+- Missing-key state remains visible and actionable through the existing model
+  provider shortcut. The slice does not hide the risk of sending with a missing
+  provider key.
+- Active-session model/mode switching, Settings persistence, branch/review,
+  terminal, commit, and fake ACP workflows stayed covered by the existing CDP
+  smoke.
+
+Next work:
+
+- Continue composer-first polish by making missing-key draft sends explain the
+  likely provider failure without blocking users from intentionally testing a
+  saved provider.
+- Continue prototype fidelity by checking the no-project first viewport Open
+  Project affordance and sidebar density against `home.jpg`.
+
 ### Slice: Composer Missing Provider Key Shortcut
 
 Status: completed in iteration 86.

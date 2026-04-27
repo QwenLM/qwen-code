@@ -135,9 +135,26 @@ async function main() {
     'project-relaunch-persistence.json',
   );
   await saveScreenshot('project-relaunch-persistence.png');
+  await assertDraftRuntimeControls(
+    'draft-runtime-controls.json',
+    'qwen-e2e-cdp',
+    'default',
+  );
+  await setFieldByAriaLabel('Permission mode', 'auto-edit');
+  await assertDraftRuntimeControls(
+    'draft-runtime-controls-selected.json',
+    'qwen-e2e-cdp',
+    'auto-edit',
+  );
+  await saveScreenshot('draft-runtime-controls-selected.png');
   await setFieldByAriaLabel('Message', commandApprovalPrompt);
   await clickButton('Send');
   await waitForText('Approve Once');
+  await assertDraftRuntimeApplied(
+    'draft-runtime-controls-applied.json',
+    'qwen-e2e-cdp',
+    'auto-edit',
+  );
   await assertInlineCommandApproval('inline-command-approval.json');
   await saveScreenshot('inline-command-approval.png');
   await clickButton('Approve Once');
@@ -709,9 +726,15 @@ async function assertProjectComposerReady(fileName) {
     async () =>
       evaluate(`(() => {
         const textarea = document.querySelector('textarea[aria-label="Message"]');
+        const permission = document.querySelector('select[aria-label="Permission mode"]');
+        const model = document.querySelector('select[aria-label="Model"]');
         return Boolean(
           textarea &&
+          permission &&
+          model &&
           !textarea.disabled &&
+          !permission.disabled &&
+          !model.disabled &&
           textarea.placeholder.includes('desktop-e2e-workspace') &&
           document.body.innerText.includes('Start a task in desktop-e2e-workspace') &&
           document.body.innerText.includes('New thread')
@@ -863,9 +886,12 @@ async function assertProjectComposerReady(fileName) {
     );
   }
 
-  if (snapshot.permissionDisabled !== true || snapshot.modelDisabled !== true) {
+  if (
+    snapshot.permissionDisabled !== false ||
+    snapshot.modelDisabled !== false
+  ) {
     throw new Error(
-      'Project composer runtime selectors should stay disabled before a session exists.',
+      'Project composer runtime selectors should be enabled before a session exists.',
     );
   }
 
@@ -1057,6 +1083,351 @@ async function assertProjectComposerReady(fileName) {
   }
 }
 
+async function assertDraftRuntimeControls(fileName, modelId, modeId) {
+  await waitFor(
+    'draft runtime controls',
+    async () =>
+      evaluate(`(() => {
+        const permission = document.querySelector('select[aria-label="Permission mode"]');
+        const model = document.querySelector('select[aria-label="Model"]');
+        return Boolean(
+          permission &&
+          model &&
+          !permission.disabled &&
+          !model.disabled &&
+          permission.value === ${JSON.stringify(modeId)} &&
+          model.value === ${JSON.stringify(modelId)} &&
+          document.body.innerText.includes('New thread')
+        );
+      })()`),
+    10_000,
+  );
+
+  const snapshot = await evaluate(`(() => {
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const overflows = (element) =>
+      Boolean(element && element.scrollWidth > element.clientWidth + 4);
+    const composer = document.querySelector('[data-testid="message-composer"]');
+    const permission = document.querySelector('select[aria-label="Permission mode"]');
+    const model = document.querySelector('select[aria-label="Model"]');
+    const modelControl = document.querySelector(
+      '[data-testid="composer-model-control"]'
+    );
+    const permissionControl = document.querySelector(
+      '[data-testid="composer-mode-control"]'
+    );
+    const providerStatus = document.querySelector(
+      '[data-testid="composer-model-provider-status"]'
+    );
+    const selectedModel = model
+      ? [...model.options].find((option) => option.selected)
+      : null;
+    const bodyText = document.body.innerText;
+    const fieldValues = [...document.querySelectorAll('input, textarea')]
+      .map((field) => field.value ?? '')
+      .join('\\n');
+    return {
+      permissionDisabled: permission?.disabled ?? null,
+      permissionValue: permission?.value ?? null,
+      permissionTitle: permission?.getAttribute('title') ?? null,
+      permissionOptions: permission
+        ? [...permission.options].map((option) => ({
+            value: option.value,
+            text: option.textContent.trim(),
+            title: option.getAttribute('title') ?? ''
+          }))
+        : [],
+      modelDisabled: model?.disabled ?? null,
+      modelValue: model?.value ?? null,
+      modelTitle: model?.getAttribute('title') ?? null,
+      modelOptions: model
+        ? [...model.options].map((option) => ({
+            value: option.value,
+            text: option.textContent.trim(),
+            title: option.getAttribute('title') ?? '',
+            selected: option.selected
+          }))
+        : [],
+      modelGroups: model
+        ? [...model.querySelectorAll('optgroup')].map((group) => ({
+            label: group.label,
+            values: [...group.querySelectorAll('option')].map(
+              (option) => option.value
+            )
+          }))
+        : [],
+      selectedModelText: selectedModel?.textContent.trim() ?? null,
+      selectedModelTitle: selectedModel?.getAttribute('title') ?? null,
+      providerStatusLabel:
+        providerStatus?.getAttribute('aria-label') ?? null,
+      providerStatusClass: providerStatus?.className ?? '',
+      hasNewThreadNotice: bodyText.includes('New thread'),
+      hasRawCodingPlanLabel:
+        bodyText.includes('ModelStudio Coding Plan') ||
+        (selectedModel?.textContent ?? '').includes('ModelStudio Coding Plan'),
+      hasSecret:
+        bodyText.includes('sk-desktop-e2e') ||
+        bodyText.includes('cp-desktop-e2e') ||
+        fieldValues.includes('sk-desktop-e2e') ||
+        fieldValues.includes('cp-desktop-e2e'),
+      hasServerUrl: /http:\\/\\/127\\.0\\.0\\.1:/u.test(bodyText),
+      composerRect: rectFor(composer),
+      permissionControlRect: rectFor(permissionControl),
+      modelControlRect: rectFor(modelControl),
+      permissionRect: rectFor(permission),
+      modelRect: rectFor(model),
+      composerOverflow: overflows(composer),
+      permissionOverflow: overflows(permissionControl),
+      modelOverflow: overflows(modelControl),
+      documentOverflow:
+        document.body.scrollWidth > window.innerWidth + 4 ||
+        document.body.scrollHeight > window.innerHeight + 4
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (
+    snapshot.permissionDisabled !== false ||
+    snapshot.modelDisabled !== false ||
+    snapshot.permissionValue !== modeId ||
+    snapshot.modelValue !== modelId
+  ) {
+    throw new Error(
+      `Draft runtime controls did not keep the selected values: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  const modeValues = snapshot.permissionOptions.map((option) => option.value);
+  if (
+    !['default', 'auto-edit', 'plan', 'yolo'].every((value) =>
+      modeValues.includes(value),
+    )
+  ) {
+    throw new Error(
+      `Draft permission mode options are incomplete: ${JSON.stringify(
+        snapshot.permissionOptions,
+      )}`,
+    );
+  }
+
+  if (
+    !snapshot.modelGroups.some(
+      (group) =>
+        group.label === 'Saved providers' && group.values.includes(modelId),
+    ) ||
+    snapshot.selectedModelText !== modelId ||
+    snapshot.providerStatusLabel !==
+      'Saved API key provider · API key missing' ||
+    !snapshot.providerStatusClass.includes('composer-model-status-missing')
+  ) {
+    throw new Error(
+      `Draft model control lost saved-provider metadata: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.hasRawCodingPlanLabel ||
+    snapshot.hasSecret ||
+    snapshot.hasServerUrl ||
+    snapshot.documentOverflow ||
+    snapshot.composerOverflow ||
+    snapshot.permissionOverflow ||
+    snapshot.modelOverflow
+  ) {
+    throw new Error(
+      `Draft runtime controls leaked data or overflowed: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    !snapshot.composerRect ||
+    !snapshot.permissionControlRect ||
+    !snapshot.modelControlRect ||
+    !snapshot.permissionRect ||
+    !snapshot.modelRect ||
+    snapshot.permissionControlRect.width > 128 ||
+    snapshot.modelControlRect.width > 128 ||
+    snapshot.permissionRect.height > 25 ||
+    snapshot.modelRect.height > 25 ||
+    snapshot.composerRect.height > 94
+  ) {
+    throw new Error(
+      `Draft runtime control geometry regressed: ${JSON.stringify(snapshot)}`,
+    );
+  }
+}
+
+async function assertDraftRuntimeApplied(fileName, modelId, modeId) {
+  await waitFor(
+    'draft runtime controls applied to active session',
+    async () =>
+      evaluate(`(() => {
+        const permission = document.querySelector('select[aria-label="Permission mode"]');
+        const model = document.querySelector('select[aria-label="Model"]');
+        return Boolean(
+          permission &&
+          model &&
+          !permission.disabled &&
+          !model.disabled &&
+          permission.value === ${JSON.stringify(modeId)} &&
+          model.value === ${JSON.stringify(modelId)} &&
+          document.body.innerText.includes('Approve Once')
+        );
+      })()`),
+    15_000,
+  );
+
+  const snapshot = await evaluate(`(() => {
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const overflows = (element) =>
+      Boolean(element && element.scrollWidth > element.clientWidth + 4);
+    const composer = document.querySelector('[data-testid="message-composer"]');
+    const permission = document.querySelector('select[aria-label="Permission mode"]');
+    const model = document.querySelector('select[aria-label="Model"]');
+    const modelControl = document.querySelector(
+      '[data-testid="composer-model-control"]'
+    );
+    const providerStatus = document.querySelector(
+      '[data-testid="composer-model-provider-status"]'
+    );
+    const selectedModel = model
+      ? [...model.options].find((option) => option.selected)
+      : null;
+    const bodyText = document.body.innerText;
+    const fieldValues = [...document.querySelectorAll('input, textarea')]
+      .map((field) => field.value ?? '')
+      .join('\\n');
+    return {
+      permissionDisabled: permission?.disabled ?? null,
+      permissionValue: permission?.value ?? null,
+      permissionTitle: permission?.getAttribute('title') ?? null,
+      modelDisabled: model?.disabled ?? null,
+      modelValue: model?.value ?? null,
+      modelTitle: model?.getAttribute('title') ?? null,
+      selectedModelText: selectedModel?.textContent.trim() ?? null,
+      selectedModelTitle: selectedModel?.getAttribute('title') ?? null,
+      providerStatusLabel:
+        providerStatus?.getAttribute('aria-label') ?? null,
+      providerStatusClass: providerStatus?.className ?? '',
+      hasApproval: bodyText.includes('Approve Once'),
+      hasNewThreadNotice: bodyText.includes('New thread'),
+      hasSecret:
+        bodyText.includes('sk-desktop-e2e') ||
+        bodyText.includes('cp-desktop-e2e') ||
+        fieldValues.includes('sk-desktop-e2e') ||
+        fieldValues.includes('cp-desktop-e2e'),
+      hasServerUrl: /http:\\/\\/127\\.0\\.0\\.1:/u.test(bodyText),
+      composerRect: rectFor(composer),
+      modelControlRect: rectFor(modelControl),
+      modelRect: rectFor(model),
+      composerOverflow: overflows(composer),
+      modelOverflow: overflows(modelControl),
+      documentOverflow:
+        document.body.scrollWidth > window.innerWidth + 4 ||
+        document.body.scrollHeight > window.innerHeight + 4
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (
+    snapshot.permissionDisabled !== false ||
+    snapshot.modelDisabled !== false ||
+    snapshot.permissionValue !== modeId ||
+    snapshot.modelValue !== modelId ||
+    !snapshot.hasApproval ||
+    snapshot.hasNewThreadNotice
+  ) {
+    throw new Error(
+      `Draft runtime choices were not applied to the active session: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.providerStatusLabel !==
+      'Saved API key provider · API key missing' ||
+    !snapshot.providerStatusClass.includes('composer-model-status-missing') ||
+    snapshot.selectedModelText !== modelId ||
+    !snapshot.selectedModelTitle?.includes('API key missing')
+  ) {
+    throw new Error(
+      `Applied draft model lost provider health metadata: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.hasSecret ||
+    snapshot.hasServerUrl ||
+    snapshot.documentOverflow ||
+    snapshot.composerOverflow ||
+    snapshot.modelOverflow
+  ) {
+    throw new Error(
+      `Applied draft runtime state leaked data or overflowed: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    !snapshot.composerRect ||
+    !snapshot.modelControlRect ||
+    !snapshot.modelRect ||
+    snapshot.modelControlRect.width > 128 ||
+    snapshot.modelRect.height > 25 ||
+    snapshot.composerRect.height > 94
+  ) {
+    throw new Error(
+      `Applied draft runtime geometry regressed: ${JSON.stringify(snapshot)}`,
+    );
+  }
+}
+
 async function assertComposerMissingProviderKeyShortcut(fileName, modelId) {
   const expectedStatus = 'Saved API key provider · API key missing';
   const expectedTitle = `${modelId} · ${expectedStatus}`;
@@ -1190,6 +1561,7 @@ async function assertComposerMissingProviderKeyShortcut(fileName, modelId) {
     snapshot.selectTitle !== expectedTitle ||
     snapshot.selectedTitle !== expectedTitle ||
     snapshot.selectValue !== modelId ||
+    snapshot.selectDisabled !== false ||
     snapshot.dotAriaLabel !== expectedStatus ||
     !snapshot.dotClass.includes('composer-model-status-missing')
   ) {
@@ -1204,7 +1576,9 @@ async function assertComposerMissingProviderKeyShortcut(fileName, modelId) {
     snapshot.shortcutAriaLabel !== 'Configure models' ||
     snapshot.shortcutTitle !== 'Configure models - API key missing' ||
     !snapshot.shortcutClass.includes('composer-model-settings-button') ||
-    !snapshot.shortcutClass.includes('composer-model-settings-button-warning') ||
+    !snapshot.shortcutClass.includes(
+      'composer-model-settings-button-warning',
+    ) ||
     !snapshot.shortcutHasIcon ||
     snapshot.shortcutDirectText !== ''
   ) {
@@ -10826,9 +11200,14 @@ async function assertDraftComposerSavedModelState(fileName, savedModelId) {
     async () =>
       evaluate(`(() => {
         const select = document.querySelector('select[aria-label="Model"]');
+        const permission = document.querySelector(
+          'select[aria-label="Permission mode"]'
+        );
         return Boolean(
           select &&
-          select.disabled &&
+          permission &&
+          !select.disabled &&
+          !permission.disabled &&
           [...select.options].length > 0 &&
           [...select.options].some(
             (option) => option.value === ${JSON.stringify(savedModelId)}
@@ -10929,9 +11308,9 @@ async function assertDraftComposerSavedModelState(fileName, savedModelId) {
     'utf8',
   );
 
-  if (snapshot.disabled !== true || snapshot.permissionDisabled !== true) {
+  if (snapshot.disabled !== false || snapshot.permissionDisabled !== false) {
     throw new Error(
-      `Draft composer runtime selectors should stay disabled: ${JSON.stringify(
+      `Draft composer runtime selectors should be enabled: ${JSON.stringify(
         snapshot,
       )}`,
     );

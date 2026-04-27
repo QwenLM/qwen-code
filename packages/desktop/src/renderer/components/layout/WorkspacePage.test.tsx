@@ -1145,7 +1145,12 @@ describe('WorkspacePage', () => {
       ),
     ).toBeNull();
     expect(permissionMode).toBeInstanceOf(HTMLSelectElement);
-    expect((permissionMode as HTMLSelectElement).disabled).toBe(true);
+    expect((permissionMode as HTMLSelectElement).disabled).toBe(false);
+    expect(
+      [...((permissionMode as HTMLSelectElement).options ?? [])].map(
+        (option) => option.value,
+      ),
+    ).toEqual(['default', 'auto-edit', 'plan', 'yolo']);
     expect(permissionMode?.getAttribute('title')).toBe(
       'Ask before run - Ask before running commands.',
     );
@@ -1203,10 +1208,14 @@ describe('WorkspacePage', () => {
     expect((sendButton as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it('shows saved provider models in the draft composer picker', () => {
+  it('enables saved provider models in the draft composer picker', () => {
+    const onModelChange = vi.fn();
+    const onModeChange = vi.fn();
     const renderedContainer = renderWorkspace({
       activeSessionId: null,
       isDraftSession: true,
+      draftMode: 'auto-edit',
+      draftModelId: 'qwen3-coder-next',
       modelState: {
         ...createInitialModelState(),
         configuredModels: [
@@ -1227,18 +1236,26 @@ describe('WorkspacePage', () => {
           },
         ],
       },
+      onModeChange,
+      onModelChange,
       sessions: [],
     });
     const model = renderedContainer.querySelector(
       'select[aria-label="Model"]',
     ) as HTMLSelectElement | null;
+    const permissionMode = renderedContainer.querySelector(
+      'select[aria-label="Permission mode"]',
+    ) as HTMLSelectElement | null;
 
     expect(model).toBeInstanceOf(HTMLSelectElement);
-    expect(model?.disabled).toBe(true);
-    expect(model?.value).toBe('qwen-e2e-cdp');
+    expect(model?.disabled).toBe(false);
+    expect(model?.value).toBe('qwen3-coder-next');
     expect(model?.getAttribute('title')).toBe(
-      'qwen-e2e-cdp · Saved API key provider · API key configured',
+      '[ModelStudio Coding Plan for Global/Intl] qwen3-coder-next',
     );
+    expect(permissionMode).toBeInstanceOf(HTMLSelectElement);
+    expect(permissionMode?.disabled).toBe(false);
+    expect(permissionMode?.value).toBe('auto-edit');
     expect([...(model?.options ?? [])].map((option) => option.value)).toEqual([
       'qwen-e2e-cdp',
       'qwen3-coder-next',
@@ -1271,12 +1288,15 @@ describe('WorkspacePage', () => {
     const providerStatus = renderedContainer.querySelector(
       '[data-testid="composer-model-provider-status"]',
     );
-    expect(providerStatus?.getAttribute('aria-label')).toBe(
-      'Saved API key provider · API key configured',
-    );
-    expect(
-      providerStatus?.classList.contains('composer-model-status-configured'),
-    ).toBe(true);
+    expect(providerStatus).toBeNull();
+
+    act(() => {
+      setSelectValue(model as HTMLSelectElement, 'qwen-e2e-cdp');
+      setSelectValue(permissionMode as HTMLSelectElement, 'default');
+    });
+
+    expect(onModelChange).toHaveBeenCalledWith('qwen-e2e-cdp');
+    expect(onModeChange).toHaveBeenCalledWith('default');
   });
 
   it('opens model provider settings from the composer shortcut', () => {
@@ -2661,6 +2681,8 @@ function renderWorkspace(
     activeSessionId: session.sessionId,
     chatState: createInitialChatState(),
     commitMessage: '',
+    draftMode: null,
+    draftModelId: null,
     gitDiff,
     loadState: readyLoadState,
     messageText: '',

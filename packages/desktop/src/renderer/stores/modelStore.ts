@@ -144,7 +144,28 @@ function mergeConfiguredModels(
     return null;
   }
 
-  const availableModels = [...models.availableModels];
+  const configuredById = new Map(
+    configuredModels.map((model) => [model.modelId, model]),
+  );
+  const availableModels = models.availableModels.map((model) => {
+    const configuredModel = configuredById.get(model.modelId);
+    if (!configuredModel) {
+      return model;
+    }
+
+    return {
+      ...model,
+      name:
+        model.name && model.name !== model.modelId
+          ? model.name
+          : configuredModel.name,
+      description: model.description ?? configuredModel.description,
+      _meta: configuredModel._meta
+        ? { ...(model._meta ?? {}), ...configuredModel._meta }
+        : model._meta,
+    };
+  });
+
   for (const configuredModel of configuredModels) {
     if (
       !availableModels.some(

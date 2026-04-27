@@ -41,6 +41,8 @@ export function ChatThread({
   activeProject,
   activeSessionId,
   chatState,
+  draftMode,
+  draftModelId,
   gitDiff,
   isDraftSession,
   messageText,
@@ -62,6 +64,8 @@ export function ChatThread({
   activeProject: DesktopProject | null;
   activeSessionId: string | null;
   chatState: ChatState;
+  draftMode: DesktopApprovalMode | null;
+  draftModelId: string | null;
   gitDiff: DesktopGitDiff | null;
   isDraftSession: boolean;
   messageText: string;
@@ -85,23 +89,39 @@ export function ChatThread({
   const placeholder = activeProject
     ? `Ask Qwen Code about ${activeProject.name}`
     : 'Open a project to start';
-  const currentModeId = modelState.modes?.currentModeId ?? 'default';
-  const modeOptions = modelState.modes?.availableModes ?? fallbackModeOptions;
+  const hasActiveSession = Boolean(activeSessionId);
+  const currentModeId = hasActiveSession
+    ? (modelState.modes?.currentModeId ?? fallbackModeOption.id)
+    : (draftMode ?? fallbackModeOption.id);
+  const modeOptions =
+    hasActiveSession && modelState.modes
+      ? modelState.modes.availableModes
+      : fallbackModeOptions;
   const currentMode =
     modeOptions.find((mode) => mode.id === currentModeId) ?? fallbackModeOption;
   const configuredModelOptions = modelState.configuredModels;
-  const currentModelId =
-    modelState.models?.currentModelId ??
-    configuredModelOptions[0]?.modelId ??
-    fallbackModelOption.modelId;
-  const modelOptions = modelState.models?.availableModels.length
-    ? modelState.models.availableModels
-    : configuredModelOptions.length > 0
+  const draftModelOptions =
+    configuredModelOptions.length > 0
       ? configuredModelOptions
       : [fallbackModelOption];
+  const modelOptions =
+    hasActiveSession && modelState.models?.availableModels.length
+      ? modelState.models.availableModels
+      : hasActiveSession && configuredModelOptions.length > 0
+        ? configuredModelOptions
+        : draftModelOptions;
+  const requestedModelId = hasActiveSession
+    ? (modelState.models?.currentModelId ??
+      configuredModelOptions[0]?.modelId ??
+      fallbackModelOption.modelId)
+    : (draftModelId ??
+      configuredModelOptions[0]?.modelId ??
+      fallbackModelOption.modelId);
   const currentModel =
-    modelOptions.find((model) => model.modelId === currentModelId) ??
+    modelOptions.find((model) => model.modelId === requestedModelId) ??
+    modelOptions[0] ??
     fallbackModelOption;
+  const currentModelId = currentModel.modelId;
   const modelOptionGroups = groupRuntimeModelOptions(modelOptions);
   const currentModelProviderStatus =
     getRuntimeModelProviderStatus(currentModel);
@@ -110,6 +130,13 @@ export function ChatThread({
   const modelSettingsTitle = modelSettingsNeedsKey
     ? 'Configure models - API key missing'
     : 'Configure models';
+  const modeSelectDisabled =
+    !activeProject || (hasActiveSession && !modelState.modes);
+  const modelSelectDisabled =
+    !activeProject ||
+    (hasActiveSession
+      ? !modelState.models
+      : configuredModelOptions.length === 0);
 
   return (
     <section
@@ -183,7 +210,7 @@ export function ChatThread({
                 <SlidersIcon className="composer-select-leading-icon" />
                 <select
                   aria-label="Permission mode"
-                  disabled={!activeSessionId || !modelState.modes}
+                  disabled={modeSelectDisabled}
                   title={formatModeTitle(currentMode)}
                   value={currentModeId}
                   onChange={(event) =>
@@ -217,7 +244,7 @@ export function ChatThread({
                 <ModelIcon className="composer-select-leading-icon" />
                 <select
                   aria-label="Model"
-                  disabled={!activeSessionId || !modelState.models}
+                  disabled={modelSelectDisabled}
                   title={currentModelTitle}
                   value={currentModelId}
                   onChange={(event) => onModelChange(event.target.value)}
@@ -1248,4 +1275,21 @@ const fallbackModeOption = {
   description: 'Ask before running commands.',
 };
 
-const fallbackModeOptions = [fallbackModeOption];
+const fallbackModeOptions = [
+  fallbackModeOption,
+  {
+    id: 'auto-edit' as const,
+    name: 'Auto Edit',
+    description: 'Allow edits while keeping command approvals visible.',
+  },
+  {
+    id: 'plan' as const,
+    name: 'Plan',
+    description: 'Review the plan before changes are applied.',
+  },
+  {
+    id: 'yolo' as const,
+    name: 'YOLO',
+    description: 'Run without approval prompts.',
+  },
+];

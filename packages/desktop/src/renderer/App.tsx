@@ -59,6 +59,7 @@ import {
 import {
   createInitialModelState,
   type ModelAction,
+  type ModelState,
   modelReducer,
 } from './stores/modelStore.js';
 import {
@@ -96,6 +97,8 @@ export function App() {
   const [terminalNotice, setTerminalNotice] = useState<string | null>(null);
   const [chatNotice, setChatNotice] = useState<string | null>(null);
   const [messageText, setMessageText] = useState('');
+  const [draftModelId, setDraftModelId] = useState<string | null>(null);
+  const [draftMode, setDraftMode] = useState<DesktopApprovalMode | null>(null);
   const [chatState, dispatchChat] = useReducer(
     chatReducer,
     undefined,
@@ -414,6 +417,8 @@ export function App() {
         setActiveProjectId(project.id);
         setActiveSessionId(null);
         setIsDraftSession(false);
+        setDraftModelId(null);
+        setDraftMode(null);
         setGitDiff(null);
         pendingSocketActionRef.current = null;
         pendingPublishSessionRef.current = null;
@@ -435,6 +440,8 @@ export function App() {
     pendingPublishSessionRef.current = null;
     setActiveSessionId(null);
     setIsDraftSession(true);
+    setDraftModelId(null);
+    setDraftMode(null);
     setMessageText('');
     setSessionError(null);
     dispatchChat({ type: 'reset' });
@@ -448,6 +455,8 @@ export function App() {
       setActiveProjectId(projectId);
       setActiveSessionId(null);
       setIsDraftSession(false);
+      setDraftModelId(null);
+      setDraftMode(null);
       setMessageText('');
       setGitDiff(null);
       pendingSocketActionRef.current = null;
@@ -486,6 +495,8 @@ export function App() {
       };
       pendingPublishSessionRef.current = null;
       setIsDraftSession(false);
+      setDraftModelId(null);
+      setDraftMode(null);
       setMessageText('');
       setSessionError(null);
       dispatchChat({ type: 'reset' });
@@ -911,7 +922,13 @@ export function App() {
 
   const changeModel = useCallback(
     async (modelId: string) => {
-      if (loadState.state !== 'ready' || !activeSessionId) {
+      if (loadState.state !== 'ready') {
+        return;
+      }
+
+      if (!activeSessionId) {
+        setDraftModelId(modelId);
+        setChatNotice(null);
         return;
       }
 
@@ -932,7 +949,13 @@ export function App() {
 
   const changeMode = useCallback(
     async (mode: DesktopApprovalMode) => {
-      if (loadState.state !== 'ready' || !activeSessionId) {
+      if (loadState.state !== 'ready') {
+        return;
+      }
+
+      if (!activeSessionId) {
+        setDraftMode(mode);
+        setChatNotice(null);
         return;
       }
 
@@ -964,13 +987,41 @@ export function App() {
           return;
         }
 
+        const selectedDraftModelId = getDraftModelId(modelState, draftModelId);
+        const selectedDraftMode = draftMode;
+
         dispatchChat({ type: 'append_user_message', content });
         setMessageText('');
         setChatNotice(null);
-        void createDesktopSession(
-          loadState.status.serverInfo,
-          activeProject.path,
-        )
+        void (async () => {
+          const session = await createDesktopSession(
+            loadState.status.serverInfo,
+            activeProject.path,
+          );
+          let models = session.models;
+          let modes = session.modes;
+
+          if (
+            selectedDraftModelId &&
+            models?.currentModelId !== selectedDraftModelId
+          ) {
+            models = await setDesktopSessionModel(
+              loadState.status.serverInfo,
+              session.sessionId,
+              selectedDraftModelId,
+            );
+          }
+
+          if (selectedDraftMode && modes?.currentModeId !== selectedDraftMode) {
+            modes = await setDesktopSessionMode(
+              loadState.status.serverInfo,
+              session.sessionId,
+              selectedDraftMode,
+            );
+          }
+
+          return { ...session, models, modes };
+        })()
           .then((session) => {
             const pendingSession = {
               ...session,
@@ -984,6 +1035,8 @@ export function App() {
               content,
             };
             setIsDraftSession(false);
+            setDraftModelId(null);
+            setDraftMode(null);
             setActiveSessionId(session.sessionId);
             dispatchModel({
               type: 'session_runtime_loaded',
@@ -1016,7 +1069,15 @@ export function App() {
       setMessageText('');
       setChatNotice(null);
     },
-    [activeProject, activeSessionId, loadState, messageText],
+    [
+      activeProject,
+      activeSessionId,
+      draftMode,
+      draftModelId,
+      loadState,
+      messageText,
+      modelState,
+    ],
   );
 
   const stopGeneration = useCallback(() => {
@@ -1058,6 +1119,8 @@ export function App() {
       activeSessionId={activeSessionId}
       chatState={chatState}
       commitMessage={commitMessage}
+      draftMode={draftMode}
+      draftModelId={draftModelId}
       gitDiff={gitDiff}
       loadState={loadState}
       messageText={messageText}
@@ -1136,6 +1199,26 @@ function isApprovalMode(value: string): value is DesktopApprovalMode {
     value === 'auto-edit' ||
     value === 'yolo'
   );
+}
+
+function getDraftModelId(
+  modelState: ModelState,
+  selectedModelId: string | null,
+): string | null {
+  if (modelState.configuredModels.length === 0) {
+    return null;
+  }
+
+  if (
+    selectedModelId &&
+    modelState.configuredModels.some(
+      (model) => model.modelId === selectedModelId,
+    )
+  ) {
+    return selectedModelId;
+  }
+
+  return modelState.configuredModels[0]?.modelId ?? null;
 }
 
 function getErrorMessage(error: unknown): string {

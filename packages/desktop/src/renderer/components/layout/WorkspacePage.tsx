@@ -36,6 +36,8 @@ export function WorkspacePage({
   activeSessionId,
   chatState,
   commitMessage,
+  draftMode,
+  draftModelId,
   gitDiff,
   loadState,
   messageText,
@@ -93,6 +95,8 @@ export function WorkspacePage({
   activeSessionId: string | null;
   chatState: ChatState;
   commitMessage: string;
+  draftMode: DesktopApprovalMode | null;
+  draftModelId: string | null;
   gitDiff: DesktopGitDiff | null;
   loadState: LoadState;
   messageText: string;
@@ -224,6 +228,8 @@ export function WorkspacePage({
             activeProject={activeProject}
             activeSessionId={activeSessionId}
             chatState={chatState}
+            draftMode={draftMode}
+            draftModelId={draftModelId}
             gitDiff={gitDiff}
             isDraftSession={isDraftSession}
             messageText={messageText}
