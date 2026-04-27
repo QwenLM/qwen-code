@@ -1451,6 +1451,7 @@ export class Config {
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
       this.contentGeneratorConfig.enableCacheControl =
         config.enableCacheControl;
+      this.contentGeneratorConfig.splitToolMedia = config.splitToolMedia;
 
       if ('model' in sources) {
         this.contentGeneratorConfigSources['model'] = sources['model'];
@@ -1466,6 +1467,10 @@ export class Config {
       if ('contextWindowSize' in sources) {
         this.contentGeneratorConfigSources['contextWindowSize'] =
           sources['contextWindowSize'];
+      }
+      if ('splitToolMedia' in sources) {
+        this.contentGeneratorConfigSources['splitToolMedia'] =
+          sources['splitToolMedia'];
       }
       return;
     }

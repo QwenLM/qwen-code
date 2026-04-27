@@ -645,6 +645,159 @@ describe('OpenAIContentConverter', () => {
       ]);
     });
 
+    it('should not synthesise a follow-up user message when splitToolMedia is enabled but the response has no media (issue #3616)', () => {
+      // Regression guard: when the flag is on but a tool response is text-only,
+      // the synthesis path must not emit any user message. Without this guard,
+      // a future refactor that always emits the follow-up could regress silently.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'c', name: 'echo', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'c',
+                  name: 'echo',
+                  response: { output: 'plain text result' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const strictContext: RequestContext = {
+        ...requestContext,
+        splitToolMedia: true,
+      };
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        strictContext,
+      );
+
+      const toolMessages = messages.filter((m) => m.role === 'tool');
+      const userMessages = messages.filter((m) => m.role === 'user');
+      expect(toolMessages).toHaveLength(1);
+      expect(userMessages).toHaveLength(0);
+    });
+
+    it('should fall back to a placeholder string when the tool response is media-only (issue #3616)', () => {
+      // When extractFunctionResponseContent returns empty AND parts contain
+      // only media, the tool message must end up with the placeholder string
+      // rather than an empty array (which would be invalid spec).
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'c', name: 'shot', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'c',
+                  name: 'shot',
+                  // null response triggers extractFunctionResponseContent
+                  // to return "" — the empty-text branch we want to cover.
+                  response: null as unknown as Record<string, unknown>,
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'xxx' } },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const strictContext: RequestContext = {
+        ...requestContext,
+        splitToolMedia: true,
+      };
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        strictContext,
+      );
+
+      const toolMessage = messages.find((m) => m.role === 'tool');
+      expect(toolMessage).toBeDefined();
+      expect(toolMessage?.content).toBe(
+        '[media attached in following user message]',
+      );
+      const userMessage = messages.find((m) => m.role === 'user');
+      const userContent = userMessage?.content as Array<{
+        type: string;
+        image_url?: { url: string };
+      }>;
+      const img = userContent.find((p) => p.type === 'image_url');
+      expect(img?.image_url?.url).toBe('data:image/png;base64,xxx');
+    });
+
+    it('should preserve prior embedded-media behavior when splitToolMedia is false (default) on parallel tool calls (issue #3616)', () => {
+      // Same input as the parallel-tool-calls split test, but with the flag
+      // off. Asserts that the opt-in is actually opt-in: media stays embedded
+      // in the tool message and no follow-up user message is synthesised.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'c1', name: 's1', args: {} } },
+              { functionCall: { id: 'c2', name: 's2', args: {} } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 's1',
+                  response: { output: 'r1' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'aaa' } },
+                  ],
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'c2',
+                  name: 's2',
+                  response: { output: 'r2' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      // requestContext default has splitToolMedia undefined / false
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      const toolMessages = messages.filter((m) => m.role === 'tool');
+      const userMessages = messages.filter((m) => m.role === 'user');
+      expect(toolMessages).toHaveLength(2);
+      expect(userMessages).toHaveLength(0);
+      // First tool message should still carry the embedded image
+      const firstToolContent = toolMessages[0].content as Array<{
+        type: string;
+        image_url?: { url: string };
+      }>;
+      const img = firstToolContent.find((p) => p.type === 'image_url');
+      expect(img?.image_url?.url).toBe('data:image/png;base64,aaa');
+    });
+
     it('should convert function responses with fileData to tool message with embedded image_url', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
