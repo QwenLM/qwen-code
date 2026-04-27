@@ -22,6 +22,113 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: No-Project Sidebar Open Project Affordance
+
+Status: completed in iteration 92.
+
+Goal: make the no-project startup state expose a compact, actionable Open
+Project row in the persistent sidebar instead of a passive empty label, reducing
+startup dead space while keeping the composer-first path intact.
+
+User-visible value: a user who opens the desktop app with no recent project can
+start from either the left project browser or the composer without decoding a
+tiny heading icon. The sidebar still stays quiet and dense like `home.jpg`.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ProjectSidebar.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/no-project-sidebar-open-project.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- With no project selected, the sidebar project browser shows exactly one
+  compact Open Project button row with an icon, accessible label, and title.
+- The passive `No folder selected` row no longer appears in the no-project
+  sidebar, and no duplicate thread/no-session rows appear.
+- Clicking the sidebar Open Project row in the real Electron harness opens the
+  fake Git project and enables the normal project-scoped composer.
+- The existing composer Open Project button remains visible, contained, and
+  secondary in the disabled composer state.
+- The change does not affect project switching, thread rows, branch controls,
+  settings, review, terminal, local server routes, preload, IPC, or ACP
+  behavior.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and no active project, assert the no-project sidebar and disabled composer
+  affordances, click the sidebar Open Project row, select the fake Git
+  workspace through the existing dialog route, then continue the existing model,
+  settings, terminal, review, branch, discard safety, compact viewport, and
+  commit smoke paths.
+- E2E assertions: the sidebar no-project row is an actionable button with icon
+  and low chrome, it is contained without overflow, the passive empty row is
+  absent, the composer Open Project action remains contained, and no console
+  errors or failed local requests are recorded.
+- Diagnostic artifacts to collect on failure:
+  `no-project-open-project-affordance.json`, `initial-workspace.png`,
+  `project-composer.json`, Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` selected this as a small vertical
+  startup workflow improvement; `frontend-design`, constrained by `home.jpg`,
+  keeps the new row compact and tool-like instead of making a landing page; and
+  `electron-desktop-dev` requires real Electron CDP coverage because the slice
+  changes renderer behavior and a user workflow.
+
+Notes and decisions:
+
+- The slice deliberately reuses the existing project picker callback; it does
+  not add a new native IPC path or duplicate recent-project persistence logic.
+- The no-project composer remains the primary bottom control center. The new
+  sidebar row is a left-rail shortcut for the same action.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 40 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T02-38-25-406Z/`.
+- `no-project-open-project-affordance.json` recorded the sidebar Open Project
+  row as a `227 x 28` px button with icon, transparent default background, no
+  overflow, and no passive `No folder selected` or duplicate thread rows.
+- `summary.json` recorded zero console errors and zero failed local requests.
+- `git diff --check` passed.
+
+Self-review:
+
+- The startup viewport is closer to the intended workbench flow because the
+  persistent project browser now offers the same Open Project path as the
+  composer, without adding a landing page or a large card.
+- The change is limited to renderer markup/style plus tests and CDP assertions.
+  No Electron main/preload security settings, local server routes, token
+  handling, settings persistence, Git operations, terminal behavior, or ACP
+  workflow changed.
+- The new button keeps the existing compact sidebar density, accessible label,
+  title, icon, and hover behavior.
+
+Next work:
+
+- Continue prototype fidelity by reducing the no-project main-canvas visual
+  emptiness without turning it into a marketing or onboarding page.
+- Continue normal workflow hardening by improving model/provider save error
+  visibility and recovery inside the settings drawer.
+
 ### Slice: Single-Line Topbar Context Alignment
 
 Status: completed in iteration 91.

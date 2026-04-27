@@ -2147,6 +2147,9 @@ describe('WorkspacePage', () => {
     const openProjectButton = renderedContainer.querySelector(
       '[data-testid="composer-open-project-button"]',
     );
+    const sidebarOpenProjectButton = renderedContainer.querySelector(
+      '[data-testid="sidebar-empty-open-project-button"]',
+    );
 
     expect(textarea.disabled).toBe(true);
     expect(textarea.placeholder).toBe('Open a project to start');
@@ -2166,17 +2169,36 @@ describe('WorkspacePage', () => {
       'Open a project to start',
     );
     expect(openProjectButton?.querySelector('svg')).toBeTruthy();
+    expect(sidebarOpenProjectButton).toBeInstanceOf(HTMLButtonElement);
+    expect(sidebarOpenProjectButton?.textContent).toBe('Open Project');
+    expect(sidebarOpenProjectButton?.getAttribute('aria-label')).toBe(
+      'Open Project',
+    );
+    expect(sidebarOpenProjectButton?.getAttribute('title')).toBe(
+      'Open Project',
+    );
+    expect(sidebarOpenProjectButton?.querySelector('svg')).toBeTruthy();
     expect(
       renderedContainer.querySelector('[data-testid="project-sidebar"]')
         ?.textContent,
     ).not.toContain('No sessions');
+    expect(
+      renderedContainer.querySelector('[data-testid="project-sidebar"]')
+        ?.textContent,
+    ).not.toContain('No folder selected');
     expect(renderedContainer.textContent).toContain('Open a project to start');
+
+    act(() => {
+      (sidebarOpenProjectButton as HTMLButtonElement).click();
+    });
+
+    expect(onChooseWorkspace).toHaveBeenCalledTimes(1);
 
     act(() => {
       (openProjectButton as HTMLButtonElement).click();
     });
 
-    expect(onChooseWorkspace).toHaveBeenCalledTimes(1);
+    expect(onChooseWorkspace).toHaveBeenCalledTimes(2);
   });
 
   it('submits on Enter and keeps Shift+Enter as a newline path', () => {

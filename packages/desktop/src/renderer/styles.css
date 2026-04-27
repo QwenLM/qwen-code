@@ -320,6 +320,40 @@ summary:focus-visible {
   font-weight: 560;
 }
 
+.sidebar-empty-action-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  width: 100%;
+  gap: 6px;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(225, 232, 242, 0.62);
+  text-align: left;
+  transition:
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.sidebar-empty-action-row svg {
+  width: 13px;
+  height: 13px;
+  justify-self: center;
+}
+
+.sidebar-empty-action-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-empty-action-row:not(:disabled):hover {
+  background: rgba(85, 166, 255, 0.08);
+  color: rgba(213, 230, 255, 0.96);
+}
+
 .workspace-path {
   display: -webkit-box;
   max-height: 72px;

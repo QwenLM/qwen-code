@@ -187,6 +187,7 @@ export function ProjectSidebar({
           projects={projects}
           searchQuery={searchQuery}
           sessions={sessions}
+          onChooseWorkspace={onChooseWorkspace}
           onSelect={onSelectProject}
           onSelectSession={onSelectSession}
         />
@@ -215,6 +216,7 @@ function ProjectBrowser({
   projects,
   searchQuery,
   sessions,
+  onChooseWorkspace,
   onSelect,
   onSelectSession,
 }: {
@@ -224,6 +226,7 @@ function ProjectBrowser({
   projects: DesktopProject[];
   searchQuery: string;
   sessions: DesktopSessionSummary[];
+  onChooseWorkspace: () => void;
   onSelect: (projectId: string) => void;
   onSelectSession: (sessionId: string) => void;
 }) {
@@ -270,7 +273,17 @@ function ProjectBrowser({
         aria-label="Projects"
         data-testid="project-list"
       >
-        <div className="empty-row">No folder selected</div>
+        <button
+          aria-label="Open Project"
+          className="empty-row sidebar-empty-action-row"
+          data-testid="sidebar-empty-open-project-button"
+          title="Open Project"
+          type="button"
+          onClick={onChooseWorkspace}
+        >
+          <FolderPlusIcon />
+          <span>Open Project</span>
+        </button>
       </div>
     );
   }
