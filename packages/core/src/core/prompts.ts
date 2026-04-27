@@ -10,7 +10,7 @@ import os from 'node:os';
 import { ToolNames } from '../tools/tool-names.js';
 import process from 'node:process';
 import { isGitRepository } from '../utils/gitUtils.js';
-import { Storage } from '../config/storage.js';
+import { QWEN_CONFIG_DIR } from '../memory/const.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -118,10 +118,9 @@ export function getCoreSystemPrompt(
   appendInstruction?: string,
 ): string {
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
-  // default path is ~/.qwen/system.md (or QWEN_HOME/system.md), can be overridden via QWEN_SYSTEM_MD
+  // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
   let systemMdEnabled = false;
-  // The default path for the system prompt file (global, not project-level).
-  let systemMdPath = path.join(Storage.getGlobalQwenDir(), 'system.md');
+  let systemMdPath = path.resolve(path.join(QWEN_CONFIG_DIR, 'system.md'));
   // Resolve the environment variable to get either a path or a switch value.
   const systemMdResolution = resolvePathFromEnv(process.env['QWEN_SYSTEM_MD']);
 
