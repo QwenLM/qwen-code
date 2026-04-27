@@ -1747,7 +1747,11 @@ export class WebViewProvider {
   /**
    * Handle common webview message types shared across all host contexts
    * (sidebar, new panel, restored panel). Returns true if the message was
-   * handled and the caller should skip further processing.
+   * fully handled and the caller should skip further processing.
+   *
+   * Note: the `sendMessage` branch resets notification timers as a
+   * side effect but returns false so the message is still routed to
+   * handlers. This avoids duplicating the reset across 3 call sites.
    */
   private async handleCommonWebviewMessage(
     message: { type: string; data?: unknown },
@@ -1798,6 +1802,7 @@ export class WebViewProvider {
     this.dotState = color;
     const panel = this.panelManager.getPanel();
     if (!panel) {
+      // No-op in sidebar mode: WebviewView has no iconPath property.
       return;
     }
     panel.iconPath = vscode.Uri.joinPath(
@@ -1855,7 +1860,14 @@ export class WebViewProvider {
           execFile(
             'paplay',
             ['/usr/share/sounds/freedesktop/stereo/complete.oga'],
-            () => {},
+            (paErr) => {
+              if (paErr) {
+                console.warn(
+                  '[WebViewProvider] paplay fallback failed:',
+                  paErr.message,
+                );
+              }
+            },
           );
         }
       });
