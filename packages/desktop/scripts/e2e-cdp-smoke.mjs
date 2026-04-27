@@ -2738,6 +2738,7 @@ async function assertTopbarContextFidelity(fileName) {
         borderTopAlpha: alphaFromColor(style.borderTopColor),
         fontSize: Number.parseFloat(style.fontSize),
         fontWeight: Number.parseFloat(style.fontWeight),
+        textTransform: style.textTransform,
         lineHeight: Number.parseFloat(style.lineHeight)
       };
     };
@@ -3042,7 +3043,8 @@ async function assertTopbarContextFidelity(fileName) {
     metrics.runtimeStatus.height > 29 ||
     metrics.runtimeStatus.width > 72 ||
     metrics.runtimeStatusStyle.fontSize > 10.75 ||
-    metrics.runtimeStatusStyle.fontWeight > 760
+    metrics.runtimeStatusStyle.fontWeight > 720 ||
+    metrics.runtimeStatusStyle.textTransform !== 'none'
   ) {
     throw new Error(
       `Runtime status should stay compact: ${JSON.stringify(
@@ -3526,9 +3528,14 @@ async function assertBranchSwitchMenu(fileName, expectedCurrentBranch) {
         )].find((row) => row.getAttribute('aria-checked') === 'true');
         return Boolean(
           currentRow &&
-            currentRow.textContent.includes(${JSON.stringify(
+            (
+              currentRow.getAttribute('title') === ${JSON.stringify(
+                expectedCurrentBranch,
+              )} ||
+              currentRow.getAttribute('aria-label')?.includes(${JSON.stringify(
               expectedCurrentBranch,
             )})
+            )
         );
       })()`),
     15_000,
@@ -3549,8 +3556,42 @@ async function assertBranchSwitchMenu(fileName, expectedCurrentBranch) {
         height: rect.height
       };
     };
+    const alphaFromColor = (color) => {
+      if (!color || color === 'transparent') {
+        return 0;
+      }
+      const match = color.match(/rgba?\\(([^)]+)\\)/u);
+      if (!match) {
+        return 1;
+      }
+      const parts = match[1].split(',').map((part) => part.trim());
+      if (parts.length < 4) {
+        return 1;
+      }
+      return Number.parseFloat(parts[3]);
+    };
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        color: style.color,
+        backgroundAlpha: alphaFromColor(style.backgroundColor),
+        borderTopWidth: Number.parseFloat(style.borderTopWidth),
+        borderRightWidth: Number.parseFloat(style.borderRightWidth),
+        borderBottomWidth: Number.parseFloat(style.borderBottomWidth),
+        borderLeftWidth: Number.parseFloat(style.borderLeftWidth),
+        fontSize: Number.parseFloat(style.fontSize),
+        fontWeight: Number.parseFloat(style.fontWeight),
+        textTransform: style.textTransform,
+        lineHeight: Number.parseFloat(style.lineHeight)
+      };
+    };
     const menu = document.querySelector('[data-testid="branch-menu"]');
+    const header = menu?.querySelector('.branch-menu-header');
     const createForm = document.querySelector('[data-testid="branch-create-form"]');
+    const createLabel = document.querySelector('.branch-create-label');
     const trigger = document.querySelector('[data-testid="topbar-branch-trigger"]');
     const topbar = document.querySelector('[data-testid="workspace-topbar"]');
     const rows = [...document.querySelectorAll('[data-testid="branch-menu-row"]')];
@@ -3558,9 +3599,15 @@ async function assertBranchSwitchMenu(fileName, expectedCurrentBranch) {
       .find((button) => button.textContent.trim().includes('Create Branch'));
     const rowSnapshots = rows.map((row) => ({
       label: row.getAttribute('aria-label') || '',
+      title: row.getAttribute('title') || '',
       checked: row.getAttribute('aria-checked'),
       disabled: row.disabled,
       text: row.textContent.trim(),
+      visibleLabel:
+        row.querySelector('[data-testid="branch-menu-row-label"]')
+          ?.textContent.trim() ?? '',
+      style: styleFor(row),
+      markerStyle: styleFor(row.querySelector('em')),
       rect: rectFor(row)
     }));
     const menuRect = rectFor(menu);
@@ -3583,12 +3630,17 @@ async function assertBranchSwitchMenu(fileName, expectedCurrentBranch) {
       triggerExpanded: trigger?.getAttribute('aria-expanded'),
       menu: menuRect,
       topbar: rectFor(topbar),
+      headerText: header?.textContent.trim() ?? '',
+      headerStyle: styleFor(header),
+      createLabelStyle: styleFor(createLabel),
       rows: rowSnapshots,
       hasLongBranch: rowSnapshots.some((row) =>
-        row.text.includes(${JSON.stringify(longBranchName)})
+        row.title === ${JSON.stringify(longBranchName)} &&
+          row.label.includes(${JSON.stringify(longBranchName)})
       ),
       hasCreatedBranch: rowSnapshots.some((row) =>
-        row.text.includes(${JSON.stringify(createdBranchName)})
+        row.title === ${JSON.stringify(createdBranchName)} &&
+          row.label.includes(${JSON.stringify(createdBranchName)})
       ),
       hasMain: rowSnapshots.some((row) => row.text.includes('main')),
       currentRows: rowSnapshots.filter((row) => row.checked === 'true'),
@@ -3629,8 +3681,81 @@ async function assertBranchSwitchMenu(fileName, expectedCurrentBranch) {
 
   if (!snapshot.hasLongBranch || !snapshot.hasMain) {
     throw new Error(
-      `Branch menu did not list expected branches: ${JSON.stringify(
+      `Branch menu did not preserve expected branch metadata: ${JSON.stringify(
         snapshot.rows,
+      )}`,
+    );
+  }
+
+  const rawLongBranchRows = snapshot.rows.filter((row) =>
+    row.text.includes(longBranchName),
+  );
+  if (rawLongBranchRows.length > 0) {
+    throw new Error(
+      `Branch menu visibly exposed raw long branch names: ${JSON.stringify(
+        rawLongBranchRows,
+      )}`,
+    );
+  }
+
+  const compactLongBranchRows = snapshot.rows.filter(
+    (row) => row.title === longBranchName || row.title === createdBranchName,
+  );
+  const unrestrainedLongBranchRows = compactLongBranchRows.filter(
+    (row) =>
+      !row.visibleLabel.includes('...') ||
+      row.visibleLabel.length > 30 ||
+      row.visibleLabel.includes(row.title),
+  );
+  if (unrestrainedLongBranchRows.length > 0) {
+    throw new Error(
+      `Branch menu row labels should stay compact: ${JSON.stringify(
+        unrestrainedLongBranchRows,
+      )}`,
+    );
+  }
+
+  const heavyBranchRows = snapshot.rows.filter(
+    (row) =>
+      !row.style ||
+      row.style.fontWeight > 680 ||
+      row.style.fontSize > 12.2,
+  );
+  if (heavyBranchRows.length > 0) {
+    throw new Error(
+      `Branch menu rows are too visually heavy: ${JSON.stringify(
+        heavyBranchRows,
+      )}`,
+    );
+  }
+
+  const currentMarker = snapshot.rows.find((row) => row.markerStyle);
+  if (
+    currentMarker?.markerStyle &&
+    (currentMarker.markerStyle.textTransform !== 'none' ||
+      currentMarker.markerStyle.fontWeight > 660)
+  ) {
+    throw new Error(
+      `Branch menu current marker should stay normal-case and restrained: ${JSON.stringify(
+        currentMarker,
+      )}`,
+    );
+  }
+
+  if (
+    !snapshot.headerStyle ||
+    snapshot.headerStyle.textTransform !== 'none' ||
+    snapshot.headerStyle.fontWeight > 720 ||
+    snapshot.headerStyle.fontSize > 11.2 ||
+    !snapshot.createLabelStyle ||
+    snapshot.createLabelStyle.fontWeight > 700
+  ) {
+    throw new Error(
+      `Branch menu support labels should stay normal-case and restrained: ${JSON.stringify(
+        {
+          header: snapshot.headerStyle,
+          createLabel: snapshot.createLabelStyle,
+        },
       )}`,
     );
   }
@@ -3651,7 +3776,7 @@ async function assertBranchSwitchMenu(fileName, expectedCurrentBranch) {
     );
   }
 
-  if (!snapshot.currentRows[0].text.includes(expectedCurrentBranch)) {
+  if (snapshot.currentRows[0].title !== expectedCurrentBranch) {
     throw new Error(
       `Branch menu should mark ${expectedCurrentBranch} current: ${JSON.stringify(
         snapshot.currentRows,

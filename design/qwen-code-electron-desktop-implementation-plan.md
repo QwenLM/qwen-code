@@ -22,6 +22,118 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Branch Menu and Runtime Chrome Restraint
+
+Status: completed in iteration 80.
+
+Goal: make the topbar branch menu and runtime status pill feel like compact
+desktop context controls instead of uppercase diagnostic chrome.
+
+User-visible value: users can open the branch menu with long branch names
+without the menu turning into a noisy full-path list, while the current runtime
+state remains visible but less visually loud.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/TopBar.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/branch-menu-runtime-chrome-restraint.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Branch menu rows show compact middle-truncated branch labels and preserve the
+  full branch name on accessible labels and native titles.
+- Branch menu header, current-row marker, create label, and runtime status pill
+  render in normal case with restrained font weights.
+- Long branch labels do not escape or widen the branch menu at default or
+  compact desktop widths.
+- Branch create, validation, dirty-switch confirmation, checkout, Git status,
+  review, settings, model, terminal, and relaunch workflows remain unchanged.
+- No local server URLs, secrets, ACP/session IDs, or other diagnostics become
+  visible in the first viewport.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, assert topbar context/runtime styles, open the branch menu on a
+  long branch, assert compact row labels and preserved full branch metadata,
+  validate branch creation, create a branch, reopen the menu, confirm dirty
+  branch switching, then continue existing review, settings, terminal, model,
+  commit, and relaunch paths.
+- E2E assertions: branch rows do not visibly include raw long branch names,
+  branch row titles/ARIA preserve the full names, support labels report
+  `text-transform: none` with restrained weights, menu rows stay contained, the
+  runtime pill reports normal-case text, and the full CDP smoke records zero
+  unexpected console errors or failed local requests.
+- Diagnostic artifacts to collect on failure: `topbar-context-fidelity.json`,
+  `branch-create-menu.json`, `branch-switch-menu.json`,
+  `branch-switch-confirmation.json`, screenshots, Electron log, and
+  `summary.json` under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` used the current next-work notes to
+  choose targeted branch/topbar chrome restraint over new workflow behavior;
+  `frontend-design` constrained by `home.jpg` to keep the branch control
+  compact, normal-case, and conversation-supporting; `electron-desktop-dev` for
+  renderer changes verified through the real Electron CDP harness.
+
+Notes and decisions:
+
+- Brainstormed alternatives: redesign the branch picker as a custom searchable
+  popover, leave full branch names visible in the menu, or make a targeted
+  menu/status restraint pass. The targeted pass is the smallest reliable slice
+  because branch creation and checkout behavior already have broad coverage.
+- This slice intentionally does not change Git service semantics, dirty
+  worktree protection, Electron main/preload APIs, local server binding, token
+  handling, or secret persistence.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 36 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T00-26-22-276Z/`.
+- `topbar-context-fidelity.json` recorded runtime status as normal-case with
+  `fontWeight: 700`, a slim 60.3 px runtime pill, compact topbar branch text,
+  zero long-branch leakage, and contained topbar actions.
+- `branch-create-menu.json` and `branch-switch-menu.json` recorded compact
+  visible branch labels such as `desktop-e2e/very...rflow-check`, full branch
+  names preserved in row `title` and `aria-label`, branch row weight at 650,
+  current markers at normal-case 640, support labels at normal-case weights,
+  contained menu geometry, zero console errors, and zero failed local requests.
+
+Self-review:
+
+- The first viewport moves closer to `home.jpg` by reducing another uppercase
+  diagnostic-looking surface without changing the conversation-first layout or
+  widening topbar controls.
+- The branch menu now treats long branch names the same way the topbar trigger
+  does: compact in visible UI and complete in accessible/native metadata.
+- The slice only changes renderer presentation plus assertions; Git checkout,
+  branch creation, dirty-worktree confirmation, Electron security settings, IPC,
+  local server binding, token handling, and secret handling are unchanged.
+
+Next work:
+
+- Continue prototype fidelity by reviewing remaining all-caps support labels in
+  sidebar section headings and assistant activity summaries where they compete
+  with message content.
+- Continue model workflow polish by exposing provider health/validation state
+  near model choices without widening the composer.
+
 ### Slice: Terminal and Review Status Label Restraint
 
 Status: completed in iteration 79.

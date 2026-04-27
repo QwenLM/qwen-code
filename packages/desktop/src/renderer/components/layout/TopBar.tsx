@@ -382,27 +382,35 @@ function BranchMenu({
                 <p className="branch-menu-status">No local branches found.</p>
               ) : null}
               <div className="branch-menu-list">
-                {branches.map((branch) => (
-                  <button
-                    aria-checked={branch.current}
-                    aria-label={`Switch to branch ${branch.name}`}
-                    className={
-                      branch.current
-                        ? 'branch-menu-row branch-menu-row-current'
-                        : 'branch-menu-row'
-                    }
-                    data-testid="branch-menu-row"
-                    disabled={branch.current || isSwitching}
-                    key={branch.name}
-                    role="menuitemradio"
-                    title={branch.name}
-                    type="button"
-                    onClick={() => requestCheckout(branch.name)}
-                  >
-                    <span>{branch.name}</span>
-                    {branch.current ? <em>Current</em> : null}
-                  </button>
-                ))}
+                {branches.map((branch) => {
+                  const branchDisplayLabel = formatTopbarBranchLabel(
+                    branch.name,
+                  );
+
+                  return (
+                    <button
+                      aria-checked={branch.current}
+                      aria-label={`Switch to branch ${branch.name}`}
+                      className={
+                        branch.current
+                          ? 'branch-menu-row branch-menu-row-current'
+                          : 'branch-menu-row'
+                      }
+                      data-testid="branch-menu-row"
+                      disabled={branch.current || isSwitching}
+                      key={branch.name}
+                      role="menuitemradio"
+                      title={branch.name}
+                      type="button"
+                      onClick={() => requestCheckout(branch.name)}
+                    >
+                      <span data-testid="branch-menu-row-label">
+                        {branchDisplayLabel}
+                      </span>
+                      {branch.current ? <em>Current</em> : null}
+                    </button>
+                  );
+                })}
               </div>
               <form
                 className="branch-create-form"

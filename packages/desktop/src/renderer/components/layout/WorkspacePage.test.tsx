@@ -785,6 +785,52 @@ describe('WorkspacePage', () => {
     expect(topbarContext?.textContent).not.toContain('3 untracked');
   });
 
+  it('keeps branch menu row labels compact while preserving branch metadata', async () => {
+    const longBranchName =
+      'desktop-e2e/very-long-branch-name-for-topbar-overflow-check';
+    const branches: DesktopGitBranch[] = [
+      { name: longBranchName, current: true },
+      { name: 'main', current: false },
+    ];
+    const dirtyProject: DesktopProject = {
+      ...project,
+      gitBranch: longBranchName,
+      gitStatus: {
+        ...project.gitStatus,
+        branch: longBranchName,
+        modified: 1,
+        clean: false,
+      },
+    };
+    const renderedContainer = renderWorkspace({
+      activeProject: dirtyProject,
+      activeProjectId: dirtyProject.id,
+      onListProjectBranches: vi.fn(async () => branches),
+      projects: [dirtyProject],
+    });
+
+    await act(async () => {
+      clickButton(renderedContainer, `Branch ${longBranchName}`);
+    });
+
+    const currentBranchRow = renderedContainer.querySelector(
+      '[data-testid="branch-menu-row"][aria-checked="true"]',
+    );
+    const currentBranchLabel = currentBranchRow?.querySelector(
+      '[data-testid="branch-menu-row-label"]',
+    );
+
+    expect(currentBranchRow).toBeTruthy();
+    expect(currentBranchLabel?.textContent).toContain('...');
+    expect(currentBranchLabel?.textContent).not.toContain(longBranchName);
+    expect(currentBranchLabel?.textContent?.length).toBeLessThanOrEqual(30);
+    expect(currentBranchRow?.textContent).not.toContain(longBranchName);
+    expect(currentBranchRow?.getAttribute('title')).toBe(longBranchName);
+    expect(currentBranchRow?.getAttribute('aria-label')).toBe(
+      `Switch to branch ${longBranchName}`,
+    );
+  });
+
   it('falls back to compact topbar file counts before diff stats load', () => {
     const dirtyProject: DesktopProject = {
       ...project,

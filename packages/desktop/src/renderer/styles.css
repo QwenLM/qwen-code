@@ -821,9 +821,9 @@ summary:focus-visible {
   gap: 12px;
   color: rgba(240, 242, 238, 0.9);
   font-size: 11px;
-  font-weight: 820;
+  font-weight: 700;
   letter-spacing: 0;
-  text-transform: uppercase;
+  text-transform: none;
 }
 
 .branch-menu-header em,
@@ -832,7 +832,7 @@ summary:focus-visible {
   color: rgba(147, 160, 178, 0.88);
   font-size: 10.5px;
   font-style: normal;
-  font-weight: 760;
+  font-weight: 640;
   text-transform: none;
 }
 
@@ -854,7 +854,7 @@ summary:focus-visible {
   background: transparent;
   color: rgba(226, 234, 246, 0.78);
   font-size: 12px;
-  font-weight: 720;
+  font-weight: 650;
   text-align: left;
 }
 
@@ -888,7 +888,7 @@ summary:focus-visible {
   gap: 6px;
   color: rgba(240, 242, 238, 0.82);
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 680;
   letter-spacing: 0;
 }
 
@@ -1031,8 +1031,8 @@ summary:focus-visible {
   border-radius: 999px;
   color: var(--text-soft);
   font-size: 10.2px;
-  font-weight: 740;
-  text-transform: uppercase;
+  font-weight: 700;
+  text-transform: none;
 }
 
 .status-pill-dot {
