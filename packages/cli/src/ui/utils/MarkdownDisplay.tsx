@@ -11,6 +11,8 @@ import { colorizeCode } from './CodeColorizer.js';
 import { TableRenderer, type ColumnAlign } from './TableRenderer.js';
 import { RenderInline } from './InlineMarkdownRenderer.js';
 import { useSettings } from '../contexts/SettingsContext.js';
+import { MermaidDiagram } from './MermaidDiagram.js';
+import { renderInlineLatex } from './latexRenderer.js';
 
 interface MarkdownDisplayProps {
   text: string;
@@ -26,6 +28,8 @@ const EMPTY_LINE_HEIGHT = 1;
 const CODE_BLOCK_PREFIX_PADDING = 1;
 const LIST_ITEM_PREFIX_PADDING = 1;
 const LIST_ITEM_TEXT_FLEX_GROW = 1;
+const BLOCKQUOTE_PREFIX_PADDING = 1;
+const MATH_BLOCK_PREFIX_PADDING = 1;
 
 const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   text,
@@ -42,6 +46,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   const ulItemRegex = /^([ \t]*)([-*+]) +(.*)/;
   const olItemRegex = /^([ \t]*)(\d+)\. +(.*)/;
   const hrRegex = /^ *([-*_] *){3,} *$/;
+  const blockquoteRegex = /^ *> ?(.*)$/;
+  const mathFenceRegex = /^ *\$\$ *$/;
   const tableRowRegex = /^\s*\|(.+)\|\s*$/;
   const tableSeparatorRegex =
     /^(?=.*\|)\s*\|?\s*(:?-+:?)\s*(\|\s*(:?-+:?)\s*)*\|?\s*$/;
@@ -66,6 +72,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   let codeBlockContent: string[] = [];
   let codeBlockLang: string | null = null;
   let codeBlockFence = '';
+  let inMathBlock = false;
+  let mathBlockContent: string[] = [];
   let inTable = false;
   let tableRows: string[][] = [];
   let tableHeaders: string[] = [];
@@ -108,11 +116,30 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       return;
     }
 
+    if (inMathBlock) {
+      if (mathFenceRegex.test(line)) {
+        addContentBlock(
+          <RenderMathBlock
+            key={key}
+            content={mathBlockContent}
+            contentWidth={contentWidth}
+          />,
+        );
+        inMathBlock = false;
+        mathBlockContent = [];
+      } else {
+        mathBlockContent.push(line);
+      }
+      return;
+    }
+
     const codeFenceMatch = line.match(codeFenceRegex);
+    const mathFenceMatch = line.match(mathFenceRegex);
     const headerMatch = line.match(headerRegex);
     const ulMatch = line.match(ulItemRegex);
     const olMatch = line.match(olItemRegex);
     const hrMatch = line.match(hrRegex);
+    const blockquoteMatch = line.match(blockquoteRegex);
     const tableRowMatch = line.match(tableRowRegex);
     const tableSeparatorMatch = line.match(tableSeparatorRegex);
 
@@ -120,6 +147,9 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       inCodeBlock = true;
       codeBlockFence = codeFenceMatch[1];
       codeBlockLang = codeFenceMatch[2] || null;
+    } else if (mathFenceMatch) {
+      inMathBlock = true;
+      mathBlockContent = [];
     } else if (tableRowMatch && !inTable) {
       // Potential table start - check if next line is separator with matching column count
       const potentialHeaders = tableRowMatch[1]
@@ -197,6 +227,14 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         <Box key={key}>
           <Text dimColor>---</Text>
         </Box>,
+      );
+    } else if (blockquoteMatch) {
+      addContentBlock(
+        <RenderBlockquote
+          key={key}
+          quoteText={blockquoteMatch[1]}
+          textColor={textColor}
+        />,
       );
     } else if (headerMatch) {
       const level = headerMatch[1].length;
@@ -301,6 +339,16 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     );
   }
 
+  if (inMathBlock) {
+    addContentBlock(
+      <RenderMathBlock
+        key="math-eof"
+        content={mathBlockContent}
+        contentWidth={contentWidth}
+      />,
+    );
+  }
+
   // Handle table at end of content
   if (inTable && tableHeaders.length > 0 && tableRows.length > 0) {
     addContentBlock(
@@ -337,6 +385,18 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
   const settings = useSettings();
   const MIN_LINES_FOR_MESSAGE = 1; // Minimum lines to show before the "generating more" message
   const RESERVED_LINES = 2; // Lines reserved for the message itself and potential padding
+  const fullContent = content.join('\n');
+
+  if (lang?.toLowerCase() === 'mermaid') {
+    return (
+      <MermaidDiagram
+        source={fullContent}
+        isPending={isPending}
+        availableTerminalHeight={availableTerminalHeight}
+        contentWidth={contentWidth}
+      />
+    );
+  }
 
   if (isPending && availableTerminalHeight !== undefined) {
     const MAX_CODE_LINES_WHEN_PENDING = Math.max(
@@ -373,7 +433,6 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
     }
   }
 
-  const fullContent = content.join('\n');
   const colorizedCode = colorizeCode(
     fullContent,
     lang,
@@ -397,6 +456,53 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
 
 const RenderCodeBlock = React.memo(RenderCodeBlockInternal);
 
+interface RenderMathBlockProps {
+  content: string[];
+  contentWidth: number;
+}
+
+const RenderMathBlockInternal: React.FC<RenderMathBlockProps> = ({
+  content,
+  contentWidth,
+}) => {
+  const rendered = renderInlineLatex(content.join(' '));
+  return (
+    <Box
+      paddingLeft={MATH_BLOCK_PREFIX_PADDING}
+      flexDirection="column"
+      width={contentWidth}
+      flexShrink={0}
+    >
+      <Text color={theme.text.accent} wrap="wrap">
+        {rendered}
+      </Text>
+    </Box>
+  );
+};
+
+const RenderMathBlock = React.memo(RenderMathBlockInternal);
+
+interface RenderBlockquoteProps {
+  quoteText: string;
+  textColor?: string;
+}
+
+const RenderBlockquoteInternal: React.FC<RenderBlockquoteProps> = ({
+  quoteText,
+  textColor = theme.text.primary,
+}) => (
+  <Box paddingLeft={BLOCKQUOTE_PREFIX_PADDING} flexDirection="row">
+    <Text color={theme.text.secondary}>│ </Text>
+    <Box flexGrow={LIST_ITEM_TEXT_FLEX_GROW}>
+      <Text wrap="wrap" color={textColor} italic>
+        <RenderInline text={quoteText} textColor={textColor} />
+      </Text>
+    </Box>
+  </Box>
+);
+
+const RenderBlockquote = React.memo(RenderBlockquoteInternal);
+
 interface RenderListItemProps {
   itemText: string;
   type: 'ul' | 'ol';
@@ -412,7 +518,15 @@ const RenderListItemInternal: React.FC<RenderListItemProps> = ({
   leadingWhitespace = '',
   textColor = theme.text.primary,
 }) => {
-  const prefix = type === 'ol' ? `${marker}. ` : `${marker} `;
+  const taskMatch = itemText.match(/^\[([ xX])\]\s+(.*)$/);
+  const isTaskItem = taskMatch !== null;
+  const isTaskChecked = taskMatch?.[1]?.toLowerCase() === 'x';
+  const effectiveItemText = taskMatch?.[2] ?? itemText;
+  const prefix = isTaskItem
+    ? `${isTaskChecked ? '✓' : '○'} `
+    : type === 'ol'
+      ? `${marker}. `
+      : `${marker} `;
   const prefixWidth = prefix.length;
   const indentation = leadingWhitespace.length;
 
@@ -426,7 +540,7 @@ const RenderListItemInternal: React.FC<RenderListItemProps> = ({
       </Box>
       <Box flexGrow={LIST_ITEM_TEXT_FLEX_GROW}>
         <Text wrap="wrap" color={textColor}>
-          <RenderInline text={itemText} textColor={textColor} />
+          <RenderInline text={effectiveItemText} textColor={textColor} />
         </Text>
       </Box>
     </Box>

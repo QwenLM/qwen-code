@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MarkdownDisplay } from './MarkdownDisplay.js';
 import { LoadedSettings } from '../../config/settings.js';
 import { renderWithProviders } from '../../test-utils/render.js';
+import { renderMermaidVisual } from './mermaidVisualRenderer.js';
 
 describe('<MarkdownDisplay />', () => {
   const baseProps = {
@@ -165,7 +166,7 @@ Some text before.
       const { lastFrame } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} />,
       );
-      const output = lastFrame();
+      const output = lastFrame() ?? '';
       expect(output).toContain('Name');
       expect(output).toContain('Alice');
       expect(output).toContain('Bob');
@@ -196,7 +197,7 @@ Some text before.
       const { lastFrame } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} />,
       );
-      const output = lastFrame();
+      const output = lastFrame() ?? '';
       expect(output).toContain('A | B');
       expect(output).toContain('C');
     });
@@ -209,7 +210,7 @@ next line
       const { lastFrame } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} />,
       );
-      const output = lastFrame();
+      const output = lastFrame() ?? '';
       expect(output).toContain('| just text |');
       expect(output).not.toContain('┌');
     });
@@ -223,7 +224,7 @@ next line
       const { lastFrame } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} />,
       );
-      const output = lastFrame();
+      const output = lastFrame() ?? '';
       expect(output).toContain('| A | B |');
       expect(output).not.toContain('┌');
     });
@@ -237,7 +238,7 @@ next line
       const { lastFrame } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} />,
       );
-      const output = lastFrame();
+      const output = lastFrame() ?? '';
       expect(output).toContain('| A | B |');
       expect(output).not.toContain('┌');
     });
@@ -251,7 +252,7 @@ data
       const { lastFrame } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} />,
       );
-      const output = lastFrame();
+      const output = lastFrame() ?? '';
       // `---` without any `|` is a horizontal rule, not a table separator
       expect(output).toContain('| Header |');
       expect(output).not.toContain('┌');
@@ -359,6 +360,151 @@ Another paragraph.
       );
       expect(lastFrame()).toMatchSnapshot();
       expect(lastFrame()).toContain(' 1 ');
+    });
+
+    it('renders task list items with checkbox markers', () => {
+      const text = `
+- [x] Done
+- [ ] Todo
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('✓ Done');
+      expect(output).toContain('○ Todo');
+    });
+
+    it('renders blockquotes as quoted text', () => {
+      const text = '> Important **note**'.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('│');
+      expect(output).toContain('Important note');
+    });
+
+    it('renders inline and block math with unicode substitutions', () => {
+      const text = `
+Inline math: $x^2 + \\alpha$
+
+$$
+\\sum_{i=1}^{n} x_i
+$$
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('x² + α');
+      expect(output).toContain('Σᵢ₌₁ⁿ xᵢ');
+    });
+
+    it('renders mermaid flowcharts as a visual preview', () => {
+      const text = `
+\`\`\`mermaid
+flowchart LR
+  A[Client] --> B[API]
+\`\`\`
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('Mermaid flowchart (LR)');
+      expect(output).toContain('Client');
+      expect(output).toContain('API');
+      expect(output).toContain('▶');
+      expect(output).not.toContain('flowchart LR');
+    });
+
+    it('reuses mermaid node labels when later edges reference node ids', () => {
+      const text = `
+\`\`\`mermaid
+flowchart TD
+  A[Developer writes code] --> B{Tests pass?}
+  B -->|Yes| C[Create Pull Request]
+  B -->|No| D[Fix failing tests]
+\`\`\`
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('Developer writes code');
+      expect(output).toContain('Tests pass?');
+      expect(output).toContain('Create Pull Request');
+      expect(output).toContain('Fix failing tests');
+      expect(output).toContain('Yes');
+      expect(output).toContain('No');
+      expect(output).toContain('▼');
+      expect(output.match(/Tests pass\?/g)?.length).toBe(1);
+      expect(output.match(/Create Pull Request/g)?.length).toBe(1);
+      expect(output.match(/Fix failing tests/g)?.length).toBe(1);
+      expect(output).not.toContain('│ B ');
+    });
+
+    it('does not duplicate branch nodes when a mermaid flowchart loops back', () => {
+      const text = `
+\`\`\`mermaid
+flowchart TD
+  A[Start] --> B{Is it working?}
+  B -->|Yes| C[Great!]
+  B -->|No| D[Debug]
+  D --> B
+\`\`\`
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('No');
+      expect(output).toContain('Debug');
+      expect(output).toContain('↩');
+      expect(output).toContain('Cycles:');
+      expect(output).toContain('Debug ↩ to Is it working?');
+      expect(output.match(/│ Debug │/g)?.length).toBe(1);
+    });
+
+    it('resizes mermaid flowchart wireframes to the available width', () => {
+      const source = `
+flowchart TD
+  A[Start] --> B{Is it working?}
+  B -->|Yes| C[Great!]
+  B -->|No| D[Debug]
+  D --> B
+`;
+      const narrow = renderMermaidVisual(source, 44).lines;
+      const wide = renderMermaidVisual(source, 72).lines;
+      const narrowOutput = narrow.join('\n');
+      const wideOutput = wide.join('\n');
+
+      expect(narrowOutput).toContain('◇ Is it working? ◇');
+      expect(narrowOutput).toContain('↩');
+      expect(narrowOutput).toContain('Cycles:');
+      expect(narrow.every((line) => line.length <= 44)).toBe(true);
+      expect(wide.every((line) => line.length <= 72)).toBe(true);
+      expect(wideOutput).not.toBe(narrowOutput);
+    });
+
+    it('renders mermaid sequence diagrams as a visual preview', () => {
+      const text = `
+\`\`\`mermaid
+sequenceDiagram
+  participant U as User
+  participant A as API
+  U->>A: request
+\`\`\`
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('Mermaid sequence diagram');
+      expect(output).toContain('Participants: User | API');
+      expect(output).toContain('User → API: request');
+      expect(output).not.toContain('sequenceDiagram');
     });
   });
 

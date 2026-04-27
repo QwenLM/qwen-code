@@ -9,6 +9,7 @@ import { Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import stringWidth from 'string-width';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { renderInlineLatex } from './latexRenderer.js';
 
 // Constants for Markdown parsing
 const BOLD_MARKER_LENGTH = 2; // For "**"
@@ -17,6 +18,7 @@ const STRIKETHROUGH_MARKER_LENGTH = 2; // For "~~")
 const INLINE_CODE_MARKER_LENGTH = 1; // For "`"
 const UNDERLINE_TAG_START_LENGTH = 3; // For "<u>"
 const UNDERLINE_TAG_END_LENGTH = 4; // For "</u>"
+const INLINE_MATH_MARKER_LENGTH = 1; // For "$"
 
 const debugLogger = createDebugLogger('INLINE_MARKDOWN');
 
@@ -30,14 +32,14 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
   textColor = theme.text.primary,
 }) => {
   // Early return for plain text without markdown or URLs
-  if (!/[*_~`<[https?:]/.test(text)) {
+  if (!/[*_~`<[$]|https?:/.test(text)) {
     return <Text color={textColor}>{text}</Text>;
   }
 
   const nodes: React.ReactNode[] = [];
   let lastIndex = 0;
   const inlineRegex =
-    /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|<u>.*?<\/u>|https?:\/\/\S+)/g;
+    /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|\$(?:\\.|[^$\n])+\$|<u>.*?<\/u>|https?:\/\/\S+)/g;
   let match;
 
   while ((match = inlineRegex.exec(text)) !== null) {
@@ -138,6 +140,21 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
             )}
           </Text>
         );
+      } else if (
+        fullMatch.startsWith('$') &&
+        fullMatch.endsWith('$') &&
+        fullMatch.length > INLINE_MATH_MARKER_LENGTH * 2
+      ) {
+        renderedNode = (
+          <Text key={key} color={theme.text.accent}>
+            {renderInlineLatex(
+              fullMatch.slice(
+                INLINE_MATH_MARKER_LENGTH,
+                -INLINE_MATH_MARKER_LENGTH,
+              ),
+            )}
+          </Text>
+        );
       } else if (fullMatch.match(/^https?:\/\//)) {
         renderedNode = (
           <Text key={key} color={theme.text.link}>
@@ -174,6 +191,7 @@ export const getPlainTextLength = (text: string): number => {
     .replace(/_(.*?)_/g, '$1')
     .replace(/~~(.*?)~~/g, '$1')
     .replace(/`(.*?)`/g, '$1')
+    .replace(/\$(.*?)\$/g, (_match, expr: string) => renderInlineLatex(expr))
     .replace(/<u>(.*?)<\/u>/g, '$1')
     .replace(/.*\[(.*?)\]\(.*\)/g, '$1');
   return stringWidth(cleanText);
