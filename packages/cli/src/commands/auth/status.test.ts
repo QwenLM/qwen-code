@@ -553,6 +553,49 @@ describe('showAuthStatus', () => {
       expect(process.exit).toHaveBeenCalledWith(0);
     });
 
+    it('should show OpenAI-compatible when stale codingPlan.region exists but active model is generic', async () => {
+      process.env['XUNFEI_API_KEY'] = 'active-key';
+
+      vi.mocked(loadSettings).mockReturnValue(
+        createMockSettings({
+          security: {
+            auth: {
+              selectedType: AuthType.USE_OPENAI,
+            },
+          },
+          codingPlan: {
+            region: 'china',
+            version: 'stale-version',
+          },
+          model: {
+            name: 'spark-v4',
+          },
+          modelProviders: {
+            openai: [
+              {
+                id: 'spark-v4',
+                envKey: 'XUNFEI_API_KEY',
+                baseUrl: 'https://spark-api-open.xf-yun.com/v1',
+              },
+            ],
+          },
+        }),
+      );
+
+      await showAuthStatus();
+
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('OpenAI-compatible Provider'),
+      );
+      expect(writeStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('API key configured'),
+      );
+      expect(writeStdoutLine).not.toHaveBeenCalledWith(
+        expect.stringContaining('Alibaba Cloud Coding Plan'),
+      );
+      expect(process.exit).toHaveBeenCalledWith(0);
+    });
+
     it('should show OpenAI-compatible when stale Coding Plan key exists but active model is generic', async () => {
       process.env[CODING_PLAN_ENV_KEY] = 'stale-coding-plan-key';
       process.env['XUNFEI_API_KEY'] = 'active-key';

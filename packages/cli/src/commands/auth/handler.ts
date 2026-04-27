@@ -462,13 +462,14 @@ export async function showAuthStatus(): Promise<void> {
           (modelName ? undefined : models[0]))
         : undefined;
 
-      // Detect Coding Plan via region OR active model matching Coding Plan baseUrl/envKey
-      const detectedCodingPlanRegion =
-        codingPlanRegion ||
-        isCodingPlanConfig(
-          activeModelConfig?.baseUrl,
-          activeModelConfig?.envKey,
-        );
+      // Detect Coding Plan: trust active model config when available, fall back to settings
+      const providerCodingPlanRegion = isCodingPlanConfig(
+        activeModelConfig?.baseUrl,
+        activeModelConfig?.envKey,
+      );
+      const detectedCodingPlanRegion = activeModelConfig
+        ? providerCodingPlanRegion
+        : codingPlanRegion;
 
       if (detectedCodingPlanRegion) {
         // --- Coding Plan path ---
