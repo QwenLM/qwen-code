@@ -22,6 +22,108 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Sidebar Section Label Restraint
+
+Status: completed in iteration 81.
+
+Goal: make the sidebar project-browser heading and count read like quiet
+navigation labels instead of uppercase diagnostic chrome.
+
+User-visible value: the left rail stays compact and easier to scan, with the
+project/thread browser visually closer to `home.jpg` while preserving current
+project grouping, search, Models, and Settings behavior.
+
+Expected files:
+
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/sidebar-section-label-restraint.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Sidebar project section headings render in normal case with restrained size
+  and weight.
+- Sidebar section count text uses the same normal-case, muted support style and
+  stays contained beside the Open Project icon button.
+- Project rows, active thread grouping, sidebar search, Settings footer, model
+  shortcut, branch metadata, and long-thread/path hiding remain unchanged.
+- The first viewport remains conversation-first, with no local server URLs,
+  internal IDs, secrets, or raw long prompts visible in the sidebar.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, assert initial layout heading computed styles, open a project,
+  assert sidebar app rail geometry and heading styles, exercise sidebar Models
+  and Search paths, then continue existing conversation, review, settings,
+  terminal, model, branch, relaunch, and commit workflows.
+- E2E assertions: sidebar heading samples report `text-transform: none`,
+  compact font size and weight, no horizontal overflow, project/thread rows
+  stay contained, and the full CDP smoke records zero unexpected console
+  errors or failed local requests.
+- Diagnostic artifacts to collect on failure: `initial-layout.json`,
+  `sidebar-app-rail.json`, sidebar screenshots, Electron log, and
+  `summary.json` under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` used the current repository memory
+  and prompt constraints to choose a small prototype-fidelity slice;
+  `frontend-design` constrained by `home.jpg` to reduce sidebar chrome without
+  inventing a new visual direction; `electron-desktop-dev` for renderer CSS
+  changes verified through the real Electron CDP harness.
+
+Notes and decisions:
+
+- Brainstormed alternatives: redesign the sidebar project header actions,
+  rename the heading text, or make a targeted computed-style restraint pass.
+  The targeted pass is the smallest safe step because the current sidebar
+  grouping and search workflows already have coverage.
+- This slice intentionally does not change Electron main/preload APIs, local
+  server security, Git behavior, model settings, or session creation.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 36 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T00-37-32-289Z/`.
+- `initial-layout.json` recorded the sidebar heading at normal-case
+  `textTransform: "none"`, 10 px, and 660 weight; the heading count recorded
+  normal-case, 9.5 px, and 620 weight.
+- `sidebar-app-rail.json` recorded the same normal-case heading/count styles,
+  no sidebar/app/project/thread/footer overflow, compact long-branch text, and
+  no leaked local server URL, protocol ID, or raw prompt/path noise. The CDP
+  `summary.json` recorded zero console errors and zero failed local requests.
+
+Self-review:
+
+- The first viewport moves closer to `home.jpg` by making the sidebar project
+  browser feel like quiet navigation rather than uppercase debug chrome.
+- The change is renderer CSS plus CDP computed-style assertions only; project
+  selection, sidebar search, model settings, thread creation, Git, terminal,
+  IPC, local server binding, token handling, and secret handling are unchanged.
+- The real Electron harness still exercises the broader workbench workflows,
+  including project switching, composer, approvals, review, settings, terminal,
+  model selection, branch switching, relaunch persistence, and commit.
+
+Next work:
+
+- Continue prototype fidelity by checking the remaining Advanced diagnostics
+  key/value label treatment now that the default workbench chrome is quieter.
+- Continue model workflow polish by exposing provider health/validation state
+  near model choices without widening the composer.
+
 ### Slice: Branch Menu and Runtime Chrome Restraint
 
 Status: completed in iteration 80.

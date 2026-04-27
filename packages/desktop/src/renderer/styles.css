@@ -193,14 +193,22 @@ summary:focus-visible {
   flex: 1 1 auto;
 }
 
-.sidebar-section h2,
-.sidebar-section-heading span {
+.sidebar-section h2 {
   margin: 0;
   color: var(--text-soft);
-  font-size: 9px;
-  font-weight: 720;
+  font-size: 10px;
+  font-weight: 660;
   letter-spacing: 0;
-  text-transform: uppercase;
+  text-transform: none;
+}
+
+.sidebar-section-heading span {
+  margin: 0;
+  color: rgba(225, 232, 228, 0.38);
+  font-size: 9.5px;
+  font-weight: 620;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .sidebar-section-heading {
@@ -210,10 +218,6 @@ summary:focus-visible {
   min-height: 18px;
   gap: 8px;
   padding: 2px 4px 0 6px;
-}
-
-.sidebar-section-heading span {
-  color: rgba(225, 232, 228, 0.38);
 }
 
 .sidebar-heading-actions {

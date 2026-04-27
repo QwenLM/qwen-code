@@ -1333,6 +1333,9 @@ async function assertRalphWorkspaceLayout(fileName) {
       sidebarHeadingStyles: [
         ...document.querySelectorAll('.sidebar-section-heading h2')
       ].map((heading) => styleForElement(heading)),
+      sidebarHeadingCountStyles: [
+        ...document.querySelectorAll('.sidebar-section-count')
+      ].map((count) => styleForElement(count)),
       sidebarEmptyRows: [...document.querySelectorAll('.empty-row')].map(
         (row) => ({
           text: row.textContent.trim(),
@@ -1486,12 +1489,31 @@ async function assertRalphWorkspaceLayout(fileName) {
   }
 
   const heavySidebarHeadings = metrics.sidebarHeadingStyles.filter(
-    (style) => !style || style.fontSize > 9.2 || style.fontWeight > 740,
+    (style) =>
+      !style ||
+      style.textTransform !== 'none' ||
+      style.fontSize > 10.3 ||
+      style.fontWeight > 680,
   );
   if (heavySidebarHeadings.length > 0) {
     throw new Error(
       `Initial sidebar headings are too heavy: ${JSON.stringify(
         heavySidebarHeadings,
+      )}`,
+    );
+  }
+
+  const heavySidebarHeadingCounts = metrics.sidebarHeadingCountStyles.filter(
+    (style) =>
+      !style ||
+      style.textTransform !== 'none' ||
+      style.fontSize > 9.8 ||
+      style.fontWeight > 640,
+  );
+  if (heavySidebarHeadingCounts.length > 0) {
+    throw new Error(
+      `Initial sidebar heading counts are too heavy: ${JSON.stringify(
+        heavySidebarHeadingCounts,
       )}`,
     );
   }
@@ -1670,7 +1692,8 @@ async function assertSidebarAppRail(fileName) {
       return {
         fontSize: Number.parseFloat(style.fontSize),
         fontWeight: Number.parseFloat(style.fontWeight),
-        lineHeight: Number.parseFloat(style.lineHeight)
+        lineHeight: Number.parseFloat(style.lineHeight),
+        textTransform: style.textTransform,
       };
     };
     const sidebar = document.querySelector('[data-testid="project-sidebar"]');
@@ -1734,6 +1757,9 @@ async function assertSidebarAppRail(fileName) {
     const headingStyles = [
       ...document.querySelectorAll('.sidebar-section-heading h2')
     ].map((heading) => styleFor(heading));
+    const headingCountStyles = [
+      ...document.querySelectorAll('.sidebar-section-count')
+    ].map((count) => styleFor(count));
     const headingLabels = [
       ...document.querySelectorAll('.sidebar-section-heading h2')
     ].map((heading) => heading.textContent.trim());
@@ -1786,6 +1812,7 @@ async function assertSidebarAppRail(fileName) {
       rows,
       projectRows,
       headingStyles,
+      headingCountStyles,
       projectTitleStyles,
       projectMetaStyles,
       threadTitleStyles,
@@ -1962,24 +1989,30 @@ async function assertSidebarAppRail(fileName) {
     );
   }
 
-  const oversizedHeadings = metrics.headingStyles.filter(
-    (style) => style && style.fontSize > 9.75,
+  const loudHeadings = metrics.headingStyles.filter(
+    (style) =>
+      !style ||
+      style.textTransform !== 'none' ||
+      style.fontSize > 10.3 ||
+      style.fontWeight > 680,
   );
-  if (oversizedHeadings.length > 0) {
+  if (loudHeadings.length > 0) {
     throw new Error(
-      `Sidebar heading typography regressed: ${JSON.stringify(
-        oversizedHeadings,
-      )}`,
+      `Sidebar heading typography regressed: ${JSON.stringify(loudHeadings)}`,
     );
   }
 
-  const heavyHeadings = metrics.headingStyles.filter(
-    (style) => style && style.fontWeight > 740,
+  const loudHeadingCounts = metrics.headingCountStyles.filter(
+    (style) =>
+      !style ||
+      style.textTransform !== 'none' ||
+      style.fontSize > 9.8 ||
+      style.fontWeight > 640,
   );
-  if (heavyHeadings.length > 0) {
+  if (loudHeadingCounts.length > 0) {
     throw new Error(
-      `Sidebar heading text weight regressed: ${JSON.stringify(
-        heavyHeadings,
+      `Sidebar heading count typography regressed: ${JSON.stringify(
+        loudHeadingCounts,
       )}`,
     );
   }
