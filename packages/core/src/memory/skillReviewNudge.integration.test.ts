@@ -427,10 +427,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
       expect(result.status).toBe('scheduled');
 
       // Project skills directory should be ready for writes
-      const skillsRoot = getProjectSkillsRoot(projectRoot);
-      const skillsRootPath = path.join(projectRoot, skillsRoot);
+      const skillsRootPath = getProjectSkillsRoot(projectRoot);
       // Directory may not exist yet, but the path should be valid
-      expect(skillsRootPath.includes('.qwen/skills')).toBe(true);
+      // Use path.normalize-friendly comparison for cross-platform (Windows uses backslash)
+      const normalizedPath = skillsRootPath.split(path.sep).join('/');
+      expect(normalizedPath.includes('.qwen/skills')).toBe(true);
     });
   });
 });
