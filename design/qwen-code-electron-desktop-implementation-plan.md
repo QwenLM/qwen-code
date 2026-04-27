@@ -22,6 +22,118 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Settings Provider Key Guidance
+
+Status: completed in iteration 85.
+
+Goal: make missing and configured provider-key states clear inside Settings >
+Model Providers without exposing secrets or adding another dashboard surface.
+
+User-visible value: when users open model provider settings from the sidebar or
+composer, they can immediately tell whether the selected provider has a saved
+key and what kind of key is required before saving.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/SettingsPage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/settings-provider-key-guidance.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Model Providers shows a compact provider-key guidance row for API-key and
+  Coding Plan modes, using configured/missing language derived from existing
+  Settings metadata.
+- The guidance row is accessible, visually contained, and does not expose API
+  key values, local server URLs, ACP/session IDs, or raw provider prefixes.
+- Existing provider validation, save status, model grouping, composer health,
+  Settings Permissions health, branch, review, terminal, relaunch, and commit
+  workflows remain unchanged.
+- The first viewport remains conversation-first; this guidance appears only
+  inside the Settings overlay.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open Settings > Model Providers from the composer and sidebar,
+  assert missing-key guidance before saving, save API-key and Coding Plan
+  provider settings, assert configured-key guidance for each provider, then
+  continue the existing Settings, Permissions, draft composer, review,
+  terminal, branch, relaunch, model, and commit paths.
+- E2E assertions: guidance text, title, role, and configured/missing classes
+  reflect the selected provider; the row remains compact and contained; fake
+  secrets and diagnostics are absent from visible text/field values/artifacts;
+  and the full CDP smoke records zero unexpected console errors or failed
+  local requests.
+- Diagnostic artifacts to collect on failure:
+  `settings-provider-key-guidance.json`, Settings screenshots, Electron log,
+  and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` selected this focused Settings
+  workflow polish over the unused `.eyebrow` cleanup because users still need a
+  clearer missing-key state while configuring models; `frontend-design`
+  constrained by `home.jpg` keeps the signal as a quiet inline status row; and
+  `electron-desktop-dev` requires real Electron CDP verification for the
+  Settings workflow and layout containment.
+
+Notes and decisions:
+
+- Brainstormed alternatives: remove the unused `.eyebrow` style, add a larger
+  provider health card, or add one compact status row inside the existing
+  provider form. The compact row is the smallest user-visible improvement
+  because it clarifies missing-key state at the point of action without changing
+  server APIs or the first viewport.
+- This slice intentionally does not add live provider network validation,
+  custom select controls, new Settings sections, Electron main/preload APIs,
+  local server changes, or secret persistence behavior.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 39 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T01-17-46-472Z/`.
+- `settings-provider-key-guidance.json` recorded API-key missing, API-key
+  ready-to-save, API-key configured, and Coding Plan configured states. Every
+  snapshot kept the 24 px status row inside the Model Providers card, retained
+  a 6 px dot, and recorded no guidance overflow, visible fake secrets, local
+  server URL leakage, or document overflow. `summary.json` recorded zero
+  console errors and zero failed local requests.
+
+Self-review:
+
+- The first viewport is unchanged and remains conversation-first; the new
+  signal appears only inside the Settings overlay's Model Providers form.
+- The guidance row uses only boolean saved-key metadata and typed-key presence;
+  API key values are never rendered into labels, titles, DOM text, screenshots,
+  or artifact fields.
+- The change is renderer/CSS/harness only; Electron main/preload, IPC, local
+  server binding, token handling, Git, terminal, branch, review, commit, and
+  Settings persistence semantics are unchanged.
+
+Next work:
+
+- Continue prototype fidelity by removing or repurposing the unused generic
+  `.eyebrow` style and checking any remaining support labels against
+  `home.jpg`.
+- Continue model workflow polish by making missing-provider states actionable
+  from composer-selected saved models without adding a larger Settings surface.
+
 ### Slice: Settings Permissions Provider Health
 
 Status: completed in iteration 84.

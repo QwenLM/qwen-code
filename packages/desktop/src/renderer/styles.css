@@ -2819,6 +2819,61 @@ textarea:focus {
   box-shadow: 0 0 0 3px rgba(240, 182, 110, 0.1);
 }
 
+.settings-provider-key-guidance {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 24px;
+  align-items: center;
+  gap: 7px;
+  overflow: hidden;
+  padding: 0 8px;
+  border: 1px solid rgba(213, 224, 255, 0.09);
+  border-radius: 999px;
+  background: rgba(238, 244, 239, 0.028);
+  color: rgba(225, 232, 228, 0.72);
+  font-size: 11px;
+  font-weight: 660;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-provider-key-guidance-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 999px;
+}
+
+.settings-provider-key-guidance span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.settings-provider-key-guidance-configured {
+  border-color: rgba(117, 217, 156, 0.2);
+  background: rgba(117, 217, 156, 0.06);
+  color: #a9eabd;
+}
+
+.settings-provider-key-guidance-configured .settings-provider-key-guidance-dot {
+  background: rgba(117, 217, 156, 0.92);
+  box-shadow: 0 0 0 3px rgba(117, 217, 156, 0.09);
+}
+
+.settings-provider-key-guidance-missing {
+  border-color: rgba(240, 182, 110, 0.22);
+  background: rgba(240, 182, 110, 0.065);
+  color: #f3c98c;
+}
+
+.settings-provider-key-guidance-missing .settings-provider-key-guidance-dot {
+  background: rgba(240, 182, 110, 0.94);
+  box-shadow: 0 0 0 3px rgba(240, 182, 110, 0.1);
+}
+
 .settings-actions {
   display: flex;
   align-items: center;

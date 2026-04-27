@@ -235,6 +235,7 @@ function ModelProvidersPanel({
     : undefined;
   const saveStatusId = saveStatus ? 'settings-save-status' : undefined;
   const saveDescribedBy = saveValidationId ?? saveStatusId;
+  const keyGuidance = getProviderKeyGuidance(state);
 
   return (
     <section
@@ -337,6 +338,19 @@ function ModelProvidersPanel({
             }
           />
         </label>
+        <div
+          aria-label={keyGuidance.title}
+          className={`settings-provider-key-guidance settings-provider-key-guidance-${keyGuidance.kind}`}
+          data-testid="settings-provider-key-guidance"
+          role="status"
+          title={keyGuidance.title}
+        >
+          <span
+            aria-hidden="true"
+            className="settings-provider-key-guidance-dot"
+          />
+          <span>{keyGuidance.message}</span>
+        </div>
 
         <div className="settings-actions">
           {validationReason ? (
@@ -389,6 +403,53 @@ function ModelProvidersPanel({
 interface ModelProviderSaveStatus {
   kind: 'saving' | 'saved' | 'error';
   message: string;
+}
+
+interface ProviderKeyGuidance {
+  kind: 'configured' | 'missing';
+  message: string;
+  title: string;
+}
+
+function getProviderKeyGuidance(state: SettingsState): ProviderKeyGuidance {
+  const provider = state.form.provider;
+  const hasIncomingKey = state.form.apiKey.trim().length > 0;
+  const hasSavedKey =
+    provider === 'coding-plan'
+      ? state.settings?.codingPlan.hasApiKey
+      : state.settings?.openai.hasApiKey;
+  const providerLabel =
+    provider === 'coding-plan' ? 'Coding Plan provider' : 'API key provider';
+  const keyLabel =
+    provider === 'coding-plan' ? 'Coding Plan API key' : 'API key';
+
+  if (hasIncomingKey) {
+    const message = `${keyLabel} ready to save`;
+
+    return {
+      kind: 'configured',
+      message,
+      title: `${providerLabel} · ${message}`,
+    };
+  }
+
+  if (hasSavedKey) {
+    const message = `${keyLabel} configured`;
+
+    return {
+      kind: 'configured',
+      message,
+      title: `${providerLabel} · ${message}`,
+    };
+  }
+
+  const message = `${keyLabel} missing`;
+
+  return {
+    kind: 'missing',
+    message,
+    title: `${providerLabel} · ${message}`,
+  };
 }
 
 function getModelProviderSaveStatus(

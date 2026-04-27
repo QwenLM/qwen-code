@@ -269,12 +269,23 @@ async function main() {
   await assertCompactSettingsOverlayLayout('compact-settings-overlay.json');
   await saveScreenshot('compact-settings-overlay.png');
   await setElectronWindowBounds(target.id, defaultWindowBounds);
+  await assertSettingsProviderKeyGuidanceMissingAndReady(
+    'settings-provider-key-guidance.json',
+  );
   await assertSettingsValidation('settings-validation.json');
   await clickButton('Save');
   await waitForText('qwen-e2e-cdp');
   await assertSettingsSaveStatusFeedback('settings-save-status-feedback.json');
+  await assertSettingsProviderKeyGuidanceConfigured(
+    'settings-provider-key-guidance.json',
+    'api-key',
+  );
   await assertSettingsProductState('settings-product-state.json');
   await assertSettingsCodingPlanWorkflow('settings-coding-plan-provider.json');
+  await assertSettingsProviderKeyGuidanceConfigured(
+    'settings-provider-key-guidance.json',
+    'coding-plan',
+  );
   await saveScreenshot('settings-coding-plan-state.png');
   await assertSettingsPermissionsModelLabelRestraint(
     'settings-permissions-model-label-restraint.json',
@@ -9343,6 +9354,240 @@ async function readSettingsValidationSnapshot() {
       settingsWidth: settingsRect?.width ?? null,
       modelConfigWidth: modelConfigRect?.width ?? null,
       validationWidth: validationRect?.width ?? null
+    };
+  })()`);
+}
+
+async function assertSettingsProviderKeyGuidanceMissingAndReady(fileName) {
+  const snapshots = {};
+
+  await waitFor(
+    'initial provider key guidance',
+    async () => {
+      const snapshot = await readSettingsProviderKeyGuidanceSnapshot();
+      return (
+        snapshot.providerValue === 'api-key' &&
+        snapshot.text === 'API key missing' &&
+        snapshot.ariaLabel === 'API key provider · API key missing'
+      );
+    },
+    5_000,
+  );
+  snapshots.initial = await readSettingsProviderKeyGuidanceSnapshot();
+
+  await setFieldByAriaLabel('Provider API key', 'sk-desktop-e2e');
+  await waitFor(
+    'provider key guidance ready to save',
+    async () => {
+      const snapshot = await readSettingsProviderKeyGuidanceSnapshot();
+      return (
+        snapshot.providerValue === 'api-key' &&
+        snapshot.text === 'API key ready to save' &&
+        snapshot.ariaLabel === 'API key provider · API key ready to save' &&
+        snapshot.apiKeyLength > 0
+      );
+    },
+    5_000,
+  );
+  snapshots.ready = await readSettingsProviderKeyGuidanceSnapshot();
+
+  await setFieldByAriaLabel('Provider API key', '');
+  await waitFor(
+    'provider key guidance restored to missing',
+    async () => {
+      const snapshot = await readSettingsProviderKeyGuidanceSnapshot();
+      return (
+        snapshot.providerValue === 'api-key' &&
+        snapshot.text === 'API key missing' &&
+        snapshot.ariaLabel === 'API key provider · API key missing' &&
+        snapshot.apiKeyLength === 0
+      );
+    },
+    5_000,
+  );
+  snapshots.restored = await readSettingsProviderKeyGuidanceSnapshot();
+
+  await writeSettingsProviderKeyGuidanceSnapshots(fileName, snapshots);
+
+  assertSettingsProviderKeyGuidanceSnapshot(snapshots.initial, {
+    className: 'settings-provider-key-guidance-missing',
+    providerValue: 'api-key',
+    text: 'API key missing',
+    title: 'API key provider · API key missing',
+  });
+  assertSettingsProviderKeyGuidanceSnapshot(snapshots.ready, {
+    className: 'settings-provider-key-guidance-configured',
+    providerValue: 'api-key',
+    text: 'API key ready to save',
+    title: 'API key provider · API key ready to save',
+  });
+  assertSettingsProviderKeyGuidanceSnapshot(snapshots.restored, {
+    className: 'settings-provider-key-guidance-missing',
+    providerValue: 'api-key',
+    text: 'API key missing',
+    title: 'API key provider · API key missing',
+  });
+}
+
+async function assertSettingsProviderKeyGuidanceConfigured(fileName, provider) {
+  const snapshot = await readSettingsProviderKeyGuidanceSnapshot();
+  const expected =
+    provider === 'coding-plan'
+      ? {
+          className: 'settings-provider-key-guidance-configured',
+          providerValue: 'coding-plan',
+          text: 'Coding Plan API key configured',
+          title: 'Coding Plan provider · Coding Plan API key configured',
+        }
+      : {
+          className: 'settings-provider-key-guidance-configured',
+          providerValue: 'api-key',
+          text: 'API key configured',
+          title: 'API key provider · API key configured',
+        };
+
+  await appendSettingsProviderKeyGuidanceSnapshot(
+    fileName,
+    provider === 'coding-plan' ? 'codingPlanConfigured' : 'apiKeyConfigured',
+    snapshot,
+  );
+
+  assertSettingsProviderKeyGuidanceSnapshot(snapshot, expected);
+}
+
+function assertSettingsProviderKeyGuidanceSnapshot(snapshot, expected) {
+  if (
+    snapshot.providerValue !== expected.providerValue ||
+    snapshot.text !== expected.text ||
+    snapshot.ariaLabel !== expected.title ||
+    snapshot.title !== expected.title ||
+    snapshot.role !== 'status' ||
+    !snapshot.className.includes(expected.className)
+  ) {
+    throw new Error(
+      `Provider key guidance metadata is incorrect: ${JSON.stringify({
+        expected,
+        snapshot,
+      })}`,
+    );
+  }
+
+  if (
+    !snapshot.dotStyle ||
+    snapshot.dotStyle.width > 7 ||
+    snapshot.dotStyle.height > 7 ||
+    !snapshot.contained ||
+    snapshot.guidanceOverflow ||
+    snapshot.visibleSecret ||
+    snapshot.hasServerUrl ||
+    snapshot.documentOverflow
+  ) {
+    throw new Error(
+      `Provider key guidance leaked data or overflowed: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+}
+
+async function appendSettingsProviderKeyGuidanceSnapshot(
+  fileName,
+  stage,
+  snapshot,
+) {
+  let snapshots = {};
+  try {
+    snapshots = JSON.parse(await readFile(join(artifactDir, fileName), 'utf8'));
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  snapshots[stage] = snapshot;
+  await writeSettingsProviderKeyGuidanceSnapshots(fileName, snapshots);
+}
+
+async function writeSettingsProviderKeyGuidanceSnapshots(fileName, snapshots) {
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshots, null, 2)}\n`,
+    'utf8',
+  );
+}
+
+async function readSettingsProviderKeyGuidanceSnapshot() {
+  return evaluate(`(() => {
+    const settings = document.querySelector('[data-testid="settings-page"]');
+    const modelConfig = document.querySelector('[data-testid="model-config"]');
+    const provider = document.querySelector(
+      'select[aria-label="Model provider"]'
+    );
+    const apiKey = document.querySelector(
+      'input[aria-label="Provider API key"]'
+    );
+    const guidance = document.querySelector(
+      '[data-testid="settings-provider-key-guidance"]'
+    );
+    const dot = guidance?.querySelector(
+      '.settings-provider-key-guidance-dot'
+    );
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        display: style.display,
+        backgroundColor: style.backgroundColor,
+        width: Number.parseFloat(style.width),
+        height: Number.parseFloat(style.height),
+        boxShadow: style.boxShadow
+      };
+    };
+    const guidanceRect = rectFor(guidance);
+    const modelConfigRect = rectFor(modelConfig);
+    const settingsText = settings?.innerText ?? '';
+    return {
+      providerValue: provider?.value ?? null,
+      text: guidance?.textContent.trim() ?? '',
+      ariaLabel: guidance?.getAttribute('aria-label') ?? null,
+      title: guidance?.getAttribute('title') ?? null,
+      role: guidance?.getAttribute('role') ?? null,
+      className: guidance?.className ?? '',
+      apiKeyLength: apiKey?.value.length ?? 0,
+      guidanceRect,
+      modelConfigRect,
+      dotStyle: styleFor(dot),
+      contained:
+        Boolean(guidanceRect && modelConfigRect) &&
+        guidanceRect.left >= modelConfigRect.left - 1 &&
+        guidanceRect.right <= modelConfigRect.right + 1 &&
+        guidanceRect.top >= modelConfigRect.top - 1 &&
+        guidanceRect.bottom <= modelConfigRect.bottom + 1,
+      guidanceOverflow:
+        Boolean(guidance) && guidance.scrollWidth > guidance.clientWidth + 4,
+      visibleSecret:
+        settingsText.includes('sk-desktop-e2e') ||
+        settingsText.includes('cp-desktop-e2e'),
+      hasServerUrl: /http:\\/\\/127\\.0\\.0\\.1:/u.test(settingsText),
+      documentOverflow:
+        document.body.scrollWidth > window.innerWidth + 4 ||
+        document.body.scrollHeight > window.innerHeight + 4
     };
   })()`);
 }

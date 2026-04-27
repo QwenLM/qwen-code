@@ -1685,11 +1685,25 @@ describe('WorkspacePage', () => {
     const validation = renderedContainer.querySelector(
       '[data-testid="settings-save-validation"]',
     );
+    const keyGuidance = renderedContainer.querySelector(
+      '[data-testid="settings-provider-key-guidance"]',
+    );
     const saveButton = [...renderedContainer.querySelectorAll('button')].find(
       (button) => button.textContent?.trim() === 'Save',
     );
 
     expect(validation?.textContent).toContain('Enter an API key');
+    expect(keyGuidance?.getAttribute('role')).toBe('status');
+    expect(keyGuidance?.getAttribute('aria-label')).toBe(
+      'API key provider · API key missing',
+    );
+    expect(keyGuidance?.getAttribute('title')).toBe(
+      'API key provider · API key missing',
+    );
+    expect(keyGuidance?.textContent).toBe('API key missing');
+    expect(
+      keyGuidance?.classList.contains('settings-provider-key-guidance-missing'),
+    ).toBe(true);
     expect(saveButton).toBeInstanceOf(HTMLButtonElement);
     expect((saveButton as HTMLButtonElement).disabled).toBe(true);
     expect(saveButton?.getAttribute('aria-describedby')).toBe(
@@ -1770,6 +1784,9 @@ describe('WorkspacePage', () => {
     const apiKey = renderedContainer.querySelector(
       'input[aria-label="Provider API key"]',
     );
+    const keyGuidance = renderedContainer.querySelector(
+      '[data-testid="settings-provider-key-guidance"]',
+    );
     const saveButton = [...renderedContainer.querySelectorAll('button')].find(
       (button) => button.textContent?.trim() === 'Save',
     );
@@ -1791,6 +1808,13 @@ describe('WorkspacePage', () => {
         '[data-testid="settings-save-validation"]',
       )?.textContent,
     ).toContain('Enter a Coding Plan API key');
+    expect(keyGuidance?.getAttribute('aria-label')).toBe(
+      'Coding Plan provider · Coding Plan API key missing',
+    );
+    expect(keyGuidance?.textContent).toBe('Coding Plan API key missing');
+    expect(
+      keyGuidance?.classList.contains('settings-provider-key-guidance-missing'),
+    ).toBe(true);
     expect(saveButton).toBeInstanceOf(HTMLButtonElement);
     expect((saveButton as HTMLButtonElement).disabled).toBe(true);
   });
@@ -1820,12 +1844,24 @@ describe('WorkspacePage', () => {
     const saveButton = [...renderedContainer.querySelectorAll('button')].find(
       (button) => button.textContent?.trim() === 'Save',
     );
+    const keyGuidance = renderedContainer.querySelector(
+      '[data-testid="settings-provider-key-guidance"]',
+    );
 
     expect(
       renderedContainer.querySelector(
         '[data-testid="settings-save-validation"]',
       ),
     ).toBeNull();
+    expect(keyGuidance?.getAttribute('aria-label')).toBe(
+      'API key provider · API key configured',
+    );
+    expect(keyGuidance?.textContent).toBe('API key configured');
+    expect(
+      keyGuidance?.classList.contains(
+        'settings-provider-key-guidance-configured',
+      ),
+    ).toBe(true);
     expect(saveButton).toBeInstanceOf(HTMLButtonElement);
     expect((saveButton as HTMLButtonElement).disabled).toBe(false);
 
@@ -1910,6 +1946,47 @@ describe('WorkspacePage', () => {
     expect(saveButton?.getAttribute('aria-describedby')).toBe(
       'settings-save-status',
     );
+  });
+
+  it('shows new provider keys as ready to save without revealing values', () => {
+    const renderedContainer = renderWorkspace({
+      settingsState: {
+        ...createInitialSettingsState(),
+        settings: createSettings(),
+        form: {
+          provider: 'api-key',
+          apiKey: 'sk-desktop-e2e',
+          codingPlanRegion: 'china',
+          activeModel: 'qwen-plus',
+          baseUrl: 'https://example.test/v1',
+        },
+      },
+    });
+
+    act(() => {
+      clickButton(renderedContainer, 'Settings');
+    });
+
+    const keyGuidance = renderedContainer.querySelector(
+      '[data-testid="settings-provider-key-guidance"]',
+    );
+    const settingsText =
+      renderedContainer.querySelector('[data-testid="settings-page"]')
+        ?.textContent ?? '';
+
+    expect(keyGuidance?.getAttribute('aria-label')).toBe(
+      'API key provider · API key ready to save',
+    );
+    expect(keyGuidance?.getAttribute('title')).toBe(
+      'API key provider · API key ready to save',
+    );
+    expect(keyGuidance?.textContent).toBe('API key ready to save');
+    expect(
+      keyGuidance?.classList.contains(
+        'settings-provider-key-guidance-configured',
+      ),
+    ).toBe(true);
+    expect(settingsText).not.toContain('sk-desktop-e2e');
   });
 
   it('bounds the inline changed-files summary before opening review', () => {
