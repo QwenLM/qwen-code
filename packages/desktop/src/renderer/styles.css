@@ -1978,6 +1978,13 @@ summary:focus-visible {
   color: #b7d9ff;
 }
 
+.composer-context-note-warning {
+  max-width: 116px;
+  border-color: rgba(240, 182, 110, 0.34);
+  background: rgba(240, 182, 110, 0.1);
+  color: #f3c98c;
+}
+
 .composer-disabled-reason {
   max-width: 148px;
   border-color: rgba(226, 232, 222, 0.08);

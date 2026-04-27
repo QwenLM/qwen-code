@@ -154,6 +154,10 @@ async function main() {
   );
   await saveScreenshot('draft-runtime-controls-selected.png');
   await setFieldByAriaLabel('Message', commandApprovalPrompt);
+  await assertComposerMissingKeySendGuidance(
+    'composer-missing-key-send-guidance.json',
+  );
+  await saveScreenshot('composer-missing-key-send-guidance.png');
   await clickButton('Send');
   await waitForText('Approve Once');
   await assertDraftRuntimeApplied(
@@ -1792,6 +1796,169 @@ async function assertComposerMissingProviderKeyShortcut(fileName, modelId) {
   ) {
     throw new Error(
       `Composer missing provider shortcut leaked data or overflowed: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+}
+
+async function assertComposerMissingKeySendGuidance(fileName) {
+  const expectedWarning =
+    'Selected model is missing an API key; sending may fail until configured.';
+  const expectedSendTitle = `Send message - ${expectedWarning}`;
+
+  await waitFor(
+    'composer missing-key send guidance',
+    async () =>
+      evaluate(`(() => {
+        const warning = document.querySelector(
+          '[data-testid="composer-send-warning"]'
+        );
+        const send = document.querySelector('button[aria-label="Send"]');
+        return Boolean(
+          warning &&
+          send &&
+          warning.textContent.trim() === 'API key missing' &&
+          warning.getAttribute('title') === ${JSON.stringify(expectedWarning)} &&
+          send.disabled === false &&
+          send.getAttribute('title') === ${JSON.stringify(expectedSendTitle)}
+        );
+      })()`),
+    5_000,
+  );
+
+  const snapshot = await evaluate(`(() => {
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        color: style.color,
+        backgroundColor: style.backgroundColor,
+        borderColor: style.borderColor,
+        fontSize: Number.parseFloat(style.fontSize),
+        width: Number.parseFloat(style.width),
+        height: Number.parseFloat(style.height)
+      };
+    };
+    const overflows = (element) =>
+      Boolean(element && element.scrollWidth > element.clientWidth + 4);
+    const composer = document.querySelector('[data-testid="message-composer"]');
+    const actions = document.querySelector('.composer-actions');
+    const warning = document.querySelector(
+      '[data-testid="composer-send-warning"]'
+    );
+    const send = document.querySelector('button[aria-label="Send"]');
+    const model = document.querySelector('select[aria-label="Model"]');
+    const providerStatus = document.querySelector(
+      '[data-testid="composer-model-provider-status"]'
+    );
+    const bodyText = document.body.innerText;
+    const fieldValues = [...document.querySelectorAll('input, textarea')]
+      .map((field) => field.value ?? '')
+      .join('\\n');
+    return {
+      warningText: warning?.textContent.trim() ?? null,
+      warningTitle: warning?.getAttribute('title') ?? null,
+      warningClass: warning?.className ?? '',
+      warningRect: rectFor(warning),
+      warningStyle: styleFor(warning),
+      sendAriaLabel: send?.getAttribute('aria-label') ?? null,
+      sendTitle: send?.getAttribute('title') ?? null,
+      sendDisabled: send?.disabled ?? null,
+      sendRect: rectFor(send),
+      modelValue: model?.value ?? null,
+      providerStatusLabel:
+        providerStatus?.getAttribute('aria-label') ?? null,
+      hasNewThreadNotice: bodyText.includes('New thread'),
+      hasRawCodingPlanLabel: bodyText.includes('ModelStudio Coding Plan'),
+      hasSecret:
+        bodyText.includes('sk-desktop-e2e') ||
+        bodyText.includes('cp-desktop-e2e') ||
+        fieldValues.includes('sk-desktop-e2e') ||
+        fieldValues.includes('cp-desktop-e2e'),
+      hasServerUrl: /http:\\/\\/127\\.0\\.0\\.1:/u.test(bodyText),
+      composerRect: rectFor(composer),
+      actionsRect: rectFor(actions),
+      composerOverflow: overflows(composer),
+      actionsOverflow: overflows(actions),
+      warningOverflow: overflows(warning),
+      documentOverflow:
+        document.body.scrollWidth > window.innerWidth + 4 ||
+        document.body.scrollHeight > window.innerHeight + 4
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (
+    snapshot.warningText !== 'API key missing' ||
+    snapshot.warningTitle !== expectedWarning ||
+    !snapshot.warningClass.includes('composer-context-note-warning') ||
+    snapshot.sendAriaLabel !== 'Send' ||
+    snapshot.sendTitle !== expectedSendTitle ||
+    snapshot.sendDisabled !== false ||
+    snapshot.modelValue !== 'qwen-e2e-cdp' ||
+    snapshot.providerStatusLabel !==
+      'Saved API key provider · API key missing' ||
+    snapshot.hasNewThreadNotice
+  ) {
+    throw new Error(
+      `Composer missing-key send guidance is not clear: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    !snapshot.warningRect ||
+    !snapshot.warningStyle ||
+    !snapshot.sendRect ||
+    !snapshot.composerRect ||
+    !snapshot.actionsRect ||
+    snapshot.warningRect.height > 25 ||
+    snapshot.warningStyle.fontSize > 11.2 ||
+    snapshot.sendRect.width > 32 ||
+    snapshot.sendRect.height > 32 ||
+    snapshot.composerRect.height > 94
+  ) {
+    throw new Error(
+      `Composer missing-key send guidance geometry regressed: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.hasRawCodingPlanLabel ||
+    snapshot.hasSecret ||
+    snapshot.hasServerUrl ||
+    snapshot.documentOverflow ||
+    snapshot.composerOverflow ||
+    snapshot.actionsOverflow ||
+    snapshot.warningOverflow
+  ) {
+    throw new Error(
+      `Composer missing-key send guidance leaked data or overflowed: ${JSON.stringify(
         snapshot,
       )}`,
     );

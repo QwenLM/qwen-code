@@ -130,9 +130,16 @@ export function ChatThread({
     getRuntimeModelProviderStatus(currentModel);
   const currentModelTitle = formatRuntimeModelOptionTitle(currentModel);
   const modelSettingsNeedsKey = currentModelProviderStatus?.state === 'missing';
+  const hasTypedMessage = messageText.trim().length > 0;
+  const missingKeySendWarning = modelSettingsNeedsKey && hasTypedMessage;
+  const missingKeySendWarningTitle =
+    'Selected model is missing an API key; sending may fail until configured.';
   const modelSettingsTitle = modelSettingsNeedsKey
     ? 'Configure models - API key missing'
     : 'Configure models';
+  const sendTitle = missingKeySendWarning
+    ? `Send message - ${missingKeySendWarningTitle}`
+    : 'Send message';
   const modeSelectDisabled =
     !activeProject || (hasActiveSession && !modelState.modes);
   const modelSelectDisabled =
@@ -296,6 +303,14 @@ export function ChatThread({
           <div className="composer-actions">
             {notice ? (
               <span className="composer-context-note">{notice}</span>
+            ) : missingKeySendWarning ? (
+              <span
+                className="composer-context-note composer-context-note-warning"
+                data-testid="composer-send-warning"
+                title={missingKeySendWarningTitle}
+              >
+                API key missing
+              </span>
             ) : null}
             {!activeProject ? (
               <button
@@ -310,7 +325,7 @@ export function ChatThread({
                 <span>Open Project</span>
               </button>
             ) : null}
-            {!activeSessionId && activeProject ? (
+            {!activeSessionId && activeProject && !missingKeySendWarning ? (
               <span className="composer-context-note">New thread</span>
             ) : null}
             <button
@@ -328,7 +343,7 @@ export function ChatThread({
               aria-label="Send"
               className="composer-action-button composer-send-button"
               disabled={!canCompose || messageText.trim().length === 0}
-              title="Send message"
+              title={sendTitle}
               type="submit"
             >
               <SendIcon />

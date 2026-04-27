@@ -22,6 +22,115 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Composer Missing Key Send Guidance
+
+Status: completed in iteration 89.
+
+Goal: make sends against a saved provider model with a missing API key explain
+the likely failure without blocking intentional testing or widening the
+composer.
+
+User-visible value: when a user types a first prompt with the selected saved
+model still missing its provider key, the composer gives a compact warning at
+the send decision point while still letting the user proceed.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/composer-missing-key-send-guidance.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- With a saved provider model whose API key is missing, typing a message shows a
+  compact warning chip in the composer action cluster.
+- The warning explains that the selected model is missing an API key and that
+  sending may fail, but the Send button remains enabled when the prompt is
+  non-empty.
+- The warning reuses the existing compact composer note geometry, replaces the
+  lower-value draft `New thread` chip while typing, and does not expose secrets,
+  local server URLs, raw provider prefixes, or diagnostics.
+- Empty draft composer state still shows `New thread`; configured provider
+  models and runtime/default models keep the quiet send affordance.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: seed the isolated E2E HOME with a saved provider model
+  lacking a key, open the fake project, type the first prompt, assert the
+  composer warning chip and Send title explain the missing-key risk while Send
+  remains enabled, then send and continue the existing draft runtime,
+  approval, settings, branch, review, terminal, relaunch, and commit paths.
+- E2E assertions: warning text/title/class, Send enabled/title, no `New thread`
+  chip while the warning is active, no fake secrets or local server URL leakage,
+  no composer/control/action overflow, and zero unexpected console errors or
+  failed local requests.
+- Diagnostic artifacts to collect on failure:
+  `composer-missing-key-send-guidance.json`,
+  `composer-missing-key-send-guidance.png`, Electron log, and `summary.json`
+  under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` selected a compact warning chip at
+  the send decision point over a blocking modal or permanent warning copy;
+  `frontend-design`, constrained by `home.jpg`, keeps the warning dense and
+  inside the composer controls; and `electron-desktop-dev` requires real
+  Electron CDP coverage because the slice depends on seeded settings, renderer
+  composer state, lazy session creation, and layout geometry.
+
+Notes and decisions:
+
+- The slice intentionally keeps missing-key sends allowed. Some users may be
+  intentionally testing provider setup or relying on an external environment,
+  so the warning should inform rather than block.
+- The warning appears only after the user has typed a prompt, preserving the
+  quieter no-input draft state and the existing icon-only missing-key shortcut.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 40 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T02-08-03-032Z/`.
+- `composer-missing-key-send-guidance.json` recorded the warning chip as
+  `API key missing`, 102.0 x 22 px, warning-styled, non-overflowing, and titled
+  `Selected model is missing an API key; sending may fail until configured.`;
+  the Send action stayed enabled with the matching warning title; the draft
+  `New thread` chip was absent while the warning was active; no fake secrets,
+  local server URLs, raw Coding Plan labels, composer overflow, action overflow,
+  or document overflow were recorded.
+- `summary.json` recorded zero console errors and zero failed local requests.
+
+Self-review:
+
+- The first viewport remains composer-first and conversation-dominant; the
+  warning only replaces one compact composer chip while the user is actively
+  preparing a send against a missing-key model.
+- The change is renderer/CSS/harness only. No Electron main/preload IPC,
+  local server route, token handling, credential persistence, Git, review,
+  terminal, or ACP transport behavior changed.
+- Missing-key sends stay non-blocking, and configured provider/default runtime
+  models keep the previous quiet Send title and controls.
+
+Next work:
+
+- Continue prototype fidelity by tightening the topbar/action icon weight and
+  checking no-project/sidebar typography against `home.jpg`.
+- Continue normal workflow hardening by making model/provider save errors more
+  discoverable without adding dashboard chrome.
+
 ### Slice: No-Project Open Project Composer Affordance
 
 Status: completed in iteration 88.

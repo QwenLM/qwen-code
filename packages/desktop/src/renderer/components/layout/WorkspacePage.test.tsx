@@ -1484,6 +1484,52 @@ describe('WorkspacePage', () => {
     expect(settingsPage?.textContent).not.toContain('sk-desktop-e2e');
   });
 
+  it('warns but allows sending when the draft model is missing an API key', () => {
+    const renderedContainer = renderWorkspace({
+      activeSessionId: null,
+      isDraftSession: false,
+      messageText: 'please inspect the failing test',
+      modelState: {
+        ...createInitialModelState(),
+        configuredModels: [
+          {
+            modelId: 'qwen-e2e-cdp',
+            name: 'qwen-e2e-cdp',
+            description: 'Saved API key provider',
+            _meta: {
+              desktopProvider: 'api-key',
+              desktopProviderHasApiKey: false,
+            },
+          },
+        ],
+      },
+      sessions: [],
+    });
+    const warning = renderedContainer.querySelector(
+      '[data-testid="composer-send-warning"]',
+    );
+    const sendButton = renderedContainer.querySelector(
+      'button[aria-label="Send"]',
+    );
+
+    expect(warning).toBeTruthy();
+    expect(warning?.textContent).toBe('API key missing');
+    expect(warning?.getAttribute('title')).toBe(
+      'Selected model is missing an API key; sending may fail until configured.',
+    );
+    expect(warning?.classList.contains('composer-context-note-warning')).toBe(
+      true,
+    );
+    expect(sendButton).toBeInstanceOf(HTMLButtonElement);
+    expect((sendButton as HTMLButtonElement).disabled).toBe(false);
+    expect(sendButton?.getAttribute('title')).toBe(
+      'Send message - Selected model is missing an API key; sending may fail until configured.',
+    );
+    expect(renderedContainer.textContent).not.toContain('New thread');
+    expect(renderedContainer.textContent).not.toContain('sk-desktop-e2e');
+    expect(renderedContainer.textContent).not.toContain('127.0.0.1');
+  });
+
   it('shortens long composer runtime labels while preserving full titles', () => {
     const renderedContainer = renderWorkspace({
       modelState: {
