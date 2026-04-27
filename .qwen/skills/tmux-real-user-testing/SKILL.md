@@ -215,7 +215,8 @@ For each step, define:
 
 ```bash
 # Start
-bash scripts/tmux-real-user-log.sh start auth-test . npm run dev -- --approval-mode yolo
+eval "$(bash .qwen/skills/tmux-real-user-testing/scripts/tmux-real-user-log.sh \
+  start auth-test . npm run dev -- --approval-mode yolo)"
 # → prints SESSION=... OUTDIR=...
 
 # Trigger /auth, navigate to OAuth provider
