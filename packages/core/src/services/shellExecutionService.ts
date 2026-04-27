@@ -421,11 +421,15 @@ export class ShellExecutionService {
           // Binary sniff applies in both modes — even streaming consumers
           // (e.g. background shell output file) shouldn't pile up text-decoded
           // garbage when the command actually emits binary (`cat /bin/ls`,
-          // image dumps, etc.). The accumulator is bounded by MAX_SNIFF_SIZE.
+          // image dumps, etc.). Track sniffed bytes by running sum so the
+          // accumulator is truly byte-bounded — the previous version recomputed
+          // sniffedBytes from `slice(0, 20)` on every call, which never grew
+          // past the first 20 chunks' total and let the chunk array leak on
+          // line-sized streams.
           if (isStreamingRawContent && sniffedBytes < MAX_SNIFF_SIZE) {
             outputChunks.push(data);
-            const sniffBuffer = Buffer.concat(outputChunks.slice(0, 20));
-            sniffedBytes = sniffBuffer.length;
+            sniffedBytes += data.length;
+            const sniffBuffer = Buffer.concat(outputChunks);
             if (isBinary(sniffBuffer)) {
               isStreamingRawContent = false;
               if (streamStdout) {
@@ -434,6 +438,11 @@ export class ShellExecutionService {
                 onOutputEvent({ type: 'binary_detected' });
                 outputChunks.length = 0;
               }
+            } else if (streamStdout && sniffedBytes >= MAX_SNIFF_SIZE) {
+              // Sniff passed in streaming mode — text confirmed, drop the
+              // accumulator. Subsequent chunks fall through to the streaming
+              // emit path below without ever touching outputChunks.
+              outputChunks.length = 0;
             }
           } else if (!streamStdout) {
             // Buffered (foreground) mode past sniff: keep accumulating for
