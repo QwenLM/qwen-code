@@ -424,6 +424,9 @@ export function AuthDialog(): React.JSX.Element {
     setCustomApiKeyError(null);
     setCustomModelIds('');
     setCustomModelIdsError(null);
+    setAdvancedThinkingEnabled(false);
+    setAdvancedModalityEnabled(false);
+    setFocusedConfigIndex(0);
     setViewLevel('custom-protocol-select');
   };
 
@@ -1123,60 +1126,52 @@ export function AuthDialog(): React.JSX.Element {
     const hasModality = advancedModalityEnabled;
     const hasGenConfig = hasThinking || hasModality;
 
-    const genConfigLines: string[] = [];
+    let genConfig: Record<string, unknown> | undefined;
     if (hasGenConfig) {
-      genConfigLines.push('        "generationConfig": {');
+      genConfig = {};
       if (hasModality) {
-        genConfigLines.push('          "modalities": {');
-        genConfigLines.push('            "image": true,');
-        genConfigLines.push('            "video": true,');
-        genConfigLines.push('            "audio": true');
-        genConfigLines.push('          },');
+        genConfig['modalities'] = {
+          image: true,
+          video: true,
+          audio: true,
+        };
       }
       if (hasThinking) {
-        genConfigLines.push('          "extra_body": {');
-        genConfigLines.push('            "enable_thinking": true');
-        genConfigLines.push('          },');
+        genConfig['extra_body'] = {
+          enable_thinking: true,
+        };
       }
-      // Remove trailing comma from last genConfig line
-      const lastLine = genConfigLines[genConfigLines.length - 1];
-      if (lastLine?.endsWith(',')) {
-        genConfigLines[genConfigLines.length - 1] = lastLine.slice(0, -1);
-      }
-      genConfigLines.push('        },');
     }
 
-    const modelEntries = normalizedIds
-      .map(
-        (id) =>
-          `      {\n        "id": "${id}",\n        "name": "${id}",\n        "baseUrl": "${customBaseUrl.trim()}",\n        "envKey": "${generatedEnvKey}"${
-            genConfigLines.length > 0
-              ? ',\n' + genConfigLines.join('\n') + '\n      '
-              : ''
-          }\n      }`,
-      )
-      .join(',\n');
+    const modelEntries = normalizedIds.map((id) => {
+      const entry: Record<string, unknown> = {
+        id,
+        name: id,
+        baseUrl: customBaseUrl.trim(),
+        envKey: generatedEnvKey,
+      };
+      if (genConfig) {
+        entry['generationConfig'] = genConfig;
+      }
+      return entry;
+    });
 
-    const jsonPreview = [
-      '{',
-      `  "env": {`,
-      `    "${generatedEnvKey}": "${maskedKey}"`,
-      '  },',
-      `  "modelProviders": {`,
-      `    "${customProtocol}": [`,
-      modelEntries,
-      '    ]',
-      '  },',
-      `  "security": {`,
-      `    "auth": {`,
-      `      "selectedType": "${customProtocol}"`,
-      '    }',
-      '  },',
-      `  "model": {`,
-      `    "name": "${normalizedIds[0]}"`,
-      '  }',
-      '}',
-    ].join('\n');
+    const preview = {
+      env: { [generatedEnvKey]: maskedKey },
+      modelProviders: {
+        [customProtocol]: modelEntries,
+      },
+      security: {
+        auth: {
+          selectedType: customProtocol,
+        },
+      },
+      model: {
+        name: normalizedIds[0],
+      },
+    };
+
+    const jsonPreview = JSON.stringify(preview, null, 2);
 
     return (
       <Box marginTop={1} flexDirection="column">
