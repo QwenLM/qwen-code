@@ -194,6 +194,16 @@ export class AgentHeadless {
     context: ContextState,
     externalSignal?: AbortSignal,
   ): Promise<void> {
+    // Record the initial user turn in the observable message log before
+    // anything that can throw — createChat / prepareTools failures still
+    // get a transcript showing the task that was asked, which is what
+    // the background-agent detail view reads via AgentCore.getMessages().
+    // Mirrors AgentInteractive's run loop.
+    const initialTaskText = String(
+      (context.get('task_prompt') as string) ?? 'Get Started!',
+    );
+    this.core.pushMessage('user', initialTaskText);
+
     const chat = await this.core.createChat(context);
 
     if (!chat) {
@@ -215,9 +225,6 @@ export class AgentHeadless {
 
     const toolsList = await this.core.prepareTools();
 
-    const initialTaskText = String(
-      (context.get('task_prompt') as string) ?? 'Get Started!',
-    );
     const initialMessages = [
       { role: 'user' as const, parts: [{ text: initialTaskText }] },
     ];
