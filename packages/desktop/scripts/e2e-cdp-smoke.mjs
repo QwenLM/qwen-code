@@ -10031,10 +10031,25 @@ async function assertSettingsAdvancedDiagnostics(fileName) {
     const toggle = document.querySelector(
       '[data-testid="settings-advanced-toggle"]'
     );
+    const readLabel = (element) => {
+      const style = window.getComputedStyle(element);
+      return {
+        text: element.textContent.trim(),
+        textTransform: style.textTransform,
+        fontWeight: Number.parseFloat(style.fontWeight),
+        fontSize: Number.parseFloat(style.fontSize),
+        overflows: element.scrollWidth > element.clientWidth + 4
+      };
+    };
+    const diagnosticLabels = advanced
+      ? [...advanced.querySelectorAll('.runtime-details dt')].map(readLabel)
+      : [];
     return {
       text: advanced?.innerText ?? '',
       runtimeText: runtime?.innerText ?? '',
       expanded: toggle?.getAttribute('aria-expanded') ?? null,
+      diagnosticLabels,
+      diagnosticLabelTexts: diagnosticLabels.map((label) => label.text),
       hasSecret:
         (advanced?.innerText ?? '').includes('sk-desktop-e2e') ||
         (advanced?.innerText ?? '').includes('cp-desktop-e2e') ||
@@ -10070,6 +10085,45 @@ async function assertSettingsAdvancedDiagnostics(fileName) {
         `Advanced diagnostics missing ${expectedDiagnostic}: ${snapshot.text}`,
       );
     }
+  }
+
+  const expectedDiagnosticLabels = [
+    'Active',
+    'Commands',
+    'Skills',
+    'Tokens',
+    'Settings path',
+    'Server',
+    'Desktop',
+    'Platform',
+    'Node',
+    'ACP',
+    'Health',
+  ];
+  const missingDiagnosticLabels = expectedDiagnosticLabels.filter(
+    (label) => !snapshot.diagnosticLabelTexts.includes(label),
+  );
+  if (missingDiagnosticLabels.length > 0) {
+    throw new Error(
+      `Advanced diagnostics labels are missing: ${missingDiagnosticLabels.join(
+        ', ',
+      )}`,
+    );
+  }
+
+  const noisyDiagnosticLabels = snapshot.diagnosticLabels.filter(
+    (label) =>
+      label.textTransform !== 'none' ||
+      label.fontWeight > 700 ||
+      label.fontSize > 12 ||
+      label.overflows,
+  );
+  if (noisyDiagnosticLabels.length > 0) {
+    throw new Error(
+      `Advanced diagnostics labels still read as debug chrome: ${JSON.stringify(
+        noisyDiagnosticLabels,
+      )}`,
+    );
   }
 
   if (!/http:\/\/127\.0\.0\.1:/u.test(snapshot.runtimeText)) {

@@ -22,6 +22,113 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Settings Advanced Diagnostics Label Restraint
+
+Status: completed in iteration 82.
+
+Goal: make the opt-in Advanced Diagnostics key/value labels match the quieter
+Settings label treatment so diagnostics remain clearly secondary when opened.
+
+User-visible value: users can inspect runtime/session diagnostics from Settings
+without the drawer snapping back to uppercase debug-dashboard chrome, while the
+diagnostics stay hidden from the default workbench and Settings views.
+
+Expected files:
+
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/settings-advanced-diagnostics-label-restraint.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Advanced Diagnostics session/runtime `dt` labels render in normal case with a
+  compact font weight and size.
+- Diagnostic values remain readable, contained, and allowed to show the local
+  server URL only after the user explicitly opens Advanced Diagnostics.
+- Default Settings, composer shortcut Settings, sidebar Models Settings,
+  compact Settings, and settings rail navigation still do not expose runtime
+  diagnostics, local server URLs, secrets, ACP/session IDs, or overflow.
+- Existing Settings model/provider validation, Permissions model grouping,
+  terminal, review, branch, relaunch, and commit workflows remain unchanged.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, open Settings, assert default diagnostics are hidden, open
+  Advanced Diagnostics, assert session/runtime diagnostic labels use normal-case
+  compact computed styles and stay contained, then continue existing settings,
+  terminal, model, branch, review, relaunch, and commit paths.
+- E2E assertions: diagnostic label samples report `text-transform: none`,
+  restrained font weights/sizes, no label overflow, expected diagnostic text,
+  local server URL only in the runtime diagnostics block after expansion, no
+  fake secrets, and zero unexpected console errors or failed local requests.
+- Diagnostic artifacts to collect on failure: `settings-advanced-diagnostics.json`,
+  Settings screenshots, Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` used the current next-work notes to
+  choose a targeted diagnostics-fidelity slice; `frontend-design` constrained
+  by `home.jpg` to keep opt-in diagnostics quiet and secondary; and
+  `electron-desktop-dev` for renderer CSS changes verified through the real
+  Electron CDP harness.
+
+Notes and decisions:
+
+- Brainstormed alternatives: hide more diagnostics by default, redesign the
+  Advanced section as a separate page, or make the remaining diagnostic label
+  chrome match the established Settings style. The targeted style pass is the
+  smallest safe slice because default diagnostic hiding and navigation behavior
+  already have executable coverage.
+- This slice intentionally does not change Settings IA, Electron main/preload
+  APIs, local server binding, token handling, secret persistence, or runtime
+  diagnostic content.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 36 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T00-42-07-584Z/`.
+- `settings-advanced-diagnostics.json` recorded the Advanced Diagnostics
+  toggle expanded, all session/runtime diagnostic labels present, each label at
+  `textTransform: "none"`, `fontWeight: 680`, `fontSize: 11.5`, no label
+  overflow, no fake secrets, and the local server URL visible only in the
+  expanded runtime diagnostics block. `summary.json` recorded zero console
+  errors and zero failed local requests.
+
+Self-review:
+
+- The first viewport and default Settings view are unchanged: diagnostics
+  remain opt-in and do not leak local server URLs, ACP/session IDs, or secrets
+  before expansion.
+- The change moves the opt-in Advanced Diagnostics surface closer to the
+  prototype by keeping support labels quiet instead of uppercase diagnostic
+  chrome.
+- The slice changes renderer CSS and CDP assertions only; Electron
+  main/preload, IPC, local server binding, token handling, Settings
+  persistence, Git, terminal, branch, review, and commit behavior are
+  unchanged.
+
+Next work:
+
+- Continue prototype fidelity by reviewing remaining generic `.eyebrow`
+  uppercase treatment and any activity/support labels that still compete with
+  message content.
+- Continue model workflow polish by exposing provider health/validation state
+  near model choices without widening the composer.
+
 ### Slice: Sidebar Section Label Restraint
 
 Status: completed in iteration 81.
