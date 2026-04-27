@@ -53,12 +53,11 @@ export class HistoryReplayer {
   private async replayRecord(record: ChatRecord): Promise<void> {
     this.setActiveRecordId(record.uuid, record.timestamp);
     switch (record.type) {
-      case 'user': {
+      case 'user':
         // Notification/cron records hold raw XML/prompt the user never
         // typed; replay the friendly displayText so the assistant's reply
         // has an antecedent in the ACP transcript.
-        const subtype: string | undefined = record.subtype;
-        if (subtype === 'notification' || subtype === 'cron') {
+        if (record.subtype === 'notification' || record.subtype === 'cron') {
           const displayText = (
             record.systemPayload as NotificationRecordPayload | undefined
           )?.displayText;
@@ -74,7 +73,6 @@ export class HistoryReplayer {
           await this.replayContent(record.message, 'user', record.timestamp);
         }
         break;
-      }
 
       case 'assistant':
         if (record.message) {

@@ -21,7 +21,9 @@ import {
   buildApiHistoryFromConversation,
   getResumePromptTokenCount,
   type ConversationRecord,
+  SESSION_TITLE_MAX_LENGTH,
 } from './sessionService.js';
+import { sanitizeTitle } from './sessionTitle.js';
 import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
@@ -909,29 +911,24 @@ describe('SessionService', () => {
 
 describe('SESSION_TITLE_MAX_LENGTH', () => {
   it('is exported as a named export from the module', async () => {
-    // Regression: SESSION_TITLE_MAX_LENGTH must be importable by
-    // downstream packages (e.g. acp-integration).
     const module = await import('../../src/services/sessionService.js');
-    expect(typeof module.SESSION_TITLE_MAX_LENGTH).toBe('number');
-    expect(module.SESSION_TITLE_MAX_LENGTH).toBe(200);
+    expect(module.SESSION_TITLE_MAX_LENGTH).toBe(SESSION_TITLE_MAX_LENGTH);
+    expect(SESSION_TITLE_MAX_LENGTH).toBe(200);
   });
 
-  it('truncates titles longer than the limit', () => {
+  it('truncates titles longer than the limit via sanitizeTitle', () => {
     const longTitle = 'a'.repeat(300);
-    expect(longTitle.length > 200).toBe(true);
-    const truncated = longTitle.slice(0, 200).trim();
-    expect(truncated.length).toBeLessThanOrEqual(200);
+    const result = sanitizeTitle(longTitle);
+    expect(result.length).toBeLessThanOrEqual(SESSION_TITLE_MAX_LENGTH);
   });
 
-  it('handles edge case: title exactly at limit', () => {
-    const exactTitle = 'b'.repeat(200);
-    expect(exactTitle.length).toBe(200);
-    expect(exactTitle.slice(0, 200)).toBe(exactTitle);
+  it('does not truncate titles at or under the limit', () => {
+    const exactTitle = 'b'.repeat(SESSION_TITLE_MAX_LENGTH);
+    const result = sanitizeTitle(exactTitle);
+    expect(result).toBe(exactTitle);
   });
 
-  it('handles edge case: empty title', () => {
-    const emptyTitle = '';
-    expect(emptyTitle.length).toBe(0);
-    expect(emptyTitle.length).toBeLessThanOrEqual(200);
+  it('handles empty title', () => {
+    expect(sanitizeTitle('')).toBe('');
   });
 });

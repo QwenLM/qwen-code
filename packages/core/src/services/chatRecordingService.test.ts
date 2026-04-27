@@ -14,6 +14,7 @@ import {
   ChatRecordingService,
   type ChatRecord,
   type AtCommandRecordPayload,
+  type NotificationRecordPayload,
 } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type { Part } from '@google/genai';
@@ -443,19 +444,19 @@ describe('ChatRecordingService', () => {
     });
 
     it('has correct structure with displayText field', () => {
-      const payload: { displayText?: string } = {
+      const payload: NotificationRecordPayload = {
         displayText: 'Test notification',
       };
       expect(payload.displayText).toBe('Test notification');
     });
 
     it('handles edge case: empty displayText', () => {
-      const payload: { displayText?: string } = { displayText: '' };
+      const payload: NotificationRecordPayload = { displayText: '' };
       expect(payload.displayText).toBe('');
     });
 
     it('handles edge case: special characters in displayText', () => {
-      const payload: { displayText?: string } = {
+      const payload: NotificationRecordPayload = {
         displayText: 'Alert: "quotes" & ampersands',
       };
       expect(payload.displayText).toContain('quotes');
