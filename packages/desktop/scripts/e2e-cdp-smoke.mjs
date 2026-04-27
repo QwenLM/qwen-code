@@ -9515,11 +9515,23 @@ async function assertSettingsPermissionsModelLabelRestraint(fileName) {
           textLength: option.textContent.trim().length
         }))
       : [];
+    const groups = select
+      ? [...select.querySelectorAll('optgroup')].map((group) => ({
+          label: group.label,
+          values: [...group.querySelectorAll('option')].map(
+            (option) => option.value
+          ),
+          texts: [...group.querySelectorAll('option')].map((option) =>
+            option.textContent.trim()
+          )
+        }))
+      : [];
     return {
       disabled: select?.disabled ?? null,
       value: select?.value ?? null,
       title: select?.getAttribute('title') ?? null,
       options,
+      groups,
       codingPlanOptions: options.filter(
         (option) =>
           option.value === 'qwen3.5-plus' ||
@@ -9582,6 +9594,29 @@ async function assertSettingsPermissionsModelLabelRestraint(fileName) {
   ) {
     throw new Error(
       `Settings permissions exposed raw or missing Coding Plan labels: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  const savedProviderGroup = snapshot.groups.find(
+    (group) => group.label === 'Saved providers',
+  );
+  const codingPlanGroup = snapshot.groups.find(
+    (group) => group.label === 'Coding Plan',
+  );
+  if (
+    !savedProviderGroup?.values.includes('qwen-e2e-cdp') ||
+    !codingPlanGroup ||
+    !codingPlanGroup.values.some(
+      (value) => value === 'qwen3.5-plus' || value === 'qwen3-coder-next',
+    ) ||
+    snapshot.groups.some((group) =>
+      group.label.includes('ModelStudio Coding Plan'),
+    )
+  ) {
+    throw new Error(
+      `Settings permissions model groups are not provider-scoped: ${JSON.stringify(
         snapshot,
       )}`,
     );
@@ -9748,6 +9783,17 @@ async function assertDraftComposerSavedModelState(fileName, savedModelId) {
           selected: option.selected
         }))
       : [];
+    const groups = select
+      ? [...select.querySelectorAll('optgroup')].map((group) => ({
+          label: group.label,
+          values: [...group.querySelectorAll('option')].map(
+            (option) => option.value
+          ),
+          texts: [...group.querySelectorAll('option')].map((option) =>
+            option.textContent.trim()
+          )
+        }))
+      : [];
     const selected = options.find((option) => option.selected) ?? null;
     return {
       disabled: select?.disabled ?? null,
@@ -9755,6 +9801,7 @@ async function assertDraftComposerSavedModelState(fileName, savedModelId) {
       value: select?.value ?? null,
       title: select?.getAttribute('title') ?? null,
       options,
+      groups,
       selected,
       hasSavedModel: options.some(
         (option) => option.value === ${JSON.stringify(savedModelId)}
@@ -9816,6 +9863,26 @@ async function assertDraftComposerSavedModelState(fileName, savedModelId) {
   if (snapshot.hasRawCodingPlanLabel) {
     throw new Error(
       `Draft composer exposed raw Coding Plan labels: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  const savedProviderGroup = snapshot.groups.find(
+    (group) => group.label === 'Saved providers',
+  );
+  const codingPlanGroup = snapshot.groups.find(
+    (group) => group.label === 'Coding Plan',
+  );
+  if (
+    !savedProviderGroup?.values.includes(savedModelId) ||
+    !codingPlanGroup?.values.some((value) => value === 'qwen3.5-plus') ||
+    snapshot.groups.some((group) =>
+      group.label.includes('ModelStudio Coding Plan'),
+    )
+  ) {
+    throw new Error(
+      `Draft composer model groups are not provider-scoped: ${JSON.stringify(
         snapshot,
       )}`,
     );
@@ -9926,6 +9993,17 @@ async function assertComposerModelSwitch(fileName, modelId) {
           selected: option.selected
         }))
       : [];
+    const groups = select
+      ? [...select.querySelectorAll('optgroup')].map((group) => ({
+          label: group.label,
+          values: [...group.querySelectorAll('option')].map(
+            (option) => option.value
+          ),
+          texts: [...group.querySelectorAll('option')].map((option) =>
+            option.textContent.trim()
+          )
+        }))
+      : [];
     const selected = options.find((option) => option.selected) ?? null;
     const bodyText = document.body.innerText;
     return {
@@ -9935,6 +10013,7 @@ async function assertComposerModelSwitch(fileName, modelId) {
       disabled: select?.disabled ?? null,
       value: select?.value ?? null,
       options,
+      groups,
       selected,
       hasRawCodingPlanLabel: options.some((option) =>
         option.text.includes('ModelStudio Coding Plan')
@@ -10047,6 +10126,30 @@ async function assertComposerModelSwitch(fileName, modelId) {
   if (snapshot.hasRawCodingPlanLabel) {
     throw new Error(
       `Composer exposed raw Coding Plan labels: ${JSON.stringify(snapshot)}`,
+    );
+  }
+
+  const activeGroup = snapshot.groups.find(
+    (group) => group.label === 'Active session',
+  );
+  const savedProviderGroup = snapshot.groups.find(
+    (group) => group.label === 'Saved providers',
+  );
+  const codingPlanGroup = snapshot.groups.find(
+    (group) => group.label === 'Coding Plan',
+  );
+  if (
+    !activeGroup?.values.includes('e2e/qwen-code') ||
+    !savedProviderGroup?.values.includes(modelId) ||
+    !codingPlanGroup?.values.includes(longCodingPlanModelId) ||
+    snapshot.groups.some((group) =>
+      group.label.includes('ModelStudio Coding Plan'),
+    )
+  ) {
+    throw new Error(
+      `Composer model groups are not provider-scoped: ${JSON.stringify(
+        snapshot,
+      )}`,
     );
   }
 

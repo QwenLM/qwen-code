@@ -18,6 +18,7 @@ import type { DesktopApprovalMode } from '../../../shared/desktopProtocol.js';
 import {
   formatRuntimeModelLabel,
   formatRuntimeModelTitle,
+  groupRuntimeModelOptions,
 } from './formatters.js';
 import { CloseIcon } from './SidebarIcons.js';
 import type { LoadState } from './types.js';
@@ -474,6 +475,9 @@ function PermissionsPanel({
   const currentModelTitle = currentModelInfo
     ? formatRuntimeModelTitle(currentModelInfo)
     : currentModel || 'Unknown';
+  const modelOptionGroups = modelState.models
+    ? groupRuntimeModelOptions(modelState.models.availableModels)
+    : [];
 
   return (
     <section
@@ -518,14 +522,18 @@ function PermissionsPanel({
               value={currentModel}
               onChange={(event) => onModelChange(event.target.value)}
             >
-              {modelState.models.availableModels.map((model) => (
-                <option
-                  key={model.modelId}
-                  title={formatRuntimeModelTitle(model)}
-                  value={model.modelId}
-                >
-                  {formatRuntimeModelLabel(model)}
-                </option>
+              {modelOptionGroups.map((group) => (
+                <optgroup key={group.label} label={group.label}>
+                  {group.models.map((model) => (
+                    <option
+                      key={model.modelId}
+                      title={formatRuntimeModelTitle(model)}
+                      value={model.modelId}
+                    >
+                      {formatRuntimeModelLabel(model)}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
           ) : (

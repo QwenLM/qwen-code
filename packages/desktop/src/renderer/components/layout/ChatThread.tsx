@@ -22,6 +22,7 @@ import type {
 import {
   formatRuntimeModelLabel,
   formatRuntimeModelTitle,
+  groupRuntimeModelOptions,
 } from './formatters.js';
 import {
   AttachmentIcon,
@@ -100,6 +101,7 @@ export function ChatThread({
   const currentModel =
     modelOptions.find((model) => model.modelId === currentModelId) ??
     fallbackModelOption;
+  const modelOptionGroups = groupRuntimeModelOptions(modelOptions);
 
   return (
     <section
@@ -208,14 +210,18 @@ export function ChatThread({
                   value={currentModelId}
                   onChange={(event) => onModelChange(event.target.value)}
                 >
-                  {modelOptions.map((model) => (
-                    <option
-                      key={model.modelId}
-                      title={formatRuntimeModelTitle(model)}
-                      value={model.modelId}
-                    >
-                      {formatRuntimeModelLabel(model)}
-                    </option>
+                  {modelOptionGroups.map((group) => (
+                    <optgroup key={group.label} label={group.label}>
+                      {group.models.map((model) => (
+                        <option
+                          key={model.modelId}
+                          title={formatRuntimeModelTitle(model)}
+                          value={model.modelId}
+                        >
+                          {formatRuntimeModelLabel(model)}
+                        </option>
+                      ))}
+                    </optgroup>
                   ))}
                 </select>
                 <ChevronDownIcon className="composer-select-chevron" />

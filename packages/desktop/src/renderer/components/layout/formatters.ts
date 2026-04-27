@@ -11,6 +11,11 @@ const MAX_SESSION_DISPLAY_TITLE_LENGTH = 52;
 const MAX_TOPBAR_BRANCH_LABEL_LENGTH = 30;
 const MAX_RUNTIME_MODEL_LABEL_LENGTH = 32;
 
+export interface RuntimeModelOptionGroup {
+  label: string;
+  models: DesktopModelInfo[];
+}
+
 export interface GitDiffStats {
   additions: number;
   deletions: number;
@@ -128,6 +133,25 @@ export function formatRuntimeModelTitle(model: DesktopModelInfo): string {
   return label.length > 0 ? label : model.modelId;
 }
 
+export function groupRuntimeModelOptions(
+  models: DesktopModelInfo[],
+): RuntimeModelOptionGroup[] {
+  const groups: RuntimeModelOptionGroup[] = [
+    { label: 'Active session', models: [] },
+    { label: 'Saved providers', models: [] },
+    { label: 'Coding Plan', models: [] },
+  ];
+
+  for (const model of models) {
+    const group = groups.find(
+      (candidate) => candidate.label === getRuntimeModelGroupLabel(model),
+    );
+    group?.models.push(model);
+  }
+
+  return groups.filter((group) => group.models.length > 0);
+}
+
 function normalizeSessionTitle(title: string): string {
   return title
     .replace(/`{1,3}([^`]+)`{1,3}/gu, '$1')
@@ -171,6 +195,37 @@ function stripCodingPlanProviderPrefix(label: string): string {
   return label
     .replace(/^\[ModelStudio Coding Plan(?: for [^\]]+)?\]\s*/u, '')
     .trim();
+}
+
+function getRuntimeModelGroupLabel(model: DesktopModelInfo): string {
+  if (isCodingPlanModel(model)) {
+    return 'Coding Plan';
+  }
+
+  if (isSavedProviderModel(model)) {
+    return 'Saved providers';
+  }
+
+  return 'Active session';
+}
+
+function isCodingPlanModel(model: DesktopModelInfo): boolean {
+  const description = model.description?.toLowerCase() ?? '';
+  return (
+    description.includes('coding plan') ||
+    /^\[ModelStudio Coding Plan(?: for [^\]]+)?\]/u.test(
+      formatRuntimeModelTitle(model),
+    )
+  );
+}
+
+function isSavedProviderModel(model: DesktopModelInfo): boolean {
+  const description = model.description?.toLowerCase() ?? '';
+  return (
+    description.includes('desktop settings') ||
+    description.includes('api key provider') ||
+    description.includes('saved provider')
+  );
 }
 
 function truncateLabel(value: string, maxLength: number): string {

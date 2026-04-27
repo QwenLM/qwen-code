@@ -12,6 +12,10 @@ import type {
 } from '../../shared/desktopProtocol.js';
 import type { DesktopUserSettings } from '../api/client.js';
 
+const CONFIGURED_API_KEY_PROVIDER_DESCRIPTION = 'Saved API key provider';
+const CONFIGURED_CODING_PLAN_PROVIDER_DESCRIPTION =
+  'Saved Coding Plan provider';
+
 export interface ModelState {
   models: DesktopSessionModelState | null;
   modes: DesktopSessionModeState | null;
@@ -223,7 +227,7 @@ function extractConfiguredModels(
     .map((provider) => ({
       modelId: provider.id.trim(),
       name: (provider.name || provider.id).trim(),
-      description: 'Configured in desktop settings',
+      description: getConfiguredModelDescription(provider.envKey),
     }))
     .filter((model) => model.modelId.length > 0);
   const activeModel = settings.model.name?.trim();
@@ -234,7 +238,10 @@ function extractConfiguredModels(
     providers.unshift({
       modelId: activeModel,
       name: activeModel,
-      description: 'Configured in desktop settings',
+      description:
+        settings.provider === 'coding-plan'
+          ? CONFIGURED_CODING_PLAN_PROVIDER_DESCRIPTION
+          : CONFIGURED_API_KEY_PROVIDER_DESCRIPTION,
     });
   }
 
@@ -247,4 +254,12 @@ function extractConfiguredModels(
     seen.add(provider.modelId);
     return true;
   });
+}
+
+function getConfiguredModelDescription(envKey: string): string {
+  if (envKey.toUpperCase().includes('CODING_PLAN')) {
+    return CONFIGURED_CODING_PLAN_PROVIDER_DESCRIPTION;
+  }
+
+  return CONFIGURED_API_KEY_PROVIDER_DESCRIPTION;
 }

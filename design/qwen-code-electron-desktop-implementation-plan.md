@@ -22,6 +22,121 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Model Picker Provider Grouping
+
+Status: completed in iteration 78.
+
+Goal: make composer and Settings thread-model selectors easier to scan when
+active runtime models, saved API-key provider models, and Coding Plan models
+coexist.
+
+User-visible value: users can distinguish active thread models from saved
+desktop provider models and Coding Plan options inside the same compact model
+picker without raw provider prefixes, secrets, or wider first-viewport chrome.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/formatters.ts`
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/SettingsPage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/stores/modelStore.ts`
+- `packages/desktop/src/renderer/stores/modelStore.test.ts`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/model-picker-provider-grouping.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Composer model options are grouped under compact provider categories when
+  runtime, saved API-key, and Coding Plan models coexist.
+- Settings Permissions thread-model options use the same grouping.
+- Visible option labels remain compact and do not include
+  `ModelStudio Coding Plan`; full raw provider names remain available only on
+  native `title` attributes.
+- Saved API-key provider entries and saved Coding Plan provider entries retain
+  distinct metadata so ordering/grouping survives Settings reloads and draft
+  thread creation.
+- The model picker, Settings drawer, and composer remain contained with no
+  visible secrets, local server URL, or first-viewport overflow.
+
+Verification:
+
+- Unit/component test commands:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/modelStore.test.ts`
+  and
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, save API-key and Coding Plan providers, inspect Settings
+  Permissions model groups, create a draft thread, inspect draft composer model
+  groups, return to an active thread, switch composer models, and assert group
+  order and labels.
+- E2E assertions: the relevant selectors expose `Saved providers` and
+  `Coding Plan` groups, active-thread selectors also expose `Active session`,
+  compact labels remain under the existing length bounds, raw Coding Plan
+  provider prefixes are not visible, titles preserve full raw provider names,
+  and console errors/failed local requests are empty.
+- Diagnostic artifacts to collect on failure: `settings-permissions-model-label-restraint.json`,
+  `draft-composer-saved-model-state.json`, `composer-model-switch.json`,
+  screenshots, Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` with the Ralph prompt and current
+  next-work notes to choose provider grouping over new picker chrome;
+  `frontend-design` constrained by `home.jpg` to add hierarchy inside native
+  controls without widening the first viewport; `electron-desktop-dev` for
+  renderer/store changes plus real Electron CDP verification.
+
+Notes and decisions:
+
+- Brainstormed alternatives: add visible provider suffixes to option labels,
+  build a custom dropdown, or use native `optgroup` labels. Native groups are
+  the smallest reliable slice because they improve scan order while preserving
+  compact option text and browser/OS select behavior.
+- This slice intentionally does not introduce a custom select component or new
+  large badges in the composer; the prototype still favors compact controls.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/modelStore.test.ts`
+  passed with 7 tests.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 35 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T00-06-10-781Z/`.
+- `settings-permissions-model-label-restraint.json`,
+  `draft-composer-saved-model-state.json`, and `composer-model-switch.json`
+  recorded `Active session`, `Saved providers`, and/or `Coding Plan` groups as
+  appropriate, compact visible model labels, full raw Coding Plan titles
+  preserved on options, no visible secrets, no local server URL, no selector
+  overflow, zero console errors, and zero failed local requests.
+
+Self-review:
+
+- The first viewport remains compact and conversation-first; the change only
+  adds native grouping semantics inside existing model selectors.
+- Raw provider prefixes remain hidden from visible option text while full
+  metadata stays available in native titles for disambiguation.
+- Store metadata now distinguishes API-key and Coding Plan saved providers
+  without changing Electron main, preload, IPC, local server binding, token
+  handling, or secret persistence.
+
+Next work:
+
+- Continue prototype fidelity by reducing remaining uppercase status chrome in
+  supporting review/terminal surfaces where it competes with thread content.
+- Continue model workflow polish by exposing provider health/validation state
+  near model choices without widening the composer.
+
 ### Slice: Settings Label Chrome Restraint
 
 Status: completed in iteration 77.

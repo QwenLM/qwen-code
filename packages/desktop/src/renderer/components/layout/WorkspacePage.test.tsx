@@ -1191,6 +1191,17 @@ describe('WorkspacePage', () => {
       'qwen-e2e-cdp',
       'qwen3-coder-next',
     ]);
+    expect(
+      [...(model?.querySelectorAll('optgroup') ?? [])].map((group) => ({
+        label: group.label,
+        values: [...group.querySelectorAll('option')].map(
+          (option) => option.value,
+        ),
+      })),
+    ).toEqual([
+      { label: 'Saved providers', values: ['qwen-e2e-cdp'] },
+      { label: 'Coding Plan', values: ['qwen3-coder-next'] },
+    ]);
     expect(model?.options[0]?.textContent).toBe('qwen-e2e-cdp');
     expect(model?.options[1]?.textContent).toBe('qwen3-coder-next');
     expect(model?.options[1]?.title).toBe(
@@ -1271,6 +1282,20 @@ describe('WorkspacePage', () => {
     expect(
       [...(model as HTMLSelectElement).options].map((option) => option.value),
     ).toEqual(['e2e/qwen-code', 'qwen-e2e-cdp', 'qwen3-coder-next']);
+    expect(
+      [
+        ...((model as HTMLSelectElement).querySelectorAll('optgroup') ?? []),
+      ].map((group) => ({
+        label: group.label,
+        values: [...group.querySelectorAll('option')].map(
+          (option) => option.value,
+        ),
+      })),
+    ).toEqual([
+      { label: 'Active session', values: ['e2e/qwen-code'] },
+      { label: 'Saved providers', values: ['qwen-e2e-cdp'] },
+      { label: 'Coding Plan', values: ['qwen3-coder-next'] },
+    ]);
     expect(renderedContainer.textContent).toContain('qwen-e2e-cdp');
     expect(renderedContainer.textContent).toContain('qwen3-coder-next');
     expect(renderedContainer.textContent).not.toContain(
@@ -1410,6 +1435,17 @@ describe('WorkspacePage', () => {
       'very-long-runtime-model-name...',
       'qwen3.5-plus',
       'qwen3-coder-next',
+    ]);
+    expect(
+      [...(model?.querySelectorAll('optgroup') ?? [])].map((group) => ({
+        label: group.label,
+        values: [...group.querySelectorAll('option')].map(
+          (option) => option.value,
+        ),
+      })),
+    ).toEqual([
+      { label: 'Active session', values: ['provider/very-long-runtime-model'] },
+      { label: 'Coding Plan', values: ['qwen3.5-plus', 'qwen3-coder-next'] },
     ]);
     expect(model?.options[1]?.title).toBe(
       '[ModelStudio Coding Plan] qwen3.5-plus',

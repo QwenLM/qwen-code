@@ -79,7 +79,7 @@ describe('modelStore', () => {
       {
         modelId: 'qwen-e2e-cdp',
         name: 'qwen-e2e-cdp',
-        description: 'Configured in desktop settings',
+        description: 'Saved API key provider',
       },
     ]);
   });
@@ -163,6 +163,26 @@ describe('modelStore', () => {
     );
     expect(codingPlanModel?.description).toBe('Coding Plan global model');
   });
+
+  it('preserves provider metadata when API-key and Coding Plan models coexist', () => {
+    const state = modelReducer(createInitialModelState(), {
+      type: 'settings_models_loaded',
+      settings: createMixedProviderSettings(),
+    });
+
+    expect(state.configuredModels).toEqual([
+      {
+        modelId: 'qwen3.5-plus',
+        name: 'qwen3.5-plus',
+        description: 'Saved Coding Plan provider',
+      },
+      {
+        modelId: 'qwen-e2e-cdp',
+        name: 'qwen-e2e-cdp',
+        description: 'Saved API key provider',
+      },
+    ]);
+  });
 });
 
 function createSettings(model: string): DesktopUserSettings {
@@ -183,6 +203,38 @@ function createSettings(model: string): DesktopUserSettings {
         {
           id: model,
           name: model,
+          baseUrl: 'https://example.invalid/v1',
+          envKey: 'OPENAI_API_KEY',
+        },
+      ],
+    },
+  };
+}
+
+function createMixedProviderSettings(): DesktopUserSettings {
+  return {
+    ok: true,
+    settingsPath: '/tmp/settings.json',
+    provider: 'coding-plan',
+    selectedAuthType: 'openai',
+    model: { name: 'qwen3.5-plus' },
+    codingPlan: {
+      region: 'global',
+      hasApiKey: true,
+      version: 'v1',
+    },
+    openai: {
+      hasApiKey: true,
+      providers: [
+        {
+          id: 'qwen3.5-plus',
+          name: 'qwen3.5-plus',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          envKey: 'QWEN_CODE_CODING_PLAN_API_KEY',
+        },
+        {
+          id: 'qwen-e2e-cdp',
+          name: 'qwen-e2e-cdp',
           baseUrl: 'https://example.invalid/v1',
           envKey: 'OPENAI_API_KEY',
         },
