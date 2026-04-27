@@ -1889,6 +1889,17 @@ summary:focus-visible {
   color: #d7eaff;
 }
 
+.composer-model-settings-button-warning {
+  border-color: rgba(240, 182, 110, 0.32);
+  background: rgba(240, 182, 110, 0.09);
+  color: #f3c98c;
+}
+
+.composer-model-settings-button-warning:not(:disabled):hover {
+  background: rgba(240, 182, 110, 0.16);
+  color: #ffdba3;
+}
+
 .composer-chip,
 .composer-context-note,
 .composer-disabled-reason {

@@ -106,6 +106,10 @@ export function ChatThread({
   const currentModelProviderStatus =
     getRuntimeModelProviderStatus(currentModel);
   const currentModelTitle = formatRuntimeModelOptionTitle(currentModel);
+  const modelSettingsNeedsKey = currentModelProviderStatus?.state === 'missing';
+  const modelSettingsTitle = modelSettingsNeedsKey
+    ? 'Configure models - API key missing'
+    : 'Configure models';
 
   return (
     <section
@@ -246,9 +250,13 @@ export function ChatThread({
             </label>
             <button
               aria-label="Configure models"
-              className="composer-icon-button composer-model-settings-button"
+              className={
+                modelSettingsNeedsKey
+                  ? 'composer-icon-button composer-model-settings-button composer-model-settings-button-warning'
+                  : 'composer-icon-button composer-model-settings-button'
+              }
               data-testid="composer-model-settings-button"
-              title="Configure models"
+              title={modelSettingsTitle}
               type="button"
               onClick={onOpenModelSettings}
             >

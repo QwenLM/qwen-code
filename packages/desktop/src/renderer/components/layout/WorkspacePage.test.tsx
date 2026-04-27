@@ -1414,6 +1414,9 @@ describe('WorkspacePage', () => {
     const providerStatus = renderedContainer.querySelector(
       '[data-testid="composer-model-provider-status"]',
     );
+    const modelSettingsButton = renderedContainer.querySelector(
+      '[data-testid="composer-model-settings-button"]',
+    );
 
     expect(model).toBeInstanceOf(HTMLSelectElement);
     expect(model?.disabled).toBe(false);
@@ -1433,7 +1436,32 @@ describe('WorkspacePage', () => {
     expect(
       providerStatus?.classList.contains('composer-model-status-missing'),
     ).toBe(true);
+    expect(modelSettingsButton).toBeInstanceOf(HTMLButtonElement);
+    expect(modelSettingsButton?.getAttribute('aria-label')).toBe(
+      'Configure models',
+    );
+    expect(modelSettingsButton?.getAttribute('title')).toBe(
+      'Configure models - API key missing',
+    );
+    expect(
+      modelSettingsButton?.classList.contains(
+        'composer-model-settings-button-warning',
+      ),
+    ).toBe(true);
     expect(renderedContainer.textContent).not.toContain('sk-desktop-e2e');
+
+    act(() => {
+      clickButton(renderedContainer, 'Configure models');
+    });
+
+    const settingsPage = renderedContainer.querySelector(
+      '[data-testid="settings-page"]',
+    );
+    expect(settingsPage).toBeTruthy();
+    expect(settingsPage?.getAttribute('data-initial-section')).toBe(
+      'settings-model-providers',
+    );
+    expect(settingsPage?.textContent).not.toContain('sk-desktop-e2e');
   });
 
   it('shortens long composer runtime labels while preserving full titles', () => {

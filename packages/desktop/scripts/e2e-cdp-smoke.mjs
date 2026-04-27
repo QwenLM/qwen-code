@@ -71,6 +71,7 @@ async function main() {
   const userDataDir = await mkdtemp(
     join(tmpdir(), 'qwen-desktop-e2e-user-data-'),
   );
+  await seedMissingProviderSettings(homeDir);
   const cdpPort = await getFreePort();
 
   appProcess = launchDesktopApp({
@@ -90,6 +91,11 @@ async function main() {
 
   await clickButtonUntilText('Open Project', 'desktop-e2e-workspace');
   await assertProjectComposerReady('project-composer.json');
+  await assertComposerMissingProviderKeyShortcut(
+    'composer-missing-provider-key-shortcut.json',
+    'qwen-e2e-cdp',
+  );
+  await saveScreenshot('composer-missing-provider-key-shortcut.png');
   await clickButton('Configure models');
   await assertComposerModelSettingsShortcut(
     'composer-model-settings-shortcut.json',
@@ -453,6 +459,33 @@ async function createCleanGitWorkspace() {
     cwd: dir,
   });
   return dir;
+}
+
+async function seedMissingProviderSettings(homeDir) {
+  const settingsDir = join(homeDir, '.qwen');
+  await mkdir(settingsDir, { recursive: true });
+  await writeFile(
+    join(settingsDir, 'settings.json'),
+    `${JSON.stringify(
+      {
+        security: { auth: { selectedType: 'openai' } },
+        model: { name: 'qwen-e2e-cdp' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'qwen-e2e-cdp',
+              name: 'qwen-e2e-cdp',
+              baseUrl: 'https://example.invalid/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
+      },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  );
 }
 
 async function assertWorkspaceCommit(expectedMessage) {
@@ -1024,6 +1057,202 @@ async function assertProjectComposerReady(fileName) {
   }
 }
 
+async function assertComposerMissingProviderKeyShortcut(fileName, modelId) {
+  const expectedStatus = 'Saved API key provider · API key missing';
+  const expectedTitle = `${modelId} · ${expectedStatus}`;
+
+  await waitFor(
+    'composer missing provider key shortcut',
+    async () =>
+      evaluate(`(() => {
+        const control = document.querySelector(
+          '[data-testid="composer-model-control"]'
+        );
+        const select = control?.querySelector('select[aria-label="Model"]');
+        const dot = control?.querySelector(
+          '[data-testid="composer-model-provider-status"]'
+        );
+        const shortcut = document.querySelector(
+          '[data-testid="composer-model-settings-button"]'
+        );
+        return Boolean(
+          control &&
+          select &&
+          dot &&
+          shortcut &&
+          select.value === ${JSON.stringify(modelId)} &&
+          select.getAttribute('title') === ${JSON.stringify(expectedTitle)} &&
+          dot.getAttribute('aria-label') === ${JSON.stringify(expectedStatus)} &&
+          shortcut.getAttribute('aria-label') === 'Configure models' &&
+          shortcut.getAttribute('title') ===
+            'Configure models - API key missing'
+        );
+      })()`),
+    10_000,
+  );
+
+  const snapshot = await evaluate(`(() => {
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        backgroundColor: style.backgroundColor,
+        borderColor: style.borderColor,
+        color: style.color,
+        width: Number.parseFloat(style.width),
+        height: Number.parseFloat(style.height)
+      };
+    };
+    const overflows = (element) =>
+      Boolean(element && element.scrollWidth > element.clientWidth + 4);
+    const composer = document.querySelector('[data-testid="message-composer"]');
+    const control = document.querySelector(
+      '[data-testid="composer-model-control"]'
+    );
+    const select = control?.querySelector('select[aria-label="Model"]');
+    const dot = control?.querySelector(
+      '[data-testid="composer-model-provider-status"]'
+    );
+    const shortcut = document.querySelector(
+      '[data-testid="composer-model-settings-button"]'
+    );
+    const selected = select
+      ? [...select.options].find((option) => option.selected)
+      : null;
+    const bodyText = document.body.innerText;
+    const fieldValues = [...document.querySelectorAll('input, textarea')]
+      .map((field) => field.value ?? '')
+      .join('\\n');
+    return {
+      composerRect: rectFor(composer),
+      controlRect: rectFor(control),
+      selectRect: rectFor(select),
+      dotRect: rectFor(dot),
+      shortcutRect: rectFor(shortcut),
+      shortcutStyle: styleFor(shortcut),
+      controlTitle: control?.getAttribute('title') ?? null,
+      selectTitle: select?.getAttribute('title') ?? null,
+      selectValue: select?.value ?? null,
+      selectDisabled: select?.disabled ?? null,
+      selectedText: selected?.textContent.trim() ?? null,
+      selectedTitle: selected?.getAttribute('title') ?? null,
+      dotAriaLabel: dot?.getAttribute('aria-label') ?? null,
+      dotClass: dot?.className ?? '',
+      shortcutAriaLabel: shortcut?.getAttribute('aria-label') ?? null,
+      shortcutTitle: shortcut?.getAttribute('title') ?? null,
+      shortcutClass: shortcut?.className ?? '',
+      shortcutHasIcon: shortcut?.querySelector('svg') !== null,
+      shortcutDirectText: [...(shortcut?.childNodes ?? [])]
+        .filter((node) => node.nodeType === Node.TEXT_NODE)
+        .map((node) => node.textContent.trim())
+        .join(''),
+      composerOverflow: overflows(composer),
+      controlOverflow: overflows(control),
+      shortcutOverflow: overflows(shortcut),
+      hasRawCodingPlanLabel:
+        (selected?.textContent ?? '').includes('ModelStudio Coding Plan'),
+      hasSecret:
+        bodyText.includes('sk-desktop-e2e') ||
+        bodyText.includes('cp-desktop-e2e') ||
+        fieldValues.includes('sk-desktop-e2e') ||
+        fieldValues.includes('cp-desktop-e2e'),
+      hasServerUrl: /http:\\/\\/127\\.0\\.0\\.1:/u.test(bodyText),
+      documentOverflow:
+        document.body.scrollWidth > window.innerWidth + 4 ||
+        document.body.scrollHeight > window.innerHeight + 4
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (
+    snapshot.controlTitle !== expectedTitle ||
+    snapshot.selectTitle !== expectedTitle ||
+    snapshot.selectedTitle !== expectedTitle ||
+    snapshot.selectValue !== modelId ||
+    snapshot.dotAriaLabel !== expectedStatus ||
+    !snapshot.dotClass.includes('composer-model-status-missing')
+  ) {
+    throw new Error(
+      `Composer missing provider metadata is not visible: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.shortcutAriaLabel !== 'Configure models' ||
+    snapshot.shortcutTitle !== 'Configure models - API key missing' ||
+    !snapshot.shortcutClass.includes('composer-model-settings-button') ||
+    !snapshot.shortcutClass.includes('composer-model-settings-button-warning') ||
+    !snapshot.shortcutHasIcon ||
+    snapshot.shortcutDirectText !== ''
+  ) {
+    throw new Error(
+      `Composer missing provider shortcut is not actionable: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    !snapshot.composerRect ||
+    !snapshot.controlRect ||
+    !snapshot.selectRect ||
+    !snapshot.dotRect ||
+    !snapshot.shortcutRect ||
+    !snapshot.shortcutStyle ||
+    snapshot.controlRect.width > 128 ||
+    snapshot.selectRect.height > 25 ||
+    snapshot.shortcutRect.width > 25 ||
+    snapshot.shortcutRect.height > 25 ||
+    snapshot.shortcutStyle.width > 25 ||
+    snapshot.shortcutStyle.height > 25
+  ) {
+    throw new Error(
+      `Composer missing provider shortcut geometry regressed: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.hasRawCodingPlanLabel ||
+    snapshot.hasSecret ||
+    snapshot.hasServerUrl ||
+    snapshot.documentOverflow ||
+    snapshot.composerOverflow ||
+    snapshot.controlOverflow ||
+    snapshot.shortcutOverflow
+  ) {
+    throw new Error(
+      `Composer missing provider shortcut leaked data or overflowed: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+}
+
 async function assertComposerModelSettingsShortcut(fileName) {
   await waitFor(
     'composer Configure models opens focused model provider settings',
@@ -1191,10 +1420,17 @@ async function assertComposerModelSettingsShortcut(fileName) {
     );
   }
 
+  const shortcutTitleAllowed =
+    snapshot.shortcut.title === 'Configure models' ||
+    snapshot.shortcut.title === 'Configure models - API key missing';
   if (
     snapshot.shortcut.ariaLabel !== 'Configure models' ||
-    snapshot.shortcut.title !== 'Configure models' ||
+    !shortcutTitleAllowed ||
     !snapshot.shortcut.className.includes('composer-icon-button') ||
+    (snapshot.shortcut.title === 'Configure models - API key missing' &&
+      !snapshot.shortcut.className.includes(
+        'composer-model-settings-button-warning',
+      )) ||
     !snapshot.shortcut.hasIcon ||
     snapshot.shortcut.directText !== '' ||
     !snapshot.shortcut.rect ||

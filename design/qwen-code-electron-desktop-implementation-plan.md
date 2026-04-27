@@ -22,6 +22,124 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Composer Missing Provider Key Shortcut
+
+Status: completed in iteration 86.
+
+Goal: make a selected saved model with a missing provider key actionable from
+the compact composer controls without adding a larger Settings surface or
+exposing secrets.
+
+User-visible value: users who have a saved provider model but no configured
+API key can see that the composer model action needs attention and can open
+Model Providers directly from the composer.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/composer-missing-provider-key-shortcut.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The composer keeps its compact model status dot and icon-only Configure
+  models control.
+- When the selected saved provider model reports `API key missing`, the
+  Configure models control uses warning styling and an accessible title that
+  explains the missing key action.
+- Clicking the warning-styled composer action opens Settings directly to Model
+  Providers, focuses the provider selector, and keeps diagnostics/secrets out
+  of the normal conversation surface.
+- Configured provider models and runtime/default models keep the existing
+  quiet Configure models appearance.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: seed the isolated E2E HOME with a saved API-key provider
+  model that has no stored key, launch real Electron with fake ACP, open the
+  project, assert the composer model control shows missing provider metadata
+  and the Configure models icon is warning-styled, click it, assert Settings >
+  Model Providers opens and focuses the provider selector, then continue the
+  existing model, settings, branch, review, terminal, relaunch, and commit
+  paths.
+- E2E assertions: warning action title/class, status dot metadata,
+  containment/no overflow, provider settings focus, no fake secrets or local
+  server URLs in visible text or fields, and zero unexpected console errors or
+  failed local requests.
+- Diagnostic artifacts to collect on failure:
+  `composer-missing-provider-key-shortcut.json`,
+  `composer-missing-provider-key-shortcut.png`, Settings shortcut artifacts,
+  Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` selected the compact missing-key
+  composer shortcut over a larger inline warning or unrelated `.eyebrow`
+  cleanup; `frontend-design`, constrained by `home.jpg`, keeps the state as a
+  quiet icon accent inside the composer control strip; and
+  `electron-desktop-dev` requires real Electron CDP coverage for the shortcut,
+  settings focus, and secret/overflow checks.
+
+Notes and decisions:
+
+- Brainstormed alternatives: add visible composer warning copy, make the model
+  status dot clickable, or reuse the existing adjacent Configure models icon
+  with warning styling and title metadata. The reused icon is the smallest
+  prototype-faithful path because it preserves the compact composer geometry
+  and gives the existing action clear urgency.
+- This slice intentionally does not add draft model persistence, live provider
+  validation, new Settings sections, new IPC/server routes, or secret
+  persistence behavior.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 39 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T01-28-52-626Z/`.
+- `composer-missing-provider-key-shortcut.json` recorded the selected saved
+  provider model as `qwen-e2e-cdp`, missing API-key metadata on the model
+  control and status dot, the warning Configure models shortcut title/class,
+  124 x 24 px model control geometry, 24 x 24 px shortcut geometry, no
+  composer/control/shortcut/document overflow, no fake secrets, no local server
+  URL, and `summary.json` recorded zero console errors and zero failed local
+  requests.
+
+Self-review:
+
+- The first viewport remains conversation-first and icon-led; the change only
+  recolors the existing composer model settings shortcut when the selected
+  provider model is missing a key.
+- Secret state is still boolean metadata only; API key values are not rendered
+  in DOM text, titles, screenshots, or harness JSON.
+- The E2E seed writes a provider entry without credentials into the isolated
+  test HOME only, then the existing Settings save flow still validates and
+  persists fake keys through the normal desktop server route.
+- Electron main/preload, IPC exposure, local server binding, token handling,
+  Git, terminal, branch, review, commit, and Settings persistence semantics are
+  unchanged.
+
+Next work:
+
+- Continue composer-first workflow polish by allowing draft thread model/mode
+  choices to be made before the first send, then applying those choices when
+  the session is created.
+- Continue prototype fidelity by checking whether the no-project first viewport
+  needs a more direct Open Project affordance without creating dashboard chrome.
+
 ### Slice: Settings Provider Key Guidance
 
 Status: completed in iteration 85.
