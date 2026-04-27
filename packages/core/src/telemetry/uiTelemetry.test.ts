@@ -457,6 +457,43 @@ describe('UiTelemetryService', () => {
       expect(modelMetrics.bySource['echoer'].tokens.prompt).toBe(40);
     });
 
+    it('tracks per-auth-type buckets for provider-specific billing', () => {
+      const openaiEvent = {
+        'event.name': EVENT_API_RESPONSE,
+        model: 'gpt-4o',
+        duration_ms: 100,
+        input_token_count: 100,
+        output_token_count: 50,
+        total_token_count: 150,
+        cached_content_token_count: 10,
+        thoughts_token_count: 0,
+        tool_token_count: 0,
+        auth_type: 'openai',
+      } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
+      const anthropicEvent = {
+        'event.name': EVENT_API_RESPONSE,
+        model: 'gpt-4o',
+        duration_ms: 80,
+        input_token_count: 40,
+        output_token_count: 10,
+        total_token_count: 50,
+        cached_content_token_count: 0,
+        thoughts_token_count: 0,
+        tool_token_count: 0,
+        auth_type: 'anthropic',
+      } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
+
+      service.addEvent(openaiEvent);
+      service.addEvent(anthropicEvent);
+
+      const modelMetrics = service.getMetrics().models['gpt-4o'];
+      expect(modelMetrics.authTypes).toEqual(['openai', 'anthropic']);
+      expect(modelMetrics.byAuthType?.['openai'].tokens.prompt).toBe(100);
+      expect(modelMetrics.byAuthType?.['anthropic'].tokens.prompt).toBe(40);
+      expect(Object.keys(modelMetrics)).not.toContain('byAuthType');
+      expect(Object.keys(modelMetrics)).not.toContain('authTypes');
+    });
+
     it('splits two subagents sharing a model into distinct source buckets', () => {
       const makeEvent = (
         subagentName: string,

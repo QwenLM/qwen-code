@@ -1409,6 +1409,13 @@ export default {
   Thoughts: '思考',
   Tool: '工具',
   Output: '輸出',
+  Billing: '計費',
+  'Uncached Input Cost': '未緩存輸入消費',
+  'Cached Input Cost': '緩存輸入消費',
+  'Output Cost': '輸出消費',
+  'Model Total': '模型合計',
+  'Current Session Total': '當前會話總計',
+  'n/a': '無',
   'No API calls have been made in this session.':
     '本次會話中未進行任何 API 調用',
   'Tool Name': '工具名稱',

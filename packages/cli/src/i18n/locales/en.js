@@ -1666,6 +1666,13 @@ export default {
   Thoughts: 'Thoughts',
   Tool: 'Tool',
   Output: 'Output',
+  Billing: 'Billing',
+  'Uncached Input Cost': 'Uncached Input Cost',
+  'Cached Input Cost': 'Cached Input Cost',
+  'Output Cost': 'Output Cost',
+  'Model Total': 'Model Total',
+  'Current Session Total': 'Current Session Total',
+  'n/a': 'n/a',
   'No API calls have been made in this session.':
     'No API calls have been made in this session.',
   'Tool Name': 'Tool Name',

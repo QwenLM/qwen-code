@@ -166,12 +166,14 @@ interface StatsDisplayProps {
   duration: string;
   title?: string;
   width?: number;
+  children?: React.ReactNode;
 }
 
 export const StatsDisplay: React.FC<StatsDisplayProps> = ({
   duration,
   title,
   width,
+  children,
 }) => {
   const { stats } = useSessionStats();
   const { metrics } = stats;
@@ -298,6 +300,7 @@ export const StatsDisplay: React.FC<StatsDisplayProps> = ({
           cacheEfficiency={computed.cacheEfficiency}
         />
       )}
+      {children}
     </Box>
   );
 };

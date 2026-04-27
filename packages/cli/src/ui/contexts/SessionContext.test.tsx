@@ -208,6 +208,123 @@ describe('SessionStatsContext', () => {
     expect(renderCount).toBe(3);
   });
 
+  it('should update metrics when auth-type billing metadata changes', () => {
+    const contextRef: MutableRefObject<
+      ReturnType<typeof useSessionStats> | undefined
+    > = { current: undefined };
+
+    let renderCount = 0;
+    const CountingTestHarness = () => {
+      contextRef.current = useSessionStats();
+      renderCount++;
+      return null;
+    };
+
+    render(
+      <SessionStatsProvider>
+        <CountingTestHarness />
+      </SessionStatsProvider>,
+    );
+
+    expect(renderCount).toBe(1);
+
+    const baseMetrics = (): SessionMetrics => ({
+      models: {
+        'gpt-4o': {
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+          tokens: {
+            prompt: 100,
+            candidates: 50,
+            total: 150,
+            cached: 10,
+            thoughts: 0,
+            tool: 0,
+          },
+          bySource: {},
+          authTypes: ['openai'],
+          byAuthType: {
+            openai: {
+              api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+              tokens: {
+                prompt: 100,
+                candidates: 50,
+                total: 150,
+                cached: 10,
+                thoughts: 0,
+                tool: 0,
+              },
+            },
+          },
+        },
+      },
+      tools: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
+        byName: {},
+      },
+      files: {
+        totalLinesAdded: 0,
+        totalLinesRemoved: 0,
+      },
+    });
+
+    const metrics = baseMetrics();
+    act(() => {
+      uiTelemetryService.emit('update', { metrics, lastPromptTokenCount: 10 });
+    });
+
+    expect(renderCount).toBe(2);
+
+    act(() => {
+      uiTelemetryService.emit('update', {
+        metrics: baseMetrics(),
+        lastPromptTokenCount: 10,
+      });
+    });
+
+    expect(renderCount).toBe(2);
+
+    const metricsWithAuthTypeChange = baseMetrics();
+    metricsWithAuthTypeChange.models['gpt-4o'].authTypes = [
+      'openai',
+      'anthropic',
+    ];
+    act(() => {
+      uiTelemetryService.emit('update', {
+        metrics: metricsWithAuthTypeChange,
+        lastPromptTokenCount: 10,
+      });
+    });
+
+    expect(renderCount).toBe(3);
+
+    const metricsWithAuthBucketChange = baseMetrics();
+    metricsWithAuthBucketChange.models['gpt-4o'].byAuthType = {
+      openai: {
+        api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+        tokens: {
+          prompt: 90,
+          candidates: 50,
+          total: 140,
+          cached: 10,
+          thoughts: 0,
+          tool: 0,
+        },
+      },
+    };
+    act(() => {
+      uiTelemetryService.emit('update', {
+        metrics: metricsWithAuthBucketChange,
+        lastPromptTokenCount: 10,
+      });
+    });
+
+    expect(renderCount).toBe(4);
+  });
+
   it('should throw an error when useSessionStats is used outside of a provider', () => {
     // Suppress console.error for this test since we expect an error
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
