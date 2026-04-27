@@ -2150,12 +2150,17 @@ describe('WorkspacePage', () => {
     const sidebarOpenProjectButton = renderedContainer.querySelector(
       '[data-testid="sidebar-empty-open-project-button"]',
     );
+    const conversationOpenProjectButton = renderedContainer.querySelector(
+      '[data-testid="conversation-empty-open-project-button"]',
+    );
 
     expect(textarea.disabled).toBe(true);
     expect(textarea.placeholder).toBe('Open a project to start');
     expect(
-      renderedContainer.querySelector('[data-testid="conversation-empty"]')
-        ?.textContent,
+      (
+        renderedContainer.querySelector('[data-testid="conversation-empty"]')
+          ?.textContent ?? ''
+      ).trim(),
     ).toBe('Open a project to start');
     expect(
       renderedContainer.querySelector(
@@ -2178,6 +2183,15 @@ describe('WorkspacePage', () => {
       'Open Project',
     );
     expect(sidebarOpenProjectButton?.querySelector('svg')).toBeTruthy();
+    expect(conversationOpenProjectButton).toBeInstanceOf(HTMLButtonElement);
+    expect(conversationOpenProjectButton?.textContent).toBe('');
+    expect(conversationOpenProjectButton?.getAttribute('aria-label')).toBe(
+      'Open Project',
+    );
+    expect(conversationOpenProjectButton?.getAttribute('title')).toBe(
+      'Open Project',
+    );
+    expect(conversationOpenProjectButton?.querySelector('svg')).toBeTruthy();
     expect(
       renderedContainer.querySelector('[data-testid="project-sidebar"]')
         ?.textContent,
@@ -2195,10 +2209,16 @@ describe('WorkspacePage', () => {
     expect(onChooseWorkspace).toHaveBeenCalledTimes(1);
 
     act(() => {
-      (openProjectButton as HTMLButtonElement).click();
+      (conversationOpenProjectButton as HTMLButtonElement).click();
     });
 
     expect(onChooseWorkspace).toHaveBeenCalledTimes(2);
+
+    act(() => {
+      (openProjectButton as HTMLButtonElement).click();
+    });
+
+    expect(onChooseWorkspace).toHaveBeenCalledTimes(3);
   });
 
   it('submits on Enter and keeps Shift+Enter as a newline path', () => {

@@ -93,7 +93,7 @@ async function main() {
   await saveScreenshot('initial-workspace.png');
 
   await clickButtonByTestIdUntilText(
-    'sidebar-empty-open-project-button',
+    'conversation-empty-open-project-button',
     'desktop-e2e-workspace',
   );
   await assertProjectComposerReady('project-composer.json');
@@ -786,6 +786,9 @@ async function assertNoProjectOpenProjectAffordance(fileName) {
     const emptyState = document.querySelector(
       '[data-testid="conversation-empty"]'
     );
+    const conversationOpenProject = document.querySelector(
+      '[data-testid="conversation-empty-open-project-button"]'
+    );
     const sidebarEmptyRows = [
       ...document.querySelectorAll('.empty-row')
     ].map((row) => ({
@@ -845,6 +848,21 @@ async function assertNoProjectOpenProjectAffordance(fileName) {
         text: emptyState?.textContent.trim() ?? null,
         rect: rectFor(emptyState),
         style: styleFor(emptyState)
+      },
+      conversationOpenProject: {
+        text: conversationOpenProject?.textContent.trim() ?? null,
+        ariaLabel: conversationOpenProject?.getAttribute('aria-label') ?? null,
+        title: conversationOpenProject?.getAttribute('title') ?? null,
+        type: conversationOpenProject?.getAttribute('type') ?? null,
+        className: conversationOpenProject?.className ?? null,
+        disabled: conversationOpenProject?.disabled ?? null,
+        rect: rectFor(conversationOpenProject),
+        style: styleFor(conversationOpenProject),
+        hasIcon: conversationOpenProject?.querySelector('svg') !== null,
+        inEmptyState: Boolean(
+          conversationOpenProject && emptyState?.contains(conversationOpenProject)
+        ),
+        overflows: overflows(conversationOpenProject)
       },
       sidebarEmptyRows,
       disabledReasonPresent: Boolean(
@@ -913,6 +931,29 @@ async function assertNoProjectOpenProjectAffordance(fileName) {
   }
 
   if (
+    snapshot.conversationOpenProject.text !== '' ||
+    snapshot.conversationOpenProject.ariaLabel !== 'Open Project' ||
+    snapshot.conversationOpenProject.title !== 'Open Project' ||
+    snapshot.conversationOpenProject.type !== 'button' ||
+    snapshot.conversationOpenProject.disabled !== false ||
+    !snapshot.conversationOpenProject.hasIcon ||
+    !snapshot.conversationOpenProject.inEmptyState ||
+    !snapshot.conversationOpenProject.rect ||
+    snapshot.conversationOpenProject.rect.width > 26 ||
+    snapshot.conversationOpenProject.rect.height > 26 ||
+    !snapshot.conversationOpenProject.style ||
+    snapshot.conversationOpenProject.style.fontSize > 12 ||
+    snapshot.conversationOpenProject.style.backgroundAlpha > 0.12 ||
+    snapshot.conversationOpenProject.overflows
+  ) {
+    throw new Error(
+      `No-project conversation Open Project action is not compact/actionable: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
     snapshot.textarea.disabled !== true ||
     snapshot.textarea.placeholder !== 'Open a project to start' ||
     snapshot.send.disabled !== true ||
@@ -929,7 +970,9 @@ async function assertNoProjectOpenProjectAffordance(fileName) {
     snapshot.disabledReasonPresent ||
     snapshot.threadListPresent ||
     snapshot.sidebarEmptyRows.some((row) => row.text === 'No sessions') ||
-    snapshot.sidebarEmptyRows.some((row) => row.text === 'No folder selected') ||
+    snapshot.sidebarEmptyRows.some(
+      (row) => row.text === 'No folder selected',
+    ) ||
     snapshot.documentOverflow ||
     snapshot.composer.overflows
   ) {

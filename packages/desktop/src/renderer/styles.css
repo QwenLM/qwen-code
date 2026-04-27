@@ -1229,6 +1229,58 @@ summary:focus-visible {
   gap: 12px;
 }
 
+.conversation-empty-no-project {
+  padding-bottom: 18px;
+}
+
+.conversation-empty-row {
+  display: inline-flex;
+  max-width: min(360px, 100%);
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.conversation-empty-row > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-empty-action {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid rgba(85, 166, 255, 0.2);
+  border-radius: 6px;
+  background: rgba(85, 166, 255, 0.055);
+  color: rgba(183, 217, 255, 0.82);
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.conversation-empty-action svg {
+  width: 14px;
+  height: 14px;
+}
+
+.conversation-empty-action:not(:disabled):hover {
+  border-color: rgba(85, 166, 255, 0.38);
+  background: rgba(85, 166, 255, 0.1);
+  color: #d7eaff;
+}
+
+.conversation-empty-action:focus-visible {
+  outline: 0;
+  border-color: rgba(85, 166, 255, 0.58);
+  box-shadow: 0 0 0 2px rgba(85, 166, 255, 0.14);
+}
+
 .chat-timeline {
   display: flex;
   min-height: 0;

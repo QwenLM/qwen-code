@@ -165,6 +165,7 @@ export function ChatThread({
         isDraftSession={isDraftSession}
         onAskUserQuestionResponse={onAskUserQuestionResponse}
         onCopyMessage={onCopyMessage}
+        onChooseWorkspace={onChooseWorkspace}
         onOpenFileReference={onOpenFileReference}
         onOpenReview={onOpenReview}
         onPermissionResponse={onPermissionResponse}
@@ -363,6 +364,7 @@ function ChatTimeline({
   isDraftSession,
   onAskUserQuestionResponse,
   onCopyMessage,
+  onChooseWorkspace,
   onOpenFileReference,
   onOpenReview,
   onPermissionResponse,
@@ -375,6 +377,7 @@ function ChatTimeline({
   isDraftSession: boolean;
   onAskUserQuestionResponse: (requestId: string, optionId: string) => void;
   onCopyMessage: (message: string) => void;
+  onChooseWorkspace: () => void;
   onOpenFileReference: (filePath: string) => void;
   onOpenReview: () => void;
   onPermissionResponse: (requestId: string, optionId: string) => void;
@@ -403,11 +406,7 @@ function ChatTimeline({
   ]);
 
   if (!activeProject) {
-    return (
-      <div className="conversation-empty" data-testid="conversation-empty">
-        <span>Open a project to start</span>
-      </div>
-    );
+    return <NoProjectEmpty onChooseWorkspace={onChooseWorkspace} />;
   }
 
   if (
@@ -466,6 +465,33 @@ function ChatTimeline({
       />
       <ChangedFilesSummaryCard gitDiff={gitDiff} onOpenReview={onOpenReview} />
       <div className="chat-scroll-anchor" aria-hidden="true" />
+    </div>
+  );
+}
+
+function NoProjectEmpty({
+  onChooseWorkspace,
+}: {
+  onChooseWorkspace: () => void;
+}) {
+  return (
+    <div
+      className="conversation-empty conversation-empty-no-project"
+      data-testid="conversation-empty"
+    >
+      <div className="conversation-empty-row">
+        <span>Open a project to start</span>
+        <button
+          aria-label="Open Project"
+          className="conversation-empty-action"
+          data-testid="conversation-empty-open-project-button"
+          title="Open Project"
+          type="button"
+          onClick={onChooseWorkspace}
+        >
+          <FolderPlusIcon />
+        </button>
+      </div>
     </div>
   );
 }

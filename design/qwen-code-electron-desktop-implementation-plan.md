@@ -22,6 +22,117 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: No-Project Conversation Empty Action
+
+Status: completed in iteration 93.
+
+Goal: make the no-project conversation canvas feel intentionally actionable by
+adding a compact in-canvas Open Project icon affordance beside the existing
+quiet empty-state copy, without turning the first viewport into onboarding or a
+landing page.
+
+User-visible value: a first-launch user can start from the conversation area,
+composer, or sidebar, and the large empty workbench reads as a usable coding
+workspace rather than a blank debug canvas.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/no-project-conversation-empty-action.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- With no active project, the conversation empty state keeps the exact visible
+  copy `Open a project to start` and adds one compact icon-only Open Project
+  button with accessible label/title.
+- The empty-state button reuses the existing project picker callback and does
+  not add a new native IPC path.
+- The empty state stays visually quiet, near the composer, and does not add a
+  card, marketing copy, feature instructions, duplicate passive rows, or
+  document/composer overflow.
+- Existing sidebar and composer Open Project actions remain present,
+  contained, accessible, and secondary.
+- Project-scoped composer, settings, model, branch, review, terminal, discard,
+  and commit paths remain unchanged.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and no active project, assert the no-project conversation empty action,
+  sidebar action, disabled composer action, and lack of passive noise, click
+  the no-project conversation action to open the fake Git project, then continue
+  the existing model, settings, terminal, review, branch, discard safety,
+  compact viewport, and commit smoke paths.
+- E2E assertions: the conversation empty action is icon-only, accessible,
+  compact, transparent by default, contained near the empty label, and wired to
+  the same project-open flow; no console errors or failed local requests are
+  recorded.
+- Diagnostic artifacts to collect on failure:
+  `no-project-open-project-affordance.json`, `initial-workspace.png`,
+  `project-composer.json`, Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` considered a large empty card, a
+  recent-project list, and a compact in-canvas icon action, choosing the icon
+  action because it is the smallest prototype-aligned affordance; `frontend-design`,
+  constrained by `home.jpg`, keeps the empty state dense and tool-like; and
+  `electron-desktop-dev` requires real Electron CDP coverage because this
+  changes renderer behavior and the startup project-open workflow.
+
+Notes and decisions:
+
+- The slice intentionally does not add onboarding prose or a central card. The
+  prototype contract favors a conversation-first workbench with quiet controls.
+- The action is icon-only in the conversation canvas to avoid duplicating the
+  larger composer label and to keep visible copy stable for tests and scanning.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 40 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T02-47-11-149Z/`.
+- `no-project-open-project-affordance.json` recorded the conversation Open
+  Project action as an icon-only `24 x 24` px button with accessible
+  label/title, transparent default chrome, no overflow, and the same visible
+  empty-state copy.
+- `summary.json` recorded zero console errors and zero failed local requests.
+- `git diff --check` passed.
+
+Self-review:
+
+- The startup viewport is slightly more actionable without adding a landing
+  card, onboarding instructions, large duplicated labels, or new app chrome.
+- The change is limited to renderer markup/style plus component and CDP
+  assertions. No Electron main/preload security settings, local server routes,
+  token handling, settings persistence, Git operations, terminal behavior, or
+  ACP workflow changed.
+- The conversation, composer, and sidebar now expose the same project-open path
+  at different densities while keeping the disabled no-project composer and
+  passive sidebar rows quiet.
+
+Next work:
+
+- Continue prototype fidelity by reducing the remaining no-project terminal
+  strip weight and checking the first-viewport bottom chrome against `home.jpg`.
+- Continue normal workflow hardening by improving recovery from model/provider
+  save failures and invalid provider configuration.
+
 ### Slice: No-Project Sidebar Open Project Affordance
 
 Status: completed in iteration 92.
