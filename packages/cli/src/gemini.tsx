@@ -77,6 +77,7 @@ import {
   startEarlyInputCapture,
   stopAndGetCapturedInput,
 } from './utils/earlyInputCapture.js';
+import { preconnectApi } from './utils/apiPreconnect.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
@@ -85,6 +86,7 @@ import { DualOutputContext } from './dualOutput/DualOutputContext.js';
 import { RemoteInputWatcher } from './remoteInput/RemoteInputWatcher.js';
 import { RemoteInputContext } from './remoteInput/RemoteInputContext.js';
 import { installTerminalRedrawOptimizer } from './ui/utils/terminalRedrawOptimizer.js';
+import { installSynchronizedOutput } from './ui/utils/synchronizedOutput.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -173,6 +175,10 @@ export async function startInteractiveUI(
   const restoreTerminalRedrawOptimizer =
     process.stdout.isTTY && !config.getScreenReader()
       ? installTerminalRedrawOptimizer(process.stdout)
+      : () => {};
+  const restoreSynchronizedOutput =
+    process.stdout.isTTY && !config.getScreenReader()
+      ? installSynchronizedOutput(process.stdout)
       : () => {};
 
   // Create dual output bridge if --json-fd or --json-file is specified.
@@ -297,6 +303,7 @@ export async function startInteractiveUI(
     // operational, preventing garbled terminal output after the app exits.
     disableKittyProtocol();
     instance.unmount();
+    restoreSynchronizedOutput();
     restoreTerminalRedrawOptimizer();
   });
 }
@@ -521,6 +528,21 @@ export async function main() {
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
+
+    // Startup optimization: preconnect API to warm TCP+TLS connection
+    // Fires early; cost is one HEAD request even for local-only commands
+    try {
+      const modelsConfig = config.getModelsConfig();
+      const authType = modelsConfig.getCurrentAuthType();
+      const resolvedBaseUrl = modelsConfig.getGenerationConfig().baseUrl;
+      const proxy = config.getProxy();
+      preconnectApi(authType, { resolvedBaseUrl, proxy });
+    } catch (error) {
+      // If we can't get authType, skip preconnect - it's optional optimization
+      debugLogger.debug(
+        `Preconnect skipped due to error getting authType: ${error}`,
+      );
+    }
 
     // FIXME: list extensions after the config initialize
     // if (config.getListExtensions()) {

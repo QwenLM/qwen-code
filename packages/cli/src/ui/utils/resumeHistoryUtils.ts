@@ -82,7 +82,11 @@ function extractFunctionCalls(
   return calls;
 }
 
-function getTool(config: Config, name: string): AnyDeclarativeTool | undefined {
+function getTool(
+  config: Config | null,
+  name: string,
+): AnyDeclarativeTool | undefined {
+  if (!config) return undefined;
   const toolRegistry = config.getToolRegistry();
   return toolRegistry.getTool(name);
 }
@@ -144,7 +148,7 @@ function restoreHistoryItem(raw: unknown): HistoryItemWithoutId | undefined {
  */
 function convertToHistoryItems(
   conversation: ConversationRecord,
-  config: Config,
+  config: Config | null,
 ): HistoryItemWithoutId[] {
   const items: HistoryItemWithoutId[] = [];
   const pendingAtCommands: AtCommandRecordPayload[] = [];
@@ -252,6 +256,9 @@ function convertToHistoryItems(
         if (!payload) continue;
         pendingAtCommands.push(payload);
       }
+      if (record.subtype === 'rewind') {
+        items.push({ type: 'info', text: 'Conversation rewound.' });
+      }
       continue;
     }
     switch (record.type) {
@@ -318,12 +325,13 @@ function convertToHistoryItems(
       case 'assistant': {
         const parts = record.message?.parts as Part[] | undefined;
 
-        // Extract thought content
-        const thoughtText = !config
-          .getContentGenerator()
-          .useSummarizedThinking()
-          ? extractThoughtTextFromParts(parts)
-          : '';
+        // Extract thought content. With no config (standalone picker preview),
+        // default to showing thoughts verbatim (same path as
+        // `!useSummarizedThinking()`).
+        const thoughtText =
+          !config || !config.getContentGenerator().useSummarizedThinking()
+            ? extractThoughtTextFromParts(parts)
+            : '';
 
         // Extract text content (non-function-call, non-thought)
         const text = extractTextFromParts(parts);
@@ -448,13 +456,16 @@ function convertToHistoryItems(
  * and assigns unique IDs to each item for use with loadHistory.
  *
  * @param sessionData The resumed session data from SessionService
- * @param config The config object for accessing tool registry
+ * @param config The config object for accessing tool registry. Pass `null`
+ *   to render in "preview" mode (no tool metadata lookup, thoughts shown
+ *   verbatim) — used by the standalone resume picker that runs before
+ *   `loadCliConfig`.
  * @param baseTimestamp Base timestamp for generating unique IDs
  * @returns Array of HistoryItem with proper IDs
  */
 export function buildResumedHistoryItems(
   sessionData: ResumedSessionData,
-  config: Config,
+  config: Config | null,
   baseTimestamp: number = Date.now(),
 ): HistoryItem[] {
   const items: HistoryItem[] = [];

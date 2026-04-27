@@ -28,6 +28,8 @@ import { vi, type Mock, type MockInstance } from 'vitest';
 import type { LoadedSettings } from './config/settings.js';
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
+import { _resetCleanupFunctionsForTest } from './utils/cleanup.js';
+import { _resetExitLatchForTest } from './utils/errors.js';
 
 // Mock core modules
 vi.mock('./ui/hooks/atCommandProcessor.js');
@@ -79,6 +81,12 @@ describe('runNonInteractive', () => {
   let mockGetDebugResponses: Mock;
 
   beforeEach(async () => {
+    // Reset module-level state from any prior test in this file. Without
+    // these resets the once-set exit latch parks subsequent JSON-mode
+    // handleError tests in the never-resolving promise (5s vitest timeout).
+    _resetCleanupFunctionsForTest();
+    _resetExitLatchForTest();
+
     mockCoreExecuteToolCall = vi.mocked(executeToolCall);
     mockShutdownTelemetry = vi.mocked(shutdownTelemetry);
     mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>

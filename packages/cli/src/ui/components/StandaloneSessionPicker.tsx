@@ -9,11 +9,40 @@ import { render, Box, useApp } from 'ink';
 import {
   getGitBranch,
   SessionService,
+  type Config,
   type SessionListItem,
 } from '@qwen-code/qwen-code-core';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
+import { ConfigContext } from '../contexts/ConfigContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
+import type { LoadedSettings } from '../../config/settings.js';
 import { SessionPicker } from './SessionPicker.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+
+/**
+ * `--resume` runs this picker BEFORE `loadCliConfig`, so no real Config /
+ * LoadedSettings exist yet. But the preview render tree (HistoryItemDisplay
+ * → ToolGroupMessage → ToolMessage) calls `useConfig()` / `useSettings()`,
+ * which throw without a Provider mounted.
+ *
+ * These stubs satisfy the Context consumers. Every downstream access of
+ * Config/Settings in the preview path is either optional-chained or gated
+ * on states (Confirming / Executing) that never occur in resumed session
+ * data, so the stubbed methods are only read, never invoked for real work.
+ * Tool descriptions fall back to the raw function-call name (see
+ * `buildResumedHistoryItems` handling when the registry returns undefined).
+ */
+const PREVIEW_CONFIG_STUB = {
+  getShouldUseNodePtyShell: () => false,
+  getIdeMode: () => false,
+  isTrustedFolder: () => false,
+  getToolRegistry: () => ({ getTool: () => undefined }),
+  getContentGenerator: () => ({ useSummarizedThinking: () => false }),
+} as unknown as Config;
+
+const PREVIEW_SETTINGS_STUB = {
+  merged: { ui: {} },
+} as unknown as LoadedSettings;
 
 interface StandalonePickerScreenProps {
   sessionService: SessionService;
@@ -43,20 +72,25 @@ function StandalonePickerScreen({
   }
 
   return (
-    <SessionPicker
-      sessionService={sessionService}
-      onSelect={(id) => {
-        onSelect(id);
-        handleExit();
-      }}
-      onCancel={() => {
-        onCancel();
-        handleExit();
-      }}
-      currentBranch={currentBranch}
-      centerSelection={true}
-      initialSessions={initialSessions}
-    />
+    <ConfigContext.Provider value={PREVIEW_CONFIG_STUB}>
+      <SettingsContext.Provider value={PREVIEW_SETTINGS_STUB}>
+        <SessionPicker
+          sessionService={sessionService}
+          onSelect={(id) => {
+            onSelect(id);
+            handleExit();
+          }}
+          onCancel={() => {
+            onCancel();
+            handleExit();
+          }}
+          currentBranch={currentBranch}
+          centerSelection={true}
+          initialSessions={initialSessions}
+          enablePreview
+        />
+      </SettingsContext.Provider>
+    </ConfigContext.Provider>
   );
 }
 
