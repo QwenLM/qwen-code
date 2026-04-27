@@ -22,6 +22,126 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Composer Model Provider Health
+
+Status: completed in iteration 83.
+
+Goal: surface saved model-provider health next to the compact composer model
+choice without widening the composer or exposing API key values.
+
+User-visible value: users who save API-key or Coding Plan model providers can
+see whether the selected saved model is backed by a configured key directly in
+the task control center, while the first viewport stays conversation-first and
+compact.
+
+Expected files:
+
+- `packages/desktop/src/renderer/stores/modelStore.ts`
+- `packages/desktop/src/renderer/stores/modelStore.test.ts`
+- `packages/desktop/src/renderer/components/layout/formatters.ts`
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/composer-model-provider-health.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Saved API-key and Coding Plan configured models carry provider kind and
+  API-key presence metadata derived from existing Settings state.
+- The composer model selector shows a tiny contained provider-health dot only
+  when the selected model has saved-provider metadata.
+- The selected model control and native option titles describe the provider
+  and key state, but visible text remains compact and does not include secrets
+  or raw provider prefixes.
+- Settings Permissions and composer model grouping remain provider-scoped and
+  existing model switching, validation, Settings, terminal, branch, review,
+  relaunch, and commit workflows remain unchanged.
+
+Verification:
+
+- Unit/component test commands:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/modelStore.test.ts`
+  and
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, save an API-key provider and a Coding Plan provider, create a
+  draft thread, switch the active composer to the saved API-key model, assert
+  the compact health dot/title/option metadata, then continue existing review,
+  settings, terminal, model, branch, relaunch, and commit paths.
+- E2E assertions: selected saved-provider model exposes saved API-key provider
+  health via title/aria metadata, the dot stays inside
+  the existing model control, option labels remain compact, no fake API keys or
+  local server URLs appear in visible text or field values, and the full CDP
+  smoke records zero unexpected console errors or failed local requests.
+- Diagnostic artifacts to collect on failure:
+  `composer-model-provider-health.json`, model/composer screenshots,
+  Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` selected the provider-health slice
+  over the unused `.eyebrow` cleanup because it is visible and workflow
+  relevant; `frontend-design` constrained by `home.jpg` keeps the signal as a
+  small native-workbench status dot rather than a wider badge; and
+  `electron-desktop-dev` requires real Electron CDP verification of the model
+  workflow and layout containment.
+
+Notes and decisions:
+
+- Brainstormed alternatives: remove the unused uppercase `.eyebrow` style,
+  add provider text badges next to the model picker, or derive compact
+  provider-health metadata from existing Settings. The metadata plus dot is the
+  smallest user-visible step because it improves the model workflow without
+  changing server APIs or widening the composer.
+- This slice intentionally does not add live provider network validation,
+  custom select controls, new Settings sections, Electron main/preload APIs,
+  or secret persistence behavior.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/stores/modelStore.test.ts`
+  passed with 8 tests.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 37 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T00-54-06-303Z/`.
+- `composer-model-provider-health.json` recorded the selected saved model as
+  `qwen-e2e-cdp`, the control/select/option titles as
+  `qwen-e2e-cdp · Saved API key provider · API key configured`, a 6 px
+  configured provider dot contained inside the 124 px model control, no control
+  or select overflow, no raw Coding Plan label leakage, no fake secrets, no
+  local server URL, and no document overflow. `summary.json` recorded zero
+  console errors and zero failed local requests.
+
+Self-review:
+
+- The first viewport remains conversation-first: this adds a tiny status signal
+  inside the existing composer model control rather than another visible text
+  badge or wider control.
+- Provider/API-key state is derived from existing Settings data and carried in
+  model `_meta`; API key values are never stored in renderer model metadata,
+  titles, DOM text, screenshots, or logs.
+- The change is renderer/store/harness only; Electron main/preload, IPC, local
+  server binding, token handling, Git, terminal, branch, review, commit, and
+  Settings persistence semantics are unchanged.
+
+Next work:
+
+- Continue model workflow polish by exposing the same compact health signal in
+  Settings Permissions if users switch models there frequently.
+- Continue prototype fidelity by removing or repurposing the unused generic
+  `.eyebrow` style and checking remaining support labels against `home.jpg`.
+
 ### Slice: Settings Advanced Diagnostics Label Restraint
 
 Status: completed in iteration 82.

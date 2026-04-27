@@ -10,10 +10,19 @@ import type { DesktopModelInfo } from '../../../shared/desktopProtocol.js';
 const MAX_SESSION_DISPLAY_TITLE_LENGTH = 52;
 const MAX_TOPBAR_BRANCH_LABEL_LENGTH = 30;
 const MAX_RUNTIME_MODEL_LABEL_LENGTH = 32;
+const CONFIGURED_MODEL_PROVIDER_META_KEY = 'desktopProvider';
+const CONFIGURED_MODEL_API_KEY_META_KEY = 'desktopProviderHasApiKey';
 
 export interface RuntimeModelOptionGroup {
   label: string;
   models: DesktopModelInfo[];
+}
+
+export interface RuntimeModelProviderStatus {
+  provider: 'api-key' | 'coding-plan';
+  state: 'configured' | 'missing';
+  label: string;
+  title: string;
 }
 
 export interface GitDiffStats {
@@ -133,6 +142,33 @@ export function formatRuntimeModelTitle(model: DesktopModelInfo): string {
   return label.length > 0 ? label : model.modelId;
 }
 
+export function formatRuntimeModelOptionTitle(model: DesktopModelInfo): string {
+  const title = formatRuntimeModelTitle(model);
+  const providerStatus = getRuntimeModelProviderStatus(model);
+
+  return providerStatus ? `${title} · ${providerStatus.title}` : title;
+}
+
+export function getRuntimeModelProviderStatus(
+  model: DesktopModelInfo,
+): RuntimeModelProviderStatus | null {
+  const provider = getRuntimeModelProviderKind(model);
+  const hasApiKey = getRuntimeModelProviderApiKeyState(model);
+  if (!provider || hasApiKey === null) {
+    return null;
+  }
+
+  const providerLabel = provider === 'coding-plan' ? 'Coding Plan' : 'API key';
+  const keyLabel = hasApiKey ? 'API key configured' : 'API key missing';
+
+  return {
+    provider,
+    state: hasApiKey ? 'configured' : 'missing',
+    label: keyLabel,
+    title: `Saved ${providerLabel} provider · ${keyLabel}`,
+  };
+}
+
 export function groupRuntimeModelOptions(
   models: DesktopModelInfo[],
 ): RuntimeModelOptionGroup[] {
@@ -212,6 +248,7 @@ function getRuntimeModelGroupLabel(model: DesktopModelInfo): string {
 function isCodingPlanModel(model: DesktopModelInfo): boolean {
   const description = model.description?.toLowerCase() ?? '';
   return (
+    getRuntimeModelProviderKind(model) === 'coding-plan' ||
     description.includes('coding plan') ||
     /^\[ModelStudio Coding Plan(?: for [^\]]+)?\]/u.test(
       formatRuntimeModelTitle(model),
@@ -222,10 +259,29 @@ function isCodingPlanModel(model: DesktopModelInfo): boolean {
 function isSavedProviderModel(model: DesktopModelInfo): boolean {
   const description = model.description?.toLowerCase() ?? '';
   return (
+    getRuntimeModelProviderKind(model) !== null ||
     description.includes('desktop settings') ||
     description.includes('api key provider') ||
     description.includes('saved provider')
   );
+}
+
+function getRuntimeModelProviderKind(
+  model: DesktopModelInfo,
+): RuntimeModelProviderStatus['provider'] | null {
+  const provider = model._meta?.[CONFIGURED_MODEL_PROVIDER_META_KEY];
+  if (provider === 'api-key' || provider === 'coding-plan') {
+    return provider;
+  }
+
+  return null;
+}
+
+function getRuntimeModelProviderApiKeyState(
+  model: DesktopModelInfo,
+): boolean | null {
+  const hasApiKey = model._meta?.[CONFIGURED_MODEL_API_KEY_META_KEY];
+  return typeof hasApiKey === 'boolean' ? hasApiKey : null;
 }
 
 function truncateLabel(value: string, maxLength: number): string {

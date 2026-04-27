@@ -80,6 +80,10 @@ describe('modelStore', () => {
         modelId: 'qwen-e2e-cdp',
         name: 'qwen-e2e-cdp',
         description: 'Saved API key provider',
+        _meta: {
+          desktopProvider: 'api-key',
+          desktopProviderHasApiKey: true,
+        },
       },
     ]);
   });
@@ -175,13 +179,46 @@ describe('modelStore', () => {
         modelId: 'qwen3.5-plus',
         name: 'qwen3.5-plus',
         description: 'Saved Coding Plan provider',
+        _meta: {
+          desktopProvider: 'coding-plan',
+          desktopProviderHasApiKey: true,
+        },
       },
       {
         modelId: 'qwen-e2e-cdp',
         name: 'qwen-e2e-cdp',
         description: 'Saved API key provider',
+        _meta: {
+          desktopProvider: 'api-key',
+          desktopProviderHasApiKey: true,
+        },
       },
     ]);
+  });
+
+  it('tracks missing API key state on saved provider metadata', () => {
+    const state = modelReducer(createInitialModelState(), {
+      type: 'settings_models_loaded',
+      settings: {
+        ...createSettings('qwen-e2e-cdp'),
+        openai: {
+          hasApiKey: false,
+          providers: [
+            {
+              id: 'qwen-e2e-cdp',
+              name: 'qwen-e2e-cdp',
+              baseUrl: 'https://example.invalid/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
+      },
+    });
+
+    expect(state.configuredModels[0]?._meta).toEqual({
+      desktopProvider: 'api-key',
+      desktopProviderHasApiKey: false,
+    });
   });
 });
 

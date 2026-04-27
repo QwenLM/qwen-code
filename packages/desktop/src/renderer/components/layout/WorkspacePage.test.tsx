@@ -1213,7 +1213,11 @@ describe('WorkspacePage', () => {
           {
             modelId: 'qwen-e2e-cdp',
             name: 'qwen-e2e-cdp',
-            description: 'Configured in desktop settings',
+            description: 'Saved API key provider',
+            _meta: {
+              desktopProvider: 'api-key',
+              desktopProviderHasApiKey: true,
+            },
           },
           {
             modelId: 'qwen3-coder-next',
@@ -1232,7 +1236,9 @@ describe('WorkspacePage', () => {
     expect(model).toBeInstanceOf(HTMLSelectElement);
     expect(model?.disabled).toBe(true);
     expect(model?.value).toBe('qwen-e2e-cdp');
-    expect(model?.getAttribute('title')).toBe('qwen-e2e-cdp');
+    expect(model?.getAttribute('title')).toBe(
+      'qwen-e2e-cdp · Saved API key provider · API key configured',
+    );
     expect([...(model?.options ?? [])].map((option) => option.value)).toEqual([
       'qwen-e2e-cdp',
       'qwen3-coder-next',
@@ -1249,6 +1255,9 @@ describe('WorkspacePage', () => {
       { label: 'Coding Plan', values: ['qwen3-coder-next'] },
     ]);
     expect(model?.options[0]?.textContent).toBe('qwen-e2e-cdp');
+    expect(model?.options[0]?.title).toBe(
+      'qwen-e2e-cdp · Saved API key provider · API key configured',
+    );
     expect(model?.options[1]?.textContent).toBe('qwen3-coder-next');
     expect(model?.options[1]?.title).toBe(
       '[ModelStudio Coding Plan for Global/Intl] qwen3-coder-next',
@@ -1259,6 +1268,15 @@ describe('WorkspacePage', () => {
     expect(renderedContainer.textContent).not.toContain(
       '[ModelStudio Coding Plan',
     );
+    const providerStatus = renderedContainer.querySelector(
+      '[data-testid="composer-model-provider-status"]',
+    );
+    expect(providerStatus?.getAttribute('aria-label')).toBe(
+      'Saved API key provider · API key configured',
+    );
+    expect(
+      providerStatus?.classList.contains('composer-model-status-configured'),
+    ).toBe(true);
   });
 
   it('opens model provider settings from the composer shortcut', () => {
@@ -1306,7 +1324,11 @@ describe('WorkspacePage', () => {
             {
               modelId: 'qwen-e2e-cdp',
               name: 'qwen-e2e-cdp',
-              description: 'Configured in desktop settings',
+              description: 'Saved API key provider',
+              _meta: {
+                desktopProvider: 'api-key',
+                desktopProviderHasApiKey: true,
+              },
             },
             {
               modelId: 'qwen3-coder-next',
@@ -1350,6 +1372,9 @@ describe('WorkspacePage', () => {
     expect((model as HTMLSelectElement).options[2]?.title).toBe(
       '[ModelStudio Coding Plan for Global/Intl] qwen3-coder-next',
     );
+    expect((model as HTMLSelectElement).options[1]?.title).toBe(
+      'qwen-e2e-cdp · Saved API key provider · API key configured',
+    );
     expect(renderedContainer.textContent).not.toContain('sk-desktop-e2e');
 
     act(() => {
@@ -1357,6 +1382,58 @@ describe('WorkspacePage', () => {
     });
 
     expect(onModelChange).toHaveBeenCalledWith('qwen-e2e-cdp');
+  });
+
+  it('shows compact provider health for the selected saved composer model', () => {
+    const renderedContainer = renderWorkspace({
+      modelState: {
+        ...createInitialModelState(),
+        models: {
+          currentModelId: 'qwen-e2e-cdp',
+          availableModels: [
+            { modelId: 'e2e/qwen-code', name: 'Qwen Code E2E' },
+            {
+              modelId: 'qwen-e2e-cdp',
+              name: 'qwen-e2e-cdp',
+              description: 'Saved API key provider',
+              _meta: {
+                desktopProvider: 'api-key',
+                desktopProviderHasApiKey: false,
+              },
+            },
+          ],
+        },
+      },
+    });
+    const model = renderedContainer.querySelector(
+      'select[aria-label="Model"]',
+    ) as HTMLSelectElement | null;
+    const modelControl = renderedContainer.querySelector(
+      '[data-testid="composer-model-control"]',
+    );
+    const providerStatus = renderedContainer.querySelector(
+      '[data-testid="composer-model-provider-status"]',
+    );
+
+    expect(model).toBeInstanceOf(HTMLSelectElement);
+    expect(model?.disabled).toBe(false);
+    expect(model?.value).toBe('qwen-e2e-cdp');
+    expect(model?.getAttribute('title')).toBe(
+      'qwen-e2e-cdp · Saved API key provider · API key missing',
+    );
+    expect(
+      modelControl?.classList.contains('composer-select-label-with-status'),
+    ).toBe(true);
+    expect(providerStatus?.getAttribute('aria-label')).toBe(
+      'Saved API key provider · API key missing',
+    );
+    expect(providerStatus?.getAttribute('title')).toBe(
+      'Saved API key provider · API key missing',
+    );
+    expect(
+      providerStatus?.classList.contains('composer-model-status-missing'),
+    ).toBe(true);
+    expect(renderedContainer.textContent).not.toContain('sk-desktop-e2e');
   });
 
   it('shortens long composer runtime labels while preserving full titles', () => {

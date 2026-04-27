@@ -15,6 +15,10 @@ import type { DesktopUserSettings } from '../api/client.js';
 const CONFIGURED_API_KEY_PROVIDER_DESCRIPTION = 'Saved API key provider';
 const CONFIGURED_CODING_PLAN_PROVIDER_DESCRIPTION =
   'Saved Coding Plan provider';
+const CONFIGURED_MODEL_PROVIDER_META_KEY = 'desktopProvider';
+const CONFIGURED_MODEL_API_KEY_META_KEY = 'desktopProviderHasApiKey';
+
+type ConfiguredModelProviderKind = 'api-key' | 'coding-plan';
 
 export interface ModelState {
   models: DesktopSessionModelState | null;
@@ -224,24 +228,38 @@ function extractConfiguredModels(
   settings: DesktopUserSettings,
 ): DesktopModelInfo[] {
   const providers = settings.openai.providers
-    .map((provider) => ({
-      modelId: provider.id.trim(),
-      name: (provider.name || provider.id).trim(),
-      description: getConfiguredModelDescription(provider.envKey),
-    }))
+    .map((provider) => {
+      const providerKind = getConfiguredProviderKind(provider.envKey);
+
+      return {
+        modelId: provider.id.trim(),
+        name: (provider.name || provider.id).trim(),
+        description: getConfiguredModelDescription(provider.envKey),
+        _meta: createConfiguredProviderMeta(
+          providerKind,
+          getConfiguredProviderHasApiKey(settings, providerKind),
+        ),
+      };
+    })
     .filter((model) => model.modelId.length > 0);
   const activeModel = settings.model.name?.trim();
   if (
     activeModel &&
     !providers.some((provider) => provider.modelId === activeModel)
   ) {
+    const providerKind =
+      settings.provider === 'coding-plan' ? 'coding-plan' : 'api-key';
     providers.unshift({
       modelId: activeModel,
       name: activeModel,
       description:
-        settings.provider === 'coding-plan'
+        providerKind === 'coding-plan'
           ? CONFIGURED_CODING_PLAN_PROVIDER_DESCRIPTION
           : CONFIGURED_API_KEY_PROVIDER_DESCRIPTION,
+      _meta: createConfiguredProviderMeta(
+        providerKind,
+        getConfiguredProviderHasApiKey(settings, providerKind),
+      ),
     });
   }
 
@@ -262,4 +280,31 @@ function getConfiguredModelDescription(envKey: string): string {
   }
 
   return CONFIGURED_API_KEY_PROVIDER_DESCRIPTION;
+}
+
+function getConfiguredProviderKind(
+  envKey: string,
+): ConfiguredModelProviderKind {
+  return envKey.toUpperCase().includes('CODING_PLAN')
+    ? 'coding-plan'
+    : 'api-key';
+}
+
+function getConfiguredProviderHasApiKey(
+  settings: DesktopUserSettings,
+  providerKind: ConfiguredModelProviderKind,
+): boolean {
+  return providerKind === 'coding-plan'
+    ? settings.codingPlan.hasApiKey
+    : settings.openai.hasApiKey;
+}
+
+function createConfiguredProviderMeta(
+  providerKind: ConfiguredModelProviderKind,
+  hasApiKey: boolean,
+): Record<string, unknown> {
+  return {
+    [CONFIGURED_MODEL_PROVIDER_META_KEY]: providerKind,
+    [CONFIGURED_MODEL_API_KEY_META_KEY]: hasApiKey,
+  };
 }

@@ -20,8 +20,9 @@ import type {
   DesktopPermissionRequest,
 } from '../../../shared/desktopProtocol.js';
 import {
+  formatRuntimeModelOptionTitle,
   formatRuntimeModelLabel,
-  formatRuntimeModelTitle,
+  getRuntimeModelProviderStatus,
   groupRuntimeModelOptions,
 } from './formatters.js';
 import {
@@ -102,6 +103,9 @@ export function ChatThread({
     modelOptions.find((model) => model.modelId === currentModelId) ??
     fallbackModelOption;
   const modelOptionGroups = groupRuntimeModelOptions(modelOptions);
+  const currentModelProviderStatus =
+    getRuntimeModelProviderStatus(currentModel);
+  const currentModelTitle = formatRuntimeModelOptionTitle(currentModel);
 
   return (
     <section
@@ -196,9 +200,13 @@ export function ChatThread({
               </span>
             </label>
             <label
-              className="composer-select-label"
+              className={
+                currentModelProviderStatus
+                  ? 'composer-select-label composer-select-label-with-status'
+                  : 'composer-select-label'
+              }
               data-testid="composer-model-control"
-              title={formatRuntimeModelTitle(currentModel)}
+              title={currentModelTitle}
             >
               <span className="sr-only">Model</span>
               <span className="composer-select-shell">
@@ -206,7 +214,7 @@ export function ChatThread({
                 <select
                   aria-label="Model"
                   disabled={!activeSessionId || !modelState.models}
-                  title={formatRuntimeModelTitle(currentModel)}
+                  title={currentModelTitle}
                   value={currentModelId}
                   onChange={(event) => onModelChange(event.target.value)}
                 >
@@ -215,7 +223,7 @@ export function ChatThread({
                       {group.models.map((model) => (
                         <option
                           key={model.modelId}
-                          title={formatRuntimeModelTitle(model)}
+                          title={formatRuntimeModelOptionTitle(model)}
                           value={model.modelId}
                         >
                           {formatRuntimeModelLabel(model)}
@@ -224,6 +232,15 @@ export function ChatThread({
                     </optgroup>
                   ))}
                 </select>
+                {currentModelProviderStatus ? (
+                  <span
+                    aria-label={currentModelProviderStatus.title}
+                    className={`composer-model-status-dot composer-model-status-${currentModelProviderStatus.state}`}
+                    data-testid="composer-model-provider-status"
+                    role="img"
+                    title={currentModelProviderStatus.title}
+                  />
+                ) : null}
                 <ChevronDownIcon className="composer-select-chevron" />
               </span>
             </label>

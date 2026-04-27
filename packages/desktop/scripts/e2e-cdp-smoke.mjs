@@ -296,6 +296,11 @@ async function main() {
   await saveScreenshot('draft-composer-saved-model-state.png');
   await clickFirstThreadRow();
   await assertComposerModelSwitch('composer-model-switch.json', 'qwen-e2e-cdp');
+  await assertComposerModelProviderHealth(
+    'composer-model-provider-health.json',
+    'qwen-e2e-cdp',
+  );
+  await saveScreenshot('composer-model-provider-health.png');
   await clickButton('Expand Terminal');
   await waitForSelector('[data-testid="terminal-body"]');
   await assertTerminalExpandedLayout('terminal-expanded-layout.json');
@@ -10607,6 +10612,182 @@ async function assertComposerModelSwitch(fileName, modelId) {
 
   if (snapshot.composerOverflow) {
     throw new Error('Composer overflows after model switch.');
+  }
+}
+
+async function assertComposerModelProviderHealth(fileName, modelId) {
+  const expectedStatus = 'Saved API key provider · API key configured';
+  const expectedTitle = `${modelId} · ${expectedStatus}`;
+
+  await waitFor(
+    'composer model provider health',
+    async () =>
+      evaluate(`(() => {
+        const control = document.querySelector(
+          '[data-testid="composer-model-control"]'
+        );
+        const select = control?.querySelector('select[aria-label="Model"]');
+        const dot = control?.querySelector(
+          '[data-testid="composer-model-provider-status"]'
+        );
+        const selected = select
+          ? [...select.options].find((option) => option.selected)
+          : null;
+        return Boolean(
+          control &&
+          select &&
+          dot &&
+          select.value === ${JSON.stringify(modelId)} &&
+          select.getAttribute('title') === ${JSON.stringify(expectedTitle)} &&
+          selected?.getAttribute('title') === ${JSON.stringify(expectedTitle)} &&
+          dot.getAttribute('aria-label') === ${JSON.stringify(expectedStatus)}
+        );
+      })()`),
+    10_000,
+  );
+
+  const snapshot = await evaluate(`(() => {
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        display: style.display,
+        backgroundColor: style.backgroundColor,
+        width: Number.parseFloat(style.width),
+        height: Number.parseFloat(style.height),
+        boxShadow: style.boxShadow
+      };
+    };
+    const control = document.querySelector(
+      '[data-testid="composer-model-control"]'
+    );
+    const select = control?.querySelector('select[aria-label="Model"]');
+    const dot = control?.querySelector(
+      '[data-testid="composer-model-provider-status"]'
+    );
+    const selected = select
+      ? [...select.options].find((option) => option.selected)
+      : null;
+    const bodyText = document.body.innerText;
+    const fieldValues = [...document.querySelectorAll('input, textarea')]
+      .map((field) => field.value ?? '')
+      .join('\\n');
+    return {
+      controlTitle: control?.getAttribute('title') ?? null,
+      controlClass: control?.className ?? '',
+      selectTitle: select?.getAttribute('title') ?? null,
+      selectValue: select?.value ?? null,
+      selectedText: selected?.textContent.trim() ?? null,
+      selectedTitle: selected?.getAttribute('title') ?? null,
+      selectedTextLength: selected?.textContent.trim().length ?? 0,
+      dotAriaLabel: dot?.getAttribute('aria-label') ?? null,
+      dotTitle: dot?.getAttribute('title') ?? null,
+      dotClass: dot?.className ?? '',
+      dotStyle: styleFor(dot),
+      controlRect: rectFor(control),
+      selectRect: rectFor(select),
+      dotRect: rectFor(dot),
+      controlOverflow:
+        Boolean(control) && control.scrollWidth > control.clientWidth + 4,
+      selectOverflow:
+        Boolean(select) && select.scrollWidth > select.clientWidth + 4,
+      hasRawCodingPlanLabel:
+        (selected?.textContent ?? '').includes('ModelStudio Coding Plan'),
+      hasSecret:
+        bodyText.includes('sk-desktop-e2e') ||
+        bodyText.includes('cp-desktop-e2e') ||
+        fieldValues.includes('sk-desktop-e2e') ||
+        fieldValues.includes('cp-desktop-e2e'),
+      hasServerUrl: /http:\\/\\/127\\.0\\.0\\.1:/u.test(bodyText),
+      documentOverflow:
+        document.body.scrollWidth > window.innerWidth + 4 ||
+        document.body.scrollHeight > window.innerHeight + 4
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (
+    snapshot.controlTitle !== expectedTitle ||
+    snapshot.selectTitle !== expectedTitle ||
+    snapshot.selectedTitle !== expectedTitle ||
+    snapshot.selectValue !== modelId ||
+    snapshot.dotAriaLabel !== expectedStatus ||
+    snapshot.dotTitle !== expectedStatus
+  ) {
+    throw new Error(
+      `Composer model provider health metadata is missing: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    !snapshot.controlClass.includes('composer-select-label-with-status') ||
+    !snapshot.dotClass.includes('composer-model-status-configured') ||
+    !snapshot.dotStyle ||
+    snapshot.dotStyle.width > 7 ||
+    snapshot.dotStyle.height > 7
+  ) {
+    throw new Error(
+      `Composer model provider health indicator is not compact: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    !snapshot.controlRect ||
+    !snapshot.selectRect ||
+    !snapshot.dotRect ||
+    snapshot.controlRect.width > 128 ||
+    snapshot.selectRect.width > snapshot.controlRect.width + 1 ||
+    snapshot.dotRect.left < snapshot.controlRect.left ||
+    snapshot.dotRect.right > snapshot.controlRect.right + 1 ||
+    snapshot.dotRect.top < snapshot.controlRect.top ||
+    snapshot.dotRect.bottom > snapshot.controlRect.bottom + 1
+  ) {
+    throw new Error(
+      `Composer model provider health indicator escaped the model control: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.selectedTextLength > 32 ||
+    snapshot.hasRawCodingPlanLabel ||
+    snapshot.hasSecret ||
+    snapshot.hasServerUrl ||
+    snapshot.controlOverflow ||
+    snapshot.selectOverflow ||
+    snapshot.documentOverflow
+  ) {
+    throw new Error(
+      `Composer model provider health leaked data or overflowed: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
   }
 }
 

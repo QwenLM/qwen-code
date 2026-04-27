@@ -1967,6 +1967,28 @@ summary:focus-visible {
   opacity: 0.68;
 }
 
+.composer-model-status-dot {
+  position: absolute;
+  right: 22px;
+  z-index: 1;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  pointer-events: none;
+  transform: translateY(-50%);
+  top: 50%;
+}
+
+.composer-model-status-configured {
+  background: rgba(117, 217, 156, 0.92);
+  box-shadow: 0 0 0 3px rgba(117, 217, 156, 0.09);
+}
+
+.composer-model-status-missing {
+  background: rgba(240, 182, 110, 0.94);
+  box-shadow: 0 0 0 3px rgba(240, 182, 110, 0.1);
+}
+
 .composer-select-label select {
   width: 100%;
   min-width: 0;
@@ -1985,6 +2007,10 @@ summary:focus-visible {
   padding: 0 23px 0 27px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.composer-select-label-with-status select {
+  padding-right: 33px;
 }
 
 .composer-select-label select:focus {
@@ -3113,6 +3139,14 @@ textarea:focus {
     font-size: 10.8px;
   }
 
+  .composer-model-status-dot {
+    right: 20px;
+  }
+
+  .composer-select-label-with-status select {
+    padding-right: 30px;
+  }
+
   .composer-action-button {
     width: 28px;
     height: 28px;
@@ -3230,6 +3264,14 @@ textarea:focus {
     max-width: 100%;
     min-height: 24px;
     padding: 0 20px 0 24px;
+  }
+
+  .workspace-grid-review-open .composer-model-status-dot {
+    right: 19px;
+  }
+
+  .workspace-grid-review-open .composer-select-label-with-status select {
+    padding-right: 29px;
   }
 
   .workspace-grid-review-open .composer-action-button {
