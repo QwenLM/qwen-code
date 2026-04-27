@@ -431,6 +431,40 @@ describe('ShellTool', () => {
       );
     });
 
+    it('does not strip a trailing && (logical AND would be syntactically broken)', async () => {
+      const invocation = shellTool.build({
+        command: 'npm run dev &&',
+        is_background: true,
+      });
+      await invocation.execute(mockAbortSignal);
+      expect(mockShellExecutionService).toHaveBeenCalledWith(
+        'npm run dev &&',
+        expect.any(String),
+        expect.any(Function),
+        expect.any(AbortSignal),
+        false,
+        {},
+        { streamStdout: true },
+      );
+    });
+
+    it('does not strip an escaped trailing \\& (literal &)', async () => {
+      const invocation = shellTool.build({
+        command: 'echo foo \\&',
+        is_background: true,
+      });
+      await invocation.execute(mockAbortSignal);
+      expect(mockShellExecutionService).toHaveBeenCalledWith(
+        'echo foo \\&',
+        expect.any(String),
+        expect.any(Function),
+        expect.any(AbortSignal),
+        false,
+        {},
+        { streamStdout: true },
+      );
+    });
+
     it('does not forward the turn signal into the background shell', async () => {
       // Verifies: the AbortSignal handed to ShellExecutionService is the
       // entry's own controller, not the outer turn signal. Cancelling the
