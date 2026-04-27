@@ -692,7 +692,7 @@ Skill 3 content`);
           (levels.has('project') && isProject) ||
           (levels.has('user') && isUser)
         ) {
-          return Promise.resolve([
+        const isBundled = pathStr.endsWith(bundledDirSegment);
             reviewDirEntry,
             simplifyDirEntry,
           ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
