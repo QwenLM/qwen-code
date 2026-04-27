@@ -22,6 +22,122 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Settings Permissions Provider Health
+
+Status: completed in iteration 84.
+
+Goal: surface saved model-provider health in Settings > Permissions for the
+selected thread model with the same compact semantics used by the composer.
+
+User-visible value: users changing the active thread model from Settings can
+see whether a saved API-key or Coding Plan model has a configured key without
+opening provider setup, while Settings remains a quiet product surface and does
+not expose secrets or diagnostics.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/SettingsPage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/settings-permissions-provider-health.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Settings Permissions shows a tiny contained provider-health dot next to the
+  Thread model selector only when the selected model has saved-provider
+  metadata.
+- The Thread model control title, select title, and selected option title
+  describe the provider and API-key state without exposing API key values.
+- Existing compact model labels, provider grouping, composer health, Settings
+  validation, branch, review, terminal, relaunch, and commit workflows remain
+  unchanged.
+- Settings default and Advanced Diagnostics visibility rules still prevent
+  secrets, local server URLs, ACP/session IDs, and raw provider prefixes from
+  leaking into normal Settings.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, save API-key and Coding Plan provider settings, open Settings,
+  navigate to Permissions, select the saved API-key thread model, assert the
+  compact health dot/title/option metadata and containment, then continue the
+  existing Advanced Diagnostics, draft composer, review, terminal, branch,
+  relaunch, model, and commit paths.
+- E2E assertions: Settings Permissions provider health reports configured
+  API-key state in title/aria metadata, the dot remains inside the selector
+  shell, option labels remain compact, no fake secrets or local server URLs
+  appear in normal Settings, and the full CDP smoke records zero unexpected
+  console errors or failed local requests.
+- Diagnostic artifacts to collect on failure:
+  `settings-permissions-provider-health.json`, Settings screenshots, Electron
+  log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` chose this focused model-workflow
+  polish over unrelated `.eyebrow` cleanup because the previous slice already
+  added provider health in the composer; `frontend-design` constrained by
+  `home.jpg` keeps the signal as a tiny status dot inside a native Settings
+  control; and `electron-desktop-dev` requires real Electron CDP verification
+  for the Settings workflow and layout containment.
+
+Notes and decisions:
+
+- Brainstormed alternatives: add larger provider badges to Settings, show
+  provider health only in the composer, or reuse the compact dot/title pattern
+  in Settings Permissions. The reused pattern is the smallest consistent slice
+  because the Settings selector already uses the same model grouping and label
+  formatters.
+- This slice intentionally does not add live provider network validation,
+  custom select popovers, new Settings sections, Electron main/preload APIs,
+  local server changes, or secret persistence changes.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 38 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T01-06-13-119Z/`.
+- `settings-permissions-provider-health.json` recorded the selected saved model
+  as `qwen-e2e-cdp`, the control/select/option titles as
+  `qwen-e2e-cdp · Saved API key provider · API key configured`, a 6 px
+  configured provider dot contained inside the Settings Thread model selector,
+  no control/shell/select overflow, no raw Coding Plan label leakage, no fake
+  secrets, no local server URL, and no document overflow. `summary.json`
+  recorded zero console errors and zero failed local requests.
+
+Self-review:
+
+- The first viewport is unchanged and remains conversation-first; the new
+  signal appears only in the Settings overlay when users edit the active
+  thread model.
+- Provider/API-key state is still derived from existing Settings/model
+  metadata; API key values are never exposed in labels, titles, DOM text,
+  screenshots, or logs.
+- The change is renderer/CSS/harness only; Electron main/preload, IPC, local
+  server binding, token handling, Git, terminal, branch, review, commit, and
+  Settings persistence semantics are unchanged.
+
+Next work:
+
+- Continue prototype fidelity by removing or repurposing the unused generic
+  `.eyebrow` style and checking remaining support labels against `home.jpg`.
+- Continue model workflow polish by giving missing provider-key states clear,
+  non-blocking Settings guidance near the provider form without adding a larger
+  dashboard surface.
+
 ### Slice: Composer Model Provider Health
 
 Status: completed in iteration 83.

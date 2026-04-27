@@ -150,9 +150,7 @@ async function main() {
   await clickButton('Submit Question');
   await waitForText('E2E fake ACP question response recorded');
   await setElectronWindowBounds(target.id, compactWindowBounds);
-  await assertCompactDenseConversationLayout(
-    'compact-dense-conversation.json',
-  );
+  await assertCompactDenseConversationLayout('compact-dense-conversation.json');
   await saveScreenshot('compact-dense-conversation.png');
   await setElectronWindowBounds(target.id, defaultWindowBounds);
   await clickButton('Copy Response');
@@ -281,6 +279,11 @@ async function main() {
   await assertSettingsPermissionsModelLabelRestraint(
     'settings-permissions-model-label-restraint.json',
   );
+  await assertSettingsPermissionsProviderHealth(
+    'settings-permissions-provider-health.json',
+    'qwen-e2e-cdp',
+  );
+  await saveScreenshot('settings-permissions-provider-health.png');
   await saveScreenshot('settings-permissions-model-label-restraint.png');
   await clickButton('Advanced Diagnostics');
   await waitForSelector('[data-testid="runtime-diagnostics"]');
@@ -416,9 +419,7 @@ async function createGitWorkspace() {
 }
 
 async function createCleanGitWorkspace() {
-  const rawDir = await mkdtemp(
-    join(tmpdir(), 'desktop-e2e-clean-workspace-'),
-  );
+  const rawDir = await mkdtemp(join(tmpdir(), 'desktop-e2e-clean-workspace-'));
   const dir = await realpath(rawDir);
   await writeFile(
     join(dir, 'README.md'),
@@ -909,9 +910,7 @@ async function assertProjectComposerReady(fileName) {
     }
 
     if (chip.rect.height > 25 || chip.style.fontSize > 11.2) {
-      throw new Error(
-        `Composer chip scale regressed: ${JSON.stringify(chip)}`,
-      );
+      throw new Error(`Composer chip scale regressed: ${JSON.stringify(chip)}`);
     }
   }
 
@@ -2122,8 +2121,7 @@ async function assertSidebarAppRail(fileName) {
 
   if (
     activeProjectRow.dirtyText !== '2 dirty' ||
-    activeProjectRow.dirtyTitle !==
-      '1 modified · 0 staged · 1 untracked'
+    activeProjectRow.dirtyTitle !== '1 modified · 0 staged · 1 untracked'
   ) {
     throw new Error(
       `Sidebar project dirty metadata regressed: ${JSON.stringify(
@@ -2437,10 +2435,7 @@ async function assertSidebarSearchFilter(fileName) {
 
   const cleared = await captureSidebarSearchSnapshot();
 
-  await setFieldByAriaLabel(
-    'Search projects and threads',
-    'no-sidebar-match',
-  );
+  await setFieldByAriaLabel('Search projects and threads', 'no-sidebar-match');
   await waitFor(
     'sidebar search empty state',
     async () =>
@@ -3085,12 +3080,10 @@ async function assertTopbarContextFidelity(fileName) {
     metrics.runtimeStatusStyle.textTransform !== 'none'
   ) {
     throw new Error(
-      `Runtime status should stay compact: ${JSON.stringify(
-        {
-          rect: metrics.runtimeStatus,
-          style: metrics.runtimeStatusStyle,
-        },
-      )}`,
+      `Runtime status should stay compact: ${JSON.stringify({
+        rect: metrics.runtimeStatus,
+        style: metrics.runtimeStatusStyle,
+      })}`,
     );
   }
 
@@ -3571,8 +3564,8 @@ async function assertBranchSwitchMenu(fileName, expectedCurrentBranch) {
                 expectedCurrentBranch,
               )} ||
               currentRow.getAttribute('aria-label')?.includes(${JSON.stringify(
-              expectedCurrentBranch,
-            )})
+                expectedCurrentBranch,
+              )})
             )
         );
       })()`),
@@ -3702,7 +3695,9 @@ async function assertBranchSwitchMenu(fileName, expectedCurrentBranch) {
   );
 
   if (snapshot.triggerExpanded !== 'true') {
-    throw new Error('Branch trigger should be expanded while the menu is open.');
+    throw new Error(
+      'Branch trigger should be expanded while the menu is open.',
+    );
   }
 
   if (!snapshot.menu || snapshot.menu.width > 330) {
@@ -3755,9 +3750,7 @@ async function assertBranchSwitchMenu(fileName, expectedCurrentBranch) {
 
   const heavyBranchRows = snapshot.rows.filter(
     (row) =>
-      !row.style ||
-      row.style.fontWeight > 680 ||
-      row.style.fontSize > 12.2,
+      !row.style || row.style.fontWeight > 680 || row.style.fontSize > 12.2,
   );
   if (heavyBranchRows.length > 0) {
     throw new Error(
@@ -4129,7 +4122,9 @@ async function assertBranchSwitchConfirmation(fileName) {
   );
 
   if (!snapshot.hasMenu) {
-    throw new Error('Branch confirmation should remain inside the branch menu.');
+    throw new Error(
+      'Branch confirmation should remain inside the branch menu.',
+    );
   }
 
   if (
@@ -4348,9 +4343,7 @@ async function assertConversationChangesSummary(fileName) {
 
   if (snapshot.bodyHasTurnComplete) {
     throw new Error(
-      `Conversation leaked a protocol stop reason: ${JSON.stringify(
-        snapshot,
-      )}`,
+      `Conversation leaked a protocol stop reason: ${JSON.stringify(snapshot)}`,
     );
   }
 
@@ -5640,12 +5633,10 @@ async function assertConversationSurfaceFidelity(fileName) {
 
   if (snapshot.assistant.hasRoleLabel || snapshot.user.hasRoleLabel) {
     throw new Error(
-      `Messages should not render role-label text nodes: ${JSON.stringify(
-        {
-          assistant: snapshot.assistant,
-          user: snapshot.user,
-        },
-      )}`,
+      `Messages should not render role-label text nodes: ${JSON.stringify({
+        assistant: snapshot.assistant,
+        user: snapshot.user,
+      })}`,
     );
   }
 
@@ -5804,7 +5795,10 @@ async function assertConversationSurfaceFidelity(fileName) {
     );
   }
 
-  if (snapshot.composer.rect.width > 840 || snapshot.composer.rect.height > 94) {
+  if (
+    snapshot.composer.rect.width > 840 ||
+    snapshot.composer.rect.height > 94
+  ) {
     throw new Error(
       `Composer should stay compact in the default conversation view: ${JSON.stringify(
         snapshot.composer.rect,
@@ -7710,9 +7704,7 @@ async function assertCompactReviewDrawerLayout(fileName) {
   ]) {
     if (!labels.includes(expectedLabel)) {
       throw new Error(
-        `Compact review missing action ${expectedLabel}: ${labels.join(
-          ', ',
-        )}`,
+        `Compact review missing action ${expectedLabel}: ${labels.join(', ')}`,
       );
     }
   }
@@ -8546,8 +8538,7 @@ async function assertSettingsPageLayout(fileName) {
     metrics.navLinks.some(
       (link, index) =>
         link.label !== expectedSettingsLinks[index][0] ||
-        link.ariaLabel !==
-          `Show ${expectedSettingsLinks[index][0]} settings` ||
+        link.ariaLabel !== `Show ${expectedSettingsLinks[index][0]} settings` ||
         link.href !== expectedSettingsLinks[index][1],
     )
   ) {
@@ -9123,8 +9114,7 @@ async function assertCompactSettingsOverlayLayout(fileName) {
     metrics.navLinks.some(
       (link, index) =>
         link.label !== expectedSettingsLinks[index][0] ||
-        link.ariaLabel !==
-          `Show ${expectedSettingsLinks[index][0]} settings` ||
+        link.ariaLabel !== `Show ${expectedSettingsLinks[index][0]} settings` ||
         link.href !== expectedSettingsLinks[index][1],
     )
   ) {
@@ -9257,8 +9247,7 @@ async function assertSettingsValidation(fileName) {
   }
 
   if (
-    snapshots.invalidBaseUrl.validationText !==
-    'Use a valid HTTP(S) base URL.'
+    snapshots.invalidBaseUrl.validationText !== 'Use a valid HTTP(S) base URL.'
   ) {
     throw new Error(
       `Invalid-base-URL validation did not render: ${JSON.stringify(
@@ -9402,7 +9391,9 @@ async function assertSettingsProductState(fileName) {
   }
 
   if (snapshot.hasAdvancedDiagnostics) {
-    throw new Error('Advanced diagnostics opened before the user requested it.');
+    throw new Error(
+      'Advanced diagnostics opened before the user requested it.',
+    );
   }
 }
 
@@ -10025,6 +10016,212 @@ async function assertSettingsPermissionsModelLabelRestraint(fileName) {
   }
 }
 
+async function assertSettingsPermissionsProviderHealth(fileName, modelId) {
+  const expectedStatus = 'Saved API key provider · API key configured';
+  const expectedTitle = `${modelId} · ${expectedStatus}`;
+
+  await setFieldByAriaLabel('Thread model', modelId);
+  await waitFor(
+    'settings permissions provider health',
+    async () =>
+      evaluate(`(() => {
+        const control = document.querySelector(
+          '[data-testid="settings-thread-model-control"]'
+        );
+        const select = control?.querySelector(
+          'select[aria-label="Thread model"]'
+        );
+        const dot = control?.querySelector(
+          '[data-testid="settings-thread-model-provider-status"]'
+        );
+        const selected = select
+          ? [...select.options].find((option) => option.selected)
+          : null;
+        return Boolean(
+          control &&
+          select &&
+          dot &&
+          select.value === ${JSON.stringify(modelId)} &&
+          control.getAttribute('title') === ${JSON.stringify(expectedTitle)} &&
+          select.getAttribute('title') === ${JSON.stringify(expectedTitle)} &&
+          selected?.getAttribute('title') === ${JSON.stringify(expectedTitle)} &&
+          dot.getAttribute('aria-label') === ${JSON.stringify(expectedStatus)}
+        );
+      })()`),
+    10_000,
+  );
+
+  const snapshot = await evaluate(`(() => {
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        display: style.display,
+        backgroundColor: style.backgroundColor,
+        width: Number.parseFloat(style.width),
+        height: Number.parseFloat(style.height),
+        boxShadow: style.boxShadow
+      };
+    };
+    const settings = document.querySelector('[data-testid="settings-page"]');
+    const permissions = document.querySelector(
+      '[data-testid="permissions-config"]'
+    );
+    const control = document.querySelector(
+      '[data-testid="settings-thread-model-control"]'
+    );
+    const shell = control?.querySelector('.settings-thread-model-shell');
+    const select = control?.querySelector(
+      'select[aria-label="Thread model"]'
+    );
+    const dot = control?.querySelector(
+      '[data-testid="settings-thread-model-provider-status"]'
+    );
+    const selected = select
+      ? [...select.options].find((option) => option.selected)
+      : null;
+    const bodyText = settings?.innerText ?? '';
+    const fieldValues = [...document.querySelectorAll('input, textarea')]
+      .map((field) => field.value ?? '')
+      .join('\\n');
+    return {
+      controlTitle: control?.getAttribute('title') ?? null,
+      controlClass: control?.className ?? '',
+      shellRect: rectFor(shell),
+      selectTitle: select?.getAttribute('title') ?? null,
+      selectValue: select?.value ?? null,
+      selectedText: selected?.textContent.trim() ?? null,
+      selectedTitle: selected?.getAttribute('title') ?? null,
+      selectedTextLength: selected?.textContent.trim().length ?? 0,
+      dotAriaLabel: dot?.getAttribute('aria-label') ?? null,
+      dotTitle: dot?.getAttribute('title') ?? null,
+      dotClass: dot?.className ?? '',
+      dotStyle: styleFor(dot),
+      settingsRect: rectFor(settings),
+      permissionsRect: rectFor(permissions),
+      controlRect: rectFor(control),
+      selectRect: rectFor(select),
+      dotRect: rectFor(dot),
+      controlOverflow:
+        Boolean(control) && control.scrollWidth > control.clientWidth + 4,
+      shellOverflow:
+        Boolean(shell) && shell.scrollWidth > shell.clientWidth + 4,
+      selectOverflow:
+        Boolean(select) && select.scrollWidth > select.clientWidth + 4,
+      visibleSecret:
+        bodyText.includes('sk-desktop-e2e') ||
+        bodyText.includes('cp-desktop-e2e'),
+      hasAnySecret:
+        bodyText.includes('sk-desktop-e2e') ||
+        bodyText.includes('cp-desktop-e2e') ||
+        fieldValues.includes('sk-desktop-e2e') ||
+        fieldValues.includes('cp-desktop-e2e'),
+      hasServerUrl: /http:\\/\\/127\\.0\\.0\\.1:/u.test(bodyText),
+      hasRawCodingPlanLabel:
+        bodyText.includes('ModelStudio Coding Plan') ||
+        (selected?.textContent ?? '').includes('ModelStudio Coding Plan'),
+      documentOverflow:
+        document.body.scrollWidth > window.innerWidth + 4 ||
+        document.body.scrollHeight > window.innerHeight + 4
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (
+    snapshot.controlTitle !== expectedTitle ||
+    snapshot.selectTitle !== expectedTitle ||
+    snapshot.selectedTitle !== expectedTitle ||
+    snapshot.selectValue !== modelId ||
+    snapshot.dotAriaLabel !== expectedStatus ||
+    snapshot.dotTitle !== expectedStatus
+  ) {
+    throw new Error(
+      `Settings permissions provider health metadata is missing: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    !snapshot.controlClass.includes(
+      'settings-thread-model-label-with-status',
+    ) ||
+    !snapshot.dotClass.includes('settings-thread-model-status-configured') ||
+    !snapshot.dotStyle ||
+    snapshot.dotStyle.width > 7 ||
+    snapshot.dotStyle.height > 7
+  ) {
+    throw new Error(
+      `Settings permissions provider health indicator is not compact: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    !snapshot.settingsRect ||
+    !snapshot.permissionsRect ||
+    !snapshot.controlRect ||
+    !snapshot.shellRect ||
+    !snapshot.selectRect ||
+    !snapshot.dotRect ||
+    snapshot.permissionsRect.left < snapshot.settingsRect.left ||
+    snapshot.permissionsRect.right > snapshot.settingsRect.right + 1 ||
+    snapshot.controlRect.left < snapshot.permissionsRect.left - 1 ||
+    snapshot.controlRect.right > snapshot.permissionsRect.right + 1 ||
+    snapshot.selectRect.right > snapshot.controlRect.right + 1 ||
+    snapshot.dotRect.left < snapshot.shellRect.left ||
+    snapshot.dotRect.right > snapshot.shellRect.right + 1 ||
+    snapshot.dotRect.top < snapshot.shellRect.top ||
+    snapshot.dotRect.bottom > snapshot.shellRect.bottom + 1
+  ) {
+    throw new Error(
+      `Settings permissions provider health geometry regressed: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.selectedTextLength > 32 ||
+    snapshot.visibleSecret ||
+    snapshot.hasAnySecret ||
+    snapshot.hasServerUrl ||
+    snapshot.hasRawCodingPlanLabel ||
+    snapshot.controlOverflow ||
+    snapshot.shellOverflow ||
+    snapshot.selectOverflow ||
+    snapshot.documentOverflow
+  ) {
+    throw new Error(
+      `Settings permissions provider health leaked data or overflowed: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+}
+
 async function assertSettingsAdvancedDiagnostics(fileName) {
   const snapshot = await evaluate(`(() => {
     const advanced = document.querySelector(
@@ -10301,7 +10498,9 @@ async function assertDraftComposerSavedModelState(fileName, savedModelId) {
   }
 
   if (!snapshot.hasNewThreadNotice) {
-    throw new Error('Draft composer should keep the New thread notice visible.');
+    throw new Error(
+      'Draft composer should keep the New thread notice visible.',
+    );
   }
 
   if (
@@ -10340,9 +10539,7 @@ async function clickFirstThreadRow() {
   await waitFor(
     'saved thread row',
     async () =>
-      evaluate(
-        `document.querySelector('[data-testid="thread-row"]') !== null`,
-      ),
+      evaluate(`document.querySelector('[data-testid="thread-row"]') !== null`),
     10_000,
   );
 
@@ -10465,9 +10662,7 @@ async function assertComposerModelSwitch(fileName, modelId) {
 
   const longCodingPlanModelId = 'qwen3-coder-next';
   if (
-    snapshot.options.some(
-      (option) => option.value === longCodingPlanModelId,
-    )
+    snapshot.options.some((option) => option.value === longCodingPlanModelId)
   ) {
     await setFieldByAriaLabel('Model', longCodingPlanModelId);
     await waitFor(
@@ -10526,7 +10721,9 @@ async function assertComposerModelSwitch(fileName, modelId) {
   );
 
   if (snapshot.disabled !== false) {
-    throw new Error('Composer model picker should be enabled for active thread.');
+    throw new Error(
+      'Composer model picker should be enabled for active thread.',
+    );
   }
 
   if (!snapshot.hasSavedModel || snapshot.value !== modelId) {

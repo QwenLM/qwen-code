@@ -1577,12 +1577,88 @@ describe('WorkspacePage', () => {
       '[ModelStudio Coding Plan for Global/Intl] qwen3-coder-next',
     );
     expect(settingsPage?.textContent).not.toContain('[ModelStudio Coding Plan');
+    expect(
+      settingsPage?.querySelector(
+        '[data-testid="settings-thread-model-provider-status"]',
+      ),
+    ).toBeNull();
 
     act(() => {
       setSelectValue(model as HTMLSelectElement, 'qwen3.5-plus');
     });
 
     expect(onModelChange).toHaveBeenCalledWith('qwen3.5-plus');
+  });
+
+  it('shows compact provider health in settings permissions', () => {
+    const renderedContainer = renderWorkspace({
+      modelState: {
+        ...createInitialModelState(),
+        models: {
+          currentModelId: 'qwen-e2e-cdp',
+          availableModels: [
+            { modelId: 'e2e/qwen-code', name: 'Qwen Code E2E' },
+            {
+              modelId: 'qwen-e2e-cdp',
+              name: 'qwen-e2e-cdp',
+              description: 'Saved API key provider',
+              _meta: {
+                desktopProvider: 'api-key',
+                desktopProviderHasApiKey: false,
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    act(() => {
+      clickButton(renderedContainer, 'Settings');
+    });
+
+    const settingsPage = renderedContainer.querySelector(
+      '[data-testid="settings-page"]',
+    );
+    const modelControl = settingsPage?.querySelector(
+      '[data-testid="settings-thread-model-control"]',
+    );
+    const model = settingsPage?.querySelector(
+      'select[aria-label="Thread model"]',
+    ) as HTMLSelectElement | null;
+    const providerStatus = settingsPage?.querySelector(
+      '[data-testid="settings-thread-model-provider-status"]',
+    );
+
+    expect(model).toBeInstanceOf(HTMLSelectElement);
+    expect(model?.disabled).toBe(false);
+    expect(model?.value).toBe('qwen-e2e-cdp');
+    expect(modelControl?.getAttribute('title')).toBe(
+      'qwen-e2e-cdp · Saved API key provider · API key missing',
+    );
+    expect(model?.getAttribute('title')).toBe(
+      'qwen-e2e-cdp · Saved API key provider · API key missing',
+    );
+    expect(model?.options[1]?.title).toBe(
+      'qwen-e2e-cdp · Saved API key provider · API key missing',
+    );
+    expect(
+      modelControl?.classList.contains(
+        'settings-thread-model-label-with-status',
+      ),
+    ).toBe(true);
+    expect(providerStatus?.getAttribute('aria-label')).toBe(
+      'Saved API key provider · API key missing',
+    );
+    expect(providerStatus?.getAttribute('title')).toBe(
+      'Saved API key provider · API key missing',
+    );
+    expect(
+      providerStatus?.classList.contains(
+        'settings-thread-model-status-missing',
+      ),
+    ).toBe(true);
+    expect(settingsPage?.textContent).toContain('qwen-e2e-cdp');
+    expect(settingsPage?.textContent).not.toContain('sk-desktop-e2e');
   });
 
   it('shows inline settings validation before saving a model provider', () => {

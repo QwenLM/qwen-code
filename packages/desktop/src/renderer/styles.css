@@ -2782,6 +2782,43 @@ textarea:focus {
   gap: 6px;
 }
 
+.settings-thread-model-shell {
+  position: relative;
+  display: block;
+  min-width: 0;
+}
+
+.settings-thread-model-shell select {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.settings-thread-model-label-with-status select {
+  padding-right: 30px;
+}
+
+.settings-thread-model-status-dot {
+  position: absolute;
+  top: 50%;
+  right: 11px;
+  z-index: 1;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.settings-thread-model-status-configured {
+  background: rgba(117, 217, 156, 0.92);
+  box-shadow: 0 0 0 3px rgba(117, 217, 156, 0.09);
+}
+
+.settings-thread-model-status-missing {
+  background: rgba(240, 182, 110, 0.94);
+  box-shadow: 0 0 0 3px rgba(240, 182, 110, 0.1);
+}
+
 .settings-actions {
   display: flex;
   align-items: center;

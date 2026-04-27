@@ -18,6 +18,7 @@ import type { DesktopApprovalMode } from '../../../shared/desktopProtocol.js';
 import {
   formatRuntimeModelLabel,
   formatRuntimeModelOptionTitle,
+  getRuntimeModelProviderStatus,
   groupRuntimeModelOptions,
 } from './formatters.js';
 import { CloseIcon } from './SidebarIcons.js';
@@ -475,6 +476,9 @@ function PermissionsPanel({
   const currentModelTitle = currentModelInfo
     ? formatRuntimeModelOptionTitle(currentModelInfo)
     : currentModel || 'Unknown';
+  const currentModelProviderStatus = currentModelInfo
+    ? getRuntimeModelProviderStatus(currentModelInfo)
+    : null;
   const modelOptionGroups = modelState.models
     ? groupRuntimeModelOptions(modelState.models.availableModels)
     : [];
@@ -512,30 +516,49 @@ function PermissionsPanel({
             <input disabled readOnly value={currentMode || 'Unknown'} />
           )}
         </label>
-        <label>
+        <label
+          className={
+            currentModelProviderStatus
+              ? 'settings-thread-model-label settings-thread-model-label-with-status'
+              : 'settings-thread-model-label'
+          }
+          data-testid="settings-thread-model-control"
+          title={currentModelTitle}
+        >
           <span>Thread model</span>
           {modelState.models ? (
-            <select
-              aria-label="Thread model"
-              disabled={!activeSessionId || modelState.savingModel}
-              title={currentModelTitle}
-              value={currentModel}
-              onChange={(event) => onModelChange(event.target.value)}
-            >
-              {modelOptionGroups.map((group) => (
-                <optgroup key={group.label} label={group.label}>
-                  {group.models.map((model) => (
-                    <option
-                      key={model.modelId}
-                      title={formatRuntimeModelOptionTitle(model)}
-                      value={model.modelId}
-                    >
-                      {formatRuntimeModelLabel(model)}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
+            <span className="settings-thread-model-shell">
+              <select
+                aria-label="Thread model"
+                disabled={!activeSessionId || modelState.savingModel}
+                title={currentModelTitle}
+                value={currentModel}
+                onChange={(event) => onModelChange(event.target.value)}
+              >
+                {modelOptionGroups.map((group) => (
+                  <optgroup key={group.label} label={group.label}>
+                    {group.models.map((model) => (
+                      <option
+                        key={model.modelId}
+                        title={formatRuntimeModelOptionTitle(model)}
+                        value={model.modelId}
+                      >
+                        {formatRuntimeModelLabel(model)}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+              {currentModelProviderStatus ? (
+                <span
+                  aria-label={currentModelProviderStatus.title}
+                  className={`settings-thread-model-status-dot settings-thread-model-status-${currentModelProviderStatus.state}`}
+                  data-testid="settings-thread-model-provider-status"
+                  role="img"
+                  title={currentModelProviderStatus.title}
+                />
+              ) : null}
+            </span>
           ) : (
             <input disabled readOnly value={currentModel || 'Unknown'} />
           )}
