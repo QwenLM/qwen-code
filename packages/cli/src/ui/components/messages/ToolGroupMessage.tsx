@@ -44,6 +44,12 @@ interface ToolGroupMessageProps {
   /** Pre-computed count of read ops from managed-auto-memory files. */
   memoryReadCount?: number;
   isUserInitiated?: boolean;
+  /**
+   * Short LLM-generated label for this batch. Used in compact mode in place
+   * of the "active tool name × count" line. Undefined when summary
+   * generation is disabled, still in-flight, or failed.
+   */
+  compactLabel?: string;
 }
 
 // Main component renders the border and maps the tools using ToolMessage
@@ -57,6 +63,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   memoryWriteCount,
   memoryReadCount,
   isUserInitiated,
+  compactLabel,
 }) => {
   const config = useConfig();
   const { compactMode } = useCompactMode();
@@ -139,6 +146,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
       <CompactToolGroupDisplay
         toolCalls={toolCalls}
         contentWidth={contentWidth}
+        compactLabel={compactLabel}
       />
     );
   }
