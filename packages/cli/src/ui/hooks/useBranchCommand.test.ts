@@ -89,10 +89,13 @@ describe('useBranchCommand', () => {
     };
   });
 
-  it('runs snapshot → finalize → forkSession → loadSession → config.startNewSession in order', async () => {
-    // The leading snapshot load (of the parent session) exists so the catch
-    // block can roll core back to the parent with the correct parentUuid
-    // chain tail if getGeminiClient().initialize() rejects after the swap.
+  it('runs finalize → snapshot → forkSession → loadSession → config.startNewSession in order', async () => {
+    // The parent snapshot must come AFTER finalize(): finalize() appends a
+    // trailing custom_title record to the parent JSONL, advancing the
+    // recorder's lastCompletedUuid. A snapshot taken before that captures
+    // a stale tail; on rollback the restored recorder would chain its next
+    // record's parentUuid to a record that's no longer the JSONL tail,
+    // orphaning the custom_title record from the parent chain.
     const order: string[] = [];
     finalize.mockImplementation(() => order.push('finalize'));
     forkSession.mockImplementation(async () => {
@@ -115,8 +118,8 @@ describe('useBranchCommand', () => {
     });
 
     expect(order).toEqual([
-      'load', // parent snapshot for rollback
       'finalize',
+      'load', // parent snapshot for rollback (after finalize so it captures the custom_title append)
       'fork',
       'load', // forked session
       'config.start',
@@ -366,6 +369,50 @@ describe('useBranchCommand', () => {
       expect.objectContaining({
         type: 'error',
         text: expect.stringMatching(/Failed to branch conversation.*init boom/),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('does not roll core back to parent when a post-UI-swap step throws', async () => {
+    // The reviewer's reverse split-brain: once the UI commits to the branch,
+    // any subsequent failure (recordCustomTitle, hook fire, remount,
+    // announcement render) must NOT trigger the catch block's core rollback.
+    // If it did, the user would see the branch UI but every new prompt
+    // would be recorded into the parent's JSONL.
+    //
+    // Pin the invariant by making remount() — which runs after the UI swap —
+    // throw, then assert: only ONE config.startNewSession call (to the
+    // branch), no second call resetting it back to the parent.
+    const oldSessionId = '12345678-aaaa-bbbb-cccc-dddddddddddd';
+    remount.mockImplementation(() => {
+      throw new Error('remount boom');
+    });
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('x');
+    });
+
+    // UI did swap.
+    expect(startNewSessionUI).toHaveBeenCalledTimes(1);
+    expect(clearItems).toHaveBeenCalled();
+    expect(loadHistory).toHaveBeenCalled();
+    // Core did NOT roll back to the parent — only the initial swap to
+    // the branch. A second call with `oldSessionId` would mean the catch
+    // block reverted core while UI stayed on the branch.
+    expect(startNewSessionConfig).toHaveBeenCalledTimes(1);
+    expect(startNewSessionConfig).not.toHaveBeenCalledWith(
+      oldSessionId,
+      expect.anything(),
+    );
+    // The user still sees the failure surfaced as an error item.
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringMatching(
+          /Failed to branch conversation.*remount boom/,
+        ),
       }),
       expect.any(Number),
     );

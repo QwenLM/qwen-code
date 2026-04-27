@@ -124,39 +124,43 @@ export function useBranchCommand(
       const newSessionId = randomUUID();
       const sessionService = config.getSessionService();
 
-      // Snapshot the parent JSONL state up front so a post-swap failure
-      // (see the catch block) can faithfully restore sessionId + recorder
-      // with the correct parentUuid chain tail. `/branch` is guarded on
-      // `isIdleRef`, so the file isn't being mutated concurrently.
-      let prevSessionData: ResumedSessionData | undefined;
-      try {
-        prevSessionData = await sessionService.loadSession(oldSessionId);
-      } catch {
-        // Best-effort snapshot. Falling back to undefined still rolls
-        // back sessionId + recorder, which is the load-bearing invariant;
-        // we just lose the parentUuid chain on the restored recorder.
-      }
-
       let coreSwapped = false;
+      let uiSwapped = false;
+      let prevSessionData: ResumedSessionData | undefined;
 
       try {
-        // 1. Flush outgoing recorder.
+        // 1. Flush outgoing recorder. Must happen BEFORE the parent snapshot
+        //    so the snapshot captures `finalize()`'s trailing custom_title
+        //    record — without that, a rollback restores the recorder with
+        //    a stale `lastCompletedUuid` and the next user message attaches
+        //    its parentUuid to a record that's no longer the JSONL tail.
         try {
           config.getChatRecordingService()?.finalize();
         } catch {
           // best-effort
         }
 
-        // 2. Fork the JSONL on disk.
+        // 2. Snapshot the parent JSONL state for rollback. `/branch` is
+        //    guarded on `isIdleRef`, so the file isn't being mutated
+        //    concurrently between this load and the swap below.
+        try {
+          prevSessionData = await sessionService.loadSession(oldSessionId);
+        } catch {
+          // Best-effort snapshot. Falling back to undefined still rolls
+          // back sessionId + recorder, which is the load-bearing invariant;
+          // we just lose the parentUuid chain on the restored recorder.
+        }
+
+        // 3. Fork the JSONL on disk.
         await sessionService.forkSession(oldSessionId, newSessionId);
 
-        // 3. Load the new file.
+        // 4. Load the new file.
         const resumed = await sessionService.loadSession(newSessionId);
         if (!resumed) {
           throw new Error('Failed to load newly forked session');
         }
 
-        // 4. Swap core first. Anything that can still fail (startNewSession,
+        // 5. Swap core first. Anything that can still fail (startNewSession,
         //    client init) runs while the UI is still showing the parent
         //    session, so a throw leaves the user safely on the parent
         //    instead of stranded with a cleared history and a half-live
@@ -168,13 +172,19 @@ export function useBranchCommand(
         coreSwapped = true;
         await config.getGeminiClient()?.initialize?.();
 
-        // 5. Swap UI.
+        // 6. Swap UI. Once this commits, rolling core back is unsafe —
+        //    it would leave UI on the branch but recorder writing into
+        //    the parent JSONL (the inverse split-brain). `uiSwapped` is
+        //    set immediately after the UI commits so any subsequent
+        //    failure (title, hook, remount, announce) skips the catch
+        //    block's core rollback.
         const uiHistoryItems = buildResumedHistoryItems(resumed, config);
         startNewSession(newSessionId);
         historyManager.clearItems();
         historyManager.loadHistory(uiHistoryItems);
+        uiSwapped = true;
 
-        // 6. Compute and apply the branch customTitle.
+        // 7. Compute and apply the branch customTitle.
         //    The forked transcript is identical to the parent's, so reading
         //    the first real user message from `resumed.conversation.messages`
         //    mirrors Claude's "use the first parent message" behavior.
@@ -187,7 +197,7 @@ export function useBranchCommand(
         config.getChatRecordingService()?.recordCustomTitle(effectiveTitle);
         setSessionName?.(effectiveTitle);
 
-        // 7. Fire SessionStart for the new session. A fork is semantically
+        // 8. Fire SessionStart for the new session. A fork is semantically
         //    distinct from a resume — the sessionId is new and the transcript
         //    is a derivative — so we use the dedicated `Branch` source value
         //    to let hook consumers distinguish the two.
@@ -203,10 +213,10 @@ export function useBranchCommand(
           config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
         }
 
-        // 8. Refresh terminal UI.
+        // 9. Refresh terminal UI.
         remount?.();
 
-        // 9. Announce. Two history items mirror Claude's success message
+        // 10. Announce. Two history items mirror Claude's success message
         //    (branched line + resume hint). The quoted name is the raw
         //    user-provided `name`; no `(Branch)` suffix — that decoration
         //    belongs in the picker/prompt bar, not in the user-facing
@@ -232,11 +242,17 @@ export function useBranchCommand(
           Date.now(),
         );
       } catch (err) {
-        if (coreSwapped) {
-          // Core already switched to the fork before the failure — put it
+        if (coreSwapped && !uiSwapped) {
+          // Core switched to the fork but UI hasn't swapped yet — put core
           // back on the parent, otherwise the recorder would keep writing
           // new user messages into the orphan fork JSONL while UI still
           // shows the parent.
+          //
+          // Skipped once `uiSwapped` is true: at that point UI is already
+          // on the branch, so reverting core would create the inverse
+          // split-brain (UI on branch, recorder on parent). Post-UI-swap
+          // failures (title, hook, remount, announce) are non-fatal and
+          // surfaced as an error item without unwinding the swap.
           try {
             config.startNewSession(oldSessionId, prevSessionData);
             // Re-hydrate chat history against the restored session. Best-
