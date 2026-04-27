@@ -910,9 +910,9 @@ describe('SessionService', () => {
 });
 
 describe('SESSION_TITLE_MAX_LENGTH', () => {
-  it('is exported as a named export from the module', async () => {
+  it('is exported and has correct value', async () => {
     const module = await import('../../src/services/sessionService.js');
-    expect(module.SESSION_TITLE_MAX_LENGTH).toBe(SESSION_TITLE_MAX_LENGTH);
+    expect(module.SESSION_TITLE_MAX_LENGTH).toBe(200);
     expect(SESSION_TITLE_MAX_LENGTH).toBe(200);
   });
 

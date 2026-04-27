@@ -435,15 +435,11 @@ describe('ChatRecordingService', () => {
   // Session resume integration tests should test via SessionService mock
 
   describe('NotificationRecordPayload', () => {
-    it('is exported as a type from the module', async () => {
-      // Regression: NotificationRecordPayload must be importable by
-      // downstream packages (e.g. acp-integration).
-      // Types are erased at runtime, so we verify the module loads correctly.
-      const module = await import('../../src/services/chatRecordingService.js');
-      expect(module).toBeDefined();
-    });
+    // Compile-time regression test: NotificationRecordPayload must be
+    // importable from chatRecordingService module. The fact that this
+    // file compiles (see import on line 17) verifies the export exists.
 
-    it('has correct structure with displayText field', () => {
+    it('requires displayText field', () => {
       const payload: NotificationRecordPayload = {
         displayText: 'Test notification',
       };
@@ -461,6 +457,13 @@ describe('ChatRecordingService', () => {
       };
       expect(payload.displayText).toContain('quotes');
       expect(payload.displayText).toContain('ampersands');
+    });
+
+    it('is importable from the module (compile-time check)', () => {
+      // This test verifies NotificationRecordPayload is exported by
+      // importing it and using it. If the export is removed, tsc fails.
+      const payload: NotificationRecordPayload = { displayText: 'test' };
+      expect(payload).toBeDefined();
     });
   });
 });
