@@ -493,6 +493,11 @@ export const AppContainer = (props: AppContainerProps) => {
     remountStaticHistory();
   }, [remountStaticHistory, stdout]);
 
+  const repaintStaticViewport = useCallback(() => {
+    stdout.write(`${ansiEscapes.cursorTo(0, 0)}${ansiEscapes.eraseDown}`);
+    remountStaticHistory();
+  }, [remountStaticHistory, stdout]);
+
   const {
     isThemeDialogOpen,
     openThemeDialog,
@@ -1610,6 +1615,8 @@ export const AppContainer = (props: AppContainerProps) => {
     pager: settings.merged.tools?.shell?.pager,
     showColor: settings.merged.tools?.shell?.showColor,
   });
+  const previousTerminalWidthRef = useRef(terminalWidth);
+
   useEffect(() => {
     if (activePtyId) {
       ShellExecutionService.resizePty(
@@ -1619,6 +1626,15 @@ export const AppContainer = (props: AppContainerProps) => {
       );
     }
   }, [terminalWidth, availableTerminalHeight, activePtyId]);
+
+  useEffect(() => {
+    if (previousTerminalWidthRef.current === terminalWidth) {
+      return;
+    }
+
+    previousTerminalWidthRef.current = terminalWidth;
+    repaintStaticViewport();
+  }, [terminalWidth, repaintStaticViewport]);
 
   useEffect(() => {
     if (ideNeedsRestart) {

@@ -98,12 +98,23 @@ bounded to the assigned dynamic budget instead of rendering an unbounded list.
 Tool descriptions and subagent result snippets are truncated by visual width,
 not raw UTF-16 length.
 
-### Resize Clear Removal
+### Resize Viewport Repaint
 
-`AppContainer` no longer calls `refreshStatic()` solely because
-`terminalWidth` changed. Active PTYs are still resized so shell dimensions stay
-correct. Explicit replacement flows such as `/clear`, compact-mode replacement,
-rewind, and view switches still own their clear/remount behavior.
+`AppContainer` no longer uses the scrollback-clearing `refreshStatic()` path
+solely because `terminalWidth` changed. A pure removal was not correct: it left
+old `<Static>` header output in the terminal, and narrow/wide reflow could turn
+the previous ASCII art into visible garbled blocks.
+
+The resize path now performs a targeted viewport repaint:
+
+```text
+cursorTo(0, 0) + eraseDown
+```
+
+Then it remounts static history at the new width. Active PTYs are still resized
+so shell dimensions stay correct. Explicit replacement flows such as `/clear`,
+compact-mode replacement, rewind, and view switches still own their
+clear/remount behavior.
 
 ### Shell Live Reflow Gate
 
@@ -128,6 +139,10 @@ the colored path. Resize-only soft-wrap changes do not emit new live chunks.
 ## Acceptance Metrics
 
 All metrics and GIF frames must come from the same deterministic run.
+For resize evidence, a full-screen clear can be emitted and repainted between
+two screenshot samples. The comparison GIF therefore must include the raw ANSI
+clear metric/event annotation and the actual narrow-frame UI, so reviewers can
+verify both the metric fix and the absence of garbled narrow output.
 
 ### Streaming Clear-Storm Scenario
 
@@ -145,8 +160,9 @@ All metrics and GIF frames must come from the same deterministic run.
 - resize 88x26 -> 62x26 -> 100x26 through the PTY;
 - synchronized output is disabled;
 - 50 frames are captured with live terminal flush enabled;
-- pass requires `clearTerminalPairCount == 0`, prompt still visible, and at
-  least 30 frames.
+- pass requires `clearTerminalPairCount == 0`, prompt still visible, no garbled
+  narrow header in the GIF, annotated resize clear events absent on the fixed
+  side, and at least 30 frames.
 
 ## Local Validation Commands
 
@@ -212,12 +228,12 @@ sizes, live flush mode, and synchronized output disabled.
 - The streaming fix is complete for the reproduced assistant/thought
   clear-storm class because pending dynamic height is bounded below the
   terminal viewport before Ink layout.
-- The resize fix removes the automatic resize-only clear path. Explicit
-  replacement operations still clear intentionally and should be validated by
-  their own UX-specific tests if their behavior changes.
+- The resize fix replaces the automatic resize-only `clearTerminal` path with a
+  viewport repaint. This is necessary because removing resize remount entirely
+  leaves stale static ASCII art to be soft-wrapped by the terminal.
 - Tool and subagent detail paths are bounded by visual height/width, including
   single long lines, so they do not depend on explicit newline count.
 - Copying a heavily modified Ink fork is not the preferred fix for these
   reproductions. The verified root causes are unbounded dynamic children and a
-  resize-only static refresh; local bounding plus targeted clear removal is
+  resize-only static refresh; local bounding plus targeted viewport repaint is
   smaller, testable, and easier to keep aligned with upstream Ink.

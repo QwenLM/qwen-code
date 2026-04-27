@@ -446,7 +446,7 @@ describe('AppContainer State Management', () => {
       expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
     });
 
-    it('does not clear the terminal just because width changed', () => {
+    it('does not clear scrollback just because width changed', () => {
       vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
       mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
       const { rerender } = render(
