@@ -13,6 +13,7 @@ import {
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import { OpenAIContentConverter } from './converter.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
+import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { PipelineConfig, RequestContext } from './types.js';
 
 /**
@@ -516,12 +517,20 @@ export class ContentGenerationPipeline {
     const toolCallParser = isStreaming
       ? new StreamingToolCallParser()
       : undefined;
+    const responseParsingOptions =
+      this.config.provider.getResponseParsingOptions?.();
+    const taggedThinkingParser =
+      isStreaming && responseParsingOptions?.taggedThinkingTags
+        ? new TaggedThinkingParser()
+        : undefined;
 
     return {
       model: effectiveModel,
       modalities: this.contentGeneratorConfig.modalities ?? {},
       startTime: Date.now(),
       ...(toolCallParser ? { toolCallParser } : {}),
+      ...(responseParsingOptions ? { responseParsingOptions } : {}),
+      ...(taggedThinkingParser ? { taggedThinkingParser } : {}),
     };
   }
 }

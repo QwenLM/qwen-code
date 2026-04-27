@@ -22,6 +22,7 @@ import type OpenAI from 'openai';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import type { RequestContext } from './types.js';
+import { parseTaggedThinkingText } from './taggedThinkingParser.js';
 import {
   convertSchema,
   type SchemaComplianceMode,
@@ -800,6 +801,22 @@ function extractTextFromContentUnion(contentUnion: unknown): string {
   return '';
 }
 
+function convertOpenAITextToParts(
+  text: string,
+  requestContext: RequestContext,
+  final = true,
+): Part[] {
+  if (!requestContext.responseParsingOptions?.taggedThinkingTags) {
+    return text ? [{ text }] : [];
+  }
+
+  if (requestContext.taggedThinkingParser) {
+    return requestContext.taggedThinkingParser.parse(text, final);
+  }
+
+  return parseTaggedThinkingText(text);
+}
+
 /**
  * Convert OpenAI response to Gemini format.
  */
@@ -823,7 +840,9 @@ export function convertOpenAIResponseToGemini(
 
     // Handle text content
     if (choice.message.content) {
-      parts.push({ text: choice.message.content });
+      parts.push(
+        ...convertOpenAITextToParts(choice.message.content, requestContext),
+      );
     }
 
     // Handle tool calls
@@ -943,10 +962,16 @@ export function convertOpenAIChunkToGemini(
     }
 
     // Handle text content
-    if (choice.delta?.content) {
-      if (typeof choice.delta.content === 'string') {
-        parts.push({ text: choice.delta.content });
-      }
+    if (typeof choice.delta?.content === 'string') {
+      parts.push(
+        ...convertOpenAITextToParts(
+          choice.delta.content,
+          requestContext,
+          Boolean(choice.finish_reason),
+        ),
+      );
+    } else if (choice.finish_reason) {
+      parts.push(...convertOpenAITextToParts('', requestContext, true));
     }
 
     // Handle tool calls using the stream-local parser

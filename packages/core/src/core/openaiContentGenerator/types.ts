@@ -11,13 +11,17 @@ import type {
   InputModalities,
 } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
+import type { OpenAIResponseParsingOptions } from './responseParsingOptions.js';
 import type { StreamingToolCallParser } from './streamingToolCallParser.js';
+import type { TaggedThinkingParser } from './taggedThinkingParser.js';
 
 export interface RequestContext {
   model: string;
   modalities: InputModalities;
   startTime: number;
   toolCallParser?: StreamingToolCallParser;
+  responseParsingOptions?: OpenAIResponseParsingOptions;
+  taggedThinkingParser?: TaggedThinkingParser;
 }
 
 export interface ErrorHandler {
