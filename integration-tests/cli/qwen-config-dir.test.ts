@@ -177,8 +177,11 @@ describe('QWEN_HOME environment variable', () => {
     /**
      * 2b. Settings migration runs against the custom config dir.
      *
-     * --help is sufficient here because loadSettings() (which triggers
-     * migration) runs BEFORE parseArguments() in the startup sequence.
+     * `extensions list` is sufficient here because it is a yargs subcommand
+     * that runs through `main()` and reaches `loadSettings()` (which triggers
+     * migration), without needing an API key or interactive session.
+     * (Note: `--help` cannot be used — yargs intercepts it and exits the
+     * process before `loadSettings()` runs.)
      */
     it('2b: settings migration runs in QWEN_HOME dir', async () => {
       rig.setup('qwen-home-2b-settings-migration');
@@ -198,11 +201,12 @@ describe('QWEN_HOME environment variable', () => {
         JSON.stringify(v1Settings, null, 2),
       );
 
-      // --help triggers loadSettings() (migration) without needing an API key
+      // `extensions list` triggers loadSettings() (migration) without needing
+      // an API key.
       try {
-        await rig.runCommand(['--help']);
+        await rig.runCommand(['extensions', 'list']);
       } catch {
-        // Expected to fail without API key; migration still runs
+        // Tolerate non-zero exit; migration runs regardless.
       }
 
       // Read migrated settings
@@ -232,7 +236,8 @@ describe('QWEN_HOME environment variable', () => {
      * If it mistakenly read from QWEN_HOME, the workspace file would be
      * untouched (already V3 in QWEN_HOME means no migration signal).
      *
-     * Using --help avoids needing an API key for this assertion.
+     * `extensions list` runs through `main()` and reaches `loadSettings()`
+     * (which triggers migration) without needing an API key.
      */
     it('3a: workspace settings are read from project .qwen/, not from QWEN_HOME', async () => {
       rig.setup('qwen-home-3a-isolation');
@@ -267,11 +272,12 @@ describe('QWEN_HOME environment variable', () => {
         ),
       );
 
-      // --help triggers loadSettings() (including migration) without an API call
+      // `extensions list` triggers loadSettings() (including migration)
+      // without needing an API key.
       try {
-        await rig.runCommand(['--help']);
+        await rig.runCommand(['extensions', 'list']);
       } catch {
-        // Expected to fail without API key; migration still runs
+        // Tolerate non-zero exit; migration runs regardless.
       }
 
       // The workspace settings.json must have been migrated to V3 — proving
