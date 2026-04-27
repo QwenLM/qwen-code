@@ -71,6 +71,13 @@ export class Stream<T> implements AsyncIterable<T> {
 
   return(): Promise<IteratorResult<T>> {
     this.isDone = true;
+    // Settle any pending next() promise so awaiters don't hang forever.
+    if (this.readResolve) {
+      const resolve = this.readResolve;
+      this.readResolve = undefined;
+      this.readReject = undefined;
+      resolve({ done: true, value: undefined });
+    }
     if (this.returned) {
       this.returned();
     }

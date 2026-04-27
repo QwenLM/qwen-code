@@ -104,6 +104,7 @@ export const AgentChatView = ({ agentId }: AgentChatViewProps) => {
   const pendingApprovals = interactiveAgent?.getPendingApprovals();
   const liveOutputs = interactiveAgent?.getLiveOutputs();
   const shellPids = interactiveAgent?.getShellPids();
+  const executionStartTimes = interactiveAgent?.getExecutionStartTimes();
   const status = interactiveAgent?.getStatus();
   const isRunning =
     status === AgentStatus.RUNNING || status === AgentStatus.INITIALIZING;
@@ -154,6 +155,7 @@ export const AgentChatView = ({ agentId }: AgentChatViewProps) => {
         pendingApprovals ?? new Map(),
         liveOutputs,
         shellPids,
+        executionStartTimes,
       ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
@@ -162,6 +164,7 @@ export const AgentChatView = ({ agentId }: AgentChatViewProps) => {
       pendingApprovals?.size,
       liveOutputs?.size,
       shellPids?.size,
+      executionStartTimes?.size,
       tickRef.current,
     ],
   );

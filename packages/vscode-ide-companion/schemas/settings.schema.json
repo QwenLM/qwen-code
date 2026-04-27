@@ -51,6 +51,16 @@
           "type": "boolean",
           "default": true
         },
+        "showSessionRecap": {
+          "description": "Auto-show a one-line \"where you left off\" recap when returning to the terminal after being away. Off by default. Use /recap to trigger manually regardless of this setting.",
+          "type": "boolean",
+          "default": false
+        },
+        "sessionRecapAwayThresholdMinutes": {
+          "description": "How many minutes the terminal must be blurred before an auto-recap fires on the next focus-in. Matches Claude Code's default of 5 minutes; raise if you briefly alt-tab and do not want recaps to pile up.",
+          "type": "number",
+          "default": 5
+        },
         "gitCoAuthor": {
           "description": "Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.",
           "type": "boolean",
@@ -73,15 +83,18 @@
           "default": false
         },
         "language": {
-          "description": "The language for the user interface. Use \"auto\" to detect from system settings. You can also use custom language codes (e.g., \"es\", \"fr\") by placing JS language files in ~/.qwen/locales/ (e.g., ~/.qwen/locales/es.js). Options: auto, en, zh, ru, de, ja, pt",
+          "description": "The language for the user interface. Use \"auto\" to detect from system settings. You can also use custom language codes (e.g., \"es\", \"fr\") by placing JS language files in ~/.qwen/locales/ (e.g., ~/.qwen/locales/es.js). Options: auto, en, zh-TW, zh, ru, de, ja, pt, fr, ca",
           "enum": [
             "auto",
             "en",
+            "zh-TW",
             "zh",
             "ru",
             "de",
             "ja",
-            "pt"
+            "pt",
+            "fr",
+            "ca"
           ],
           "default": "auto"
         },
@@ -124,6 +137,20 @@
         }
       }
     },
+    "dualOutput": {
+      "description": "Dual-output sidecar mode: emit structured JSON events to a second channel while the TUI renders normally on stdout. See docs/users/features/dual-output.md. CLI flags take precedence over these settings.",
+      "type": "object",
+      "properties": {
+        "jsonFile": {
+          "description": "File path for structured JSON event output. Equivalent to --json-file. Ignored if --json-fd or --json-file is also set.",
+          "type": "string"
+        },
+        "inputFile": {
+          "description": "File path for remote input commands (JSONL). Equivalent to --input-file. Ignored if --input-file is also set.",
+          "type": "string"
+        }
+      }
+    },
     "ui": {
       "description": "User interface settings.",
       "type": "object",
@@ -134,7 +161,7 @@
           "default": "Qwen Dark"
         },
         "statusLine": {
-          "description": "Custom status line display configuration.",
+          "description": "Custom status line display configuration. Optional `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.",
           "type": "object",
           "additionalProperties": true
         },
@@ -176,7 +203,7 @@
           }
         },
         "enableWelcomeBack": {
-          "description": "Show welcome back dialog when returning to a project with conversation history.",
+          "description": "Show welcome back dialog when returning to a project with conversation history. Choosing \"Start new chat session\" suppresses the dialog for that project until the project summary changes.",
           "type": "boolean",
           "default": true
         },
@@ -224,6 +251,11 @@
           "description": "Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).",
           "type": "boolean",
           "default": false
+        },
+        "shellOutputMaxLines": {
+          "description": "Max number of shell output lines shown inline. Set to 0 to disable the cap and show full output. The hidden line count is still surfaced via the `+N lines` indicator.",
+          "type": "number",
+          "default": 5
         }
       }
     },
@@ -368,6 +400,22 @@
           "type": "boolean",
           "default": false
         },
+        "clearContextOnIdle": {
+          "description": "Settings for clearing stale context after idle periods. Use -1 to disable a threshold.",
+          "type": "object",
+          "properties": {
+            "toolResultsThresholdMinutes": {
+              "description": "Minutes of inactivity before clearing old tool result content. Use -1 to disable.",
+              "type": "number",
+              "default": 60
+            },
+            "toolResultsNumToKeep": {
+              "description": "Number of most-recent compactable tool results to preserve when clearing. Floor at 1.",
+              "type": "number",
+              "default": 5
+            }
+          }
+        },
         "fileFiltering": {
           "description": "Settings for git-aware file filtering.",
           "type": "object",
@@ -393,11 +441,35 @@
               "default": true
             }
           }
+        }
+      }
+    },
+    "memory": {
+      "description": "Settings for managed auto-memory.",
+      "type": "object",
+      "properties": {
+        "enableManagedAutoMemory": {
+          "description": "Enable background extraction of memories from conversations.",
+          "type": "boolean",
+          "default": true
         },
-        "gapThresholdMinutes": {
-          "description": "Minutes of inactivity after which retained thinking blocks are cleared to free context tokens. Aligns with provider prompt-cache TTL.",
-          "type": "number",
-          "default": 5
+        "enableManagedAutoDream": {
+          "description": "Enable automatic consolidation (dream) of collected memories.",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "slashCommands": {
+      "description": "Configuration for slash commands exposed by the CLI. Useful for locking down the command surface in multi-tenant or enterprise deployments.",
+      "type": "object",
+      "properties": {
+        "disabled": {
+          "description": "Slash command names to hide and refuse to execute. Matched case-insensitively against the final command name (for extension commands this is the disambiguated form, e.g. \"myext.deploy\"). Merged as a union across settings scopes, so workspace settings can add to but not remove entries defined in system/user settings.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
@@ -436,6 +508,10 @@
           "description": "Sandbox execution environment (can be a boolean or a path string).",
           "type": "object",
           "additionalProperties": true
+        },
+        "sandboxImage": {
+          "description": "Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.",
+          "type": "string"
         },
         "shell": {
           "description": "Settings for shell execution.",
@@ -588,6 +664,14 @@
               "type": "string"
             }
           }
+        },
+        "allowedHttpHookUrls": {
+          "description": "Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection).",
+          "type": "array",
+          "items": {
+            "description": "URL pattern (supports * wildcard)",
+            "type": "string"
+          }
         }
       }
     },
@@ -623,17 +707,8 @@
         "runtimeOutputDir": {
           "description": "Custom directory for runtime output (temp files, debug logs, session data, todos, etc.). Config files remain at ~/.qwen (or QWEN_HOME if set). Env var QWEN_RUNTIME_DIR takes priority.",
           "type": "string"
-        },
-        "tavilyApiKey": {
-          "description": "⚠️ DEPRECATED: Please use webSearch.provider configuration instead. Legacy API key for the Tavily API.",
-          "type": "string"
         }
       }
-    },
-    "webSearch": {
-      "description": "Configuration for web search providers.",
-      "type": "object",
-      "additionalProperties": true
     },
     "agents": {
       "description": "Settings for multi-agent collaboration features (Arena, Team, Swarm).",
@@ -708,19 +783,38 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry that defines a hook to execute.",
                   "type": "object",
                   "properties": {
                     "type": {
-                      "description": "The type of hook.",
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "http"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
                       "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     },
                     "name": {
                       "description": "An optional name for the hook.",
@@ -731,7 +825,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in milliseconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution.",
                       "type": "number"
                     },
                     "env": {
@@ -740,11 +834,30 @@
                       "additionalProperties": {
                         "type": "string"
                       }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
                     }
                   },
                   "required": [
-                    "type",
-                    "command"
+                    "type"
                   ]
                 }
               }
@@ -773,19 +886,38 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry that defines a hook to execute.",
                   "type": "object",
                   "properties": {
                     "type": {
-                      "description": "The type of hook.",
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "http"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
                       "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     },
                     "name": {
                       "description": "An optional name for the hook.",
@@ -796,7 +928,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in milliseconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution.",
                       "type": "number"
                     },
                     "env": {
@@ -805,11 +937,30 @@
                       "additionalProperties": {
                         "type": "string"
                       }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
                     }
                   },
                   "required": [
-                    "type",
-                    "command"
+                    "type"
                   ]
                 }
               }
@@ -838,19 +989,38 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry that defines a hook to execute.",
                   "type": "object",
                   "properties": {
                     "type": {
-                      "description": "The type of hook.",
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "http"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
                       "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     },
                     "name": {
                       "description": "An optional name for the hook.",
@@ -861,7 +1031,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in milliseconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution.",
                       "type": "number"
                     },
                     "env": {
@@ -870,11 +1040,30 @@
                       "additionalProperties": {
                         "type": "string"
                       }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
                     }
                   },
                   "required": [
-                    "type",
-                    "command"
+                    "type"
                   ]
                 }
               }
@@ -903,19 +1092,38 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry that defines a hook to execute.",
                   "type": "object",
                   "properties": {
                     "type": {
-                      "description": "The type of hook.",
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "http"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
                       "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     },
                     "name": {
                       "description": "An optional name for the hook.",
@@ -926,7 +1134,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in milliseconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution.",
                       "type": "number"
                     },
                     "env": {
@@ -935,11 +1143,30 @@
                       "additionalProperties": {
                         "type": "string"
                       }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
                     }
                   },
                   "required": [
-                    "type",
-                    "command"
+                    "type"
                   ]
                 }
               }
@@ -968,19 +1195,38 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry that defines a hook to execute.",
                   "type": "object",
                   "properties": {
                     "type": {
-                      "description": "The type of hook.",
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "http"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
                       "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     },
                     "name": {
                       "description": "An optional name for the hook.",
@@ -991,7 +1237,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in milliseconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution.",
                       "type": "number"
                     },
                     "env": {
@@ -1000,11 +1246,30 @@
                       "additionalProperties": {
                         "type": "string"
                       }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
                     }
                   },
                   "required": [
-                    "type",
-                    "command"
+                    "type"
                   ]
                 }
               }
@@ -1033,19 +1298,38 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry that defines a hook to execute.",
                   "type": "object",
                   "properties": {
                     "type": {
-                      "description": "The type of hook.",
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "http"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
                       "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     },
                     "name": {
                       "description": "An optional name for the hook.",
@@ -1056,7 +1340,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in milliseconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution.",
                       "type": "number"
                     },
                     "env": {
@@ -1065,11 +1349,30 @@
                       "additionalProperties": {
                         "type": "string"
                       }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
                     }
                   },
                   "required": [
-                    "type",
-                    "command"
+                    "type"
                   ]
                 }
               }
@@ -1098,19 +1401,38 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry that defines a hook to execute.",
                   "type": "object",
                   "properties": {
                     "type": {
-                      "description": "The type of hook.",
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "http"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
                       "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     },
                     "name": {
                       "description": "An optional name for the hook.",
@@ -1121,7 +1443,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in milliseconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution.",
                       "type": "number"
                     },
                     "env": {
@@ -1130,11 +1452,30 @@
                       "additionalProperties": {
                         "type": "string"
                       }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
                     }
                   },
                   "required": [
-                    "type",
-                    "command"
+                    "type"
                   ]
                 }
               }
@@ -1163,19 +1504,38 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry that defines a hook to execute.",
                   "type": "object",
                   "properties": {
                     "type": {
-                      "description": "The type of hook.",
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "http"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
                       "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     },
                     "name": {
                       "description": "An optional name for the hook.",
@@ -1186,7 +1546,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in milliseconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution.",
                       "type": "number"
                     },
                     "env": {
@@ -1195,11 +1555,30 @@
                       "additionalProperties": {
                         "type": "string"
                       }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
                     }
                   },
                   "required": [
-                    "type",
-                    "command"
+                    "type"
                   ]
                 }
               }
@@ -1228,19 +1607,38 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry that defines a hook to execute.",
                   "type": "object",
                   "properties": {
                     "type": {
-                      "description": "The type of hook.",
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "http"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
                       "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     },
                     "name": {
                       "description": "An optional name for the hook.",
@@ -1251,7 +1649,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in milliseconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution.",
                       "type": "number"
                     },
                     "env": {
@@ -1260,11 +1658,30 @@
                       "additionalProperties": {
                         "type": "string"
                       }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
                     }
                   },
                   "required": [
-                    "type",
-                    "command"
+                    "type"
                   ]
                 }
               }
@@ -1293,19 +1710,38 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry that defines a hook to execute.",
                   "type": "object",
                   "properties": {
                     "type": {
-                      "description": "The type of hook.",
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "http"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
                       "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     },
                     "name": {
                       "description": "An optional name for the hook.",
@@ -1316,7 +1752,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in milliseconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution.",
                       "type": "number"
                     },
                     "env": {
@@ -1325,11 +1761,30 @@
                       "additionalProperties": {
                         "type": "string"
                       }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
                     }
                   },
                   "required": [
-                    "type",
-                    "command"
+                    "type"
                   ]
                 }
               }
@@ -1358,19 +1813,38 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry that defines a hook to execute.",
                   "type": "object",
                   "properties": {
                     "type": {
-                      "description": "The type of hook.",
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "http"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
                       "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     },
                     "name": {
                       "description": "An optional name for the hook.",
@@ -1381,7 +1855,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in milliseconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution.",
                       "type": "number"
                     },
                     "env": {
@@ -1390,11 +1864,30 @@
                       "additionalProperties": {
                         "type": "string"
                       }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
                     }
                   },
                   "required": [
-                    "type",
-                    "command"
+                    "type"
                   ]
                 }
               }
@@ -1423,19 +1916,38 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry that defines a hook to execute.",
                   "type": "object",
                   "properties": {
                     "type": {
-                      "description": "The type of hook.",
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "http"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
                       "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     },
                     "name": {
                       "description": "An optional name for the hook.",
@@ -1446,7 +1958,7 @@
                       "type": "string"
                     },
                     "timeout": {
-                      "description": "Timeout in milliseconds for the hook execution.",
+                      "description": "Timeout in seconds for the hook execution.",
                       "type": "number"
                     },
                     "env": {
@@ -1455,11 +1967,30 @@
                       "additionalProperties": {
                         "type": "string"
                       }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
                     }
                   },
                   "required": [
-                    "type",
-                    "command"
+                    "type"
                   ]
                 }
               }

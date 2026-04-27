@@ -32,7 +32,10 @@ export function parseAndFormatApiError(
 ): string {
   if (isStructuredError(error)) {
     // Qwen OAuth quota errors have their own user-friendly message; don't wrap them
-    if (error.message.startsWith('Qwen OAuth quota exceeded:')) {
+    if (
+      error.message.startsWith('Qwen OAuth quota exceeded:') ||
+      error.message.startsWith('Qwen OAuth free tier has been discontinued')
+    ) {
       return error.message;
     }
 

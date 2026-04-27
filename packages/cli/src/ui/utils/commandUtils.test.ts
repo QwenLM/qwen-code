@@ -14,6 +14,7 @@ import {
   copyToClipboard,
   getUrlOpenCommand,
   CodePage,
+  findMidInputSlashCommand,
 } from './commandUtils.js';
 
 // Mock child_process
@@ -91,14 +92,14 @@ describe('commandUtils', () => {
   describe('isSlashCommand', () => {
     it('should return true when query starts with /', () => {
       expect(isSlashCommand('/help')).toBe(true);
-      expect(isSlashCommand('/memory show')).toBe(true);
+      expect(isSlashCommand('/config set')).toBe(true);
       expect(isSlashCommand('/clear')).toBe(true);
       expect(isSlashCommand('/')).toBe(true);
     });
 
     it('should return false when query does not start with /', () => {
       expect(isSlashCommand('help')).toBe(false);
-      expect(isSlashCommand('memory show')).toBe(false);
+      expect(isSlashCommand('config set')).toBe(false);
       expect(isSlashCommand('')).toBe(false);
       expect(isSlashCommand('path/to/file')).toBe(false);
       expect(isSlashCommand(' /help')).toBe(false);
@@ -485,5 +486,53 @@ describe('commandUtils', () => {
         expect(getUrlOpenCommand()).toBe('xdg-open');
       });
     });
+  });
+});
+
+describe('findMidInputSlashCommand', () => {
+  it('returns null when input starts with / (handled by start-of-line completion)', () => {
+    expect(findMidInputSlashCommand('/review', 7)).toBeNull();
+  });
+
+  it('returns null when cursor is before the slash token', () => {
+    // "hello /review", cursor at position 3 (inside "hello")
+    expect(findMidInputSlashCommand('hello /review', 3)).toBeNull();
+  });
+
+  it('returns match when cursor is exactly at the end of the token', () => {
+    // "hello /re", cursor at end (offset=9)
+    const result = findMidInputSlashCommand('hello /re', 9);
+    expect(result).toEqual({
+      token: '/re',
+      startPos: 6,
+      partialCommand: 're',
+    });
+  });
+
+  it('returns null when cursor is inside the token (not at the end)', () => {
+    // "hello /review", cursor at offset 9 (inside 'review')
+    // slashPos=6, fullCommand="review"(len=6), end=13 → 9 !== 13 → null
+    expect(findMidInputSlashCommand('hello /review', 9)).toBeNull();
+  });
+
+  it('returns null when cursor has moved past the token into a space', () => {
+    // "hello /review ", cursor at offset 14 (after the trailing space)
+    expect(findMidInputSlashCommand('hello /review ', 14)).toBeNull();
+  });
+
+  it('returns match for empty partial (cursor immediately after /)', () => {
+    // partialCommand="" → getBestSlashCommandMatch will return null, but
+    // findMidInputSlashCommand itself should return the match object
+    const result = findMidInputSlashCommand('hello /', 7);
+    expect(result).toEqual({
+      token: '/',
+      startPos: 6,
+      partialCommand: '',
+    });
+  });
+
+  it('returns null when / is not preceded by whitespace', () => {
+    // "hello/review", no space before slash
+    expect(findMidInputSlashCommand('hello/review', 12)).toBeNull();
   });
 });

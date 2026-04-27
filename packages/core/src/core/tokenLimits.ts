@@ -191,6 +191,22 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^kimi-k2\.5/, LIMITS['32k']],
 ];
 
+function findTokenLimit(
+  model: Model,
+  type: TokenLimitType = 'input',
+): TokenCount | undefined {
+  const norm = normalize(model);
+  const patterns = type === 'output' ? OUTPUT_PATTERNS : PATTERNS;
+
+  for (const [regex, limit] of patterns) {
+    if (regex.test(norm)) {
+      return limit;
+    }
+  }
+
+  return undefined;
+}
+
 /**
  * Check if a model has an explicitly defined output token limit.
  * This distinguishes between models with known limits in OUTPUT_PATTERNS
@@ -202,6 +218,13 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
 export function hasExplicitOutputLimit(model: Model): boolean {
   const norm = normalize(model);
   return OUTPUT_PATTERNS.some(([regex]) => regex.test(norm));
+}
+
+export function knownTokenLimit(
+  model: Model,
+  type: TokenLimitType = 'input',
+): TokenCount | undefined {
+  return findTokenLimit(model, type);
 }
 
 /**
@@ -223,17 +246,8 @@ export function tokenLimit(
   model: Model,
   type: TokenLimitType = 'input',
 ): TokenCount {
-  const norm = normalize(model);
-
-  // Choose the appropriate patterns based on token type
-  const patterns = type === 'output' ? OUTPUT_PATTERNS : PATTERNS;
-
-  for (const [regex, limit] of patterns) {
-    if (regex.test(norm)) {
-      return limit;
-    }
-  }
-
-  // Return appropriate default based on token type
-  return type === 'output' ? DEFAULT_OUTPUT_TOKEN_LIMIT : DEFAULT_TOKEN_LIMIT;
+  return (
+    knownTokenLimit(model, type) ??
+    (type === 'output' ? DEFAULT_OUTPUT_TOKEN_LIMIT : DEFAULT_TOKEN_LIMIT)
+  );
 }

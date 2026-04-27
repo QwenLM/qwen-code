@@ -17,96 +17,13 @@ import { getShellConfiguration } from '../utils/shell-utils.js';
 import pkg from '@xterm/headless';
 import {
   serializeTerminalToObject,
+  serializeTerminalToText,
   type AnsiOutput,
 } from '../utils/terminalSerializer.js';
+import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 const { Terminal } = pkg;
 
 const SIGKILL_TIMEOUT_MS = 200;
-const WINDOWS_PATH_DELIMITER = ';';
-let cachedWindowsPathFingerprint: string | undefined;
-let cachedMergedWindowsPath: string | undefined;
-
-function mergeWindowsPathValues(
-  env: NodeJS.ProcessEnv,
-  pathKeys: string[],
-): string | undefined {
-  const mergedEntries: string[] = [];
-  const seenEntries = new Set<string>();
-
-  for (const key of pathKeys) {
-    const value = env[key];
-    if (value === undefined) {
-      continue;
-    }
-
-    for (const entry of value.split(WINDOWS_PATH_DELIMITER)) {
-      if (seenEntries.has(entry)) {
-        continue;
-      }
-      seenEntries.add(entry);
-      mergedEntries.push(entry);
-    }
-  }
-
-  return mergedEntries.length > 0
-    ? mergedEntries.join(WINDOWS_PATH_DELIMITER)
-    : undefined;
-}
-
-function getWindowsPathFingerprint(
-  env: NodeJS.ProcessEnv,
-  pathKeys: string[],
-): string {
-  return pathKeys.map((key) => `${key}=${env[key] ?? ''}`).join('\0');
-}
-
-function normalizePathEnvForWindows(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  if (os.platform() !== 'win32') {
-    return env;
-  }
-
-  const normalized: NodeJS.ProcessEnv = { ...env };
-  const pathKeys = Object.keys(normalized).filter(
-    (key) => key.toLowerCase() === 'path',
-  );
-
-  if (pathKeys.length === 0) {
-    return normalized;
-  }
-
-  const orderedPathKeys = [...pathKeys].sort((left, right) => {
-    if (left === 'PATH') {
-      return -1;
-    }
-    if (right === 'PATH') {
-      return 1;
-    }
-    return left.localeCompare(right);
-  });
-
-  const fingerprint = getWindowsPathFingerprint(normalized, orderedPathKeys);
-  const canonicalValue =
-    fingerprint === cachedWindowsPathFingerprint
-      ? cachedMergedWindowsPath
-      : mergeWindowsPathValues(normalized, orderedPathKeys);
-
-  if (fingerprint !== cachedWindowsPathFingerprint) {
-    cachedWindowsPathFingerprint = fingerprint;
-    cachedMergedWindowsPath = canonicalValue;
-  }
-
-  for (const key of pathKeys) {
-    if (key !== 'PATH') {
-      delete normalized[key];
-    }
-  }
-
-  if (canonicalValue !== undefined) {
-    normalized['PATH'] = canonicalValue;
-  }
-
-  return normalized;
-}
 
 /**
  * On Windows with PowerShell, prefix the command with a statement that forces
@@ -198,12 +115,12 @@ const getErrorMessage = (error: unknown): string =>
 
 const isExpectedPtyReadExitError = (error: unknown): boolean => {
   const code = getErrnoCode(error);
-  if (code === 'EIO') {
+  if (code === 'EIO' || code === 'EAGAIN') {
     return true;
   }
 
   const message = getErrorMessage(error);
-  return message.includes('read EIO');
+  return message.includes('read EIO') || message.includes('EAGAIN');
 };
 
 const isExpectedPtyExitRaceError = (error: unknown): boolean => {
@@ -217,17 +134,6 @@ const isExpectedPtyExitRaceError = (error: unknown): boolean => {
     message.includes('ioctl(2) failed, EBADF') ||
     message.includes('Cannot resize a pty that has already exited')
   );
-};
-
-const getFullBufferText = (terminal: pkg.Terminal): string => {
-  const buffer = terminal.buffer.active;
-  const lines: string[] = [];
-  for (let i = 0; i < buffer.length; i++) {
-    const line = buffer.getLine(i);
-    const lineContent = line ? line.translateToString(true) : '';
-    lines.push(lineContent);
-  }
-  return lines.join('\n').trimEnd();
 };
 
 const replayTerminalOutput = async (
@@ -247,7 +153,90 @@ const replayTerminalOutput = async (
     replayTerminal.write(output, () => resolve());
   });
 
-  return getFullBufferText(replayTerminal);
+  return serializeTerminalToText(replayTerminal);
+};
+
+const getLastNonEmptyAnsiLineIndex = (output: AnsiOutput): number => {
+  for (let i = output.length - 1; i >= 0; i--) {
+    const line = output[i];
+    if (
+      line
+        .map((segment) => segment.text)
+        .join('')
+        .trim().length > 0
+    ) {
+      return i;
+    }
+  }
+
+  return -1;
+};
+
+const trimTrailingEmptyAnsiLines = (output: AnsiOutput): AnsiOutput =>
+  output.slice(0, getLastNonEmptyAnsiLineIndex(output) + 1);
+
+const areAnsiOutputsEqual = (
+  left: AnsiOutput | null,
+  right: AnsiOutput,
+): boolean => {
+  if (!left || left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((leftLine, lineIndex) => {
+    const rightLine = right[lineIndex];
+    if (leftLine.length !== rightLine.length) {
+      return false;
+    }
+
+    return leftLine.every((leftToken, tokenIndex) => {
+      const rightToken = rightLine[tokenIndex];
+      return (
+        leftToken.text === rightToken.text &&
+        leftToken.bold === rightToken.bold &&
+        leftToken.italic === rightToken.italic &&
+        leftToken.underline === rightToken.underline &&
+        leftToken.dim === rightToken.dim &&
+        leftToken.inverse === rightToken.inverse &&
+        leftToken.fg === rightToken.fg &&
+        leftToken.bg === rightToken.bg
+      );
+    });
+  });
+};
+
+const createPlainAnsiLine = (text: string) => [
+  {
+    text,
+    bold: false,
+    italic: false,
+    underline: false,
+    dim: false,
+    inverse: false,
+    fg: '',
+    bg: '',
+  },
+];
+
+const serializePlainViewportToAnsiOutput = (
+  terminal: pkg.Terminal,
+  unwrapWrappedLines = false,
+): AnsiOutput => {
+  const buffer = terminal.buffer.active;
+  const lines: AnsiOutput = [];
+
+  for (let y = 0; y < terminal.rows; y++) {
+    const line = buffer.getLine(buffer.viewportY + y);
+    const lineContent = line ? line.translateToString(true) : '';
+
+    if (unwrapWrappedLines && line?.isWrapped && lines.length > 0) {
+      lines[lines.length - 1][0].text += lineContent;
+    } else {
+      lines.push(createPlainAnsiLine(lineContent));
+    }
+  }
+
+  return lines;
 };
 
 interface ProcessCleanupStrategy {
@@ -620,7 +609,7 @@ export class ShellExecutionService {
 
         let processingChain = Promise.resolve();
         let decoder: TextDecoder | null = null;
-        let output: string | AnsiOutput | null = null;
+        let outputComparison: AnsiOutput | null = null;
         const outputChunks: Buffer[] = [];
         const error: Error | null = null;
         let exited = false;
@@ -642,7 +631,7 @@ export class ShellExecutionService {
 
           if (!shellExecutionConfig.disableDynamicLineTrimming) {
             if (!hasStartedOutput) {
-              const bufferText = getFullBufferText(headlessTerminal);
+              const bufferText = serializeTerminalToText(headlessTerminal);
               if (bufferText.trim().length === 0) {
                 return;
               }
@@ -651,53 +640,36 @@ export class ShellExecutionService {
           }
 
           let newOutput: AnsiOutput;
+          let newOutputComparison: AnsiOutput;
           if (shellExecutionConfig.showColor) {
             newOutput = serializeTerminalToObject(headlessTerminal);
+            newOutputComparison = serializeTerminalToObject(
+              headlessTerminal,
+              0,
+              { unwrapWrappedLines: true },
+            );
           } else {
-            const buffer = headlessTerminal.buffer.active;
-            const lines: AnsiOutput = [];
-            for (let y = 0; y < headlessTerminal.rows; y++) {
-              const line = buffer.getLine(buffer.viewportY + y);
-              const lineContent = line ? line.translateToString(true) : '';
-              lines.push([
-                {
-                  text: lineContent,
-                  bold: false,
-                  italic: false,
-                  underline: false,
-                  dim: false,
-                  inverse: false,
-                  fg: '',
-                  bg: '',
-                },
-              ]);
-            }
-            newOutput = lines;
+            newOutput = serializePlainViewportToAnsiOutput(headlessTerminal);
+            newOutputComparison = serializePlainViewportToAnsiOutput(
+              headlessTerminal,
+              true,
+            );
           }
 
-          let lastNonEmptyLine = -1;
-          for (let i = newOutput.length - 1; i >= 0; i--) {
-            const line = newOutput[i];
-            if (
-              line
-                .map((segment) => segment.text)
-                .join('')
-                .trim().length > 0
-            ) {
-              lastNonEmptyLine = i;
-              break;
-            }
-          }
-
-          const trimmedOutput = newOutput.slice(0, lastNonEmptyLine + 1);
+          const trimmedOutput = trimTrailingEmptyAnsiLines(newOutput);
+          const trimmedOutputComparison =
+            trimTrailingEmptyAnsiLines(newOutputComparison);
 
           const finalOutput = shellExecutionConfig.disableDynamicLineTrimming
             ? newOutput
             : trimmedOutput;
+          const finalOutputComparison =
+            shellExecutionConfig.disableDynamicLineTrimming
+              ? newOutputComparison
+              : trimmedOutputComparison;
 
-          // Using stringify for a quick deep comparison.
-          if (JSON.stringify(output) !== JSON.stringify(finalOutput)) {
-            output = finalOutput;
+          if (!areAnsiOutputsEqual(outputComparison, finalOutputComparison)) {
+            outputComparison = finalOutputComparison;
             onOutputEvent({
               type: 'data',
               chunk: finalOutput,
@@ -843,11 +815,11 @@ export class ShellExecutionService {
                     rows,
                   );
                 } else {
-                  fullOutput = getFullBufferText(headlessTerminal);
+                  fullOutput = serializeTerminalToText(headlessTerminal);
                 }
               } catch {
                 try {
-                  fullOutput = getFullBufferText(headlessTerminal);
+                  fullOutput = serializeTerminalToText(headlessTerminal);
                 } catch {
                   // Ignore fallback rendering errors and resolve with empty text.
                 }

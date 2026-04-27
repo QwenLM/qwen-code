@@ -10,6 +10,7 @@ import {
   loadSkillsFromDir,
   validateConfig,
 } from './skill-load.js';
+import { parseModelField } from './types.js';
 import * as fs from 'fs/promises';
 
 // Mock file system operations
@@ -40,6 +41,13 @@ describe('skill-load', () => {
           name: 'test-skill',
           description: 'A test skill',
           allowedTools: ['read_file', 'write_file'],
+        };
+      }
+      if (yamlString.includes('argument-hint:')) {
+        return {
+          name: 'test-skill',
+          description: 'A test skill',
+          'argument-hint': '[topic]',
         };
       }
       // Default case
@@ -173,6 +181,21 @@ You are a helpful assistant with this skill.
       expect(config.allowedTools).toEqual(['read_file', 'write_file']);
     });
 
+    it('should parse argument-hint from frontmatter', () => {
+      const markdownWithArgumentHint = `---
+name: test-skill
+description: A test skill
+argument-hint: "[topic]"
+---
+
+Skill body.
+`;
+
+      const config = parseSkillContent(markdownWithArgumentHint, testFilePath);
+
+      expect(config.argumentHint).toBe('[topic]');
+    });
+
     it('should throw error for invalid format without frontmatter', () => {
       const invalidMarkdown = `# Just a heading
 Some content without frontmatter.
@@ -298,6 +321,94 @@ Valid skill.
 
       expect(result.isValid).toBe(true);
       expect(result.warnings).toContain('Skill body is empty');
+    });
+  });
+
+  describe('parseModelField', () => {
+    it('should return the model string for a valid model', () => {
+      expect(parseModelField({ model: 'qwen-max' })).toBe('qwen-max');
+    });
+
+    it('should return undefined when model is omitted', () => {
+      expect(parseModelField({})).toBeUndefined();
+    });
+
+    it('should return undefined for "inherit"', () => {
+      expect(parseModelField({ model: 'inherit' })).toBeUndefined();
+    });
+
+    it('should return undefined for empty string', () => {
+      expect(parseModelField({ model: '' })).toBeUndefined();
+    });
+
+    it('should return undefined for whitespace-only string', () => {
+      expect(parseModelField({ model: '   ' })).toBeUndefined();
+    });
+
+    it('should trim whitespace from model string', () => {
+      expect(parseModelField({ model: '  qwen-max  ' })).toBe('qwen-max');
+    });
+
+    it('should throw for non-string types', () => {
+      expect(() => parseModelField({ model: 123 })).toThrow(
+        '"model" must be a string',
+      );
+      expect(() => parseModelField({ model: true })).toThrow(
+        '"model" must be a string',
+      );
+    });
+
+    it('should treat "inherit" case-sensitively', () => {
+      expect(parseModelField({ model: 'Inherit' })).toBe('Inherit');
+      expect(parseModelField({ model: 'INHERIT' })).toBe('INHERIT');
+    });
+  });
+
+  describe('parseSkillContent model field', () => {
+    const testFilePath = '/test/extension/skills/model-test/SKILL.md';
+
+    it('should parse model from frontmatter', () => {
+      mockParseYaml.mockReturnValue({
+        name: 'model-test',
+        description: 'Test skill with model',
+        model: 'qwen-max',
+      });
+
+      const config = parseSkillContent(
+        `---\nname: model-test\ndescription: Test skill with model\nmodel: qwen-max\n---\n\nBody text.`,
+        testFilePath,
+      );
+
+      expect(config.model).toBe('qwen-max');
+    });
+
+    it('should set model to undefined when omitted', () => {
+      mockParseYaml.mockReturnValue({
+        name: 'model-test',
+        description: 'Test skill without model',
+      });
+
+      const config = parseSkillContent(
+        `---\nname: model-test\ndescription: Test skill without model\n---\n\nBody text.`,
+        testFilePath,
+      );
+
+      expect(config.model).toBeUndefined();
+    });
+
+    it('should set model to undefined for "inherit"', () => {
+      mockParseYaml.mockReturnValue({
+        name: 'model-test',
+        description: 'Test skill with inherit',
+        model: 'inherit',
+      });
+
+      const config = parseSkillContent(
+        `---\nname: model-test\ndescription: Test skill with inherit\nmodel: inherit\n---\n\nBody text.`,
+        testFilePath,
+      );
+
+      expect(config.model).toBeUndefined();
     });
   });
 });

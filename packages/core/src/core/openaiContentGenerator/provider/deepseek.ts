@@ -22,8 +22,17 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
     contentGeneratorConfig: ContentGeneratorConfig,
   ): boolean {
     const baseUrl = contentGeneratorConfig.baseUrl ?? '';
+    if (baseUrl.toLowerCase().includes('api.deepseek.com')) {
+      return true;
+    }
 
-    return baseUrl.toLowerCase().includes('api.deepseek.com');
+    // DeepSeek models served behind any OpenAI-compatible endpoint (sglang,
+    // vllm, ollama, etc.) share the same content-format constraint that the
+    // official api.deepseek.com endpoint has. Detect them by model name so
+    // the buildRequest flattening below kicks in.
+    // See https://github.com/QwenLM/qwen-code/issues/3613
+    const model = contentGeneratorConfig.model ?? '';
+    return model.toLowerCase().includes('deepseek');
   }
 
   /**

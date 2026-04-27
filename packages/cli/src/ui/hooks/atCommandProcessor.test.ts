@@ -1132,5 +1132,30 @@ describe('handleAtCommand', () => {
       expect(result.toolDisplays!.length).toBeGreaterThanOrEqual(1);
       expect(result.toolDisplays![0].description).toContain('file.txt');
     });
+
+    it('should mark per-file failures as Error status, not Success', async () => {
+      // Trigger the >10MB size error in processSingleFileContent so the
+      // readManyFiles result carries a per-file `error` field.
+      const filePath = path.join(testRootDir, 'oversized.bin');
+      await fsPromises.mkdir(path.dirname(filePath), { recursive: true });
+      await fsPromises.writeFile(filePath, Buffer.alloc(10 * 1024 * 1024 + 1));
+      const query = `@${filePath}`;
+
+      const result = await handleAtCommand({
+        query,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 504,
+        signal: abortController.signal,
+      });
+
+      expect(result.toolDisplays).toBeDefined();
+      expect(result.toolDisplays).toHaveLength(1);
+      expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Error);
+      expect(result.toolDisplays![0].resultDisplay).toContain(
+        'Failed to read oversized.bin',
+      );
+      expect(result.toolDisplays![0].resultDisplay).toContain('10MB');
+    });
   });
 });

@@ -611,6 +611,7 @@ export class QwenLogger {
       properties: {
         model: event.model,
         prompt_id: event.prompt_id,
+        subagent_name: event.subagent_name,
       },
     });
 
@@ -628,6 +629,7 @@ export class QwenLogger {
         auth_type: event.auth_type,
         model: event.model,
         prompt_id: event.prompt_id,
+        subagent_name: event.subagent_name,
       },
       snapshots: JSON.stringify({
         input_token_count: event.input_token_count,
@@ -666,6 +668,7 @@ export class QwenLogger {
         auth_type: event.auth_type,
         model: event.model,
         prompt_id: event.prompt_id,
+        subagent_name: event.subagent_name,
         error_message: event.error_message,
         error_type: event.error_type,
       },

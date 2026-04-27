@@ -794,4 +794,179 @@ describe('HookAggregator', () => {
       expect(hookOutput.isBlockingDecision()).toBe(false);
     });
   });
+
+  describe('StopFailure - fire-and-forget special handling', () => {
+    it('should always return success true for StopFailure', () => {
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: { type: HookType.Command, command: 'echo test' },
+          eventName: HookEventName.StopFailure,
+          success: false,
+          error: new Error('Hook failed'),
+          duration: 100,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.StopFailure,
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('should ignore all outputs for StopFailure', () => {
+      const outputs: HookOutput[] = [
+        { decision: 'block', reason: 'should be ignored' },
+        { continue: false, stopReason: 'also ignored' },
+      ];
+
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.StopFailure,
+        success: true,
+        output,
+        duration: 100,
+      }));
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.StopFailure,
+      );
+      expect(result.allOutputs).toEqual([]);
+      expect(result.finalOutput).toBeUndefined();
+    });
+
+    it('should ignore all errors for StopFailure', () => {
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: { type: HookType.Command, command: 'hook1.sh' },
+          eventName: HookEventName.StopFailure,
+          success: false,
+          error: new Error('First error'),
+          duration: 50,
+        },
+        {
+          hookConfig: { type: HookType.Command, command: 'hook2.sh' },
+          eventName: HookEventName.StopFailure,
+          success: false,
+          error: new Error('Second error'),
+          duration: 75,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.StopFailure,
+      );
+      expect(result.success).toBe(true);
+      expect(result.errors).toEqual([]);
+    });
+
+    it('should calculate total duration for StopFailure', () => {
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: { type: HookType.Command, command: 'hook1.sh' },
+          eventName: HookEventName.StopFailure,
+          success: true,
+          duration: 100,
+        },
+        {
+          hookConfig: { type: HookType.Command, command: 'hook2.sh' },
+          eventName: HookEventName.StopFailure,
+          success: true,
+          duration: 200,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.StopFailure,
+      );
+      expect(result.totalDuration).toBe(300);
+    });
+
+    it('should return empty result for StopFailure with no hooks', () => {
+      const result = aggregator.aggregateResults([], HookEventName.StopFailure);
+      expect(result.success).toBe(true);
+      expect(result.allOutputs).toEqual([]);
+      expect(result.errors).toEqual([]);
+      expect(result.totalDuration).toBe(0);
+      expect(result.finalOutput).toBeUndefined();
+    });
+  });
+
+  describe('PostCompact - mergeSimple', () => {
+    it('should use mergeSimple for PostCompact event', () => {
+      const outputs: HookOutput[] = [
+        { reason: 'first', continue: true },
+        { reason: 'second', continue: false },
+      ];
+
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.PostCompact,
+        success: true,
+        output,
+        duration: 100,
+      }));
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.PostCompact,
+      );
+      // mergeSimple uses later values for simple fields
+      expect(result.finalOutput?.reason).toBe('second');
+      expect(result.finalOutput?.continue).toBe(false);
+    });
+
+    it('should concatenate additionalContext for PostCompact', () => {
+      const outputs: HookOutput[] = [
+        { hookSpecificOutput: { additionalContext: 'context 1' } },
+        { hookSpecificOutput: { additionalContext: 'context 2' } },
+      ];
+
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.PostCompact,
+        success: true,
+        output,
+        duration: 100,
+      }));
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.PostCompact,
+      );
+      expect(
+        result.finalOutput?.hookSpecificOutput?.['additionalContext'],
+      ).toBe('context 1\ncontext 2');
+    });
+
+    it('should handle single output for PostCompact', () => {
+      const output: HookOutput = {
+        hookSpecificOutput: {
+          hookEventName: 'PostCompact',
+          additionalContext: 'single context',
+        },
+      };
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: { type: HookType.Command, command: 'echo test' },
+          eventName: HookEventName.PostCompact,
+          success: true,
+          output,
+          duration: 100,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.PostCompact,
+      );
+      expect(result.finalOutput).toBeDefined();
+      expect(
+        result.finalOutput?.hookSpecificOutput?.['additionalContext'],
+      ).toBe('single context');
+    });
+  });
 });

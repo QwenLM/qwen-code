@@ -14,6 +14,15 @@ import type { FzfResultItem } from 'fzf';
 import { AsyncFzf } from 'fzf';
 import { unescapePath } from '../paths.js';
 
+/**
+ * Safety cap on the number of file entries the recursive crawler will
+ * materialise in memory. Without this, workspaces with millions of files
+ * (e.g. missing .gitignore, huge node_modules trees) can push Node.js past
+ * its heap limit and crash with an OOM.  100 000 entries is generous enough
+ * for virtually all real projects while keeping peak memory well under 100 MB.
+ */
+const MAX_CRAWL_FILES = 100_000;
+
 export interface FileSearchOptions {
   projectRoot: string;
   ignoreDirs: string[];
@@ -108,6 +117,7 @@ class RecursiveFileSearch implements FileSearch {
       cache: this.options.cache,
       cacheTtl: this.options.cacheTtl,
       maxDepth: this.options.maxDepth,
+      maxFiles: MAX_CRAWL_FILES,
     });
     this.buildResultCache();
   }

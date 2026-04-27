@@ -39,6 +39,7 @@ let mockGeminiClientInstance: Mocked<GeminiClient>;
 const fsService = new StandardFileSystemService();
 const mockConfigInternal = {
   getTargetDir: () => rootDir,
+  getProjectRoot: () => rootDir,
   getApprovalMode: vi.fn(() => ApprovalMode.DEFAULT),
   setApprovalMode: vi.fn(),
   getGeminiClient: vi.fn(), // Initialize as a plain mock function

@@ -5,6 +5,7 @@
  */
 
 import type { ModelInfo } from '@agentclientprotocol/sdk';
+import { knownTokenLimit } from '@qwen-code/qwen-code-core/src/core/tokenLimits.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 
 type AcpMeta = Record<string, unknown>;
@@ -17,6 +18,15 @@ const asMeta = (value: unknown): AcpMeta | null | undefined => {
     return value as AcpMeta;
   }
   return undefined;
+};
+
+const getContextLimitFromMeta = (
+  meta: AcpMeta | null | undefined,
+): number | null | undefined => {
+  const metaLimit = meta?.['contextLimit'];
+  return typeof metaLimit === 'number' || metaLimit === null
+    ? metaLimit
+    : undefined;
 };
 
 const normalizeModelInfo = (value: unknown): ModelInfo | null => {
@@ -48,10 +58,25 @@ const normalizeModelInfo = (value: unknown): ModelInfo | null => {
 
   // Back-compat: older implementations used `contextLimit` at the top-level.
   const legacyContextLimit = obj['contextLimit'];
-  const contextLimit =
+  const legacyLimit =
     typeof legacyContextLimit === 'number' || legacyContextLimit === null
       ? legacyContextLimit
       : undefined;
+  const metaLimit = getContextLimitFromMeta(metaFromWire);
+  const derivedLimit = knownTokenLimit(modelId || name);
+
+  // Priority: legacy numeric > meta numeric > derived from known model > explicit null > undefined.
+  // An explicit `null` from the server means "limit intentionally unknown"; `undefined` means "not provided".
+  const contextLimit =
+    typeof legacyLimit === 'number'
+      ? legacyLimit
+      : typeof metaLimit === 'number'
+        ? metaLimit
+        : typeof derivedLimit === 'number'
+          ? derivedLimit
+          : legacyLimit === null || metaLimit === null
+            ? null
+            : undefined;
 
   let mergedMeta: AcpMeta | null | undefined = metaFromWire;
   if (typeof contextLimit !== 'undefined') {

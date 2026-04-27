@@ -17,6 +17,7 @@ import type {
   SettingInputRequest,
   PluginChoiceRequest,
 } from '../types.js';
+import type { TodoItem } from '../components/TodoDisplay.js';
 import type { QwenAuthState } from '../hooks/useQwenAuth.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
@@ -25,6 +26,7 @@ import type {
   IdeContext,
   ApprovalMode,
   IdeInfo,
+  SessionListItem,
 } from '@qwen-code/qwen-code-core';
 import type { DOMElement } from 'ink';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
@@ -53,6 +55,7 @@ export interface UIState {
   debugMessage: string;
   quittingMessages: HistoryItem[] | null;
   isSettingsDialogOpen: boolean;
+  isMemoryDialogOpen: boolean;
   isModelDialogOpen: boolean;
   isFastModelMode: boolean;
   isTrustDialogOpen: boolean;
@@ -60,6 +63,8 @@ export interface UIState {
   isPermissionsDialogOpen: boolean;
   isApprovalModeDialogOpen: boolean;
   isResumeDialogOpen: boolean;
+  resumeMatchedSessions: SessionListItem[] | undefined;
+  isDeleteDialogOpen: boolean;
   slashCommands: readonly SlashCommand[];
   pendingSlashCommandHistoryItems: HistoryItemWithoutId[];
   commandContext: CommandContext;
@@ -106,6 +111,7 @@ export interface UIState {
   staticExtraHeight: number;
   dialogsVisible: boolean;
   pendingHistoryItems: HistoryItemWithoutId[];
+  stickyTodos: TodoItem[] | null;
   btwItem: HistoryItemBtw | null;
   setBtwItem: (item: HistoryItemBtw | null) => void;
   cancelBtw: () => void;
@@ -143,10 +149,20 @@ export interface UIState {
   isFeedbackDialogOpen: boolean;
   // Per-task token tracking
   taskStartTokens: number;
+  // Real-time token display: ref to streaming output char length (polled, not state)
+  streamingResponseLengthRef: React.RefObject<number>;
+  // True = receiving content (↓), false = waiting for API response (↑)
+  isReceivingContent: boolean;
+  // Session custom name (set via /rename)
+  sessionName: string | null;
+  setSessionName: (name: string | null) => void;
   // Prompt suggestion
   promptSuggestion: string | null;
   /** Dismiss prompt suggestion (clears state, aborts speculation) */
   dismissPromptSuggestion: () => void;
+  // Rewind selector
+  isRewindSelectorOpen: boolean;
+  rewindEscPending: boolean;
 }
 
 export const UIStateContext = createContext<UIState | null>(null);

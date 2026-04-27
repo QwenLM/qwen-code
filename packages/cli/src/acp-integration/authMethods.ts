@@ -21,8 +21,7 @@ export function buildAuthMethods(): AuthMethod[] {
     {
       id: AuthType.QWEN_OAUTH,
       name: 'Qwen OAuth',
-      description:
-        'OAuth authentication for Qwen models with free daily requests',
+      description: 'Qwen OAuth (free tier discontinued 2026-04-15)',
       _meta: {
         type: 'terminal',
         args: ['--auth-type=qwen-oauth'],

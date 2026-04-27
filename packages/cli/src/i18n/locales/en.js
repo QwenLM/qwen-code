@@ -59,6 +59,7 @@ export default {
   'to search history': 'to search history',
   'to paste images': 'to paste images',
   'for external editor': 'for external editor',
+  'to toggle compact mode': 'to toggle compact mode',
   'Jump through words in the input': 'Jump through words in the input',
   'Close dialogs, cancel requests, or quit application':
     'Close dialogs, cancel requests, or quit application',
@@ -431,6 +432,8 @@ export default {
   'Tool Schema Compliance': 'Tool Schema Compliance',
   // Settings enum options
   'Auto (detect from system)': 'Auto (detect from system)',
+  'Auto (detect terminal theme)': 'Auto (detect terminal theme)',
+  Auto: 'Auto',
   Text: 'Text',
   JSON: 'JSON',
   Plan: 'Plan',
@@ -572,6 +575,8 @@ export default {
   'Updates all extensions or a named extension to the latest version.':
     'Updates all extensions or a named extension to the latest version.',
   'Update all extensions.': 'Update all extensions.',
+  'The name of the extension to update.':
+    'The name of the extension to update.',
   'Either an extension name or --all must be provided':
     'Either an extension name or --all must be provided',
   'Lists installed extensions.': 'Lists installed extensions.',
@@ -723,6 +728,7 @@ export default {
   'User Settings': 'User Settings',
   'System Settings': 'System Settings',
   Extensions: 'Extensions',
+  'Session (temporary)': 'Session (temporary)',
   // Hooks - Status
   '✓ Enabled': '✓ Enabled',
   '✗ Disabled': '✗ Disabled',
@@ -948,6 +954,43 @@ export default {
     'Usage: /memory add [--global|--project] <text to remember>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     'Attempting to save to memory {{scope}}: "{{fact}}"',
+  'Open auto-memory folder': 'Open auto-memory folder',
+  'Auto-memory: {{status}}': 'Auto-memory: {{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    'Auto-dream: {{status}} · {{lastDream}} · /dream to run',
+  never: 'never',
+  on: 'on',
+  off: 'off',
+  '✦ dreaming': '✦ dreaming',
+  'Remove matching entries from managed auto-memory.':
+    'Remove matching entries from managed auto-memory.',
+  'Usage: /forget <memory text to remove>':
+    'Usage: /forget <memory text to remove>',
+  'No managed auto-memory entries matched: {{query}}':
+    'No managed auto-memory entries matched: {{query}}',
+  'Show managed auto-memory status.': 'Show managed auto-memory status.',
+  'Run managed auto-memory extraction for the current session.':
+    'Run managed auto-memory extraction for the current session.',
+  'Managed auto-memory root: {{root}}': 'Managed auto-memory root: {{root}}',
+  'Managed auto-memory topics:': 'Managed auto-memory topics:',
+  'No extraction cursor found yet.': 'No extraction cursor found yet.',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}',
+  'No chat client available to extract memory.':
+    'No chat client available to extract memory.',
+  'Managed auto-memory extraction is already running.':
+    'Managed auto-memory extraction is already running.',
+  'Managed auto-memory extraction found no new durable memories.':
+    'Managed auto-memory extraction found no new durable memories.',
+  'Consolidate managed auto-memory topic files.':
+    'Consolidate managed auto-memory topic files.',
+  'Managed auto-memory dream found nothing to improve.':
+    'Managed auto-memory dream found nothing to improve.',
+  'Deduplicated entries: {{count}}': 'Deduplicated entries: {{count}}',
+  'Save a durable memory using the save_memory tool.':
+    'Save a durable memory using the save_memory tool.',
+  'Usage: /remember [--global|--project] <text to remember>':
+    'Usage: /remember [--global|--project] <text to remember>',
 
   // ============================================================================
   // Commands - MCP
@@ -1045,6 +1088,12 @@ export default {
     'Press Enter to start authentication, Esc to go back',
   'Authenticating... Please complete the login in your browser.':
     'Authenticating... Please complete the login in your browser.',
+  'Press c to copy the authorization URL to your clipboard.':
+    'Press c to copy the authorization URL to your clipboard.',
+  'Copy request sent to your terminal. If paste is empty, copy the URL above manually.':
+    'Copy request sent to your terminal. If paste is empty, copy the URL above manually.',
+  'Cannot write to terminal — copy the URL above manually.':
+    'Cannot write to terminal — copy the URL above manually.',
   'Press Enter or Esc to go back': 'Press Enter or Esc to go back',
 
   // MCP Tool List
@@ -1298,10 +1347,16 @@ export default {
   'Terms of Services and Privacy Notice':
     'Terms of Services and Privacy Notice',
   'Qwen OAuth': 'Qwen OAuth',
-  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
-    'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models',
-  'Login with QwenChat account to use daily free quota.':
-    'Login with QwenChat account to use daily free quota.',
+  'Discontinued — switch to Coding Plan or API Key':
+    'Discontinued — switch to Coding Plan or API Key',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch provider.':
+    'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch provider.',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.':
+    'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.':
+    'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.',
+  '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n':
+    '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
     'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
@@ -1489,6 +1544,7 @@ export default {
   'Press Ctrl+C again to exit.': 'Press Ctrl+C again to exit.',
   'Press Ctrl+D again to exit.': 'Press Ctrl+D again to exit.',
   'Press Esc again to clear.': 'Press Esc again to clear.',
+  'Press ↑ to edit queued messages': 'Press ↑ to edit queued messages',
 
   // ============================================================================
   // MCP Status
@@ -1556,6 +1612,18 @@ export default {
     'You can switch permission mode quickly with Tab or /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Try /insight to generate personalized insights from your chat history.',
+  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
+    'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    'Add a QWEN.md file to give Qwen Code persistent project context.',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    'Use /btw to ask a quick side question without disrupting the conversation.',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    'Context is almost full! Run /compress now or start /new to continue.',
+  'Context is getting full. Use /compress to free up space.':
+    'Context is getting full. Use /compress to free up space.',
+  'Long conversation? /compress summarizes history to free context.':
+    'Long conversation? /compress summarizes history to free context.',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1831,6 +1899,8 @@ export default {
   // Coding Plan Authentication
   // ============================================================================
   'API key cannot be empty.': 'API key cannot be empty.',
+  'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
+    'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.',
   'You can get your Coding Plan API key here':
     'You can get your Coding Plan API key here',
   'API key is stored in settings.env. You can migrate it to a .env file for better security.':
@@ -1884,6 +1954,11 @@ export default {
   // Context Usage Component
   // ============================================================================
   'Context Usage': 'Context Usage',
+  '% used': '% used',
+  '% context used': '% context used',
+  'Context exceeds limit! Use /compress or /clear to reduce.':
+    'Context exceeds limit! Use /compress or /clear to reduce.',
+  'Use /compress or /clear': 'Use /compress or /clear',
   'No API response yet. Send a message to see actual usage.':
     'No API response yet. Send a message to see actual usage.',
   'Estimated pre-conversation overhead': 'Estimated pre-conversation overhead',
@@ -1903,6 +1978,8 @@ export default {
     'Show context window usage breakdown.',
   'Run /context detail for per-item breakdown.':
     'Run /context detail for per-item breakdown.',
+  'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
+    'Show context window usage breakdown. Use "/context detail" for per-item breakdown.',
   'body loaded': 'body loaded',
   memory: 'memory',
   '{{region}} configuration updated successfully.':
@@ -1978,16 +2055,19 @@ export default {
     '⚠️  No authentication method configured.\n',
   'Run one of the following commands to get started:\n':
     'Run one of the following commands to get started:\n',
-  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
-    '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
+    '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)',
   '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
     '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n',
   'Or simply run:': 'Or simply run:',
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - Interactive authentication setup\n',
   '✓ Authentication Method: Qwen OAuth': '✓ Authentication Method: Qwen OAuth',
-  '  Type: Free tier': '  Type: Free tier',
-  '  Limit: Up to 1,000 requests/day': '  Limit: Up to 1,000 requests/day',
+  '  Type: Free tier (discontinued 2026-04-15)':
+    '  Type: Free tier (discontinued 2026-04-15)',
+  '  Limit: No longer available': '  Limit: No longer available',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan, OpenRouter, Fireworks AI, or another provider.':
+    'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan, OpenRouter, Fireworks AI, or another provider.',
   '  Models: Qwen latest models\n': '  Models: Qwen latest models\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ Authentication Method: Alibaba Cloud Coding Plan',
@@ -2013,6 +2093,7 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
   compact: 'compact',
+  'compact mode: on (Ctrl+O off)': 'compact mode: on (Ctrl+O off)',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
     'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
   'Press Ctrl+O to show full tool output':

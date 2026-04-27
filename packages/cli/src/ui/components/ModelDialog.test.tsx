@@ -192,8 +192,8 @@ describe('<ModelDialog />', () => {
     expect(mockedSelect).toHaveBeenCalledTimes(1);
   });
 
-  it('calls config.switchModel and onClose when DescriptiveRadioButtonSelect.onSelect is triggered', async () => {
-    const { props, mockConfig, mockSettings } = renderComponent(
+  it('blocks qwen-oauth model selection with an error message (discontinued)', async () => {
+    const { props, mockConfig } = renderComponent(
       {},
       {
         getAvailableModelsForAuthType: vi.fn((t: AuthType) => {
@@ -214,25 +214,79 @@ describe('<ModelDialog />', () => {
 
     await childOnSelect(`${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`);
 
-    expect(mockConfig?.switchModel).toHaveBeenCalledWith(
-      AuthType.QWEN_OAUTH,
-      DEFAULT_QWEN_MODEL,
+    // qwen-oauth is discontinued — switchModel should NOT be called
+    expect(mockConfig?.switchModel).not.toHaveBeenCalled();
+    // Dialog should NOT close (user stays in the dialog to see the error)
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
+  it('calls config.switchModel and onClose when selecting a non-OAuth model', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const getAuthType = vi.fn(() => AuthType.USE_OPENAI);
+    const getAvailableModelsForAuthType = vi.fn((t: AuthType) => {
+      if (t === AuthType.USE_OPENAI) {
+        return [{ id: 'gpt-4', label: 'GPT-4', authType: t }];
+      }
+      if (t === AuthType.QWEN_OAUTH) {
+        return getFilteredQwenModels().map((m) => ({
+          id: m.id,
+          label: m.label,
+          authType: AuthType.QWEN_OAUTH,
+        }));
+      }
+      return [];
+    });
+
+    const { props, mockSettings } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType,
+      switchModel,
+      getAvailableModelsForAuthType,
+      getAllConfiguredModels: vi.fn(() => [
+        ...getFilteredQwenModels().map((m) => ({
+          id: m.id,
+          label: m.label,
+          description: m.description || '',
+          authType: AuthType.QWEN_OAUTH,
+        })),
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          description: 'GPT-4 model',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+      })),
+    } as unknown as Partial<Config>);
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    expect(childOnSelect).toBeDefined();
+
+    // Select a non-OAuth model (USE_OPENAI)
+    await childOnSelect(`${AuthType.USE_OPENAI}::gpt-4`);
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'gpt-4',
       undefined,
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'model.name',
-      DEFAULT_QWEN_MODEL,
+      'gpt-4',
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'security.auth.selectedType',
-      AuthType.QWEN_OAUTH,
+      AuthType.USE_OPENAI,
     );
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('calls config.switchModel and persists authType+model when selecting a different authType', async () => {
+  it('blocks switching to qwen-oauth from another authType (discontinued)', async () => {
     const switchModel = vi.fn().mockResolvedValue(undefined);
     const getAuthType = vi.fn(() => AuthType.USE_OPENAI);
     const getAvailableModelsForAuthType = vi.fn((t: AuthType) => {
@@ -253,39 +307,25 @@ describe('<ModelDialog />', () => {
       getAuthType,
       getModel: vi.fn(() => 'gpt-4'),
       getContentGeneratorConfig: vi.fn(() => ({
-        authType: AuthType.QWEN_OAUTH,
-        model: DEFAULT_QWEN_MODEL,
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
       })),
-      // Add switchModel to the mock object (not the type)
       switchModel,
       getAvailableModelsForAuthType,
     };
 
-    const { props, mockSettings } = renderComponent(
+    const { props } = renderComponent(
       {},
-      // Cast to Config to bypass type checking, matching the runtime behavior
       mockConfigWithSwitchAuthType as unknown as Partial<Config>,
     );
 
     const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
     await childOnSelect(`${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`);
 
-    expect(switchModel).toHaveBeenCalledWith(
-      AuthType.QWEN_OAUTH,
-      DEFAULT_QWEN_MODEL,
-      { requireCachedCredentials: true },
-    );
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      SettingScope.User,
-      'model.name',
-      DEFAULT_QWEN_MODEL,
-    );
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      SettingScope.User,
-      'security.auth.selectedType',
-      AuthType.QWEN_OAUTH,
-    );
-    expect(props.onClose).toHaveBeenCalledTimes(1);
+    // qwen-oauth is discontinued — switchModel should NOT be called
+    expect(switchModel).not.toHaveBeenCalled();
+    // Dialog should NOT close
+    expect(props.onClose).not.toHaveBeenCalled();
   });
 
   it('passes onHighlight to DescriptiveRadioButtonSelect', () => {

@@ -83,7 +83,7 @@ describe('HookPlanner', () => {
     });
 
     it('should deduplicate hooks with same config', () => {
-      const config = { type: HookType.Command, command: 'echo test' };
+      const config = { type: HookType.Command as const, command: 'echo test' };
       const entry1: HookRegistryEntry = {
         config,
         source: HooksConfigSource.Project,
@@ -709,6 +709,159 @@ describe('HookPlanner', () => {
 
       const result = planner.createExecutionPlan(HookEventName.SubagentStop, {
         agentType: 'any-agent-type',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    // StopFailure matcher tests
+    it('should match error type with exact string for StopFailure', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.StopFailure,
+        matcher: 'rate_limit',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.StopFailure, {
+        error: 'rate_limit',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    it('should not match error type with different string for StopFailure', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.StopFailure,
+        matcher: 'rate_limit',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.StopFailure, {
+        error: 'authentication_failed',
+      });
+
+      expect(result).toBeNull();
+    });
+
+    it('should match all error types when no matcher for StopFailure', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.StopFailure,
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.StopFailure, {
+        error: 'server_error',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    it('should match all error types when matcher is wildcard for StopFailure', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.StopFailure,
+        matcher: '*',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.StopFailure, {
+        error: 'billing_error',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    // PostCompact matcher tests
+    it('should match trigger with exact string for PostCompact', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.PostCompact,
+        matcher: 'manual',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.PostCompact, {
+        trigger: 'manual',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    it('should not match trigger with different string for PostCompact', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.PostCompact,
+        matcher: 'manual',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.PostCompact, {
+        trigger: 'auto',
+      });
+
+      expect(result).toBeNull();
+    });
+
+    it('should match all triggers when no matcher for PostCompact', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.PostCompact,
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.PostCompact, {
+        trigger: 'auto',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    it('should match all triggers when matcher is wildcard for PostCompact', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.PostCompact,
+        matcher: '*',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.PostCompact, {
+        trigger: 'manual',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    it('should match auto trigger for PostCompact', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.PostCompact,
+        matcher: 'auto',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.PostCompact, {
+        trigger: 'auto',
       });
 
       expect(result).not.toBeNull();

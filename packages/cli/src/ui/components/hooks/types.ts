@@ -37,6 +37,7 @@ export interface HookConfigDisplayInfo {
   source: HooksConfigSource;
   sourceDisplay: string;
   sourcePath?: string;
+  matcher?: string;
   enabled: boolean;
 }
 

@@ -14,6 +14,7 @@ export const themeCommand: SlashCommand = {
     return t('change the theme');
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive'] as const,
   action: (_context, _args): OpenDialogActionReturn => ({
     type: 'dialog',
     dialog: 'theme',

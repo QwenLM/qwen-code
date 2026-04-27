@@ -99,4 +99,41 @@ describe('isRateLimitError — return shape', () => {
   it('should return null for non-rate-limit errors', () => {
     expect(isRateLimitError(new Error('Connection refused'))).toBe(false);
   });
+
+  it('should fall through JSON-in-message non-numeric code when Error has .status', () => {
+    // Some middleware wraps errors into plain Error instances with the
+    // provider error serialised into .message AND augments .status. The
+    // JSON-in-message parse must not short-circuit with null when the
+    // embedded code is non-numeric — the .status on the Error should win.
+    const error: HttpError = new Error(
+      '{"error":{"code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"}}',
+    );
+    error.status = 429;
+    expect(isRateLimitError(error)).toBe(true);
+  });
+
+  it('should fall through ApiError with non-numeric code when .status is set', () => {
+    // DashScope/OpenAI-SDK shape: RateLimitError with .status=429 but
+    // .error.code is a non-numeric string. Must still be recognised as a
+    // rate limit via the .status fallback.
+    const error = Object.assign(new Error('429 Allocated quota exceeded'), {
+      status: 429,
+      error: {
+        code: 'Throttling.AllocationQuota',
+        message: 'Allocated quota exceeded',
+      },
+    });
+    expect(isRateLimitError(error)).toBe(true);
+  });
+
+  it('should detect DashScope SSE-embedded 429 (Throttling.AllocationQuota)', () => {
+    // Reproduces the production error seen from DashScope when the stream
+    // opens with HTTP 200 and the throttling is surfaced mid-stream as an
+    // SSE `event:error` frame. The OpenAI SDK preserves the raw SSE payload
+    // in error.message, with no numeric `.status` on the error object.
+    const error = new Error(
+      'id:1\nevent:error\n:HTTP_STATUS/429\ndata:{"request_id":"70acdc21-a546-489a-b5d6-650df970a4ef","code":"Throttling.AllocationQuota","message":"Allocated quota exceeded, please increase your quota limit."}',
+    );
+    expect(isRateLimitError(error)).toBe(true);
+  });
 });

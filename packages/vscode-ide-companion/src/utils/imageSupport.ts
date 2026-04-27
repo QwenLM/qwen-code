@@ -59,31 +59,6 @@ export function unescapePath(filePath: string): string {
   );
 }
 
-// ---------- Supported image MIME types ----------
-// Inlined from @qwen-code/qwen-code-core to avoid pulling Node.js-only modules
-// into the browser webview bundle (esbuild marks core as external, but deep
-// sub-path imports like core/src/utils/... bypass the external filter and cause
-// "Dynamic require is not supported" at runtime).
-
-const SUPPORTED_IMAGE_MIME_TYPES: readonly string[] = [
-  'image/bmp',
-  'image/jpeg',
-  'image/jpg',
-  'image/png',
-  'image/tiff',
-  'image/webp',
-  'image/heic',
-];
-
-/**
- * Check whether a MIME type is supported for pasted-image processing.
- * @param mimeType - The MIME type string to validate
- * @returns `true` when the type is in the supported list
- */
-function isSupportedImageMimeType(mimeType: string): boolean {
-  return SUPPORTED_IMAGE_MIME_TYPES.includes(mimeType);
-}
-
 // ---------- Image format detection ----------
 
 const PASTED_IMAGE_MIME_TO_EXTENSION: Record<string, string> = {
@@ -95,6 +70,11 @@ const PASTED_IMAGE_MIME_TO_EXTENSION: Record<string, string> = {
   'image/tiff': '.tiff',
   'image/webp': '.webp',
 };
+
+// Keep this list aligned with packages/core/src/utils/request-tokenizer/supportedImageFormats.ts.
+export const SUPPORTED_PASTED_IMAGE_MIME_TYPES = new Set(
+  Object.keys(PASTED_IMAGE_MIME_TO_EXTENSION),
+);
 
 const DISPLAYABLE_IMAGE_EXTENSION_TO_MIME: Record<string, string> = {
   '.bmp': 'image/bmp',
@@ -109,7 +89,7 @@ const DISPLAYABLE_IMAGE_EXTENSION_TO_MIME: Record<string, string> = {
 };
 
 export function isSupportedPastedImageMimeType(mimeType: string): boolean {
-  return isSupportedImageMimeType(mimeType);
+  return SUPPORTED_PASTED_IMAGE_MIME_TYPES.has(mimeType);
 }
 
 export function getImageExtensionForMimeType(mimeType: string): string {

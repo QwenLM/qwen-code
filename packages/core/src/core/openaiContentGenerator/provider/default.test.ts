@@ -306,6 +306,46 @@ describe('DefaultOpenAICompatibleProvider', () => {
       expect(result.max_tokens).toBe(8000); // GPT-4 has 16K limit, min(16K, 8K) = 8K
     });
 
+    it('should not inject max_tokens when samplingParams is set without it (e.g. GPT-5 / o-series)', () => {
+      // GPT-5 / o-series on Azure reject max_tokens entirely.
+      // When the user sets samplingParams without max_tokens, honor the opt-out.
+      const cfg = {
+        ...mockContentGeneratorConfig,
+        samplingParams: { max_completion_tokens: 4096 },
+      } as ContentGeneratorConfig;
+      const p = new DefaultOpenAICompatibleProvider(cfg, mockCliConfig);
+
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'gpt-4',
+        messages: [{ role: 'user', content: 'Hello' }],
+      };
+
+      const result = p.buildRequest(request, 'prompt-id');
+
+      expect(result.max_tokens).toBeUndefined();
+    });
+
+    it('should pass samplingParams.max_tokens through verbatim, bypassing the model cap', () => {
+      // When samplingParams is the source of truth, even max_tokens values that
+      // exceed the known model output limit pass through unchanged —
+      // no automatic capping.
+      const cfg = {
+        ...mockContentGeneratorConfig,
+        samplingParams: { max_tokens: 100000 },
+      } as ContentGeneratorConfig;
+      const p = new DefaultOpenAICompatibleProvider(cfg, mockCliConfig);
+
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'gpt-4', // known model, 16K output limit — would normally cap.
+        messages: [{ role: 'user', content: 'Hello' }],
+        max_tokens: 100000,
+      };
+
+      const result = p.buildRequest(request, 'prompt-id');
+
+      expect(result.max_tokens).toBe(100000);
+    });
+
     it('should handle streaming requests', () => {
       const streamingRequest: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'gpt-4',

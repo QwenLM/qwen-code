@@ -9,7 +9,7 @@ import type {
   GenerateContentParameters,
   GenerateContentResponse,
 } from '@google/genai';
-import type { PipelineConfig } from './pipeline.js';
+import type { PipelineConfig } from './types.js';
 import { ContentGenerationPipeline } from './pipeline.js';
 import { EnhancedErrorHandler } from './errorHandler.js';
 import { RequestTokenEstimator } from '../../utils/request-tokenizer/index.js';

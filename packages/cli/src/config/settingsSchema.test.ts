@@ -28,7 +28,6 @@ describe('SettingsSchema', () => {
         'mcp',
         'security',
         'advanced',
-        'webSearch',
       ];
 
       expectedSettings.forEach((setting) => {
@@ -108,6 +107,16 @@ describe('SettingsSchema', () => {
         getSettingsSchema().context.properties.fileFiltering.properties
           ?.enableRecursiveFileSearch,
       ).toBeDefined();
+    });
+
+    it('should have sandboxImage setting under tools', () => {
+      expect(getSettingsSchema().tools.properties.sandboxImage).toBeDefined();
+      expect(getSettingsSchema().tools.properties.sandboxImage.type).toBe(
+        'string',
+      );
+      expect(getSettingsSchema().tools.properties.sandboxImage.default).toBe(
+        undefined,
+      );
     });
 
     it('should have unique categories', () => {

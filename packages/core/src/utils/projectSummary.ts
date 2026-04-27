@@ -19,13 +19,88 @@ export interface ProjectSummaryInfo {
   inProgressCount?: number;
   todoCount?: number;
   pendingTasks?: string[];
+  summaryFingerprint?: string;
+}
+
+export interface WelcomeBackProjectState {
+  lastChoice: 'restart';
+  summaryFingerprint: string;
+}
+
+interface PersistedWelcomeBackStateV1 {
+  version: 1;
+  lastChoice: 'restart';
+  summaryFingerprint: string;
+}
+
+const PROJECT_SUMMARY_FILENAME = 'PROJECT_SUMMARY.md';
+const WELCOME_BACK_STATE_FILENAME = 'welcome-back-state.json';
+
+function getProjectSummaryPath(): string {
+  return path.join(process.cwd(), '.qwen', PROJECT_SUMMARY_FILENAME);
+}
+
+function getWelcomeBackStatePath(): string {
+  return path.join(process.cwd(), '.qwen', WELCOME_BACK_STATE_FILENAME);
+}
+
+function buildSummaryFingerprint(stat: {
+  mtimeMs: number;
+  size: number;
+}): string {
+  return `${stat.mtimeMs}:${stat.size}`;
+}
+
+export async function getWelcomeBackState(): Promise<WelcomeBackProjectState | null> {
+  try {
+    const raw = await fs.readFile(getWelcomeBackStatePath(), 'utf-8');
+    const parsed = JSON.parse(raw) as Partial<PersistedWelcomeBackStateV1>;
+
+    if (
+      parsed.version !== 1 ||
+      parsed.lastChoice !== 'restart' ||
+      typeof parsed.summaryFingerprint !== 'string'
+    ) {
+      return null;
+    }
+
+    return {
+      lastChoice: parsed.lastChoice,
+      summaryFingerprint: parsed.summaryFingerprint,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function saveWelcomeBackRestartChoice(
+  summaryFingerprint: string,
+): Promise<void> {
+  const statePath = getWelcomeBackStatePath();
+  await fs.mkdir(path.dirname(statePath), { recursive: true });
+
+  const state: PersistedWelcomeBackStateV1 = {
+    version: 1,
+    lastChoice: 'restart',
+    summaryFingerprint,
+  };
+
+  await fs.writeFile(statePath, JSON.stringify(state, null, 2), 'utf-8');
+}
+
+export async function clearWelcomeBackState(): Promise<void> {
+  try {
+    await fs.rm(getWelcomeBackStatePath(), { force: true });
+  } catch {
+    // Treat cleanup as best-effort so welcome back remains non-critical.
+  }
 }
 
 /**
  * Reads and parses the project summary file to extract structured information
  */
 export async function getProjectSummaryInfo(): Promise<ProjectSummaryInfo> {
-  const summaryPath = path.join(process.cwd(), '.qwen', 'PROJECT_SUMMARY.md');
+  const summaryPath = getProjectSummaryPath();
 
   try {
     await fs.access(summaryPath);
@@ -36,7 +111,9 @@ export async function getProjectSummaryInfo(): Promise<ProjectSummaryInfo> {
   }
 
   try {
+    const summaryStat = await fs.stat(summaryPath);
     const content = await fs.readFile(summaryPath, 'utf-8');
+    const summaryFingerprint = buildSummaryFingerprint(summaryStat);
 
     // Extract timestamp if available
     const timestampMatch = content.match(/\*\*Update time\*\*: (.+)/);
@@ -110,6 +187,7 @@ export async function getProjectSummaryInfo(): Promise<ProjectSummaryInfo> {
       inProgressCount,
       todoCount,
       pendingTasks,
+      summaryFingerprint,
     };
   } catch (_error) {
     return {

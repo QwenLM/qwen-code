@@ -71,9 +71,19 @@ Sandbox: test
 Proxy: no proxy
 Memory Usage: 100 MB`;
     const expectedUrl =
-      'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title=A%20test%20bug&info=' +
-      encodeURIComponent(`\n${expectedInfo}\n`);
+      'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title=A%20test%20bug&info=%0A' +
+      encodeURIComponent(expectedInfo) +
+      '%0A';
 
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: 'To submit your bug report, please open the following URL in your browser:',
+        linkUrl: expectedUrl,
+        linkText: 'Open GitHub bug report form',
+      },
+      expect.any(Number),
+    );
     expect(open).toHaveBeenCalledWith(expectedUrl);
   });
 
@@ -109,6 +119,15 @@ Memory Usage: 100 MB`;
       .replace('{title}', encodeURIComponent('A custom bug'))
       .replace('{info}', encodeURIComponent(`\n${expectedInfo}\n`));
 
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: 'To submit your bug report, please open the following URL in your browser:',
+        linkUrl: expectedUrl,
+        linkText: 'Open GitHub bug report form',
+      },
+      expect.any(Number),
+    );
     expect(open).toHaveBeenCalledWith(expectedUrl);
   });
 
@@ -161,9 +180,19 @@ Sandbox: test
 Proxy: no proxy
 Memory Usage: 100 MB`;
     const expectedUrl =
-      'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title=OpenAI%20bug&info=' +
-      encodeURIComponent(`\n${expectedInfo}\n`);
+      'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title=OpenAI%20bug&info=%0A' +
+      encodeURIComponent(expectedInfo) +
+      '%0A';
 
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: 'To submit your bug report, please open the following URL in your browser:',
+        linkUrl: expectedUrl,
+        linkText: 'Open GitHub bug report form',
+      },
+      expect.any(Number),
+    );
     expect(open).toHaveBeenCalledWith(expectedUrl);
   });
 });

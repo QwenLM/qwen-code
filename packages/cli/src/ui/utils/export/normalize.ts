@@ -5,7 +5,7 @@
  */
 
 import type { Part } from '@google/genai';
-import { ExitPlanModeTool, ToolNames } from '@qwen-code/qwen-code-core';
+import { ToolNames } from '@qwen-code/qwen-code-core';
 import type { ChatRecord, Config, Kind } from '@qwen-code/qwen-code-core';
 import type { ExportMessage, ExportSessionData } from './types.js';
 
@@ -244,7 +244,7 @@ function resolveToolMetadata(
  * Maps tool kind to allowed export kinds.
  */
 function mapToolKind(kind: Kind | undefined, toolName?: string): string {
-  if (toolName && toolName === ExitPlanModeTool.Name) {
+  if (toolName && toolName === ToolNames.EXIT_PLAN_MODE) {
     return 'switch_mode';
   }
 

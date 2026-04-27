@@ -161,6 +161,94 @@ interface PerfectMatchResult {
   isPerfectMatch: boolean;
 }
 
+const enum CommandMatchStrength {
+  FUZZY = 0,
+  SEGMENT_PREFIX = 1,
+  PREFIX = 2,
+  EXACT = 3,
+}
+
+interface RankedCommandMatch {
+  command: SlashCommand;
+  matchStrength: CommandMatchStrength;
+  completionPriority: number;
+  score: number;
+  start: number;
+  itemLength: number;
+  originalIndex: number;
+}
+
+function getCompletionPriority(command: SlashCommand): number {
+  return command.completionPriority ?? 0;
+}
+
+function isSegmentBoundary(value: string, start: number): boolean {
+  if (start <= 0) {
+    return false;
+  }
+
+  return ['-', '_', '/', ' '].includes(value[start - 1] ?? '');
+}
+
+function getCommandMatchStrength(
+  matchedValue: string,
+  query: string,
+  start: number,
+): CommandMatchStrength {
+  const normalizedValue = matchedValue.toLowerCase();
+  const normalizedQuery = query.toLowerCase();
+
+  if (normalizedValue === normalizedQuery) {
+    return CommandMatchStrength.EXACT;
+  }
+
+  if (normalizedValue.startsWith(normalizedQuery)) {
+    return CommandMatchStrength.PREFIX;
+  }
+
+  if (
+    start > 0 &&
+    normalizedValue.slice(start).startsWith(normalizedQuery) &&
+    isSegmentBoundary(normalizedValue, start)
+  ) {
+    return CommandMatchStrength.SEGMENT_PREFIX;
+  }
+
+  return CommandMatchStrength.FUZZY;
+}
+
+function compareRankedCommandMatches(
+  left: RankedCommandMatch,
+  right: RankedCommandMatch,
+): number {
+  return (
+    right.matchStrength - left.matchStrength ||
+    right.completionPriority - left.completionPriority ||
+    right.score - left.score ||
+    left.start - right.start ||
+    left.itemLength - right.itemLength ||
+    left.originalIndex - right.originalIndex
+  );
+}
+
+function createRankedCommandMatch(
+  command: SlashCommand,
+  matchedValue: string,
+  query: string,
+  result: Pick<FzfCommandResult, 'score' | 'start'>,
+  originalIndex: number,
+): RankedCommandMatch {
+  return {
+    command,
+    matchStrength: getCommandMatchStrength(matchedValue, query, result.start),
+    completionPriority: getCompletionPriority(command),
+    score: result.score,
+    start: result.start,
+    itemLength: matchedValue.length,
+    originalIndex,
+  };
+}
+
 function useCommandSuggestions(
   parserResult: CommandParserResult,
   commandContext: CommandContext,
@@ -255,14 +343,34 @@ function useCommandSuggestions(
             try {
               const fzfResults = await fzfInstance.fzf.find(partial);
               if (signal.aborted) return;
-              const uniqueCommands = new Set<SlashCommand>();
+              const commandOrder = new Map<SlashCommand, number>();
+              commandsToSearch.forEach((cmd, index) => {
+                commandOrder.set(cmd, index);
+              });
+              const rankedMatches = new Map<SlashCommand, RankedCommandMatch>();
               fzfResults.forEach((result: FzfCommandResult) => {
                 const cmd = fzfInstance.commandMap.get(result.item);
-                if (cmd && cmd.description) {
-                  uniqueCommands.add(cmd);
+                const originalIndex = cmd ? commandOrder.get(cmd) : undefined;
+                if (cmd && cmd.description && originalIndex !== undefined) {
+                  const rankedMatch = createRankedCommandMatch(
+                    cmd,
+                    result.item,
+                    partial,
+                    result,
+                    originalIndex,
+                  );
+                  const existingRank = rankedMatches.get(cmd);
+                  if (
+                    !existingRank ||
+                    compareRankedCommandMatches(rankedMatch, existingRank) < 0
+                  ) {
+                    rankedMatches.set(cmd, rankedMatch);
+                  }
                 }
               });
-              potentialSuggestions = Array.from(uniqueCommands);
+              potentialSuggestions = Array.from(rankedMatches.values())
+                .sort(compareRankedCommandMatches)
+                .map((match) => match.command);
             } catch (error) {
               logErrorSafely(
                 error,
@@ -475,16 +583,45 @@ export function useSlashCompletion(props: UseSlashCompletionProps): {
 
   // Memoized helper function for prefix-based filtering to improve performance
   const getPrefixSuggestions = useMemo(
-    () => (commands: readonly SlashCommand[], partial: string) =>
-      commands.filter(
-        (cmd) =>
-          cmd.description &&
-          !cmd.hidden &&
-          (cmd.name.toLowerCase().startsWith(partial.toLowerCase()) ||
-            cmd.altNames?.some((alt) =>
-              alt.toLowerCase().startsWith(partial.toLowerCase()),
-            )),
-      ),
+    () => (commands: readonly SlashCommand[], partial: string) => {
+      const rankedMatches = commands.flatMap((cmd, index) => {
+        if (!cmd.description || cmd.hidden) {
+          return [];
+        }
+
+        const matchedValues = [cmd.name, ...(cmd.altNames ?? [])].filter(
+          (value) => value.toLowerCase().startsWith(partial.toLowerCase()),
+        );
+
+        if (matchedValues.length === 0) {
+          return [];
+        }
+
+        const bestMatch = matchedValues
+          .map((matchedValue) =>
+            createRankedCommandMatch(
+              cmd,
+              matchedValue,
+              partial,
+              {
+                score:
+                  matchedValue.toLowerCase() === partial.toLowerCase()
+                    ? 100
+                    : 80,
+                start: 0,
+              },
+              index,
+            ),
+          )
+          .sort(compareRankedCommandMatches)[0];
+
+        return bestMatch ? [bestMatch] : [];
+      });
+
+      return rankedMatches
+        .sort(compareRankedCommandMatches)
+        .map((match) => match.command);
+    },
     [],
   );
 

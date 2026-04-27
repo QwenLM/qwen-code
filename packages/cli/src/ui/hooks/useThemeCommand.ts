@@ -5,7 +5,7 @@
  */
 
 import { useState, useCallback } from 'react';
-import { themeManager } from '../themes/theme-manager.js';
+import { themeManager, AUTO_THEME_NAME } from '../themes/theme-manager.js';
 import type { LoadedSettings, SettingScope } from '../../config/settings.js'; // Import LoadedSettings, AppSettings, MergedSetting
 import { type HistoryItem, MessageType } from '../types.js';
 import process from 'node:process';
@@ -92,10 +92,11 @@ export const useThemeCommand = (
           ...(loadedSettings.user.settings.ui?.customThemes || {}),
           ...(loadedSettings.workspace.settings.ui?.customThemes || {}),
         };
-        // Only allow selecting themes available in the merged custom themes or built-in themes
+        // Only allow selecting themes available in the merged custom themes, built-in themes, or 'auto'
+        const isAuto = themeName === AUTO_THEME_NAME;
         const isBuiltIn = themeManager.findThemeByName(themeName);
         const isCustom = themeName && mergedCustomThemes[themeName];
-        if (!isBuiltIn && !isCustom) {
+        if (!isAuto && !isBuiltIn && !isCustom) {
           setThemeError(
             t('Theme "{{themeName}}" not found in selected scope.', {
               themeName: themeName ?? '',

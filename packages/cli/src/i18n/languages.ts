@@ -7,10 +7,13 @@
 export type SupportedLanguage =
   | 'en'
   | 'zh'
+  | 'zh-TW'
   | 'ru'
   | 'de'
   | 'ja'
   | 'pt'
+  | 'fr'
+  | 'ca'
   | string;
 
 export interface LanguageDefinition {
@@ -30,6 +33,12 @@ export const SUPPORTED_LANGUAGES: readonly LanguageDefinition[] = [
     id: 'en-US',
     fullName: 'English',
     nativeName: 'English',
+  },
+  {
+    code: 'zh-TW',
+    id: 'zh-TW',
+    fullName: 'Traditional Chinese',
+    nativeName: '繁體中文',
   },
   {
     code: 'zh',
@@ -61,6 +70,18 @@ export const SUPPORTED_LANGUAGES: readonly LanguageDefinition[] = [
     fullName: 'Portuguese',
     nativeName: 'Português',
   },
+  {
+    code: 'fr',
+    id: 'fr-FR',
+    fullName: 'French',
+    nativeName: 'Français',
+  },
+  {
+    code: 'ca',
+    id: 'ca-ES',
+    fullName: 'Catalan',
+    nativeName: 'Català',
+  },
 ];
 
 /**
@@ -68,7 +89,8 @@ export const SUPPORTED_LANGUAGES: readonly LanguageDefinition[] = [
  * Used for LLM output language instructions.
  */
 export function getLanguageNameFromLocale(locale: SupportedLanguage): string {
-  const lang = SUPPORTED_LANGUAGES.find((l) => l.code === locale);
+  const lower = locale.toLowerCase();
+  const lang = SUPPORTED_LANGUAGES.find((l) => l.code.toLowerCase() === lower);
   return lang?.fullName || 'English';
 }
 

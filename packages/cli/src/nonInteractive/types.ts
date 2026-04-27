@@ -407,6 +407,11 @@ export interface CLIControlSupportedCommandsRequest {
   subtype: 'supported_commands';
 }
 
+export interface CLIControlGetContextUsageRequest {
+  subtype: 'get_context_usage';
+  show_details?: boolean;
+}
+
 export type ControlRequestPayload =
   | CLIControlInterruptRequest
   | CLIControlPermissionRequest
@@ -416,7 +421,8 @@ export type ControlRequestPayload =
   | CLIControlMcpMessageRequest
   | CLIControlSetModelRequest
   | CLIControlMcpStatusRequest
-  | CLIControlSupportedCommandsRequest;
+  | CLIControlSupportedCommandsRequest
+  | CLIControlGetContextUsageRequest;
 
 export interface CLIControlRequest {
   type: 'control_request';

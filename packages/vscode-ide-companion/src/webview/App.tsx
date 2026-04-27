@@ -26,7 +26,7 @@ import type { PermissionOption, PermissionToolCall } from '@qwen-code/webui';
 import type { TextMessage } from './hooks/message/useMessageHandling.js';
 import type { ToolCallData } from './components/messages/toolcalls/ToolCall.js';
 import { ToolCall } from './components/messages/toolcalls/ToolCall.js';
-import { hasToolCallOutput } from './utils/utils.js';
+import { hasToolCallOutput, shouldShowToolCall } from './utils/utils.js';
 import { Onboarding } from './components/layout/Onboarding.js';
 import { type CompletionItem } from '../types/completionItemTypes.js';
 import { useCompletionTrigger } from './hooks/useCompletionTrigger.js';
@@ -39,6 +39,7 @@ import {
   FileIcon,
   PermissionDrawer,
   AskUserQuestionDialog,
+  InsightProgressCard,
   ImageMessageRenderer,
   ImagePreview,
   // Layout components imported directly from webui
@@ -47,13 +48,181 @@ import {
   SessionSelector,
 } from '@qwen-code/webui';
 import { InputForm } from './components/layout/InputForm.js';
+import {
+  AccountInfoDialog,
+  type AccountInfo,
+} from './components/AccountInfoDialog.js';
 import { ApprovalMode, NEXT_APPROVAL_MODE } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { PlanEntry, UsageStatsPayload } from '../types/chatTypes.js';
 import type { ModelInfo, AvailableCommand } from '@agentclientprotocol/sdk';
 import type { Question } from '../types/acpTypes.js';
-import { DEFAULT_TOKEN_LIMIT, tokenLimit } from '../utils/tokenLimits.js';
 import { useImagePaste, type WebViewImageMessage } from './hooks/useImage.js';
+import { computeContextUsage } from './utils/contextUsage.js';
+import {
+  SKILL_ITEM_ID_PREFIX,
+  isSkillsSecondaryQuery,
+  shouldOpenSkillsSecondaryPicker,
+} from './utils/completionUtils.js';
+import {
+  buildSlashCommandItems,
+  isExpandableSlashCommand,
+} from './utils/slashCommandUtils.js';
+
+/**
+ * Memoized message list that only re-renders when messages or callbacks change,
+ * not on every keystroke in the input field.
+ */
+interface MessageListItem {
+  type: 'message' | 'in-progress-tool-call' | 'completed-tool-call';
+  data: TextMessage | ToolCallData;
+  timestamp: number;
+}
+
+interface MessageListProps {
+  allMessages: MessageListItem[];
+  onFileClick: (path: string) => void;
+  /**
+   * After each render, this ref is updated with an array that maps
+   * DOM child position → allMessages index, only for items that
+   * actually render a DOM element (skipping nulls).
+   */
+  childIndexMap: React.MutableRefObject<number[]>;
+}
+
+const MessageList = React.memo<MessageListProps>(
+  ({ allMessages, onFileClick, childIndexMap }) => {
+    let imageIndex = 0;
+
+    // Build child→allMessages index mapping: for each item that renders
+    // a non-null element, record its allMessages index. This array's
+    // position corresponds to the DOM child position in the container.
+    const mapping: number[] = [];
+
+    const elements = allMessages.map((item, index) => {
+      let child: React.ReactNode;
+      switch (item.type) {
+        case 'message': {
+          const msg = item.data as TextMessage;
+
+          if (msg.kind === 'image' && msg.imagePath) {
+            imageIndex += 1;
+            child = (
+              <ImageMessageRenderer
+                msg={msg as WebViewImageMessage}
+                imageIndex={imageIndex}
+              />
+            );
+            break;
+          }
+
+          if (msg.role === 'thinking') {
+            child = (
+              <ThinkingMessage
+                content={msg.content || ''}
+                timestamp={msg.timestamp || 0}
+                onFileClick={onFileClick}
+              />
+            );
+            break;
+          }
+
+          if (msg.role === 'user') {
+            child = (
+              <UserMessage
+                content={msg.content || ''}
+                timestamp={msg.timestamp || 0}
+                onFileClick={onFileClick}
+                fileContext={msg.fileContext}
+              />
+            );
+            break;
+          }
+
+          {
+            const content = (msg.content || '').trim();
+            if (!content) {
+              child = null;
+              break;
+            }
+            if (content === 'Interrupted' || content === 'Tool interrupted') {
+              child = <InterruptedMessage text={content} />;
+              break;
+            }
+            child = (
+              <AssistantMessage
+                content={content}
+                timestamp={msg.timestamp || 0}
+                onFileClick={onFileClick}
+              />
+            );
+          }
+          break;
+        }
+
+        case 'in-progress-tool-call':
+        case 'completed-tool-call': {
+          const tc = item.data as ToolCallData;
+          if (!shouldShowToolCall(tc.kind)) {
+            child = null;
+            break;
+          }
+          child = <ToolCall toolCall={tc} />;
+          break;
+        }
+
+        default:
+          child = null;
+      }
+      // No wrapper div — message components render directly as children
+      // of the scroll container, preserving the original CSS layout.
+      if (child == null) return null;
+      mapping.push(index);
+      return <React.Fragment key={`msg-${index}`}>{child}</React.Fragment>;
+    });
+
+    // Update the mapping ref so the copy handler can use it
+    childIndexMap.current = mapping;
+
+    return <>{elements}</>;
+  },
+);
+
+MessageList.displayName = 'MessageList';
+
+/**
+ * Given a click target inside the messages container, find which
+ * allMessages index it belongs to by walking up from the target to
+ * the container's direct child, then mapping through childIndexMap.
+ *
+ * NOTE: childIndexMap indices correspond to MessageList's DOM children
+ * which must be the first N children of the container. Elements rendered
+ * after MessageList (InsightProgressCard, WaitingMessage, etc.) are
+ * excluded from the map and will correctly return -1.
+ */
+function findMessageIndex(
+  target: Element,
+  container: Element,
+  childIndexMap: number[],
+): number {
+  // Walk up from the click target to find the direct child of the container.
+  // This works for all message types regardless of whether they have
+  // .qwen-message class (e.g. InterruptedMessage does not).
+  let directChild: Element | null = target;
+  while (directChild && directChild.parentElement !== container) {
+    directChild = directChild.parentElement;
+  }
+  if (!directChild) return -1;
+
+  // Find DOM child position among container's children
+  const children = container.children;
+  for (let i = 0; i < children.length; i++) {
+    if (children[i] === directChild) {
+      return i < childIndexMap.length ? childIndexMap[i] : -1;
+    }
+  }
+  return -1;
+}
 
 export const App: React.FC = () => {
   const vscode = useVSCode();
@@ -90,9 +259,22 @@ export const App: React.FC = () => {
   const [availableCommands, setAvailableCommands] = useState<
     AvailableCommand[]
   >([]);
+  const [availableSkills, setAvailableSkills] = useState<string[]>([]);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
+  const [insightProgress, setInsightProgress] = useState<{
+    stage: string;
+    progress: number;
+    detail?: string;
+  } | null>(null);
+  const [insightReportPath, setInsightReportPath] = useState<string | null>(
+    null,
+  );
   const [showModelSelector, setShowModelSelector] = useState(false);
+  const [accountInfo, setAccountInfo] = useState<AccountInfo | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  // Maps DOM child position → allMessages index. Built during render by
+  // MessageList, only includes items that actually produce DOM elements.
+  const childIndexMapRef = useRef<number[]>([]);
   // Scroll container for message list; used to keep the view anchored to the latest content
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const inputFieldRef = useRef<HTMLDivElement | null>(null);
@@ -148,6 +330,22 @@ export const App: React.FC = () => {
 
         return allItems;
       } else {
+        if (availableSkills.length > 0 && isSkillsSecondaryQuery(query)) {
+          const skillQuery = query.replace(/^skills\s+/i, '').toLowerCase();
+          return availableSkills
+            .map(
+              (skill) =>
+                ({
+                  id: `${SKILL_ITEM_ID_PREFIX}${skill}`,
+                  label: skill,
+                  type: 'command' as const,
+                  group: 'Skills',
+                  value: `skills ${skill}`,
+                }) satisfies CompletionItem,
+            )
+            .filter((item) => item.label.toLowerCase().includes(skillQuery));
+        }
+
         // Handle slash commands with grouping
         // Model group - special items without / prefix
         const modelGroupItems: CompletionItem[] = [
@@ -163,24 +361,24 @@ export const App: React.FC = () => {
         // Account group
         const accountGroupItems: CompletionItem[] = [
           {
-            id: 'login',
-            label: 'Login',
-            description: 'Login to Qwen Code',
+            id: 'auth',
+            label: '/auth',
+            description: 'Configure Coding Plan or API Key',
+            type: 'command',
+            group: 'Account',
+          },
+          {
+            id: 'account',
+            label: 'Account',
+            description: 'Show current account and authentication info',
             type: 'command',
             group: 'Account',
           },
         ];
 
-        // Slash Commands group - commands from server (available_commands_update)
-        const slashCommandItems: CompletionItem[] = availableCommands.map(
-          (cmd) => ({
-            id: cmd.name,
-            label: `/${cmd.name}`,
-            description: cmd.description,
-            type: 'command' as const,
-            group: 'Slash Commands',
-            value: cmd.name,
-          }),
+        const slashCommandItems = buildSlashCommandItems(
+          query,
+          availableCommands,
         );
 
         // Combine all commands
@@ -191,66 +389,32 @@ export const App: React.FC = () => {
         ];
 
         // Filter by query
-        const lowerQuery = query.toLowerCase();
         return allCommands.filter(
           (cmd) =>
-            cmd.label.toLowerCase().includes(lowerQuery) ||
+            cmd.label.toLowerCase().includes(query.toLowerCase()) ||
             (cmd.description &&
-              cmd.description.toLowerCase().includes(lowerQuery)),
+              cmd.description.toLowerCase().includes(query.toLowerCase())),
         );
       }
     },
-    [fileContext, availableCommands, modelInfo?.name],
+    [fileContext, availableCommands, availableSkills, modelInfo?.name],
   );
 
   const completion = useCompletionTrigger(inputFieldRef, getCompletionItems);
+  const {
+    isOpen: completionIsOpen,
+    triggerChar: completionTriggerChar,
+    query: completionQuery,
+    items: completionItems,
+    closeCompletion,
+    openCompletion,
+    refreshCompletion,
+  } = completion;
 
-  const contextUsage = useMemo(() => {
-    if (!usageStats && !modelInfo) {
-      return null;
-    }
-
-    const modelName =
-      modelInfo?.modelId && typeof modelInfo.modelId === 'string'
-        ? modelInfo.modelId
-        : modelInfo?.name && typeof modelInfo.name === 'string'
-          ? modelInfo.name
-          : undefined;
-
-    // Note: In the webview context, the contextWindowSize is already reflected in
-    // modelInfo._meta.contextLimit which is computed on the extension side with the proper config.
-    // We only use tokenLimit as a fallback if metaLimit is not available.
-    const derivedLimit =
-      modelName && modelName.length > 0
-        ? tokenLimit(modelName, 'input')
-        : undefined;
-
-    const metaLimitRaw = modelInfo?._meta?.['contextLimit'];
-    const metaLimit =
-      typeof metaLimitRaw === 'number' || metaLimitRaw === null
-        ? metaLimitRaw
-        : undefined;
-
-    const limit =
-      usageStats?.tokenLimit ??
-      metaLimit ??
-      derivedLimit ??
-      DEFAULT_TOKEN_LIMIT;
-
-    const used = usageStats?.usage?.promptTokens ?? 0;
-    if (typeof limit !== 'number' || limit <= 0 || used < 0) {
-      return null;
-    }
-    const percentLeft = Math.max(
-      0,
-      Math.min(100, Math.round(((limit - used) / limit) * 100)),
-    );
-    return {
-      percentLeft,
-      usedTokens: used,
-      tokenLimit: limit,
-    };
-  }, [usageStats, modelInfo]);
+  const contextUsage = useMemo(
+    () => computeContextUsage(usageStats, modelInfo),
+    [usageStats, modelInfo],
+  );
 
   // Track a lightweight signature of workspace files to detect content changes even when length is unchanged
   const workspaceFilesSignature = useMemo(
@@ -268,17 +432,32 @@ export const App: React.FC = () => {
   // Note: Avoid depending on the entire `completion` object here, since its identity
   // changes on every render which would retrigger this effect and can cause a refresh loop.
   useEffect(() => {
-    if (completion.isOpen && completion.triggerChar === '@') {
+    if (completionIsOpen && completionTriggerChar === '@') {
       // Only refresh items; do not change other completion state to avoid re-renders loops
-      completion.refreshCompletion();
+      refreshCompletion();
     }
-    // Only re-run when the actual data source changes, not on every render
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     workspaceFilesSignature,
-    completion.isOpen,
-    completion.triggerChar,
-    completion.query,
+    completionIsOpen,
+    completionTriggerChar,
+    completionQuery,
+    refreshCompletion,
+  ]);
+
+  useEffect(() => {
+    if (
+      completionIsOpen &&
+      completionTriggerChar === '/' &&
+      isSkillsSecondaryQuery(completionQuery)
+    ) {
+      refreshCompletion();
+    }
+  }, [
+    availableSkills,
+    completionIsOpen,
+    completionTriggerChar,
+    completionQuery,
+    refreshCompletion,
   ]);
 
   const { attachedImages, handleRemoveImage, clearImages, handlePaste } =
@@ -360,9 +539,17 @@ export const App: React.FC = () => {
     setAvailableCommands: (commands) => {
       setAvailableCommands(commands);
     },
+    setAvailableSkills: (skills) => {
+      setAvailableSkills(skills);
+    },
     setAvailableModels: (models) => {
       setAvailableModels(models);
     },
+    setAccountInfo: (info) => {
+      setAccountInfo(info);
+    },
+    setInsightReportPath,
+    setInsightProgress,
   });
 
   // Auto-scroll handling: keep the view pinned to bottom when new content arrives,
@@ -545,7 +732,7 @@ export const App: React.FC = () => {
 
       // Ignore info items (placeholders like "Searching files…")
       if (item.type === 'info') {
-        completion.closeCompletion();
+        closeCompletion();
         return;
       }
 
@@ -609,25 +796,43 @@ export const App: React.FC = () => {
           }
         };
 
-        if (itemId === 'login') {
+        if (itemId === 'auth') {
           clearTriggerText();
-          vscode.postMessage({ type: 'login', data: {} });
-          completion.closeCompletion();
+          vscode.postMessage({ type: 'auth', data: {} });
+          closeCompletion();
+          return;
+        }
+
+        if (itemId === 'account') {
+          clearTriggerText();
+          vscode.postMessage({ type: 'getAccountInfo', data: {} });
+          closeCompletion();
           return;
         }
 
         if (itemId === 'model') {
           clearTriggerText();
           setShowModelSelector(true);
-          completion.closeCompletion();
+          closeCompletion();
           return;
         }
 
         // Handle server-provided slash commands by sending them as messages.
         // Skip when fillOnly (Tab) — let the generic insertion path fill the
         // command text so the user can keep typing arguments.
+        // Special case: /skills always uses fill behavior (Enter = Tab) to
+        // allow the secondary skill picker to appear.
         const serverCmd = availableCommands.find((c) => c.name === itemId);
-        if (serverCmd && !fillOnly) {
+        const isSkillsCmd = shouldOpenSkillsSecondaryPicker(
+          item,
+          availableSkills,
+        );
+        if (
+          serverCmd &&
+          !fillOnly &&
+          !isSkillsCmd &&
+          !isExpandableSlashCommand(serverCmd.name)
+        ) {
           // Clear the trigger text since we're sending the command
           clearTriggerText();
           // Send the slash command as a user message
@@ -635,7 +840,23 @@ export const App: React.FC = () => {
             type: 'sendMessage',
             data: { text: `/${serverCmd.name}` },
           });
-          completion.closeCompletion();
+          closeCompletion();
+          return;
+        }
+
+        // Handle secondary skill selection — send `/skills <name>` with
+        // optional trailing user text
+        if (itemId.startsWith(SKILL_ITEM_ID_PREFIX) && !fillOnly) {
+          clearTriggerText();
+          const value =
+            typeof item.value === 'string'
+              ? item.value
+              : itemId.slice(SKILL_ITEM_ID_PREFIX.length);
+          vscode.postMessage({
+            type: 'sendMessage',
+            data: { text: `/${value}` },
+          });
+          closeCompletion();
           return;
         }
       }
@@ -697,7 +918,7 @@ export const App: React.FC = () => {
       const atPos = textBeforeCursor.lastIndexOf('@');
       // Only consider slash as trigger if we're in slash command mode
       const slashPos =
-        completion.triggerChar === '/' ? textBeforeCursor.lastIndexOf('/') : -1;
+        completionTriggerChar === '/' ? textBeforeCursor.lastIndexOf('/') : -1;
       const triggerPos = Math.max(atPos, slashPos);
 
       if (triggerPos >= 0) {
@@ -719,18 +940,45 @@ export const App: React.FC = () => {
         newRange.collapse(false);
         sel?.removeAllRanges();
         sel?.addRange(newRange);
+
+        if (shouldOpenSkillsSecondaryPicker(item, availableSkills)) {
+          const rangeRect = newRange.getBoundingClientRect();
+          const inputRect = inputElement.getBoundingClientRect();
+          const position =
+            rangeRect.top > 0 || rangeRect.left > 0
+              ? { top: rangeRect.top, left: rangeRect.left }
+              : { top: inputRect.top, left: inputRect.left };
+
+          void openCompletion('/', `${insertValue} `, position);
+          return;
+        }
+
+        if (
+          completion.triggerChar === '/' &&
+          isExpandableSlashCommand(insertValue.trim())
+        ) {
+          completion.closeCompletion();
+          requestAnimationFrame(() => {
+            inputElement.dispatchEvent(new Event('input', { bubbles: true }));
+          });
+          return;
+        }
       }
 
       // Close the completion menu
-      completion.closeCompletion();
+      closeCompletion();
     },
     [
-      completion,
-      inputFieldRef,
-      setInputText,
-      fileContext,
-      vscode,
       availableCommands,
+      availableSkills,
+      closeCompletion,
+      completion,
+      completionTriggerChar,
+      fileContext,
+      inputFieldRef,
+      openCompletion,
+      setInputText,
+      vscode,
     ],
   );
 
@@ -754,12 +1002,21 @@ export const App: React.FC = () => {
     });
   }, [vscode]);
 
+  const handleOpenInsightReport = useCallback(() => {
+    if (!insightReportPath) {
+      return;
+    }
+    vscode.postMessage({
+      type: 'openInsightReport',
+      data: { path: insightReportPath },
+    });
+  }, [insightReportPath, vscode]);
+
   // Handle toggle edit mode (Default -> Auto-edit -> YOLO -> Default)
   const handleToggleEditMode = useCallback(() => {
     setEditMode((prev) => {
       const next: ApprovalModeValue = NEXT_APPROVAL_MODE[prev];
 
-      // Notify extension to set approval mode via ACP
       try {
         vscode.postMessage({
           type: 'setApprovalMode',
@@ -772,10 +1029,25 @@ export const App: React.FC = () => {
     });
   }, [vscode]);
 
-  // Handle toggle thinking
-  const handleToggleThinking = () => {
+  // Handle Tab key to cycle approval modes when input is focused
+  const handleInputKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (
+        e.key === 'Tab' &&
+        !e.shiftKey &&
+        !isComposing &&
+        !completion.isOpen
+      ) {
+        e.preventDefault();
+        handleToggleEditMode();
+      }
+    },
+    [completion.isOpen, handleToggleEditMode, isComposing],
+  );
+
+  const handleToggleThinking = useCallback(() => {
     setThinkingEnabled((prev) => !prev);
-  };
+  }, []);
 
   // When user sends a message after scrolling up, re-pin and jump to the bottom
   const handleSubmitWithScroll = useCallback(
@@ -830,89 +1102,176 @@ export const App: React.FC = () => {
     );
   }, [messageHandling.messages, inProgressToolCalls, completedToolCalls]);
 
-  console.log('[App] Rendering messages:', allMessages);
+  const handleFileClick = useCallback(
+    (path: string): void => {
+      vscode.postMessage({
+        type: 'openFile',
+        data: { path },
+      });
+    },
+    [vscode],
+  );
 
-  // Render all messages and tool calls
-  const renderMessages = useCallback<() => React.ReactNode>(() => {
-    let imageIndex = 0;
-    return allMessages.map((item, index) => {
-      switch (item.type) {
-        case 'message': {
-          const msg = item.data as TextMessage;
-          const handleFileClick = (path: string): void => {
-            vscode.postMessage({
-              type: 'openFile',
-              data: { path },
-            });
-          };
+  // Build a markdown code fence that won't collide with content containing backticks
+  const buildFence = useCallback((content: string): string => {
+    const matches = (content ?? '').match(/`+/g);
+    const maxRun = matches ? Math.max(...matches.map((m) => m.length)) : 0;
+    return '`'.repeat(Math.max(3, maxRun + 1));
+  }, []);
 
-          if (msg.kind === 'image' && msg.imagePath) {
-            imageIndex += 1;
-            return (
-              <ImageMessageRenderer
-                key={`message-${index}`}
-                msg={msg as WebViewImageMessage}
-                imageIndex={imageIndex}
-              />
-            );
-          }
-
-          if (msg.role === 'thinking') {
-            return (
-              <ThinkingMessage
-                key={`message-${index}`}
-                content={msg.content || ''}
-                timestamp={msg.timestamp || 0}
-                onFileClick={handleFileClick}
-              />
-            );
-          }
-
-          if (msg.role === 'user') {
-            return (
-              <UserMessage
-                key={`message-${index}`}
-                content={msg.content || ''}
-                timestamp={msg.timestamp || 0}
-                onFileClick={handleFileClick}
-                fileContext={msg.fileContext}
-              />
-            );
-          }
-
-          {
-            const content = (msg.content || '').trim();
-            if (content === 'Interrupted' || content === 'Tool interrupted') {
-              return (
-                <InterruptedMessage key={`message-${index}`} text={content} />
-              );
+  // Format a tool call's content for clipboard copy
+  // wrapCodeBlock: true for Copy All (markdown), false for single Copy Message (plain text)
+  const formatToolCallForCopy = useCallback(
+    (tc: ToolCallData, wrapCodeBlock = false): string => {
+      const parts: string[] = [];
+      if (tc.content) {
+        for (const c of tc.content) {
+          if (c.type === 'content' && c.content?.text) {
+            if (wrapCodeBlock) {
+              const fence = buildFence(c.content.text);
+              parts.push(`${fence}\n${c.content.text}\n${fence}`);
+            } else {
+              parts.push(c.content.text);
             }
-            return (
-              <AssistantMessage
-                key={`message-${index}`}
-                content={content}
-                timestamp={msg.timestamp || 0}
-                onFileClick={handleFileClick}
-              />
-            );
+          } else if (c.type === 'diff') {
+            const filePath = c.path || '';
+            if (c.oldText) {
+              const oldLines = c.oldText
+                .split('\n')
+                .map((l) => `-${l}`)
+                .join('\n');
+              const newLines = (c.newText || '')
+                .split('\n')
+                .map((l) => `+${l}`)
+                .join('\n');
+              const diffContent = `--- ${filePath}\n+++ ${filePath}\n${oldLines}\n${newLines}`;
+              if (wrapCodeBlock) {
+                const fence = buildFence(diffContent);
+                parts.push(`${fence}diff\n${diffContent}\n${fence}`);
+              } else {
+                parts.push(diffContent);
+              }
+            } else {
+              if (wrapCodeBlock) {
+                const fence = buildFence(c.newText || '');
+                parts.push(
+                  `${filePath}:\n${fence}\n${c.newText || ''}\n${fence}`,
+                );
+              } else {
+                parts.push(`${filePath}:\n${c.newText || ''}`);
+              }
+            }
           }
         }
-
-        case 'in-progress-tool-call':
-        case 'completed-tool-call': {
-          return (
-            <ToolCall
-              key={`toolcall-${(item.data as ToolCallData).toolCallId}-${item.type}`}
-              toolCall={item.data as ToolCallData}
-            />
-          );
-        }
-
-        default:
-          return null;
       }
-    });
-  }, [allMessages, vscode]);
+      return parts.join('\n\n');
+    },
+    [buildFence],
+  );
+
+  // Track which message was right-clicked by resolving the index immediately.
+  // Storing the DOM element reference would be fragile: React re-renders between
+  // the right-click and the async copy command (routed via extension host) can
+  // detach the element, causing findMessageIndex to fail intermittently.
+  const contextMenuMsgIdxRef = useRef<number>(-1);
+  useEffect(() => {
+    const trackTarget = (e: MouseEvent) => {
+      const container = messagesContainerRef.current;
+      if (container && e.target instanceof Element) {
+        contextMenuMsgIdxRef.current = findMessageIndex(
+          e.target,
+          container,
+          childIndexMapRef.current,
+        );
+      }
+      // Notify extension that this webview was right-clicked, so copy commands route here
+      vscode.postMessage({ type: 'contextMenuTriggered', data: {} });
+    };
+    document.addEventListener('contextmenu', trackTarget, true);
+    return () => document.removeEventListener('contextmenu', trackTarget, true);
+  }, [vscode]);
+
+  // Copy text via the extension host's clipboard API (more reliable than navigator.clipboard in webview)
+  const copyToClipboard = useCallback(
+    (text: string) => {
+      vscode.postMessage({ type: 'copyToClipboard', data: { text } });
+    },
+    [vscode],
+  );
+
+  // Handle copy commands from VSCode native context menu
+  useEffect(() => {
+    const handler = (event: MessageEvent) => {
+      const message = event.data;
+      if (message?.type !== 'copyCommand') return;
+
+      const { action } = message.data as { action: string };
+
+      if (action === 'copyMessage') {
+        const idx = contextMenuMsgIdxRef.current;
+        if (idx >= 0 && idx < allMessages.length) {
+          const item = allMessages[idx];
+          if (item.type === 'message') {
+            const msg = item.data as TextMessage;
+            if (msg.kind === 'image' && msg.imagePath) {
+              copyToClipboard(`![image](${msg.imagePath})`);
+            } else {
+              copyToClipboard(msg.content || '');
+            }
+          } else if (
+            item.type === 'completed-tool-call' ||
+            item.type === 'in-progress-tool-call'
+          ) {
+            copyToClipboard(formatToolCallForCopy(item.data as ToolCallData));
+          }
+        }
+      } else if (action === 'copyAllMessages') {
+        const parts: string[] = [];
+        for (const item of allMessages) {
+          if (item.type === 'message') {
+            const msg = item.data as TextMessage;
+            const content =
+              msg.kind === 'image' && msg.imagePath
+                ? `![image](${msg.imagePath})`
+                : (msg.content || '').trim();
+            if (!content) continue;
+            if (msg.role === 'user') {
+              parts.push(`**User:** ${content}`);
+            } else if (msg.role === 'thinking') {
+              parts.push(`**Thinking:** ${content}`);
+            } else {
+              parts.push(`**Qwen Code:** ${content}`);
+            }
+          } else if (
+            item.type === 'completed-tool-call' ||
+            item.type === 'in-progress-tool-call'
+          ) {
+            const tc = item.data as ToolCallData;
+            if (!shouldShowToolCall(tc.kind)) continue;
+            const text = formatToolCallForCopy(tc, true);
+            if (text) {
+              parts.push(`**[Tool: ${tc.kind}]**\n\n${text}`);
+            }
+          }
+        }
+        copyToClipboard(parts.join('\n\n---\n\n'));
+      } else if (action === 'copyLastReply') {
+        for (let i = allMessages.length - 1; i >= 0; i--) {
+          const item = allMessages[i];
+          if (item.type === 'message') {
+            const msg = item.data as TextMessage;
+            if (msg.role === 'assistant' && msg.content?.trim()) {
+              copyToClipboard(msg.content);
+              return;
+            }
+          }
+        }
+      }
+    };
+
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, [allMessages, copyToClipboard, formatToolCallForCopy]);
 
   const hasContent =
     messageHandling.messages.length > 0 ||
@@ -925,12 +1284,14 @@ export const App: React.FC = () => {
   return (
     <div className="chat-container relative">
       {/* Top-level loading overlay */}
-      {isLoading && (
+      {(isLoading || sessionManagement.isSwitchingSession) && (
         <div className="bg-background/80 absolute inset-0 z-50 flex items-center justify-center backdrop-blur-sm">
           <div className="text-center">
             <div className="border-primary mx-auto mb-2 h-8 w-8 animate-spin rounded-full border-b-2"></div>
             <p className="text-muted-foreground text-sm">
-              Preparing Qwen Code...
+              {sessionManagement.isSwitchingSession
+                ? 'Loading conversation...'
+                : 'Preparing Qwen Code...'}
             </p>
           </div>
         </div>
@@ -946,6 +1307,8 @@ export const App: React.FC = () => {
           sessionManagement.handleSwitchSession(sessionId);
           sessionManagement.setSessionSearchQuery('');
         }}
+        onRenameSession={sessionManagement.handleRenameSession}
+        onDeleteSession={sessionManagement.handleDeleteSession}
         onClose={() => sessionManagement.setShowSessionSelector(false)}
         hasMore={sessionManagement.hasMore}
         isLoading={sessionManagement.isLoading}
@@ -963,26 +1326,66 @@ export const App: React.FC = () => {
       <div
         ref={messagesContainerRef}
         className="chat-messages messages-container flex-1 overflow-y-auto overflow-x-hidden pt-5 pr-5 pl-5 pb-[140px] flex flex-col relative min-w-0 focus:outline-none [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-white/20 [&::-webkit-scrollbar-thumb]:rounded-sm [&::-webkit-scrollbar-thumb]:hover:bg-white/30 [&>*]:flex [&>*]:gap-0 [&>*]:items-start [&>*]:text-left [&>*]:py-2 [&>*:not(:last-child)]:pb-[8px] [&>*]:flex-col [&>*]:relative [&>*]:animate-[fadeIn_0.2s_ease-in]"
+        data-vscode-context={
+          hasContent ? '{"webviewSection": "chat-messages"}' : undefined
+        }
       >
-        {!hasContent && !isLoading ? (
+        {!hasContent && !isLoading && !sessionManagement.isSwitchingSession ? (
           isAuthenticated === false ? (
-            <Onboarding
-              onLogin={() => {
-                vscode.postMessage({ type: 'login', data: {} });
-                messageHandling.setWaitingForResponse(
-                  'Logging in to Qwen Code...',
-                );
-              }}
-            />
+            <Onboarding />
           ) : isAuthenticated === null ? (
-            <EmptyState loadingMessage="Checking login status…" />
+            <div className="flex flex-col items-center justify-center h-full gap-3">
+              <span
+                className="inline-block w-6 h-6 animate-spin rounded-full border-2"
+                style={{
+                  borderColor: 'var(--app-secondary-foreground)',
+                  borderTopColor: 'transparent',
+                }}
+              />
+              <span
+                className="text-sm"
+                style={{ color: 'var(--app-secondary-foreground)' }}
+              >
+                Preparing Qwen Code...
+              </span>
+            </div>
           ) : (
             <EmptyState isAuthenticated />
           )
         ) : (
           <>
             {/* Render all messages and tool calls */}
-            {renderMessages()}
+            <MessageList
+              allMessages={allMessages}
+              onFileClick={handleFileClick}
+              childIndexMap={childIndexMapRef}
+            />
+
+            {insightProgress && (
+              <InsightProgressCard
+                stage={insightProgress.stage}
+                progress={insightProgress.progress}
+                detail={insightProgress.detail}
+              />
+            )}
+
+            {insightReportPath && (
+              <div className="px-[30px] py-2">
+                <div className="text-sm text-[var(--vscode-descriptionForeground)]">
+                  Insight report generated at:
+                </div>
+                <a
+                  href="#"
+                  className="mt-1 inline-block break-all text-sm text-[var(--vscode-textLink-foreground)] underline decoration-[color-mix(in_srgb,var(--vscode-textLink-foreground)_55%,transparent)] underline-offset-2 hover:text-[var(--vscode-textLink-activeForeground)]"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    handleOpenInsightReport();
+                  }}
+                >
+                  {insightReportPath}
+                </a>
+              </div>
+            )}
 
             {/* Waiting message positioned fixed above the input form to avoid layout shifts */}
             {messageHandling.isWaitingForResponse &&
@@ -1014,7 +1417,7 @@ export const App: React.FC = () => {
           onInputChange={setInputText}
           onCompositionStart={() => setIsComposing(true)}
           onCompositionEnd={() => setIsComposing(false)}
-          onKeyDown={() => {}}
+          onKeyDown={handleInputKeyDown}
           onSubmit={handleSubmitWithScroll}
           onCancel={handleCancel}
           onToggleEditMode={handleToggleEditMode}
@@ -1055,16 +1458,16 @@ export const App: React.FC = () => {
                 position = { top: inputRect.top, left: inputRect.left };
               }
 
-              await completion.openCompletion('/', '', position);
+              await openCompletion('/', '', position);
             }
           }}
           onAttachContext={handleAttachContextClick}
           onPaste={handlePaste}
-          completionIsOpen={completion.isOpen}
-          completionItems={completion.items}
+          completionIsOpen={completionIsOpen}
+          completionItems={completionItems}
           onCompletionSelect={handleCompletionSelect}
           onCompletionFill={(item) => handleCompletionSelect(item, true)}
-          onCompletionClose={completion.closeCompletion}
+          onCompletionClose={closeCompletion}
           canSubmit={canSubmit}
           extraContent={
             attachedImages.length > 0 ? (
@@ -1097,6 +1500,13 @@ export const App: React.FC = () => {
           questions={askUserQuestionRequest.questions}
           onSubmit={handleAskUserQuestionResponse}
           onCancel={handleAskUserQuestionCancel}
+        />
+      )}
+
+      {accountInfo && (
+        <AccountInfoDialog
+          info={accountInfo}
+          onClose={() => setAccountInfo(null)}
         />
       )}
     </div>

@@ -19,6 +19,7 @@ import { getProjectHash } from '../utils/paths.js';
 import {
   SessionService,
   buildApiHistoryFromConversation,
+  getResumePromptTokenCount,
   type ConversationRecord,
 } from './sessionService.js';
 import { CompressionStatus } from '../core/turn.js';
@@ -631,6 +632,71 @@ describe('SessionService', () => {
     });
   });
 
+  describe('getResumePromptTokenCount', () => {
+    const baseRecord: ChatRecord = {
+      uuid: 'r1',
+      parentUuid: null,
+      sessionId: sessionIdA,
+      timestamp: '2024-01-01T00:00:00Z',
+      type: 'user',
+      cwd: '/test/project/root',
+      version: '1.0.0',
+    };
+
+    const makeConversation = (messages: ChatRecord[]): ConversationRecord => ({
+      sessionId: sessionIdA,
+      projectHash: 'test-project-hash',
+      startTime: '2024-01-01T00:00:00Z',
+      lastUpdated: '2024-01-01T00:00:00Z',
+      messages,
+    });
+
+    const compressionRecord: ChatRecord = {
+      ...baseRecord,
+      uuid: 'comp',
+      type: 'system',
+      subtype: 'chat_compression',
+      systemPayload: {
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 300,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: [],
+      },
+    };
+
+    it('should return latest assistant usage without scanning further back', () => {
+      const assistant: ChatRecord = {
+        ...baseRecord,
+        uuid: 'a1',
+        parentUuid: 'comp',
+        type: 'assistant',
+        usageMetadata: { totalTokenCount: 450 },
+      };
+      expect(
+        getResumePromptTokenCount(
+          makeConversation([compressionRecord, assistant]),
+        ),
+      ).toBe(450);
+    });
+
+    it('should fall back to compression when latest assistant has zero usage', () => {
+      const assistant: ChatRecord = {
+        ...baseRecord,
+        uuid: 'a1',
+        parentUuid: 'comp',
+        type: 'assistant',
+        usageMetadata: { totalTokenCount: 0, promptTokenCount: 0 },
+      };
+      expect(
+        getResumePromptTokenCount(
+          makeConversation([compressionRecord, assistant]),
+        ),
+      ).toBe(300);
+    });
+  });
+
   describe('buildApiHistoryFromConversation', () => {
     it('should return linear messages when no compression checkpoint exists', () => {
       const assistantA1: ChatRecord = {
@@ -715,6 +781,127 @@ describe('SessionService', () => {
         },
         recordB2.message,
         postCompressionRecord.message,
+      ]);
+    });
+
+    it('should preserve thought parts by default (stripThoughtsFromHistory=false)', () => {
+      const modelWithThought: ChatRecord = {
+        uuid: 't1',
+        parentUuid: 'a1',
+        sessionId: sessionIdA,
+        timestamp: '2024-01-01T01:00:00Z',
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            { text: 'reasoning step', thought: true },
+            { text: 'final answer' },
+          ],
+        },
+        cwd: '/test/project/root',
+        version: '1.0.0',
+      };
+
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-01T01:00:00Z',
+        messages: [recordA1, modelWithThought],
+      };
+
+      const history = buildApiHistoryFromConversation(conversation);
+
+      // Thought parts should be preserved by default
+      expect(history).toHaveLength(2);
+      expect(history[1].parts).toEqual([
+        { text: 'reasoning step', thought: true },
+        { text: 'final answer' },
+      ]);
+    });
+
+    it('should strip thought parts when stripThoughtsFromHistory=true', () => {
+      const modelWithThought: ChatRecord = {
+        uuid: 't1',
+        parentUuid: 'a1',
+        sessionId: sessionIdA,
+        timestamp: '2024-01-01T01:00:00Z',
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            { text: 'reasoning step', thought: true },
+            { text: 'final answer' },
+          ],
+        },
+        cwd: '/test/project/root',
+        version: '1.0.0',
+      };
+
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-01T01:00:00Z',
+        messages: [recordA1, modelWithThought],
+      };
+
+      const history = buildApiHistoryFromConversation(conversation, {
+        stripThoughtsFromHistory: true,
+      });
+
+      // Thought parts should be stripped
+      expect(history).toHaveLength(2);
+      expect(history[1].parts).toEqual([{ text: 'final answer' }]);
+    });
+
+    it('should preserve thought parts in compressed history by default', () => {
+      const compressionRecord: ChatRecord = {
+        uuid: 'c1',
+        parentUuid: 'b2',
+        sessionId: sessionIdA,
+        timestamp: '2024-01-02T03:00:00Z',
+        type: 'system',
+        subtype: 'chat_compression',
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        gitBranch: 'main',
+        systemPayload: {
+          info: {
+            originalTokenCount: 100,
+            newTokenCount: 50,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+          compressedHistory: [
+            { role: 'user', parts: [{ text: 'summary' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'deep thinking', thought: true },
+                { text: 'final answer' },
+              ],
+            },
+          ],
+        },
+      };
+
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-02T03:00:00Z',
+        messages: [recordA1, recordB2, compressionRecord],
+      };
+
+      const history = buildApiHistoryFromConversation(conversation);
+
+      // Thought parts should be preserved in compressed history by default.
+      // The compressedHistory has 2 entries (user, model), and no messages
+      // exist after the compression record, so the result is 2 items.
+      expect(history).toHaveLength(2);
+      expect(history[1].parts).toEqual([
+        { text: 'deep thinking', thought: true },
+        { text: 'final answer' },
       ]);
     });
   });

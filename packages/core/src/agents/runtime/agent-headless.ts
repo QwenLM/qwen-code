@@ -212,7 +212,7 @@ export class AgentHeadless {
       abortController.abort();
     }
 
-    const toolsList = this.core.prepareTools();
+    const toolsList = await this.core.prepareTools();
 
     const initialTaskText = String(
       (context.get('task_prompt') as string) ?? 'Get Started!',

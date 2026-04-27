@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   normalize,
   tokenLimit,
+  knownTokenLimit,
   DEFAULT_TOKEN_LIMIT,
   DEFAULT_OUTPUT_TOKEN_LIMIT,
 } from './tokenLimits.js';
@@ -231,6 +232,21 @@ describe('tokenLimit', () => {
   it('should handle case-insensitive model names', () => {
     expect(tokenLimit('GPT-4O')).toBe(131072);
     expect(tokenLimit('CLAUDE-3.5-SONNET')).toBe(200000);
+  });
+});
+
+describe('knownTokenLimit', () => {
+  it('returns a limit for known input models', () => {
+    expect(knownTokenLimit('qwen3-max')).toBe(262144);
+    expect(knownTokenLimit('gpt-5')).toBe(272000);
+  });
+
+  it('returns a limit for known output models', () => {
+    expect(knownTokenLimit('qwen3-max', 'output')).toBe(32768);
+  });
+
+  it('returns undefined for unknown models instead of the default fallback', () => {
+    expect(knownTokenLimit('unknown-model-v1.0')).toBeUndefined();
   });
 });
 

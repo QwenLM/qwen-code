@@ -42,6 +42,7 @@ const createMockMetrics = (
         thoughts: 0,
         tool: 0,
       },
+      bySource: {},
     },
   },
   tools: {
@@ -462,6 +463,7 @@ describe('ArenaAgentClient', () => {
               thoughts: 0,
               tool: 0,
             },
+            bySource: {},
           },
           'model-b': {
             api: {
@@ -477,6 +479,7 @@ describe('ArenaAgentClient', () => {
               thoughts: 0,
               tool: 0,
             },
+            bySource: {},
           },
         },
         tools: {

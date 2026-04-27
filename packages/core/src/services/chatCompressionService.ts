@@ -15,7 +15,11 @@ import { getResponseText } from '../utils/partUtils.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import type { PermissionMode } from '../hooks/types.js';
-import { SessionStartSource, PreCompactTrigger } from '../hooks/types.js';
+import {
+  SessionStartSource,
+  PreCompactTrigger,
+  PostCompactTrigger,
+} from '../hooks/types.js';
 
 /**
  * Threshold for compression token count as a fraction of the model's token limit.
@@ -353,6 +357,18 @@ export class ChatCompressionService {
           );
       } catch (err) {
         config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
+      }
+
+      // Fire PostCompact event after successful compression
+      try {
+        const postCompactTrigger = force
+          ? PostCompactTrigger.Manual
+          : PostCompactTrigger.Auto;
+        await config
+          .getHookSystem()
+          ?.firePostCompactEvent(postCompactTrigger, summary, signal);
+      } catch (err) {
+        config.getDebugLogger().warn(`PostCompact hook failed: ${err}`);
       }
 
       return {

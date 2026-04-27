@@ -43,6 +43,9 @@ import { ExtensionsManagerDialog } from './extensions/ExtensionsManagerDialog.js
 import { MCPManagementDialog } from './mcp/MCPManagementDialog.js';
 import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
 import { SessionPicker } from './SessionPicker.js';
+import { RewindSelector } from './RewindSelector.js';
+import { MemoryDialog } from './MemoryDialog.js';
+import { t } from '../../i18n/index.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
@@ -202,6 +205,14 @@ export const DialogManager = ({
       </Box>
     );
   }
+  if (uiState.isModelDialogOpen) {
+    return (
+      <ModelDialog
+        onClose={uiActions.closeModelDialog}
+        isFastModelMode={uiState.isFastModelMode}
+      />
+    );
+  }
   if (uiState.isSettingsDialogOpen) {
     return (
       <Box flexDirection="column">
@@ -216,6 +227,10 @@ export const DialogManager = ({
               uiActions.openEditorDialog();
               return;
             }
+            if (settingName === 'fastModel') {
+              uiActions.openModelDialog({ fastModelMode: true });
+              return;
+            }
             uiActions.closeSettingsDialog();
           }}
           onRestartRequest={() => process.exit(0)}
@@ -224,6 +239,9 @@ export const DialogManager = ({
         />
       </Box>
     );
+  }
+  if (uiState.isMemoryDialogOpen) {
+    return <MemoryDialog onClose={uiActions.closeMemoryDialog} />;
   }
   if (uiState.isApprovalModeDialogOpen) {
     const currentMode = config.getApprovalMode();
@@ -238,14 +256,6 @@ export const DialogManager = ({
           }
         />
       </Box>
-    );
-  }
-  if (uiState.isModelDialogOpen) {
-    return (
-      <ModelDialog
-        onClose={uiActions.closeModelDialog}
-        isFastModelMode={uiState.isFastModelMode}
-      />
     );
   }
   if (uiState.activeArenaDialog === 'start') {
@@ -371,6 +381,30 @@ export const DialogManager = ({
         currentBranch={uiState.branchName}
         onSelect={uiActions.handleResume}
         onCancel={uiActions.closeResumeDialog}
+        initialSessions={uiState.resumeMatchedSessions}
+        enablePreview
+      />
+    );
+  }
+
+  if (uiState.isDeleteDialogOpen) {
+    return (
+      <SessionPicker
+        sessionService={config.getSessionService()}
+        currentBranch={uiState.branchName}
+        onSelect={uiActions.handleDelete}
+        onCancel={uiActions.closeDeleteDialog}
+        title={t('Delete Session')}
+      />
+    );
+  }
+
+  if (uiState.isRewindSelectorOpen) {
+    return (
+      <RewindSelector
+        history={uiState.history}
+        onRewind={uiActions.handleRewindConfirm}
+        onCancel={uiActions.closeRewindSelector}
       />
     );
   }

@@ -9,7 +9,10 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as cache from './crawlCache.js';
 import { crawl } from './crawler.js';
-import { createTmpDir, cleanupTmpDir } from '@qwen-code/qwen-code-test-utils';
+import {
+  createTmpDir,
+  cleanupTmpDir,
+} from '../../test-utils/file-system-test-helpers.js';
 import type { Ignore } from './ignore.js';
 import { loadIgnoreRules } from './ignore.js';
 
@@ -178,8 +181,10 @@ describe('crawler', () => {
     });
 
     expect(results).toEqual(
-      expect.arrayContaining(['.', '.gitignore', 'Foo.mk', 'bar.mk']),
+      expect.arrayContaining(['.', '.gitignore', 'Foo.mk']),
     );
+    // bar.mk matches *.mk and is not negated, so it should be filtered out
+    expect(results).not.toContain('bar.mk');
   });
 
   it('should handle directory negation with glob', async () => {
@@ -569,6 +574,108 @@ describe('crawler', () => {
           'level1/level2/level3/file-level3.txt',
         ]),
       );
+    });
+  });
+
+  describe('with maxFiles', () => {
+    it('should truncate results when maxFiles is exceeded', async () => {
+      tmpDir = await createTmpDir({
+        'a.txt': '',
+        'b.txt': '',
+        'c.txt': '',
+        sub: ['d.txt', 'e.txt'],
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const allResults = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      const limitedResults = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+        maxFiles: 3,
+      });
+
+      expect(allResults.length).toBeGreaterThan(3);
+      expect(limitedResults.length).toBe(3);
+    });
+
+    it('should not count file-ignored entries toward maxFiles budget', async () => {
+      tmpDir = await createTmpDir({
+        '.gitignore': '*.log',
+        'a.txt': '',
+        'b.txt': '',
+        'noise1.log': '',
+        'noise2.log': '',
+        'noise3.log': '',
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: true,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      // Valid entries: '.', '.gitignore', 'a.txt', 'b.txt' = 4
+      // Ignored entries: 'noise1.log', 'noise2.log', 'noise3.log'
+      // With maxFiles=4, all valid entries should fit because
+      // .log files are filtered out before the cap is applied.
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+        maxFiles: 4,
+      });
+
+      expect(results).toEqual(
+        expect.arrayContaining(['.', '.gitignore', 'a.txt', 'b.txt']),
+      );
+      for (const r of results) {
+        expect(r).not.toMatch(/\.log$/);
+      }
+    });
+
+    it('should not truncate when maxFiles exceeds total entries', async () => {
+      tmpDir = await createTmpDir({
+        'a.txt': '',
+        'b.txt': '',
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+        maxFiles: 1000,
+      });
+
+      expect(results.length).toBeLessThanOrEqual(1000);
+      expect(results).toEqual(expect.arrayContaining(['.', 'a.txt', 'b.txt']));
     });
   });
 });

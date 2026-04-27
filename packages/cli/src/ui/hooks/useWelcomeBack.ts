@@ -6,7 +6,10 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import {
+  clearWelcomeBackState,
   getProjectSummaryInfo,
+  getWelcomeBackState,
+  saveWelcomeBackRestartChoice,
   type ProjectSummaryInfo,
   type Config,
 } from '@qwen-code/qwen-code-core';
@@ -51,7 +54,16 @@ export function useWelcomeBack(
 
     try {
       const info = await getProjectSummaryInfo();
-      if (info.hasHistory) {
+      if (!info.hasHistory) {
+        return;
+      }
+
+      const persistedState = await getWelcomeBackState();
+      const isRestartSuppressed =
+        persistedState?.lastChoice === 'restart' &&
+        persistedState.summaryFingerprint === info.summaryFingerprint;
+
+      if (!isRestartSuppressed) {
         setWelcomeBackInfo(info);
         setShowWelcomeBackDialog(true);
       }
@@ -67,6 +79,24 @@ export function useWelcomeBack(
       setWelcomeBackChoice(choice);
       setShowWelcomeBackDialog(false);
 
+      if (choice === 'restart' && welcomeBackInfo?.summaryFingerprint) {
+        void saveWelcomeBackRestartChoice(
+          welcomeBackInfo.summaryFingerprint,
+        ).catch((error) => {
+          config
+            .getDebugLogger()
+            .debug('Failed to persist welcome back restart choice:', error);
+        });
+      }
+
+      if (choice === 'continue') {
+        void clearWelcomeBackState().catch((error) => {
+          config
+            .getDebugLogger()
+            .debug('Failed to clear welcome back state:', error);
+        });
+      }
+
       if (choice === 'continue' && welcomeBackInfo?.content) {
         // Create the context message to fill in the input box
         const contextMessage = `@.qwen/PROJECT_SUMMARY.md, Based on our previous conversation,Let's continue?`;
@@ -77,7 +107,7 @@ export function useWelcomeBack(
       }
       // If choice is 'restart', just close the dialog and continue normally
     },
-    [welcomeBackInfo],
+    [config, welcomeBackInfo],
   );
 
   const handleWelcomeBackClose = useCallback(() => {

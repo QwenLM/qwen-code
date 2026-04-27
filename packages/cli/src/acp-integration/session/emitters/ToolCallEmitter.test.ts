@@ -13,7 +13,7 @@ import type {
   AnyDeclarativeTool,
   AnyToolInvocation,
 } from '@qwen-code/qwen-code-core';
-import { Kind, TodoWriteTool } from '@qwen-code/qwen-code-core';
+import { Kind, ToolNames } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 
 // Helper to create mock message parts for tests
@@ -107,7 +107,7 @@ describe('ToolCallEmitter', () => {
 
     it('should skip emit for TodoWriteTool and return false', async () => {
       const result = await emitter.emitStart({
-        toolName: TodoWriteTool.Name,
+        toolName: ToolNames.TODO_WRITE,
         callId: 'call-todo',
         args: { todos: [] },
       });
@@ -279,7 +279,7 @@ describe('ToolCallEmitter', () => {
     describe('TodoWriteTool handling', () => {
       it('should emit plan update instead of tool_call_update for TodoWriteTool', async () => {
         await emitter.emitResult({
-          toolName: TodoWriteTool.Name,
+          toolName: ToolNames.TODO_WRITE,
           callId: 'call-todo',
           success: true,
           message: [],
@@ -304,7 +304,7 @@ describe('ToolCallEmitter', () => {
 
       it('should use args as fallback for TodoWriteTool todos', async () => {
         await emitter.emitResult({
-          toolName: TodoWriteTool.Name,
+          toolName: ToolNames.TODO_WRITE,
           callId: 'call-todo',
           success: true,
           message: [],
@@ -324,7 +324,7 @@ describe('ToolCallEmitter', () => {
 
       it('should not emit anything for TodoWriteTool with empty todos', async () => {
         await emitter.emitResult({
-          toolName: TodoWriteTool.Name,
+          toolName: ToolNames.TODO_WRITE,
           callId: 'call-todo',
           success: true,
           message: [],
@@ -336,7 +336,7 @@ describe('ToolCallEmitter', () => {
 
       it('should not emit anything for TodoWriteTool with no extractable todos', async () => {
         await emitter.emitResult({
-          toolName: TodoWriteTool.Name,
+          toolName: ToolNames.TODO_WRITE,
           callId: 'call-todo',
           success: true,
           message: [],
@@ -370,8 +370,8 @@ describe('ToolCallEmitter', () => {
   });
 
   describe('isTodoWriteTool', () => {
-    it('should return true for TodoWriteTool.Name', () => {
-      expect(emitter.isTodoWriteTool(TodoWriteTool.Name)).toBe(true);
+    it('should return true for ToolNames.TODO_WRITE', () => {
+      expect(emitter.isTodoWriteTool(ToolNames.TODO_WRITE)).toBe(true);
     });
 
     it('should return false for other tool names', () => {
@@ -578,7 +578,7 @@ describe('ToolCallEmitter', () => {
     describe('Fix 6: Empty plan emission when args has todos', () => {
       it('should emit empty plan when args had todos but result has none', async () => {
         await emitter.emitResult({
-          toolName: TodoWriteTool.Name,
+          toolName: ToolNames.TODO_WRITE,
           callId: 'call-todo-empty',
           success: true,
           message: [],
@@ -596,7 +596,7 @@ describe('ToolCallEmitter', () => {
 
       it('should emit empty plan when result todos is empty but args had todos', async () => {
         await emitter.emitResult({
-          toolName: TodoWriteTool.Name,
+          toolName: ToolNames.TODO_WRITE,
           callId: 'call-todo-cleared',
           success: true,
           message: [],

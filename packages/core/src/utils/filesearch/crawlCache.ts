@@ -18,12 +18,16 @@ export const getCacheKey = (
   directory: string,
   ignoreContent: string,
   maxDepth?: number,
+  maxFiles?: number,
 ): string => {
   const hash = crypto.createHash('sha256');
   hash.update(directory);
   hash.update(ignoreContent);
   if (maxDepth !== undefined) {
     hash.update(String(maxDepth));
+  }
+  if (maxFiles !== undefined) {
+    hash.update(`maxFiles:${maxFiles}`);
   }
   return hash.digest('hex');
 };

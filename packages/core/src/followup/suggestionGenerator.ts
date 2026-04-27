@@ -11,12 +11,15 @@
 
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { getCacheSafeParams, runForkedQuery } from './forkedQuery.js';
+import { getCacheSafeParams, runForkedAgent } from '../utils/forkedAgent.js';
 import {
   uiTelemetryService,
   EVENT_API_RESPONSE,
 } from '../telemetry/uiTelemetry.js';
 import { ApiResponseEvent } from '../telemetry/types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('FOLLOWUP');
 
 /**
  * Prompt for suggestion generation.
@@ -104,6 +107,9 @@ export async function generatePromptSuggestion(
     // Try cache-aware forked query if enabled and params available
     const cacheSafe = options?.enableCacheSharing ? getCacheSafeParams() : null;
     const modelOverride = options?.model;
+    debugLogger.debug(
+      `Generating suggestion: cacheSharing=${!!cacheSafe}, model=${modelOverride || '(default)'}`,
+    );
     const raw = cacheSafe
       ? await generateViaForkedQuery(config, abortSignal, modelOverride)
       : await generateViaBaseLlm(
@@ -116,19 +122,25 @@ export async function generatePromptSuggestion(
     const suggestion = typeof raw === 'string' ? raw.trim() : null;
 
     if (!suggestion) {
+      debugLogger.debug('Suggestion generation returned empty result');
       return { suggestion: null, filterReason: 'empty' };
     }
 
     const filterReason = getFilterReason(suggestion);
     if (filterReason) {
+      debugLogger.debug(
+        `Suggestion filtered: reason=${filterReason}, text="${suggestion}"`,
+      );
       return { suggestion: null, filterReason };
     }
 
+    debugLogger.debug(`Suggestion accepted: "${suggestion}"`);
     return { suggestion };
-  } catch {
+  } catch (error) {
     if (abortSignal.aborted) {
       return { suggestion: null };
     }
+    debugLogger.warn('Suggestion generation failed:', error);
     return { suggestion: null, filterReason: 'error' };
   }
 }
@@ -140,9 +152,13 @@ async function generateViaForkedQuery(
   modelOverride?: string,
 ): Promise<string | null> {
   const model = modelOverride || config.getModel();
+  const cacheSafeParams = getCacheSafeParams();
+  if (!cacheSafeParams) return null;
   const startTime = Date.now();
-  const result = await runForkedQuery(config, SUGGESTION_PROMPT, {
-    abortSignal,
+  const result = await runForkedAgent({
+    config,
+    userMessage: SUGGESTION_PROMPT,
+    cacheSafeParams,
     jsonSchema: SUGGESTION_SCHEMA,
     model,
   });
@@ -218,7 +234,8 @@ async function generateViaBaseLlm(
   }
 
   const text = response.candidates?.[0]?.content?.parts
-    ?.map((p) => p.text ?? '')
+    ?.filter((p) => !(p as Record<string, unknown>)['thought'])
+    .map((p) => p.text ?? '')
     .join('')
     .trim();
   if (text) {
