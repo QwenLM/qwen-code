@@ -663,7 +663,7 @@ export class LspServerManager {
   }
 
   /**
-   * 请求用户确认启动 LSP 服务器
+   * Request user consent before starting an LSP server.
    */
   private async requestUserConsent(
     serverName: string,

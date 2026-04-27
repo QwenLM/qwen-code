@@ -66,5 +66,29 @@ describe('LspServerManager', () => {
         manager.isPathSafe('../bin/clangd', workspaceRoot, workspaceRoot),
       ).toBe(false);
     });
+
+    it('blocks relative paths that use intermediate traversal to escape', () => {
+      const workspaceRoot = path.resolve('/workspace/project');
+      const manager = createManager(workspaceRoot);
+
+      expect(
+        manager.isPathSafe(
+          './tools/../../../etc/passwd',
+          workspaceRoot,
+          workspaceRoot,
+        ),
+      ).toBe(false);
+    });
+
+    it('treats commands with forward slash but no path.sep on Windows as relative', () => {
+      const workspaceRoot = path.resolve('/workspace/project');
+      const manager = createManager(workspaceRoot);
+
+      // A command like "subdir/server" is relative; if it resolves inside
+      // the workspace it should be allowed.
+      expect(
+        manager.isPathSafe('tools/clangd', workspaceRoot, workspaceRoot),
+      ).toBe(true);
+    });
   });
 });
