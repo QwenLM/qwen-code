@@ -45,17 +45,17 @@ describe('TaskStopTool', () => {
     expect(ac.signal.aborted).toBe(true);
   });
 
-  it('returns error for non-existent agent', async () => {
+  it('returns error for non-existent task', async () => {
     const result = await tool.validateBuildAndExecute(
       { task_id: 'nope' },
       new AbortController().signal,
     );
 
-    expect(result.error?.type).toBe(ToolErrorType.TASK_STOP_AGENT_NOT_FOUND);
-    expect(result.llmContent).toContain('No background agent found');
+    expect(result.error?.type).toBe(ToolErrorType.TASK_STOP_NOT_FOUND);
+    expect(result.llmContent).toContain('No background task found');
   });
 
-  it('returns error for non-running agent', async () => {
+  it('returns error for non-running task', async () => {
     registry.register({
       agentId: 'agent-1',
       description: 'test agent',
@@ -70,7 +70,7 @@ describe('TaskStopTool', () => {
       new AbortController().signal,
     );
 
-    expect(result.error?.type).toBe(ToolErrorType.TASK_STOP_AGENT_NOT_RUNNING);
+    expect(result.error?.type).toBe(ToolErrorType.TASK_STOP_NOT_RUNNING);
     expect(result.llmContent).toContain('not running');
   });
 

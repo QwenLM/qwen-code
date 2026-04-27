@@ -120,14 +120,14 @@ describe('BackgroundTaskRegistry', () => {
       expect(callback).not.toHaveBeenCalled();
 
       // Pathological tool case: bgBody never emits. After the grace period
-      // the fallback fires so hasUnfinalizedAgents() stops reporting true
+      // the fallback fires so hasUnfinalizedTasks() stops reporting true
       // and the headless wait loop can exit.
       vi.runAllTimers();
 
       expect(callback).toHaveBeenCalledOnce();
       const [, modelText] = callback.mock.calls[0] as [string, string];
       expect(modelText).toContain('<status>cancelled</status>');
-      expect(registry.hasUnfinalizedAgents()).toBe(false);
+      expect(registry.hasUnfinalizedTasks()).toBe(false);
     } finally {
       vi.useRealTimers();
     }
@@ -180,6 +180,34 @@ describe('BackgroundTaskRegistry', () => {
     expect(callback).toHaveBeenCalledOnce();
     const [, modelText] = callback.mock.calls[0] as [string, string];
     expect(modelText).toContain('<status>cancelled</status>');
+  });
+
+  it('complete() after the cancellation has already been notified is a no-op', () => {
+    // Once finalizeCancelled has emitted the terminal notification, a
+    // late-arriving complete() must not double-fire — the SDK contract
+    // is one notification per task_started.
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+
+    registry.register({
+      agentId: 'test-1',
+      description: 'test agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    registry.cancel('test-1');
+    registry.finalizeCancelled('test-1', 'partial');
+    expect(callback).toHaveBeenCalledOnce();
+    callback.mockClear();
+
+    registry.complete('test-1', 'late result');
+
+    expect(callback).not.toHaveBeenCalled();
+    // Status stays cancelled — the notified terminal state wins.
+    expect(registry.get('test-1')!.status).toBe('cancelled');
+    expect(registry.get('test-1')!.result).toBe('partial');
   });
 
   it('does not cancel a non-running agent', () => {
@@ -257,7 +285,7 @@ describe('BackgroundTaskRegistry', () => {
     expect(callback).toHaveBeenCalledTimes(2);
   });
 
-  it('hasUnfinalizedAgents reports cancelled-but-not-notified entries', () => {
+  it('hasUnfinalizedTasks reports cancelled-but-not-notified entries', () => {
     // Headless runs rely on this to keep the event loop alive after a
     // task_stop until the agent's natural handler has emitted the
     // terminal task-notification — otherwise the matching notification
@@ -269,17 +297,17 @@ describe('BackgroundTaskRegistry', () => {
       startTime: Date.now(),
       abortController: new AbortController(),
     });
-    expect(registry.hasUnfinalizedAgents()).toBe(true);
+    expect(registry.hasUnfinalizedTasks()).toBe(true);
 
     registry.cancel('test-1');
     expect(registry.get('test-1')!.status).toBe('cancelled');
-    expect(registry.hasUnfinalizedAgents()).toBe(true);
+    expect(registry.hasUnfinalizedTasks()).toBe(true);
 
     registry.finalizeCancelled('test-1', '');
-    expect(registry.hasUnfinalizedAgents()).toBe(false);
+    expect(registry.hasUnfinalizedTasks()).toBe(false);
   });
 
-  it('hasUnfinalizedAgents clears once every entry has been notified', () => {
+  it('hasUnfinalizedTasks clears once every entry has been notified', () => {
     registry.register({
       agentId: 'a',
       description: 'agent a',
@@ -295,11 +323,11 @@ describe('BackgroundTaskRegistry', () => {
       abortController: new AbortController(),
     });
 
-    expect(registry.hasUnfinalizedAgents()).toBe(true);
+    expect(registry.hasUnfinalizedTasks()).toBe(true);
     registry.complete('a', 'done');
-    expect(registry.hasUnfinalizedAgents()).toBe(true);
+    expect(registry.hasUnfinalizedTasks()).toBe(true);
     registry.fail('b', 'boom');
-    expect(registry.hasUnfinalizedAgents()).toBe(false);
+    expect(registry.hasUnfinalizedTasks()).toBe(false);
   });
 
   it('complete after cancellation surfaces the real result', () => {

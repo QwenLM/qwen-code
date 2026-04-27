@@ -714,11 +714,11 @@ export async function runNonInteractive(
               await handleCancellationError(config);
             }
             await drainLocalQueue();
-            // Wait for every agent's terminal notification, not just the
+            // Wait for every task's terminal notification, not just the
             // running ones: cancel() marks status 'cancelled' synchronously
             // but the notification is emitted later by the natural handler,
             // and SDK consumers need every task_started paired with one.
-            if (!registry.hasUnfinalizedAgents() && localQueue.length === 0)
+            if (!registry.hasUnfinalizedTasks() && localQueue.length === 0)
               break;
             await new Promise((r) => setTimeout(r, 100));
           }

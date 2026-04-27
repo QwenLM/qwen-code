@@ -23,7 +23,7 @@ describe('SendMessageTool', () => {
     tool = new SendMessageTool(config);
   });
 
-  it('queues a message for a running agent', async () => {
+  it('queues a message for a running task', async () => {
     registry.register({
       agentId: 'agent-1',
       description: 'test agent',
@@ -33,7 +33,7 @@ describe('SendMessageTool', () => {
     });
 
     const result = await tool.validateBuildAndExecute(
-      { to: 'agent-1', message: 'do more work' },
+      { task_id: 'agent-1', message: 'do more work' },
       new AbortController().signal,
     );
 
@@ -52,11 +52,11 @@ describe('SendMessageTool', () => {
     });
 
     await tool.validateBuildAndExecute(
-      { to: 'agent-1', message: 'first' },
+      { task_id: 'agent-1', message: 'first' },
       new AbortController().signal,
     );
     await tool.validateBuildAndExecute(
-      { to: 'agent-1', message: 'second' },
+      { task_id: 'agent-1', message: 'second' },
       new AbortController().signal,
     );
 
@@ -66,17 +66,17 @@ describe('SendMessageTool', () => {
     ]);
   });
 
-  it('returns error for non-existent agent', async () => {
+  it('returns error for non-existent task', async () => {
     const result = await tool.validateBuildAndExecute(
-      { to: 'nope', message: 'hello' },
+      { task_id: 'nope', message: 'hello' },
       new AbortController().signal,
     );
 
-    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_AGENT_NOT_FOUND);
-    expect(result.llmContent).toContain('No background agent found');
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.llmContent).toContain('No background task found');
   });
 
-  it('returns error for non-running agent', async () => {
+  it('returns error for non-running task', async () => {
     registry.register({
       agentId: 'agent-1',
       description: 'test agent',
@@ -87,17 +87,15 @@ describe('SendMessageTool', () => {
     registry.complete('agent-1', 'done');
 
     const result = await tool.validateBuildAndExecute(
-      { to: 'agent-1', message: 'hello' },
+      { task_id: 'agent-1', message: 'hello' },
       new AbortController().signal,
     );
 
-    expect(result.error?.type).toBe(
-      ToolErrorType.SEND_MESSAGE_AGENT_NOT_RUNNING,
-    );
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
     expect(result.llmContent).toContain('not running');
   });
 
-  it('rejects messages for a cancelled agent', async () => {
+  it('rejects messages for a cancelled task', async () => {
     // Once task_stop fires, the reasoning loop is winding down — there is
     // no next tool-round boundary to drain into, so the message would be
     // silently dropped. Reject instead of accepting a message that will
@@ -112,17 +110,15 @@ describe('SendMessageTool', () => {
     registry.cancel('agent-1');
 
     const result = await tool.validateBuildAndExecute(
-      { to: 'agent-1', message: 'too late' },
+      { task_id: 'agent-1', message: 'too late' },
       new AbortController().signal,
     );
 
-    expect(result.error?.type).toBe(
-      ToolErrorType.SEND_MESSAGE_AGENT_NOT_RUNNING,
-    );
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
     expect(registry.get('agent-1')!.pendingMessages).toEqual([]);
   });
 
-  it('includes agent description in success display', async () => {
+  it('includes task description in success display', async () => {
     registry.register({
       agentId: 'agent-1',
       description: 'Search for auth code',
@@ -132,7 +128,7 @@ describe('SendMessageTool', () => {
     });
 
     const result = await tool.validateBuildAndExecute(
-      { to: 'agent-1', message: 'focus on login' },
+      { task_id: 'agent-1', message: 'focus on login' },
       new AbortController().signal,
     );
 

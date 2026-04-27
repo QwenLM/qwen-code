@@ -41,6 +41,11 @@ function sanitizeFilenameComponent(value: string): string {
 /**
  * Returns the directory holding all subagent transcripts for a given session.
  * Layout: `<projectDir>/subagents/<sessionId>/`.
+ *
+ * TODO: this path is part of the model-facing contract via `<output-file>` in
+ * the task-notification XML. When a second background task kind lands (e.g. a
+ * shell pool), migrate to `<projectDir>/tasks/<sessionId>/<kind>-<id>.jsonl`
+ * so the namespace generalizes. Update `read-file.ts` auto-allow accordingly.
  */
 export function getSubagentSessionDir(
   projectDir: string,

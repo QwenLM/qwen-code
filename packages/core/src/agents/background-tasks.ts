@@ -221,14 +221,14 @@ export class BackgroundTaskRegistry {
   }
 
   /**
-   * True if any registered agent has not yet emitted its terminal
+   * True if any registered task has not yet emitted its terminal
    * task-notification. Covers `running` (still executing) and
    * `cancelled`-but-not-finalized (cancel requested, but the natural
    * handler hasn't fired finalizeCancelled() yet). Headless callers
    * must keep their event loop alive while this returns true, so every
    * task_started is paired with a matching task_notification.
    */
-  hasUnfinalizedAgents(): boolean {
+  hasUnfinalizedTasks(): boolean {
     for (const entry of this.agents.values()) {
       if (!entry.notified) return true;
     }

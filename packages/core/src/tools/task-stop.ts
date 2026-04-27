@@ -5,7 +5,7 @@
  */
 
 /**
- * @fileoverview TaskStop tool — lets the model cancel a running background agent.
+ * @fileoverview TaskStop tool — lets the model cancel a running background task.
  */
 
 import type { Config } from '../config/config.js';
@@ -20,7 +20,7 @@ import {
 } from './tools.js';
 
 export interface TaskStopParams {
-  /** The ID of the background agent to stop. */
+  /** The ID of the background task to stop. */
   task_id: string;
 }
 
@@ -36,7 +36,7 @@ class TaskStopInvocation extends BaseToolInvocation<
   }
 
   getDescription(): string {
-    return `Stop background agent ${this.params.task_id}`;
+    return `Stop background task ${this.params.task_id}`;
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
@@ -45,35 +45,35 @@ class TaskStopInvocation extends BaseToolInvocation<
 
     if (!entry) {
       return {
-        llmContent: `Error: No background agent found with ID "${this.params.task_id}".`,
-        returnDisplay: 'Agent not found.',
+        llmContent: `Error: No background task found with ID "${this.params.task_id}".`,
+        returnDisplay: 'Task not found.',
         error: {
-          message: `Agent not found: ${this.params.task_id}`,
-          type: ToolErrorType.TASK_STOP_AGENT_NOT_FOUND,
+          message: `Task not found: ${this.params.task_id}`,
+          type: ToolErrorType.TASK_STOP_NOT_FOUND,
         },
       };
     }
 
     if (entry.status !== 'running') {
       return {
-        llmContent: `Error: Background agent "${this.params.task_id}" is not running (status: ${entry.status}).`,
-        returnDisplay: `Agent not running (${entry.status}).`,
+        llmContent: `Error: Background task "${this.params.task_id}" is not running (status: ${entry.status}).`,
+        returnDisplay: `Task not running (${entry.status}).`,
         error: {
-          message: `Agent is ${entry.status}: ${this.params.task_id}`,
-          type: ToolErrorType.TASK_STOP_AGENT_NOT_RUNNING,
+          message: `Task is ${entry.status}: ${this.params.task_id}`,
+          type: ToolErrorType.TASK_STOP_NOT_RUNNING,
         },
       };
     }
 
     registry.cancel(this.params.task_id);
 
-    // The terminal task-notification is emitted by the agent's own handler
+    // The terminal task-notification is emitted by the task's own handler
     // (via registry.complete/fail) rather than cancel(), so the parent model
-    // still receives the agent's real partial/final result — not just a bare
+    // still receives the task's real partial/final result — not just a bare
     // "cancelled" message — once the reasoning loop unwinds.
     const desc = entry.description;
     return {
-      llmContent: `Cancellation requested for background agent "${this.params.task_id}". A final task-notification carrying the agent's last result will follow.\nDescription: ${desc}`,
+      llmContent: `Cancellation requested for background task "${this.params.task_id}". A final task-notification carrying the task's last result will follow.\nDescription: ${desc}`,
       returnDisplay: `Cancelled: ${desc}`,
     };
   }
@@ -89,7 +89,7 @@ export class TaskStopTool extends BaseDeclarativeTool<
     super(
       TaskStopTool.Name,
       ToolDisplayNames.TASK_STOP,
-      'Cancel a running background agent by its ID. The agent ID is returned when you launch a background agent.',
+      'Cancel a running background task by its ID. The task ID is returned when the task is launched.',
       Kind.Other,
       {
         type: 'object',
@@ -97,7 +97,7 @@ export class TaskStopTool extends BaseDeclarativeTool<
           task_id: {
             type: 'string',
             description:
-              'The ID of the background agent to stop (from the launch response or notification).',
+              'The ID of the background task to stop (from the launch response or notification).',
           },
         },
         required: ['task_id'],
