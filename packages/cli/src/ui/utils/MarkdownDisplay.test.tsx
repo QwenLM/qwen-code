@@ -506,6 +506,23 @@ sequenceDiagram
       expect(output).toContain('User → API: request');
       expect(output).not.toContain('sequenceDiagram');
     });
+
+    it('does not leave mermaid image rendering placeholders in finalized output', () => {
+      const text = `
+\`\`\`mermaid
+flowchart TD
+  A[Start] --> B[End]
+\`\`\`
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={false} />,
+      );
+      const output = lastFrame() ?? '';
+
+      expect(output).not.toContain('Rendering Mermaid image');
+      expect(output).toContain('Start');
+      expect(output).toContain('End');
+    });
   });
 
   it('correctly splits lines using \\n regardless of platform EOL', () => {

@@ -29,48 +29,21 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
   const { write } = useStdout();
   const preparedKittySequence = React.useRef<string | null>(null);
   const innerWidth = Math.max(8, contentWidth - MERMAID_PADDING);
-  const renderKey = React.useMemo(
-    () => `${source}\0${innerWidth}\0${availableTerminalHeight ?? 'auto'}`,
-    [availableTerminalHeight, innerWidth, source],
-  );
-  const [imageState, setImageState] = React.useState<{
-    key: string;
-    image: ReturnType<typeof renderMermaidImageSync> | null;
-  }>({ key: '', image: null });
   const visual = React.useMemo(
     () => renderMermaidVisual(source, innerWidth),
     [source, innerWidth],
   );
-  const image = imageState.key === renderKey ? imageState.image : null;
-  const imageAttemptPending = !isPending && image === null;
-
-  React.useEffect(() => {
-    if (isPending) {
-      setImageState({ key: renderKey, image: null });
-      return;
-    }
-
-    let cancelled = false;
-    setImageState((current) =>
-      current.key === renderKey ? current : { key: renderKey, image: null },
-    );
-
-    const timer = setTimeout(() => {
-      const nextImage = renderMermaidImageSync({
-        source,
-        contentWidth: innerWidth,
-        availableTerminalHeight,
-      });
-      if (!cancelled) {
-        setImageState({ key: renderKey, image: nextImage });
-      }
-    }, 20);
-
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [availableTerminalHeight, innerWidth, isPending, renderKey, source]);
+  const image = React.useMemo(
+    () =>
+      isPending
+        ? null
+        : renderMermaidImageSync({
+            source,
+            contentWidth: innerWidth,
+            availableTerminalHeight,
+          }),
+    [availableTerminalHeight, innerWidth, isPending, source],
+  );
 
   const kittySequence =
     image?.kind === 'terminal-image' &&
@@ -187,11 +160,6 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
       {visual.warning && (
         <Text color={theme.text.secondary} wrap="wrap">
           {visual.warning}
-        </Text>
-      )}
-      {imageAttemptPending && (
-        <Text color={theme.text.secondary} wrap="wrap">
-          Rendering Mermaid image... showing wireframe preview meanwhile.
         </Text>
       )}
       {!isPending && image?.kind === 'unavailable' && (
