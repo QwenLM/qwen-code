@@ -8,6 +8,7 @@ import type { RefObject } from 'react';
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type { CompletionItem } from '../../types/completionItemTypes.js';
 import { shouldAllowCompletionQuery } from '../utils/slashCommandUtils.js';
+import { stripZeroWidthSpaces } from '@qwen-code/webui';
 
 interface CompletionTriggerState {
   isOpen: boolean;
@@ -252,7 +253,9 @@ export function useCompletionTrigger(
     };
 
     const handleInput = async () => {
-      const text = inputElement.textContent || '';
+      // Strip zero-width space placeholders before processing, consistent
+      // with InputForm's onInput handler that strips them for React state.
+      const text = stripZeroWidthSpaces(inputElement.textContent || '');
       const selection = window.getSelection();
       if (!selection || selection.rangeCount === 0) {
         console.log('[useCompletionTrigger] No selection or rangeCount === 0');
@@ -304,8 +307,12 @@ export function useCompletionTrigger(
 
       // Find trigger character before cursor
       // Use text length if cursorPosition is 0 but we have text (edge case for first character)
-      const effectiveCursorPosition =
-        cursorPosition === 0 && text.length > 0 ? text.length : cursorPosition;
+      // Clamp to text.length because the DOM cursor offset may exceed the
+      // stripped text length (e.g. after removing a leading zero-width space).
+      const effectiveCursorPosition = Math.min(
+        cursorPosition === 0 && text.length > 0 ? text.length : cursorPosition,
+        text.length,
+      );
 
       const textBeforeCursor = text.substring(0, effectiveCursorPosition);
       const lastAtMatch = textBeforeCursor.lastIndexOf('@');

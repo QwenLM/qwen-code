@@ -8,23 +8,33 @@ import {
   AuthType,
   getErrorMessage,
   type Config,
-  type ModelProvidersConfig,
   type ProviderModelConfig as ModelConfig,
 } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { t } from '../../i18n/index.js';
+import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
   getCodingPlanConfig,
   isCodingPlanConfig,
   CodingPlanRegion,
   CODING_PLAN_ENV_KEY,
-} from '@qwen-code/qwen-code-core';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+} from '../../constants/codingPlan.js';
 import { backupSettingsFile } from '../../utils/settingsUtils.js';
 import { loadSettings, type LoadedSettings } from '../../config/settings.js';
 import { loadCliConfig } from '../../config/config.js';
 import type { CliArgs } from '../../config/config.js';
 import { InteractiveSelector } from './interactiveSelector.js';
+import {
+  applyOpenRouterModelsConfiguration,
+  createOpenRouterOAuthSession,
+  isOpenRouterConfig,
+  OPENROUTER_ENV_KEY,
+  runOpenRouterOAuthLogin,
+} from './openrouterOAuth.js';
+
+function formatElapsedTime(startMs: number): string {
+  return `${((Date.now() - startMs) / 1000).toFixed(2)}s`;
+}
 
 interface QwenAuthOptions {
   region?: string;
@@ -56,7 +66,7 @@ interface MergedSettingsWithCodingPlan {
  * Handles the authentication process based on the specified command and options
  */
 export async function handleQwenAuth(
-  command: 'qwen-oauth' | 'coding-plan',
+  command: 'qwen-oauth' | 'coding-plan' | 'openrouter',
   options: QwenAuthOptions,
 ) {
   try {
@@ -129,6 +139,8 @@ export async function handleQwenAuth(
       await handleQwenOAuth(config, settings);
     } else if (command === 'coding-plan') {
       await handleCodePlanAuth(config, settings, options);
+    } else if (command === 'openrouter') {
+      await handleOpenRouterAuth(config, settings, options);
     }
 
     // Exit after authentication is complete
@@ -195,7 +207,7 @@ async function handleCodePlanAuth(
   } else {
     // Otherwise, prompt interactively
     selectedRegion = await promptForRegion();
-    selectedKey = await promptForKey();
+    selectedKey = await promptForAuthKey(t('Enter your Coding Plan API key: '));
   }
 
   writeStdoutLine(t('Processing Alibaba Cloud Coding Plan authentication...'));
@@ -283,6 +295,105 @@ async function handleCodePlanAuth(
 }
 
 /**
+ * Handles OpenRouter API key setup.
+ */
+async function handleOpenRouterAuth(
+  config: Config,
+  settings: LoadedSettings,
+  options: QwenAuthOptions,
+): Promise<void> {
+  writeStdoutLine(t('Processing OpenRouter authentication...'));
+
+  try {
+    const authStartMs = Date.now();
+    let selectedKey = options.key;
+
+    if (!selectedKey) {
+      const oauthStartMs = Date.now();
+      const oauthSession = createOpenRouterOAuthSession();
+      writeStdoutLine(
+        t(
+          'Starting OpenRouter OAuth in your browser. If needed, open this link manually: {{authorizationUrl}}',
+          {
+            authorizationUrl: oauthSession.authorizationUrl,
+          },
+        ),
+      );
+      const oauthResult = await runOpenRouterOAuthLogin(undefined, {
+        session: oauthSession,
+      });
+      writeStdoutLine(
+        t('Waited for OpenRouter browser authorization in {{elapsed}}.', {
+          elapsed:
+            typeof oauthResult.authorizationCodeWaitMs === 'number'
+              ? `${(oauthResult.authorizationCodeWaitMs / 1000).toFixed(2)}s`
+              : formatElapsedTime(oauthStartMs),
+        }),
+      );
+      writeStdoutLine(
+        t('Exchanged OpenRouter auth code for API key in {{elapsed}}.', {
+          elapsed:
+            typeof oauthResult.apiKeyExchangeMs === 'number'
+              ? `${(oauthResult.apiKeyExchangeMs / 1000).toFixed(2)}s`
+              : formatElapsedTime(oauthStartMs),
+        }),
+      );
+      writeStdoutLine(
+        t('OpenRouter OAuth callback completed in {{elapsed}}.', {
+          elapsed: formatElapsedTime(oauthStartMs),
+        }),
+      );
+      selectedKey = oauthResult.apiKey;
+    }
+
+    if (!selectedKey) {
+      throw new Error(
+        'OpenRouter authentication completed without an API key.',
+      );
+    }
+
+    const authTypeScope = getPersistScopeForModelSelection(settings);
+    const settingsFile = settings.forScope(authTypeScope);
+    backupSettingsFile(settingsFile.path);
+
+    const modelsStartMs = Date.now();
+    await applyOpenRouterModelsConfiguration({
+      settings,
+      config,
+      apiKey: selectedKey,
+      reloadConfig: true,
+    });
+    writeStdoutLine(
+      t('Fetched OpenRouter models in {{elapsed}}.', {
+        elapsed: formatElapsedTime(modelsStartMs),
+      }),
+    );
+
+    const refreshStartMs = Date.now();
+    await config.refreshAuth(AuthType.USE_OPENAI);
+    writeStdoutLine(
+      t('Refreshed OpenRouter auth in {{elapsed}}.', {
+        elapsed: formatElapsedTime(refreshStartMs),
+      }),
+    );
+    writeStdoutLine(
+      t('Total OpenRouter setup time: {{elapsed}}.', {
+        elapsed: formatElapsedTime(authStartMs),
+      }),
+    );
+
+    writeStdoutLine(t('Successfully configured OpenRouter.'));
+  } catch (error) {
+    writeStderrLine(
+      t('Failed to configure OpenRouter: {{error}}', {
+        error: getErrorMessage(error),
+      }),
+    );
+    process.exit(1);
+  }
+}
+
+/**
  * Prompts the user to select a region using an interactive selector
  */
 async function promptForRegion(): Promise<CodingPlanRegion> {
@@ -308,12 +419,12 @@ async function promptForRegion(): Promise<CodingPlanRegion> {
 /**
  * Prompts the user to enter an API key
  */
-async function promptForKey(): Promise<string> {
+async function promptForAuthKey(prompt: string): Promise<string> {
   // Create a simple password-style input (without echoing characters)
   const stdin = process.stdin;
   const stdout = process.stdout;
 
-  stdout.write(t('Enter your Coding Plan API key: '));
+  stdout.write(prompt);
 
   // Set raw mode to capture keystrokes
   const wasRaw = stdin.isRaw;
@@ -374,6 +485,13 @@ export async function runInteractiveAuth() {
   const selector = new InteractiveSelector(
     [
       {
+        value: 'openrouter' as const,
+        label: t('OpenRouter'),
+        description: t(
+          'API key setup · OpenAI-compatible provider via OpenRouter',
+        ),
+      },
+      {
         value: 'coding-plan' as const,
         label: t('Alibaba Cloud Coding Plan'),
         description: t(
@@ -403,6 +521,8 @@ export async function runInteractiveAuth() {
 
   if (choice === 'coding-plan') {
     await handleQwenAuth('coding-plan', {});
+  } else if (choice === 'openrouter') {
+    await handleQwenAuth('openrouter', {});
   }
 }
 
@@ -422,6 +542,9 @@ export async function showAuthStatus(): Promise<void> {
     if (!selectedType) {
       writeStdoutLine(t('⚠️  No authentication method configured.\n'));
       writeStdoutLine(t('Run one of the following commands to get started:\n'));
+      writeStdoutLine(
+        t('  qwen auth openrouter      - Configure OpenRouter API key'),
+      );
       writeStdoutLine(
         t(
           '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)',
@@ -450,19 +573,16 @@ export async function showAuthStatus(): Promise<void> {
       );
     } else if (selectedType === AuthType.USE_OPENAI) {
       const codingPlanRegion = mergedSettings.codingPlan?.region;
+      const codingPlanVersion = mergedSettings.codingPlan?.version;
       const modelName = mergedSettings.model?.name;
-
-      // Resolve the active model's provider config (shared by both paths)
-      const modelProviders = mergedSettings.modelProviders as
-        | ModelProvidersConfig
-        | undefined;
-      const models = modelProviders?.[AuthType.USE_OPENAI];
-      const activeModelConfig = Array.isArray(models)
-        ? (models.find((m) => m.id === modelName) ??
-          (modelName ? undefined : models[0]))
-        : undefined;
-
-      // Detect Coding Plan: trust active model config when available, fall back to settings
+      const openAiProviders =
+        mergedSettings.modelProviders?.[AuthType.USE_OPENAI] || [];
+      const activeModelConfig = modelName
+        ? openAiProviders.find((model) => model.id === modelName)
+        : openAiProviders[0];
+      const isActiveOpenRouter = activeModelConfig
+        ? isOpenRouterConfig(activeModelConfig)
+        : false;
       const providerCodingPlanRegion = isCodingPlanConfig(
         activeModelConfig?.baseUrl,
         activeModelConfig?.envKey,
@@ -471,10 +591,31 @@ export async function showAuthStatus(): Promise<void> {
         ? providerCodingPlanRegion
         : codingPlanRegion;
 
-      if (detectedCodingPlanRegion) {
-        // --- Coding Plan path ---
-        const codingPlanVersion = mergedSettings.codingPlan?.version;
+      if (isActiveOpenRouter) {
+        const hasOpenRouterApiKey =
+          !!process.env[OPENROUTER_ENV_KEY] ||
+          !!mergedSettings.env?.[OPENROUTER_ENV_KEY];
 
+        if (hasOpenRouterApiKey) {
+          writeStdoutLine(t('✓ Authentication Method: OpenRouter'));
+
+          if (modelName) {
+            writeStdoutLine(
+              t('  Current Model: {{model}}', { model: modelName }),
+            );
+          }
+
+          writeStdoutLine(t('  Status: API key configured\n'));
+        } else {
+          writeStdoutLine(
+            t('⚠️  Authentication Method: OpenRouter (Incomplete)'),
+          );
+          writeStdoutLine(
+            t('  Issue: API key not found in environment or settings\n'),
+          );
+          writeStdoutLine(t('  Run `qwen auth openrouter` to re-configure.\n'));
+        }
+      } else if (detectedCodingPlanRegion) {
         const hasCodingPlanKey =
           !!process.env[CODING_PLAN_ENV_KEY] ||
           !!mergedSettings.env?.[CODING_PLAN_ENV_KEY];
@@ -484,7 +625,6 @@ export async function showAuthStatus(): Promise<void> {
             t('✓ Authentication Method: Alibaba Cloud Coding Plan'),
           );
 
-          // Show region from settings or from detected config
           const displayRegion = codingPlanRegion || detectedCodingPlanRegion;
           if (displayRegion) {
             const regionDisplay =
@@ -525,8 +665,6 @@ export async function showAuthStatus(): Promise<void> {
           );
         }
       } else {
-        // --- Generic OpenAI-compatible provider path ---
-        // Mirror hasApiKeyForAuth() semantics: explicit envKey → no fallback
         let hasApiKey: boolean;
         if (activeModelConfig?.envKey) {
           hasApiKey =

@@ -1,6 +1,7 @@
 ---
 name: review
 description: Review changed code for correctness, security, code quality, and performance. Use when the user asks to review code changes, a PR, or specific files. Invoke with `/review`, `/review <pr-number>`, `/review <file-path>`, or `/review <pr-number> --comment` to post inline comments on the PR.
+argument-hint: '[pr-number|file-path] [--comment]'
 allowedTools:
   - task
   - run_shell_command

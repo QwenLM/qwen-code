@@ -221,6 +221,7 @@ describe('Session', () => {
         {
           name: 'init',
           description: 'Initialize project context',
+          argumentHint: '[path]',
         },
       ]);
 
@@ -239,7 +240,7 @@ describe('Session', () => {
             {
               name: 'init',
               description: 'Initialize project context',
-              input: null,
+              input: { hint: '[path]' },
             },
           ],
         },

@@ -299,13 +299,12 @@ test_rewind_command() {
   send_keys y
   wait_for "Conversation rewound" || return 1
 
-  # After rewind: the input should be pre-populated with the selected turn's
-  # text ("say exactly GAMMA3..."). The GAMMA3 *response* turn should be gone
-  # from the conversation, but the text appears in the input bar — which is
-  # the correct pre-population behavior.
-  # Verify pre-population: the input bar should contain GAMMA3 text
-  assert_screen "say exactly GAMMA3" || return 1
-  # Verify the earlier turns (ALPHA1, BETA2) are still in conversation
+  # After rewind: pressing Up once from the initial selection (GAMMA3, the last
+  # real user turn) lands on BETA2. Rewind targets BETA2, so its text gets
+  # pre-populated into the input bar. Slash commands like /rewind are excluded
+  # from the turn list by isRealUserTurn().
+  assert_screen "say exactly BETA2" || return 1
+  # Verify the earlier turn (ALPHA1) is still in conversation
   assert_scrollback "ALPHA1" || return 1
 }
 

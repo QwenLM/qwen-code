@@ -188,7 +188,12 @@ describe('terminalSerializer', () => {
         unwrapWrappedLines: true,
       });
       const visibleText = result
-        .map((line) => line.map((token) => token.text).join('').trimEnd())
+        .map((line) =>
+          line
+            .map((token) => token.text)
+            .join('')
+            .trimEnd(),
+        )
         .filter(Boolean);
 
       expect(visibleText).toEqual(['abcdefghijkl', 'short']);
