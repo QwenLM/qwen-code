@@ -482,6 +482,23 @@ export function createMinimalSettings(): LoadedSettings {
 }
 
 /**
+ * Returns the set of normalized .env file paths that count as user-level.
+ *
+ * User-level paths cover the home `.env` and the global Qwen config dir
+ * `.env` (which respects `QWEN_HOME`). These are used both to allow loading
+ * under untrusted workspaces and to opt out of the project-level excluded
+ * vars filter inside `loadEnvironment`.
+ */
+function getUserLevelEnvPaths(): Set<string> {
+  const homeDir = homedir();
+  const globalQwenDir = Storage.getGlobalQwenDir();
+  return new Set([
+    path.normalize(path.join(homeDir, '.env')),
+    path.normalize(path.join(globalQwenDir, '.env')),
+  ]);
+}
+
+/**
  * Finds the .env file to load, respecting workspace trust settings.
  *
  * When workspace is untrusted, only allow user-level .env files at:
@@ -494,10 +511,7 @@ function findEnvFile(settings: Settings, startDir: string): string | null {
 
   // Pre-compute user-level .env paths for fast comparison
   const globalQwenDir = Storage.getGlobalQwenDir();
-  const userLevelPaths = new Set([
-    path.normalize(path.join(homeDir, '.env')),
-    path.normalize(path.join(globalQwenDir, '.env')),
-  ]);
+  const userLevelPaths = getUserLevelEnvPaths();
 
   // Determine if we can use this .env file based on trust settings
   const canUseEnvFile = (filePath: string): boolean =>
@@ -593,7 +607,12 @@ export function loadEnvironment(settings: Settings): void {
 
       const excludedVars =
         settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
-      const isProjectEnvFile = !envFilePath.includes(QWEN_DIR);
+      const userLevelPaths = getUserLevelEnvPaths();
+      const normalizedEnvFilePath = path.normalize(envFilePath);
+      const isUserLevelEnvFile =
+        userLevelPaths.has(normalizedEnvFilePath) ||
+        normalizedEnvFilePath.includes(`${path.sep}${QWEN_DIR}${path.sep}`);
+      const isProjectEnvFile = !isUserLevelEnvFile;
 
       for (const key in parsedEnv) {
         if (Object.hasOwn(parsedEnv, key)) {
