@@ -157,9 +157,7 @@ describe('openrouterOAuth', () => {
     );
     await listener.ready;
 
-    const codePromise = await expect(listener.waitForCode).rejects.toThrow(
-      'Invalid OAuth state',
-    );
+    const codePromise = listener.waitForCode.catch((error: unknown) => error);
     await new Promise<void>((resolve, reject) => {
       const req = request(
         'http://localhost:3101/openrouter/callback?code=fast-code-123&state=wrong-state',
@@ -173,7 +171,11 @@ describe('openrouterOAuth', () => {
       req.end();
     });
 
-    await codePromise;
+    await expect(codePromise).resolves.toEqual(
+      expect.objectContaining({
+        message: expect.stringContaining('Invalid OAuth state'),
+      }),
+    );
   }, 15_000);
 
   it('creates a reusable OAuth session for manual fallback links', () => {
