@@ -135,6 +135,26 @@ export function parseModelField(
 }
 
 /**
+ * Parse the `paths` field from skill frontmatter into normalized glob
+ * patterns. Returns `undefined` when the field is omitted, an empty array,
+ * or contains only blank entries — those cases mean "no path gating, treat
+ * as unconditional". Throws when `paths` is present but not an array.
+ */
+export function parsePathsField(
+  frontmatter: Record<string, unknown>,
+): string[] | undefined {
+  const raw = frontmatter['paths'];
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(raw)) {
+    throw new Error('"paths" must be an array of glob patterns');
+  }
+  const cleaned = raw.map((p) => String(p).trim()).filter((p) => p.length > 0);
+  return cleaned.length > 0 ? cleaned : undefined;
+}
+
+/**
  * Result of a validation operation on a skill configuration.
  */
 export interface SkillValidationResult {

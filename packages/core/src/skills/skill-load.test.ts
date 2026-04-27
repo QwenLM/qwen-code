@@ -10,7 +10,7 @@ import {
   loadSkillsFromDir,
   validateConfig,
 } from './skill-load.js';
-import { parseModelField } from './types.js';
+import { parseModelField, parsePathsField } from './types.js';
 import * as fs from 'fs/promises';
 
 // Mock file system operations
@@ -339,6 +339,51 @@ Valid skill.
     it('should treat "inherit" case-sensitively', () => {
       expect(parseModelField({ model: 'Inherit' })).toBe('Inherit');
       expect(parseModelField({ model: 'INHERIT' })).toBe('INHERIT');
+    });
+  });
+
+  describe('parsePathsField', () => {
+    it('returns the cleaned array for a valid paths frontmatter', () => {
+      expect(
+        parsePathsField({ paths: ['src/**/*.tsx', 'test/**/*.ts'] }),
+      ).toEqual(['src/**/*.tsx', 'test/**/*.ts']);
+    });
+
+    it('returns undefined when paths is omitted', () => {
+      expect(parsePathsField({})).toBeUndefined();
+    });
+
+    it('returns undefined for an empty array', () => {
+      expect(parsePathsField({ paths: [] })).toBeUndefined();
+    });
+
+    it('drops blank/whitespace-only entries and trims', () => {
+      expect(
+        parsePathsField({ paths: ['  src/**  ', '', '  ', 'lib/**'] }),
+      ).toEqual(['src/**', 'lib/**']);
+    });
+
+    it('returns undefined when every entry is blank', () => {
+      expect(parsePathsField({ paths: ['', '   '] })).toBeUndefined();
+    });
+
+    it('coerces non-string entries via String()', () => {
+      expect(parsePathsField({ paths: [123, 'src/**'] })).toEqual([
+        '123',
+        'src/**',
+      ]);
+    });
+
+    it('throws when paths is a scalar (not an array)', () => {
+      expect(() => parsePathsField({ paths: 'src/**' })).toThrow(
+        '"paths" must be an array of glob patterns',
+      );
+    });
+
+    it('throws when paths is an object', () => {
+      expect(() => parsePathsField({ paths: { glob: 'src/**' } })).toThrow(
+        '"paths" must be an array',
+      );
     });
   });
 

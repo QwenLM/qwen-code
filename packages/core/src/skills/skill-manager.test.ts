@@ -82,7 +82,10 @@ describe('SkillManager', () => {
           allowedTools: ['read_file', 'write_file'],
         };
       }
-      if (yamlString.includes('paths:')) {
+      // Match a frontmatter-level `paths:` field, not any incidental
+      // occurrence of "paths:" in the body. Multiline + start-anchor matches
+      // a top-level YAML key.
+      if (/^paths:/m.test(yamlString)) {
         // Branch handles paths-related tests by reading the literal YAML so
         // the parser-behavior nuance (array vs scalar vs empty) is preserved.
         // Names are inferred from the literal `name: <x>` line so multiple

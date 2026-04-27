@@ -2,6 +2,7 @@ import {
   type SkillConfig,
   type SkillValidationResult,
   parseModelField,
+  parsePathsField,
 } from './types.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -117,17 +118,7 @@ export function parseSkillContent(
 
   // Optional `paths` frontmatter: glob patterns that gate when this skill
   // is offered to the model (conditional skill).
-  const pathsRaw = frontmatter['paths'];
-  let paths: string[] | undefined;
-  if (pathsRaw !== undefined) {
-    if (!Array.isArray(pathsRaw)) {
-      throw new Error('"paths" must be an array of glob patterns');
-    }
-    const cleaned = pathsRaw
-      .map((p) => String(p).trim())
-      .filter((p) => p.length > 0);
-    paths = cleaned.length > 0 ? cleaned : undefined;
-  }
+  const paths = parsePathsField(frontmatter);
 
   const config: SkillConfig = {
     name,
