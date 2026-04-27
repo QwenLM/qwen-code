@@ -239,6 +239,7 @@ async function main() {
   );
   await clickButton('Add Comment');
   await waitForSelector('[aria-label="Review comment for README.md"]');
+  await assertReviewCommentEditorChrome('review-comment-editor-chrome.json');
   await setFieldByAriaLabel(
     'Review comment for README.md',
     'Review note from E2E',
@@ -1254,7 +1255,8 @@ async function assertRalphWorkspaceLayout(fileName) {
         fontSize: Number.parseFloat(style.fontSize),
         fontWeight: Number.parseFloat(style.fontWeight),
         lineHeight: Number.parseFloat(style.lineHeight),
-        opacity: Number.parseFloat(style.opacity)
+        opacity: Number.parseFloat(style.opacity),
+        textTransform: style.textTransform
       };
     };
     const styleFor = (selector) =>
@@ -1345,6 +1347,9 @@ async function assertRalphWorkspaceLayout(fileName) {
         ...document.querySelectorAll('.topbar-context-item')
       ].map((item) => styleForElement(item)),
       runtimeStatusStyle: styleFor('[data-testid="topbar-runtime-status"]'),
+      terminalStatusStyle: styleFor(
+        '[data-testid="terminal-strip-status"]'
+      ),
       terminalVisibleLabelText:
         document
           .querySelector('[data-testid="terminal-toggle"] .message-role')
@@ -1567,6 +1572,19 @@ async function assertRalphWorkspaceLayout(fileName) {
   if (metrics.terminalVisibleLabelText !== null) {
     throw new Error(
       `Collapsed terminal should not render a visible section label: ${metrics.terminalVisibleLabelText}`,
+    );
+  }
+
+  if (
+    !metrics.terminalStatusStyle ||
+    metrics.terminalStatusStyle.textTransform !== 'none' ||
+    metrics.terminalStatusStyle.fontWeight > 720 ||
+    metrics.terminalStatusStyle.fontSize > 11.2
+  ) {
+    throw new Error(
+      `Collapsed terminal status should stay normal-case and restrained: ${JSON.stringify(
+        metrics.terminalStatusStyle,
+      )}`,
     );
   }
 
@@ -5787,9 +5805,11 @@ async function assertCompactDenseConversationLayout(fileName) {
       const style = window.getComputedStyle(element);
       return {
         fontSize: numberFromPixel(style.fontSize),
+        fontWeight: Number.parseFloat(style.fontWeight),
         lineHeight: numberFromPixel(style.lineHeight),
         overflowWrap: style.overflowWrap,
         position: style.position,
+        textTransform: style.textTransform,
         whiteSpace: style.whiteSpace,
         wordBreak: style.wordBreak
       };
@@ -5982,6 +6002,7 @@ async function assertCompactDenseConversationLayout(fileName) {
       terminalToggle: rectFor(terminalToggle),
       terminalProject: rectFor(terminalProject),
       terminalStatus: rectFor(terminalStatus),
+      terminalStatusStyle: typeStyleFor(terminalStatus),
       terminalPreview: rectFor(terminalPreview),
       terminalVisibleLabelText:
         terminalToggle?.querySelector('.message-role')?.textContent.trim() ??
@@ -6271,6 +6292,19 @@ async function assertCompactDenseConversationLayout(fileName) {
   if (snapshot.terminalVisibleLabelText !== null) {
     throw new Error(
       `Compact terminal should not render a visible section label: ${snapshot.terminalVisibleLabelText}`,
+    );
+  }
+
+  if (
+    !snapshot.terminalStatusStyle ||
+    snapshot.terminalStatusStyle.textTransform !== 'none' ||
+    snapshot.terminalStatusStyle.fontWeight > 720 ||
+    snapshot.terminalStatusStyle.fontSize > 11.2
+  ) {
+    throw new Error(
+      `Compact terminal status should stay normal-case and restrained: ${JSON.stringify(
+        snapshot.terminalStatusStyle,
+      )}`,
     );
   }
 
@@ -6574,6 +6608,17 @@ async function assertReviewDrawerLayout(fileName) {
         height: rect.height
       };
     };
+    const styleForElement = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        fontSize: Number.parseFloat(style.fontSize),
+        fontWeight: Number.parseFloat(style.fontWeight),
+        textTransform: style.textTransform
+      };
+    };
 
     return {
       viewport: {
@@ -6648,6 +6693,20 @@ async function assertReviewDrawerLayout(fileName) {
         width: item.getBoundingClientRect().width,
         height: item.getBoundingClientRect().height
       })),
+      supportLabelStyles: {
+        changedFileMeta: styleForElement(
+          document.querySelector('.changed-files summary small')
+        ),
+        hunkSource: styleForElement(
+          document.querySelector('.diff-hunk-header small')
+        ),
+        reviewNote: styleForElement(
+          document.querySelector('.review-comment-prompt')
+        ),
+        terminalStatus: styleForElement(
+          document.querySelector('[data-testid="terminal-strip-status"]')
+        )
+      },
       commentBox: rectFor('.review-comment-box'),
       commentEditor: rectFor('[data-testid="review-comment-editor"]'),
       commentTextarea: rectFor('[aria-label="Review comment for README.md"]'),
@@ -6754,6 +6813,21 @@ async function assertReviewDrawerLayout(fileName) {
     if (item.height > 28) {
       throw new Error(
         `Review metadata item should stay compact: ${JSON.stringify(item)}`,
+      );
+    }
+  }
+
+  for (const [name, style] of Object.entries(metrics.supportLabelStyles)) {
+    if (
+      !style ||
+      style.textTransform !== 'none' ||
+      style.fontWeight > 720 ||
+      style.fontSize > 11.2
+    ) {
+      throw new Error(
+        `Review support label ${name} should stay normal-case and restrained: ${JSON.stringify(
+          style,
+        )}`,
       );
     }
   }
@@ -6884,6 +6958,81 @@ function assertReviewActionButtonDensity(buttons, context) {
   }
 }
 
+async function assertReviewCommentEditorChrome(fileName) {
+  const snapshot = await evaluate(`(() => {
+    const editor = document.querySelector('[data-testid="review-comment-editor"]');
+    const label = editor?.querySelector('span') ?? null;
+    const textarea = document.querySelector(
+      '[aria-label="Review comment for README.md"]'
+    );
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        fontSize: Number.parseFloat(style.fontSize),
+        fontWeight: Number.parseFloat(style.fontWeight),
+        textTransform: style.textTransform
+      };
+    };
+
+    return {
+      editor: rectFor(editor),
+      labelText: label?.textContent.trim() ?? '',
+      labelStyle: styleFor(label),
+      textarea: rectFor(textarea),
+      textareaLabel: textarea?.getAttribute('aria-label') ?? ''
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (
+    !snapshot.editor ||
+    !snapshot.textarea ||
+    snapshot.textareaLabel !== 'Review comment for README.md'
+  ) {
+    throw new Error(
+      `Review comment editor should be open and accessible: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.labelText !== 'Comment' ||
+    !snapshot.labelStyle ||
+    snapshot.labelStyle.textTransform !== 'none' ||
+    snapshot.labelStyle.fontWeight > 720 ||
+    snapshot.labelStyle.fontSize > 11.2
+  ) {
+    throw new Error(
+      `Review comment label should stay normal-case and restrained: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+}
+
 async function assertCompactReviewDrawerLayout(fileName) {
   await waitFor(
     'compact review drawer viewport',
@@ -6930,6 +7079,17 @@ async function assertCompactReviewDrawerLayout(fileName) {
         left: rect.left,
         width: rect.width,
         height: rect.height
+      };
+    };
+    const styleForElement = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        fontSize: Number.parseFloat(style.fontSize),
+        fontWeight: Number.parseFloat(style.fontWeight),
+        textTransform: style.textTransform
       };
     };
     const overflows = (selector) => {
@@ -7083,6 +7243,20 @@ async function assertCompactReviewDrawerLayout(fileName) {
         width: item.getBoundingClientRect().width,
         height: item.getBoundingClientRect().height
       })),
+      supportLabelStyles: {
+        changedFileMeta: styleForElement(
+          document.querySelector('.changed-files summary small')
+        ),
+        hunkSource: styleForElement(
+          document.querySelector('.diff-hunk-header small')
+        ),
+        reviewNote: styleForElement(
+          document.querySelector('.review-comment-prompt')
+        ),
+        terminalStatus: styleForElement(
+          document.querySelector('[data-testid="terminal-strip-status"]')
+        )
+      },
       commentBox: rectFor('.review-comment-box'),
       commentEditor: rectFor('[data-testid="review-comment-editor"]'),
       commentTextarea: rectFor('[aria-label="Review comment for README.md"]'),
@@ -7420,6 +7594,21 @@ async function assertCompactReviewDrawerLayout(fileName) {
     }
   }
 
+  for (const [name, style] of Object.entries(metrics.supportLabelStyles)) {
+    if (
+      !style ||
+      style.textTransform !== 'none' ||
+      style.fontWeight > 720 ||
+      style.fontSize > 11.2
+    ) {
+      throw new Error(
+        `Compact review support label ${name} should stay normal-case and restrained: ${JSON.stringify(
+          style,
+        )}`,
+      );
+    }
+  }
+
   if (metrics.commentBox === null || metrics.commentBox.height > 50) {
     throw new Error(
       `Compact collapsed comment box should stay short: ${JSON.stringify(
@@ -7572,7 +7761,7 @@ async function assertReviewStageAllResult(fileName) {
           gitStatus?.getAttribute('title')?.includes(
             '0 modified · 2 staged · 0 untracked'
           ) === true &&
-          (review?.innerText ?? '').includes('ADDED · 1 HUNK')
+          (review?.innerText ?? '').includes('added · 1 hunk')
         );
       })()`),
     10_000,
@@ -7626,9 +7815,15 @@ async function assertReviewStageAllResult(fileName) {
     );
   }
 
-  if (!snapshot.reviewText.includes('ADDED · 1 HUNK')) {
+  if (!snapshot.reviewText.includes('added · 1 hunk')) {
     throw new Error(
       `Stage All did not update changed-file states: ${snapshot.reviewText}`,
+    );
+  }
+
+  if (snapshot.reviewText.includes('ADDED · 1 HUNK')) {
+    throw new Error(
+      `Stage All retained uppercase changed-file metadata: ${snapshot.reviewText}`,
     );
   }
 }

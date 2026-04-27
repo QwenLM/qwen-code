@@ -2338,8 +2338,8 @@ textarea:focus {
 .changed-files summary small {
   color: var(--muted);
   font-size: 10px;
-  font-weight: 820;
-  text-transform: uppercase;
+  font-weight: 680;
+  text-transform: none;
   white-space: nowrap;
 }
 
@@ -2408,8 +2408,8 @@ textarea:focus {
     'Segoe UI',
     sans-serif;
   font-size: 10px;
-  font-weight: 820;
-  text-transform: uppercase;
+  font-weight: 680;
+  text-transform: none;
 }
 
 .changed-files pre,
@@ -2456,9 +2456,9 @@ textarea:focus {
   overflow: hidden;
   color: var(--muted);
   font-size: 11px;
-  font-weight: 760;
+  font-weight: 660;
   text-overflow: ellipsis;
-  text-transform: uppercase;
+  text-transform: none;
   white-space: nowrap;
 }
 
@@ -2470,8 +2470,8 @@ textarea:focus {
 .review-comment-box label span {
   color: var(--muted);
   font-size: 11px;
-  font-weight: 820;
-  text-transform: uppercase;
+  font-weight: 680;
+  text-transform: none;
 }
 
 .settings-form label span {
@@ -2584,8 +2584,8 @@ textarea:focus {
   border-radius: 999px;
   color: rgba(225, 232, 228, 0.66);
   font-size: 11px;
-  font-weight: 760;
-  text-transform: uppercase;
+  font-weight: 680;
+  text-transform: none;
 }
 
 .terminal-strip-preview {

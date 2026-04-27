@@ -22,6 +22,124 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Terminal and Review Status Label Restraint
+
+Status: completed in iteration 79.
+
+Goal: reduce the remaining uppercase status labels in the collapsed terminal
+strip and review drawer so supporting surfaces stay quieter than the
+conversation and composer.
+
+User-visible value: users can keep the terminal and review drawer available
+without small status chips, hunk metadata, and review note labels reading like
+debug-dashboard headers.
+
+Expected files:
+
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/terminal-review-label-restraint.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- The collapsed terminal status chip renders in normal case with restrained
+  font weight while preserving its compact pill geometry and overflow
+  containment.
+- Review drawer file metadata, hunk source metadata, collapsed review-note
+  prompt, and open comment label render in normal case with compact weights.
+- Review safety, staging, discard confirmation, commit, terminal attach, model,
+  settings, branch, and compact viewport workflows remain unchanged.
+- The first viewport remains conversation-first: terminal stays collapsed by
+  default, review opens as a supporting drawer, and no local server URLs,
+  secrets, or protocol IDs become visible.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and fake ACP, assert initial and compact collapsed terminal label styles,
+  open the dirty fake project review drawer, assert review metadata/comment
+  label styles at default and compact widths, open the comment editor and assert
+  the label style, then continue discard safety, stage, commit, settings,
+  terminal attach, model, branch, and relaunch paths.
+- E2E assertions: terminal and review support labels report
+  `text-transform: none`, stay below the existing compact font-weight bounds,
+  remain horizontally contained, and the full CDP smoke records zero unexpected
+  console errors or failed local requests.
+- Diagnostic artifacts to collect on failure: updated `initial-layout.json`,
+  `compact-dense-conversation.json`, `review-drawer-layout.json`,
+  `compact-review-drawer.json`, `review-comment-editor-chrome.json`,
+  screenshots, Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` used repository memory and the
+  current next-work notes to choose a small fidelity slice; `frontend-design`
+  constrained by `home.jpg` to reduce loud support chrome without introducing a
+  new visual direction; `electron-desktop-dev` for renderer CSS changes
+  verified through real Electron CDP interaction.
+
+Notes and decisions:
+
+- Brainstormed alternatives: leave uppercase treatment only in terminal,
+  redesign the review drawer information hierarchy, or make a targeted
+  normal-case styling pass over the remaining support labels. The targeted pass
+  is the smallest safe step because prior slices already established the
+  drawer/terminal structure and CDP geometry checks.
+- This slice intentionally does not change review behavior, Git service
+  semantics, terminal command execution, Electron main/preload APIs, or local
+  server security.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 35 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T00-19-11-628Z/`.
+- An initial CDP run at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T00-17-09-585Z/`
+  failed because the harness still expected the previous rendered uppercase
+  changed-file metadata. Git staging had succeeded; the assertion was updated
+  to the new normal-case contract before the passing rerun.
+- Key recorded metrics: `initial-layout.json` and
+  `compact-dense-conversation.json` recorded the terminal status chip with
+  `textTransform: "none"` and `fontWeight: 680`; `review-drawer-layout.json`
+  and `compact-review-drawer.json` recorded changed-file metadata, hunk source
+  metadata, review note, and terminal status support labels with
+  `textTransform: "none"` and weights at or below 680; and
+  `review-comment-editor-chrome.json` recorded the open comment label as
+  normal-case at 680 weight. `summary.json` recorded zero console errors and
+  zero failed local requests.
+
+Self-review:
+
+- The first viewport moves closer to `home.jpg` by making terminal/review
+  support chrome quieter while preserving the existing compact geometry,
+  icon-led controls, and conversation-first layout.
+- The slice only changes renderer CSS and the CDP harness; Electron
+  main/preload, IPC, local server binding, token handling, Git staging, discard,
+  commit, and terminal command execution behavior are unchanged.
+- The CDP harness now protects against regressing these support labels back to
+  uppercase while continuing to exercise the existing review, settings,
+  terminal, model, branch, relaunch, and commit workflows.
+
+Next work:
+
+- Continue prototype fidelity by reviewing branch-menu and topbar uppercase
+  status chrome that still reads more like diagnostics than product context.
+- Continue model workflow polish by exposing provider health/validation state
+  near model choices without widening the composer.
+
 ### Slice: Model Picker Provider Grouping
 
 Status: completed in iteration 78.
