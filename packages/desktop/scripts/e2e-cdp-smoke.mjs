@@ -90,6 +90,9 @@ async function main() {
   await assertNoProjectOpenProjectAffordance(
     'no-project-open-project-affordance.json',
   );
+  await assertNoProjectTerminalStripRestraint(
+    'no-project-terminal-strip-restraint.json',
+  );
   await saveScreenshot('initial-workspace.png');
 
   await clickButtonByTestIdUntilText(
@@ -979,6 +982,171 @@ async function assertNoProjectOpenProjectAffordance(fileName) {
     throw new Error(
       `No-project first viewport leaked passive/noisy state or overflowed: ${JSON.stringify(
         snapshot,
+      )}`,
+    );
+  }
+}
+
+async function assertNoProjectTerminalStripRestraint(fileName) {
+  const snapshot = await evaluate(`(() => {
+    const alphaFromColor = (color) => {
+      if (!color || color === 'transparent') {
+        return 0;
+      }
+      const match = color.match(/rgba?\\(([^)]+)\\)/u);
+      if (!match) {
+        return 1;
+      }
+      const parts = match[1].split(',').map((part) => part.trim());
+      return parts.length < 4 ? 1 : Number.parseFloat(parts[3]);
+    };
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        color: style.color,
+        colorAlpha: alphaFromColor(style.color),
+        backgroundAlpha: alphaFromColor(style.backgroundColor),
+        fontFamily: style.fontFamily,
+        fontSize: Number.parseFloat(style.fontSize),
+        fontWeight: Number.parseFloat(style.fontWeight),
+        opacity: Number.parseFloat(style.opacity),
+        textTransform: style.textTransform
+      };
+    };
+    const overflows = (element) =>
+      Boolean(element && element.scrollWidth > element.clientWidth + 4);
+    const terminal = document.querySelector('[data-testid="terminal-drawer"]');
+    const toggle = document.querySelector('[data-testid="terminal-toggle"]');
+    const project = document.querySelector(
+      '[data-testid="terminal-strip-project"]'
+    );
+    const status = document.querySelector(
+      '[data-testid="terminal-strip-status"]'
+    );
+    const preview = document.querySelector(
+      '[data-testid="terminal-strip-preview"]'
+    );
+
+    return {
+      terminal: {
+        className: terminal?.className ?? null,
+        text: terminal?.textContent.trim().replace(/\\s+/gu, ' ') ?? null,
+        rect: rectFor(terminal),
+        style: styleFor(terminal)
+      },
+      toggle: {
+        ariaExpanded: toggle?.getAttribute('aria-expanded') ?? null,
+        rect: rectFor(toggle),
+        overflows: overflows(toggle)
+      },
+      project: {
+        text: project?.textContent.trim() ?? null,
+        rect: rectFor(project),
+        style: styleFor(project),
+        overflows: overflows(project)
+      },
+      status: {
+        present: status !== null,
+        text: status?.textContent.trim() ?? null,
+        rect: rectFor(status),
+        style: styleFor(status)
+      },
+      preview: {
+        text: preview?.textContent.trim() ?? null,
+        rect: rectFor(preview),
+        style: styleFor(preview),
+        overflows: overflows(preview)
+      },
+      documentOverflow:
+        document.documentElement.scrollWidth > window.innerWidth + 4 ||
+        document.documentElement.scrollHeight > window.innerHeight + 4
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (
+    !snapshot.terminal.className?.includes('terminal-drawer-no-project') ||
+    !snapshot.terminal.rect ||
+    snapshot.terminal.rect.height < 38 ||
+    snapshot.terminal.rect.height > 52 ||
+    !snapshot.toggle.rect ||
+    snapshot.toggle.ariaExpanded !== 'false' ||
+    snapshot.toggle.rect.height < 30 ||
+    snapshot.toggle.rect.height > 36 ||
+    snapshot.toggle.overflows ||
+    snapshot.documentOverflow
+  ) {
+    throw new Error(
+      `No-project terminal strip should stay collapsed, docked, and contained: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.project.text !== 'Terminal' ||
+    !snapshot.project.rect ||
+    !snapshot.project.style ||
+    snapshot.project.style.fontSize > 11.6 ||
+    snapshot.project.style.fontWeight > 670 ||
+    snapshot.project.style.colorAlpha > 0.74 ||
+    snapshot.project.overflows
+  ) {
+    throw new Error(
+      `No-project terminal identity is too heavy or missing: ${JSON.stringify(
+        snapshot.project,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.status.present ||
+    snapshot.terminal.text?.includes('No project') ||
+    snapshot.terminal.text?.includes('No recent command') ||
+    snapshot.terminal.text?.includes('Idle')
+  ) {
+    throw new Error(
+      `No-project terminal strip should not repeat project/status noise: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.preview.text !== 'Open a project to run commands' ||
+    !snapshot.preview.rect ||
+    !snapshot.preview.style ||
+    snapshot.preview.style.fontSize > 11 ||
+    snapshot.preview.style.fontWeight > 620 ||
+    snapshot.preview.style.colorAlpha > 0.54 ||
+    snapshot.preview.style.textTransform !== 'none' ||
+    snapshot.preview.overflows
+  ) {
+    throw new Error(
+      `No-project terminal preview should stay muted and actionable: ${JSON.stringify(
+        snapshot.preview,
       )}`,
     );
   }
@@ -2684,7 +2852,21 @@ async function assertRalphWorkspaceLayout(fileName) {
     );
   }
 
-  if (
+  if (expectInitialEmptyState) {
+    if (
+      metrics.terminalStatus !== null ||
+      metrics.terminalStatusStyle !== null
+    ) {
+      throw new Error(
+        `Initial no-project terminal should not render a separate status pill: ${JSON.stringify(
+          {
+            status: metrics.terminalStatus,
+            style: metrics.terminalStatusStyle,
+          },
+        )}`,
+      );
+    }
+  } else if (
     !metrics.terminalStatusStyle ||
     metrics.terminalStatusStyle.textTransform !== 'none' ||
     metrics.terminalStatusStyle.fontWeight > 720 ||
@@ -2701,11 +2883,13 @@ async function assertRalphWorkspaceLayout(fileName) {
     throw new Error('Collapsed terminal toggle overflowed.');
   }
 
-  for (const [key, rect] of Object.entries({
+  const terminalRects = {
     project: metrics.terminalProject,
-    status: metrics.terminalStatus,
     preview: metrics.terminalPreview,
-  })) {
+    ...(expectInitialEmptyState ? {} : { status: metrics.terminalStatus }),
+  };
+
+  for (const [key, rect] of Object.entries(terminalRects)) {
     if (
       !rect ||
       rect.left < metrics.terminalToggle.left - 1 ||

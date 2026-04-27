@@ -2731,6 +2731,16 @@ textarea:focus {
   text-align: left;
 }
 
+.terminal-drawer-no-project {
+  background:
+    linear-gradient(180deg, rgba(13, 16, 17, 0.76), rgba(10, 12, 13, 0.84)),
+    #0b0d0e;
+}
+
+.terminal-drawer-no-project .terminal-strip {
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+}
+
 .terminal-strip:not(:disabled):hover {
   border-color: rgba(85, 166, 255, 0.2);
   background: rgba(238, 244, 239, 0.035);
@@ -2767,6 +2777,12 @@ textarea:focus {
   line-height: 1.1;
 }
 
+.terminal-drawer-no-project .terminal-strip-copy strong {
+  color: rgba(225, 232, 228, 0.7);
+  font-size: 11.4px;
+  font-weight: 650;
+}
+
 .terminal-strip-status {
   min-height: 18px;
   padding: 1px 6px;
@@ -2784,6 +2800,18 @@ textarea:focus {
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
     monospace;
   font-size: 11px;
+}
+
+.terminal-drawer-no-project .terminal-strip-preview {
+  color: rgba(177, 188, 184, 0.48);
+  font-family: inherit;
+  font-size: 10.8px;
+  font-weight: 600;
+}
+
+.terminal-drawer-no-project .terminal-strip-icon,
+.terminal-drawer-no-project .terminal-strip-chevron {
+  color: rgba(225, 232, 228, 0.46);
 }
 
 .terminal-body {

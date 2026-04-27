@@ -51,19 +51,24 @@ export function TerminalDrawer({
   project: DesktopProject | null;
   terminal: DesktopTerminal | null;
 }) {
+  const hasProject = Boolean(project);
   const hasOutput = (terminal?.output.trim().length ?? 0) > 0;
   const canWriteInput = terminal?.status === 'running';
   const terminalStatus = getTerminalStatusLabel(terminal);
-  const terminalPreview = getTerminalPreview(terminal, notice, error);
+  const terminalPreview = hasProject
+    ? getTerminalPreview(terminal, notice, error)
+    : (error ?? notice ?? 'Open a project to run commands');
   const toggleLabel = isExpanded ? 'Collapse Terminal' : 'Expand Terminal';
 
   return (
     <section
-      className={
-        isExpanded
-          ? 'terminal-drawer terminal-drawer-expanded'
-          : 'terminal-drawer terminal-drawer-collapsed'
-      }
+      className={[
+        'terminal-drawer',
+        isExpanded ? 'terminal-drawer-expanded' : 'terminal-drawer-collapsed',
+        hasProject ? null : 'terminal-drawer-no-project',
+      ]
+        .filter(Boolean)
+        .join(' ')}
       aria-label="Terminal"
       data-expanded={String(isExpanded)}
       data-testid="terminal-drawer"
@@ -84,15 +89,17 @@ export function TerminalDrawer({
         <span className="terminal-strip-copy">
           <span className="sr-only">Terminal project</span>
           <strong data-testid="terminal-strip-project">
-            {project?.name || 'No project'}
+            {project?.name || 'Terminal'}
           </strong>
         </span>
-        <span
-          className="terminal-strip-status"
-          data-testid="terminal-strip-status"
-        >
-          {terminalStatus}
-        </span>
+        {hasProject ? (
+          <span
+            className="terminal-strip-status"
+            data-testid="terminal-strip-status"
+          >
+            {terminalStatus}
+          </span>
+        ) : null}
         <span
           className="terminal-strip-preview"
           data-testid="terminal-strip-preview"

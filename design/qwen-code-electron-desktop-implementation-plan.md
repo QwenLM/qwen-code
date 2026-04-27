@@ -22,6 +22,115 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: No-Project Terminal Strip Restraint
+
+Status: completed in iteration 94.
+
+Goal: reduce the bottom terminal chrome weight in the no-project startup
+viewport so it reads as a quiet supporting surface instead of another repeated
+project/status row.
+
+User-visible value: first-launch users see the project-open path and composer
+as the primary actions. The collapsed terminal remains discoverable, but it no
+longer repeats `No project`, `Idle`, and `No recent command` below the composer.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/TerminalDrawer.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/no-project-terminal-strip-restraint.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- With no active project and the terminal collapsed, the strip shows a compact
+  `Terminal` identity plus a muted `Open a project to run commands` preview.
+- The no-project collapsed strip does not render the separate `Idle` status
+  pill or repeated visible `No project` terminal label.
+- Project-scoped terminal behavior stays unchanged: collapsed strip still shows
+  project, status, preview; expanded terminal command, stdin, copy, attach,
+  clear, and kill paths continue to work.
+- The terminal strip remains docked below the conversation, contained at default
+  and compact Electron viewports, and does not introduce document overflow.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and no active project, assert the no-project terminal strip copy and
+  containment, open the fake Git project, verify the project-scoped strip and
+  continue the existing model, settings, terminal, review, branch, discard
+  safety, compact viewport, and commit smoke paths.
+- E2E assertions: initial terminal strip has no visible no-project repetition
+  or status pill, preview is muted and contained, the collapsed drawer remains
+  supporting, project terminal metrics still pass, and no console errors or
+  failed local requests are recorded.
+- Diagnostic artifacts to collect on failure:
+  `initial-layout.json`, `initial-workspace.png`,
+  `no-project-terminal-strip-restraint.json`, Electron log, and `summary.json`
+  under `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` compared hiding the terminal
+  entirely, shrinking the global collapsed strip, and a no-project-specific
+  restrained copy treatment, selecting the last option because it preserves the
+  terminal affordance while removing repeated startup noise; `frontend-design`,
+  constrained by `home.jpg`, keeps bottom chrome secondary to the composer; and
+  `electron-desktop-dev` requires real Electron CDP coverage because this
+  changes renderer behavior and first-viewport geometry.
+
+Notes and decisions:
+
+- The slice intentionally does not hide the terminal or change the active
+  project terminal workflow. It only changes the no-project collapsed summary
+  copy and styling.
+- Expanded no-project terminal still communicates that a project is required
+  through the existing disabled command placeholder.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 40 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T02-56-35-264Z/`.
+- `no-project-terminal-strip-restraint.json` recorded the collapsed no-project
+  terminal as a `42` px docked strip with `Terminal` identity, no status pill,
+  preview `Open a project to run commands`, no repeated visible `No project`,
+  `Idle`, or `No recent command` terminal copy, and no document overflow.
+- `summary.json` recorded zero console errors and zero failed local requests.
+
+Self-review:
+
+- The no-project first viewport now keeps the project-open path and composer as
+  the primary bottom actions while leaving the terminal discoverable as a
+  restrained supporting strip.
+- Project-scoped terminal behavior is unchanged: the active project strip still
+  renders project, status, preview, and the existing expanded command/stdin,
+  copy, attach, clear, and kill flows passed the CDP harness.
+- The change is limited to renderer markup/style plus component and CDP
+  assertions. No Electron main/preload security settings, local server routes,
+  token handling, settings persistence, Git operations, or ACP transport
+  changed.
+
+Next work:
+
+- Continue no-project prototype fidelity by reducing topbar repetition between
+  `No project selected`, `No Git branch`, and `No project` while preserving
+  clear startup state.
+- Continue normal workflow hardening by improving recovery from model/provider
+  save failures and invalid provider configuration.
+
 ### Slice: No-Project Conversation Empty Action
 
 Status: completed in iteration 93.

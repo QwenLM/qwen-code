@@ -2153,6 +2153,9 @@ describe('WorkspacePage', () => {
     const conversationOpenProjectButton = renderedContainer.querySelector(
       '[data-testid="conversation-empty-open-project-button"]',
     );
+    const terminalDrawer = renderedContainer.querySelector(
+      '[data-testid="terminal-drawer"]',
+    );
 
     expect(textarea.disabled).toBe(true);
     expect(textarea.placeholder).toBe('Open a project to start');
@@ -2192,6 +2195,21 @@ describe('WorkspacePage', () => {
       'Open Project',
     );
     expect(conversationOpenProjectButton?.querySelector('svg')).toBeTruthy();
+    expect(
+      terminalDrawer?.classList.contains('terminal-drawer-no-project'),
+    ).toBe(true);
+    expect(
+      terminalDrawer?.querySelector('[data-testid="terminal-strip-project"]')
+        ?.textContent,
+    ).toBe('Terminal');
+    expect(
+      terminalDrawer?.querySelector('[data-testid="terminal-strip-status"]'),
+    ).toBeNull();
+    expect(
+      terminalDrawer?.querySelector('[data-testid="terminal-strip-preview"]')
+        ?.textContent,
+    ).toBe('Open a project to run commands');
+    expect(terminalDrawer?.textContent).not.toContain('No recent command');
     expect(
       renderedContainer.querySelector('[data-testid="project-sidebar"]')
         ?.textContent,
