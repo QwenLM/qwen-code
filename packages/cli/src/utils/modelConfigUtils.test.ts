@@ -982,7 +982,7 @@ describe('modelConfigUtils', () => {
       // The env-matched provider should only supply metadata when no model is requested.
       const mockSettings = makeMockSettings({
         modelProviders: {
-          [AuthType.USE_OPENAI]: [{ id: 'gpt-4', model: 'gpt-4' }],
+          [AuthType.USE_OPENAI]: [{ id: 'gpt-4', name: 'gpt-4' }],
         },
         model: { name: 'custom-model-not-in-providers' },
       });

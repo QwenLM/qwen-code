@@ -1922,4 +1922,11 @@ type InferSettings<T extends SettingsSchema> = {
         : T[K]['default'];
 };
 
-export type Settings = InferSettings<SettingsSchemaType>;
+export interface ModelPricing {
+  inputPerMillionTokens?: number;
+  outputPerMillionTokens?: number;
+}
+
+export type Settings = InferSettings<SettingsSchemaType> & {
+  modelPricing?: Record<string, ModelPricing>;
+};
