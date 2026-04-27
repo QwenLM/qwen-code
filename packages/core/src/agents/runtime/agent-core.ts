@@ -71,13 +71,26 @@ import { type ContextState, templateString } from './agent-headless.js';
  * Tools that must never be available to subagents (including forked agents).
  * - AgentTool prevents recursive subagent spawning.
  * - Cron tools are session-scoped and should only run from the main session.
+ * - TaskStop and SendMessage are parent-side control-plane tools for managing
+ *   background subagents; subagents have no agent IDs to manage natively, so
+ *   exposing them only widens the surface for cross-agent interference if an
+ *   ID leaks via prompt or transcript.
  */
 export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
+  ToolNames.TASK_STOP,
+  ToolNames.SEND_MESSAGE,
 ]);
+
+/**
+ * Prefix applied to each external message injected into a background agent's
+ * reasoning loop via getExternalMessages. Kept here so tests and any future
+ * parsers can import the same literal.
+ */
+export const EXTERNAL_MESSAGE_PREFIX = '[Message from parent agent]:';
 
 export interface ReasoningLoopResult {
   /** The final model text response (empty if terminated by abort/limits). */
@@ -98,6 +111,12 @@ export interface ReasoningLoopOptions {
   maxTimeMinutes?: number;
   /** Start time in ms (for timeout calculation). Defaults to Date.now(). */
   startTimeMs?: number;
+  /**
+   * Optional callback to drain external messages between tool rounds.
+   * Called after processFunctionCalls completes. Returned strings are
+   * appended to the next model request as user-role content.
+   */
+  getExternalMessages?: () => string[];
 }
 
 /**
@@ -567,6 +586,30 @@ export class AgentCore {
           currentResponseId,
           wasOutputTruncated,
         );
+
+        const externalMsgs = options?.getExternalMessages?.() ?? [];
+        if (externalMsgs.length > 0) {
+          // Append to the tool-response user message so external input rides
+          // alongside the tool results the model is about to see.
+          // processFunctionCalls always returns exactly one user-role entry.
+          const last = currentMessages[currentMessages.length - 1];
+          last.parts!.push(
+            ...externalMsgs.map((text) => ({
+              text: `\n${EXTERNAL_MESSAGE_PREFIX} ${text}`,
+            })),
+          );
+          // Emit one event per injection so observers (e.g. the JSONL
+          // transcript writer) can persist each external message as a
+          // user-role record. The framing prefix is stripped — the prefix
+          // is a model-facing detail, not part of the original message.
+          for (const text of externalMsgs) {
+            this.eventEmitter?.emit(AgentEventType.EXTERNAL_MESSAGE, {
+              subagentId: this.subagentId,
+              text,
+              timestamp: Date.now(),
+            });
+          }
+        }
       } else {
         // No tool calls — treat this as the model's final answer.
         if (roundText && roundText.trim().length > 0) {
