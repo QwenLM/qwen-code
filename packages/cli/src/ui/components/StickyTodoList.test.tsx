@@ -108,6 +108,21 @@ describe('StickyTodoList', () => {
     expect(lines).toHaveLength(6);
   });
 
+  it('sizes the number column for original todo numbers after sorting', () => {
+    const todos = makeTodos(10).map((todo, index) => ({
+      ...todo,
+      status: index === 9 ? ('in_progress' as const) : ('completed' as const),
+    }));
+
+    const { lastFrame } = render(
+      <StickyTodoList todos={todos} width={24} maxVisibleItems={1} />,
+    );
+    const output = lastFrame() ?? '';
+
+    expect(output).toContain('10. ◐ Task 10');
+    expect(output).toContain('... and 9 more');
+  });
+
   it('derives a viewport-aware visible item count', () => {
     expect(getStickyTodoMaxVisibleItems(8)).toBe(1);
     expect(getStickyTodoMaxVisibleItems(15)).toBe(3);
