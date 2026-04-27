@@ -22,6 +22,117 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: No-Project Topbar Context Restraint
+
+Status: completed in iteration 95.
+
+Goal: remove repeated no-project placeholders from the startup topbar so the
+header stays slim and tool-like while the conversation/composer remain the
+primary project-open path.
+
+User-visible value: first-launch users no longer see `No project selected`,
+`No Git branch`, and `No project` repeated in the top chrome. The topbar keeps
+the app identity and runtime connection visible, while project, branch, and
+diff context appear only after a workspace is open.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/TopBar.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/no-project-topbar-context-restraint.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- With no active project, the topbar title remains `Qwen Code Desktop` and the
+  topbar does not render visible `No project selected`, `No Git branch`, or
+  `No project` placeholder copy.
+- With no active project, the topbar context renders the connection item only;
+  branch switching and Git status controls are absent instead of disabled
+  placeholders.
+- Project-scoped behavior is unchanged: after opening a Git workspace, branch
+  switching, compact dirty diff stats, review entry, settings entry, and the
+  project name remain visible and contained.
+- Topbar height, one-row alignment, typography, and first-viewport containment
+  remain within the existing CDP geometry bounds.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data
+  and no active project, assert the restrained no-project topbar text and
+  absent disabled branch/Git placeholders, open the fake Git project, then
+  continue the existing model, settings, terminal, review, branch, discard
+  safety, compact viewport, and commit smoke paths.
+- E2E assertions: startup topbar has no repeated no-project placeholder copy,
+  only one context item for connection, no branch/Git controls before a project
+  opens, project-scoped topbar branch/diff behavior still passes, and no
+  console errors or failed local requests are recorded.
+- Diagnostic artifacts to collect on failure:
+  `initial-layout.json`, `no-project-topbar-context-restraint.json`,
+  `initial-workspace.png`, Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` compared replacing the placeholders
+  with an `Open Project` chip, keeping a shortened disabled branch label, and
+  hiding project-only context until a project exists, choosing the last option
+  because the composer/sidebar/conversation already expose the project-open
+  action; `frontend-design`, constrained by `home.jpg`, keeps the header
+  compact and icon-led; and `electron-desktop-dev` requires real Electron CDP
+  coverage because this changes renderer behavior and first-viewport geometry.
+
+Notes and decisions:
+
+- The slice intentionally hides branch and Git status controls until an active
+  project exists. It does not add another Open Project chip to the topbar
+  because the startup viewport already exposes Open Project in the sidebar,
+  conversation empty state, and composer.
+- Active-project behavior is unchanged: branch switching, dirty diff stats, and
+  review/settings actions still render through the existing controls.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 40 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T03-05-37-622Z/`.
+- `no-project-topbar-context-restraint.json` recorded the startup topbar text
+  as `Qwen Code DesktopConnectedConversationChangesSettingsReady`, the title
+  project label as `null`, exactly one context item (`Connected`), no branch
+  trigger, no Git status control, and no document/topbar overflow.
+- `summary.json` recorded zero console errors and zero failed local requests.
+- `git diff --check` passed.
+
+Self-review:
+
+- The first viewport moves closer to `home.jpg`: top chrome is slimmer and no
+  longer reads like disabled debug state before a project is open.
+- The project-open path remains clear through the sidebar, conversation empty
+  action, and composer, so removing no-project branch/Git placeholders does not
+  hide the primary next action.
+- No Electron main/preload security settings, IPC routes, token handling, local
+  server behavior, Git operations, settings persistence, terminal workflow, or
+  ACP transport changed.
+
+Next work:
+
+- Continue startup fidelity by checking whether the no-project topbar action
+  cluster should visually de-emphasize unavailable Changes while preserving the
+  project-scoped review entry.
+- Continue normal workflow hardening by improving recovery from model/provider
+  save failures and invalid provider configuration.
+
 ### Slice: No-Project Terminal Strip Restraint
 
 Status: completed in iteration 94.

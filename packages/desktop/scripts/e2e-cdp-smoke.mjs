@@ -87,6 +87,9 @@ async function main() {
   await waitForText('Connected');
   await assertWorkbenchLandmarks();
   await assertRalphWorkspaceLayout('initial-layout.json');
+  await assertNoProjectTopbarContextRestraint(
+    'no-project-topbar-context-restraint.json',
+  );
   await assertNoProjectOpenProjectAffordance(
     'no-project-open-project-affordance.json',
   );
@@ -730,6 +733,135 @@ async function assertWorkbenchLandmarks() {
 
   if (landmarks.length > 0) {
     throw new Error(`Missing workbench landmarks: ${landmarks.join(', ')}`);
+  }
+}
+
+async function assertNoProjectTopbarContextRestraint(fileName) {
+  const snapshot = await evaluate(`(() => {
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const overflows = (element) =>
+      Boolean(element && element.scrollWidth > element.clientWidth + 4);
+    const topbar = document.querySelector('[data-testid="workspace-topbar"]');
+    const title = document.querySelector('[data-testid="topbar-title"]');
+    const context = document.querySelector('[data-testid="topbar-context"]');
+    const branchTrigger = document.querySelector(
+      '[data-testid="topbar-branch-trigger"]'
+    );
+    const gitStatus = document.querySelector('[data-testid="topbar-git-status"]');
+    const contextItems = [
+      ...document.querySelectorAll(
+        '[data-testid="topbar-context"] .topbar-context-item'
+      )
+    ].map((item) => ({
+      label: item.getAttribute('aria-label') || '',
+      title: item.getAttribute('title') || '',
+      text: item.textContent.trim(),
+      rect: rectFor(item),
+      overflows: overflows(item)
+    }));
+
+    return {
+      topbar: {
+        text: topbar?.textContent.trim() ?? null,
+        rect: rectFor(topbar),
+        overflows: overflows(topbar)
+      },
+      title: {
+        heading: title?.querySelector('h2')?.textContent.trim() ?? null,
+        project: title?.querySelector('span')?.textContent.trim() ?? null,
+        rect: rectFor(title),
+        overflows: overflows(title)
+      },
+      context: {
+        text: context?.textContent.trim() ?? null,
+        rect: rectFor(context),
+        overflows: overflows(context),
+        items: contextItems
+      },
+      branchTriggerPresent: branchTrigger !== null,
+      gitStatusPresent: gitStatus !== null,
+      documentOverflow:
+        document.documentElement.scrollWidth > window.innerWidth + 4 ||
+        document.documentElement.scrollHeight > window.innerHeight + 4
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (
+    !snapshot.topbar.rect ||
+    !snapshot.title.rect ||
+    !snapshot.context.rect ||
+    snapshot.topbar.overflows ||
+    snapshot.title.overflows ||
+    snapshot.context.overflows ||
+    snapshot.documentOverflow
+  ) {
+    throw new Error(
+      `No-project topbar should stay contained: ${JSON.stringify(snapshot)}`,
+    );
+  }
+
+  if (
+    snapshot.title.heading !== 'Qwen Code Desktop' ||
+    snapshot.title.project !== null
+  ) {
+    throw new Error(
+      `No-project topbar title should avoid project placeholders: ${JSON.stringify(
+        snapshot.title,
+      )}`,
+    );
+  }
+
+  const leakedPlaceholder = [
+    'No project selected',
+    'No Git branch',
+    'No project',
+  ].find((placeholder) => snapshot.topbar.text?.includes(placeholder));
+  if (leakedPlaceholder) {
+    throw new Error(
+      `No-project topbar leaked placeholder ${leakedPlaceholder}: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (snapshot.branchTriggerPresent || snapshot.gitStatusPresent) {
+    throw new Error(
+      `No-project topbar should hide branch and Git placeholders: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.context.items.length !== 1 ||
+    !snapshot.context.items[0]?.label.startsWith('Connection') ||
+    snapshot.context.items[0]?.text !== 'Connected' ||
+    snapshot.context.items[0]?.overflows
+  ) {
+    throw new Error(
+      `No-project topbar context should only show connection state: ${JSON.stringify(
+        snapshot.context,
+      )}`,
+    );
   }
 }
 

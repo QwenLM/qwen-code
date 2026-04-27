@@ -2156,9 +2156,36 @@ describe('WorkspacePage', () => {
     const terminalDrawer = renderedContainer.querySelector(
       '[data-testid="terminal-drawer"]',
     );
+    const topbar = renderedContainer.querySelector(
+      '[data-testid="workspace-topbar"]',
+    );
+    const topbarTitle = renderedContainer.querySelector(
+      '[data-testid="topbar-title"]',
+    );
+    const topbarContext = renderedContainer.querySelector(
+      '[data-testid="topbar-context"]',
+    );
 
     expect(textarea.disabled).toBe(true);
     expect(textarea.placeholder).toBe('Open a project to start');
+    expect(topbar).toBeTruthy();
+    expect(topbarTitle?.querySelector('h2')?.textContent).toBe(
+      'Qwen Code Desktop',
+    );
+    expect(topbarTitle?.querySelector('span')).toBeNull();
+    expect(
+      topbarContext?.querySelectorAll('.topbar-context-item'),
+    ).toHaveLength(1);
+    expect(topbarContext?.textContent).toContain('Connected');
+    expect(
+      topbar?.querySelector('[data-testid="topbar-branch-trigger"]'),
+    ).toBeNull();
+    expect(
+      topbar?.querySelector('[data-testid="topbar-git-status"]'),
+    ).toBeNull();
+    expect(topbar?.textContent).not.toContain('No project selected');
+    expect(topbar?.textContent).not.toContain('No Git branch');
+    expect(topbar?.textContent).not.toContain('No project');
     expect(
       (
         renderedContainer.querySelector('[data-testid="conversation-empty"]')

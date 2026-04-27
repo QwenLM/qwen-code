@@ -57,7 +57,7 @@ export function TopBar({
   statusLabel: string;
 }) {
   const title = getTopBarTitle(activeView, activeSessionTitle, activeProject);
-  const projectLabel = activeProject?.name ?? 'No project selected';
+  const projectLabel = activeProject?.name ?? null;
   const fullBranchLabel = activeProject?.gitBranch || 'No Git branch';
   const branchLabel = activeProject?.gitStatus.isRepository
     ? formatTopbarBranchLabel(fullBranchLabel)
@@ -96,7 +96,9 @@ export function TopBar({
       <div className="topbar-title-stack" data-testid="topbar-title-stack">
         <div className="topbar-title" data-testid="topbar-title">
           <h2 title={title}>{title}</h2>
-          <span title={projectLabel}>{projectLabel}</span>
+          {projectLabel ? (
+            <span title={projectLabel}>{projectLabel}</span>
+          ) : null}
         </div>
         <div
           className="topbar-context"
@@ -111,31 +113,42 @@ export function TopBar({
             <span className="topbar-context-dot" aria-hidden="true" />
             <span className="topbar-context-text">{statusLabel}</span>
           </span>
-          <BranchMenu
-            activeBranch={activeProject?.gitBranch ?? null}
-            branchLabel={branchLabel}
-            canSwitchBranch={canSwitchBranch}
-            fullBranchLabel={fullBranchLabel}
-            isDirty={Boolean(activeProject && !activeProject.gitStatus.clean)}
-            onCheckoutBranch={onCheckoutBranch}
-            onCreateBranch={onCreateBranch}
-            onListBranches={onListBranches}
-          />
-          <span
-            className="topbar-context-item topbar-git-status"
-            aria-label={`Git status ${gitStatusLabel}: ${gitStatusMetadata}`}
-            data-testid="topbar-git-status"
-            title={`Git status: ${gitStatusMetadata}`}
-          >
-            {diffStatusLabel && diffStats ? (
-              <span className="topbar-diff-stat" data-testid="topbar-diff-stat">
-                <span className="diff-addition">+{diffStats.additions}</span>{' '}
-                <span className="diff-deletion">-{diffStats.deletions}</span>
+          {activeProject ? (
+            <>
+              <BranchMenu
+                activeBranch={activeProject.gitBranch}
+                branchLabel={branchLabel}
+                canSwitchBranch={canSwitchBranch}
+                fullBranchLabel={fullBranchLabel}
+                isDirty={!activeProject.gitStatus.clean}
+                onCheckoutBranch={onCheckoutBranch}
+                onCreateBranch={onCreateBranch}
+                onListBranches={onListBranches}
+              />
+              <span
+                className="topbar-context-item topbar-git-status"
+                aria-label={`Git status ${gitStatusLabel}: ${gitStatusMetadata}`}
+                data-testid="topbar-git-status"
+                title={`Git status: ${gitStatusMetadata}`}
+              >
+                {diffStatusLabel && diffStats ? (
+                  <span
+                    className="topbar-diff-stat"
+                    data-testid="topbar-diff-stat"
+                  >
+                    <span className="diff-addition">
+                      +{diffStats.additions}
+                    </span>{' '}
+                    <span className="diff-deletion">
+                      -{diffStats.deletions}
+                    </span>
+                  </span>
+                ) : (
+                  <span className="topbar-context-text">{gitStatusLabel}</span>
+                )}
               </span>
-            ) : (
-              <span className="topbar-context-text">{gitStatusLabel}</span>
-            )}
-          </span>
+            </>
+          ) : null}
         </div>
       </div>
 
