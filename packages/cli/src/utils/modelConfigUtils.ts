@@ -107,7 +107,10 @@ export function resolveCliGenerationConfig(
     resolvedModel = env['OPENAI_MODEL'] || env['QWEN_MODEL'];
   }
 
-  // Find a matching provider for the resolved model (for metadata only)
+  // Find a matching provider for the resolved model (for metadata: generationConfig, envKey, etc.)
+  // When resolvedModel is from settings and matches a provider, modelProvider.id == settings.model.name,
+  // so the resolver correctly uses the settings-selected model (no override occurs).
+  // The old candidate-loop code that fell through to OPENAI_MODEL is gone.
   let modelProvider: ProviderModelConfig | undefined;
   if (resolvedModel && authType && settings.modelProviders) {
     const providers = settings.modelProviders[authType];
