@@ -1,22 +1,10 @@
 #!/usr/bin/env npx tsx
 /**
- * Deterministic TUI validation for long assistant streaming output.
+ * Deterministic TUI validation for resize-triggered clear flicker.
  *
- * This script records screenshots/GIF and checks the raw ANSI stream from the
- * same run. It intentionally disables synchronized-output wrapping so the pass
- * signal measures whether Ink had to clear and replay the screen, not whether a
- * terminal emulator hid the clear sequence.
- *
- * Usage:
- *   npm run build && npm run bundle
- *   cd integration-tests/terminal-capture
- *   npm run capture:streaming-clear-storm
- *
- * Useful env:
- *   QWEN_TUI_E2E_REPO=/path/to/qwen-code
- *   QWEN_TUI_E2E_OUT=/tmp/qwen-tui-streaming-clear-storm
- *   QWEN_TUI_E2E_MIN_CLEAR_PAIRS=1
- *   QWEN_TUI_E2E_MAX_CLEAR_PAIRS=Infinity
+ * This records the same terminal run that produces the raw ANSI metrics. The
+ * failure signal is a full-screen clear emitted after the initial prompt is
+ * already visible and the terminal width changes.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -37,20 +25,18 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { TerminalCapture } from './terminal-capture.js';
 
-const STREAM_DONE = 'E2E_STREAM_DONE';
-const STREAM_CHUNK_COUNT = 220;
-const STREAM_INTERVAL_MS = 70;
-const FRAME_COUNT = 90;
-const FRAME_INTERVAL_MS = 180;
+const FRAME_INTERVAL_MS = 120;
+const FRAMES_PER_RESIZE = 24;
 const LIVE_FLUSH_INTERVAL_MS = 16;
-const TERMINAL_COLS = 88;
+const INITIAL_COLS = 88;
+const NARROW_COLS = 62;
+const WIDE_COLS = 100;
 const TERMINAL_ROWS = 26;
 const ESC = '\u001B';
 const ESC_PATTERN = '\\u001B';
 
 type FakeServer = {
   baseUrl: string;
-  getRequestCount: () => number;
   close: () => Promise<void>;
 };
 
@@ -67,10 +53,9 @@ type Summary = Counts & {
   gifPath: string | null;
   framesCaptured: number;
   rawBytes: number;
-  streamDeltaBytes: number;
+  resizeDeltaBytes: number;
   finalScreenLines: number;
-  finalDoneCount: number;
-  requestCount: number;
+  promptVisibleCount: number;
   limits: {
     minClearTerminalPairs: number;
     maxClearTerminalPairs: number | 'Infinity';
@@ -144,96 +129,30 @@ function captureCounts(raw: string): Counts {
   };
 }
 
-function streamOpenAIResponse(res: ServerResponse): void {
-  res.writeHead(200, {
-    'content-type': 'text/event-stream; charset=utf-8',
-    'cache-control': 'no-cache, no-transform',
-    connection: 'keep-alive',
-  });
-
-  const send = (payload: unknown) => {
-    res.write(`data: ${JSON.stringify(payload)}\n\n`);
-  };
-  const base = {
-    id: 'chatcmpl-qwen-tui-clear-storm',
-    object: 'chat.completion.chunk',
-    created: Math.floor(Date.now() / 1000),
-    model: 'dummy',
-  };
-
-  send({
-    ...base,
-    choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
-  });
-
-  const chunks = Array.from({ length: STREAM_CHUNK_COUNT }, (_, index) => {
-    const marker = String(index).padStart(3, '0');
-    return `clear-storm-${marker} `.repeat(3);
-  });
-  chunks.push(STREAM_DONE);
-
-  let index = 0;
-  const timer = setInterval(() => {
-    if (index < chunks.length) {
-      send({
-        ...base,
-        choices: [
-          {
-            index: 0,
-            delta: { content: chunks[index] },
-            finish_reason: null,
-          },
-        ],
-      });
-      index += 1;
-      return;
-    }
-
-    clearInterval(timer);
-    send({
-      ...base,
-      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-      usage: { prompt_tokens: 10, completion_tokens: 221, total_tokens: 231 },
-    });
-    res.write('data: [DONE]\n\n');
-    res.end();
-  }, STREAM_INTERVAL_MS);
-}
-
 async function startFakeOpenAIServer(): Promise<FakeServer> {
-  let requestCount = 0;
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-    requestCount += 1;
     if (req.method !== 'POST') {
       res.writeHead(404).end();
       return;
     }
 
-    let body = '';
-    req.on('data', (chunk: Buffer) => {
-      body += chunk.toString('utf8');
-    });
+    req.resume();
     req.on('end', () => {
-      if (body.includes('"stream":true')) {
-        streamOpenAIResponse(res);
-        return;
-      }
-
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(
         JSON.stringify({
-          id: 'chatcmpl-qwen-tui-clear-storm',
+          id: 'chatcmpl-qwen-tui-resize',
           object: 'chat.completion',
           created: Math.floor(Date.now() / 1000),
           model: 'dummy',
           choices: [
             {
               index: 0,
-              message: { role: 'assistant', content: STREAM_DONE },
+              message: { role: 'assistant', content: 'resize ready' },
               finish_reason: 'stop',
             },
           ],
-          usage: { prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 },
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
         }),
       );
     });
@@ -249,7 +168,6 @@ async function startFakeOpenAIServer(): Promise<FakeServer> {
 
   return {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
-    getRequestCount: () => requestCount,
     close: () =>
       new Promise<void>((resolveClose) => {
         server.close(() => resolveClose());
@@ -261,13 +179,11 @@ function generateGifWithFfmpeg(
   frames: string[],
   outputDir: string,
 ): string | null {
-  const gifPath = join(outputDir, 'streaming-clear-storm.gif');
+  const gifPath = join(outputDir, 'resize-clear-regression.gif');
   const listFile = join(outputDir, 'frames.txt');
   const lines = frames.flatMap((frame) => [
     `file '${resolve(frame).replace(/'/g, "'\\''")}'`,
-    `duration ${
-      frame.includes('-stream-') ? String(FRAME_INTERVAL_MS / 1000) : '1.0'
-    }`,
+    `duration ${frame.includes('-resize-') ? FRAME_INTERVAL_MS / 1000 : 1.0}`,
   ]);
   lines.push(
     `file '${resolve(frames[frames.length - 1]).replace(/'/g, "'\\''")}'`,
@@ -309,7 +225,7 @@ function generateGifWithPython(
   frames: string[],
   outputDir: string,
 ): string | null {
-  const gifPath = join(outputDir, 'streaming-clear-storm.gif');
+  const gifPath = join(outputDir, 'resize-clear-regression.gif');
   const python = process.env['QWEN_TUI_E2E_PYTHON'] ?? 'python3';
   const script = String.raw`
 import os
@@ -318,14 +234,16 @@ from PIL import Image
 
 out = sys.argv[1]
 frames = sys.argv[2:]
+opened = [Image.open(frame).convert("RGBA") for frame in frames]
+width = max(image.width for image in opened)
+height = max(image.height for image in opened)
 images = []
 durations = []
-for frame in frames:
-    image = Image.open(frame)
-    images.append(
-        image.convert("P", palette=Image.Palette.ADAPTIVE, colors=128)
-    )
-    durations.append(350 if "-stream-" in os.path.basename(frame) else 1000)
+for frame, image in zip(frames, opened):
+    canvas = Image.new("RGBA", (width, height), (13, 17, 23, 255))
+    canvas.paste(image, ((width - image.width) // 2, 0))
+    images.append(canvas.convert("P", palette=Image.Palette.ADAPTIVE, colors=128))
+    durations.append(120 if "-resize-" in os.path.basename(frame) else 1000)
 
 images[0].save(
     out,
@@ -364,13 +282,13 @@ async function main(): Promise<void> {
   const repoRoot = resolve(process.env['QWEN_TUI_E2E_REPO'] ?? defaultRepoRoot);
   const defaultOut = join(
     tmpdir(),
-    'qwen-tui-streaming-clear-storm',
+    'qwen-tui-resize-clear-regression',
     basename(repoRoot),
   );
   const outputDir = resolve(process.env['QWEN_TUI_E2E_OUT'] ?? defaultOut);
   const minClearTerminalPairs = envNumber('QWEN_TUI_E2E_MIN_CLEAR_PAIRS', 0);
   const maxClearTerminalPairs = envNumber('QWEN_TUI_E2E_MAX_CLEAR_PAIRS', 0);
-  const minFrames = envNumber('QWEN_TUI_E2E_MIN_FRAMES', 40);
+  const minFrames = envNumber('QWEN_TUI_E2E_MIN_FRAMES', 30);
 
   if (existsSync(outputDir)) {
     rmSync(outputDir, { recursive: true });
@@ -391,11 +309,11 @@ async function main(): Promise<void> {
   delete env['NO_COLOR'];
 
   const terminal = await TerminalCapture.create({
-    cols: TERMINAL_COLS,
+    cols: INITIAL_COLS,
     rows: TERMINAL_ROWS,
     cwd: repoRoot,
     outputDir,
-    title: 'streaming clear storm',
+    title: 'resize clear regression',
     theme: 'github-dark',
     chrome: true,
     fontSize: 14,
@@ -408,32 +326,46 @@ async function main(): Promise<void> {
     terminal.startAutoFlush(LIVE_FLUSH_INTERVAL_MS);
     await terminal.waitFor('Type your message', { timeout: 30000 });
     frames.push(await terminal.capture('00-ready.png'));
-    await terminal.type('Run the deterministic streaming clear-storm test.');
-    frames.push(await terminal.capture('01-prompt-entered.png'));
 
     const rawBefore = terminal.getRawOutput().length;
-    await terminal.type('\n');
 
-    for (let index = 0; index < FRAME_COUNT; index += 1) {
+    await terminal.resize(NARROW_COLS, TERMINAL_ROWS);
+    for (let index = 0; index < FRAMES_PER_RESIZE; index += 1) {
       await sleep(FRAME_INTERVAL_MS);
-      const filename = `02-stream-${String(index + 1).padStart(2, '0')}.png`;
-      frames.push(await terminal.capture(filename));
+      frames.push(
+        await terminal.capture(
+          `01-resize-narrow-${String(index + 1).padStart(2, '0')}.png`,
+        ),
+      );
     }
 
-    await terminal.idle(3000, 90000);
+    await terminal.resize(WIDE_COLS, TERMINAL_ROWS);
+    for (let index = 0; index < FRAMES_PER_RESIZE; index += 1) {
+      await sleep(FRAME_INTERVAL_MS);
+      frames.push(
+        await terminal.capture(
+          `02-resize-wide-${String(index + 1).padStart(2, '0')}.png`,
+        ),
+      );
+    }
+
     await terminal.stopAutoFlush();
     frames.push(await terminal.capture('03-final.png'));
 
     const finalScreen = await terminal.getScreenText();
     const raw = terminal.getRawOutput();
-    const streamDelta = raw.slice(rawBefore);
-    const counts = captureCounts(streamDelta);
+    const resizeDelta = raw.slice(rawBefore);
+    const counts = captureCounts(resizeDelta);
     const gifPath = generateGif(frames, outputDir);
+    const promptVisibleCount = countOccurrences(
+      finalScreen,
+      'Type your message',
+    );
     const pass =
       counts.clearTerminalPairCount >= minClearTerminalPairs &&
       counts.clearTerminalPairCount <= maxClearTerminalPairs &&
       frames.length >= minFrames &&
-      countOccurrences(finalScreen, STREAM_DONE) === 1;
+      promptVisibleCount >= 1;
 
     const summary: Summary = {
       repoRoot,
@@ -441,11 +373,10 @@ async function main(): Promise<void> {
       gifPath,
       framesCaptured: frames.length,
       rawBytes: raw.length,
-      streamDeltaBytes: streamDelta.length,
+      resizeDeltaBytes: resizeDelta.length,
       ...counts,
       finalScreenLines: finalScreen.split('\n').length,
-      finalDoneCount: countOccurrences(finalScreen, STREAM_DONE),
-      requestCount: fakeServer.getRequestCount(),
+      promptVisibleCount,
       limits: {
         minClearTerminalPairs,
         maxClearTerminalPairs: serializeNumberLimit(maxClearTerminalPairs),
@@ -459,7 +390,7 @@ async function main(): Promise<void> {
       JSON.stringify(summary, null, 2),
     );
     writeFileSync(join(outputDir, 'final.screen.txt'), finalScreen);
-    writeFileSync(join(outputDir, 'stream.raw.ansi.log'), streamDelta);
+    writeFileSync(join(outputDir, 'resize.raw.ansi.log'), resizeDelta);
 
     console.log(JSON.stringify(summary, null, 2));
 

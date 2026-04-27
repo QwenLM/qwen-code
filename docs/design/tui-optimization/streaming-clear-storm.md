@@ -1,170 +1,223 @@
-# Streaming Clear-Storm Fix
+# TUI Flicker And Narrow Output Fix
 
 ## Scope
 
-This document covers the supplemental fix for long assistant streaming output
-that makes the main TUI flash, replay the banner, or duplicate visible history
-while a response is still being generated.
+This PR is the metric-backed follow-up to the earlier TUI flicker work. It
+targets the remaining classes that were still reproducible with local evidence:
 
-It does not claim to close every TUI flicker class. Explicit screen refreshes
-from resize, compact toggles, or deliberate static-output replacement still need
-separate validation because those paths intentionally call the terminal clear
-operation.
+- long pending assistant/thought streaming output can grow taller than the
+  terminal and make Ink clear the whole screen;
+- terminal resize can force a static-history remount and emit a full-screen
+  clear even when the user has not requested `/clear`;
+- narrow shell output can reflow without new bytes and look like fresh live
+  output;
+- expanded subagent detail can exceed its assigned tool-message budget.
 
-## User-Visible Problem
+The PR does not rely on terminal emulator support to hide the problem. The E2E
+scripts disable synchronized output and count raw ANSI clear sequences from the
+same run that produces the GIF frames.
 
-When an assistant response streams a long single paragraph or a long
-single-line payload, the pending message can grow beyond the current terminal
-height. With Ink 6.2.3, once the rendered dynamic output is at least as tall as
-`stdout.rows`, Ink writes `clearTerminal` and replays the static output before
-the next dynamic frame.
+## Source-Level Root Causes
 
-The visible result is a clear storm:
+### 1. Pending Assistant Output Clear Storm
 
-- the whole terminal flashes during the stream;
-- the banner or previous static content is repeatedly replayed;
-- the raw PTY stream grows much faster than the meaningful content;
-- terminal recordings can look short or inconclusive if they do not also record
-  the raw ANSI clear count.
+`MainContent` renders committed history in Ink `<Static>` and the current
+pending assistant item dynamically. Before this fix, `ConversationMessages`
+sent long pending text directly to `MarkdownDisplay`. Long paragraphs and
+single-line payloads could wrap into more visual rows than `stdout.rows`.
 
-## Source-Level Root Cause
-
-The issue is triggered by this chain:
-
-1. `packages/cli/src/ui/components/MainContent.tsx` keeps completed history in
-   `<Static>` and renders the currently pending message dynamically.
-2. `HistoryItemDisplay` routes pending assistant text to
-   `ConversationMessages`.
-3. `ConversationMessages` previously passed long pending text directly into
-   `MarkdownDisplay`.
-4. `MarkdownDisplay` bounded pending code blocks, but ordinary paragraphs and
-   single-line text could still wrap into many visual rows.
-5. Ink treats dynamic output taller than the terminal as unsafe to patch
-   incrementally and emits `clearTerminal`, which is
-   `ESC[2J ESC[3J ESC[H]`.
-
-The important distinction is that the final transcript can be long, but the
-live pending viewport must stay bounded. The fix therefore bounds only pending
-assistant/thought rendering. Completed messages still render normally.
-
-## Implementation
-
-`packages/cli/src/ui/components/messages/ConversationMessages.tsx` now slices
-pending markdown text by visual height before it reaches Ink/Yoga layout:
-
-- it calculates visual rows using cached display width and Unicode code points;
-- it preserves the newest tail of the stream, which is the part users need for
-  live feedback;
-- it renders a compact marker such as
-  `... first N streaming lines hidden ...`;
-- it only switches to the bounded plain-text preview while the item is pending
-  and visually too tall;
-- once the message is no longer pending, the full markdown content renders via
-  the existing `MarkdownDisplay` path.
-
-`packages/core/src/services/shellExecutionService.ts` also keeps the shell live
-viewport from emitting resize-only reflow as new output. The render callback now
-requires both a semantic viewport change and new renderable output before it
-sends another live shell chunk. This prevents narrow-width soft wraps from being
-misclassified as fresh shell output.
-
-## Acceptance Metrics
-
-The metric and UI capture must come from the same deterministic run.
-
-Scenario:
-
-- start a fake OpenAI-compatible streaming server;
-- stream 220 chunks at 70 ms per chunk;
-- each chunk is a long plain-text segment that wraps on an 88x26 terminal;
-- disable synchronized-output wrapping so terminal capability hiding cannot mask
-  the underlying Ink clear behavior;
-- capture at least 40 frames during the stream and a final frame after idle.
-
-Pass criteria for the fixed branch:
-
-- `clearTerminalPairCount == 0` for the raw ANSI emitted after Enter;
-- `finalDoneCount == 1` on the rendered terminal screen;
-- `framesCaptured >= 40`;
-- the GIF/screenshot sequence shows continuous bounded pending text rather than
-  banner replay or repeated full-screen blanking.
-
-Failure-first criteria for the base branch:
-
-- `clearTerminalPairCount >= 1` in the same scenario proves the reproduction is
-  real;
-- the matching GIF/screenshot sequence should show at least one banner/static
-  replay or visible full-screen refresh during streaming.
-
-The key raw sequence is:
+Ink treats dynamic output that is taller than the terminal as unsafe to patch
+incrementally. It then emits:
 
 ```text
 ESC[2J ESC[3J ESC[H]
 ```
 
-Counting only erase-line or cursor-up operations is not enough because normal
-Ink patching uses those sequences as part of incremental redraw.
+That sequence clears the screen, resets scrollback, moves the cursor home, and
+then replays static output. The user-visible result is a banner/history replay
+while the model is still streaming.
 
-## Local Validation Command
+### 2. Resize-Triggered Static Refresh
 
-Build the repository first:
+`AppContainer` previously watched `terminalWidth` and called `refreshStatic()`
+after a short debounce. `refreshStatic()` intentionally writes
+`ansiEscapes.clearTerminal` before bumping the static history key. That was safe
+for explicit history replacement, but resize is not an explicit replacement
+operation. A simple narrow/wide resize produced full-screen clear sequences.
+
+### 3. Narrow Shell Reflow
+
+The shell runner stores live output in a headless xterm. When terminal width
+changes, soft-wrapped visual rows can change even when no new renderable bytes
+arrived. The shell live renderer must not treat that resize-only reflow as a new
+output chunk.
+
+### 4. Subagent Detail Expansion
+
+`AgentExecutionDisplay` supports compact/default/verbose detail modes. The
+expanded modes previously had fixed item limits but did not derive their budget
+from the `availableHeight` assigned by `ToolGroupMessage`. In a small terminal,
+expanded detail could still occupy too much dynamic space.
+
+## Implementation
+
+### Shared Visual-Height Slicing
+
+`packages/cli/src/ui/utils/textUtils.ts` now exports
+`sliceTextByVisualHeight()`. It counts both explicit newlines and soft wraps
+using cached display width and Unicode code points, so a single long JSON,
+base64 payload, or minified log line is bounded before it reaches Ink/Yoga.
+
+The helper supports two modes:
+
+- `overflowDirection: "top"` keeps the newest tail for streaming logs/output;
+- `overflowDirection: "bottom"` keeps the beginning for task prompts.
+
+### Pending Assistant/Thought Output
+
+`ConversationMessages` uses the shared slicer only while the item is pending.
+When the pending text exceeds the visual budget, the live viewport shows the
+newest tail plus a marker such as:
+
+```text
+... first N streaming lines hidden ...
+```
+
+Completed assistant messages still render through the existing full
+`MarkdownDisplay` path, so final transcript fidelity is unchanged.
+
+### Tool And Subagent Output
+
+`ToolMessage` uses the same visual-height logic for string result display, so
+long single-line outputs are sliced before Ink wraps them. `MaxSizedBox` still
+owns the final visible-window rendering and hidden-line marker.
+
+`AgentExecutionDisplay` now derives prompt and tool-call limits from
+`availableHeight`. Default and verbose modes remain expandable, but verbose is
+bounded to the assigned dynamic budget instead of rendering an unbounded list.
+Tool descriptions and subagent result snippets are truncated by visual width,
+not raw UTF-16 length.
+
+### Resize Clear Removal
+
+`AppContainer` no longer calls `refreshStatic()` solely because
+`terminalWidth` changed. Active PTYs are still resized so shell dimensions stay
+correct. Explicit replacement flows such as `/clear`, compact-mode replacement,
+rewind, and view switches still own their clear/remount behavior.
+
+### Shell Live Reflow Gate
+
+`ShellExecutionService` now tracks a `renderableOutputVersion`. Live viewport
+emission requires both:
+
+- a semantic viewport comparison change; and
+- newly received renderable output since the previous emitted live chunk.
+
+The default `showColor=false` path compares unwrapped logical lines, matching
+the colored path. Resize-only soft-wrap changes do not emit new live chunks.
+
+### Evidence Capture
+
+`TerminalCapture` now supports:
+
+- `startAutoFlush()` / `stopAutoFlush()` so screenshots/GIFs see near-real-time
+  terminal repaint instead of only a settled screenshot-time flush;
+- `resize(cols, rows)` so E2E can trigger real SIGWINCH behavior through the
+  PTY and xterm viewport together.
+
+## Acceptance Metrics
+
+All metrics and GIF frames must come from the same deterministic run.
+
+### Streaming Clear-Storm Scenario
+
+- fake OpenAI-compatible server streams 220 long text chunks at 70 ms/chunk;
+- terminal size is 88x26;
+- synchronized output is disabled;
+- 93 frames are captured with live terminal flush enabled;
+- pass requires `clearTerminalPairCount == 0`, `finalDoneCount == 1`, and at
+  least 40 frames.
+
+### Resize Clear-Regression Scenario
+
+- start the normal interactive TUI with a fake OpenAI-compatible endpoint;
+- wait for the prompt;
+- resize 88x26 -> 62x26 -> 100x26 through the PTY;
+- synchronized output is disabled;
+- 50 frames are captured with live terminal flush enabled;
+- pass requires `clearTerminalPairCount == 0`, prompt still visible, and at
+  least 30 frames.
+
+## Local Validation Commands
+
+Build the bundle first:
 
 ```bash
 npm run build && npm run bundle
 ```
 
-Run the fixed-branch validation:
+Run strict fixed-branch validation:
 
 ```bash
 cd integration-tests/terminal-capture
+QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
 npm run capture:streaming-clear-storm
+
+QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
+npm run capture:resize-clear-regression
 ```
 
-Run a failure-first baseline with a separate checkout of `origin/main`:
+Run failure-first validation against a separate `origin/main` checkout:
 
 ```bash
 QWEN_TUI_E2E_REPO=/path/to/main-checkout \
-QWEN_TUI_E2E_OUT=/tmp/qwen-tui-streaming-clear-storm/main \
+QWEN_TUI_E2E_OUT=/tmp/qwen-tui/main-streaming \
 QWEN_TUI_E2E_MIN_CLEAR_PAIRS=1 \
 QWEN_TUI_E2E_MAX_CLEAR_PAIRS=Infinity \
+QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
 npm run capture:streaming-clear-storm
+
+QWEN_TUI_E2E_REPO=/path/to/main-checkout \
+QWEN_TUI_E2E_OUT=/tmp/qwen-tui/main-resize \
+QWEN_TUI_E2E_MIN_CLEAR_PAIRS=1 \
+QWEN_TUI_E2E_MAX_CLEAR_PAIRS=Infinity \
+QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
+npm run capture:resize-clear-regression
 ```
 
-Run the fixed branch with the strict default:
+Each run writes:
 
-```bash
-QWEN_TUI_E2E_REPO=/path/to/fixed-checkout \
-QWEN_TUI_E2E_OUT=/tmp/qwen-tui-streaming-clear-storm/fixed \
-npm run capture:streaming-clear-storm
-```
+- `summary.json`;
+- raw ANSI delta log;
+- per-frame PNG screenshots;
+- scenario GIF when `ffmpeg` or Python/Pillow is available.
 
-Each run writes `summary.json`, `stream.raw.ansi.log`, terminal screenshots, and
-`streaming-clear-storm.gif` when either `ffmpeg` or Python/Pillow is available.
-Set `QWEN_TUI_E2E_PYTHON=/path/to/python` if the default `python3` does not have
-Pillow installed. Keep local absolute artifact paths out of GitHub comments; PR
-descriptions should include only the metric values and uploaded/attached media.
+Keep local absolute artifact paths out of GitHub PR descriptions. Upload the
+generated GIFs to GitHub first, then insert only GitHub attachment URLs.
 
 ## Validation Record
 
-The supplemental PR was validated on April 27, 2026 with the same script,
-prompt, fake streaming server, 88x26 terminal, and 55 captured frames on both
-branches.
+Validated on April 27, 2026 with the same scripts, prompt, fake server, terminal
+sizes, live flush mode, and synchronized output disabled.
 
-| Branch        | Expected                   | `clearTerminalPairCount` | `finalDoneCount` | Result     |
-| ------------- | -------------------------- | -----------------------: | ---------------: | ---------- |
-| `origin/main` | failure-first reproduction |                      427 |                1 | reproduced |
-| fixed branch  | strict pass                |                        0 |                1 | passed     |
-
-The side-by-side GIF should label the left side as `origin/main` and the right
-side as the fixed branch, with the clear-pair count shown in the overlay.
+| Scenario  | Branch        | Expected                   | `clearTerminalPairCount` | `clearScreenCodeCount` | Frames | Result     |
+| --------- | ------------- | -------------------------- | -----------------------: | ---------------------: | -----: | ---------- |
+| Streaming | `origin/main` | failure-first reproduction |                      427 |                    854 |     93 | reproduced |
+| Streaming | fixed branch  | strict pass                |                        0 |                      0 |     93 | passed     |
+| Resize    | `origin/main` | failure-first reproduction |                        2 |                      4 |     50 | reproduced |
+| Resize    | fixed branch  | strict pass                |                        0 |                      0 |     50 | passed     |
 
 ## Review Notes
 
-- This is a complete fix for the long assistant streaming clear-storm class
-  because the pending dynamic render height is bounded below the terminal rows.
-- It is not a complete fix for all flicker reports. Resize, compact-mode
-  switching, tool detail expansion, and terminal-specific synchronized output
-  behavior have different triggers and need their own metric-backed scenarios.
-- Copying a heavily modified Ink fork is not the first choice here. The observed
-  root cause is caused by an unbounded dynamic child. Bounding that child keeps
-  the fix local, reviewable, and independent of Ink internals.
+- The streaming fix is complete for the reproduced assistant/thought
+  clear-storm class because pending dynamic height is bounded below the
+  terminal viewport before Ink layout.
+- The resize fix removes the automatic resize-only clear path. Explicit
+  replacement operations still clear intentionally and should be validated by
+  their own UX-specific tests if their behavior changes.
+- Tool and subagent detail paths are bounded by visual height/width, including
+  single long lines, so they do not depend on explicit newline count.
+- Copying a heavily modified Ink fork is not the preferred fix for these
+  reproductions. The verified root causes are unbounded dynamic children and a
+  resize-only static refresh; local bounding plus targeted clear removal is
+  smaller, testable, and easier to keep aligned with upstream Ink.

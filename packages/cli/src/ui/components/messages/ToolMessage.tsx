@@ -31,7 +31,7 @@ import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../../config/settings.js';
 import { useCompactMode } from '../../contexts/CompactModeContext.js';
-import { getCachedStringWidth, toCodePoints } from '../../utils/textUtils.js';
+import { sliceTextByVisualHeight } from '../../utils/textUtils.js';
 
 import {
   ToolStatusIndicator,
@@ -54,58 +54,11 @@ function sliceTextForMaxHeight(
   maxHeight: number | undefined,
   maxWidth: number,
 ): { text: string; hiddenLinesCount: number } {
-  if (maxHeight === undefined) {
-    return { text, hiddenLinesCount: 0 };
-  }
-
-  const targetMaxHeight = Math.max(Math.round(maxHeight), MINIMUM_MAX_HEIGHT);
-  const visibleContentHeight = targetMaxHeight - 1;
-  const visualWidth = Math.max(1, Math.floor(maxWidth));
-  const visibleLines: string[] = [];
-  let visualLineCount = 0;
-  let currentLine = '';
-  let currentLineWidth = 0;
-
-  const appendVisibleLine = (line: string) => {
-    visualLineCount += 1;
-    visibleLines.push(line);
-    if (visibleLines.length > visibleContentHeight) {
-      visibleLines.shift();
-    }
-  };
-
-  const flushCurrentLine = () => {
-    appendVisibleLine(currentLine);
-    currentLine = '';
-    currentLineWidth = 0;
-  };
-
-  for (const char of toCodePoints(text)) {
-    if (char === '\n') {
-      flushCurrentLine();
-      continue;
-    }
-
-    const charWidth = Math.max(getCachedStringWidth(char), 1);
-    if (currentLineWidth > 0 && currentLineWidth + charWidth > visualWidth) {
-      flushCurrentLine();
-    }
-
-    currentLine += char;
-    currentLineWidth += charWidth;
-  }
-
-  flushCurrentLine();
-
-  if (visualLineCount <= targetMaxHeight) {
-    return { text, hiddenLinesCount: 0 };
-  }
-
-  const hiddenLinesCount = visualLineCount - visibleContentHeight;
-  return {
-    text: visibleLines.join('\n'),
-    hiddenLinesCount,
-  };
+  return sliceTextByVisualHeight(text, maxHeight, maxWidth, {
+    minHeight: MINIMUM_MAX_HEIGHT,
+    reservedRows: 1,
+    overflowDirection: 'top',
+  });
 }
 
 type DisplayRendererResult =

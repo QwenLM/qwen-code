@@ -151,6 +151,7 @@ describe('AppContainer State Management', () => {
   const mockedUseTextBuffer = useTextBuffer as Mock;
   const mockedUseLogger = useLogger as Mock;
   const mockedUseLoadingIndicator = useLoadingIndicator as Mock;
+  const mockedUseTerminalSize = useTerminalSize as Mock;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -268,6 +269,7 @@ describe('AppContainer State Management', () => {
       elapsedTime: '0.0s',
       currentLoadingPhrase: '',
     });
+    mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
 
     // Mock Config
     mockConfig = makeFakeConfig();
@@ -442,6 +444,34 @@ describe('AppContainer State Management', () => {
       capturedUIActions.refreshStatic();
 
       expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
+    });
+
+    it('does not clear the terminal just because width changed', () => {
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      mockStdout.write.mockClear();
+
+      mockedUseTerminalSize.mockReturnValue({ columns: 100, rows: 24 });
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearTerminal,
+      );
     });
 
     it('handleClearScreen avoids a second clearTerminal write', () => {

@@ -207,9 +207,11 @@ export class TerminalCapture {
   private ptyProcess: pty.IPty | null = null;
   private rawOutput = '';
   private lastFlushedLength = 0;
+  private autoFlushTimer: NodeJS.Timeout | null = null;
+  private flushQueue: Promise<void> = Promise.resolve();
 
-  private readonly cols: number;
-  private readonly rows: number;
+  private cols: number;
+  private rows: number;
   private readonly cwd: string;
   private readonly env: NodeJS.ProcessEnv;
   private readonly theme: XtermTheme;
@@ -363,6 +365,36 @@ export class TerminalCapture {
     });
   }
 
+  /**
+   * Continuously stream PTY output into xterm.js while a scenario is running.
+   *
+   * Regular `capture()` intentionally flushes before each screenshot, which is
+   * ideal for final-state screenshots but can hide very short clear/repaint
+   * flicker. Auto flush keeps the browser terminal close to real time so GIFs
+   * preserve the visible transition.
+   */
+  startAutoFlush(intervalMs: number = 16): void {
+    if (this.autoFlushTimer) {
+      return;
+    }
+
+    this.autoFlushTimer = setInterval(() => {
+      void this.flush().catch(() => {
+        // Scenario code will surface terminal/browser failures on the next
+        // awaited capture or close. Keep the timer from creating unhandled
+        // rejections while the process is shutting down.
+      });
+    }, intervalMs);
+  }
+
+  async stopAutoFlush(): Promise<void> {
+    if (this.autoFlushTimer) {
+      clearInterval(this.autoFlushTimer);
+      this.autoFlushTimer = null;
+    }
+    await this.flush();
+  }
+
   // ── Input ────────────────────────────────
 
   /**
@@ -398,6 +430,30 @@ export class TerminalCapture {
       this.ptyProcess.write(translated);
       await this.sleep(options?.delay ?? 10);
     }
+  }
+
+  /**
+   * Resize both the pseudo-terminal and the browser-side xterm.js viewport.
+   * This triggers the same SIGWINCH path that real terminal users hit when
+   * dragging a terminal window narrower or wider.
+   */
+  async resize(cols: number, rows: number): Promise<void> {
+    if (!this.page || !this.ptyProcess) {
+      throw new Error('No process running. Call spawn() first.');
+    }
+
+    this.cols = cols;
+    this.rows = rows;
+    this.ptyProcess.resize(cols, rows);
+    await this.page.evaluate(
+      ({ nextCols, nextRows }: { nextCols: number; nextRows: number }) => {
+        const W = window as unknown as Record<string, unknown>;
+        const term = W['term'] as { resize: (c: number, r: number) => void };
+        term.resize(nextCols, nextRows);
+      },
+      { nextCols: cols, nextRows: rows },
+    );
+    await this.sleep(100);
   }
 
   // ── Wait ─────────────────────────────────
@@ -686,6 +742,11 @@ export class TerminalCapture {
    * Release all resources (PTY process, browser)
    */
   async close(): Promise<void> {
+    if (this.autoFlushTimer) {
+      clearInterval(this.autoFlushTimer);
+      this.autoFlushTimer = null;
+    }
+
     if (this.ptyProcess) {
       try {
         this.ptyProcess.kill();
@@ -710,6 +771,15 @@ export class TerminalCapture {
    * then waits one requestAnimationFrame to ensure rendering is complete.
    */
   private async flush(): Promise<void> {
+    const nextFlush = this.flushQueue.then(
+      () => this.flushNow(),
+      () => this.flushNow(),
+    );
+    this.flushQueue = nextFlush.catch(() => {});
+    return nextFlush;
+  }
+
+  private async flushNow(): Promise<void> {
     if (!this.page || this.rawOutput.length <= this.lastFlushedLength) {
       return;
     }

@@ -8,7 +8,8 @@
     "capture": "npx tsx run.ts scenarios/",
     "capture:about": "npx tsx run.ts scenarios/about.ts",
     "capture:all": "npx tsx run.ts scenarios/all.ts",
-    "capture:streaming-clear-storm": "npx tsx streaming-clear-storm.ts"
+    "capture:streaming-clear-storm": "npx tsx streaming-clear-storm.ts",
+    "capture:resize-clear-regression": "npx tsx resize-clear-regression.ts"
   },
   "dependencies": {
     "@lydell/node-pty": "1.2.0-beta.10",
