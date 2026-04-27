@@ -685,4 +685,173 @@ describe('modelConfigResolver', () => {
       expect(result.errors[0].message).toContain('envKey');
     });
   });
+
+  describe('[Regression] timeout env override refactor', () => {
+    it('[Regression] OAuth path must apply QWEN_CODE_API_TIMEOUT_MS (was broken before fix #3629)', () => {
+      // Guards against the original bug where resolveQwenOAuthConfig()
+      // returned before applying the env override.
+      const result = resolveModelConfig({
+        authType: AuthType.QWEN_OAUTH,
+        cli: {},
+        settings: {},
+        env: {
+          QWEN_CODE_API_TIMEOUT_MS: '45000',
+        },
+      });
+
+      expect(result.config.timeout).toBe(45000);
+      expect(result.sources['timeout']).toBeDefined();
+      expect(result.sources['timeout'].kind).toBe('env');
+      expect(result.sources['timeout'].envKey).toBe('QWEN_CODE_API_TIMEOUT_MS');
+      expect(result.config.model).toBe(DEFAULT_QWEN_MODEL);
+    });
+
+    it('[Regression] non-OAuth path must apply QWEN_CODE_API_TIMEOUT_MS', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: { apiKey: 'key' },
+        env: {
+          OPENAI_API_KEY: 'key',
+          QWEN_CODE_API_TIMEOUT_MS: '900000',
+        },
+      });
+
+      expect(result.config.timeout).toBe(900000);
+      expect(result.sources['timeout'].kind).toBe('env');
+      expect(result.sources['timeout'].envKey).toBe('QWEN_CODE_API_TIMEOUT_MS');
+    });
+
+    it('[Regression] modelProvider timeout must win over env in both paths', () => {
+      // Non-OAuth
+      const nonOAuth = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          MY_KEY: 'key',
+          QWEN_CODE_API_TIMEOUT_MS: '900000',
+        },
+        modelProvider: {
+          id: 'model',
+          name: 'Model',
+          envKey: 'MY_KEY',
+          baseUrl: 'https://api.example.com',
+          generationConfig: { timeout: 60000 },
+        },
+      });
+      expect(nonOAuth.config.timeout).toBe(60000);
+      expect(nonOAuth.sources['timeout'].kind).toBe('modelProviders');
+
+      // OAuth
+      const oauth = resolveModelConfig({
+        authType: AuthType.QWEN_OAUTH,
+        cli: {},
+        settings: {},
+        env: {
+          QWEN_CODE_API_TIMEOUT_MS: '45000',
+        },
+        modelProvider: {
+          id: 'qwen-oauth',
+          name: 'Qwen OAuth',
+          generationConfig: { timeout: 120000 },
+        },
+      });
+      expect(oauth.config.timeout).toBe(120000);
+      expect(oauth.sources['timeout'].kind).toBe('modelProviders');
+    });
+
+    it('[Regression] refactor must not alter precedence: env > settings', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {
+          apiKey: 'key',
+          generationConfig: { timeout: 30000 },
+        },
+        env: {
+          OPENAI_API_KEY: 'key',
+          QWEN_CODE_API_TIMEOUT_MS: '900000',
+        },
+      });
+
+      // env must override settings
+      expect(result.config.timeout).toBe(900000);
+      expect(result.sources['timeout'].kind).toBe('env');
+    });
+  });
+
+  describe('[Additional] timeout env override edge cases', () => {
+    it('handles scientific notation in QWEN_CODE_API_TIMEOUT_MS', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: { apiKey: 'key' },
+        env: {
+          OPENAI_API_KEY: 'key',
+          QWEN_CODE_API_TIMEOUT_MS: '1.5e5',
+        },
+      });
+
+      expect(result.config.timeout).toBe(150000);
+      expect(result.sources['timeout'].kind).toBe('env');
+    });
+
+    it('handles hex values in QWEN_CODE_API_TIMEOUT_MS', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: { apiKey: 'key', generationConfig: { timeout: 30000 } },
+        env: {
+          OPENAI_API_KEY: 'key',
+          QWEN_CODE_API_TIMEOUT_MS: '0x2BF20', // 180000 in hex
+        },
+      });
+
+      expect(result.config.timeout).toBe(180000);
+      expect(result.sources['timeout'].kind).toBe('env');
+    });
+
+    it('ignores empty string QWEN_CODE_API_TIMEOUT_MS', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: { apiKey: 'key', generationConfig: { timeout: 30000 } },
+        env: {
+          OPENAI_API_KEY: 'key',
+          QWEN_CODE_API_TIMEOUT_MS: '',
+        },
+      });
+
+      expect(result.config.timeout).toBe(30000);
+      expect(result.sources['timeout'].kind).toBe('settings');
+    });
+
+    it('applies env override for every supported auth type', () => {
+      const authTypes = [
+        { type: AuthType.USE_OPENAI, env: { OPENAI_API_KEY: 'key' } },
+        {
+          type: AuthType.USE_ANTHROPIC,
+          env: {
+            ANTHROPIC_API_KEY: 'key',
+            ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
+          },
+        },
+      ];
+
+      for (const { type, env } of authTypes) {
+        const result = resolveModelConfig({
+          authType: type,
+          cli: {},
+          settings: {
+            ...(type === AuthType.USE_OPENAI ? { apiKey: 'key' } : {}),
+          },
+          env: { ...env, QWEN_CODE_API_TIMEOUT_MS: '99999' },
+        });
+
+        expect(result.config.timeout).toBe(99999);
+        expect(result.sources['timeout'].kind).toBe('env');
+      }
+    });
+  });
 });
