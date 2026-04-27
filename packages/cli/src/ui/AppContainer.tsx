@@ -301,10 +301,7 @@ export const AppContainer = (props: AppContainerProps) => {
     [],
   );
 
-  // Helper to determine the current model (polled, since Config has no model-change event).
-  const getCurrentModel = useCallback(() => config.getModel(), [config]);
-
-  const [currentModel, setCurrentModel] = useState(getCurrentModel());
+  const [currentModel, setCurrentModel] = useState(() => config.getModel());
 
   const [isConfigInitialized, setConfigInitialized] = useState(false);
 
@@ -418,21 +415,6 @@ export const AppContainer = (props: AppContainerProps) => {
     return () => handler?.cleanup();
   }, [historyManager.addItem]);
 
-  // Watch for model changes (e.g., user switches model via /model)
-  useEffect(() => {
-    const checkModelChange = () => {
-      const model = getCurrentModel();
-      if (model !== currentModel) {
-        setCurrentModel(model);
-      }
-    };
-
-    checkModelChange();
-    const interval = setInterval(checkModelChange, 1000); // Check every second
-
-    return () => clearInterval(interval);
-  }, [config, currentModel, getCurrentModel]);
-
   // Derive widths for InputPrompt using shared helper
   const { inputWidth, suggestionsWidth } = useMemo(() => {
     const { inputWidth, suggestionsWidth } =
@@ -493,6 +475,23 @@ export const AppContainer = (props: AppContainerProps) => {
     stdout.write(ansiEscapes.clearTerminal);
     remountStaticHistory();
   }, [remountStaticHistory, stdout]);
+
+  // Keep the static header in sync with model changes without polling.
+  // Ink's <Static> output is append-only, so model changes must explicitly
+  // clear and remount the static region to redraw the banner at the top.
+  useEffect(() => {
+    const unsubscribe = config.onModelChange((model) => {
+      setCurrentModel((prev) => {
+        if (prev === model) {
+          return prev;
+        }
+        refreshStatic();
+        return model;
+      });
+    });
+
+    return unsubscribe;
+  }, [config, refreshStatic]);
 
   const {
     isThemeDialogOpen,

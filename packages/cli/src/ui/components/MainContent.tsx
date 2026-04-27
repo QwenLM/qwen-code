@@ -35,6 +35,7 @@ export const MainContent = () => {
     mainAreaWidth,
     staticAreaMaxItemHeight,
     availableTerminalHeight,
+    historyRemountKey,
   } = uiState;
 
   // Merge consecutive tool_groups for compact mode display
@@ -87,7 +88,7 @@ export const MainContent = () => {
   return (
     <>
       <Static
-        key={`${uiState.historyRemountKey}-${uiState.currentModel}`}
+        key={historyRemountKey}
         items={[
           <AppHeader key="app-header" version={version} />,
           <DebugModeNotification key="debug-notification" />,
