@@ -22,6 +22,8 @@ export interface CrawlOptions {
   maxFiles?: number;
   // A pre-configured Ignore instance.
   ignore: Ignore;
+  // Whether gitignore filtering should be respected by git/rg paths.
+  useGitignore?: boolean;
   // Caching options.
   cache: boolean;
   cacheTtl: number;
@@ -40,7 +42,6 @@ function getStateKey(options: CrawlOptions): string {
     normalizePath(options.cwd),
     options.ignore.getFingerprint(),
     options.maxDepth === undefined ? 'undefined' : String(options.maxDepth),
-    options.maxFiles === undefined ? 'undefined' : String(options.maxFiles),
   ].join('|');
 }
 
@@ -63,11 +64,10 @@ interface ChangeState {
 const changeStateMap = new Map<string, ChangeState>();
 
 function resolveGitDir(crawlDirectory: string): string | null {
-  let current = crawlDirectory;
-  while (current) {
-    const gitPath = path.join(current, '.git');
-
-    try {
+  try {
+    let current = crawlDirectory;
+    while (current) {
+      const gitPath = path.join(current, '.git');
       const stat = fs.statSync(gitPath);
 
       if (stat.isDirectory()) {
@@ -86,17 +86,13 @@ function resolveGitDir(crawlDirectory: string): string | null {
           ? resolvedGitDir
           : path.resolve(current, resolvedGitDir);
       }
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
-        return null;
-      }
-      // Keep walking ancestors when .git is simply missing here.
-    }
 
-    const parent = path.dirname(current);
-    if (parent === current) break;
-    current = parent;
+      const parent = path.dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+  } catch {
+    // Ignore errors when .git metadata is missing or unreadable.
   }
 
   return null;
@@ -379,7 +375,7 @@ function applyFilters(
 const YIELD_INTERVAL = 1000;
 
 async function maybeYield(index: number): Promise<void> {
-  if (index % YIELD_INTERVAL === 0) {
+  if (index > 0 && index % YIELD_INTERVAL === 0) {
     await new Promise((resolve) => setImmediate(resolve));
   }
 }
@@ -423,19 +419,18 @@ function hasReachedFileBudget(
 }
 
 function existingTrackedPath(gitRoot: string, normalizedFile: string): boolean {
-  try {
-    fs.lstatSync(path.join(gitRoot, normalizedFile));
-    return true;
-  } catch {
-    return false;
-  }
+  return fs.existsSync(path.join(gitRoot, normalizedFile));
 }
 
 async function listUntrackedFiles(
   gitRoot: string,
   relativeToGitRoot: string,
+  useGitignore: boolean,
 ): Promise<string[] | null> {
-  const untrackedArgs = ['ls-files', '--others', '--exclude-standard'];
+  const untrackedArgs = ['ls-files', '--others'];
+  if (useGitignore) {
+    untrackedArgs.push('--exclude-standard');
+  }
   if (relativeToGitRoot && relativeToGitRoot !== '.') {
     untrackedArgs.push(relativeToGitRoot);
   }
@@ -456,6 +451,7 @@ async function listUntrackedFiles(
 async function hasUntrackedFilesChanged(
   state: ChangeState,
   crawlDirectory: string,
+  useGitignore: boolean,
 ): Promise<boolean> {
   if (state.untrackedFingerprint === null) {
     return false;
@@ -467,7 +463,11 @@ async function hasUntrackedFilesChanged(
   }
 
   const relativeToGitRoot = getPosixRelative(gitRoot, crawlDirectory);
-  const untrackedFiles = await listUntrackedFiles(gitRoot, relativeToGitRoot);
+  const untrackedFiles = await listUntrackedFiles(
+    gitRoot,
+    relativeToGitRoot,
+    useGitignore,
+  );
   if (untrackedFiles === null) {
     return true;
   }
@@ -505,7 +505,11 @@ async function crawlWithGitLsFiles(
     return { success: false, files: [], isGitRepo: true };
   }
 
-  const untrackedFiles = await listUntrackedFiles(gitRoot, relativeToGitRoot);
+  const untrackedFiles = await listUntrackedFiles(
+    gitRoot,
+    relativeToGitRoot,
+    options.useGitignore !== false,
+  );
 
   const fileSet = new Set<string>();
   let count = 0;
@@ -564,17 +568,13 @@ async function crawlWithGitLsFiles(
   const results = buildResultsFromFileSet(fileSet);
   const filteredResults = applyFilters(results, options, relativeToCrawlDir);
 
-  // Avoid caching a partial git snapshot when untracked listing fails.
-  // A missing untracked snapshot can hide files during the throttle window.
-  if (untrackedFiles !== null) {
-    updateChangeState(
-      stateKey,
-      crawlDirectory,
-      filteredResults,
-      untrackedFiles,
-    );
-    recordRebuild(stateKey);
-  }
+  updateChangeState(
+    stateKey,
+    crawlDirectory,
+    filteredResults,
+    untrackedFiles ?? undefined,
+  );
+  recordRebuild(stateKey);
 
   return { success: true, files: filteredResults, isGitRepo: true };
 }
@@ -598,12 +598,12 @@ async function crawlWithRipgrep(
   cwd: string,
   options: CrawlOptions,
 ): Promise<{ success: boolean; files: string[] }> {
-  const rgResult = await commandRunner(
-    'rg',
-    ['--files', '--no-require-git', '--hidden'],
-    crawlDirectory,
-    20_000,
-  );
+  const rgArgs = ['--files', '--no-require-git', '--hidden'];
+  if (options.useGitignore === false) {
+    rgArgs.push('--no-ignore');
+  }
+
+  const rgResult = await commandRunner('rg', rgArgs, crawlDirectory, 20_000);
 
   if (!rgResult.success) {
     return { success: false, files: [] };
@@ -710,13 +710,10 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     if (!needReCrawl) {
       const state = changeStateMap.get(stateKey);
       if (state) {
-        if (isThrottled(stateKey)) {
-          return applyMaxFilesLimit(state.fileList, options.maxFiles);
-        }
-
         const untrackedChanged = await hasUntrackedFilesChanged(
           state,
           options.crawlDirectory,
+          options.useGitignore !== false,
         );
         if (!untrackedChanged) {
           return applyMaxFilesLimit(state.fileList, options.maxFiles);

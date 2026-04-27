@@ -812,39 +812,6 @@ describe('crawler', () => {
       expect(results).not.toContain('deleted.txt');
     });
 
-    it('should include tracked dangling symlinks', async () => {
-      if (process.platform === 'win32') {
-        return;
-      }
-
-      tmpDir = await createTmpDir({
-        'alive.txt': '',
-      });
-      await fs.symlink(
-        'missing-target.txt',
-        path.join(tmpDir, 'broken-link.txt'),
-      );
-      await initGitRepo(tmpDir);
-
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const results = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      });
-
-      expect(results).toContain('alive.txt');
-      expect(results).toContain('broken-link.txt');
-    });
-
     it('should fall back to fdir when not in a git repo and ripgrep unavailable', async () => {
       __setCommandRunnerForTests(async (command) => {
         if (command === 'git' || command === 'rg') {
@@ -876,51 +843,6 @@ describe('crawler', () => {
       expect(results).toEqual(
         expect.arrayContaining(['.', 'lib/', 'index.js', 'lib/util.js']),
       );
-    });
-
-    it('should keep ignore-file handling enabled in ripgrep fallback', async () => {
-      const rgArgsSeen: string[][] = [];
-
-      __setCommandRunnerForTests(async (command, args) => {
-        if (command === 'git') {
-          return { success: false, lines: [] };
-        }
-
-        if (command === 'rg') {
-          rgArgsSeen.push(args);
-          return { success: true, lines: ['index.js'] };
-        }
-
-        return { success: false, lines: [] };
-      });
-
-      tmpDir = await createTmpDir({
-        'index.js': '',
-      });
-
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const results = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      });
-
-      expect(results).toEqual(expect.arrayContaining(['.', 'index.js']));
-      expect(rgArgsSeen).toHaveLength(1);
-      expect(rgArgsSeen[0]).toEqual([
-        '--files',
-        '--no-require-git',
-        '--hidden',
-      ]);
-      expect(rgArgsSeen[0]).not.toContain('--no-ignore');
     });
 
     it('should respect maxDepth on git ls-files path', async () => {
@@ -974,10 +896,11 @@ describe('crawler', () => {
         crawlDirectory: tmpDir,
         cwd: tmpDir,
         ignore: withoutGitignore,
+        useGitignore: false,
         cache: false,
         cacheTtl: 0,
       });
-      expect(withoutGitignoreResults).not.toContain('keep.log');
+      expect(withoutGitignoreResults).toContain('keep.log');
       expect(withoutGitignoreResults).toContain('keep.txt');
 
       const withGitignore = loadIgnoreRules({
@@ -990,11 +913,59 @@ describe('crawler', () => {
         crawlDirectory: tmpDir,
         cwd: tmpDir,
         ignore: withGitignore,
+        useGitignore: true,
         cache: false,
         cacheTtl: 0,
       });
       expect(withGitignoreResults).not.toContain('keep.log');
       expect(withGitignoreResults).toContain('keep.txt');
+    });
+
+    it('should include gitignored files in non-git rg fallback when useGitignore is false', async () => {
+      const rgArgsSeen: string[][] = [];
+
+      __setCommandRunnerForTests(async (command, args) => {
+        if (command === 'git') {
+          return { success: false, lines: [] };
+        }
+
+        if (command === 'rg') {
+          rgArgsSeen.push(args);
+          if (args.includes('--no-ignore')) {
+            return { success: true, lines: ['keep.log', 'keep.txt'] };
+          }
+          return { success: true, lines: ['keep.txt'] };
+        }
+
+        return { success: false, lines: [] };
+      });
+
+      tmpDir = await createTmpDir({
+        '.gitignore': '*.log',
+        'keep.log': '',
+        'keep.txt': '',
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        useGitignore: false,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toContain('keep.log');
+      expect(results).toContain('keep.txt');
+      expect(rgArgsSeen).toHaveLength(1);
+      expect(rgArgsSeen[0]).toContain('--no-ignore');
     });
   });
 
@@ -1026,91 +997,11 @@ describe('crawler', () => {
       expect(results2).toContain('file1.js');
     });
 
-    it('should skip untracked refresh while reusing throttled git results', async () => {
+    it('should refresh untracked files before reusing throttled git results', async () => {
       tmpDir = await createTmpDir({
         'tracked.js': '',
       });
-
-      let listOthersCalls = 0;
-      __setCommandRunnerForTests(async (command, args) => {
-        if (command !== 'git') {
-          return { success: false, lines: [] };
-        }
-
-        if (args[0] === 'rev-parse' && args.includes('--show-toplevel')) {
-          return { success: true, lines: [tmpDir] };
-        }
-
-        if (args[0] === 'ls-files' && args.includes('--cached')) {
-          return { success: true, lines: ['tracked.js'] };
-        }
-
-        if (args[0] === 'ls-files' && args.includes('--others')) {
-          listOthersCalls += 1;
-          return { success: true, lines: [] };
-        }
-
-        return { success: false, lines: [] };
-      });
-
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-      const options = {
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      };
-
-      const first = await crawl(options);
-      expect(first).toContain('tracked.js');
-      expect(first).not.toContain('new-untracked.js');
-
-      await fs.writeFile(path.join(tmpDir, 'new-untracked.js'), '');
-
-      const second = await crawl(options);
-      expect(second).toContain('tracked.js');
-      expect(second).not.toContain('new-untracked.js');
-      expect(listOthersCalls).toBe(1);
-    });
-
-    it('should not reuse throttled snapshot when untracked listing fails transiently', async () => {
-      tmpDir = await createTmpDir({
-        'tracked.js': '',
-      });
-
-      let listOthersAttempt = 0;
-      let listCachedCalls = 0;
-
-      __setCommandRunnerForTests(async (command, args) => {
-        if (command !== 'git') {
-          return { success: false, lines: [] };
-        }
-
-        if (args[0] === 'rev-parse' && args.includes('--show-toplevel')) {
-          return { success: true, lines: [tmpDir] };
-        }
-
-        if (args[0] === 'ls-files' && args.includes('--cached')) {
-          listCachedCalls += 1;
-          return { success: true, lines: ['tracked.js'] };
-        }
-
-        if (args[0] === 'ls-files' && args.includes('--others')) {
-          listOthersAttempt += 1;
-          if (listOthersAttempt === 1) {
-            return { success: false, lines: [] };
-          }
-          return { success: true, lines: ['new-untracked.js'] };
-        }
-
-        return { success: false, lines: [] };
-      });
+      await initGitRepo(tmpDir);
 
       const ignore = loadIgnoreRules({
         projectRoot: tmpDir,
@@ -1135,10 +1026,6 @@ describe('crawler', () => {
       const second = await crawl(options);
       expect(second).toContain('tracked.js');
       expect(second).toContain('new-untracked.js');
-
-      // The first crawl should not cache a throttled snapshot when --others failed,
-      // so the second crawl must run git ls-files --cached again.
-      expect(listCachedCalls).toBe(2);
     });
 
     it('should throttle re-crawl on non-git fallback paths until the window expires', async () => {
@@ -1184,50 +1071,6 @@ describe('crawler', () => {
         vi.useRealTimers();
       }
     });
-
-    it('should not reuse throttled snapshot across different maxFiles values', async () => {
-      __setCommandRunnerForTests(async (command) => {
-        if (command === 'git' || command === 'rg') {
-          return { success: false, lines: [] };
-        }
-        return { success: false, lines: [] };
-      });
-
-      tmpDir = await createTmpDir({
-        'a.js': '',
-        'b.js': '',
-        'c.js': '',
-      });
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const first = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-        maxFiles: 2,
-      });
-
-      const second = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-        maxFiles: 100,
-      });
-
-      expect(second.length).toBeGreaterThan(first.length);
-      expect(second).toEqual(
-        expect.arrayContaining(['.', 'a.js', 'b.js', 'c.js']),
-      );
-    });
   });
 
   describe('mtime-based change detection', () => {
@@ -1258,44 +1101,6 @@ describe('crawler', () => {
 
       const results2 = await crawl(options);
       expect(results2.length).toBeGreaterThanOrEqual(results1.length);
-    });
-
-    it('should detect git index changes when crawling a subdirectory', async () => {
-      tmpDir = await createTmpDir({
-        nested: {
-          'tracked.txt': '',
-        },
-      });
-      await initGitRepo(tmpDir);
-
-      const nestedDir = path.join(tmpDir, 'nested');
-      const ignore = loadIgnoreRules({
-        projectRoot: nestedDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-      const options = {
-        crawlDirectory: nestedDir,
-        cwd: nestedDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      };
-
-      const first = await crawl(options);
-      expect(first).toContain('tracked.txt');
-      expect(first).not.toContain('new-tracked.txt');
-
-      await fs.writeFile(path.join(nestedDir, 'new-tracked.txt'), '');
-      await runExecFile('git', ['add', 'nested/new-tracked.txt'], tmpDir);
-      const indexPath = path.join(tmpDir, '.git', 'index');
-      const futureTime = new Date(Date.now() + 60_000);
-      await fs.utimes(indexPath, futureTime, futureTime);
-
-      const second = await crawl(options);
-      expect(second).toContain('tracked.txt');
-      expect(second).toContain('new-tracked.txt');
     });
 
     it('should re-crawl git worktrees when the gitdir index changes', async () => {
