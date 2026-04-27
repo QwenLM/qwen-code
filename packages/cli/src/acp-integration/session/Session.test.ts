@@ -222,6 +222,7 @@ describe('Session', () => {
           name: 'init',
           description: 'Initialize project context',
           kind: 'built-in',
+          argumentHint: '[path]',
         },
       ]);
 
