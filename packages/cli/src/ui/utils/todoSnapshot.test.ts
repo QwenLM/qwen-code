@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import {
+  STICKY_TODO_MAX_VISIBLE_ITEMS,
   getStickyTodoMaxVisibleItems,
   getStickyTodos,
   getStickyTodosLayoutKey,
@@ -285,5 +286,15 @@ describe('sticky todo layout helpers', () => {
     expect(getStickyTodoMaxVisibleItems(8)).toBe(1);
     expect(getStickyTodoMaxVisibleItems(15)).toBe(3);
     expect(getStickyTodoMaxVisibleItems(80)).toBe(5);
+  });
+
+  it('falls back to the maximum sticky todo item count for invalid terminal heights', () => {
+    expect(getStickyTodoMaxVisibleItems(Number.NaN)).toBe(
+      STICKY_TODO_MAX_VISIBLE_ITEMS,
+    );
+    expect(getStickyTodoMaxVisibleItems(-1)).toBe(
+      STICKY_TODO_MAX_VISIBLE_ITEMS,
+    );
+    expect(getStickyTodoMaxVisibleItems(0)).toBe(STICKY_TODO_MAX_VISIBLE_ITEMS);
   });
 });

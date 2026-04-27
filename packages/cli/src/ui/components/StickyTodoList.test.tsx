@@ -6,9 +6,20 @@
 
 import { render } from 'ink-testing-library';
 import { describe, expect, it } from 'vitest';
-import { getStickyTodoMaxVisibleItems } from '../utils/todoSnapshot.js';
+import {
+  getStickyTodoMaxVisibleItems,
+  STICKY_TODO_MAX_VISIBLE_ITEMS,
+} from '../utils/todoSnapshot.js';
 import { StickyTodoList } from './StickyTodoList.js';
 import type { TodoItem } from './TodoDisplay.js';
+
+function makeTodos(count: number): TodoItem[] {
+  return Array.from({ length: count }, (_, index) => ({
+    id: `todo-${index + 1}`,
+    content: `Task ${index + 1}`,
+    status: 'pending' as const,
+  }));
+}
 
 describe('StickyTodoList', () => {
   it('keeps each task number attached to the original task after sorting', () => {
@@ -101,5 +112,26 @@ describe('StickyTodoList', () => {
     expect(getStickyTodoMaxVisibleItems(8)).toBe(1);
     expect(getStickyTodoMaxVisibleItems(15)).toBe(3);
     expect(getStickyTodoMaxVisibleItems(80)).toBe(5);
+  });
+
+  it('falls back to the maximum visible item count for non-finite maxVisibleItems', () => {
+    const todos = makeTodos(STICKY_TODO_MAX_VISIBLE_ITEMS + 1);
+
+    for (const maxVisibleItems of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      const { lastFrame, unmount } = render(
+        <StickyTodoList
+          todos={todos}
+          width={42}
+          maxVisibleItems={maxVisibleItems}
+        />,
+      );
+      const output = lastFrame() ?? '';
+
+      expect(output).toContain(`Task ${STICKY_TODO_MAX_VISIBLE_ITEMS}`);
+      expect(output).not.toContain(`Task ${STICKY_TODO_MAX_VISIBLE_ITEMS + 1}`);
+      expect(output).toContain('... and 1 more');
+
+      unmount();
+    }
   });
 });

@@ -59,7 +59,8 @@ const StickyTodoListComponent: React.FC<StickyTodoListProps> = ({
   const visibleTodoCount = clampVisibleTodoCount(maxVisibleItems);
   const visibleTodos = orderedTodos.slice(0, visibleTodoCount);
   const hiddenTodoCount = orderedTodos.length - visibleTodos.length;
-  const numberColumnWidth = String(todos.length).length + 2;
+  const numberColumnWidth = String(visibleTodoCount).length + 2;
+  // 6 = 2 (status icon column) + 2 (border columns) + 2 (paddingX columns).
   const contentColumnWidth = Math.max(1, width - numberColumnWidth - 6);
 
   return (

@@ -19,6 +19,10 @@ interface TodoSnapshotSearchResult {
 
 type SnapshotSearchResult = TodoSnapshotSearchResult | undefined;
 
+// This threshold is item-count based, not line-count based. A single long
+// response can fill the viewport while still counting as one item, so the
+// sticky panel may stay hidden longer than strictly necessary. That is
+// preferable to duplicating a recently committed inline TodoWrite result.
 const MIN_HISTORY_ITEMS_AFTER_TODO_BEFORE_STICKY = 2;
 export const STICKY_TODO_MAX_VISIBLE_ITEMS = 5;
 const STICKY_TODO_ROWS_PER_VISIBLE_ITEM = 5;
