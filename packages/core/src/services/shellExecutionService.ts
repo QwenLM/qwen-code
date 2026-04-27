@@ -682,10 +682,10 @@ export class ShellExecutionService {
           const finalOutput = shellExecutionConfig.disableDynamicLineTrimming
             ? newOutput
             : trimmedOutput;
-          const finalOutputComparison = shellExecutionConfig
-            .disableDynamicLineTrimming
-            ? newOutputComparison
-            : trimmedOutputComparison;
+          const finalOutputComparison =
+            shellExecutionConfig.disableDynamicLineTrimming
+              ? newOutputComparison
+              : trimmedOutputComparison;
 
           if (!areAnsiOutputsEqual(outputComparison, finalOutputComparison)) {
             outputComparison = finalOutputComparison;

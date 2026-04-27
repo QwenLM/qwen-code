@@ -450,7 +450,11 @@ export class SkillManager {
       // Extract optional model field
       const model = parseModelField(frontmatter);
 
-      // Extract when_to_use and disable-model-invocation
+      // Extract argument-hint, when_to_use, and disable-model-invocation
+      const argumentHint =
+        typeof frontmatter['argument-hint'] === 'string'
+          ? frontmatter['argument-hint']
+          : undefined;
       const whenToUse =
         typeof frontmatter['when_to_use'] === 'string'
           ? frontmatter['when_to_use']
@@ -468,6 +472,7 @@ export class SkillManager {
         allowedTools,
         hooks,
         skillRoot,
+        argumentHint,
         model,
         level,
         filePath,

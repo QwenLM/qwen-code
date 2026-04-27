@@ -6,7 +6,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { showAuthStatus } from './handler.js';
-import { AuthType, CODING_PLAN_ENV_KEY } from '@qwen-code/qwen-code-core';
+import { AuthType } from '@qwen-code/qwen-code-core';
+import { CODING_PLAN_ENV_KEY } from '../../constants/codingPlan.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
 vi.mock('../../config/settings.js', () => ({
@@ -26,11 +27,13 @@ describe('showAuthStatus', () => {
     vi.clearAllMocks();
     vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     delete process.env[CODING_PLAN_ENV_KEY];
+    delete process.env['OPENROUTER_API_KEY'];
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     delete process.env[CODING_PLAN_ENV_KEY];
+    delete process.env['OPENROUTER_API_KEY'];
   });
 
   const createMockSettings = (
@@ -54,6 +57,9 @@ describe('showAuthStatus', () => {
 
     expect(writeStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining('No authentication method configured'),
+    );
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('qwen auth openrouter'),
     );
     expect(writeStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining('qwen auth qwen-oauth'),
@@ -118,6 +124,77 @@ describe('showAuthStatus', () => {
       expect.stringContaining('API key configured'),
     );
     expect(process.exit).toHaveBeenCalledWith(0);
+  });
+
+  it('should show OpenRouter status when configured with API key', async () => {
+    process.env['OPENROUTER_API_KEY'] = 'test-openrouter-key';
+
+    vi.mocked(loadSettings).mockReturnValue(
+      createMockSettings({
+        security: {
+          auth: {
+            selectedType: AuthType.USE_OPENAI,
+          },
+        },
+        model: {
+          name: 'openai/gpt-4o-mini',
+        },
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'openai/gpt-4o-mini',
+              name: 'OpenRouter · GPT-4o mini',
+              baseUrl: 'https://openrouter.ai/api/v1',
+              envKey: 'OPENROUTER_API_KEY',
+            },
+          ],
+        },
+      }),
+    );
+
+    await showAuthStatus();
+
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('OpenRouter'),
+    );
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('openai/gpt-4o-mini'),
+    );
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('API key configured'),
+    );
+    expect(process.exit).toHaveBeenCalledWith(0);
+  });
+
+  it('should show OpenRouter as incomplete when API key is missing', async () => {
+    vi.mocked(loadSettings).mockReturnValue(
+      createMockSettings({
+        security: {
+          auth: {
+            selectedType: AuthType.USE_OPENAI,
+          },
+        },
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'openai/gpt-4o-mini',
+              name: 'OpenRouter · GPT-4o mini',
+              baseUrl: 'https://openrouter.ai/api/v1',
+              envKey: 'OPENROUTER_API_KEY',
+            },
+          ],
+        },
+      }),
+    );
+
+    await showAuthStatus();
+
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('OpenRouter (Incomplete)'),
+    );
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('qwen auth openrouter'),
+    );
   });
 
   it('should show Coding Plan as incomplete when API key is missing', async () => {

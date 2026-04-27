@@ -84,6 +84,7 @@ export class SkillCommandLoader implements ICommandLoader {
             : 'skill-dir-command') as CommandSource,
           sourceLabel,
           modelInvocable,
+          argumentHint: skill.argumentHint,
           whenToUse: skill.whenToUse,
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
             const body = skill.body;
