@@ -13,6 +13,7 @@ import {
 import type { PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
 import { ToolConfirmationOutcome } from '../tools.js';
+import { ToolNames } from '../tool-names.js';
 import { type Config, ApprovalMode } from '../../config/config.js';
 import { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
@@ -31,6 +32,10 @@ import type {
 import { partToString } from '../../utils/partUtils.js';
 import type { HookSystem } from '../../hooks/hookSystem.js';
 import { PermissionMode } from '../../hooks/types.js';
+import { runWithAgentContext } from './agent-context.js';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 // Type for accessing protected methods in tests
 type AgentToolInvocation = {
@@ -87,6 +92,7 @@ describe('AgentTool', () => {
     config = {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      getCliVersion: vi.fn().mockReturnValue('test-version'),
       getSubagentManager: vi.fn(),
       getGeminiClient: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
@@ -1410,6 +1416,8 @@ describe('AgentTool', () => {
       register: ReturnType<typeof vi.fn>;
       complete: ReturnType<typeof vi.fn>;
       fail: ReturnType<typeof vi.fn>;
+      finalizeCancelled: ReturnType<typeof vi.fn>;
+      drainMessages: ReturnType<typeof vi.fn>;
     };
 
     const bgSubagent: SubagentConfig = {
@@ -1436,6 +1444,8 @@ describe('AgentTool', () => {
         register: vi.fn(),
         complete: vi.fn(),
         fail: vi.fn(),
+        finalizeCancelled: vi.fn(),
+        drainMessages: vi.fn().mockReturnValue([]),
       };
 
       vi.mocked(config.getApprovalMode).mockReturnValue(ApprovalMode.DEFAULT);
@@ -1445,6 +1455,12 @@ describe('AgentTool', () => {
       (config as unknown as Record<string, unknown>)[
         'getBackgroundTaskRegistry'
       ] = vi.fn().mockReturnValue(mockRegistry);
+      (config as unknown as Record<string, unknown>)['storage'] = {
+        getProjectDir: () => '/tmp/qwen-test',
+      };
+      (mockAgent as unknown as Record<string, unknown>)[
+        'setExternalMessageProvider'
+      ] = vi.fn();
 
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(bgSubagent);
       vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
@@ -1466,6 +1482,12 @@ describe('AgentTool', () => {
 
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Background agent launched');
+      expect(llmText).toContain(
+        `Use ${ToolNames.SEND_MESSAGE} to continue this agent`,
+      );
+      expect(llmText).toContain(`or ${ToolNames.TASK_STOP} to cancel.`);
+      expect(llmText).not.toContain('with to:');
+      expect(llmText).not.toContain('Use send_message with task_id:');
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({
           description: 'Start monitor',
@@ -1565,6 +1587,77 @@ describe('AgentTool', () => {
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({ toolUseId: 'call-xyz-789' }),
       );
+    });
+
+    describe('parentAgentId sidecar', () => {
+      let tempProjectDir: string;
+
+      beforeEach(() => {
+        tempProjectDir = fs.mkdtempSync(
+          path.join(os.tmpdir(), 'agent-parent-id-'),
+        );
+        (config as unknown as Record<string, unknown>)['storage'] = {
+          getProjectDir: () => tempProjectDir,
+        };
+      });
+
+      afterEach(() => {
+        fs.rmSync(tempProjectDir, { recursive: true, force: true });
+      });
+
+      const readSidecar = (agentId: string) => {
+        const metaPath = path.join(
+          tempProjectDir,
+          'subagents',
+          'test-session-id',
+          `agent-${agentId}.meta.json`,
+        );
+        return JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      };
+
+      it('writes parentAgentId: null at top-level launches', async () => {
+        const params: AgentParams = {
+          description: 'Start monitor',
+          prompt: 'Watch for changes',
+          subagent_type: 'monitor',
+        };
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(params);
+        (
+          invocation as unknown as { setCallId: (id: string) => void }
+        ).setCallId('top-1');
+        await invocation.execute();
+
+        const meta = readSidecar('monitor-top-1');
+        expect(meta.parentAgentId).toBeNull();
+      });
+
+      it('records the launching agent id when launched from a subagent frame', async () => {
+        const params: AgentParams = {
+          description: 'Start monitor',
+          prompt: 'Watch for changes',
+          subagent_type: 'monitor',
+        };
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(params);
+        (
+          invocation as unknown as { setCallId: (id: string) => void }
+        ).setCallId('nested-1');
+
+        await runWithAgentContext(
+          { agentId: 'explore-parent-42' },
+          async () => {
+            await invocation.execute();
+          },
+        );
+
+        const meta = readSidecar('monitor-nested-1');
+        expect(meta.parentAgentId).toBe('explore-parent-42');
+      });
     });
   });
 });
