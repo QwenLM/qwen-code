@@ -22,6 +22,122 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: Topbar Action Chrome Restraint
+
+Status: completed in iteration 90.
+
+Goal: make the topbar action cluster and runtime status read as quiet desktop
+chrome instead of framed toolbar buttons, while preserving the existing
+conversation, review, settings, branch, and diff workflows.
+
+User-visible value: the first viewport moves closer to `home.jpg`: the thread
+title, project, branch, and diff context remain scannable, but the repeated
+topbar actions stop competing with the conversation and composer.
+
+Expected files:
+
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/topbar-action-chrome-restraint.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- Default topbar icon buttons have transparent or near-transparent chrome with
+  compact icon geometry and accessible labels/tooltips unchanged.
+- Active/hover topbar actions use a subtle low-alpha surface, not heavy bordered
+  button frames.
+- The runtime status remains visible and accessible but no longer reads as a
+  prominent bordered pill.
+- The changed-files badge stays contained and secondary, with no overflow in
+  default or compact review Electron viewports.
+- Existing branch switching, review drawer, settings overlay, composer,
+  terminal, relaunch, and commit paths remain unchanged.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/runtime/user-data,
+  open the fake Git project, send and approve the deterministic prompt, assert
+  the topbar action chrome metrics, open review at default and compact widths,
+  and continue the existing settings, terminal, relaunch, branch, discard
+  safety, and commit smoke paths.
+- E2E assertions: topbar action default backgrounds and borders stay low-alpha,
+  active/hover frames stay bounded, runtime status border is removed or
+  negligible, badges stay small and contained, and no console errors or failed
+  local requests are recorded.
+- Diagnostic artifacts to collect on failure:
+  `topbar-context-fidelity.json`, `topbar-context-fidelity.png`,
+  `compact-review-drawer.json`, Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` selected the smallest visual
+  fidelity slice from the prior next-work notes; `frontend-design`, constrained
+  by `home.jpg`, keeps action controls icon-led and restrained; and
+  `electron-desktop-dev` requires real Electron CDP coverage because this slice
+  changes renderer CSS and first-viewport geometry.
+
+Notes and decisions:
+
+- The slice is intentionally CSS and harness only. It does not move actions,
+  change branch/review/settings behavior, or alter local server, preload, IPC,
+  Git, credential, terminal, or ACP contracts.
+- The existing action labels and native button semantics stay intact; the
+  change reduces visual weight rather than hiding controls.
+- The first real Electron run exposed an over-strict harness assertion that
+  treated the icon button's inherited computed font size as visible chrome.
+  The assertion now checks frame and badge style instead of inherited font size.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 40 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` first failed on the inherited
+  font-size harness false positive; diagnostics were saved at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T02-16-01-286Z/`.
+- After correcting the assertion,
+  `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T02-16-34-459Z/`.
+- `topbar-context-fidelity.json` recorded a 50 px topbar, inactive action
+  background/border alpha `0`, active action background alpha `0.07`, active
+  border alpha `0.12`, runtime status `58.0546875 x 26` with background alpha
+  `0.055` and transparent borders, changed-files badge `13` px tall with
+  background alpha `0.72`, no long-branch leakage, and no containment failure.
+- `compact-review-drawer.json` recorded the compact review viewport with
+  `28 x 28` topbar actions, no topbar/review/composer overflow, and the
+  conversation still wider than the review drawer.
+- `summary.json` recorded zero console errors and zero failed local requests.
+- `git diff --check` passed.
+
+Self-review:
+
+- The first viewport moves closer to the prototype by removing inactive framed
+  topbar buttons and softening the runtime pill without hiding project, branch,
+  diff, review, settings, or runtime state.
+- The change is CSS plus E2E assertion coverage only. No Electron main/preload
+  security settings, local server routes, token handling, settings persistence,
+  Git operations, terminal behavior, or ACP workflow changed.
+- The topbar still exposes accessible labels, titles, active pressed state, and
+  the existing compact changed-files affordance.
+
+Next work:
+
+- Continue prototype fidelity by making the topbar title/context layout more
+  single-row when space permits, matching `home.jpg` without losing long-label
+  containment.
+- Continue normal workflow hardening by improving model/provider save error
+  visibility in the settings drawer.
+
 ### Slice: Composer Missing Key Send Guidance
 
 Status: completed in iteration 89.

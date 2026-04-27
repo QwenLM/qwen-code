@@ -972,6 +972,7 @@ summary:focus-visible {
 .topbar-actions {
   flex-wrap: nowrap;
   justify-content: flex-end;
+  gap: 5px;
 }
 
 .topbar-icon-button {
@@ -980,10 +981,10 @@ summary:focus-visible {
   width: 28px;
   height: 28px;
   place-items: center;
-  border: 1px solid rgba(213, 224, 255, 0.12);
+  border: 1px solid transparent;
   border-radius: 7px;
-  background: rgba(238, 244, 239, 0.018);
-  color: rgba(225, 232, 228, 0.68);
+  background: transparent;
+  color: rgba(225, 232, 228, 0.62);
   transition:
     background 140ms ease,
     border-color 140ms ease,
@@ -992,8 +993,8 @@ summary:focus-visible {
 
 .topbar-icon-button:not(:disabled):hover,
 .topbar-icon-button-active {
-  border-color: rgba(85, 166, 255, 0.28);
-  background: rgba(85, 166, 255, 0.1);
+  border-color: rgba(85, 166, 255, 0.12);
+  background: rgba(85, 166, 255, 0.07);
   color: #c7e2ff;
 }
 
@@ -1004,18 +1005,18 @@ summary:focus-visible {
 
 .topbar-action-badge {
   position: absolute;
-  top: -5px;
-  right: -5px;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border: 1px solid rgba(12, 14, 15, 0.92);
+  top: -3px;
+  right: -3px;
+  min-width: 13px;
+  height: 13px;
+  padding: 0 3px;
+  border: 1px solid rgba(12, 14, 15, 0.72);
   border-radius: 999px;
-  background: rgba(85, 166, 255, 0.96);
+  background: rgba(85, 166, 255, 0.72);
   color: #071017;
-  font-size: 10px;
-  font-weight: 840;
-  line-height: 14px;
+  font-size: 8.5px;
+  font-weight: 760;
+  line-height: 11px;
   text-align: center;
 }
 
@@ -1027,15 +1028,16 @@ summary:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 58px;
-  min-height: 28px;
+  min-width: 54px;
+  min-height: 26px;
   gap: 5px;
-  padding: 0 8px;
-  border: 1px solid rgba(213, 224, 255, 0.14);
+  padding: 0 7px;
+  border: 1px solid transparent;
   border-radius: 999px;
-  color: var(--text-soft);
+  background: rgba(238, 244, 239, 0.018);
+  color: rgba(194, 202, 191, 0.8);
   font-size: 10.2px;
-  font-weight: 700;
+  font-weight: 660;
   text-transform: none;
 }
 
@@ -1049,14 +1051,14 @@ summary:focus-visible {
 }
 
 .status-pill-ready {
-  border-color: rgba(117, 217, 156, 0.26);
-  background: rgba(117, 217, 156, 0.075);
-  color: #a9eabd;
+  border-color: transparent;
+  background: rgba(117, 217, 156, 0.055);
+  color: rgba(169, 234, 189, 0.9);
 }
 
 .status-pill-error {
-  border-color: rgba(255, 127, 105, 0.55);
-  background: rgba(255, 127, 105, 0.11);
+  border-color: rgba(255, 127, 105, 0.18);
+  background: rgba(255, 127, 105, 0.09);
   color: #ffad9f;
 }
 

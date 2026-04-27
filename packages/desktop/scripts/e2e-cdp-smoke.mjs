@@ -3763,6 +3763,9 @@ async function assertTopbarContextFidelity(fileName) {
         borderBottomWidth: Number.parseFloat(style.borderBottomWidth),
         borderLeftWidth: Number.parseFloat(style.borderLeftWidth),
         borderTopAlpha: alphaFromColor(style.borderTopColor),
+        borderRightAlpha: alphaFromColor(style.borderRightColor),
+        borderBottomAlpha: alphaFromColor(style.borderBottomColor),
+        borderLeftAlpha: alphaFromColor(style.borderLeftColor),
         fontSize: Number.parseFloat(style.fontSize),
         fontWeight: Number.parseFloat(style.fontWeight),
         textTransform: style.textTransform,
@@ -3798,10 +3801,23 @@ async function assertTopbarContextFidelity(fileName) {
       ...document.querySelectorAll(
         '[data-testid="workspace-topbar"] .topbar-icon-button'
       )
-    ].map((button) => ({
-      label: button.getAttribute('aria-label') || '',
-      rect: rectFor(button)
-    }));
+    ].map((button) => {
+      const badge = button.querySelector('.topbar-action-badge:not(:empty)');
+      return {
+        label: button.getAttribute('aria-label') || '',
+        ariaPressed: button.getAttribute('aria-pressed') ?? null,
+        className: button.className,
+        rect: rectFor(button),
+        style: styleFor(button),
+        badge: badge
+          ? {
+              text: badge.textContent.trim(),
+              rect: rectFor(badge),
+              style: styleFor(badge)
+            }
+          : null
+      };
+    });
     const contextItems = [
       ...document.querySelectorAll('.topbar-context-item')
     ].map((item) => ({
@@ -4069,6 +4085,8 @@ async function assertTopbarContextFidelity(fileName) {
   if (
     metrics.runtimeStatus.height > 29 ||
     metrics.runtimeStatus.width > 72 ||
+    metrics.runtimeStatusStyle.backgroundAlpha > 0.08 ||
+    metrics.runtimeStatusStyle.borderTopAlpha > 0.08 ||
     metrics.runtimeStatusStyle.fontSize > 10.75 ||
     metrics.runtimeStatusStyle.fontWeight > 720 ||
     metrics.runtimeStatusStyle.textTransform !== 'none'
@@ -4078,6 +4096,51 @@ async function assertTopbarContextFidelity(fileName) {
         rect: metrics.runtimeStatus,
         style: metrics.runtimeStatusStyle,
       })}`,
+    );
+  }
+
+  const heavyTopbarActionChrome = metrics.actionRects.filter((action) => {
+    if (!action.style) {
+      return true;
+    }
+
+    const isPressed = action.ariaPressed === 'true';
+    const maxBackgroundAlpha = isPressed ? 0.09 : 0.025;
+    const maxBorderAlpha = isPressed ? 0.14 : 0.045;
+
+    return (
+      action.style.backgroundAlpha > maxBackgroundAlpha ||
+      action.style.borderTopAlpha > maxBorderAlpha ||
+      action.style.borderRightAlpha > maxBorderAlpha ||
+      action.style.borderBottomAlpha > maxBorderAlpha ||
+      action.style.borderLeftAlpha > maxBorderAlpha
+    );
+  });
+  if (heavyTopbarActionChrome.length > 0) {
+    throw new Error(
+      `Topbar action chrome should stay quiet: ${JSON.stringify(
+        heavyTopbarActionChrome,
+      )}`,
+    );
+  }
+
+  const heavyActionBadges = metrics.actionRects.filter(
+    (action) =>
+      action.badge &&
+      (!action.badge.rect ||
+        !action.badge.style ||
+        action.badge.rect.height > 14 ||
+        action.badge.rect.width > 22 ||
+        action.badge.style.backgroundAlpha > 0.78 ||
+        action.badge.style.borderTopAlpha > 0.78 ||
+        action.badge.style.fontSize > 9.2 ||
+        action.badge.style.fontWeight > 800),
+  );
+  if (heavyActionBadges.length > 0) {
+    throw new Error(
+      `Topbar changed-file badges should stay secondary: ${JSON.stringify(
+        heavyActionBadges,
+      )}`,
     );
   }
 
