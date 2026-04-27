@@ -565,6 +565,7 @@ async function handleAlibabaStandardApiKeyAuth(): Promise<void> {
 
     // Clear stale Coding Plan state to avoid incorrect status/update prompts
     delete process.env[CODING_PLAN_ENV_KEY];
+    settings.setValue(persistScope, `env.${CODING_PLAN_ENV_KEY}`, '');
     settings.setValue(persistScope, 'codingPlan.region', '');
     settings.setValue(persistScope, 'codingPlan.version', '');
 
@@ -794,9 +795,9 @@ export async function showAuthStatus(): Promise<void> {
           );
           writeStdoutLine(t('  Run `qwen auth api-key` to re-configure.\n'));
         }
-      } else {
-        // Generic OpenAI-compatible provider
-        const envKey = activeConfig?.envKey;
+      } else if (activeConfig) {
+        // Generic OpenAI-compatible provider with a known config
+        const envKey = activeConfig.envKey;
         const hasKey =
           envKey && (!!process.env[envKey] || !!mergedSettings.env?.[envKey]);
 
@@ -831,6 +832,68 @@ export async function showAuthStatus(): Promise<void> {
               '  Configure it in settings.json or set the environment variable.\n',
             ),
           );
+        }
+      } else {
+        // No active model config found — fall back to env key / metadata checks
+        const hasCodingPlanKey =
+          !!process.env[CODING_PLAN_ENV_KEY] ||
+          !!mergedSettings.env?.[CODING_PLAN_ENV_KEY];
+        const hasCodingPlanMetadata = !!codingPlanRegion || !!codingPlanVersion;
+
+        if (hasCodingPlanKey) {
+          writeStdoutLine(
+            t('✓ Authentication Method: Alibaba Cloud Coding Plan'),
+          );
+
+          if (codingPlanRegion) {
+            const regionDisplay =
+              codingPlanRegion === CodingPlanRegion.CHINA
+                ? t('中国 (China) - 阿里云百炼')
+                : t('Global - Alibaba Cloud');
+            writeStdoutLine(
+              t('  Region: {{region}}', { region: regionDisplay }),
+            );
+          }
+
+          if (modelName) {
+            writeStdoutLine(
+              t('  Current Model: {{model}}', { model: modelName }),
+            );
+          }
+
+          if (codingPlanVersion) {
+            writeStdoutLine(
+              t('  Config Version: {{version}}', {
+                version: codingPlanVersion.substring(0, 8) + '...',
+              }),
+            );
+          }
+
+          writeStdoutLine(t('  Status: API key configured\n'));
+        } else if (hasCodingPlanMetadata) {
+          writeStdoutLine(
+            t(
+              '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)',
+            ),
+          );
+          writeStdoutLine(
+            t('  Issue: API key not found in environment or settings\n'),
+          );
+          writeStdoutLine(
+            t('  Run `qwen auth coding-plan` to re-configure.\n'),
+          );
+        } else {
+          writeStdoutLine(
+            t(
+              '⚠️  Authentication Method: OpenAI-compatible API Key (Incomplete)',
+            ),
+          );
+          writeStdoutLine(
+            t(
+              '  Issue: No model provider configuration found for the selected model.\n',
+            ),
+          );
+          writeStdoutLine(t('  Run `qwen auth` to re-configure.\n'));
         }
       }
     } else {
