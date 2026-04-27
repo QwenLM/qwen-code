@@ -109,6 +109,8 @@ describe('runNonInteractive', () => {
 
     mockGeminiClient = {
       sendMessageStream: vi.fn(),
+      consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
+      recordCompletedToolCall: vi.fn(),
       getChatRecordingService: vi.fn(() => ({
         initialize: vi.fn(),
         recordMessage: vi.fn(),
@@ -154,6 +156,7 @@ describe('runNonInteractive', () => {
       getCronScheduler: vi.fn().mockReturnValue(null),
       setModelInvocableCommandsProvider: vi.fn(),
       setModelInvocableCommandsExecutor: vi.fn(),
+      getAutoSkillEnabled: vi.fn().mockReturnValue(false),
       getDisabledSlashCommands: vi.fn().mockReturnValue([]),
       getBackgroundTaskRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),
