@@ -30,6 +30,7 @@ export default defineConfig({
       provider: 'v8',
       reportsDirectory: './coverage',
       include: ['src/**/*'],
+      exclude: ['**/*Types.ts', '**/*.d.ts', '**/types/**', '**/schemas/**'],
       reporter: [
         ['text', { file: 'full-text-summary.txt' }],
         'html',
