@@ -13,6 +13,7 @@ import {
   oscKittyNotify,
   oscGhosttyNotify,
   sanitizeOscPayload,
+  encodeKittyPayload,
   OSC,
   BEL,
   ST,
@@ -106,8 +107,17 @@ describe('osc', () => {
   it('builds OSC sequence with ST terminator for kitty', () => {
     process.env['TERM'] = 'xterm-kitty';
     delete process.env['TERM_PROGRAM'];
+    delete process.env['STY'];
     const result = osc(99, 'test');
     expect(result).toBe(`\x1b]99;test${ST}`);
+  });
+
+  it('falls back to BEL for kitty inside screen to avoid ST conflict with DCS wrapper', () => {
+    process.env['TERM'] = 'xterm-kitty';
+    delete process.env['TERM_PROGRAM'];
+    process.env['STY'] = '12345.pts-0.host';
+    const result = osc(99, 'test');
+    expect(result).toBe(`\x1b]99;test${BEL}`);
   });
 
   it('joins multiple parts with semicolons', () => {
@@ -173,6 +183,20 @@ describe('oscITerm2Notify', () => {
   });
 });
 
+describe('encodeKittyPayload', () => {
+  it('base64-encodes ASCII text', () => {
+    expect(encodeKittyPayload('Title')).toBe(
+      Buffer.from('Title', 'utf8').toString('base64'),
+    );
+  });
+
+  it('base64-encodes UTF-8 text', () => {
+    expect(encodeKittyPayload('你好')).toBe(
+      Buffer.from('你好', 'utf8').toString('base64'),
+    );
+  });
+});
+
 describe('oscKittyNotify', () => {
   const originalEnv = { ...process.env };
 
@@ -180,18 +204,23 @@ describe('oscKittyNotify', () => {
     process.env = { ...originalEnv };
   });
 
-  it('returns three-step protocol sequences', () => {
+  it('returns three-step protocol sequences with base64-encoded payloads', () => {
     process.env['TERM'] = 'xterm-kitty';
     delete process.env['TERM_PROGRAM'];
+    delete process.env['STY'];
     const seqs = oscKittyNotify('Title', 'Body', 42);
     expect(seqs).toHaveLength(3);
-    // Step 1: title
-    expect(seqs[0]).toContain('i=42:d=0:p=title');
-    expect(seqs[0]).toContain('Title');
-    // Step 2: body
-    expect(seqs[1]).toContain('i=42:p=body');
-    expect(seqs[1]).toContain('Body');
-    // Step 3: activate
+    const b64Title = Buffer.from('Title', 'utf8').toString('base64');
+    const b64Body = Buffer.from('Body', 'utf8').toString('base64');
+    // Step 1: title with e=1 (base64)
+    expect(seqs[0]).toContain('i=42:d=0:p=title:e=1');
+    expect(seqs[0]).toContain(b64Title);
+    expect(seqs[0]).not.toContain('Title');
+    // Step 2: body with e=1 (base64)
+    expect(seqs[1]).toContain('i=42:p=body:e=1');
+    expect(seqs[1]).toContain(b64Body);
+    expect(seqs[1]).not.toContain('Body');
+    // Step 3: activate (no payload to encode)
     expect(seqs[2]).toContain('i=42:d=1:a=focus');
   });
 });

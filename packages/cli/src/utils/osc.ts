@@ -94,13 +94,20 @@ export function sanitizeOscPayload(text: string): string {
 
 /**
  * Build an OSC escape sequence from parts.
- * Uses ST terminator for Kitty (which doesn't support BEL in OSC),
- * and BEL for all other terminals.
+ *
+ * Terminator selection:
+ * - Kitty prefers ST (`ESC \`), but ST inside a GNU screen DCS wrapper
+ *   would prematurely terminate the outer DCS. So when `STY` is set
+ *   (screen session), we fall back to BEL even for Kitty.
+ * - All other terminals always use BEL.
  *
  * All string parts are sanitized to prevent control character injection.
  */
 export function osc(...parts: Array<string | number>): string {
-  const terminator = detectTerminal() === 'kitty' ? ST : BEL;
+  const isKitty = detectTerminal() === 'kitty';
+  const inScreen = !!process.env['STY'];
+  // Use ST for Kitty except inside screen where ST conflicts with DCS wrapper
+  const terminator = isKitty && !inScreen ? ST : BEL;
   const sanitized = parts.map((p) =>
     typeof p === 'string' ? sanitizeOscPayload(p) : p,
   );
@@ -128,6 +135,17 @@ export function wrapForMultiplexer(sequence: string): string {
   return sequence;
 }
 
+// ── Encoding helpers ───────────────────────────────────────────────
+
+/**
+ * Base64-encode a UTF-8 string for Kitty OSC 99 payloads.
+ * Kitty requires `e=1` (base64) encoding to safely transport arbitrary
+ * UTF-8 text without delimiter/control-character conflicts.
+ */
+export function encodeKittyPayload(text: string): string {
+  return Buffer.from(text, 'utf8').toString('base64');
+}
+
 // ── Notification helpers ────────────────────────────────────────────
 
 /**
@@ -145,6 +163,9 @@ export function oscITerm2Notify(title: string, message: string): string {
  * Kitty desktop notification via OSC 99 (three-step protocol).
  * Returns an array of sequences that must be written in order.
  *
+ * Payloads are base64-encoded (`e=1`) as required by the Kitty
+ * notification protocol to safely transport UTF-8 text.
+ *
  * @see https://sw.kovidgoyal.net/kitty/desktop-notifications/
  */
 export function oscKittyNotify(
@@ -153,8 +174,8 @@ export function oscKittyNotify(
   id: number,
 ): string[] {
   return [
-    osc(OSC.KITTY, `i=${id}:d=0:p=title`, title),
-    osc(OSC.KITTY, `i=${id}:p=body`, message),
+    osc(OSC.KITTY, `i=${id}:d=0:p=title:e=1`, encodeKittyPayload(title)),
+    osc(OSC.KITTY, `i=${id}:p=body:e=1`, encodeKittyPayload(message)),
     osc(OSC.KITTY, `i=${id}:d=1:a=focus`, ''),
   ];
 }
