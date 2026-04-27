@@ -9,9 +9,16 @@ import os from 'node:os';
 import { execSync } from 'node:child_process';
 import type { CommandContext } from '../ui/commands/types.js';
 import { getCliVersion } from './version.js';
-import { IdeClient, AuthType } from '@qwen-code/qwen-code-core';
+import {
+  IdeClient,
+  AuthType,
+  createDebugLogger,
+  type LspStatusSnapshot,
+} from '@qwen-code/qwen-code-core';
 import { formatMemoryUsage } from '../ui/utils/formatters.js';
 import { GIT_COMMIT_INFO } from '../generated/git-commit.js';
+
+const debugLogger = createDebugLogger('STATUS');
 
 /**
  * System information interface containing all system-related details
@@ -42,6 +49,7 @@ export interface ExtendedSystemInfo extends SystemInfo {
   gitCommit?: string;
   proxy?: string;
   fastModel?: string;
+  lspStatus?: string;
 }
 
 /**
@@ -185,6 +193,7 @@ export async function getExtendedSystemInfo(
 
   // Get fast model from settings
   const fastModel = context.services.settings?.merged?.fastModel || undefined;
+  const lspStatus = getLspStatus(context);
 
   return {
     ...baseInfo,
@@ -194,5 +203,50 @@ export async function getExtendedSystemInfo(
     apiKeyEnvKey,
     gitCommit,
     fastModel,
+    lspStatus,
   };
+}
+
+function getLspStatus(context: CommandContext): string | undefined {
+  const snapshot = context.services.config?.getLspStatusSnapshot?.();
+  if (!snapshot) {
+    return undefined;
+  }
+
+  if (context.services.config?.getDebugMode?.()) {
+    debugLogger.debug('LSP status snapshot for /status:', snapshot);
+  }
+
+  return formatLspStatusSnapshot(snapshot);
+}
+
+function formatLspStatusSnapshot(snapshot: LspStatusSnapshot): string {
+  if (!snapshot.enabled) {
+    return 'disabled';
+  }
+
+  if (snapshot.initializationError) {
+    return `enabled, initialization failed: ${snapshot.initializationError}`;
+  }
+
+  if (snapshot.statusUnavailable) {
+    return 'enabled, status unavailable';
+  }
+
+  if (snapshot.configuredServers === 0) {
+    return 'enabled, no servers configured';
+  }
+
+  const details = [
+    snapshot.failedServers > 0 ? `${snapshot.failedServers} failed` : '',
+    snapshot.inProgressServers > 0
+      ? `${snapshot.inProgressServers} starting`
+      : '',
+    snapshot.notStartedServers > 0
+      ? `${snapshot.notStartedServers} not started`
+      : '',
+  ].filter(Boolean);
+
+  const detailText = details.length > 0 ? ` (${details.join(', ')})` : '';
+  return `enabled, ${snapshot.readyServers}/${snapshot.configuredServers} ready${detailText}`;
 }

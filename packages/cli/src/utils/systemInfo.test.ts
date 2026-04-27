@@ -333,5 +333,68 @@ describe('systemInfo', () => {
 
       expect(extendedInfo.baseUrl).toBeUndefined();
     });
+
+    it('should include formatted LSP status when config exposes it', async () => {
+      vi.mocked(IdeClient.getInstance).mockResolvedValue({
+        getDetectedIdeDisplayName: vi.fn().mockReturnValue(''),
+      } as unknown as IdeClient);
+      const getLspStatusSnapshot = vi.fn().mockReturnValue({
+        enabled: true,
+        configuredServers: 2,
+        readyServers: 1,
+        failedServers: 1,
+        inProgressServers: 0,
+        notStartedServers: 0,
+        servers: [
+          {
+            name: 'clangd',
+            status: 'READY',
+            languages: ['cpp'],
+            transport: 'stdio',
+          },
+          {
+            name: 'pyright',
+            status: 'FAILED',
+            languages: ['python'],
+            transport: 'stdio',
+            error: 'startup failed',
+          },
+        ],
+      });
+      mockContext.services.config = {
+        ...(mockContext.services.config ?? {}),
+        getLspStatusSnapshot,
+        getDebugMode: vi.fn().mockReturnValue(false),
+      } as unknown as CommandContext['services']['config'];
+
+      const extendedInfo = await getExtendedSystemInfo(mockContext);
+
+      expect(getLspStatusSnapshot).toHaveBeenCalledTimes(1);
+      expect(extendedInfo.lspStatus).toBe('enabled, 1/2 ready (1 failed)');
+    });
+
+    it('should report unavailable LSP status distinctly', async () => {
+      vi.mocked(IdeClient.getInstance).mockResolvedValue({
+        getDetectedIdeDisplayName: vi.fn().mockReturnValue(''),
+      } as unknown as IdeClient);
+      mockContext.services.config = {
+        ...(mockContext.services.config ?? {}),
+        getLspStatusSnapshot: vi.fn().mockReturnValue({
+          enabled: true,
+          configuredServers: 0,
+          readyServers: 0,
+          failedServers: 0,
+          inProgressServers: 0,
+          notStartedServers: 0,
+          servers: [],
+          statusUnavailable: true,
+        }),
+        getDebugMode: vi.fn().mockReturnValue(false),
+      } as unknown as CommandContext['services']['config'];
+
+      const extendedInfo = await getExtendedSystemInfo(mockContext);
+
+      expect(extendedInfo.lspStatus).toBe('enabled, status unavailable');
+    });
   });
 });

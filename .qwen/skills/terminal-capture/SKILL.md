@@ -32,13 +32,13 @@ node-pty (pseudo-terminal)
 Core files:
 
 - `integration-tests/terminal-capture/terminal-capture.ts`
-   Low-level PTY, xterm.js, and Playwright engine.
+  Low-level PTY, xterm.js, and Playwright engine.
 - `integration-tests/terminal-capture/scenario-runner.ts`
-   Scenario executor for config, interactions, and screenshots.
+  Scenario executor for config, interactions, and screenshots.
 - `integration-tests/terminal-capture/run.ts`
-   CLI entry point for batch scenario runs.
+  CLI entry point for batch scenario runs.
 - `integration-tests/terminal-capture/scenarios/*.ts`
-   Scenario configuration files.
+  Scenario configuration files.
 
 ## Quick Start
 
@@ -226,17 +226,17 @@ This tool is commonly used for visual verification during PR reviews.
 ## Troubleshooting
 
 - Playwright error `browser not found`
-   Cause: browser not installed.
-   Solution: `npx playwright install chromium`.
+  Cause: browser not installed.
+  Solution: `npx playwright install chromium`.
 - Blank screenshot
-   Cause: process starts slowly or build failed.
-   Solution: check build success and the spawn command.
+  Cause: process starts slowly or build failed.
+  Solution: check build success and the spawn command.
 - PTY-related errors
-   Cause: node-pty native module not compiled.
-   Solution: `npm rebuild node-pty`.
+  Cause: node-pty native module not compiled.
+  Solution: `npm rebuild node-pty`.
 - Unstable screenshot output
-   Cause: terminal output not fully rendered.
-   Solution: add scenario wait time.
+  Cause: terminal output not fully rendered.
+  Solution: add scenario wait time.
 
 ## Full ScenarioConfig Type
 

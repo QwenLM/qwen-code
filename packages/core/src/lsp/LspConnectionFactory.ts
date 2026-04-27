@@ -7,10 +7,26 @@
 import * as cp from 'node:child_process';
 import * as net from 'node:net';
 import { DEFAULT_LSP_REQUEST_TIMEOUT_MS } from './constants.js';
-import type { JsonRpcMessage } from './types.js';
+import type { JsonRpcMessage, LspProcessDiagnostics } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('LSP');
+const MAX_STDERR_TAIL_BYTES = 8192;
+
+/**
+ * Keep only the last `maxBytes` bytes of a UTF-8 string.
+ *
+ * Note: slicing at an arbitrary byte offset may split a multi-byte character,
+ * producing a replacement character (U+FFFD) at the start of the result.
+ * This is acceptable for debug logging purposes.
+ */
+function trimTail(value: string, maxBytes: number): string {
+  const buffer = Buffer.from(value, 'utf8');
+  if (buffer.byteLength <= maxBytes) {
+    return value;
+  }
+  return buffer.subarray(buffer.byteLength - maxBytes).toString('utf8');
+}
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -236,6 +252,7 @@ class JsonRpcConnection {
 interface LspConnection {
   connection: JsonRpcConnection;
   process?: cp.ChildProcess;
+  processDiagnostics?: LspProcessDiagnostics;
   socket?: net.Socket;
 }
 
@@ -260,6 +277,9 @@ export class LspConnectionFactory {
         stdio: 'pipe',
         ...options,
       };
+      const processDiagnostics: LspProcessDiagnostics = {
+        stderrTail: '',
+      };
       const processInstance = cp.spawn(command, args, spawnOptions);
 
       const timeoutId = setTimeout(() => {
@@ -282,18 +302,36 @@ export class LspConnectionFactory {
           return;
         }
 
+        processInstance.stderr?.on('data', (chunk: Buffer) => {
+          processDiagnostics.stderrTail = trimTail(
+            processDiagnostics.stderrTail + chunk.toString('utf8'),
+            MAX_STDERR_TAIL_BYTES,
+          );
+        });
+
         const connection = new JsonRpcConnection(
           (payload) => processInstance.stdin?.write(payload),
           () => processInstance.stdin?.end(),
         );
 
         connection.listen(processInstance.stdout);
-        processInstance.once('exit', () => connection.end());
-        processInstance.once('close', () => connection.end());
+        const recordProcessExit = (
+          code: number | null,
+          signal: NodeJS.Signals | null,
+        ) => {
+          processDiagnostics.exitCode = code;
+          processDiagnostics.exitSignal = signal;
+        };
+        processInstance.once('exit', recordProcessExit);
+        processInstance.once('close', (code, signal) => {
+          recordProcessExit(code, signal);
+          connection.end();
+        });
 
         resolve({
           connection,
           process: processInstance,
+          processDiagnostics,
         });
       });
     });

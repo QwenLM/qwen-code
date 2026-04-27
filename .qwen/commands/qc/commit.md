@@ -41,9 +41,9 @@ the user, then commit and push.
 - **If current branch is NOT main/master:**
 - Check if branch name matches the staged changes
 - If branch name doesn't match changes, ask user:
-    - "Current branch `<branch>` doesn't seem to match these changes."
-    - "Options: (1) Create a new branch, (2) Commit on current branch"
-    - Wait for user decision
+  - "Current branch `<branch>` doesn't seem to match these changes."
+  - "Options: (1) Create a new branch, (2) Commit on current branch"
+  - Wait for user decision
 
 ### 5. Generate commit message
 

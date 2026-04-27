@@ -178,6 +178,11 @@ enum StreamProcessingStatus {
 }
 
 const EDIT_TOOL_NAMES = new Set(['replace', 'write_file']);
+const STREAM_UPDATE_THROTTLE_MS = 60;
+
+type BufferedStreamEvent =
+  | { kind: 'content'; value: string }
+  | { kind: 'thought'; value: ThoughtSummary };
 
 function showCitations(settings: LoadedSettings): boolean {
   const enabled = settings?.merged?.ui?.showCitations;
@@ -216,6 +221,7 @@ export const useGeminiStream = (
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const flushBufferedStreamEventsRef = useRef<Set<() => void>>(new Set());
   const turnCancelledRef = useRef(false);
   const isSubmittingQueryRef = useRef(false);
   const lastPromptRef = useRef<PartListUnion | null>(null);
@@ -482,6 +488,9 @@ export const useGeminiStream = (
     }
     if (turnCancelledRef.current) {
       return;
+    }
+    for (const flushBufferedStreamEvents of flushBufferedStreamEventsRef.current) {
+      flushBufferedStreamEvents();
     }
     turnCancelledRef.current = true;
     isSubmittingQueryRef.current = false;
@@ -1121,133 +1130,226 @@ export const useGeminiStream = (
       let geminiMessageBuffer = '';
       let thoughtBuffer = '';
       const toolCallRequests: ToolCallRequestInfo[] = [];
-      dualOutput?.startAssistantMessage();
-      for await (const event of stream) {
-        dualOutput?.processEvent(event);
-        switch (event.type) {
-          case ServerGeminiEventType.Thought:
-            // If the thought has a subject, it's a discrete status update rather than
-            // a streamed textual thought, so we update the thought state directly.
-            if (event.value.subject) {
-              setThought(event.value);
-            } else {
-              thoughtBuffer = handleThoughtEvent(
-                event.value,
-                thoughtBuffer,
-                userMessageTimestamp,
-              );
+      const bufferedEvents: BufferedStreamEvent[] = [];
+      let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const discardBufferedStreamEvents = () => {
+        if (flushTimer) {
+          clearTimeout(flushTimer);
+          flushTimer = null;
+        }
+        bufferedEvents.length = 0;
+      };
+
+      const flushBufferedStreamEvents = () => {
+        if (flushTimer) {
+          clearTimeout(flushTimer);
+          flushTimer = null;
+        }
+
+        if (bufferedEvents.length === 0) {
+          return;
+        }
+
+        while (bufferedEvents.length > 0) {
+          const nextEvent = bufferedEvents.shift()!;
+
+          if (nextEvent.kind === 'content') {
+            let mergedContent = nextEvent.value;
+
+            while (bufferedEvents[0]?.kind === 'content') {
+              const queuedContent = bufferedEvents.shift();
+              if (queuedContent?.kind !== 'content') {
+                break;
+              }
+              mergedContent += queuedContent.value;
             }
-            break;
-          case ServerGeminiEventType.Content:
+
             geminiMessageBuffer = handleContentEvent(
-              event.value,
+              mergedContent,
               geminiMessageBuffer,
               userMessageTimestamp,
             );
-            break;
-          case ServerGeminiEventType.ToolCallRequest:
-            toolCallRequests.push(event.value);
-            // Count tool call args JSON toward token estimation (matches
-            // Claude Code's input_json_delta handling).
-            try {
-              const argsJson = JSON.stringify(event.value.args);
-              streamingResponseLengthRef.current += argsJson.length;
-            } catch {
-              // Best-effort — don't block on serialization errors
+            continue;
+          }
+
+          let mergedThought = nextEvent.value;
+
+          while (bufferedEvents[0]?.kind === 'thought') {
+            const queuedThought = bufferedEvents.shift();
+            if (queuedThought?.kind !== 'thought') {
+              break;
             }
-            break;
-          case ServerGeminiEventType.UserCancelled:
-            handleUserCancelledEvent(userMessageTimestamp);
-            break;
-          case ServerGeminiEventType.Error:
-            handleErrorEvent(event.value, userMessageTimestamp);
-            break;
-          case ServerGeminiEventType.ChatCompressed:
-            handleChatCompressionEvent(event.value, userMessageTimestamp);
-            break;
-          case ServerGeminiEventType.ToolCallConfirmation:
-          case ServerGeminiEventType.ToolCallResponse:
-            // do nothing
-            break;
-          case ServerGeminiEventType.MaxSessionTurns:
-            handleMaxSessionTurnsEvent();
-            break;
-          case ServerGeminiEventType.SessionTokenLimitExceeded:
-            handleSessionTokenLimitExceededEvent(event.value);
-            break;
-          case ServerGeminiEventType.Finished:
-            handleFinishedEvent(
-              event as ServerGeminiFinishedEvent,
-              userMessageTimestamp,
-            );
-            break;
-          case ServerGeminiEventType.Citation:
-            handleCitationEvent(event.value, userMessageTimestamp);
-            break;
-          case ServerGeminiEventType.LoopDetected:
-            // handle later because we want to move pending history to history
-            // before we add loop detected message to history
-            loopDetectedRef.current = true;
-            break;
-          case ServerGeminiEventType.Retry:
-            // On fresh restart (escalation / rate-limit / invalid stream),
-            // clear pending content and buffers to discard the failed attempt.
-            // On continuation (recovery), keep the pending gemini item AND
-            // buffers so the model's continuation text appends to them —
-            // otherwise handleContentEvent would see a null pending item,
-            // create a fresh one, and reset the buffer to just the new chunk,
-            // losing the partial text we meant to preserve.
-            if (!event.isContinuation) {
+            mergedThought = {
+              subject: queuedThought.value.subject || mergedThought.subject,
+              description: `${mergedThought.description ?? ''}${
+                queuedThought.value.description ?? ''
+              }`,
+            };
+          }
+
+          thoughtBuffer = handleThoughtEvent(
+            mergedThought,
+            thoughtBuffer,
+            userMessageTimestamp,
+          );
+        }
+      };
+
+      const scheduleBufferedStreamFlush = () => {
+        if (flushTimer) {
+          return;
+        }
+
+        flushTimer = setTimeout(() => {
+          flushBufferedStreamEvents();
+        }, STREAM_UPDATE_THROTTLE_MS);
+      };
+
+      flushBufferedStreamEventsRef.current.add(flushBufferedStreamEvents);
+      dualOutput?.startAssistantMessage();
+      try {
+        for await (const event of stream) {
+          dualOutput?.processEvent(event);
+          switch (event.type) {
+            case ServerGeminiEventType.Thought:
+              // If the thought has a subject, it's a discrete status update rather than
+              // a streamed textual thought, so we update the thought state directly.
+              if (event.value.subject) {
+                flushBufferedStreamEvents();
+                setThought(event.value);
+              } else {
+                bufferedEvents.push({ kind: 'thought', value: event.value });
+                scheduleBufferedStreamFlush();
+              }
+              break;
+            case ServerGeminiEventType.Content:
+              bufferedEvents.push({ kind: 'content', value: event.value });
+              scheduleBufferedStreamFlush();
+              break;
+            case ServerGeminiEventType.ToolCallRequest:
+              flushBufferedStreamEvents();
+              toolCallRequests.push(event.value);
+              // Count tool call args JSON toward token estimation (matches
+              // Claude Code's input_json_delta handling).
+              try {
+                const argsJson = JSON.stringify(event.value.args);
+                streamingResponseLengthRef.current += argsJson.length;
+              } catch {
+                // Best-effort — don't block on serialization errors
+              }
+              break;
+            case ServerGeminiEventType.UserCancelled:
+              flushBufferedStreamEvents();
+              handleUserCancelledEvent(userMessageTimestamp);
+              break;
+            case ServerGeminiEventType.Error:
+              flushBufferedStreamEvents();
+              handleErrorEvent(event.value, userMessageTimestamp);
+              break;
+            case ServerGeminiEventType.ChatCompressed:
+              flushBufferedStreamEvents();
+              handleChatCompressionEvent(event.value, userMessageTimestamp);
+              break;
+            case ServerGeminiEventType.ToolCallConfirmation:
+            case ServerGeminiEventType.ToolCallResponse:
+              flushBufferedStreamEvents();
+              break;
+            case ServerGeminiEventType.MaxSessionTurns:
+              flushBufferedStreamEvents();
+              handleMaxSessionTurnsEvent();
+              break;
+            case ServerGeminiEventType.SessionTokenLimitExceeded:
+              flushBufferedStreamEvents();
+              handleSessionTokenLimitExceededEvent(event.value);
+              break;
+            case ServerGeminiEventType.Finished:
+              flushBufferedStreamEvents();
+              handleFinishedEvent(
+                event as ServerGeminiFinishedEvent,
+                userMessageTimestamp,
+              );
+              break;
+            case ServerGeminiEventType.Citation:
+              flushBufferedStreamEvents();
+              handleCitationEvent(event.value, userMessageTimestamp);
+              break;
+            case ServerGeminiEventType.LoopDetected:
+              flushBufferedStreamEvents();
+              // handle later because we want to move pending history to history
+              // before we add loop detected message to history
+              loopDetectedRef.current = true;
+              break;
+            case ServerGeminiEventType.Retry:
+              // On fresh restart (escalation / rate-limit / invalid stream),
+              // clear pending content and buffers to discard the failed attempt.
+              // On continuation (recovery), keep the pending gemini item AND
+              // buffers so the model's continuation text appends to them —
+              // otherwise handleContentEvent would see a null pending item,
+              // create a fresh one, and reset the buffer to just the new chunk,
+              // losing the partial text we meant to preserve.
+              if (!event.isContinuation) {
+                discardBufferedStreamEvents();
+                if (pendingHistoryItemRef.current) {
+                  setPendingHistoryItem(null);
+                }
+                geminiMessageBuffer = '';
+                thoughtBuffer = '';
+              } else {
+                flushBufferedStreamEvents();
+              }
+              // Always discard tool call requests from the truncated/failed
+              // attempt to prevent duplicate execution after escalation or
+              // recovery. The recovery path now skips turns that already
+              // contain a functionCall (see geminiChat.ts), so this only
+              // clears stale requests from pre-RETRY accumulation.
+              toolCallRequests.length = 0;
+              // Show retry info if available (rate-limit / throttling errors)
+              if (event.retryInfo) {
+                startRetryCountdown(event.retryInfo);
+              } else {
+                // The retry attempt is starting now, so any prior retry UI is stale.
+                clearRetryCountdown();
+              }
+              break;
+            case ServerGeminiEventType.HookSystemMessage:
+              flushBufferedStreamEvents();
+              // Display system message from Stop hooks with "Stop says:" prefix
+              // First commit any pending AI response to ensure correct ordering
               if (pendingHistoryItemRef.current) {
+                addItem(pendingHistoryItemRef.current, userMessageTimestamp);
                 setPendingHistoryItem(null);
               }
-              geminiMessageBuffer = '';
-              thoughtBuffer = '';
+              addItem(
+                {
+                  type: 'stop_hook_system_message',
+                  message: event.value,
+                } as HistoryItemWithoutId,
+                userMessageTimestamp,
+              );
+              break;
+            case ServerGeminiEventType.UserPromptSubmitBlocked:
+              flushBufferedStreamEvents();
+              handleUserPromptSubmitBlockedEvent(
+                event.value,
+                userMessageTimestamp,
+              );
+              break;
+            case ServerGeminiEventType.StopHookLoop:
+              flushBufferedStreamEvents();
+              handleStopHookLoopEvent(event.value, userMessageTimestamp);
+              break;
+            default: {
+              // enforces exhaustive switch-case
+              const unreachable: never = event;
+              return unreachable;
             }
-            // Always discard tool call requests from the truncated/failed
-            // attempt to prevent duplicate execution after escalation or
-            // recovery. The recovery path now skips turns that already
-            // contain a functionCall (see geminiChat.ts), so this only
-            // clears stale requests from pre-RETRY accumulation.
-            toolCallRequests.length = 0;
-            // Show retry info if available (rate-limit / throttling errors)
-            if (event.retryInfo) {
-              startRetryCountdown(event.retryInfo);
-            } else {
-              // The retry attempt is starting now, so any prior retry UI is stale.
-              clearRetryCountdown();
-            }
-            break;
-          case ServerGeminiEventType.HookSystemMessage:
-            // Display system message from Stop hooks with "Stop says:" prefix
-            // First commit any pending AI response to ensure correct ordering
-            if (pendingHistoryItemRef.current) {
-              addItem(pendingHistoryItemRef.current, userMessageTimestamp);
-              setPendingHistoryItem(null);
-            }
-            addItem(
-              {
-                type: 'stop_hook_system_message',
-                message: event.value,
-              } as HistoryItemWithoutId,
-              userMessageTimestamp,
-            );
-            break;
-          case ServerGeminiEventType.UserPromptSubmitBlocked:
-            handleUserPromptSubmitBlockedEvent(
-              event.value,
-              userMessageTimestamp,
-            );
-            break;
-          case ServerGeminiEventType.StopHookLoop:
-            handleStopHookLoopEvent(event.value, userMessageTimestamp);
-            break;
-          default: {
-            // enforces exhaustive switch-case
-            const unreachable: never = event;
-            return unreachable;
           }
         }
+      } finally {
+        flushBufferedStreamEvents();
+        discardBufferedStreamEvents();
+        flushBufferedStreamEventsRef.current.delete(flushBufferedStreamEvents);
       }
       dualOutput?.finalizeAssistantMessage();
       if (toolCallRequests.length > 0) {

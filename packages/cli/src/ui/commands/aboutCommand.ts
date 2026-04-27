@@ -34,6 +34,7 @@ export const aboutCommand: SlashCommand = {
           ? [`Git commit: ${systemInfo.gitCommit}`]
           : []),
         ...(systemInfo.ideClient ? [`IDE: ${systemInfo.ideClient}`] : []),
+        ...(systemInfo.lspStatus ? [`LSP: ${systemInfo.lspStatus}`] : []),
       ];
       return {
         type: 'message' as const,

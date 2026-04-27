@@ -489,10 +489,10 @@ export enum QwenOAuth2Event {
 export type AuthResult =
   | { success: true }
   | {
-    success: false;
-    reason: 'timeout' | 'cancelled' | 'error' | 'rate_limit';
-    message?: string; // Detailed error message for better error reporting
-  };
+      success: false;
+      reason: 'timeout' | 'cancelled' | 'error' | 'rate_limit';
+      message?: string; // Detailed error message for better error reporting
+    };
 
 /**
  * Global event emitter instance for QwenOAuth2 authentication events
@@ -731,13 +731,14 @@ async function authWithQwenDeviceFlow(
           debugLogger.info(`Please open this URL manually: ${url}`);
         });
 
-        // Optional: Also listen for 'close' or 'exit' if needed for cleanup, 
+        // Optional: Also listen for 'close' or 'exit' if needed for cleanup,
         // but 'error' is the main crasher.
       } else {
         // Fallback: If open() didn't return a valid process object, log a warning
-        debugLogger.debug('open() did not return a valid child process object.');
+        debugLogger.debug(
+          'open() did not return a valid child process object.',
+        );
       }
-
     } catch (err) {
       // Handle synchronous errors or promise rejections from open()
       const errorMessage = err instanceof Error ? err.message : String(err);

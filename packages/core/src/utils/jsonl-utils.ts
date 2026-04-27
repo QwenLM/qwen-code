@@ -110,22 +110,38 @@ export async function read<T = unknown>(filePath: string): Promise<T[]> {
 }
 
 /**
+ * Per-directory cache: once we've successfully created a parent dir we don't
+ * need to mkdir again on subsequent writes. Cuts an async syscall off every
+ * hot-path write (chat session JSONL appends).
+ */
+const ensuredDirs = new Set<string>();
+
+/**
+ * Test-only: clear the per-directory mkdir cache. Needed when tests mutate
+ * fs state at the same directory path across cases.
+ */
+export function _resetEnsuredDirsCacheForTest(): void {
+  ensuredDirs.clear();
+}
+
+/**
  * Appends a line to a JSONL file with concurrency control.
- * This method uses a mutex to ensure only one write happens at a time per file.
+ * Uses a per-file mutex so concurrent callers serialize, and `fs.promises`
+ * so the actual I/O does not block the event loop.
  */
 export async function writeLine(
   filePath: string,
   data: unknown,
 ): Promise<void> {
   const lock = getFileLock(filePath);
-  await lock.runExclusive(() => {
+  await lock.runExclusive(async () => {
     const line = `${JSON.stringify(data)}\n`;
-    // Ensure directory exists before writing
     const dir = path.dirname(filePath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+    if (!ensuredDirs.has(dir)) {
+      await fs.promises.mkdir(dir, { recursive: true });
+      ensuredDirs.add(dir);
     }
-    fs.appendFileSync(filePath, line, 'utf8');
+    await fs.promises.appendFile(filePath, line, 'utf8');
   });
 }
 

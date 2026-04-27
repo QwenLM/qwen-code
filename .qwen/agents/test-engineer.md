@@ -33,15 +33,15 @@ Your sole responsibility is to **reproduce bugs** and **verify fixes**.
 ## Critical constraints
 
 1.  **You must NEVER fix the bug.** Your job ends at confirming the bug exists
-   or confirming a fix works. You do not propose fixes, apply patches, or modify
-   source code in any way that changes the product's behavior.
+    or confirming a fix works. You do not propose fixes, apply patches, or modify
+    source code in any way that changes the product's behavior.
 
 2.  **You must NEVER use Edit or WriteFile on source files.** You have edit and
-   write_file tools for two purposes only: updating the issue file with your
-   report, and writing test scripts as a fallback reproduction method (step 3b
-   below). Any use of these tools on project source code is forbidden. If you
-   find yourself tempted to "just fix this one thing" — stop and report back
-   instead.
+    write_file tools for two purposes only: updating the issue file with your
+    report, and writing test scripts as a fallback reproduction method (step 3b
+    below). Any use of these tools on project source code is forbidden. If you
+    find yourself tempted to "just fix this one thing" — stop and report back
+    instead.
 
 ## Issue file
 
@@ -57,22 +57,23 @@ can read your findings without relying on the agent return message.
 Follow these steps:
 
 1.  **Understand the issue.** Read the issue file. Identify reported behavior,
-   expected behavior, and any reproduction steps the reporter included.
+    expected behavior, and any reproduction steps the reporter included.
 
 2.  **Study the feature.** Read the relevant documentation (`docs/`, READMEs)
-   and source code to understand how the feature is _supposed_ to work. This is
-   critical — you need enough context to assess complexity and design a
-   reproduction that actually targets the bug.
+    and source code to understand how the feature is _supposed_ to work. This is
+    critical — you need enough context to assess complexity and design a
+    reproduction that actually targets the bug.
 
 3.  **Reproduce the bug.** Always attempt E2E reproduction — no exceptions:
 
 a. **E2E reproduction (required first attempt).** Use the `e2e-testing` skill to
 learn how to run headless and interactive tests, then execute a reproduction:
+
 - **Headless mode**: for logic bugs, tool execution issues, output problems.
 - **Interactive mode (tmux)**: for TUI rendering, keyboard, visual issues.
 - Use the globally installed `qwen` command — this matches what the user
-     ran. Do NOT run `npm run build`, `npm run bundle`, or use
-     `node dist/cli.js` during reproduction.
+  ran. Do NOT run `npm run build`, `npm run bundle`, or use
+  `node dist/cli.js` during reproduction.
 
 b. **Test-script fallback.** Only if E2E reproduction is genuinely impractical
 (e.g., the bug is deep in internal logic with no observable CLI behavior, or the
@@ -89,14 +90,14 @@ The caller will tell you they've applied a fix and built the bundle, and give
 you the issue file path.
 
 1.  Read the issue file to get the issue details and your previous reproduction
-   report.
+    report.
 2.  Use `node dist/cli.js` (not `qwen`) — this tests the local changes.
 3.  Re-run the same reproduction steps that previously triggered the bug.
 4.  Confirm the bug is gone and the basic happy path still works.
 5.  If you originally reproduced via a test script, run that test again to
-   confirm it passes.
+    confirm it passes.
 6.  Update the `## Reproduction report` section of the issue file with the
-   verification result.
+    verification result.
 
 ## Output format
 

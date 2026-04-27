@@ -338,11 +338,12 @@ You can override trust requirements for specific servers in their configuration:
 
 ### Server Not Starting
 
-1. **Check if the server is installed**: Run the command manually to verify
-2. **Check the PATH**: Ensure the server binary is in your system PATH
-3. **Check workspace trust**: The workspace must be trusted for LSP
-4. **Check logs**: Look for error messages in the console output
-5. **Verify --experimental-lsp flag**: Make sure you're using the flag when starting Qwen Code
+1. **Verify `--experimental-lsp` flag**: Make sure you're using the flag when starting Qwen Code
+2. **Check if the server is installed**: Run the command manually (e.g. `clangd --version`) to verify
+3. **Check the PATH**: Ensure the server binary is in your system PATH
+4. **Check workspace trust**: The workspace must be trusted for LSP
+5. **Check logs**: Start Qwen Code with `--debug`, then search for LSP-related entries in the debug log (see Debugging section below)
+6. **Check the process**: Run `ps aux | grep <server-name>` to verify the server process is running
 
 ### Slow Performance
 
@@ -357,13 +358,67 @@ You can override trust requirements for specific servers in their configuration:
 
 ### Debugging
 
-Enable debug logging to see LSP communication:
+LSP does not have a separate debug flag. Use Qwen Code's normal debug mode together with the LSP feature flag:
 
 ```bash
-DEBUG=lsp* qwen --experimental-lsp
+qwen --experimental-lsp --debug
 ```
 
-Or check the LSP debugging guide at `packages/cli/LSP_DEBUGGING_GUIDE.md`.
+Debug logs are written to the session debug log directory. To check LSP-related entries:
+
+```bash
+# Default runtime directory
+rg "LSP|Native LSP|clangd|connection closed" ~/.qwen/debug/latest
+# Or, without ripgrep:
+grep -E "LSP|Native LSP|clangd|connection closed" ~/.qwen/debug/latest
+
+# If QWEN_RUNTIME_DIR is configured
+rg "LSP|Native LSP|clangd|connection closed" "$QWEN_RUNTIME_DIR/debug/latest"
+```
+
+Useful entries include:
+
+- `[LSP] ...`: Logs emitted by the native LSP service and server manager.
+- `[CONFIG] Native LSP status after discovery: ...`: LSP server configuration discovered for the session.
+- `[CONFIG] Native LSP status after startup: ...`: Server startup result, including ready/failed counts.
+- `[STATUS] LSP status snapshot for /status: ...`: Status snapshot printed when running `/status` in debug mode.
+
+You can also run `/status` in the CLI to see a short LSP summary:
+
+```text
+LSP: disabled
+LSP: enabled, 1/1 ready
+LSP: enabled, 0/1 ready (1 failed)
+LSP: enabled, no servers configured
+LSP: enabled, status unavailable
+```
+
+Common error messages to look for:
+
+```text
+command path is unsafe        -> relative path escapes workspace, use absolute path or add to PATH
+command not found             -> server binary not installed or not in PATH
+requires trusted workspace    -> run /trust first
+LSP connection closed         -> server started but exited or closed stdio before replying to initialize
+```
+
+For clangd startup failures, verify the server directly from the project root:
+
+```bash
+clangd --version
+clangd --check=/path/to/file.cpp --log=verbose
+```
+
+C/C++ projects should usually provide a `compile_commands.json` or `compile_flags.txt`. If the compile database is in a build directory, pass it to clangd:
+
+```json
+{
+  "cpp": {
+    "command": "clangd",
+    "args": ["--background-index", "--compile-commands-dir=build"]
+  }
+}
+```
 
 ## Claude Code Compatibility
 
@@ -406,7 +461,21 @@ qwen --experimental-lsp
 
 ### Q: How do I know which language servers are running?
 
-Use the `/lsp status` command to see all configured and running language servers.
+Start Qwen Code with LSP and debug mode enabled:
+
+```bash
+qwen --experimental-lsp --debug
+```
+
+Then run `/status` for a short summary, or inspect the debug log:
+
+```bash
+rg "LSP|Native LSP|<server-name>" ~/.qwen/debug/latest
+# Or:
+grep -E "LSP|Native LSP|<server-name>" ~/.qwen/debug/latest
+```
+
+LSP uses Qwen Code's normal `--debug` mode; there is no separate LSP debug flag.
 
 ### Q: Can I use multiple language servers for the same file type?
 
