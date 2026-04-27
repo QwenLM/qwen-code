@@ -105,7 +105,7 @@ runs:
         echo "_For detailed HTML reports, please see the 'coverage-reports-${NODE_VERSION}-${OS}' artifact from the main CI run._" >> "${COMMENT_FILE}"
 
     - name: 'Post Coverage Comment'
-      uses: 'thollander/actions-comment-pull-request@65f9e5c9a1f2cd378bd74b2e057c9736982a8e74' # ratchet:thollander/actions-comment-pull-request@v3
+      uses: 'thollander/actions-comment-pull-request@24bffb9b452ba05a4f3f77933840a6a841d1b32b'  # v3.0.1
       if: |-
         ${{ always() }}
       with:
