@@ -47,7 +47,7 @@ jobs:
       duplicate_issues_csv: '${{ env.DUPLICATE_ISSUES_CSV }}'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
 
       - name: 'Log in to GitHub Container Registry'
         uses: 'docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1' # ratchet:docker/login-action@v3
@@ -180,7 +180,7 @@ jobs:
           permission-issues: 'write'
 
       - name: 'Comment and Label Duplicate Issue'
-        uses: 'actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea'
+        uses: 'actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71'  # v9.0.0
         env:
           DUPLICATES_OUTPUT: '${{ needs.find-duplicates.outputs.duplicate_issues_csv }}'
         with:

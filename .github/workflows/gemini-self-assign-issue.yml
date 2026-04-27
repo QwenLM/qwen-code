@@ -38,7 +38,7 @@ jobs:
           permission-issues: 'write'
 
       - name: 'Assign issue to user'
-        uses: 'actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea'
+        uses: 'actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71'  # v9.0.0
         with:
           github-token: '${{ steps.generate_token.outputs.token }}'
           script: |
