@@ -77,6 +77,7 @@ import {
   startEarlyInputCapture,
   stopAndGetCapturedInput,
 } from './utils/earlyInputCapture.js';
+import { preconnectApi } from './utils/apiPreconnect.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
@@ -527,6 +528,21 @@ export async function main() {
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
+
+    // Startup optimization: preconnect API to warm TCP+TLS connection
+    // Fires early; cost is one HEAD request even for local-only commands
+    try {
+      const modelsConfig = config.getModelsConfig();
+      const authType = modelsConfig.getCurrentAuthType();
+      const resolvedBaseUrl = modelsConfig.getGenerationConfig().baseUrl;
+      const proxy = config.getProxy();
+      preconnectApi(authType, { resolvedBaseUrl, proxy });
+    } catch (error) {
+      // If we can't get authType, skip preconnect - it's optional optimization
+      debugLogger.debug(
+        `Preconnect skipped due to error getting authType: ${error}`,
+      );
+    }
 
     // FIXME: list extensions after the config initialize
     // if (config.getListExtensions()) {

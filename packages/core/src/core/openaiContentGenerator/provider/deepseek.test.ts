@@ -49,15 +49,40 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
       expect(result).toBe(true);
     });
 
-    it('returns false for non deepseek baseUrl', () => {
+    it('returns false when neither baseUrl nor model match deepseek', () => {
       const config = {
         ...mockContentGeneratorConfig,
         baseUrl: 'https://api.example.com/v1',
+        model: 'gpt-4o',
       } as ContentGeneratorConfig;
 
       const result =
         DeepSeekOpenAICompatibleProvider.isDeepSeekProvider(config);
       expect(result).toBe(false);
+    });
+
+    it('returns true for deepseek model on a non-deepseek baseUrl (e.g. sglang) — issue #3613', () => {
+      const config = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://my-sglang.example.com:8000/v1',
+        model: 'deepseek-v4-pro',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DeepSeekOpenAICompatibleProvider.isDeepSeekProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('matches model name case-insensitively', () => {
+      const config = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://my-vllm.example.com/v1',
+        model: 'DeepSeek-R1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DeepSeekOpenAICompatibleProvider.isDeepSeekProvider(config);
+      expect(result).toBe(true);
     });
   });
 

@@ -23,6 +23,7 @@ import {
   isSessionExportFormat,
   type SessionExportFormat,
 } from '../utils/exportSlashCommand.js';
+import { stripZeroWidthSpaces } from '@qwen-code/webui';
 
 export { EXPORT_SESSION_FORMATS as SESSION_EXPORT_FORMATS };
 export type { SessionExportFormat } from '../utils/exportSlashCommand.js';
@@ -40,7 +41,7 @@ const EXPORT_CONFIG = {
 export function parseExportSlashCommand(
   text: string,
 ): SessionExportFormat | null {
-  const trimmed = text.replace(/\u200B/g, '').trim();
+  const trimmed = stripZeroWidthSpaces(text).trim();
   if (!trimmed.startsWith('/')) {
     return null;
   }

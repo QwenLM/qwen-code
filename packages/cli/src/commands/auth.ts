@@ -59,6 +59,21 @@ const apiKeyCommand = {
   },
 };
 
+const openRouterCommand = {
+  command: 'openrouter',
+  describe: t('Authenticate using OpenRouter API key setup'),
+  builder: (yargs: Argv) =>
+    yargs.option('key', {
+      alias: 'k',
+      describe: t('API key for OpenRouter'),
+      type: 'string',
+    }),
+  handler: async (argv: { key?: string }) => {
+    const key = argv['key'] as string | undefined;
+    await handleQwenAuth('openrouter', { key });
+  },
+};
+
 const statusCommand = {
   command: 'status',
   describe: t('Show current authentication status'),
@@ -70,12 +85,13 @@ const statusCommand = {
 export const authCommand: CommandModule = {
   command: 'auth',
   describe: t(
-    'Configure Qwen authentication with Coding Plan, API Key, or Qwen-OAuth',
+    'Configure Qwen authentication with OpenRouter, Coding Plan, API Key, or Qwen-OAuth',
   ),
   builder: (yargs: Argv) =>
     yargs
       .command(qwenOauthCommand)
       .command(codePlanCommand)
+      .command(openRouterCommand)
       .command(apiKeyCommand)
       .command(statusCommand)
       .demandCommand(0) // Don't require a subcommand

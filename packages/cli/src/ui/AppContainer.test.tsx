@@ -31,6 +31,7 @@ import {
 } from './contexts/UIActionsContext.js';
 import { ToolCallStatus } from './types.js';
 import { useContext } from 'react';
+import { Box, measureElement } from 'ink';
 
 // Mock useStdout to capture terminal title writes
 let mockStdout: { write: ReturnType<typeof vi.fn> };
@@ -50,7 +51,7 @@ let capturedUIActions: UIActions;
 function TestContextConsumer() {
   capturedUIState = useContext(UIStateContext)!;
   capturedUIActions = useContext(UIActionsContext)!;
-  return null;
+  return <Box ref={capturedUIState.mainControlsRef} />;
 }
 
 vi.mock('./App.js', () => ({
@@ -122,7 +123,6 @@ import { useSessionStats } from './contexts/SessionContext.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
-import { measureElement } from 'ink';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core';
 
@@ -191,9 +191,17 @@ describe('AppContainer State Management', () => {
       onAuthError: vi.fn(),
       isAuthDialogOpen: false,
       isAuthenticating: false,
+      pendingAuthType: undefined,
+      externalAuthState: null,
+      qwenAuthState: {
+        deviceAuth: null,
+        authStatus: 'idle',
+        authMessage: null,
+      },
       handleAuthSelect: vi.fn(),
       handleCodingPlanSubmit: vi.fn(),
       handleAlibabaStandardSubmit: vi.fn(),
+      handleOpenRouterSubmit: vi.fn(),
       openAuthDialog: vi.fn(),
       cancelAuthentication: vi.fn(),
     });
@@ -1397,7 +1405,17 @@ describe('AppContainer State Management', () => {
         onAuthError: vi.fn(),
         isAuthDialogOpen: false,
         isAuthenticating: true,
+        pendingAuthType: undefined,
+        externalAuthState: null,
+        qwenAuthState: {
+          deviceAuth: null,
+          authStatus: 'idle',
+          authMessage: null,
+        },
         handleAuthSelect: vi.fn(),
+        handleCodingPlanSubmit: vi.fn(),
+        handleAlibabaStandardSubmit: vi.fn(),
+        handleOpenRouterSubmit: vi.fn(),
         openAuthDialog: vi.fn(),
         cancelAuthentication: vi.fn(),
       });
