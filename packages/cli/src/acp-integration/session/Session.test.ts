@@ -241,7 +241,36 @@ describe('Session', () => {
             {
               name: 'init',
               description: 'Initialize project context',
-              input: null,
+              input: { hint: '[path]' },
+            },
+          ],
+        },
+      });
+    });
+
+    it('sets input for built-in commands with subCommands', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'export',
+          description: 'Export conversation history',
+          kind: 'built-in',
+          subCommands: [
+            { name: 'md', description: 'Export as markdown', kind: 'built-in' },
+          ],
+        },
+      ]);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            {
+              name: 'export',
+              description: 'Export conversation history',
+              input: { hint: '' },
             },
           ],
         },
