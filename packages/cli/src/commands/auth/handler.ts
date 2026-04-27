@@ -537,18 +537,21 @@ async function handleAlibabaStandardApiKeyAuth(): Promise<void> {
         AuthType.USE_OPENAI
       ] || [];
 
-    const nonAlibabaStandardConfigs = existingConfigs.filter(
+    const nonReplacedConfigs = existingConfigs.filter(
       (existing) =>
+        // Filter out old Alibaba Standard entries
         !(
           existing.envKey === DASHSCOPE_STANDARD_API_KEY_ENV_KEY &&
           typeof existing.baseUrl === 'string' &&
           Object.values(ALIBABA_STANDARD_API_KEY_ENDPOINTS).includes(
             existing.baseUrl,
           )
-        ),
+        ) &&
+        // Filter out Coding Plan entries (their key will be cleared)
+        !isCodingPlanConfig(existing.baseUrl, existing.envKey),
     );
 
-    const updatedConfigs = [...newConfigs, ...nonAlibabaStandardConfigs];
+    const updatedConfigs = [...newConfigs, ...nonReplacedConfigs];
 
     // Persist model providers and auth settings
     settings.setValue(
