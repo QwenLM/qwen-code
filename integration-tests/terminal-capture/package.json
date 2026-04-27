@@ -10,7 +10,8 @@
     "capture:all": "npx tsx run.ts scenarios/all.ts",
     "capture:streaming-clear-storm": "npx tsx streaming-clear-storm.ts",
     "capture:narrow-streaming-regression": "QWEN_TUI_E2E_TERMINAL_COLS=52 QWEN_TUI_E2E_STREAMING_RESIZE_COLS=44,52,68,44,52,68 npx tsx streaming-clear-storm.ts",
-    "capture:resize-clear-regression": "npx tsx resize-clear-regression.ts"
+    "capture:resize-clear-regression": "npx tsx resize-clear-regression.ts",
+    "capture:shell-reflow-regression": "npx tsx shell-reflow-regression.ts"
   },
   "dependencies": {
     "@lydell/node-pty": "1.2.0-beta.10",

@@ -9,8 +9,8 @@ targets the remaining classes that were still reproducible with local evidence:
   terminal and make Ink clear the whole screen;
 - terminal resize can force a static-history remount and emit a full-screen
   clear even when the user has not requested `/clear`;
-- narrow shell output can reflow without new bytes and look like fresh live
-  output;
+- narrow shell output can reflow without new visible bytes and be re-emitted as
+  fresh live output;
 - expanded subagent detail can exceed its assigned tool-message budget.
 
 The PR does not rely on terminal emulator support to hide the problem. The E2E
@@ -140,6 +140,13 @@ the colored path. Resize-only soft-wrap changes do not emit new live chunks.
 - `resize(cols, rows)` so E2E can trigger real SIGWINCH behavior through the
   PTY and xterm viewport together.
 
+The shell live-output reflow evidence is captured by a separate
+`shell-reflow-regression.ts` script. That script exercises
+`ShellExecutionService` directly rather than using the assistant streaming
+server. This keeps the evidence aligned with the source path that owns the
+narrow duplicate-output bug: the shell service emits live output events, and
+the CLI renders those events inside the tool message.
+
 ## Acceptance Metrics
 
 All metrics and GIF frames must come from the same deterministic run.
@@ -162,11 +169,39 @@ verify both the metric fix and the absence of garbled narrow output.
 - same fake streaming server and prompt as the streaming clear-storm scenario;
 - terminal starts at 52x26, then resizes during active streaming through
   44 -> 52 -> 68 -> 44 -> 52 -> 68 columns;
-- this is the validation path for #2912/#3279 style reports where narrow panes
-  or drag-resize during output cause repeated visible text;
+- this validates the pending assistant/thought path under narrow panes and
+  drag-resize while output is actively streaming;
 - pass requires the same raw clear metric as streaming clear-storm, plus a GIF
   that visibly contrasts the old unbounded narrow output with the bounded fixed
   preview while resize is happening.
+
+This scenario is not the proof for shell live-output duplication. The old GIF
+could show raw clear metrics, but it could not reliably show the shell-specific
+duplicate viewport event. The shell-specific proof is the next scenario.
+
+### Shell Live Reflow Scenario
+
+- `ShellExecutionService` starts a PTY at 24x8 and runs a deterministic command
+  that prints one long line;
+- after the first real live-output event, the PTY is resized 24 -> 12 -> 18;
+- the command then emits only carriage returns (`\r`), which do not add new
+  visible characters;
+- on the unfixed path, the soft-wrap segmentation change is emitted as an
+  extra live-output event, so the UI can append a duplicate-looking block;
+- on the fixed path, resize-only reflow is ignored until new renderable bytes
+  arrive;
+- pass requires `resizeOnlyDataEventCount == 0` on the fixed branch and, for a
+  failure-first comparison run, `resizeOnlyDataEventCount >= 1` on the base
+  branch.
+
+The comparison GIF intentionally renders the live-output event stream:
+
+- left side: the base branch receives `event #2: resize-only duplicate`;
+- right side: the fixed branch shows `no resize-only event emitted`.
+
+That visual difference maps directly to the metric. If the left side does not
+show a second resize-only event, the test has not reproduced the narrow shell
+duplication bug and should not be used as evidence for that issue.
 
 ### Resize Clear-Regression Scenario
 
@@ -199,6 +234,9 @@ npm run capture:narrow-streaming-regression
 
 QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
 npm run capture:resize-clear-regression
+
+QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
+npm run capture:shell-reflow-regression
 ```
 
 Run failure-first validation against a separate `origin/main` checkout:
@@ -224,6 +262,10 @@ QWEN_TUI_E2E_MIN_CLEAR_PAIRS=1 \
 QWEN_TUI_E2E_MAX_CLEAR_PAIRS=Infinity \
 QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
 npm run capture:resize-clear-regression
+
+QWEN_TUI_E2E_BASE_REPO=/path/to/main-checkout \
+QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
+npm run capture:shell-reflow-regression
 ```
 
 Each run writes:
@@ -250,6 +292,15 @@ sizes, live flush mode, and synchronized output disabled.
 | Resize                    | `origin/main` | failure-first reproduction |                        2 |                      4 |     50 | reproduced |
 | Resize                    | fixed branch  | strict pass                |                        0 |                      0 |     50 | passed     |
 
+Shell live-output reflow has a different metric because the bug is not a raw
+screen-clear sequence. It is an extra live-output event produced after a
+resize-only soft-wrap change.
+
+| Scenario          | Branch        | Expected                   | Data events | Resize-only events | Result     |
+| ----------------- | ------------- | -------------------------- | ----------: | -----------------: | ---------- |
+| Shell live reflow | `origin/main` | failure-first reproduction |           2 |                  1 | reproduced |
+| Shell live reflow | fixed branch  | strict pass                |           1 |                  0 | passed     |
+
 ## Review Notes
 
 - The streaming fix is complete for the reproduced assistant/thought
@@ -258,6 +309,10 @@ sizes, live flush mode, and synchronized output disabled.
 - The resize fix replaces the automatic resize-only `clearTerminal` path with a
   viewport repaint. This is necessary because removing resize remount entirely
   leaves stale static ASCII art to be soft-wrapped by the terminal.
+- The shell reflow fix must be validated with shell live-output events, not the
+  assistant streaming clear-storm GIF. The latter proves dynamic-height
+  bounding and raw clear suppression; the former proves narrow shell duplicate
+  output is no longer emitted.
 - Tool and subagent detail paths are bounded by visual height/width, including
   single long lines, so they do not depend on explicit newline count.
 - Copying a heavily modified Ink fork is not the preferred fix for these
