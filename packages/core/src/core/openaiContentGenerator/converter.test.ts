@@ -455,6 +455,196 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
+    it('should keep all tool messages contiguous and merge split media into a single follow-up user message for parallel tool calls (issue #3616)', () => {
+      // Two assistant tool calls in parallel. Both responses come back in the
+      // same `user` content as separate functionResponse parts. The first
+      // returns an image; the second returns text only. OpenAI Chat
+      // Completions requires every `role: "tool"` response to appear
+      // contiguously before any non-tool message, so the synthesised user
+      // message carrying split media MUST come after BOTH tool messages,
+      // not interleaved between them.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_screenshot',
+                  name: 'browser_take_screenshot',
+                  args: {},
+                },
+              },
+              {
+                functionCall: {
+                  id: 'call_console',
+                  name: 'browser_console_messages',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_screenshot',
+                  name: 'browser_take_screenshot',
+                  response: { output: 'Captured screenshot' },
+                  parts: [
+                    {
+                      inlineData: {
+                        mimeType: 'image/png',
+                        data: 'shotbase64',
+                      },
+                    },
+                  ],
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'call_console',
+                  name: 'browser_console_messages',
+                  response: { output: 'no console messages' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const strictContext: RequestContext = {
+        ...requestContext,
+        splitToolMedia: true,
+      };
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        strictContext,
+      );
+
+      // Locate the assistant turn (with the two tool calls) and assert that
+      // the next two messages are both `tool`, contiguously, before any
+      // user message.
+      const assistantIdx = messages.findIndex((m) => m.role === 'assistant');
+      expect(assistantIdx).toBeGreaterThanOrEqual(0);
+      expect(messages[assistantIdx + 1]?.role).toBe('tool');
+      expect(messages[assistantIdx + 2]?.role).toBe('tool');
+      expect(messages[assistantIdx + 3]?.role).toBe('user');
+
+      // Both tool messages have spec-compliant content (string OR array of
+      // text-typed parts only — no image_url / input_audio / video_url /
+      // file parts allowed by OpenAI on tool messages).
+      const isSpecCompliantToolContent = (content: unknown): boolean => {
+        if (typeof content === 'string') return true;
+        if (!Array.isArray(content)) return false;
+        return (content as Array<{ type: string }>).every(
+          (p) => p.type === 'text',
+        );
+      };
+      expect(
+        isSpecCompliantToolContent(
+          (messages[assistantIdx + 1] as { content: unknown }).content,
+        ),
+      ).toBe(true);
+      expect(
+        isSpecCompliantToolContent(
+          (messages[assistantIdx + 2] as { content: unknown }).content,
+        ),
+      ).toBe(true);
+
+      // Exactly one synthesised user message exists, and it carries the
+      // single image from the first tool response.
+      const userMessages = messages.filter((m) => m.role === 'user');
+      expect(userMessages).toHaveLength(1);
+      const userContent = userMessages[0].content as Array<{
+        type: string;
+        text?: string;
+        image_url?: { url: string };
+      }>;
+      const imageParts = userContent.filter((p) => p.type === 'image_url');
+      expect(imageParts).toHaveLength(1);
+      expect(imageParts[0].image_url?.url).toBe(
+        'data:image/png;base64,shotbase64',
+      );
+    });
+
+    it('should merge media from multiple media-bearing parallel tool responses into one follow-up user message (issue #3616)', () => {
+      // Both tool responses return images. The accumulator must combine them
+      // into a single user message — we should NOT see two separate user
+      // messages (which would still violate the contiguity rule because the
+      // first user message would split the tool messages apart).
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: { id: 'call_a', name: 'shot_a', args: {} },
+              },
+              {
+                functionCall: { id: 'call_b', name: 'shot_b', args: {} },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_a',
+                  name: 'shot_a',
+                  response: { output: 'A' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'aaa' } },
+                  ],
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'call_b',
+                  name: 'shot_b',
+                  response: { output: 'B' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'bbb' } },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const strictContext: RequestContext = {
+        ...requestContext,
+        splitToolMedia: true,
+      };
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        strictContext,
+      );
+
+      const toolMessages = messages.filter((m) => m.role === 'tool');
+      const userMessages = messages.filter((m) => m.role === 'user');
+      expect(toolMessages).toHaveLength(2);
+      expect(userMessages).toHaveLength(1);
+
+      const userContent = userMessages[0].content as Array<{
+        type: string;
+        text?: string;
+        image_url?: { url: string };
+      }>;
+      const imageUrls = userContent
+        .filter((p) => p.type === 'image_url')
+        .map((p) => p.image_url?.url);
+      expect(imageUrls).toEqual([
+        'data:image/png;base64,aaa',
+        'data:image/png;base64,bbb',
+      ]);
+    });
+
     it('should convert function responses with fileData to tool message with embedded image_url', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
