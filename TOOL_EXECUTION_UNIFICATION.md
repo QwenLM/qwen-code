@@ -1,0 +1,1 @@
+# Tool Execution Unification (Issue #3247)\n\nThis branch tracks the refactoring work to unify tool execution logic across Interactive, Non-Interactive, and ACP modes.\n\nSee Issue #3247 for full context.
