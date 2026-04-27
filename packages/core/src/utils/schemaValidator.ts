@@ -65,6 +65,26 @@ function getValidator(schema: AnySchema): Ajv {
  */
 export class SchemaValidator {
   /**
+   * Strictly compiles a schema. Returns an error message if the schema is
+   * malformed or uses an Ajv version we can't support. Returns null on
+   * success. Unlike {@link validate}, this does NOT silently skip on
+   * compile failure — callers (e.g. the CLI's `--json-schema` parser) need
+   * to surface invalid schemas instead of letting them no-op at runtime.
+   */
+  static compileStrict(schema: unknown): string | null {
+    if (!schema || typeof schema !== 'object') {
+      return 'schema must be a JSON object';
+    }
+    const validator = getValidator(schema as AnySchema);
+    try {
+      validator.compile(schema as AnySchema);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  /**
    * Returns null if the data conforms to the schema described by schema (or if schema
    *  is null). Otherwise, returns a string describing the error.
    */

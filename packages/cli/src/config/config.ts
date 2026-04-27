@@ -30,6 +30,7 @@ import {
   NativeLspService,
   isBareMode,
   isToolEnabled,
+  SchemaValidator,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -160,7 +161,122 @@ export interface CliArgs {
   channel: string | undefined;
   jsonFd?: number | undefined;
   jsonFile?: string | undefined;
+  jsonSchema?: string | undefined;
   inputFile?: string | undefined;
+}
+
+/**
+ * Returns true if the root of the given schema can accept a JSON object.
+ *
+ * Considers:
+ *  - explicit root `type` (string or array)
+ *  - root `anyOf` / `oneOf` branches (at least one branch must accept
+ *    object-typed values)
+ *
+ * Leaves `allOf` alone — tight interactions between `allOf` branches with
+ * contradictory types are rare for `--json-schema` input and we'd rather
+ * let Ajv surface that at runtime than guess wrong here.
+ */
+function schemaRootAcceptsObject(schema: Record<string, unknown>): boolean {
+  const rawType = schema['type'];
+  if (rawType !== undefined) {
+    const types = Array.isArray(rawType) ? rawType : [rawType];
+    return types.includes('object');
+  }
+  for (const key of ['anyOf', 'oneOf'] as const) {
+    const variants = schema[key];
+    if (Array.isArray(variants) && variants.length > 0) {
+      return variants.some(
+        (v) =>
+          typeof v === 'object' &&
+          v !== null &&
+          !Array.isArray(v) &&
+          schemaRootAcceptsObject(v as Record<string, unknown>),
+      );
+    }
+  }
+  // No narrowing at the root — lenient default, treated as object-compatible.
+  return true;
+}
+
+/**
+ * Resolves the `--json-schema` argument into a parsed JSON Schema object.
+ *
+ * Accepts either a JSON literal or `@path/to/schema.json`. Fails fast with a
+ * FatalConfigError if the input can't be read/parsed/compiled — invalid
+ * schemas should not silently skip validation at runtime.
+ */
+export function resolveJsonSchemaArg(
+  raw: string | undefined,
+): Record<string, unknown> | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    throw new FatalConfigError('--json-schema cannot be empty.');
+  }
+
+  let payload: string;
+  if (trimmed.startsWith('@')) {
+    const resolvedPath = resolvePath(trimmed.slice(1));
+    try {
+      payload = fs.readFileSync(resolvedPath, 'utf8');
+    } catch (err) {
+      throw new FatalConfigError(
+        `--json-schema could not read "${resolvedPath}": ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  } else {
+    payload = trimmed;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch (err) {
+    throw new FatalConfigError(
+      `--json-schema is not valid JSON: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new FatalConfigError(
+      '--json-schema must be a JSON object describing a schema.',
+    );
+  }
+
+  // The schema will be installed as a TOOL PARAMETER schema. All function-
+  // calling APIs (Gemini/OpenAI/Anthropic) require tool arguments to be a
+  // JSON object, so a schema that cannot accept objects registers an
+  // unusable synthetic tool the model could never satisfy. Check the root
+  // *and* any top-level anyOf/oneOf narrowing — a schema without a root
+  // `type` but whose only anyOf branches are non-object is equally broken.
+  if (!schemaRootAcceptsObject(parsed as Record<string, unknown>)) {
+    throw new FatalConfigError(
+      '--json-schema root must accept object-typed values (tool parameters ' +
+        'are always JSON objects). Every branch of a root anyOf/oneOf must ' +
+        'be satisfiable by an object, or the root must omit `type` / declare ' +
+        '`type: "object"`.',
+    );
+  }
+
+  // Ajv compile-time validation. SchemaValidator.validate is deliberately
+  // lenient at runtime (falls back to no-op on compile failure to support
+  // exotic MCP schemas) — but `--json-schema` is explicit user intent, so
+  // surface a bad schema here rather than letting it silently no-op later.
+  const compileError = SchemaValidator.compileStrict(parsed);
+  if (compileError) {
+    throw new FatalConfigError(
+      `--json-schema is not a valid JSON Schema: ${compileError}`,
+    );
+  }
+
+  return parsed as Record<string, unknown>;
 }
 
 function normalizeOutputFormat(
@@ -461,6 +577,14 @@ export async function parseArguments(): Promise<CliArgs> {
             'File path for structured JSON event output (dual output mode). ' +
             'Can be a regular file, FIFO (named pipe), or /dev/fd/N.',
         })
+        .option('json-schema', {
+          type: 'string',
+          description:
+            'JSON Schema that the model\'s final output must conform to ' +
+            '(headless mode only). Accepts a JSON literal or "@path/to/schema.json". ' +
+            'Registers a synthetic `structured_output` tool; the session ends on ' +
+            'the first valid call.',
+        })
         .option('input-file', {
           type: 'string',
           description:
@@ -593,6 +717,19 @@ export async function parseArguments(): Promise<CliArgs> {
           // --resume accepts either a session UUID or a custom title
           if (argv['jsonFd'] != null && argv['jsonFile'] != null) {
             return '--json-fd and --json-file are mutually exclusive. Use one or the other.';
+          }
+          if (argv['jsonSchema']) {
+            if (argv['promptInteractive']) {
+              return '--json-schema cannot be used with --prompt-interactive (-i); structured output only terminates the non-interactive flow.';
+            }
+            const hasPrompt = !!argv['prompt'];
+            const query = argv['query'] as string | string[] | undefined;
+            const hasPositionalQuery = Array.isArray(query)
+              ? query.length > 0
+              : !!query;
+            if (!hasPrompt && !hasPositionalQuery) {
+              return '--json-schema only applies to non-interactive mode; pass a prompt via -p or as a positional argument.';
+            }
           }
           return true;
         }),
@@ -1221,6 +1358,7 @@ export async function loadCliConfig(
     // absent.
     jsonFd: argv.jsonFd,
     jsonFile: argv.jsonFile ?? settings.dualOutput?.jsonFile,
+    jsonSchema: resolveJsonSchemaArg(argv.jsonSchema),
     inputFile: argv.inputFile ?? settings.dualOutput?.inputFile,
     // Precedence: explicit CLI flag > settings file > default(true).
     // NOTE: do NOT set a yargs default for `chat-recording`, otherwise argv will

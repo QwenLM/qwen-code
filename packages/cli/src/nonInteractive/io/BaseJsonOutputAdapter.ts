@@ -66,6 +66,12 @@ export interface ResultOptions {
   readonly stats?: SessionMetrics;
   readonly summary?: string;
   readonly subtype?: string;
+  /**
+   * Payload that the model submitted via the synthetic `structured_output`
+   * tool. When set, `result` is forced to the JSON-stringified form and a
+   * top-level `structured_result` field is added to the result message.
+   */
+  readonly structuredResult?: unknown;
 }
 
 /**
@@ -1188,7 +1194,14 @@ export abstract class BaseJsonOutputAdapter {
         error: { message: errorMessage },
       };
     } else {
-      const success: CLIResultMessageSuccess & { stats?: SessionMetrics } = {
+      const hasStructured = options.structuredResult !== undefined;
+      const finalResult = hasStructured
+        ? JSON.stringify(options.structuredResult)
+        : resultText;
+      const success: CLIResultMessageSuccess & {
+        stats?: SessionMetrics;
+        structured_result?: unknown;
+      } = {
         type: 'result',
         subtype:
           (options.subtype as CLIResultMessageSuccess['subtype']) ?? 'success',
@@ -1198,13 +1211,16 @@ export abstract class BaseJsonOutputAdapter {
         duration_ms: options.durationMs,
         duration_api_ms: options.apiDurationMs,
         num_turns: options.numTurns,
-        result: resultText,
+        result: finalResult,
         usage,
         permission_denials: [...this.permissionDenials],
       };
 
       if (options.stats) {
         success.stats = options.stats;
+      }
+      if (hasStructured) {
+        success.structured_result = options.structuredResult;
       }
 
       return success;

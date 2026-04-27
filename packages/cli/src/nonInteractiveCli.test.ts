@@ -148,6 +148,7 @@ describe('runNonInteractive', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getDebugMode: vi.fn().mockReturnValue(false),
       getOutputFormat: vi.fn().mockReturnValue('text'),
+      getJsonSchema: vi.fn().mockReturnValue(undefined),
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
       getFolderTrust: vi.fn().mockReturnValue(false),
       getIncludePartialMessages: vi.fn().mockReturnValue(false),
@@ -167,6 +168,7 @@ describe('runNonInteractive', () => {
         setNotificationCallback: vi.fn(),
         setRegisterCallback: vi.fn(),
         getRunning: vi.fn().mockReturnValue([]),
+        abortAll: vi.fn(),
       }),
     } as unknown as Config;
 
@@ -1867,5 +1869,122 @@ describe('runNonInteractive', () => {
       'prompt-blocks-content',
       { type: SendMessageType.UserQuery },
     );
+  });
+
+  describe('--json-schema structured output', () => {
+    it('stops executing remaining tool calls from the same turn once structured_output succeeds', async () => {
+      (mockConfig.getJsonSchema as Mock).mockReturnValue({
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+      });
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+
+      // Same turn: the model emits structured_output FIRST, then a second
+      // (hypothetical side-effecting) tool. The break must prevent the
+      // second tool from running.
+      const structuredCall: ServerGeminiStreamEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-structured',
+          name: 'structured_output',
+          args: { summary: 'done' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-structured',
+        },
+      };
+      const trailingCall: ServerGeminiStreamEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-trailing',
+          name: 'side_effect_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-structured',
+        },
+      };
+
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: [{ text: 'ok' }],
+      });
+
+      mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([structuredCall, trailingCall]),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Emit structured output',
+        'prompt-id-structured',
+      );
+
+      // Only structured_output should have been executed. The trailing tool
+      // should have been skipped because structured output ended the session.
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+      const firstCallArg = mockCoreExecuteToolCall.mock.calls[0][1] as {
+        name: string;
+      };
+      expect(firstCallArg.name).toBe('structured_output');
+
+      // And we should not have sent a second follow-up turn.
+      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it('errors with non-zero exit when model emits plain text instead of structured_output', async () => {
+      (mockConfig.getJsonSchema as Mock).mockReturnValue({
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+      });
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+
+      const writes: string[] = [];
+      processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+        writes.push(
+          typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'),
+        );
+        return true;
+      });
+
+      const plainTextTurn: ServerGeminiStreamEvent[] = [
+        { type: GeminiEventType.Content, value: 'Here is my answer as text.' },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+        },
+      ];
+      mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents(plainTextTurn),
+      );
+
+      const originalExitCode = process.exitCode;
+      try {
+        await runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Should call structured_output',
+          'prompt-id-plaintext',
+        );
+        expect(process.exitCode).toBe(1);
+      } finally {
+        process.exitCode = originalExitCode;
+      }
+
+      const result = writes
+        .join('')
+        .split('\n')
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line))
+        .flat()
+        .find(
+          (m: unknown) =>
+            typeof m === 'object' &&
+            m !== null &&
+            (m as { type?: string }).type === 'result',
+        );
+      expect(result?.is_error).toBe(true);
+      expect(result?.error?.message).toMatch(/structured_output/);
+    });
   });
 });

@@ -21,6 +21,7 @@ import {
   OutputFormat,
   InputFormat,
   LoopType,
+  ToolNames,
   uiTelemetryService,
   parseAndFormatApiError,
   createDebugLogger,
@@ -402,6 +403,10 @@ export async function runNonInteractive(
 
         if (toolCallRequests.length > 0) {
           const toolResponseParts: Part[] = [];
+          // When --json-schema is active, the first successful call to the
+          // synthetic structured_output tool terminates the session with the
+          // submitted args as the structured result.
+          let structuredSubmission: unknown = undefined;
 
           for (const requestInfo of toolCallRequests) {
             const finalRequestInfo = requestInfo;
@@ -458,6 +463,21 @@ export async function runNonInteractive(
 
             adapter.emitToolResult(finalRequestInfo, toolResponse);
 
+            if (
+              finalRequestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
+              !toolResponse.error
+            ) {
+              // Honour the "first valid call ends the session" contract:
+              // stop processing the remaining tool calls from this turn so
+              // we don't execute side-effecting tools after the result has
+              // already been accepted. Any trailing tool_use blocks the
+              // model emitted will simply lack a matching tool_result, which
+              // is consistent with how other terminal paths (max-turns,
+              // cancellation) leave the stream.
+              structuredSubmission = finalRequestInfo.args;
+              break;
+            }
+
             if (toolResponse.responseParts) {
               toolResponseParts.push(...toolResponse.responseParts);
             }
@@ -468,6 +488,28 @@ export async function runNonInteractive(
             if ('modelOverride' in toolResponse) {
               modelOverride = toolResponse.modelOverride;
             }
+          }
+          if (structuredSubmission !== undefined) {
+            // Abort any in-flight background agents so they don't race the
+            // terminal emitResult; structured-output mode is a single-shot
+            // contract and the caller expects a deterministic shutdown.
+            registry.abortAll();
+            const metrics = uiTelemetryService.getMetrics();
+            const usage = computeUsageFromMetrics(metrics);
+            const stats =
+              outputFormat === OutputFormat.JSON
+                ? uiTelemetryService.getMetrics()
+                : undefined;
+            adapter.emitResult({
+              isError: false,
+              durationMs: Date.now() - startTime,
+              apiDurationMs: totalApiDurationMs,
+              numTurns: turnCount,
+              usage,
+              stats,
+              structuredResult: structuredSubmission,
+            });
+            return;
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
         } else {
@@ -726,6 +768,28 @@ export async function runNonInteractive(
             outputFormat === OutputFormat.JSON
               ? uiTelemetryService.getMetrics()
               : undefined;
+
+          // --json-schema contract: the model MUST terminate via the
+          // structured_output tool. Reaching this branch means it emitted
+          // plain text instead — surface as an error rather than silently
+          // returning whatever free-form summary the adapter collected.
+          // Setting exitCode + returning (rather than throwing) avoids the
+          // outer catch re-emitting the result a second time.
+          if (config.getJsonSchema()) {
+            adapter.emitResult({
+              isError: true,
+              durationMs: Date.now() - startTime,
+              apiDurationMs: totalApiDurationMs,
+              numTurns: turnCount,
+              errorMessage:
+                'Model produced plain text instead of calling the structured_output tool as required by --json-schema.',
+              usage,
+              stats,
+            });
+            process.exitCode = 1;
+            return;
+          }
+
           adapter.emitResult({
             isError: false,
             durationMs: Date.now() - startTime,
