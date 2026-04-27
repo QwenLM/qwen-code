@@ -298,6 +298,7 @@ async function main(): Promise<void> {
   const fakeServer = await startFakeOpenAIServer();
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    DEV: 'true',
     FORCE_COLOR: '1',
     NODE_NO_WARNINGS: '1',
     QWEN_CODE_DISABLE_SYNCHRONIZED_OUTPUT: '1',

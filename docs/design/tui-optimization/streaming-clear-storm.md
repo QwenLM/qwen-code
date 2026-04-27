@@ -67,6 +67,10 @@ expanded detail could still occupy too much dynamic space.
 `sliceTextByVisualHeight()`. It counts both explicit newlines and soft wraps
 using cached display width and Unicode code points, so a single long JSON,
 base64 payload, or minified log line is bounded before it reaches Ink/Yoga.
+Reserved rows are subtracted before the overflow decision. This matters in
+narrow streaming: footer/status rows and existing static history can grow while
+a response is pending, and waiting until the unreserved height is exceeded lets
+Ink briefly full-clear before the slicer activates.
 
 The helper supports two modes:
 
@@ -153,6 +157,17 @@ verify both the metric fix and the absence of garbled narrow output.
 - pass requires `clearTerminalPairCount == 0`, `finalDoneCount == 1`, and at
   least 40 frames.
 
+### Narrow Streaming Resize Scenario
+
+- same fake streaming server and prompt as the streaming clear-storm scenario;
+- terminal starts at 52x26, then resizes during active streaming through
+  44 -> 52 -> 68 -> 44 -> 52 -> 68 columns;
+- this is the validation path for #2912/#3279 style reports where narrow panes
+  or drag-resize during output cause repeated visible text;
+- pass requires the same raw clear metric as streaming clear-storm, plus a GIF
+  that visibly contrasts the old unbounded narrow output with the bounded fixed
+  preview while resize is happening.
+
 ### Resize Clear-Regression Scenario
 
 - start the normal interactive TUI with a fake OpenAI-compatible endpoint;
@@ -180,6 +195,9 @@ QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
 npm run capture:streaming-clear-storm
 
 QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
+npm run capture:narrow-streaming-regression
+
+QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
 npm run capture:resize-clear-regression
 ```
 
@@ -192,6 +210,13 @@ QWEN_TUI_E2E_MIN_CLEAR_PAIRS=1 \
 QWEN_TUI_E2E_MAX_CLEAR_PAIRS=Infinity \
 QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
 npm run capture:streaming-clear-storm
+
+QWEN_TUI_E2E_REPO=/path/to/main-checkout \
+QWEN_TUI_E2E_OUT=/tmp/qwen-tui/main-narrow-streaming \
+QWEN_TUI_E2E_MIN_CLEAR_PAIRS=1 \
+QWEN_TUI_E2E_MAX_CLEAR_PAIRS=Infinity \
+QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
+npm run capture:narrow-streaming-regression
 
 QWEN_TUI_E2E_REPO=/path/to/main-checkout \
 QWEN_TUI_E2E_OUT=/tmp/qwen-tui/main-resize \
@@ -216,12 +241,14 @@ generated GIFs to GitHub first, then insert only GitHub attachment URLs.
 Validated on April 27, 2026 with the same scripts, prompt, fake server, terminal
 sizes, live flush mode, and synchronized output disabled.
 
-| Scenario  | Branch        | Expected                   | `clearTerminalPairCount` | `clearScreenCodeCount` | Frames | Result     |
-| --------- | ------------- | -------------------------- | -----------------------: | ---------------------: | -----: | ---------- |
-| Streaming | `origin/main` | failure-first reproduction |                      427 |                    854 |     93 | reproduced |
-| Streaming | fixed branch  | strict pass                |                        0 |                      0 |     93 | passed     |
-| Resize    | `origin/main` | failure-first reproduction |                        2 |                      4 |     50 | reproduced |
-| Resize    | fixed branch  | strict pass                |                        0 |                      0 |     50 | passed     |
+| Scenario                  | Branch        | Expected                   | `clearTerminalPairCount` | `clearScreenCodeCount` | Frames | Result     |
+| ------------------------- | ------------- | -------------------------- | -----------------------: | ---------------------: | -----: | ---------- |
+| Streaming                 | `origin/main` | failure-first reproduction |                      427 |                    854 |     93 | reproduced |
+| Streaming                 | fixed branch  | strict pass                |                        0 |                      0 |     93 | passed     |
+| Narrow streaming + resize | `origin/main` | failure-first reproduction |                      498 |                    996 |     93 | reproduced |
+| Narrow streaming + resize | fixed branch  | strict pass                |                        0 |                      0 |     93 | passed     |
+| Resize                    | `origin/main` | failure-first reproduction |                        2 |                      4 |     50 | reproduced |
+| Resize                    | fixed branch  | strict pass                |                        0 |                      0 |     50 | passed     |
 
 ## Review Notes
 

@@ -225,7 +225,7 @@ export function sliceTextByVisualHeight(
 
   flushCurrentLine();
 
-  if (visualLineCount <= targetMaxHeight) {
+  if (visualLineCount <= visibleContentHeight) {
     return { text, hiddenLinesCount: 0 };
   }
 

@@ -43,8 +43,8 @@ const STREAM_INTERVAL_MS = 70;
 const FRAME_COUNT = 90;
 const FRAME_INTERVAL_MS = 180;
 const LIVE_FLUSH_INTERVAL_MS = 16;
-const TERMINAL_COLS = 88;
-const TERMINAL_ROWS = 26;
+const DEFAULT_TERMINAL_COLS = 88;
+const DEFAULT_TERMINAL_ROWS = 26;
 const ESC = '\u001B';
 const ESC_PATTERN = '\\u001B';
 
@@ -71,6 +71,11 @@ type Summary = Counts & {
   finalScreenLines: number;
   finalDoneCount: number;
   requestCount: number;
+  terminal: {
+    cols: number;
+    rows: number;
+    resizeCols: number[];
+  };
   limits: {
     minClearTerminalPairs: number;
     maxClearTerminalPairs: number | 'Infinity';
@@ -93,6 +98,18 @@ function envNumber(name: string, fallback: number): number {
 
 function serializeNumberLimit(value: number): number | 'Infinity' {
   return Number.isFinite(value) ? value : 'Infinity';
+}
+
+function envNumberList(name: string): number[] {
+  const value = process.env[name];
+  if (value === undefined || value.trim() === '') {
+    return [];
+  }
+
+  return value
+    .split(',')
+    .map((part) => Number(part.trim()))
+    .filter((part) => Number.isFinite(part) && part > 0);
 }
 
 function qwenArgs(baseUrl: string): string[] {
@@ -168,7 +185,7 @@ function streamOpenAIResponse(res: ServerResponse): void {
 
   const chunks = Array.from({ length: STREAM_CHUNK_COUNT }, (_, index) => {
     const marker = String(index).padStart(3, '0');
-    return `clear-storm-${marker} `.repeat(3);
+    return `clear-storm-${marker}-alpha clear-storm-${marker}-beta clear-storm-${marker}-gamma `;
   });
   chunks.push(STREAM_DONE);
 
@@ -371,6 +388,21 @@ async function main(): Promise<void> {
   const minClearTerminalPairs = envNumber('QWEN_TUI_E2E_MIN_CLEAR_PAIRS', 0);
   const maxClearTerminalPairs = envNumber('QWEN_TUI_E2E_MAX_CLEAR_PAIRS', 0);
   const minFrames = envNumber('QWEN_TUI_E2E_MIN_FRAMES', 40);
+  const terminalCols = envNumber(
+    'QWEN_TUI_E2E_TERMINAL_COLS',
+    DEFAULT_TERMINAL_COLS,
+  );
+  const terminalRows = envNumber(
+    'QWEN_TUI_E2E_TERMINAL_ROWS',
+    DEFAULT_TERMINAL_ROWS,
+  );
+  const streamingResizeCols = envNumberList(
+    'QWEN_TUI_E2E_STREAMING_RESIZE_COLS',
+  );
+  const streamingResizeEveryFrames = Math.max(
+    1,
+    envNumber('QWEN_TUI_E2E_STREAMING_RESIZE_EVERY_FRAMES', 8),
+  );
 
   if (existsSync(outputDir)) {
     rmSync(outputDir, { recursive: true });
@@ -380,6 +412,7 @@ async function main(): Promise<void> {
   const fakeServer = await startFakeOpenAIServer();
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    DEV: 'true',
     FORCE_COLOR: '1',
     NODE_NO_WARNINGS: '1',
     QWEN_CODE_DISABLE_SYNCHRONIZED_OUTPUT: '1',
@@ -391,8 +424,8 @@ async function main(): Promise<void> {
   delete env['NO_COLOR'];
 
   const terminal = await TerminalCapture.create({
-    cols: TERMINAL_COLS,
-    rows: TERMINAL_ROWS,
+    cols: terminalCols,
+    rows: terminalRows,
     cwd: repoRoot,
     outputDir,
     title: 'streaming clear storm',
@@ -414,7 +447,18 @@ async function main(): Promise<void> {
     const rawBefore = terminal.getRawOutput().length;
     await terminal.type('\n');
 
+    let resizeIndex = 0;
     for (let index = 0; index < FRAME_COUNT; index += 1) {
+      if (
+        streamingResizeCols.length > 0 &&
+        index % streamingResizeEveryFrames === 0
+      ) {
+        const cols =
+          streamingResizeCols[resizeIndex % streamingResizeCols.length]!;
+        await terminal.resize(cols, terminalRows);
+        resizeIndex += 1;
+      }
+
       await sleep(FRAME_INTERVAL_MS);
       const filename = `02-stream-${String(index + 1).padStart(2, '0')}.png`;
       frames.push(await terminal.capture(filename));
@@ -446,6 +490,11 @@ async function main(): Promise<void> {
       finalScreenLines: finalScreen.split('\n').length,
       finalDoneCount: countOccurrences(finalScreen, STREAM_DONE),
       requestCount: fakeServer.getRequestCount(),
+      terminal: {
+        cols: terminalCols,
+        rows: terminalRows,
+        resizeCols: streamingResizeCols,
+      },
       limits: {
         minClearTerminalPairs,
         maxClearTerminalPairs: serializeNumberLimit(maxClearTerminalPairs),

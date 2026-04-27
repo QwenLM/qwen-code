@@ -40,6 +40,18 @@ describe('textUtils', () => {
         hiddenLinesCount: 1,
       });
     });
+
+    it('starts slicing when content exceeds the height left after reserved rows', () => {
+      const sliced = sliceTextByVisualHeight('a\nb\nc', 4, 80, {
+        reservedRows: 2,
+        overflowDirection: 'top',
+      });
+
+      expect(sliced).toEqual({
+        text: 'b\nc',
+        hiddenLinesCount: 1,
+      });
+    });
   });
 
   describe('escapeAnsiCtrlCodes', () => {
