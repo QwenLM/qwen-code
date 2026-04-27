@@ -87,9 +87,15 @@ async function main() {
   await waitForText('Connected');
   await assertWorkbenchLandmarks();
   await assertRalphWorkspaceLayout('initial-layout.json');
+  await assertNoProjectOpenProjectAffordance(
+    'no-project-open-project-affordance.json',
+  );
   await saveScreenshot('initial-workspace.png');
 
-  await clickButtonUntilText('Open Project', 'desktop-e2e-workspace');
+  await clickButtonByTestIdUntilText(
+    'composer-open-project-button',
+    'desktop-e2e-workspace',
+  );
   await assertProjectComposerReady('project-composer.json');
   await assertComposerMissingProviderKeyShortcut(
     'composer-missing-provider-key-shortcut.json',
@@ -717,6 +723,171 @@ async function assertWorkbenchLandmarks() {
 
   if (landmarks.length > 0) {
     throw new Error(`Missing workbench landmarks: ${landmarks.join(', ')}`);
+  }
+}
+
+async function assertNoProjectOpenProjectAffordance(fileName) {
+  const snapshot = await evaluate(`(() => {
+    const alphaFromColor = (color) => {
+      if (!color || color === 'transparent') {
+        return 0;
+      }
+      const match = color.match(/rgba?\\(([^)]+)\\)/u);
+      if (!match) {
+        return 1;
+      }
+      const parts = match[1].split(',').map((part) => part.trim());
+      return parts.length < 4 ? 1 : Number.parseFloat(parts[3]);
+    };
+    const rectFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    };
+    const styleFor = (element) => {
+      if (!element) {
+        return null;
+      }
+      const style = window.getComputedStyle(element);
+      return {
+        color: style.color,
+        colorAlpha: alphaFromColor(style.color),
+        backgroundAlpha: alphaFromColor(style.backgroundColor),
+        fontSize: Number.parseFloat(style.fontSize),
+        fontWeight: Number.parseFloat(style.fontWeight),
+        opacity: Number.parseFloat(style.opacity)
+      };
+    };
+    const overflows = (element) =>
+      Boolean(element && element.scrollWidth > element.clientWidth + 4);
+    const composer = document.querySelector('[data-testid="message-composer"]');
+    const actions = document.querySelector('.composer-actions');
+    const openProject = document.querySelector(
+      '[data-testid="composer-open-project-button"]'
+    );
+    const textarea = document.querySelector('textarea[aria-label="Message"]');
+    const send = document.querySelector('button[aria-label="Send"]');
+    const emptyState = document.querySelector(
+      '[data-testid="conversation-empty"]'
+    );
+    const sidebarEmptyRows = [
+      ...document.querySelectorAll('.empty-row')
+    ].map((row) => ({
+      text: row.textContent.trim(),
+      rect: rectFor(row),
+      style: styleFor(row),
+      overflows: overflows(row)
+    }));
+
+    return {
+      button: {
+        text: openProject?.textContent.trim() ?? null,
+        ariaLabel: openProject?.getAttribute('aria-label') ?? null,
+        title: openProject?.getAttribute('title') ?? null,
+        type: openProject?.getAttribute('type') ?? null,
+        className: openProject?.className ?? null,
+        disabled: openProject?.disabled ?? null,
+        rect: rectFor(openProject),
+        style: styleFor(openProject),
+        hasIcon: openProject?.querySelector('svg') !== null,
+        inComposer: Boolean(openProject && composer?.contains(openProject)),
+        inActions: Boolean(openProject && actions?.contains(openProject)),
+        overflows: overflows(openProject)
+      },
+      composer: {
+        rect: rectFor(composer),
+        overflows: overflows(composer)
+      },
+      textarea: {
+        disabled: textarea?.disabled ?? null,
+        placeholder: textarea?.getAttribute('placeholder') ?? null
+      },
+      send: {
+        disabled: send?.disabled ?? null,
+        rect: rectFor(send),
+        style: styleFor(send)
+      },
+      emptyState: {
+        text: emptyState?.textContent.trim() ?? null,
+        rect: rectFor(emptyState),
+        style: styleFor(emptyState)
+      },
+      sidebarEmptyRows,
+      disabledReasonPresent: Boolean(
+        document.querySelector('[data-testid="composer-disabled-reason"]')
+      ),
+      threadListPresent: Boolean(document.querySelector('[data-testid="thread-list"]')),
+      documentOverflow:
+        document.documentElement.scrollWidth > window.innerWidth + 4 ||
+        document.documentElement.scrollHeight > window.innerHeight + 4
+    };
+  })()`);
+
+  await writeFile(
+    join(artifactDir, fileName),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    'utf8',
+  );
+
+  if (
+    snapshot.button.text !== 'Open Project' ||
+    snapshot.button.ariaLabel !== 'Open Project' ||
+    snapshot.button.title !== 'Open a project to start' ||
+    snapshot.button.type !== 'button' ||
+    snapshot.button.disabled !== false ||
+    !snapshot.button.hasIcon ||
+    !snapshot.button.inComposer ||
+    !snapshot.button.inActions ||
+    !snapshot.button.rect ||
+    snapshot.button.rect.width > 140 ||
+    snapshot.button.rect.height > 28 ||
+    !snapshot.button.style ||
+    snapshot.button.style.fontSize > 11 ||
+    snapshot.button.style.fontWeight > 680 ||
+    snapshot.button.style.backgroundAlpha > 0.16 ||
+    snapshot.button.overflows
+  ) {
+    throw new Error(
+      `No-project composer Open Project action is not compact/actionable: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.textarea.disabled !== true ||
+    snapshot.textarea.placeholder !== 'Open a project to start' ||
+    snapshot.send.disabled !== true ||
+    snapshot.emptyState.text !== 'Open a project to start'
+  ) {
+    throw new Error(
+      `No-project composer should keep text/send disabled with clear empty-state copy: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
+  }
+
+  if (
+    snapshot.disabledReasonPresent ||
+    snapshot.threadListPresent ||
+    snapshot.sidebarEmptyRows.some((row) => row.text === 'No sessions') ||
+    snapshot.documentOverflow ||
+    snapshot.composer.overflows
+  ) {
+    throw new Error(
+      `No-project first viewport leaked passive/noisy state or overflowed: ${JSON.stringify(
+        snapshot,
+      )}`,
+    );
   }
 }
 
@@ -1899,6 +2070,9 @@ async function assertRalphWorkspaceLayout(fileName) {
     const disabledReason = document.querySelector(
       '[data-testid="composer-disabled-reason"]'
     );
+    const openProjectAction = document.querySelector(
+      '[data-testid="composer-open-project-button"]'
+    );
 
     return {
       viewport: {
@@ -1937,6 +2111,18 @@ async function assertRalphWorkspaceLayout(fileName) {
         rect: rectForElement(disabledReason),
         style: styleForElement(disabledReason),
         overflows: overflowsElement(disabledReason)
+      },
+      openProjectAction: {
+        text: openProjectAction?.textContent.trim() ?? null,
+        ariaLabel: openProjectAction?.getAttribute('aria-label') ?? null,
+        title: openProjectAction?.getAttribute('title') ?? null,
+        rect: rectForElement(openProjectAction),
+        style: styleForElement(openProjectAction),
+        hasIcon: openProjectAction?.querySelector('svg') !== null,
+        inComposerActions: Boolean(
+          openProjectAction?.closest('.composer-actions')
+        ),
+        overflows: overflowsElement(openProjectAction)
       },
       composerActionButtons: [
         ...document.querySelectorAll('.composer-actions button')
@@ -2060,20 +2246,40 @@ async function assertRalphWorkspaceLayout(fileName) {
       );
     }
 
+    if (metrics.disabledComposerReason.text !== null) {
+      throw new Error(
+        `Initial composer should use the Open Project action instead of a passive disabled reason: ${JSON.stringify(
+          metrics.disabledComposerReason,
+        )}`,
+      );
+    }
+
     if (
-      metrics.disabledComposerReason.text !== 'Open a project to start' ||
-      !metrics.disabledComposerReason.rect ||
-      !metrics.disabledComposerReason.style ||
-      metrics.disabledComposerReason.overflows ||
-      metrics.disabledComposerReason.rect.height > 24 ||
-      metrics.disabledComposerReason.style.fontSize > 10.8 ||
-      metrics.disabledComposerReason.style.fontWeight > 640 ||
-      metrics.disabledComposerReason.style.colorAlpha > 0.62 ||
-      metrics.disabledComposerReason.style.backgroundAlpha > 0.08
+      metrics.openProjectAction.text !== 'Open Project' ||
+      metrics.openProjectAction.ariaLabel !== 'Open Project' ||
+      metrics.openProjectAction.title !== 'Open a project to start' ||
+      !metrics.openProjectAction.rect ||
+      !metrics.openProjectAction.style ||
+      !metrics.openProjectAction.hasIcon ||
+      !metrics.openProjectAction.inComposerActions ||
+      metrics.openProjectAction.overflows ||
+      metrics.openProjectAction.rect.height > 28 ||
+      metrics.openProjectAction.rect.width > 140 ||
+      metrics.openProjectAction.style.fontSize > 11 ||
+      metrics.openProjectAction.style.fontWeight > 680 ||
+      metrics.openProjectAction.style.backgroundAlpha > 0.16
     ) {
       throw new Error(
-        `Disabled composer reason should stay present, muted, and compact: ${JSON.stringify(
-          metrics.disabledComposerReason,
+        `Initial composer Open Project action should be compact and actionable: ${JSON.stringify(
+          metrics.openProjectAction,
+        )}`,
+      );
+    }
+
+    if (metrics.sidebarEmptyRows.some((row) => row.text === 'No sessions')) {
+      throw new Error(
+        `Initial sidebar should not show a duplicate sessions empty row: ${JSON.stringify(
+          metrics.sidebarEmptyRows,
         )}`,
       );
     }
@@ -11893,6 +12099,23 @@ async function clickButton(text) {
   }
 }
 
+async function clickButtonByTestId(testId) {
+  const clicked = await evaluate(`(() => {
+    const button = document.querySelector(
+      '[data-testid="' + ${JSON.stringify(testId)} + '"]'
+    );
+    if (!(button instanceof HTMLButtonElement) || button.disabled) {
+      return false;
+    }
+    button.click();
+    return true;
+  })()`);
+
+  if (!clicked) {
+    throw new Error(`Button not found or disabled for test id: ${testId}`);
+  }
+}
+
 async function pressKey(key) {
   const code = key === 'Escape' ? 'Escape' : key;
   const windowsVirtualKeyCode = key === 'Escape' ? 27 : 0;
@@ -11937,6 +12160,41 @@ async function clickButtonUntilText(
     `Timed out waiting for text ${JSON.stringify(
       expectedText,
     )} after clicking ${JSON.stringify(buttonText)}${
+      lastError instanceof Error ? `: ${lastError.message}` : ''
+    }`,
+  );
+}
+
+async function clickButtonByTestIdUntilText(
+  testId,
+  expectedText,
+  timeoutMs = 15_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+
+  while (Date.now() < deadline) {
+    if (
+      await evaluate(
+        `document.body.innerText.includes(${JSON.stringify(expectedText)})`,
+      )
+    ) {
+      return;
+    }
+
+    try {
+      await clickButtonByTestId(testId);
+    } catch (error) {
+      lastError = error;
+    }
+
+    await delay(500);
+  }
+
+  throw new Error(
+    `Timed out waiting for text ${JSON.stringify(
+      expectedText,
+    )} after clicking ${JSON.stringify(testId)}${
       lastError instanceof Error ? `: ${lastError.message}` : ''
     }`,
   );

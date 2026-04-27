@@ -1878,6 +1878,49 @@ summary:focus-visible {
   box-shadow: 0 0 0 2px rgba(85, 166, 255, 0.14);
 }
 
+.composer-open-project-button {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 132px;
+  min-height: 26px;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  padding: 0 9px;
+  border: 1px solid rgba(85, 166, 255, 0.24);
+  border-radius: 999px;
+  background: rgba(85, 166, 255, 0.075);
+  color: #b7d9ff;
+  font-size: 10.8px;
+  font-weight: 660;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.composer-open-project-button svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+}
+
+.composer-open-project-button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-open-project-button:not(:disabled):hover {
+  border-color: rgba(85, 166, 255, 0.42);
+  background: rgba(85, 166, 255, 0.13);
+  color: #d7eaff;
+}
+
 .composer-model-settings-button {
   border-color: rgba(85, 166, 255, 0.24);
   background: rgba(85, 166, 255, 0.075);
@@ -3225,6 +3268,13 @@ textarea:focus {
     padding: 0 7px;
   }
 
+  .composer-open-project-button {
+    max-width: 116px;
+    min-height: 24px;
+    padding: 0 8px;
+    font-size: 10.8px;
+  }
+
   .composer-chip-project {
     max-width: 132px;
   }
@@ -3351,6 +3401,12 @@ textarea:focus {
   .workspace-grid-review-open .composer-chip,
   .workspace-grid-review-open .composer-context-note {
     padding: 0 6px;
+  }
+
+  .workspace-grid-review-open .composer-open-project-button {
+    max-width: 110px;
+    min-height: 24px;
+    padding: 0 7px;
   }
 
   .workspace-grid-review-open .composer-chip-project {

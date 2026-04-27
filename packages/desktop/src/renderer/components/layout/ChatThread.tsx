@@ -30,6 +30,7 @@ import {
   ChevronDownIcon,
   CopyIcon,
   DiffIcon,
+  FolderPlusIcon,
   ModelIcon,
   RefreshIcon,
   SendIcon,
@@ -53,6 +54,7 @@ export function ChatThread({
   onModeChange,
   onModelChange,
   onMessageTextChange,
+  onChooseWorkspace,
   onOpenModelSettings,
   onOpenFileReference,
   onOpenReview,
@@ -76,6 +78,7 @@ export function ChatThread({
   onModeChange: (mode: DesktopApprovalMode) => void;
   onModelChange: (modelId: string) => void;
   onMessageTextChange: (message: string) => void;
+  onChooseWorkspace: () => void;
   onOpenModelSettings: () => void;
   onOpenFileReference: (filePath: string) => void;
   onOpenReview: () => void;
@@ -294,13 +297,18 @@ export function ChatThread({
             {notice ? (
               <span className="composer-context-note">{notice}</span>
             ) : null}
-            {disabledReason ? (
-              <span
-                className="composer-disabled-reason"
-                data-testid="composer-disabled-reason"
+            {!activeProject ? (
+              <button
+                aria-label="Open Project"
+                className="composer-open-project-button"
+                data-testid="composer-open-project-button"
+                title={disabledReason ?? 'Open Project'}
+                type="button"
+                onClick={onChooseWorkspace}
               >
-                {disabledReason}
-              </span>
+                <FolderPlusIcon />
+                <span>Open Project</span>
+              </button>
             ) : null}
             {!activeSessionId && activeProject ? (
               <span className="composer-context-note">New thread</span>

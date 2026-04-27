@@ -22,6 +22,120 @@ execution order, verification, decisions, and remaining work.
 
 ## Codex Alignment Progress
 
+### Slice: No-Project Open Project Composer Affordance
+
+Status: completed in iteration 88.
+
+Goal: make the first no-project viewport immediately actionable from the
+composer control center while keeping the empty conversation and sidebar quiet.
+
+User-visible value: a user who launches the desktop app with no recent project
+can open a project from the same bottom task area they will use after the
+project is active, instead of scanning the mostly empty workbench or relying on
+the tiny sidebar heading icon.
+
+Expected files:
+
+- `packages/desktop/src/renderer/components/layout/ChatThread.tsx`
+- `packages/desktop/src/renderer/components/layout/ProjectSidebar.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.tsx`
+- `packages/desktop/src/renderer/components/layout/WorkspacePage.test.tsx`
+- `packages/desktop/src/renderer/styles.css`
+- `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- `.qwen/e2e-tests/electron-desktop/no-project-open-project-affordance.md`
+- `design/qwen-code-electron-desktop-implementation-plan.md`
+
+Acceptance criteria:
+
+- With no active project, the composer remains disabled for text entry but shows
+  a compact, clickable `Open Project` action in the composer action cluster.
+- The no-project action uses icon-plus-label affordance, accessible label/title,
+  and muted secondary styling; the disabled Send action remains visually neutral.
+- The conversation empty state remains quiet and near the composer rather than
+  becoming a landing page.
+- The sidebar no-project state avoids duplicate thread/session noise while
+  preserving the normal project/thread browser once a project is selected.
+- Clicking the composer `Open Project` action follows the existing native
+  project-open path and leaves the project composer enabled afterward.
+
+Verification:
+
+- Unit/component test command:
+  `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+- Syntax command: `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- Build/typecheck/lint commands:
+  `cd packages/desktop && npm run typecheck && npm run lint && npm run build`
+- Real Electron harness:
+  `cd packages/desktop && npm run e2e:cdp`
+- Harness path: `packages/desktop/scripts/e2e-cdp-smoke.mjs`
+- E2E scenario steps: launch real Electron with isolated HOME/user-data and no
+  active project, assert the composer-scoped Open Project action is visible,
+  compact, accessible, and not overflowing, click it, select the fake project
+  through the existing native dialog path, and assert the normal project composer
+  is enabled.
+- E2E assertions: no-project conversation stays visually quiet, sidebar empty
+  state has no duplicate `No sessions` row, the new action is contained in the
+  composer action cluster, disabled Send stays neutral, the document has no
+  overflow, and zero unexpected console errors or failed local requests are
+  recorded.
+- Diagnostic artifacts to collect on failure:
+  `initial-layout.json`, `no-project-open-project-affordance.json`,
+  `initial-workspace.png`, Electron log, and `summary.json` under
+  `.qwen/e2e-tests/electron-desktop/artifacts/`.
+- Required skills applied: `brainstorming` selected the compact composer action
+  over a large welcome panel or enabling a text input without a project;
+  `frontend-design`, constrained by `home.jpg`, keeps the startup surface dense,
+  icon-led, and quiet; and `electron-desktop-dev` requires a real Electron CDP
+  path because the slice depends on native project selection, renderer state,
+  and layout geometry.
+
+Notes and decisions:
+
+- Brainstormed alternatives: add a large centered empty-state card, make the
+  textarea itself trigger project selection, or add a compact action beside the
+  disabled Send control. The compact composer action is the smallest
+  prototype-faithful path because it keeps the bottom composer as the task
+  control center without making the first viewport a landing page.
+- This slice intentionally does not change recent-project persistence, native
+  dialog behavior, lazy session creation, model/provider persistence, or the
+  active-project composer controls.
+
+Verification results:
+
+- `node --check packages/desktop/scripts/e2e-cdp-smoke.mjs` passed.
+- `cd packages/desktop && SHELL=/bin/bash npx vitest run src/renderer/components/layout/WorkspacePage.test.tsx`
+  passed with 39 tests.
+- `cd packages/desktop && npm run typecheck` passed.
+- `cd packages/desktop && npm run lint` passed.
+- `cd packages/desktop && npm run build` passed.
+- `cd packages/desktop && npm run e2e:cdp` passed through real Electron at
+  `.qwen/e2e-tests/electron-desktop/artifacts/2026-04-27T01-57-00-235Z/`.
+- `no-project-open-project-affordance.json` recorded the composer
+  `Open Project` button as enabled, icon-led, 109.9 x 26 px, contained in the
+  composer action cluster, and non-overflowing; the textarea and Send stayed
+  disabled; the sidebar had one quiet `No folder selected` row and no
+  `No sessions` row; `summary.json` recorded zero console errors and zero
+  failed local requests.
+
+Self-review:
+
+- The first viewport stays conversation-first and avoids a welcome-card/landing
+  composition; the only new visible affordance is a compact action in the
+  composer control cluster.
+- The no-project action reuses the existing native project selection callback;
+  no new IPC, server route, local server exposure, credential handling, or
+  Electron security setting was added.
+- Active-project composer-first thread creation, draft model/mode controls,
+  branch/review/settings/terminal, and commit workflows remain covered by the
+  CDP smoke.
+
+Next work:
+
+- Continue prototype fidelity by tightening topbar/action icon weight and
+  checking the no-project sidebar action typography against `home.jpg`.
+- Continue composer-first polish by making missing-key draft sends explain the
+  likely provider failure without blocking intentional testing.
+
 ### Slice: Draft Runtime Controls Apply On First Send
 
 Status: completed in iteration 87.

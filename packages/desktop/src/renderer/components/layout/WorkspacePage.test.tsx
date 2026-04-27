@@ -2086,16 +2086,21 @@ describe('WorkspacePage', () => {
     ).toBeTruthy();
   });
 
-  it('shows a clear disabled composer reason with no active project', () => {
+  it('shows a compact composer Open Project action with no active project', () => {
+    const onChooseWorkspace = vi.fn();
     const renderedContainer = renderWorkspace({
       activeProject: null,
       activeProjectId: null,
       activeSessionId: null,
       isDraftSession: false,
+      onChooseWorkspace,
       projects: [],
       sessions: [],
     });
     const textarea = getMessageTextArea(renderedContainer);
+    const openProjectButton = renderedContainer.querySelector(
+      '[data-testid="composer-open-project-button"]',
+    );
 
     expect(textarea.disabled).toBe(true);
     expect(textarea.placeholder).toBe('Open a project to start');
@@ -2106,9 +2111,26 @@ describe('WorkspacePage', () => {
     expect(
       renderedContainer.querySelector(
         '[data-testid="composer-disabled-reason"]',
-      )?.textContent,
-    ).toBe('Open a project to start');
+      ),
+    ).toBeNull();
+    expect(openProjectButton).toBeInstanceOf(HTMLButtonElement);
+    expect(openProjectButton?.textContent).toBe('Open Project');
+    expect(openProjectButton?.getAttribute('aria-label')).toBe('Open Project');
+    expect(openProjectButton?.getAttribute('title')).toBe(
+      'Open a project to start',
+    );
+    expect(openProjectButton?.querySelector('svg')).toBeTruthy();
+    expect(
+      renderedContainer.querySelector('[data-testid="project-sidebar"]')
+        ?.textContent,
+    ).not.toContain('No sessions');
     expect(renderedContainer.textContent).toContain('Open a project to start');
+
+    act(() => {
+      (openProjectButton as HTMLButtonElement).click();
+    });
+
+    expect(onChooseWorkspace).toHaveBeenCalledTimes(1);
   });
 
   it('submits on Enter and keeps Shift+Enter as a newline path', () => {

@@ -271,14 +271,6 @@ function ProjectBrowser({
         data-testid="project-list"
       >
         <div className="empty-row">No folder selected</div>
-        <ThreadList
-          activeSessionId={activeSessionId}
-          ariaLabel="Threads"
-          className="project-thread-list"
-          isDraftSession={false}
-          sessions={[]}
-          onSelect={onSelectSession}
-        />
       </div>
     );
   }

@@ -237,6 +237,7 @@ export function WorkspacePage({
             notice={chatNotice}
             onAskUserQuestionResponse={onAskUserQuestionResponse}
             onCopyMessage={onCopyMessage}
+            onChooseWorkspace={onChooseWorkspace}
             onModeChange={onModeChange}
             onModelChange={onModelChange}
             onMessageTextChange={onMessageTextChange}
