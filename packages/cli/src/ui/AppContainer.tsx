@@ -515,6 +515,7 @@ export const AppContainer = (props: AppContainerProps) => {
     handleCodingPlanSubmit,
     handleAlibabaStandardSubmit,
     handleOpenRouterSubmit,
+    handleCustomApiKeySubmit,
     openAuthDialog,
     cancelAuthentication,
   } = useAuthCommand(settings, config, historyManager.addItem, refreshStatic);
@@ -2355,6 +2356,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleCodingPlanSubmit,
       handleAlibabaStandardSubmit,
       handleOpenRouterSubmit,
+      handleCustomApiKeySubmit,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
@@ -2424,6 +2426,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleCodingPlanSubmit,
       handleAlibabaStandardSubmit,
       handleOpenRouterSubmit,
+      handleCustomApiKeySubmit,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,

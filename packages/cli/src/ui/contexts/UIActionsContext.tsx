@@ -53,6 +53,24 @@ export interface UIActions {
     modelIdsInput: string,
   ) => Promise<void>;
   handleOpenRouterSubmit: () => Promise<void>;
+  handleCustomApiKeySubmit: (
+    protocol:
+      | AuthType.USE_OPENAI
+      | AuthType.USE_ANTHROPIC
+      | AuthType.USE_GEMINI,
+    baseUrl: string,
+    apiKey: string,
+    modelIdsInput: string,
+    generationConfig?: {
+      enableThinking?: boolean;
+      multimodal?: {
+        image?: boolean;
+        video?: boolean;
+        audio?: boolean;
+      };
+      maxTokens?: number;
+    },
+  ) => Promise<void>;
   setAuthState: (state: AuthState) => void;
   onAuthError: (error: string | null) => void;
   cancelAuthentication: () => void;
