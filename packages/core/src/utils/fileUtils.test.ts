@@ -40,6 +40,40 @@ vi.mock('mime/lite', () => ({
   getType: vi.fn(),
 }));
 
+// Mock execFile so isPdftotextAvailable does not spawn a real process.
+// On platforms where pdftotext is not installed (e.g. Windows CI),
+// the 5-second execFile timeout can exceed the default 5s test timeout.
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    execFile: vi.fn(
+      (
+        _command: string,
+        _args: string[],
+        _optionsOrCallback: unknown,
+        _callback?: unknown,
+      ) => {
+        // Resolve the callback (supports both signatures of execFile)
+        const cb =
+          typeof _optionsOrCallback === 'function'
+            ? _optionsOrCallback
+            : _callback;
+        const error = Object.assign(new Error('Command not found'), {
+          code: 'ENOENT',
+        });
+        if (typeof cb === 'function') {
+          setImmediate(() => cb(error, '', ''));
+        }
+        return {
+          kill: vi.fn(),
+          on: vi.fn(),
+        } as unknown as import('node:child_process').ChildProcess;
+      },
+    ),
+  };
+});
+
 const mockMimeGetType = mime.getType as Mock;
 
 describe('fileUtils', () => {

@@ -4,8 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
-import { buildRuntimeFetchOptions } from './runtimeFetchOptions.js';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  buildRuntimeFetchOptions,
+  getOrCreateSharedDispatcher,
+  resetDispatcherCache,
+} from './runtimeFetchOptions.js';
 
 type UndiciOptions = Record<string, unknown>;
 
@@ -31,6 +35,9 @@ vi.mock('undici', () => {
 });
 
 describe('buildRuntimeFetchOptions (node runtime)', () => {
+  beforeEach(() => {
+    resetDispatcherCache();
+  });
   it('disables undici timeouts for Agent in OpenAI options', () => {
     const result = buildRuntimeFetchOptions('openai');
 
@@ -91,5 +98,38 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
       headersTimeout: 0,
       bodyTimeout: 0,
     });
+  });
+});
+
+describe('getOrCreateSharedDispatcher', () => {
+  beforeEach(() => {
+    resetDispatcherCache();
+  });
+
+  it('returns the same instance for repeated calls without proxy', () => {
+    const d1 = getOrCreateSharedDispatcher();
+    const d2 = getOrCreateSharedDispatcher();
+    expect(d1).toBe(d2);
+  });
+
+  it('returns the same instance for repeated calls with the same proxy', () => {
+    const d1 = getOrCreateSharedDispatcher('http://proxy.local');
+    const d2 = getOrCreateSharedDispatcher('http://proxy.local');
+    expect(d1).toBe(d2);
+  });
+
+  it('returns different instances for different proxy URLs', () => {
+    const d1 = getOrCreateSharedDispatcher();
+    const d2 = getOrCreateSharedDispatcher('http://proxy.local');
+    expect(d1).not.toBe(d2);
+  });
+
+  it('shares the same dispatcher with buildRuntimeFetchOptions', () => {
+    const shared = getOrCreateSharedDispatcher();
+    const result = buildRuntimeFetchOptions('openai');
+    const sdkDispatcher = (
+      result as { fetchOptions?: { dispatcher?: unknown } }
+    ).fetchOptions?.dispatcher;
+    expect(sdkDispatcher).toBe(shared);
   });
 });

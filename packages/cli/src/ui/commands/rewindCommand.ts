@@ -16,7 +16,7 @@ export const rewindCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   action: async (): Promise<SlashCommandActionReturn> => ({
-      type: 'dialog',
-      dialog: 'rewind',
-    }),
+    type: 'dialog',
+    dialog: 'rewind',
+  }),
 };

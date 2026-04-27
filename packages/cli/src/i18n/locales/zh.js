@@ -1291,6 +1291,8 @@ export default {
     '付费 \u00B7 每 5 小时最多 6,000 次请求 \u00B7 支持阿里云百炼 Coding Plan 全部模型',
   'Alibaba Cloud Coding Plan': '阿里云百炼 Coding Plan',
   'Bring your own API key': '使用自己的 API 密钥',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    '基于浏览器的第三方提供商认证（例如 OpenRouter、ModelScope）',
   'Use coding plan credentials or your own api-keys/providers.':
     '使用 Coding Plan 凭证或您自己的 API 密钥/提供商。',
   OpenAI: 'OpenAI',
