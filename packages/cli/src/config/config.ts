@@ -67,7 +67,6 @@ export function isValidSessionId(value: string): boolean {
 }
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
-import { buildWebSearchConfig } from './webSearch.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 const debugLogger = createDebugLogger('CONFIG');
@@ -138,10 +137,6 @@ export interface CliArgs {
   openaiLoggingDir: string | undefined;
   proxy: string | undefined;
   includeDirectories: string[] | undefined;
-  tavilyApiKey: string | undefined;
-  googleApiKey: string | undefined;
-  googleSearchEngineId: string | undefined;
-  webSearchDefault: string | undefined;
   screenReader: boolean | undefined;
   inputFormat?: string | undefined;
   outputFormat: string | undefined;
@@ -431,23 +426,6 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           description: 'OpenAI base URL (for custom endpoints)',
         })
-        .option('tavily-api-key', {
-          type: 'string',
-          description: 'Tavily API key for web search',
-        })
-        .option('google-api-key', {
-          type: 'string',
-          description: 'Google Custom Search API key',
-        })
-        .option('google-search-engine-id', {
-          type: 'string',
-          description: 'Google Custom Search Engine ID',
-        })
-        .option('web-search-default', {
-          type: 'string',
-          description:
-            'Default web search provider (dashscope, tavily, google)',
-        })
         .option('screen-reader', {
           type: 'boolean',
           description: 'Enable screen reader mode for accessibility.',
@@ -524,13 +502,6 @@ export async function parseArguments(): Promise<CliArgs> {
           coerce: (tools: string[]) =>
             tools.flatMap((tool) => tool.split(',').map((t) => t.trim())),
         })
-        .option('allowed-tools', {
-          type: 'array',
-          string: true,
-          description: 'Tools to allow, will bypass confirmation',
-          coerce: (tools: string[]) =>
-            tools.flatMap((tool) => tool.split(',').map((t) => t.trim())),
-        })
         .option('disabled-slash-commands', {
           type: 'array',
           string: true,
@@ -541,6 +512,13 @@ export async function parseArguments(): Promise<CliArgs> {
             'against the final command name.',
           coerce: (names: string[]) =>
             names.flatMap((n) => n.split(',').map((t) => t.trim())),
+        })
+        .option('allowed-tools', {
+          type: 'array',
+          string: true,
+          description: 'Tools to allow, will bypass confirmation',
+          coerce: (tools: string[]) =>
+            tools.flatMap((tool) => tool.split(',').map((t) => t.trim())),
         })
         .option('auth-type', {
           type: 'string',
@@ -1190,6 +1168,7 @@ export async function loadCliConfig(
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     cronEnabled: settings.experimental?.cron ?? false,
+    emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
     overrideExtensions: overrideExtensions || argv.extensions,
     noBrowser: !!process.env['NO_BROWSER'],
@@ -1206,9 +1185,6 @@ export async function loadCliConfig(
       ? []
       : (settings.security?.allowedHttpHookUrls ?? []),
     cliVersion: await getCliVersion(),
-    webSearch: bareMode
-      ? undefined
-      : buildWebSearchConfig(argv, settings, selectedAuthType),
     ideMode,
     chatCompression: settings.model?.chatCompression,
     folderTrust,

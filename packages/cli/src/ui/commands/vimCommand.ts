@@ -14,7 +14,7 @@ export const vimCommand: SlashCommand = {
     return t('toggle vim mode on/off');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
+  supportedModes: ['interactive'] as const,
   action: async (context, _args) => {
     const newVimState = await context.ui.toggleVimEnabled();
 

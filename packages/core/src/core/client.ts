@@ -156,17 +156,6 @@ export class GeminiClient {
    */
   private lastApiCompletionTimestamp: number | null = null;
 
-  /**
-   * Sticky-on latch for clearing thinking blocks from prior turns.
-   * Triggered when idle exceeds the configured threshold (default 5 min,
-   * aligned with provider prompt-cache TTL). Once latched, stays true to
-   * prevent oscillation: without it, thinking would accumulate → get
-   * stripped → accumulate again, causing the message prefix to change
-   * repeatedly (bad for provider-side prompt caching and wastes context).
-   * Reset on /clear (resetChat).
-   */
-  private thinkingClearLatched = false;
-
   constructor(private readonly config: Config) {
     this.loopDetector = new LoopDetectionService(config);
   }
@@ -228,6 +217,11 @@ export class GeminiClient {
     this.forceFullIdeContext = true;
   }
 
+  truncateHistory(keepCount: number) {
+    this.getChat().truncateHistory(keepCount);
+    this.forceFullIdeContext = true;
+  }
+
   async setTools(): Promise<void> {
     if (!this.isInitialized()) {
       return;
@@ -242,8 +236,6 @@ export class GeminiClient {
 
   async resetChat(): Promise<void> {
     this.surfacedRelevantAutoMemoryPaths.clear();
-    // Reset thinking clear latch — fresh chat, no prior thinking to clean up
-    this.thinkingClearLatched = false;
     this.lastApiCompletionTimestamp = null;
     await this.startChat();
   }
@@ -693,29 +685,6 @@ export class GeminiClient {
           ?.recordCronPrompt(request, options?.notificationDisplayText);
       } else {
         this.config.getChatRecordingService()?.recordUserMessage(request);
-      }
-
-      // Idle cleanup: clear stale thinking blocks after idle period.
-      // Latch: once triggered, never revert — prevents oscillation.
-      const idleConfig = this.config.getClearContextOnIdle();
-      const thinkingThresholdMin = idleConfig.thinkingThresholdMinutes ?? 5;
-      if (
-        thinkingThresholdMin >= 0 &&
-        !this.thinkingClearLatched &&
-        this.lastApiCompletionTimestamp !== null
-      ) {
-        const thresholdMs = thinkingThresholdMin * 60 * 1000;
-        const idleMs = Date.now() - this.lastApiCompletionTimestamp;
-        if (idleMs > thresholdMs) {
-          this.thinkingClearLatched = true;
-          debugLogger.debug(
-            `Thinking clear latched: idle ${Math.round(idleMs / 1000)}s > threshold ${thresholdMs / 1000}s`,
-          );
-        }
-      }
-      if (this.thinkingClearLatched) {
-        this.getChat().stripThoughtsFromHistoryKeepRecent(1);
-        debugLogger.debug('Stripped old thinking blocks (keeping last 1 turn)');
       }
 
       // Idle cleanup: clear old tool results when idle > threshold.

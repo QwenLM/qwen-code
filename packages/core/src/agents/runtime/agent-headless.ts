@@ -136,6 +136,7 @@ export class AgentHeadless {
   private readonly core: AgentCore;
   private finalText: string = '';
   private terminateMode: AgentTerminateMode = AgentTerminateMode.ERROR;
+  private externalMessageProvider?: () => string[];
 
   private constructor(core: AgentCore) {
     this.core = core;
@@ -254,6 +255,7 @@ export class AgentHeadless {
           maxTurns: this.core.runConfig.max_turns,
           maxTimeMinutes: this.core.runConfig.max_time_minutes,
           startTimeMs: startTime,
+          getExternalMessages: this.externalMessageProvider,
         },
       );
 
@@ -348,6 +350,14 @@ export class AgentHeadless {
 
   getTerminateMode(): AgentTerminateMode {
     return this.terminateMode;
+  }
+
+  /**
+   * Sets a callback that the reasoning loop calls between tool rounds
+   * to drain external messages (e.g. from SendMessage tool).
+   */
+  setExternalMessageProvider(provider: () => string[]): void {
+    this.externalMessageProvider = provider;
   }
 
   get name(): string {

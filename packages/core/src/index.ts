@@ -98,7 +98,6 @@ export * from './tools/sdk-control-client-transport.js';
 export * from './tools/modifiable-tool.js';
 
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
-export type { WebSearchProviderConfig } from './tools/web-search/types.js';
 export { buildSkillLlmContent } from './tools/skill-utils.js';
 
 // Backward-compatible type re-exports for tool classes removed from eager loading.
@@ -128,12 +127,6 @@ export type {
   TodoWriteParams,
 } from './tools/todoWrite.js';
 export type { WebFetchTool, WebFetchToolParams } from './tools/web-fetch.js';
-export type {
-  WebSearchTool,
-  WebSearchToolParams,
-  WebSearchToolResult,
-  WebSearchConfig,
-} from './tools/web-search/index.js';
 export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
 export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
@@ -151,7 +144,10 @@ export * from './services/gitService.js';
 export * from './services/gitWorktreeService.js';
 export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
+export * from './services/sessionTitle.js';
+export { stripTerminalControlSequences } from './utils/terminalSafe.js';
 export * from './services/shellExecutionService.js';
+export * from './services/toolUseSummary.js';
 export * from './utils/bareMode.js';
 
 // ============================================================================
@@ -303,6 +299,10 @@ export * from './utils/request-tokenizer/supportedImageFormats.js';
 export { TextTokenizer } from './utils/request-tokenizer/textTokenizer.js';
 export * from './utils/retry.js';
 export * from './utils/ripgrepUtils.js';
+export {
+  detectRuntime,
+  getOrCreateSharedDispatcher,
+} from './utils/runtimeFetchOptions.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/shell-utils.js';
 export * from './utils/subagentGenerator.js';

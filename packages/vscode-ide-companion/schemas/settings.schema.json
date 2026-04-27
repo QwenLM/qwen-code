@@ -83,16 +83,18 @@
           "default": false
         },
         "language": {
-          "description": "The language for the user interface. Use \"auto\" to detect from system settings. You can also use custom language codes (e.g., \"es\", \"fr\") by placing JS language files in ~/.qwen/locales/ (e.g., ~/.qwen/locales/es.js). Options: auto, en, zh, ru, de, ja, pt, fr",
+          "description": "The language for the user interface. Use \"auto\" to detect from system settings. You can also use custom language codes (e.g., \"es\", \"fr\") by placing JS language files in ~/.qwen/locales/ (e.g., ~/.qwen/locales/es.js). Options: auto, en, zh-TW, zh, ru, de, ja, pt, fr, ca",
           "enum": [
             "auto",
             "en",
+            "zh-TW",
             "zh",
             "ru",
             "de",
             "ja",
             "pt",
-            "fr"
+            "fr",
+            "ca"
           ],
           "default": "auto"
         },
@@ -402,11 +404,6 @@
           "description": "Settings for clearing stale context after idle periods. Use -1 to disable a threshold.",
           "type": "object",
           "properties": {
-            "thinkingThresholdMinutes": {
-              "description": "Minutes of inactivity before clearing old thinking blocks. Use -1 to disable.",
-              "type": "number",
-              "default": 5
-            },
             "toolResultsThresholdMinutes": {
               "description": "Minutes of inactivity before clearing old tool result content. Use -1 to disable.",
               "type": "number",
@@ -463,6 +460,19 @@
         }
       }
     },
+    "slashCommands": {
+      "description": "Configuration for slash commands exposed by the CLI. Useful for locking down the command surface in multi-tenant or enterprise deployments.",
+      "type": "object",
+      "properties": {
+        "disabled": {
+          "description": "Slash command names to hide and refuse to execute. Matched case-insensitively against the final command name (for extension commands this is the disambiguated form, e.g. \"myext.deploy\"). Merged as a union across settings scopes, so workspace settings can add to but not remove entries defined in system/user settings.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "permissions": {
       "description": "Permission rules controlling tool usage. Rules are evaluated in priority order: deny > ask > allow.",
       "type": "object",
@@ -483,19 +493,6 @@
         },
         "deny": {
           "description": "Tools or commands that are always blocked. Highest priority rule. Examples: \"ShellTool\", \"Bash(rm -rf *)\".",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      }
-    },
-    "slashCommands": {
-      "description": "Configuration for slash commands exposed by the CLI. Useful for locking down the command surface in multi-tenant or enterprise deployments.",
-      "type": "object",
-      "properties": {
-        "disabled": {
-          "description": "Slash command names to hide and refuse to execute. Matched case-insensitively against the final command name (for extension commands this is the disambiguated form, e.g. \"myext.deploy\"). Merged as a union across settings scopes, so workspace settings can add to but not remove entries defined in system/user settings.",
           "type": "array",
           "items": {
             "type": "string"
@@ -710,17 +707,8 @@
         "runtimeOutputDir": {
           "description": "Custom directory for runtime output (temp files, debug logs, session data, todos, etc.). Config files remain at ~/.qwen. Env var QWEN_RUNTIME_DIR takes priority.",
           "type": "string"
-        },
-        "tavilyApiKey": {
-          "description": "⚠️ DEPRECATED: Please use webSearch.provider configuration instead. Legacy API key for the Tavily API.",
-          "type": "string"
         }
       }
-    },
-    "webSearch": {
-      "description": "Configuration for web search providers.",
-      "type": "object",
-      "additionalProperties": true
     },
     "agents": {
       "description": "Settings for multi-agent collaboration features (Arena, Team, Swarm).",
@@ -2022,6 +2010,11 @@
           "description": "Enable in-session cron/loop tools (experimental). When enabled, the model can create recurring prompts using cron_create, cron_list, and cron_delete tools. Can also be enabled via QWEN_CODE_ENABLE_CRON=1 environment variable.",
           "type": "boolean",
           "default": false
+        },
+        "emitToolUseSummaries": {
+          "description": "Generate a short LLM-based label after each tool batch completes. In compact mode the label replaces the generic `Tool × N` header; in full mode it appears as a dim `● <label>` line below the tool group. Requires a fast model to be configured; runs in parallel with the next API call so latency is hidden. Currently affects interactive CLI rendering only — SDK / non-interactive emission of the `tool_use_summary` message is not yet wired (the message factory is exported for a follow-up PR). Can be overridden with QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0 or =1.",
+          "type": "boolean",
+          "default": true
         }
       }
     },

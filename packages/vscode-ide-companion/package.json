@@ -2,7 +2,7 @@
   "name": "qwen-code-vscode-ide-companion",
   "displayName": "Qwen Code Companion",
   "description": "Enable Qwen Code with direct access to your VS Code workspace.",
-  "version": "0.14.5",
+  "version": "0.15.2",
   "publisher": "qwenlm",
   "icon": "assets/icon.png",
   "repository": {
@@ -125,6 +125,18 @@
       {
         "command": "qwen-code.showLogs",
         "title": "Qwen Code: Show Logs"
+      },
+      {
+        "command": "qwen-code.copyMessage",
+        "title": "%qwen-code.copyMessage.title%"
+      },
+      {
+        "command": "qwen-code.copyAllMessages",
+        "title": "%qwen-code.copyAllMessages.title%"
+      },
+      {
+        "command": "qwen-code.copyLastReply",
+        "title": "%qwen-code.copyLastReply.title%"
       }
     ],
     "menus": {
@@ -139,6 +151,35 @@
         },
         {
           "command": "qwen-code.auth"
+        },
+        {
+          "command": "qwen-code.copyMessage",
+          "when": "false"
+        },
+        {
+          "command": "qwen-code.copyAllMessages",
+          "when": "false"
+        },
+        {
+          "command": "qwen-code.copyLastReply",
+          "when": "false"
+        }
+      ],
+      "webview/context": [
+        {
+          "command": "qwen-code.copyMessage",
+          "when": "webviewSection == 'chat-messages'",
+          "group": "9_cutcopypaste@1"
+        },
+        {
+          "command": "qwen-code.copyAllMessages",
+          "when": "webviewSection == 'chat-messages'",
+          "group": "9_cutcopypaste@2"
+        },
+        {
+          "command": "qwen-code.copyLastReply",
+          "when": "webviewSection == 'chat-messages'",
+          "group": "9_cutcopypaste@3"
         }
       ],
       "editor/title": [
@@ -194,6 +235,18 @@
           ],
           "default": "china",
           "markdownDescription": "Region for Coding Plan. _(Only used when Provider is `coding-plan`)_"
+        },
+        "qwen-code.dotIndicator": {
+          "order": 3,
+          "type": "boolean",
+          "default": true,
+          "description": "Show a colored dot on the tab icon when a task completes (orange) or needs your attention (blue) while the tab is hidden."
+        },
+        "qwen-code.notifications": {
+          "order": 4,
+          "type": "boolean",
+          "default": true,
+          "description": "Show notifications with sound when a task completes (at least 20 seconds) or needs your attention, while you are not actively viewing the Qwen Code panel."
         }
       }
     },

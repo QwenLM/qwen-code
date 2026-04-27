@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.14.5",
+  "version": "0.15.2",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -16,6 +16,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./export": {
+      "types": "./dist/src/export/index.d.ts",
+      "import": "./dist/src/export/index.js"
     }
   },
   "scripts": {
@@ -33,7 +37,7 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.14.5"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.15.2"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",

@@ -28,6 +28,8 @@ import { vi, type Mock, type MockInstance } from 'vitest';
 import type { LoadedSettings } from './config/settings.js';
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
+import { _resetCleanupFunctionsForTest } from './utils/cleanup.js';
+import { _resetExitLatchForTest } from './utils/errors.js';
 
 // Mock core modules
 vi.mock('./ui/hooks/atCommandProcessor.js');
@@ -79,6 +81,12 @@ describe('runNonInteractive', () => {
   let mockGetDebugResponses: Mock;
 
   beforeEach(async () => {
+    // Reset module-level state from any prior test in this file. Without
+    // these resets the once-set exit latch parks subsequent JSON-mode
+    // handleError tests in the never-resolving promise (5s vitest timeout).
+    _resetCleanupFunctionsForTest();
+    _resetExitLatchForTest();
+
     mockCoreExecuteToolCall = vi.mocked(executeToolCall);
     mockShutdownTelemetry = vi.mocked(shutdownTelemetry);
     mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
@@ -152,12 +160,16 @@ describe('runNonInteractive', () => {
       isInteractive: vi.fn().mockReturnValue(false),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getCronScheduler: vi.fn().mockReturnValue(null),
+      setModelInvocableCommandsProvider: vi.fn(),
+      setModelInvocableCommandsExecutor: vi.fn(),
+      getDisabledSlashCommands: vi.fn().mockReturnValue([]),
       getBackgroundTaskRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),
         setRegisterCallback: vi.fn(),
         getRunning: vi.fn().mockReturnValue([]),
+        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+        abortAll: vi.fn(),
       }),
-      getDisabledSlashCommands: vi.fn().mockReturnValue([]),
     } as unknown as Config;
 
     mockSettings = {
@@ -269,6 +281,38 @@ describe('runNonInteractive', () => {
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
     expect(mockShutdownTelemetry).toHaveBeenCalled();
+  });
+
+  it('on EPIPE, destroys stdout and returns normally instead of process.exit', async () => {
+    // Regression: process.exit(0) on EPIPE bypassed runExitCleanup → flush()
+    // and dropped queued JSONL writes for `qwen -p ... | head -1` patterns.
+    // process.exit is mocked to throw in beforeEach, so reaching the
+    // assertion also proves the bypass route is gone.
+    setupMetricsMock();
+    const stdoutDestroySpy = vi
+      .spyOn(process.stdout, 'destroy')
+      .mockReturnValue(process.stdout);
+
+    mockGeminiClient.sendMessageStream.mockImplementation(
+      async function* mockStream(): AsyncGenerator<ServerGeminiStreamEvent> {
+        process.stdout.emit(
+          'error',
+          Object.assign(new Error('EPIPE'), { code: 'EPIPE' }),
+        );
+        yield { type: GeminiEventType.Content, value: 'Hello' };
+        yield {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        };
+      },
+    );
+
+    await runNonInteractive(mockConfig, mockSettings, 'test', 'p1');
+
+    expect(stdoutDestroySpy).toHaveBeenCalled();
   });
 
   it('should handle a single tool call and respond', async () => {

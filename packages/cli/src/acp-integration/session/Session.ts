@@ -147,7 +147,6 @@ export class Session implements SessionContext {
 
   constructor(
     id: string,
-    private readonly chat: GeminiChat,
     readonly config: Config,
     private readonly client: AgentSideConnection,
     private readonly settings: LoadedSettings,
@@ -294,7 +293,9 @@ export class Session implements SessionContext {
         // Increment turn counter for each user prompt
         this.turn += 1;
 
-        const chat = this.chat;
+        // Always fetch the current chat from GeminiClient so that /clear's
+        // resetChat() (which replaces the chat instance) is reflected here.
+        const chat = this.config.getGeminiClient()!.getChat();
         const promptId = this.config.getSessionId() + '########' + this.turn;
 
         // Extract text from all text blocks to construct the full prompt text for logging
@@ -521,17 +522,11 @@ export class Session implements SessionContext {
           }
 
           if (functionCalls.length > 0) {
-            const toolResponseParts: Part[] = [];
-
-            for (const fc of functionCalls) {
-              const response = await this.runTool(
-                pendingSend.signal,
-                promptId,
-                fc,
-              );
-              toolResponseParts.push(...response);
-            }
-
+            const toolResponseParts = await this.runToolCalls(
+              pendingSend.signal,
+              promptId,
+              functionCalls,
+            );
             nextMessage = { role: 'user', parts: toolResponseParts };
           }
         }
@@ -591,12 +586,12 @@ export class Session implements SessionContext {
       // Get response text from the chat history
       const history = chat.getHistory();
       const lastModelMessage = history
-        .filter((msg) => msg.role === 'model')
+        .filter((msg: Content) => msg.role === 'model')
         .pop();
       const responseText =
         lastModelMessage?.parts
-          ?.filter((p): p is { text: string } => 'text' in p)
-          .map((p) => p.text)
+          ?.filter((p: Part): p is { text: string } & Part => 'text' in p)
+          .map((p: { text: string }) => p.text)
           .join('') || '[no response text]';
 
       const response = await messageBus.request<
@@ -762,17 +757,11 @@ export class Session implements SessionContext {
 
           // Process tool calls from the follow-up message
           if (functionCalls.length > 0) {
-            const toolResponseParts: Part[] = [];
-
-            for (const fc of functionCalls) {
-              const toolResponse = await this.runTool(
-                pendingSend.signal,
-                promptId,
-                fc,
-              );
-              toolResponseParts.push(...toolResponse);
-            }
-
+            const toolResponseParts = await this.runToolCalls(
+              pendingSend.signal,
+              promptId,
+              functionCalls,
+            );
             nextMessage = { role: 'user', parts: toolResponseParts };
           }
         }
@@ -894,14 +883,17 @@ export class Session implements SessionContext {
               null;
             const streamStartTime = Date.now();
 
-            const responseStream = await this.chat.sendMessageStream(
-              this.config.getModel(),
-              {
-                message: nextMessage.parts ?? [],
-                config: { abortSignal: ac.signal },
-              },
-              promptId,
-            );
+            const responseStream = await this.config
+              .getGeminiClient()!
+              .getChat()
+              .sendMessageStream(
+                this.config.getModel(),
+                {
+                  message: nextMessage.parts ?? [],
+                  config: { abortSignal: ac.signal },
+                },
+                promptId,
+              );
             nextMessage = null;
 
             for await (const resp of responseStream) {
@@ -952,11 +944,11 @@ export class Session implements SessionContext {
             }
 
             if (functionCalls.length > 0) {
-              const toolResponseParts: Part[] = [];
-              for (const fc of functionCalls) {
-                const response = await this.runTool(ac.signal, promptId, fc);
-                toolResponseParts.push(...response);
-              }
+              const toolResponseParts = await this.runToolCalls(
+                ac.signal,
+                promptId,
+                functionCalls,
+              );
               nextMessage = { role: 'user', parts: toolResponseParts };
             }
           }
@@ -989,13 +981,31 @@ export class Session implements SessionContext {
         (cmd) => ({
           name: cmd.name,
           description: cmd.description,
-          input: null,
+          input: cmd.argumentHint ? { hint: cmd.argumentHint } : null,
         }),
       );
+
+      let availableSkills: string[] | undefined;
+      try {
+        const skillManager = this.config.getSkillManager();
+        if (skillManager) {
+          const skills = await skillManager.listSkills();
+          availableSkills = skills.map((skill) => skill.name);
+        }
+      } catch (error) {
+        debugLogger.error('Error loading available skills:', error);
+      }
 
       const update: SessionUpdate = {
         sessionUpdate: 'available_commands_update',
         availableCommands,
+        ...(availableSkills
+          ? {
+              _meta: {
+                availableSkills,
+              },
+            }
+          : {}),
       };
 
       await this.sendUpdate(update);
@@ -1097,6 +1107,79 @@ export class Session implements SessionContext {
     };
 
     await this.sendUpdate(update);
+  }
+
+  /**
+   * Execute a batch of model-returned tool calls, running Agent calls
+   * concurrently while keeping other tools sequential.
+   *
+   * Mirrors the partition logic in `coreToolScheduler.partitionToolCalls`:
+   * consecutive Agent calls form a parallel batch (they spawn independent
+   * sub-agents with no shared mutable state); any other tool forms its own
+   * sequential batch to preserve the implicit ordering the model may rely
+   * on. Response-part ordering matches the original `functionCalls` order.
+   */
+  private async runToolCalls(
+    abortSignal: AbortSignal,
+    promptId: string,
+    functionCalls: FunctionCall[],
+  ): Promise<Part[]> {
+    type Batch = { concurrent: boolean; calls: FunctionCall[] };
+    const batches: Batch[] = [];
+    for (const fc of functionCalls) {
+      const isAgent = fc.name === ToolNames.AGENT;
+      const last = batches[batches.length - 1];
+      if (isAgent && last?.concurrent) {
+        last.calls.push(fc);
+      } else {
+        batches.push({ concurrent: isAgent, calls: [fc] });
+      }
+    }
+
+    // Bounded-concurrency runner: matches core's `runConcurrently`
+    // behaviour (`coreToolScheduler.ts:1506`), capped by
+    // `QWEN_CODE_MAX_TOOL_CONCURRENCY` (default 10). Results are returned
+    // in input order regardless of resolution order.
+    const runBounded = async (calls: FunctionCall[]): Promise<Part[][]> => {
+      const parsed = parseInt(
+        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] || '',
+        10,
+      );
+      const maxConcurrency =
+        Number.isFinite(parsed) && parsed >= 1 ? parsed : 10;
+      const results: Part[][] = new Array(calls.length);
+      const executing = new Set<Promise<void>>();
+      for (let i = 0; i < calls.length; i++) {
+        const idx = i;
+        const p = this.runTool(abortSignal, promptId, calls[idx])
+          .then((r) => {
+            results[idx] = r;
+          })
+          .finally(() => {
+            executing.delete(p);
+          });
+        executing.add(p);
+        if (executing.size >= maxConcurrency) {
+          await Promise.race(executing);
+        }
+      }
+      await Promise.all(executing);
+      return results;
+    };
+
+    const parts: Part[] = [];
+    for (const batch of batches) {
+      if (batch.concurrent && batch.calls.length > 1) {
+        const results = await runBounded(batch.calls);
+        for (const r of results) parts.push(...r);
+      } else {
+        for (const fc of batch.calls) {
+          const r = await this.runTool(abortSignal, promptId, fc);
+          parts.push(...r);
+        }
+      }
+    }
+    return parts;
   }
 
   /**
@@ -1243,14 +1326,19 @@ export class Session implements SessionContext {
     try {
       const invocation = tool.build(args);
 
-      if (isAgentTool && 'eventEmitter' in invocation) {
-        // Access eventEmitter from AgentTool invocation
-        const taskEventEmitter = (
-          invocation as {
-            eventEmitter: AgentEventEmitter;
-          }
-        ).eventEmitter;
-
+      // Production AgentTool always initializes `eventEmitter` on its
+      // invocation (`agent.ts:392`). Be defensive about the `undefined`
+      // case too so an incomplete/custom AgentTool invocation degrades
+      // gracefully (no sub-agent event forwarding) instead of throwing
+      // inside SubAgentTracker.setup — the `'eventEmitter' in invocation`
+      // key-presence check passed for `{ eventEmitter: undefined }` and
+      // the ensuing `eventEmitter.on(...)` blew up.
+      const taskEventEmitter = (
+        invocation as {
+          eventEmitter?: AgentEventEmitter;
+        }
+      ).eventEmitter;
+      if (isAgentTool && taskEventEmitter) {
         // Extract subagent metadata from AgentTool call
         const parentToolCallId = callId;
         const subagentType = (args['subagent_type'] as string) ?? '';
@@ -1752,44 +1840,59 @@ export class Session implements SessionContext {
         return normalizePartList(result.content);
 
       case 'message': {
-        await this.client.extNotification('_qwencode/slash_command', {
-          sessionId: this.sessionId,
-          command: originalPrompt
-            .filter((block) => block.type === 'text')
-            .map((block) => (block.type === 'text' ? block.text : ''))
-            .join(' '),
-          messageType: result.messageType,
-          message: result.content || '',
-        });
-
         if (result.messageType === 'error') {
           // Throw error to stop execution
           throw new Error(result.content || 'Slash command failed.');
         }
-        // For info messages, return null to indicate command was handled
+        // Emit the message as an agent message chunk so Zed renders it in the
+        // chat UI. extNotification only goes to the ACP debug log and is not
+        // rendered by Zed.
+        // Replace bare \n with Markdown hard line-breaks (two trailing spaces)
+        // so Zed's Markdown renderer preserves the line structure.
+        const rendered = (result.content || '').replace(/\n/g, '  \n');
+        await this.messageEmitter.emitAgentMessage(rendered);
+        // Write a system/slash_command record so history replay on restart can
+        // re-emit this message. system records are skipped by
+        // buildApiHistoryFromConversation, so this won't pollute model context.
+        this.config.getChatRecordingService()?.recordSlashCommand({
+          phase: 'result',
+          rawCommand: originalPrompt
+            .filter((b) => b.type === 'text')
+            .map((b) => (b.type === 'text' ? b.text : ''))
+            .join(' '),
+          outputHistoryItems: [
+            { type: 'assistant', text: result.content || '' },
+          ],
+        });
         return null;
       }
 
       case 'stream_messages': {
         // Command returns multiple messages via async generator (ACP-preferred)
-        const command = originalPrompt
-          .filter((block) => block.type === 'text')
-          .map((block) => (block.type === 'text' ? block.text : ''))
-          .join(' ');
-
-        // Stream all messages to the client
+        // Stream all messages to the client as agent message chunks.
+        const chunks: string[] = [];
         for await (const msg of result.messages) {
-          await this.client.extNotification('_qwencode/slash_command', {
-            sessionId: this.sessionId,
-            command,
-            messageType: msg.messageType,
-            message: msg.content,
-          });
-
-          // If we encounter an error message, throw after sending
           if (msg.messageType === 'error') {
             throw new Error(msg.content || 'Slash command failed.');
           }
+          await this.messageEmitter.emitAgentMessage(
+            (msg.content || '').replace(/\n/g, '  \n'),
+          );
+          chunks.push(msg.content || '');
+        }
+        // Write a system/slash_command record for history replay (same reason as
+        // 'message' case — system records are invisible to model history).
+        if (chunks.length > 0) {
+          this.config.getChatRecordingService()?.recordSlashCommand({
+            phase: 'result',
+            rawCommand: originalPrompt
+              .filter((b) => b.type === 'text')
+              .map((b) => (b.type === 'text' ? b.text : ''))
+              .join(' '),
+            outputHistoryItems: [
+              { type: 'assistant', text: chunks.join('\n') },
+            ],
+          });
         }
 
         // All messages sent successfully, return null to indicate command was handled

@@ -6,7 +6,8 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OpenAIContentConverter } from './converter.js';
-import type { StreamingToolCallParser } from './streamingToolCallParser.js';
+import { StreamingToolCallParser } from './streamingToolCallParser.js';
+import type { RequestContext } from './types.js';
 import {
   Type,
   FinishReason,
@@ -20,68 +21,196 @@ import type OpenAI from 'openai';
 import { convertToFunctionResponse } from '../coreToolScheduler.js';
 
 describe('OpenAIContentConverter', () => {
-  let converter: OpenAIContentConverter;
+  let converter: typeof OpenAIContentConverter;
+  let requestContext: RequestContext;
 
   beforeEach(() => {
-    converter = new OpenAIContentConverter('test-model', 'auto', {
-      image: true,
-      pdf: true,
-      audio: true,
-      video: true,
-    });
+    converter = OpenAIContentConverter;
+    requestContext = {
+      model: 'test-model',
+      modalities: {
+        image: true,
+        pdf: true,
+        audio: true,
+        video: true,
+      },
+      startTime: 0,
+    };
   });
 
-  describe('resetStreamingToolCalls', () => {
-    it('should clear streaming tool calls accumulator', () => {
-      // Access private field for testing
-      const parser = (
-        converter as unknown as {
-          streamingToolCallParser: StreamingToolCallParser;
-        }
-      ).streamingToolCallParser;
+  function withStreamParser(
+    toolCallParser: StreamingToolCallParser = new StreamingToolCallParser(),
+  ): RequestContext {
+    return {
+      ...requestContext,
+      toolCallParser,
+    };
+  }
 
-      // Add some test data to the parser
-      parser.addChunk(0, '{"arg": "value"}', 'test-id', 'test-function');
-      parser.addChunk(1, '{"arg2": "value2"}', 'test-id-2', 'test-function-2');
+  describe('stream-local parser state', () => {
+    it('creates fresh parser instances', () => {
+      const ctx1 = new StreamingToolCallParser();
+      const ctx2 = new StreamingToolCallParser();
 
-      // Verify data is present
-      expect(parser.getBuffer(0)).toBe('{"arg": "value"}');
-      expect(parser.getBuffer(1)).toBe('{"arg2": "value2"}');
-
-      // Call reset method
-      converter.resetStreamingToolCalls();
-
-      // Verify data is cleared
-      expect(parser.getBuffer(0)).toBe('');
-      expect(parser.getBuffer(1)).toBe('');
+      expect(ctx1).toBeInstanceOf(StreamingToolCallParser);
+      expect(ctx2).toBeInstanceOf(StreamingToolCallParser);
+      expect(ctx1).not.toBe(ctx2);
     });
 
-    it('should be safe to call multiple times', () => {
-      // Call reset multiple times
-      converter.resetStreamingToolCalls();
-      converter.resetStreamingToolCalls();
-      converter.resetStreamingToolCalls();
+    it('isolates two contexts so writes to one do not leak into the other', () => {
+      // Regression for issue #3516: previously the parser lived on the
+      // Converter as an instance field, so two concurrent streams sharing
+      // the same Config.contentGenerator would overwrite each other's
+      // tool-call buffers. Per-stream contexts eliminate that contention.
+      const ctx1 = new StreamingToolCallParser();
+      const ctx2 = new StreamingToolCallParser();
 
-      // Should not throw any errors
-      const parser = (
-        converter as unknown as {
-          streamingToolCallParser: StreamingToolCallParser;
-        }
-      ).streamingToolCallParser;
-      expect(parser.getBuffer(0)).toBe('');
+      ctx1.addChunk(0, '{"a":1}', 'call_A', 'fn_A');
+      ctx2.addChunk(0, '{"b":2}', 'call_B', 'fn_B');
+
+      expect(ctx1.getBuffer(0)).toBe('{"a":1}');
+      expect(ctx2.getBuffer(0)).toBe('{"b":2}');
+      expect(ctx1.getToolCallMeta(0).id).toBe('call_A');
+      expect(ctx2.getToolCallMeta(0).id).toBe('call_B');
     });
 
-    it('should be safe to call on empty accumulator', () => {
-      // Call reset on empty accumulator
-      converter.resetStreamingToolCalls();
+    it('demuxes interleaved chunks from two concurrent streams correctly (#3516)', () => {
+      // Real-world shape: two subagents share one Config (hence one
+      // Converter). Their OpenAI streams run concurrently; chunks arrive
+      // interleaved at the event loop. Under the pre-fix architecture
+      // this corrupted both tool calls; under per-stream contexts each
+      // stream's chunks stay in their own parser and close cleanly.
+      const streamA = withStreamParser(new StreamingToolCallParser());
+      const streamB = withStreamParser(new StreamingToolCallParser());
 
-      // Should not throw any errors
-      const parser = (
-        converter as unknown as {
-          streamingToolCallParser: StreamingToolCallParser;
-        }
-      ).streamingToolCallParser;
-      expect(parser.getBuffer(0)).toBe('');
+      const openerA = {
+        object: 'chat.completion.chunk',
+        id: 'A-open',
+        created: 1,
+        model: 'test',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_A',
+                  type: 'function' as const,
+                  function: {
+                    name: 'read_file',
+                    arguments: '{"file_path":"/a',
+                  },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      const openerB = {
+        ...openerA,
+        id: 'B-open',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_B',
+                  type: 'function' as const,
+                  function: {
+                    name: 'read_file',
+                    arguments: '{"file_path":"/b',
+                  },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      const contA = {
+        ...openerA,
+        id: 'A-cont',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [{ index: 0, function: { arguments: '/x.ts"}' } }],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      const contB = {
+        ...openerB,
+        id: 'B-cont',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [{ index: 0, function: { arguments: '/y.ts"}' } }],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      const finisher = (id: string) =>
+        ({
+          object: 'chat.completion.chunk',
+          id,
+          created: 2,
+          model: 'test',
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: 'tool_calls',
+              logprobs: null,
+            },
+          ],
+        }) as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      // Interleave the two streams. Pre-fix this produced corrupt JSON
+      // because every chunk fed the same shared parser.
+      converter.convertOpenAIChunkToGemini(openerA, streamA);
+      converter.convertOpenAIChunkToGemini(openerB, streamB);
+      converter.convertOpenAIChunkToGemini(contA, streamA);
+      converter.convertOpenAIChunkToGemini(contB, streamB);
+
+      const resultA = converter.convertOpenAIChunkToGemini(
+        finisher('A-finish'),
+        streamA,
+      );
+      const resultB = converter.convertOpenAIChunkToGemini(
+        finisher('B-finish'),
+        streamB,
+      );
+
+      const fnA = resultA.candidates?.[0]?.content?.parts?.find(
+        (p: Part) => p.functionCall,
+      )?.functionCall;
+      const fnB = resultB.candidates?.[0]?.content?.parts?.find(
+        (p: Part) => p.functionCall,
+      )?.functionCall;
+
+      expect(fnA?.name).toBe('read_file');
+      expect(fnA?.args).toEqual({ file_path: '/a/x.ts' });
+      expect(fnA?.id).toBe('call_A');
+
+      expect(fnB?.name).toBe('read_file');
+      expect(fnB?.args).toEqual({ file_path: '/b/y.ts' });
+      expect(fnB?.id).toBe('call_B');
     });
   });
 
@@ -126,7 +255,10 @@ describe('OpenAIContentConverter', () => {
         output: 'Raw output text',
       });
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
       const toolMessage = messages.find((message) => message.role === 'tool');
 
       expect(toolMessage).toBeDefined();
@@ -144,7 +276,10 @@ describe('OpenAIContentConverter', () => {
         error: 'Command failed',
       });
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
       const toolMessage = messages.find((message) => message.role === 'tool');
 
       expect(toolMessage).toBeDefined();
@@ -162,7 +297,10 @@ describe('OpenAIContentConverter', () => {
         data: { value: 42 },
       });
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
       const toolMessage = messages.find((message) => message.role === 'tool');
 
       expect(toolMessage).toBeDefined();
@@ -214,7 +352,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
 
       // Should have tool message with both text and image content
       const toolMessage = messages.find((message) => message.role === 'tool');
@@ -280,7 +421,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
 
       // Should have tool message with both text and image content
       const toolMessage = messages.find((message) => message.role === 'tool');
@@ -342,7 +486,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
 
       // Should have tool message with both text and file content
       const toolMessage = messages.find((message) => message.role === 'tool');
@@ -406,7 +553,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
 
       // Should have tool message with both text and audio content
       const toolMessage = messages.find((message) => message.role === 'tool');
@@ -472,7 +622,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
 
       const toolMessage = messages.find((message) => message.role === 'tool');
       expect(toolMessage).toBeDefined();
@@ -532,7 +685,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
 
       const toolMessage = messages.find((message) => message.role === 'tool');
       expect(toolMessage).toBeDefined();
@@ -592,7 +748,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
 
       // Should have tool message with both text and video content
       const toolMessage = messages.find((message) => message.role === 'tool');
@@ -656,7 +815,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
 
       const toolMessage = messages.find((message) => message.role === 'tool');
       expect(toolMessage).toBeDefined();
@@ -715,7 +877,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
 
       const toolMessage = messages.find((message) => message.role === 'tool');
       expect(toolMessage).toBeDefined();
@@ -773,7 +938,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
 
       const toolMessage = messages.find((message) => message.role === 'tool');
       expect(toolMessage).toBeDefined();
@@ -796,7 +964,10 @@ describe('OpenAIContentConverter', () => {
         output: 'Plain text output',
       });
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
       const toolMessage = messages.find((message) => message.role === 'tool');
 
       expect(toolMessage).toBeDefined();
@@ -848,7 +1019,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
 
       // Should create an assistant message with tool call and a tool message with empty content
       // This is required because OpenAI API expects every tool call to have a corresponding response
@@ -892,7 +1066,10 @@ describe('OpenAIContentConverter', () => {
           ],
         };
 
-        const messages = converter.convertGeminiRequestToOpenAI(request);
+        const messages = converter.convertGeminiRequestToOpenAI(
+          request,
+          requestContext,
+        );
 
         const assistantMsg = messages.find((m) => m.role === 'assistant');
         expect(assistantMsg).toBeDefined();
@@ -937,7 +1114,10 @@ describe('OpenAIContentConverter', () => {
           ],
         };
 
-        const messages = converter.convertGeminiRequestToOpenAI(request);
+        const messages = converter.convertGeminiRequestToOpenAI(
+          request,
+          requestContext,
+        );
 
         const assistantMsg = messages.find((m) => m.role === 'assistant');
         expect(assistantMsg).toBeDefined();
@@ -960,7 +1140,10 @@ describe('OpenAIContentConverter', () => {
           ],
         };
 
-        const messages = converter.convertGeminiRequestToOpenAI(request);
+        const messages = converter.convertGeminiRequestToOpenAI(
+          request,
+          requestContext,
+        );
 
         const assistantMsg = messages.find((m) => m.role === 'assistant');
         expect(assistantMsg).toBeDefined();
@@ -1023,7 +1206,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
 
       const toolMessage = messages.find((m) => m.role === 'tool');
       expect(toolMessage).toBeDefined();
@@ -1091,7 +1277,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
 
       const toolMessage = messages.find((m) => m.role === 'tool');
       expect(toolMessage).toBeDefined();
@@ -1121,13 +1310,16 @@ describe('OpenAIContentConverter', () => {
 
   describe('convertOpenAIResponseToGemini', () => {
     it('should handle empty choices array without crashing', () => {
-      const response = converter.convertOpenAIResponseToGemini({
-        object: 'chat.completion',
-        id: 'chatcmpl-empty',
-        created: 123,
-        model: 'test-model',
-        choices: [],
-      } as unknown as OpenAI.Chat.ChatCompletion);
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-empty',
+          created: 123,
+          model: 'test-model',
+          choices: [],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
 
       expect(response.candidates).toEqual([]);
     });
@@ -1135,24 +1327,27 @@ describe('OpenAIContentConverter', () => {
 
   describe('OpenAI -> Gemini reasoning content', () => {
     it('should convert reasoning_content to a thought part for non-streaming responses', () => {
-      const response = converter.convertOpenAIResponseToGemini({
-        object: 'chat.completion',
-        id: 'chatcmpl-1',
-        created: 123,
-        model: 'gpt-test',
-        choices: [
-          {
-            index: 0,
-            message: {
-              role: 'assistant',
-              content: 'final answer',
-              reasoning_content: 'chain-of-thought',
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-1',
+          created: 123,
+          model: 'gpt-test',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: 'final answer',
+                reasoning_content: 'chain-of-thought',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
             },
-            finish_reason: 'stop',
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletion);
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
 
       const parts = response.candidates?.[0]?.content?.parts;
       expect(parts?.[0]).toEqual(
@@ -1164,24 +1359,27 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should convert reasoning to a thought part for non-streaming responses', () => {
-      const response = converter.convertOpenAIResponseToGemini({
-        object: 'chat.completion',
-        id: 'chatcmpl-2',
-        created: 123,
-        model: 'gpt-test',
-        choices: [
-          {
-            index: 0,
-            message: {
-              role: 'assistant',
-              content: 'final answer',
-              reasoning: 'chain-of-thought',
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-2',
+          created: 123,
+          model: 'gpt-test',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: 'final answer',
+                reasoning: 'chain-of-thought',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
             },
-            finish_reason: 'stop',
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletion);
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
 
       const parts = response.candidates?.[0]?.content?.parts;
       expect(parts?.[0]).toEqual(
@@ -1193,23 +1391,26 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should convert streaming reasoning_content delta to a thought part', () => {
-      const chunk = converter.convertOpenAIChunkToGemini({
-        object: 'chat.completion.chunk',
-        id: 'chunk-1',
-        created: 456,
-        choices: [
-          {
-            index: 0,
-            delta: {
-              content: 'visible text',
-              reasoning_content: 'thinking...',
+      const chunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-1',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: {
+                content: 'visible text',
+                reasoning_content: 'thinking...',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
             },
-            finish_reason: 'stop',
-            logprobs: null,
-          },
-        ],
-        model: 'gpt-test',
-      } as unknown as OpenAI.Chat.ChatCompletionChunk);
+          ],
+          model: 'gpt-test',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        withStreamParser(new StreamingToolCallParser()),
+      );
 
       const parts = chunk.candidates?.[0]?.content?.parts;
       expect(parts?.[0]).toEqual(
@@ -1221,23 +1422,26 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should convert streaming reasoning delta to a thought part', () => {
-      const chunk = converter.convertOpenAIChunkToGemini({
-        object: 'chat.completion.chunk',
-        id: 'chunk-1b',
-        created: 456,
-        choices: [
-          {
-            index: 0,
-            delta: {
-              content: 'visible text',
-              reasoning: 'thinking...',
+      const chunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-1b',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: {
+                content: 'visible text',
+                reasoning: 'thinking...',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
             },
-            finish_reason: 'stop',
-            logprobs: null,
-          },
-        ],
-        model: 'gpt-test',
-      } as unknown as OpenAI.Chat.ChatCompletionChunk);
+          ],
+          model: 'gpt-test',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        withStreamParser(new StreamingToolCallParser()),
+      );
 
       const parts = chunk.candidates?.[0]?.content?.parts;
       expect(parts?.[0]).toEqual(
@@ -1249,21 +1453,24 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should not throw when streaming chunk has no delta', () => {
-      const chunk = converter.convertOpenAIChunkToGemini({
-        object: 'chat.completion.chunk',
-        id: 'chunk-2',
-        created: 456,
-        choices: [
-          {
-            index: 0,
-            // Some OpenAI-compatible providers may omit delta entirely.
-            delta: undefined,
-            finish_reason: null,
-            logprobs: null,
-          },
-        ],
-        model: 'gpt-test',
-      } as unknown as OpenAI.Chat.ChatCompletionChunk);
+      const chunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-2',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              // Some OpenAI-compatible providers may omit delta entirely.
+              delta: undefined,
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'gpt-test',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        withStreamParser(new StreamingToolCallParser()),
+      );
 
       const parts = chunk.candidates?.[0]?.content?.parts;
       expect(parts).toEqual([]);
@@ -1620,7 +1827,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
 
       expect(messages).toHaveLength(1);
       expect(messages[0].role).toBe('assistant');
@@ -1646,7 +1856,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
 
       expect(messages).toHaveLength(1);
       expect(messages[0].role).toBe('assistant');
@@ -1708,9 +1921,13 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request, {
-        cleanOrphanToolCalls: false,
-      });
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+        {
+          cleanOrphanToolCalls: false,
+        },
+      );
 
       // Should have: assistant (tool_call_1), tool (result_1), assistant (tool_call_2), tool (result_2)
       expect(messages).toHaveLength(4);
@@ -1739,7 +1956,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
 
       expect(messages).toHaveLength(3);
       expect(messages[0].role).toBe('assistant');
@@ -1762,7 +1982,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
 
       expect(messages).toHaveLength(1);
       expect(messages[0].content).toBe('Text partAnother text');
@@ -1787,7 +2010,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
 
       // Empty messages should be filtered out
       expect(messages).toHaveLength(1);
@@ -1806,15 +2032,21 @@ describe('MCP tool result end-to-end through OpenAI converter (issue #1520)', ()
    * Verifies that multi-part MCP tool results are properly carried through
    * into the OpenAI tool message, with no content leaking into user messages.
    */
-  let converter: OpenAIContentConverter;
+  let converter: typeof OpenAIContentConverter;
+  let requestContext: RequestContext;
 
   beforeEach(() => {
-    converter = new OpenAIContentConverter('test-model', 'auto', {
-      image: true,
-      pdf: true,
-      audio: true,
-      video: true,
-    });
+    converter = OpenAIContentConverter;
+    requestContext = {
+      model: 'test-model',
+      modalities: {
+        image: true,
+        pdf: true,
+        audio: true,
+        video: true,
+      },
+      startTime: 0,
+    };
   });
 
   it('should preserve MCP multi-text content in tool message (not leak to user message)', () => {
@@ -1861,7 +2093,10 @@ describe('MCP tool result end-to-end through OpenAI converter (issue #1520)', ()
       model: 'models/test',
       contents,
     };
-    const messages = converter.convertGeminiRequestToOpenAI(request);
+    const messages = converter.convertGeminiRequestToOpenAI(
+      request,
+      requestContext,
+    );
 
     const toolMessages = messages.filter((m) => m.role === 'tool');
     const userMessages = messages.filter((m) => m.role === 'user');
@@ -1931,7 +2166,10 @@ describe('MCP tool result end-to-end through OpenAI converter (issue #1520)', ()
       model: 'models/test',
       contents,
     };
-    const messages = converter.convertGeminiRequestToOpenAI(request);
+    const messages = converter.convertGeminiRequestToOpenAI(
+      request,
+      requestContext,
+    );
 
     const toolMessages = messages.filter((m) => m.role === 'tool');
     const userMessages = messages.filter((m) => m.role === 'user');
@@ -1993,7 +2231,10 @@ describe('MCP tool result end-to-end through OpenAI converter (issue #1520)', ()
       model: 'models/test',
       contents,
     };
-    const messages = converter.convertGeminiRequestToOpenAI(request);
+    const messages = converter.convertGeminiRequestToOpenAI(
+      request,
+      requestContext,
+    );
 
     const toolMessages = messages.filter((m) => m.role === 'tool');
     const userMessages = messages.filter((m) => m.role === 'user');
@@ -2058,7 +2299,10 @@ describe('MCP tool result end-to-end through OpenAI converter (issue #1520)', ()
       model: 'models/test',
       contents,
     };
-    const messages = converter.convertGeminiRequestToOpenAI(request);
+    const messages = converter.convertGeminiRequestToOpenAI(
+      request,
+      requestContext,
+    );
 
     const toolMessages = messages.filter((m) => m.role === 'tool');
     const userMessages = messages.filter((m) => m.role === 'user');
@@ -2089,18 +2333,27 @@ describe('MCP tool result end-to-end through OpenAI converter (issue #1520)', ()
 });
 
 describe('Truncated tool call detection in streaming', () => {
-  let converter: OpenAIContentConverter;
+  let converter: typeof OpenAIContentConverter;
 
   beforeEach(() => {
-    converter = new OpenAIContentConverter('test-model');
+    converter = OpenAIContentConverter;
   });
+
+  function createStreamingRequestContext(model = 'test-model'): RequestContext {
+    return {
+      model,
+      modalities: {},
+      startTime: 0,
+      toolCallParser: new StreamingToolCallParser(),
+    };
+  }
 
   /**
    * Helper: feed streaming chunks then a final chunk with finish_reason,
    * and return the Gemini response for the final chunk.
    */
   function feedToolCallChunks(
-    conv: OpenAIContentConverter,
+    conv: typeof OpenAIContentConverter,
     toolCallChunks: Array<{
       index: number;
       id?: string;
@@ -2109,51 +2362,60 @@ describe('Truncated tool call detection in streaming', () => {
     }>,
     finishReason: string,
   ) {
+    // One stream-local context covers every chunk of this simulated stream.
+    const ctx = createStreamingRequestContext();
+
     // Feed argument chunks (no finish_reason yet)
     for (const tc of toolCallChunks) {
-      conv.convertOpenAIChunkToGemini({
+      conv.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-stream',
+          created: 100,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              delta: {
+                tool_calls: [
+                  {
+                    index: tc.index,
+                    id: tc.id,
+                    type: 'function' as const,
+                    function: {
+                      name: tc.name,
+                      arguments: tc.arguments,
+                    },
+                  },
+                ],
+              },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        ctx,
+      );
+    }
+
+    // Final chunk with finish_reason
+    return conv.convertOpenAIChunkToGemini(
+      {
         object: 'chat.completion.chunk',
-        id: 'chunk-stream',
-        created: 100,
+        id: 'chunk-final',
+        created: 101,
         model: 'test-model',
         choices: [
           {
             index: 0,
-            delta: {
-              tool_calls: [
-                {
-                  index: tc.index,
-                  id: tc.id,
-                  type: 'function' as const,
-                  function: {
-                    name: tc.name,
-                    arguments: tc.arguments,
-                  },
-                },
-              ],
-            },
-            finish_reason: null,
+            delta: {},
+            finish_reason: finishReason,
             logprobs: null,
           },
         ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk);
-    }
-
-    // Final chunk with finish_reason
-    return conv.convertOpenAIChunkToGemini({
-      object: 'chat.completion.chunk',
-      id: 'chunk-final',
-      created: 101,
-      model: 'test-model',
-      choices: [
-        {
-          index: 0,
-          delta: {},
-          finish_reason: finishReason,
-          logprobs: null,
-        },
-      ],
-    } as unknown as OpenAI.Chat.ChatCompletionChunk);
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      ctx,
+    );
   }
 
   it('should override finishReason to MAX_TOKENS when tool call JSON is truncated and provider reports "stop"', () => {
@@ -2253,71 +2515,81 @@ describe('Truncated tool call detection in streaming', () => {
 
   it('should detect truncation with multi-chunk streaming arguments', () => {
     // Feed arguments in multiple small chunks like real streaming
-    const conv = new OpenAIContentConverter('test-model');
+    const conv = OpenAIContentConverter;
+    const ctx = createStreamingRequestContext();
 
     // Chunk 1: start of JSON with tool metadata
-    conv.convertOpenAIChunkToGemini({
-      object: 'chat.completion.chunk',
-      id: 'c1',
-      created: 100,
-      model: 'test-model',
-      choices: [
-        {
-          index: 0,
-          delta: {
-            tool_calls: [
-              {
-                index: 0,
-                id: 'call_1',
-                type: 'function' as const,
-                function: { name: 'write_file', arguments: '{"file_' },
-              },
-            ],
+    conv.convertOpenAIChunkToGemini(
+      {
+        object: 'chat.completion.chunk',
+        id: 'c1',
+        created: 100,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_1',
+                  type: 'function' as const,
+                  function: { name: 'write_file', arguments: '{"file_' },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
           },
-          finish_reason: null,
-          logprobs: null,
-        },
-      ],
-    } as unknown as OpenAI.Chat.ChatCompletionChunk);
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      ctx,
+    );
 
     // Chunk 2: more arguments
-    conv.convertOpenAIChunkToGemini({
-      object: 'chat.completion.chunk',
-      id: 'c2',
-      created: 100,
-      model: 'test-model',
-      choices: [
-        {
-          index: 0,
-          delta: {
-            tool_calls: [
-              {
-                index: 0,
-                function: { arguments: 'path": "/tmp/f.txt", "conten' },
-              },
-            ],
+    conv.convertOpenAIChunkToGemini(
+      {
+        object: 'chat.completion.chunk',
+        id: 'c2',
+        created: 100,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  function: { arguments: 'path": "/tmp/f.txt", "conten' },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
           },
-          finish_reason: null,
-          logprobs: null,
-        },
-      ],
-    } as unknown as OpenAI.Chat.ChatCompletionChunk);
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      ctx,
+    );
 
     // Final chunk: finish_reason "stop" but JSON is still incomplete
-    const result = conv.convertOpenAIChunkToGemini({
-      object: 'chat.completion.chunk',
-      id: 'c3',
-      created: 101,
-      model: 'test-model',
-      choices: [
-        {
-          index: 0,
-          delta: {},
-          finish_reason: 'stop',
-          logprobs: null,
-        },
-      ],
-    } as unknown as OpenAI.Chat.ChatCompletionChunk);
+    const result = conv.convertOpenAIChunkToGemini(
+      {
+        object: 'chat.completion.chunk',
+        id: 'c3',
+        created: 101,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {},
+            finish_reason: 'stop',
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      ctx,
+    );
 
     expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
   });
@@ -2328,6 +2600,17 @@ describe('modality filtering', () => {
     return {
       model: 'test-model',
       contents: [{ role: 'user', parts }],
+    };
+  }
+
+  function makeRequestContext(
+    model: string,
+    modalities: RequestContext['modalities'],
+  ): RequestContext {
+    return {
+      model,
+      modalities,
+      startTime: 0,
     };
   }
 
@@ -2346,14 +2629,17 @@ describe('modality filtering', () => {
   }
 
   it('replaces image with placeholder when image modality is disabled', () => {
-    const conv = new OpenAIContentConverter('deepseek-chat', 'auto', {});
+    const conv = OpenAIContentConverter;
     const request = makeRequest([
       {
         inlineData: { mimeType: 'image/png', data: 'abc123' },
         displayName: 'screenshot.png',
       } as unknown as Part,
     ]);
-    const messages = conv.convertGeminiRequestToOpenAI(request);
+    const messages = conv.convertGeminiRequestToOpenAI(
+      request,
+      makeRequestContext('deepseek-chat', {}),
+    );
     const parts = getUserContentParts(messages);
     expect(parts).toHaveLength(1);
     expect(parts[0].type).toBe('text');
@@ -2362,22 +2648,23 @@ describe('modality filtering', () => {
   });
 
   it('keeps image when image modality is enabled', () => {
-    const conv = new OpenAIContentConverter('gpt-4o', 'auto', { image: true });
+    const conv = OpenAIContentConverter;
     const request = makeRequest([
       {
         inlineData: { mimeType: 'image/png', data: 'abc123' },
       } as unknown as Part,
     ]);
-    const messages = conv.convertGeminiRequestToOpenAI(request);
+    const messages = conv.convertGeminiRequestToOpenAI(
+      request,
+      makeRequestContext('gpt-4o', { image: true }),
+    );
     const parts = getUserContentParts(messages);
     expect(parts).toHaveLength(1);
     expect(parts[0].type).toBe('image_url');
   });
 
   it('replaces PDF with placeholder when pdf modality is disabled', () => {
-    const conv = new OpenAIContentConverter('test-model', 'auto', {
-      image: true,
-    });
+    const conv = OpenAIContentConverter;
     const request = makeRequest([
       {
         inlineData: {
@@ -2387,7 +2674,10 @@ describe('modality filtering', () => {
         },
       } as unknown as Part,
     ]);
-    const messages = conv.convertGeminiRequestToOpenAI(request);
+    const messages = conv.convertGeminiRequestToOpenAI(
+      request,
+      makeRequestContext('test-model', { image: true }),
+    );
     const parts = getUserContentParts(messages);
     expect(parts).toHaveLength(1);
     expect(parts[0].type).toBe('text');
@@ -2396,10 +2686,7 @@ describe('modality filtering', () => {
   });
 
   it('keeps PDF when pdf modality is enabled', () => {
-    const conv = new OpenAIContentConverter('claude-sonnet', 'auto', {
-      image: true,
-      pdf: true,
-    });
+    const conv = OpenAIContentConverter;
     const request = makeRequest([
       {
         inlineData: {
@@ -2409,20 +2696,26 @@ describe('modality filtering', () => {
         },
       } as unknown as Part,
     ]);
-    const messages = conv.convertGeminiRequestToOpenAI(request);
+    const messages = conv.convertGeminiRequestToOpenAI(
+      request,
+      makeRequestContext('claude-sonnet', { image: true, pdf: true }),
+    );
     const parts = getUserContentParts(messages);
     expect(parts).toHaveLength(1);
     expect(parts[0].type).toBe('file');
   });
 
   it('replaces video with placeholder when video modality is disabled', () => {
-    const conv = new OpenAIContentConverter('test-model', 'auto', {});
+    const conv = OpenAIContentConverter;
     const request = makeRequest([
       {
         inlineData: { mimeType: 'video/mp4', data: 'vid-data' },
       } as unknown as Part,
     ]);
-    const messages = conv.convertGeminiRequestToOpenAI(request);
+    const messages = conv.convertGeminiRequestToOpenAI(
+      request,
+      makeRequestContext('test-model', {}),
+    );
     const parts = getUserContentParts(messages);
     expect(parts).toHaveLength(1);
     expect(parts[0].type).toBe('text');
@@ -2430,13 +2723,16 @@ describe('modality filtering', () => {
   });
 
   it('replaces audio with placeholder when audio modality is disabled', () => {
-    const conv = new OpenAIContentConverter('test-model', 'auto', {});
+    const conv = OpenAIContentConverter;
     const request = makeRequest([
       {
         inlineData: { mimeType: 'audio/wav', data: 'audio-data' },
       } as unknown as Part,
     ]);
-    const messages = conv.convertGeminiRequestToOpenAI(request);
+    const messages = conv.convertGeminiRequestToOpenAI(
+      request,
+      makeRequestContext('test-model', {}),
+    );
     const parts = getUserContentParts(messages);
     expect(parts).toHaveLength(1);
     expect(parts[0].type).toBe('text');
@@ -2444,7 +2740,7 @@ describe('modality filtering', () => {
   });
 
   it('handles mixed content: keeps text + supported media, replaces unsupported', () => {
-    const conv = new OpenAIContentConverter('gpt-4o', 'auto', { image: true });
+    const conv = OpenAIContentConverter;
     const request = makeRequest([
       { text: 'Analyze these files' },
       {
@@ -2454,7 +2750,10 @@ describe('modality filtering', () => {
         inlineData: { mimeType: 'video/mp4', data: 'vid-data' },
       } as unknown as Part,
     ]);
-    const messages = conv.convertGeminiRequestToOpenAI(request);
+    const messages = conv.convertGeminiRequestToOpenAI(
+      request,
+      makeRequestContext('gpt-4o', { image: true }),
+    );
     const parts = getUserContentParts(messages);
     expect(parts).toHaveLength(3);
     expect(parts[0].type).toBe('text');
@@ -2465,13 +2764,16 @@ describe('modality filtering', () => {
   });
 
   it('defaults to text-only when no modalities are specified', () => {
-    const conv = new OpenAIContentConverter('unknown-model');
+    const conv = OpenAIContentConverter;
     const request = makeRequest([
       {
         inlineData: { mimeType: 'image/png', data: 'img-data' },
       } as unknown as Part,
     ]);
-    const messages = conv.convertGeminiRequestToOpenAI(request);
+    const messages = conv.convertGeminiRequestToOpenAI(
+      request,
+      makeRequestContext('unknown-model', {}),
+    );
     const parts = getUserContentParts(messages);
     expect(parts).toHaveLength(1);
     expect(parts[0].type).toBe('text');

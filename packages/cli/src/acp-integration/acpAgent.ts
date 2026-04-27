@@ -42,6 +42,8 @@ import type {
   LoadSessionRequest,
   LoadSessionResponse,
   McpServer,
+  McpServerHttp,
+  McpServerSse,
   McpServerStdio,
   NewSessionRequest,
   NewSessionResponse,
@@ -162,9 +164,27 @@ export async function runAcpAgent(
   process.off('SIGINT', shutdownHandler);
 }
 
-function toStdioServer(server: McpServer): McpServerStdio | undefined {
+export function toStdioServer(server: McpServer): McpServerStdio | undefined {
   if ('command' in server && 'args' in server && 'env' in server) {
     return server as McpServerStdio;
+  }
+  return undefined;
+}
+
+export function toSseServer(
+  server: McpServer,
+): (McpServerSse & { type: 'sse' }) | undefined {
+  if ('type' in server && server.type === 'sse') {
+    return server as McpServerSse & { type: 'sse' };
+  }
+  return undefined;
+}
+
+export function toHttpServer(
+  server: McpServer,
+): (McpServerHttp & { type: 'http' }) | undefined {
+  if ('type' in server && server.type === 'http') {
+    return server as McpServerHttp & { type: 'http' };
   }
   return undefined;
 }
@@ -203,6 +223,10 @@ class QwenAgent implements Agent {
         sessionCapabilities: {
           list: {},
           resume: {},
+        },
+        mcpCapabilities: {
+          sse: true,
+          http: true,
         },
       },
     };
@@ -499,18 +523,55 @@ class QwenAgent implements Agent {
 
     for (const server of mcpServers) {
       const stdioServer = toStdioServer(server);
-      if (!stdioServer) continue;
-
-      const env: Record<string, string> = {};
-      for (const { name: envName, value } of stdioServer.env) {
-        env[envName] = value;
+      if (stdioServer) {
+        const env: Record<string, string> = {};
+        for (const { name: envName, value } of stdioServer.env) {
+          env[envName] = value;
+        }
+        mergedMcpServers[stdioServer.name] = new MCPServerConfig(
+          stdioServer.command,
+          stdioServer.args,
+          env,
+          cwd,
+        );
+        continue;
       }
-      mergedMcpServers[stdioServer.name] = new MCPServerConfig(
-        stdioServer.command,
-        stdioServer.args,
-        env,
-        cwd,
-      );
+
+      const sseServer = toSseServer(server);
+      if (sseServer) {
+        const headers: Record<string, string> = {};
+        for (const { name: headerName, value } of sseServer.headers) {
+          headers[headerName] = value;
+        }
+        mergedMcpServers[sseServer.name] = new MCPServerConfig(
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          sseServer.url,
+          undefined,
+          Object.keys(headers).length > 0 ? headers : undefined,
+        );
+        continue;
+      }
+
+      const httpServer = toHttpServer(server);
+      if (httpServer) {
+        const headers: Record<string, string> = {};
+        for (const { name: headerName, value } of httpServer.headers) {
+          headers[headerName] = value;
+        }
+        mergedMcpServers[httpServer.name] = new MCPServerConfig(
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          httpServer.url,
+          Object.keys(headers).length > 0 ? headers : undefined,
+        );
+        continue;
+      }
     }
 
     const settings = { ...this.settings.merged, mcpServers: mergedMcpServers };
@@ -618,11 +679,8 @@ class QwenAgent implements Agent {
       await geminiClient.initialize();
     }
 
-    const chat = geminiClient.getChat();
-
     const session = new Session(
       sessionId,
-      chat,
       config,
       this.connection,
       this.settings,

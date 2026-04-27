@@ -18,6 +18,7 @@ import {
 } from '../utils/sessionPickerUtils.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { t } from '../../i18n/index.js';
+import { SessionPreview } from './SessionPreview.js';
 
 export interface SessionPickerProps {
   sessionService: SessionService | null;
@@ -41,6 +42,14 @@ export interface SessionPickerProps {
    * When provided, skips initial load and disables pagination.
    */
   initialSessions?: SessionData[];
+
+  /**
+   * Enable Space-to-preview. Off by default — preview's Enter shortcut
+   * forwards to `onSelect`, which for resume flows is "resume", but for
+   * destructive flows (e.g. delete) would commit the action. Only opt in
+   * for non-destructive selection flows.
+   */
+  enablePreview?: boolean;
 }
 
 const PREFIX_CHARS = {
@@ -94,6 +103,11 @@ function SessionListItemView({
 
   const promptText = session.customTitle || session.prompt || '(empty prompt)';
   const truncatedPrompt = truncateText(promptText, maxPromptWidth);
+  // Dim auto-generated titles so users can distinguish a model guess from
+  // a title they chose themselves with `/rename`. Selected row keeps the
+  // accent color — legibility of the focused row wins over source hinting.
+  const isAutoTitle =
+    session.titleSource === 'auto' && Boolean(session.customTitle);
 
   return (
     <Box flexDirection="column" marginBottom={isLast ? 0 : 1}>
@@ -111,7 +125,13 @@ function SessionListItemView({
           {prefix}
         </Text>
         <Text
-          color={isSelected ? theme.text.accent : theme.text.primary}
+          color={
+            isSelected
+              ? theme.text.accent
+              : isAutoTitle
+                ? theme.text.secondary
+                : theme.text.primary
+          }
           bold={isSelected}
         >
           {truncatedPrompt}
@@ -136,6 +156,7 @@ export function SessionPicker(props: SessionPickerProps) {
     title,
     centerSelection = true,
     initialSessions,
+    enablePreview = false,
   } = props;
 
   const { columns: width, rows: height } = useTerminalSize();
@@ -161,7 +182,31 @@ export function SessionPicker(props: SessionPickerProps) {
     centerSelection,
     initialSessions,
     isActive: true,
+    enablePreview,
   });
+
+  if (
+    enablePreview &&
+    picker.viewMode === 'preview' &&
+    picker.previewSessionId &&
+    sessionService
+  ) {
+    const previewed = picker.filteredSessions.find(
+      (s) => s.sessionId === picker.previewSessionId,
+    );
+    return (
+      <SessionPreview
+        sessionService={sessionService}
+        sessionId={picker.previewSessionId}
+        sessionTitle={previewed?.customTitle ?? previewed?.prompt ?? undefined}
+        messageCount={previewed?.messageCount}
+        mtime={previewed?.mtime}
+        gitBranch={previewed?.gitBranch}
+        onExit={picker.exitPreview}
+        onResume={onSelect}
+      />
+    );
+  }
 
   return (
     <Box
@@ -251,7 +296,12 @@ export function SessionPicker(props: SessionPickerProps) {
                 >
                   B
                 </Text>
-                {t(' to toggle branch')} ·
+                {t(' to toggle branch · ')}
+              </Text>
+            )}
+            {enablePreview && (
+              <Text color={theme.text.secondary}>
+                {t('Space to preview · ')}
               </Text>
             )}
             <Text color={theme.text.secondary}>

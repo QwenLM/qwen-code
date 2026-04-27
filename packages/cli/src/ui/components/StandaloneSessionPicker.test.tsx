@@ -4,11 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ReactNode } from 'react';
 import { render } from 'ink-testing-library';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
+import { ConfigContext } from '../contexts/ConfigContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
 import { SessionPicker } from './SessionPicker.js';
+import type { LoadedSettings } from '../../config/settings.js';
 import type {
+  Config,
   SessionListItem,
   ListSessionsResult,
 } from '@qwen-code/qwen-code-core';
@@ -619,6 +624,283 @@ describe('SessionPicker', () => {
       expect(mockService.listSessions).toHaveBeenCalled();
 
       unmount();
+    });
+  });
+
+  describe('Preview Mode', () => {
+    // Mirror `StandaloneSessionPicker`'s runtime wrapping so the preview
+    // render tree (ToolGroupMessage, ToolMessage) can safely call
+    // `useConfig()` / `useSettings()` in tests. Without these, any test
+    // whose previewed session contains tool calls would crash.
+    const PREVIEW_CONFIG_STUB = {
+      getShouldUseNodePtyShell: () => false,
+      getIdeMode: () => false,
+      isTrustedFolder: () => false,
+      getToolRegistry: () => ({ getTool: () => undefined }),
+      getContentGenerator: () => ({ useSummarizedThinking: () => false }),
+    } as unknown as Config;
+    const PREVIEW_SETTINGS_STUB = {
+      merged: { ui: {} },
+    } as unknown as LoadedSettings;
+
+    function renderPicker(children: ReactNode) {
+      return render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <ConfigContext.Provider value={PREVIEW_CONFIG_STUB}>
+            <SettingsContext.Provider value={PREVIEW_SETTINGS_STUB}>
+              {children}
+            </SettingsContext.Provider>
+          </ConfigContext.Provider>
+        </KeypressProvider>,
+      );
+    }
+
+    function fakeResumedData(sessionId: string) {
+      return {
+        conversation: {
+          sessionId,
+          projectHash: 'h',
+          startTime: '2026-01-01T00:00:00.000Z',
+          lastUpdated: '2026-01-01T00:00:00.000Z',
+          messages: [
+            {
+              uuid: 'u1',
+              parentUuid: null,
+              sessionId,
+              timestamp: '2026-01-01T00:00:00.000Z',
+              type: 'user',
+              cwd: '/tmp',
+              version: 'test',
+              message: {
+                role: 'user',
+                parts: [{ text: 'USER-ASKED-THIS' }],
+              },
+            },
+            {
+              uuid: 'u2',
+              parentUuid: 'u1',
+              sessionId,
+              timestamp: '2026-01-01T00:00:01.000Z',
+              type: 'assistant',
+              cwd: '/tmp',
+              version: 'test',
+              message: {
+                role: 'model',
+                parts: [{ text: 'ASSISTANT-REPLIED' }],
+              },
+            },
+          ],
+        },
+        filePath: `/tmp/${sessionId}.jsonl`,
+        lastCompletedUuid: 'u2',
+      };
+    }
+
+    it('opens preview on Space and closes on Esc', async () => {
+      const sessions = [
+        createMockSession({
+          sessionId: 's1',
+          prompt: 'First session',
+          messageCount: 2,
+        }),
+      ];
+      const service = createMockSessionService(sessions);
+      service.loadSession.mockResolvedValue(fakeResumedData('s1'));
+
+      const { stdin, lastFrame } = renderPicker(
+        <SessionPicker
+          sessionService={service as never}
+          onSelect={vi.fn()}
+          onCancel={vi.fn()}
+          enablePreview
+        />,
+      );
+
+      await wait(100);
+      expect(lastFrame()).toContain('First session');
+
+      stdin.write(' '); // Space
+      await wait(150);
+      const previewFrame = lastFrame() ?? '';
+      expect(previewFrame).toContain('USER-ASKED-THIS');
+      expect(previewFrame).toContain('ASSISTANT-REPLIED');
+
+      stdin.write('\u001B'); // Esc
+      await wait(50);
+      const afterExitFrame = lastFrame() ?? '';
+      expect(afterExitFrame).toContain('First session');
+      expect(afterExitFrame).not.toContain('USER-ASKED-THIS');
+    });
+
+    it('renders tool_group items without crashing (stub Providers mounted)', async () => {
+      // The previewed session contains a function call + tool_result, which
+      // produces a `tool_group` HistoryItem that exercises ToolGroupMessage
+      // and ToolMessage — the places that throw without stub Providers.
+      const toolSession = {
+        conversation: {
+          sessionId: 's1',
+          projectHash: 'h',
+          startTime: '2026-01-01T00:00:00.000Z',
+          lastUpdated: '2026-01-01T00:00:00.000Z',
+          messages: [
+            {
+              uuid: 'u1',
+              parentUuid: null,
+              sessionId: 's1',
+              timestamp: '2026-01-01T00:00:00.000Z',
+              type: 'user',
+              cwd: '/tmp',
+              version: 'test',
+              message: { role: 'user', parts: [{ text: 'list files' }] },
+            },
+            {
+              uuid: 'u2',
+              parentUuid: 'u1',
+              sessionId: 's1',
+              timestamp: '2026-01-01T00:00:01.000Z',
+              type: 'assistant',
+              cwd: '/tmp',
+              version: 'test',
+              message: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call-1',
+                      name: 'BashTool',
+                      args: { command: 'ls' },
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              uuid: 'u3',
+              parentUuid: 'u2',
+              sessionId: 's1',
+              timestamp: '2026-01-01T00:00:02.000Z',
+              type: 'tool_result',
+              cwd: '/tmp',
+              version: 'test',
+              toolCallResult: {
+                callId: 'call-1',
+                resultDisplay: 'a.txt\nb.txt',
+                status: 'success',
+              },
+            },
+          ],
+        },
+        filePath: '/tmp/s1.jsonl',
+        lastCompletedUuid: 'u3',
+      };
+
+      const sessions = [
+        createMockSession({
+          sessionId: 's1',
+          prompt: 'list files',
+          messageCount: 3,
+        }),
+      ];
+      const service = createMockSessionService(sessions);
+      service.loadSession.mockResolvedValue(toolSession);
+
+      const { stdin, lastFrame } = renderPicker(
+        <SessionPicker
+          sessionService={service as never}
+          onSelect={vi.fn()}
+          onCancel={vi.fn()}
+          enablePreview
+        />,
+      );
+
+      await wait(100);
+      stdin.write(' '); // Space → preview
+      await wait(150);
+      const frame = lastFrame() ?? '';
+      // Tool group renders with raw function name fallback (no registry).
+      expect(frame).toContain('BashTool');
+    });
+
+    it('Enter inside preview fires onSelect with previewed sessionId', async () => {
+      const sessions = [
+        createMockSession({
+          sessionId: 's1',
+          prompt: 'First',
+          messageCount: 2,
+        }),
+        createMockSession({
+          sessionId: 's2',
+          prompt: 'Second',
+          messageCount: 2,
+        }),
+      ];
+      const service = createMockSessionService(sessions);
+      service.loadSession.mockResolvedValue(fakeResumedData('s1'));
+      const onSelect = vi.fn();
+
+      const { stdin } = renderPicker(
+        <SessionPicker
+          sessionService={service as never}
+          onSelect={onSelect}
+          onCancel={vi.fn()}
+          enablePreview
+        />,
+      );
+
+      await wait(100);
+      stdin.write(' '); // open preview on s1
+      await wait(150);
+      stdin.write('\r'); // Enter
+      await wait(50);
+      expect(onSelect).toHaveBeenCalledWith('s1');
+    });
+
+    it('without enablePreview, Space is a no-op and footer omits the hint', async () => {
+      // Regression: SessionPicker is also reused by the delete-session
+      // dialog, where `onSelect = handleDelete`. If preview were on by
+      // default, Space → preview → Enter would silently delete the session
+      // while the preview UI still says "Enter to resume". The default must
+      // stay opt-in.
+      const sessions = [
+        createMockSession({
+          sessionId: 's1',
+          prompt: 'Deletable session',
+          messageCount: 2,
+        }),
+      ];
+      const service = createMockSessionService(sessions);
+      service.loadSession.mockResolvedValue(fakeResumedData('s1'));
+      const onSelect = vi.fn();
+
+      const { stdin, lastFrame } = renderPicker(
+        <SessionPicker
+          sessionService={service as never}
+          onSelect={onSelect}
+          onCancel={vi.fn()}
+          // intentionally NO enablePreview — emulates the delete dialog
+        />,
+      );
+
+      await wait(100);
+      const beforeFrame = lastFrame() ?? '';
+      expect(beforeFrame).toContain('Deletable session');
+      // Hint must not appear, otherwise we are training users to press
+      // Space in destructive flows.
+      expect(beforeFrame).not.toContain('Space to preview');
+
+      stdin.write(' '); // Space
+      await wait(150);
+      const afterFrame = lastFrame() ?? '';
+      // No preview body, still on the list.
+      expect(afterFrame).not.toContain('USER-ASKED-THIS');
+      expect(afterFrame).toContain('Deletable session');
+
+      // Enter must still call onSelect on the highlighted row (delete path
+      // unchanged), not be eaten by a phantom preview.
+      stdin.write('\r');
+      await wait(50);
+      expect(onSelect).toHaveBeenCalledWith('s1');
+      expect(service.loadSession).not.toHaveBeenCalled();
     });
   });
 });

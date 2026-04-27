@@ -64,9 +64,14 @@ export enum ToolErrorType {
   WEB_FETCH_FALLBACK_FAILED = 'web_fetch_fallback_failed',
   WEB_FETCH_PROCESSING_ERROR = 'web_fetch_processing_error',
 
-  // WebSearch-specific Errors
-  WEB_SEARCH_FAILED = 'web_search_failed',
-
   // Truncation Errors
   OUTPUT_TRUNCATED = 'output_truncated',
+
+  // TaskStop-specific Errors
+  TASK_STOP_NOT_FOUND = 'task_stop_not_found',
+  TASK_STOP_NOT_RUNNING = 'task_stop_not_running',
+
+  // SendMessage-specific Errors
+  SEND_MESSAGE_NOT_FOUND = 'send_message_not_found',
+  SEND_MESSAGE_NOT_RUNNING = 'send_message_not_running',
 }

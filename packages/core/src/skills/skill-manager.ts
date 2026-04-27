@@ -450,16 +450,35 @@ export class SkillManager {
       // Extract optional model field
       const model = parseModelField(frontmatter);
 
+      // Extract argument-hint, when_to_use, and disable-model-invocation
+      const argumentHint =
+        typeof frontmatter['argument-hint'] === 'string'
+          ? frontmatter['argument-hint']
+          : undefined;
+      const whenToUse =
+        typeof frontmatter['when_to_use'] === 'string'
+          ? frontmatter['when_to_use']
+          : undefined;
+      const disableModelInvocationRaw = frontmatter['disable-model-invocation'];
+      const disableModelInvocation =
+        disableModelInvocationRaw === true ||
+        disableModelInvocationRaw === 'true'
+          ? true
+          : undefined;
+
       const config: SkillConfig = {
         name,
         description,
         allowedTools,
         hooks,
         skillRoot,
+        argumentHint,
         model,
         level,
         filePath,
         body: body.trim(),
+        whenToUse,
+        disableModelInvocation,
       };
 
       // Validate the parsed configuration
@@ -649,7 +668,7 @@ export class SkillManager {
       const skills: SkillConfig[] = [];
       for (const extension of extensions) {
         extension.skills?.forEach((skill) => {
-          skills.push(skill);
+          skills.push({ ...skill, extensionName: extension.name });
         });
       }
       debugLogger.debug(

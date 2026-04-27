@@ -412,7 +412,6 @@ export class PermissionManager {
     'run_shell_command',
     'list_directory',
     'web_fetch',
-    'web_search',
     'todo_write',
     'save_memory',
     'lsp',

@@ -7,8 +7,7 @@ Learn how to enable and setup OpenTelemetry for Qwen Code.
   - [OpenTelemetry Integration](#opentelemetry-integration)
   - [Configuration](#configuration)
   - [Aliyun Telemetry](#aliyun-telemetry)
-    - [Prerequisites](#prerequisites)
-    - [Direct Export (Recommended)](#direct-export-recommended)
+    - [Manual OTLP Export](#manual-otlp-export)
   - [Local Telemetry](#local-telemetry)
     - [File-based Output (Recommended)](#file-based-output-recommended)
     - [Collector-Based Export (Advanced)](#collector-based-export-advanced)
@@ -44,6 +43,11 @@ observability framework — Qwen Code's observability system provides:
   instrumentation
 
 [OpenTelemetry]: https://opentelemetry.io/
+[aliyun-opentelemetry-overview]: https://www.alibabacloud.com/help/en/arms/tracing-analysis/product-overview/what-is-tracing-analysis
+[aliyun-opentelemetry-get-started]: https://www.alibabacloud.com/help/en/arms/tracing-analysis/before-you-begin
+[aliyun-opentelemetry-console-cn]: https://trace.console.aliyun.com
+[aliyun-opentelemetry-console-cn-legacy]: https://tracing.console.aliyun.com
+[aliyun-opentelemetry-console-intl]: https://arms.console.alibabacloud.com
 
 ## Configuration
 
@@ -54,15 +58,15 @@ observability framework — Qwen Code's observability system provides:
 All telemetry behavior is controlled through your `.qwen/settings.json` file.
 These settings can be overridden by environment variables or CLI flags.
 
-| Setting        | Environment Variable           | CLI Flag                                                 | Description                                       | Values             | Default                 |
-| -------------- | ------------------------------ | -------------------------------------------------------- | ------------------------------------------------- | ------------------ | ----------------------- |
-| `enabled`      | `QWEN_TELEMETRY_ENABLED`       | `--telemetry` / `--no-telemetry`                         | Enable or disable telemetry                       | `true`/`false`     | `false`                 |
-| `target`       | `QWEN_TELEMETRY_TARGET`        | `--telemetry-target <local\|qwen>`                       | Where to send telemetry data                      | `"qwen"`/`"local"` | `"local"`               |
-| `otlpEndpoint` | `QWEN_TELEMETRY_OTLP_ENDPOINT` | `--telemetry-otlp-endpoint <URL>`                        | OTLP collector endpoint                           | URL string         | `http://localhost:4317` |
-| `otlpProtocol` | `QWEN_TELEMETRY_OTLP_PROTOCOL` | `--telemetry-otlp-protocol <grpc\|http>`                 | OTLP transport protocol                           | `"grpc"`/`"http"`  | `"grpc"`                |
-| `outfile`      | `QWEN_TELEMETRY_OUTFILE`       | `--telemetry-outfile <path>`                             | Save telemetry to file (overrides `otlpEndpoint`) | file path          | -                       |
-| `logPrompts`   | `QWEN_TELEMETRY_LOG_PROMPTS`   | `--telemetry-log-prompts` / `--no-telemetry-log-prompts` | Include prompts in telemetry logs                 | `true`/`false`     | `true`                  |
-| `useCollector` | `QWEN_TELEMETRY_USE_COLLECTOR` | -                                                        | Use external OTLP collector (advanced)            | `true`/`false`     | `false`                 |
+| Setting        | Environment Variable           | CLI Flag                                                 | Description                                       | Values            | Default                 |
+| -------------- | ------------------------------ | -------------------------------------------------------- | ------------------------------------------------- | ----------------- | ----------------------- |
+| `enabled`      | `QWEN_TELEMETRY_ENABLED`       | `--telemetry` / `--no-telemetry`                         | Enable or disable telemetry                       | `true`/`false`    | `false`                 |
+| `target`       | `QWEN_TELEMETRY_TARGET`        | `--telemetry-target <local\|gcp>`                        | Where to send telemetry data                      | `"gcp"`/`"local"` | `"local"`               |
+| `otlpEndpoint` | `QWEN_TELEMETRY_OTLP_ENDPOINT` | `--telemetry-otlp-endpoint <URL>`                        | OTLP collector endpoint                           | URL string        | `http://localhost:4317` |
+| `otlpProtocol` | `QWEN_TELEMETRY_OTLP_PROTOCOL` | `--telemetry-otlp-protocol <grpc\|http>`                 | OTLP transport protocol                           | `"grpc"`/`"http"` | `"grpc"`                |
+| `outfile`      | `QWEN_TELEMETRY_OUTFILE`       | `--telemetry-outfile <path>`                             | Save telemetry to file (overrides `otlpEndpoint`) | file path         | -                       |
+| `logPrompts`   | `QWEN_TELEMETRY_LOG_PROMPTS`   | `--telemetry-log-prompts` / `--no-telemetry-log-prompts` | Include prompts in telemetry logs                 | `true`/`false`    | `true`                  |
+| `useCollector` | `QWEN_TELEMETRY_USE_COLLECTOR` | -                                                        | Use external OTLP collector (advanced)            | `true`/`false`    | `false`                 |
 
 **Note on boolean environment variables:** For the boolean settings (`enabled`,
 `logPrompts`, `useCollector`), setting the corresponding environment variable to
@@ -73,21 +77,55 @@ For detailed information about all configuration options, see the
 
 ## Aliyun Telemetry
 
-### Direct Export (Recommended)
+### Manual OTLP Export
 
-Sends telemetry directly to Aliyun services. No collector needed.
+To view Qwen Code telemetry in Alibaba Cloud Managed Service for
+OpenTelemetry, configure Qwen Code to export to the OTLP endpoint
+provided by ARMS.
 
-1. Enable telemetry in your `.qwen/settings.json`:
+Setting `"target": "gcp"` alone does not configure the export
+destination. If `otlpEndpoint` is not set, Qwen Code still defaults to
+`http://localhost:4317`. If `outfile` is set, it overrides
+`otlpEndpoint` and telemetry is written to the file instead of being
+sent to Alibaba Cloud.
+
+1. Enable telemetry in your `.qwen/settings.json` and set the OTLP
+   endpoint:
    ```json
    {
      "telemetry": {
        "enabled": true,
-       "target": "qwen"
+       "target": "gcp",
+       "otlpEndpoint": "https://<your-otlp-endpoint>",
+       "otlpProtocol": "grpc"
      }
    }
    ```
-2. Run Qwen Code and send prompts.
-3. View logs and metrics in the Aliyun Console.
+2. If your Alibaba Cloud endpoint requires authentication, provide OTLP
+   headers through standard OpenTelemetry environment variables such as
+   `OTEL_EXPORTER_OTLP_HEADERS` (or the signal-specific variants). Qwen
+   Code does not currently expose OTLP auth headers directly in
+   `.qwen/settings.json`.
+3. Run Qwen Code and send prompts.
+4. View telemetry in Managed Service for OpenTelemetry:
+   - Product overview:
+     [What is Managed Service for OpenTelemetry?][aliyun-opentelemetry-overview]
+   - Getting started:
+     [Get started with Managed Service for OpenTelemetry][aliyun-opentelemetry-get-started]
+   - Console entry points:
+     - China mainland:
+       [trace.console.aliyun.com][aliyun-opentelemetry-console-cn]
+       (legacy console:
+       [tracing.console.aliyun.com][aliyun-opentelemetry-console-cn-legacy])
+     - International:
+       [arms.console.alibabacloud.com][aliyun-opentelemetry-console-intl]
+   - In the console, use `Applications` to inspect traces and service
+     topology.
+   - To locate the OTLP endpoint and access information:
+     - **New console** (`trace.console.aliyun.com` or international):
+       navigate to `Integration Center`.
+     - **Legacy console** (`tracing.console.aliyun.com`): navigate to
+       `Cluster Configurations` → `Access point information`.
 
 ## Local Telemetry
 

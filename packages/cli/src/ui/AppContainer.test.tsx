@@ -14,7 +14,8 @@ import {
   type Mock,
 } from 'vitest';
 import { render, cleanup } from 'ink-testing-library';
-import { AppContainer } from './AppContainer.js';
+import { AppContainer, dedupeNewestFirst } from './AppContainer.js';
+import ansiEscapes from 'ansi-escapes';
 import {
   type Config,
   makeFakeConfig,
@@ -28,7 +29,9 @@ import {
   UIActionsContext,
   type UIActions,
 } from './contexts/UIActionsContext.js';
+import { ToolCallStatus } from './types.js';
 import { useContext } from 'react';
+import { Box, measureElement } from 'ink';
 
 // Mock useStdout to capture terminal title writes
 let mockStdout: { write: ReturnType<typeof vi.fn> };
@@ -48,7 +51,7 @@ let capturedUIActions: UIActions;
 function TestContextConsumer() {
   capturedUIState = useContext(UIStateContext)!;
   capturedUIActions = useContext(UIActionsContext)!;
-  return null;
+  return <Box ref={capturedUIState.mainControlsRef} />;
 }
 
 vi.mock('./App.js', () => ({
@@ -120,7 +123,6 @@ import { useSessionStats } from './contexts/SessionContext.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
-import { measureElement } from 'ink';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core';
 
@@ -189,9 +191,17 @@ describe('AppContainer State Management', () => {
       onAuthError: vi.fn(),
       isAuthDialogOpen: false,
       isAuthenticating: false,
+      pendingAuthType: undefined,
+      externalAuthState: null,
+      qwenAuthState: {
+        deviceAuth: null,
+        authStatus: 'idle',
+        authMessage: null,
+      },
       handleAuthSelect: vi.fn(),
       handleCodingPlanSubmit: vi.fn(),
       handleAlibabaStandardSubmit: vi.fn(),
+      handleOpenRouterSubmit: vi.fn(),
       openAuthDialog: vi.fn(),
       cancelAuthentication: vi.fn(),
     });
@@ -245,6 +255,7 @@ describe('AppContainer State Management', () => {
       getQueuedMessagesText: vi.fn().mockReturnValue(''),
       popAllMessages: vi.fn().mockReturnValue(null),
       drainQueue: vi.fn().mockReturnValue([]),
+      popNextSegment: vi.fn().mockReturnValue(null),
     });
     mockedUseAutoAcceptIndicator.mockReturnValue(false);
     mockedUseGitBranchName.mockReturnValue('main');
@@ -426,6 +437,83 @@ describe('AppContainer State Management', () => {
       }).not.toThrow();
     });
 
+    it('refreshStatic clears the terminal before remounting history', () => {
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.refreshStatic();
+
+      expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
+    });
+
+    it('handleClearScreen avoids a second clearTerminal write', () => {
+      const clearSpy = vi.spyOn(console, 'clear').mockImplementation(() => {});
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleClearScreen();
+
+      expect(clearSpy).toHaveBeenCalledTimes(1);
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearTerminal,
+      );
+
+      clearSpy.mockRestore();
+    });
+
+    it('passes a remount-only refresh callback to slash commands', () => {
+      let slashRefreshStatic: (() => void) | undefined;
+      mockedUseSlashCommandProcessor.mockImplementation(
+        (
+          _config,
+          _settings,
+          _addItem,
+          _clearItems,
+          _loadHistory,
+          refreshStatic,
+        ) => {
+          slashRefreshStatic = refreshStatic;
+          return {
+            handleSlashCommand: vi.fn(),
+            slashCommands: [],
+            pendingHistoryItems: [],
+            commandContext: {},
+            shellConfirmationRequest: null,
+            confirmationRequest: null,
+          };
+        },
+      );
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      slashRefreshStatic?.();
+
+      expect(slashRefreshStatic).toBeDefined();
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearTerminal,
+      );
+    });
+
     it('provides ConfigContext with config object', () => {
       expect(() => {
         render(
@@ -459,6 +547,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
       });
 
       render(
@@ -473,6 +562,44 @@ describe('AppContainer State Management', () => {
       capturedUIActions.handleFinalSubmit('/btw quick side question');
 
       expect(mockSubmitQuery).toHaveBeenCalledWith('/btw quick side question');
+      expect(mockQueueMessage).not.toHaveBeenCalled();
+    });
+
+    it('submits slash commands immediately instead of queueing while idle', () => {
+      const mockSubmitQuery = vi.fn();
+      const mockQueueMessage = vi.fn();
+
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: mockSubmitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleFinalSubmit('/model');
+
+      expect(mockSubmitQuery).toHaveBeenCalledWith('/model');
       expect(mockQueueMessage).not.toHaveBeenCalled();
     });
 
@@ -497,6 +624,7 @@ describe('AppContainer State Management', () => {
           getQueuedMessagesText: vi.fn().mockReturnValue(''),
           popAllMessages: vi.fn().mockReturnValue(null),
           drainQueue: vi.fn().mockReturnValue([]),
+          popNextSegment: vi.fn().mockReturnValue(null),
         });
 
         render(
@@ -577,6 +705,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
       });
 
       render(
@@ -605,6 +734,7 @@ describe('AppContainer State Management', () => {
     it('moves queued follow-up messages into an empty buffer on cancel', async () => {
       const mockSetText = vi.fn();
       const mockPopAllMessages = vi.fn().mockReturnValue('queued follow-up');
+      const mockClearQueue = vi.fn();
       mockedUseTextBuffer.mockReturnValue({
         text: '',
         setText: mockSetText,
@@ -626,10 +756,11 @@ describe('AppContainer State Management', () => {
       mockedUseMessageQueue.mockReturnValue({
         messageQueue: ['queued follow-up'],
         addMessage: vi.fn(),
-        clearQueue: vi.fn(),
+        clearQueue: mockClearQueue,
         getQueuedMessagesText: vi.fn().mockReturnValue('queued follow-up'),
         popAllMessages: mockPopAllMessages,
         drainQueue: vi.fn().mockReturnValue(['queued follow-up']),
+        popNextSegment: vi.fn().mockReturnValue('queued follow-up'),
       });
 
       render(
@@ -653,6 +784,75 @@ describe('AppContainer State Management', () => {
         expect.stringContaining('the previous prompt'),
       );
       expect(mockPopAllMessages).toHaveBeenCalled();
+      // popAllForEdit drains the queue internally, so the cancel handler
+      // does not need to call clearQueue separately on this path.
+      expect(mockClearQueue).not.toHaveBeenCalled();
+    });
+
+    it('drops the queue when cancelling during tool execution', async () => {
+      // Simulates: user asks for a shell tool (e.g. sleep 30), queues
+      // `/model` and `hi` while the tool is running, then hits Ctrl+C.
+      // The cancel must clear BOTH the buffer and the queue so that
+      // `hi` does not auto-fire once the tool settles and the app
+      // returns to idle.
+      const mockSetText = vi.fn();
+      const mockClearQueue = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [
+          {
+            type: 'tool_group',
+            tools: [
+              {
+                callId: 'call-1',
+                name: 'run_shell_command',
+                description: 'sleep 30',
+                status: ToolCallStatus.Executing,
+                resultDisplay: undefined,
+                confirmationDetails: undefined,
+                renderOutputAsMarkdown: false,
+              },
+            ],
+          },
+        ],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: ['/model', 'hi'],
+        addMessage: vi.fn(),
+        clearQueue: mockClearQueue,
+        getQueuedMessagesText: vi.fn().mockReturnValue('/model\n\nhi'),
+        popAllMessages: vi.fn().mockReturnValue('/model'),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue('/model'),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      triggerCancel();
+
+      // Buffer cleared and queue dropped — same "abort and redirect"
+      // contract as the non-tool cancel path.
+      expect(mockSetText).toHaveBeenCalledWith('');
+      expect(mockClearQueue).toHaveBeenCalled();
     });
 
     it('preserves an in-progress draft when restoring queued messages on cancel', async () => {
@@ -680,6 +880,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue('queued follow-up'),
         popAllMessages: vi.fn().mockReturnValue('queued follow-up'),
         drainQueue: vi.fn().mockReturnValue(['queued follow-up']),
+        popNextSegment: vi.fn().mockReturnValue('queued follow-up'),
       });
 
       render(
@@ -1204,7 +1405,17 @@ describe('AppContainer State Management', () => {
         onAuthError: vi.fn(),
         isAuthDialogOpen: false,
         isAuthenticating: true,
+        pendingAuthType: undefined,
+        externalAuthState: null,
+        qwenAuthState: {
+          deviceAuth: null,
+          authStatus: 'idle',
+          authMessage: null,
+        },
         handleAuthSelect: vi.fn(),
+        handleCodingPlanSubmit: vi.fn(),
+        handleAlibabaStandardSubmit: vi.fn(),
+        handleOpenRouterSubmit: vi.fn(),
         openAuthDialog: vi.fn(),
         cancelAuthentication: vi.fn(),
       });
@@ -1403,5 +1614,30 @@ describe('AppContainer State Management', () => {
       capturedUIActions.closeModelDialog();
       expect(mockCloseModelDialog).toHaveBeenCalled();
     });
+  });
+});
+
+describe('dedupeNewestFirst', () => {
+  it('returns empty array for empty input', () => {
+    expect(dedupeNewestFirst([])).toEqual([]);
+  });
+
+  it('preserves order when there are no duplicates', () => {
+    expect(dedupeNewestFirst(['a', 'b', 'c'])).toEqual(['a', 'b', 'c']);
+  });
+
+  it('removes consecutive duplicates', () => {
+    expect(dedupeNewestFirst(['a', 'a', 'b'])).toEqual(['a', 'b']);
+  });
+
+  it('removes non-consecutive duplicates keeping the first (newest) occurrence', () => {
+    expect(
+      dedupeNewestFirst([
+        'first prompt',
+        'third prompt',
+        'second prompt',
+        'first prompt',
+      ]),
+    ).toEqual(['first prompt', 'third prompt', 'second prompt']);
   });
 });

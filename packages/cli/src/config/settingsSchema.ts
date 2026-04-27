@@ -1012,16 +1012,6 @@ const SETTINGS_SCHEMA = {
           'Settings for clearing stale context after idle periods. Use -1 to disable a threshold.',
         showInDialog: false,
         properties: {
-          thinkingThresholdMinutes: {
-            type: 'number',
-            label: 'Thinking Idle Threshold (minutes)',
-            category: 'Context',
-            requiresRestart: false,
-            default: 5 as number,
-            description:
-              'Minutes of inactivity before clearing old thinking blocks. Use -1 to disable.',
-            showInDialog: false,
-          },
           toolResultsThresholdMinutes: {
             type: 'number',
             label: 'Tool Results Idle Threshold (minutes)',
@@ -1126,6 +1116,36 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  slashCommands: {
+    type: 'object',
+    label: 'Slash Commands',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Configuration for slash commands exposed by the CLI. Useful for ' +
+      'locking down the command surface in multi-tenant or enterprise ' +
+      'deployments.',
+    showInDialog: false,
+    properties: {
+      disabled: {
+        type: 'array',
+        label: 'Disabled Slash Commands',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Slash command names to hide and refuse to execute. Matched ' +
+          'case-insensitively against the final command name (for extension ' +
+          'commands this is the disambiguated form, e.g. "myext.deploy"). ' +
+          'Merged as a union across settings scopes, so workspace settings ' +
+          'can add to but not remove entries defined in system/user settings.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+    },
+  },
+
   permissions: {
     type: 'object',
     label: 'Permissions',
@@ -1169,36 +1189,6 @@ const SETTINGS_SCHEMA = {
         description:
           'Tools or commands that are always blocked. Highest priority rule. ' +
           'Examples: "ShellTool", "Bash(rm -rf *)".',
-        showInDialog: false,
-        mergeStrategy: MergeStrategy.UNION,
-      },
-    },
-  },
-
-  slashCommands: {
-    type: 'object',
-    label: 'Slash Commands',
-    category: 'Advanced',
-    requiresRestart: true,
-    default: {},
-    description:
-      'Configuration for slash commands exposed by the CLI. Useful for ' +
-      'locking down the command surface in multi-tenant or enterprise ' +
-      'deployments.',
-    showInDialog: false,
-    properties: {
-      disabled: {
-        type: 'array',
-        label: 'Disabled Slash Commands',
-        category: 'Advanced',
-        requiresRestart: true,
-        default: undefined as string[] | undefined,
-        description:
-          'Slash command names to hide and refuse to execute. Matched ' +
-          'case-insensitively against the final command name (for extension ' +
-          'commands this is the disambiguated form, e.g. "myext.deploy"). ' +
-          'Merged as a union across settings scopes, so workspace settings ' +
-          'can add to but not remove entries defined in system/user settings.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
@@ -1590,37 +1580,9 @@ const SETTINGS_SCHEMA = {
           'Config files remain at ~/.qwen. Env var QWEN_RUNTIME_DIR takes priority.',
         showInDialog: false,
       },
-      tavilyApiKey: {
-        type: 'string',
-        label: 'Tavily API Key (Deprecated)',
-        category: 'Advanced',
-        requiresRestart: false,
-        default: undefined as string | undefined,
-        description:
-          '⚠️ DEPRECATED: Please use webSearch.provider configuration instead. Legacy API key for the Tavily API.',
-        showInDialog: false,
-      },
     },
   },
 
-  webSearch: {
-    type: 'object',
-    label: 'Web Search',
-    category: 'Advanced',
-    requiresRestart: true,
-    default: undefined as
-      | {
-          provider: Array<{
-            type: 'tavily' | 'google' | 'dashscope';
-            apiKey?: string;
-            searchEngineId?: string;
-          }>;
-          default: string;
-        }
-      | undefined,
-    description: 'Configuration for web search providers.',
-    showInDialog: false,
-  },
   agents: {
     type: 'object',
     label: 'Agents',
@@ -1898,6 +1860,16 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'Enable in-session cron/loop tools (experimental). When enabled, the model can create recurring prompts using cron_create, cron_list, and cron_delete tools. Can also be enabled via QWEN_CODE_ENABLE_CRON=1 environment variable.',
+        showInDialog: true,
+      },
+      emitToolUseSummaries: {
+        type: 'boolean',
+        label: 'Tool Use Summaries',
+        category: 'Experimental',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Generate a short LLM-based label after each tool batch completes. In compact mode the label replaces the generic `Tool × N` header; in full mode it appears as a dim `● <label>` line below the tool group. Requires a fast model to be configured; runs in parallel with the next API call so latency is hidden. Currently affects interactive CLI rendering only — SDK / non-interactive emission of the `tool_use_summary` message is not yet wired (the message factory is exported for a follow-up PR). Can be overridden with QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0 or =1.',
         showInDialog: true,
       },
     },

@@ -1,43 +1,42 @@
 ---
 name: structured-debugging
-description: >
-  Hypothesis-driven debugging methodology for hard bugs. Use this skill whenever
-  you're investigating non-trivial bugs, unexpected behavior, flaky tests, or
-  tracing issues through complex systems. Activate proactively when debugging
-  requires more than a quick glance — especially when the first attempt at a fix
-  didn't work, when behavior seems "impossible", or when you're tempted to blame
-  an external system (model, API, library) without evidence.
+description: Hypothesis-driven debugging methodology for hard bugs. Use this
+  skill whenever you're investigating non-trivial bugs, unexpected behavior,
+  flaky tests, or tracing issues through complex systems. Activate proactively
+  when debugging requires more than a quick glance — especially when the first
+  attempt at a fix didn't work, when behavior seems "impossible", or when you're
+  tempted to blame an external system (model, API, library) without evidence.
 ---
 
 # Structured Debugging
 
-When debugging hard issues, the natural instinct is to form a theory and immediately
-apply a fix. This fails more often than it works. The fix addresses the wrong cause,
-adds complexity, creates false confidence, and obscures the real issue. Worse, after
-several failed attempts you lose track of what's been tried and start guessing randomly.
+When debugging hard issues, the natural instinct is to form a theory and
+immediately apply a fix. This fails more often than it works. The fix addresses
+the wrong cause, adds complexity, creates false confidence, and obscures the
+real issue. Worse, after several failed attempts you lose track of what's been
+tried and start guessing randomly.
 
-This methodology replaces guessing with a disciplined cycle that converges on the
-root cause. Each iteration narrows the search space. It's slower per attempt but
-dramatically faster overall because you stop wasting runs on wrong theories.
+This methodology replaces guessing with a disciplined cycle that converges on
+the root cause. Each iteration narrows the search space. It's slower per attempt
+but dramatically faster overall because you stop wasting runs on wrong theories.
 
 ## The Cycle
 
 ### 1. Hypothesize
 
-Before touching code, write down what you think is happening and why. Be specific
-about the expected state at each step in the execution path.
+Before touching code, write down what you think is happening and why. Be
+specific about the expected state at each step in the execution path.
 
-Bad: "Something is wrong with the wait loop."
-Good: "The leader hangs because `hasActiveTeammates()` returns true after all agents
-have reported completed, likely because terminal status isn't being set on the agent
-object after the backend process exits."
+Bad: "Something is wrong with the wait loop." Good: "The leader hangs because
+`hasActiveTeammates()` returns true after all agents have reported completed,
+likely because terminal status isn't being set on the agent object after the
+backend process exits."
 
-For bugs you expect to take more than one round, create a side note file
-for the investigation in whichever location the project uses for such
-notes.
+For bugs you expect to take more than one round, create a side note file for the
+investigation in whichever location the project uses for such notes.
 
-Write your hypothesis there. This file persists across conversation turns and even
-across sessions — it's your investigation journal.
+Write your hypothesis there. This file persists across conversation turns and
+even across sessions — it's your investigation journal.
 
 ### 2. Design Instrumentation
 
@@ -47,19 +46,18 @@ confirm or reject your hypothesis. Think about what data you need to see.
 Don't scatter `console.log` everywhere. Identify the 2-3 places where your
 hypothesis makes a testable prediction, and instrument those.
 
-Prefer logging _values_ (return codes, payload contents, stream types,
-message bodies, env state) over _presence checks_ ("was this function
-called?", "was this branch taken?"). Code-path traces tell you what ran;
-data traces tell you what it ran on. Most non-trivial bugs are correct
-code processing wrong data.
+Prefer logging _values_ (return codes, payload contents, stream types, message
+bodies, env state) over _presence checks_ ("was this function called?", "was
+this branch taken?"). Code-path traces tell you what ran; data traces tell you
+what it ran on. Most non-trivial bugs are correct code processing wrong data.
 
-Ask yourself: "If my hypothesis is correct, what will I see at point X?
-If it's wrong, what will I see instead?"
+Ask yourself: "If my hypothesis is correct, what will I see at point X? If it's
+wrong, what will I see instead?"
 
 ### 3. Verify Data Collection
 
-Before running, confirm that your instrumentation output will actually be captured
-and accessible.
+Before running, confirm that your instrumentation output will actually be
+captured and accessible.
 
 Common traps:
 
@@ -73,10 +71,11 @@ A test run that produces no data is wasted.
 
 ### 4. Run and Observe
 
-Execute the test. Read the actual output — every line of it. Don't assume what it says.
+Execute the test. Read the actual output — every line of it. Don't assume what
+it says.
 
-When the data contradicts your hypothesis, believe the data. Don't rationalize it
-away. The whole point of this step is to let reality override your theory.
+When the data contradicts your hypothesis, believe the data. Don't rationalize
+it away. The whole point of this step is to let reality override your theory.
 
 ### 5. Document Findings
 
@@ -86,8 +85,8 @@ Update the side note with:
 - What was confirmed vs. disproved
 - Updated hypothesis for the next iteration
 
-This is critical for not losing context across attempts. Hard bugs typically take
-3-5 rounds. Without notes, you'll forget what you ruled out and waste runs
+This is critical for not losing context across attempts. Hard bugs typically
+take 3-5 rounds. Without notes, you'll forget what you ruled out and waste runs
 re-checking things.
 
 ### 6. Iterate
@@ -105,30 +104,31 @@ notice yourself drifting toward any of them, stop and return to the cycle.
 
 ### Jumping to fixes without evidence
 
-The most common failure. You have a plausible theory, so you "fix" it and run again.
-If the theory was wrong, you've added complexity, wasted a test run, and possibly
-introduced a new bug. The side note should always show "hypothesis verified by
-[specific data]" before any fix is applied.
+The most common failure. You have a plausible theory, so you "fix" it and run
+again. If the theory was wrong, you've added complexity, wasted a test run, and
+possibly introduced a new bug. The side note should always show "hypothesis
+verified by [specific data]" before any fix is applied.
 
 ### Blaming external systems
 
 "The model is hallucinating." "The API is flaky." "The library has a bug." These
-conclusions feel satisfying because they put the problem outside your control. They're
-also usually wrong.
+conclusions feel satisfying because they put the problem outside your control.
+They're also usually wrong.
 
-Before blaming an external system, inspect what it actually received. A model that
-appears to hallucinate may be responding rationally to stale data you didn't know
-was there. An API that appears flaky may be receiving malformed requests. Look at
-the inputs, not just the outputs.
+Before blaming an external system, inspect what it actually received. A model
+that appears to hallucinate may be responding rationally to stale data you
+didn't know was there. An API that appears flaky may be receiving malformed
+requests. Look at the inputs, not just the outputs.
 
 ### Inspecting code paths but not data
 
-You instrument the code and prove it executes correctly — the right functions are
-called, in the right order, with no errors. But the bug persists. Why?
+You instrument the code and prove it executes correctly — the right functions
+are called, in the right order, with no errors. But the bug persists. Why?
 
-Because the code can work perfectly while processing garbage input. A function that
-correctly reads an inbox, correctly delivers messages, and correctly formats output
-is still broken if the inbox contains stale messages from a previous run.
+Because the code can work perfectly while processing garbage input. A function
+that correctly reads an inbox, correctly delivers messages, and correctly
+formats output is still broken if the inbox contains stale messages from a
+previous run.
 
 Always inspect the _content_ flowing through the code, not just whether the code
 runs. Check payloads, message contents, file data, and database state.
@@ -136,19 +136,18 @@ runs. Check payloads, message contents, file data, and database state.
 ### Reframing the user's report instead of investigating it
 
 When the user reports a symptom your own run doesn't reproduce, the
-contradiction _is_ the evidence — the two environments differ in some way
-you haven't identified yet. The wrong move is to reframe their report
-("they must be on a stale SHA", "they must be confused about what they
-saw", "must be a flake") so that your run becomes the ground truth. Once
-you do that, every later piece of evidence gets bent to defend the
-reframing, and the actual bug stays hidden.
+contradiction _is_ the evidence — the two environments differ in some way you
+haven't identified yet. The wrong move is to reframe their report ("they must be
+on a stale SHA", "they must be confused about what they saw", "must be a flake")
+so that your run becomes the ground truth. Once you do that, every later piece
+of evidence gets bent to defend the reframing, and the actual bug stays hidden.
 
-The right move: catalogue what differs between their environment and
-yours (TTY vs pipe, terminal emulator, shell, locale, env vars, prior
-state, build artifacts) before forming any hypothesis. For ambiguous
-symptoms ("no output", "it's slow", "it's wrong") ask one disambiguating
-question first — e.g., "does it hang or exit cleanly?" — that prunes the
-hypothesis space cheaply before any test run.
+The right move: catalogue what differs between their environment and yours (TTY
+vs pipe, terminal emulator, shell, locale, env vars, prior state, build
+artifacts) before forming any hypothesis. For ambiguous symptoms ("no output",
+"it's slow", "it's wrong") ask one disambiguating question first — e.g., "does
+does it hang or exit cleanly?" That prunes the hypothesis space before any
+test run.
 
 ### Losing context across attempts
 
@@ -161,9 +160,9 @@ a new round, re-read it first.
 
 ## Persistent State: A Special Category
 
-Features that persist data across runs — caches, session recordings, message queues,
-temp files, database rows — are a frequent source of "impossible" bugs. The current
-run's behavior is contaminated by leftover state from previous runs.
+Features that persist data across runs — caches, session recordings, message
+queues, temp files, and database rows often cause "impossible" bugs.
+The current run's behavior is contaminated by leftover state from previous runs.
 
 When behavior seems irrational, always check:
 
@@ -175,7 +174,7 @@ This is easy to miss because the code is correct — it's the data that's wrong.
 
 ## When to Exit the Cycle
 
-Apply the fix when — and only when — you can point to specific data from your
+Apply the fix only when you can point to specific data from your
 instrumentation that confirms the root cause. Write in the side note:
 
 ```
@@ -188,7 +187,7 @@ Then apply the fix, remove instrumentation, and verify with a clean run.
 
 ## Worked examples
 
-- [`examples/headless-bg-agent-empty-stdout.md`](examples/headless-bg-agent-empty-stdout.md)
+- `examples/headless-bg-agent-empty-stdout.md`
   — pipe-captured runs all passed; the user's TTY printed nothing. The
-  contradiction _was_ the bug. Illustrates _reproduction contradiction is
-  data_ and _instrument data, not code paths_.
+  contradiction _was_ the bug. Illustrates _reproduction contradiction is data_
+  and _instrument data, not code paths_.

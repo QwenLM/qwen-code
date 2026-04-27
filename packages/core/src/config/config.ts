@@ -203,8 +203,6 @@ export interface ChatCompressionSettings {
  * Threshold values of -1 mean "never clear" (disabled).
  */
 export interface ClearContextOnIdleSettings {
-  /** Minutes idle before clearing old thinking blocks. Default 5. Use -1 to disable. */
-  thinkingThresholdMinutes?: number;
   /** Minutes idle before clearing old tool results. Default 60. Use -1 to disable. */
   toolResultsThresholdMinutes?: number;
   /** Number of most-recent tool results to preserve. Default 5. */
@@ -385,6 +383,7 @@ export interface ConfigParameters {
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
+  emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
   allowedMcpServers?: string[];
@@ -404,15 +403,6 @@ export interface ConfigParameters {
   loadMemoryFromIncludeDirectories?: boolean;
   importFormat?: 'tree' | 'flat';
   chatRecording?: boolean;
-  // Web search providers
-  webSearch?: {
-    provider: Array<{
-      type: 'tavily' | 'google' | 'dashscope';
-      apiKey?: string;
-      searchEngineId?: string;
-    }>;
-    default: string;
-  };
   chatCompression?: ChatCompressionSettings;
   interactive?: boolean;
   trustedFolder?: boolean;
@@ -558,6 +548,12 @@ export class Config {
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
+  private modelInvocableCommandsProvider:
+    | (() => ReadonlyArray<{ name: string; description: string }>)
+    | null = null;
+  private modelInvocableCommandsExecutor:
+    | ((name: string, args?: string) => Promise<string | null>)
+    | null = null;
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
@@ -636,17 +632,10 @@ export class Config {
   private readonly cliVersion?: string;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = false;
+  private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly importFormat: 'tree' | 'flat';
-  private readonly webSearch?: {
-    provider: Array<{
-      type: 'tavily' | 'google' | 'dashscope';
-      apiKey?: string;
-      searchEngineId?: string;
-    }>;
-    default: string;
-  };
   private readonly chatCompression: ChatCompressionSettings | undefined;
   private readonly interactive: boolean;
   private readonly trustedFolder: boolean | undefined;
@@ -777,8 +766,6 @@ export class Config {
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
     this.clearContextOnIdle = {
-      thinkingThresholdMinutes:
-        params.clearContextOnIdle?.thinkingThresholdMinutes ?? 5,
       toolResultsThresholdMinutes:
         params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
       toolResultsNumToKeep:
@@ -788,6 +775,7 @@ export class Config {
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
     this.cronEnabled = params.cronEnabled ?? false;
+    this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
     this.noBrowser = params.noBrowser ?? false;
@@ -812,8 +800,7 @@ export class Config {
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
 
-    // Web search
-    this.webSearch = params.webSearch;
+    // (web search removed)
     this.useRipgrep = params.useRipgrep ?? true;
     this.useBuiltinRipgrep = params.useBuiltinRipgrep ?? true;
     this.shouldUseNodePtyShell =
@@ -1604,9 +1591,11 @@ export class Config {
       return;
     }
     try {
-      // Finalize the current session's metadata before cleanup.
+      // Finalize the current session's metadata before cleanup, then drain
+      // the async write queue so no records are lost on exit.
       try {
         this.chatRecordingService?.finalize();
+        await this.chatRecordingService?.flush();
       } catch {
         // Best-effort — don't block shutdown
       }
@@ -1705,20 +1694,17 @@ export class Config {
     return merged;
   }
 
+  getToolDiscoveryCommand(): string | undefined {
+    return this.toolDiscoveryCommand;
+  }
+
   /**
    * Returns the pre-merged list of slash command names that should be hidden
    * from the CLI surface. Callers should treat this as a case-insensitive
    * denylist; `CommandService.create` handles the normalization.
-   *
-   * CLI callers (loadCliConfig) populate this from settings, the
-   * `--disabled-slash-commands` flag, and `QWEN_DISABLED_SLASH_COMMANDS`.
    */
   getDisabledSlashCommands(): readonly string[] {
     return this.disabledSlashCommands;
-  }
-
-  getToolDiscoveryCommand(): string | undefined {
-    return this.toolDiscoveryCommand;
   }
 
   getToolCallCommand(): string | undefined {
@@ -2007,6 +1993,22 @@ export class Config {
     return this.cronEnabled;
   }
 
+  /**
+   * Whether the turn loop should fire a fast-model call after each tool batch
+   * to emit a `tool_use_summary` message. Mirrors Claude Code's
+   * `CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES` gate, but defaults to on so the
+   * compact-mode UI benefits without configuration.
+   *
+   * Env overrides (either direction): `QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0`
+   * to force off, `=1` to force on.
+   */
+  getEmitToolUseSummaries(): boolean {
+    const env = process.env['QWEN_CODE_EMIT_TOOL_USE_SUMMARIES'];
+    if (env === '0' || env === 'false') return false;
+    if (env === '1' || env === 'true') return true;
+    return this.emitToolUseSummaries;
+  }
+
   getEnableRecursiveFileSearch(): boolean {
     return this.fileFiltering.enableRecursiveFileSearch;
   }
@@ -2244,11 +2246,6 @@ export class Config {
 
   isBrowserLaunchSuppressed(): boolean {
     return this.getNoBrowser() || !shouldAttemptBrowserLaunch();
-  }
-
-  // Web search provider configuration
-  getWebSearchConfig() {
-    return this.getBareMode() ? undefined : this.webSearch;
   }
 
   getIdeMode(): boolean {
@@ -2502,6 +2499,49 @@ export class Config {
     return this.skillManager;
   }
 
+  /**
+   * Registers a provider that returns model-invocable commands (e.g., bundled
+   * skills, user/project file commands, MCP prompts). Called by the CLI's
+   * CommandService after initialisation so that SkillTool can merge these into
+   * its tool description.
+   */
+  setModelInvocableCommandsProvider(
+    provider: () => ReadonlyArray<{ name: string; description: string }>,
+  ): void {
+    this.modelInvocableCommandsProvider = provider;
+  }
+
+  /**
+   * Returns the registered model-invocable commands provider, or null if none
+   * has been registered (e.g., in SDK mode).
+   */
+  getModelInvocableCommandsProvider():
+    | (() => ReadonlyArray<{ name: string; description: string }>)
+    | null {
+    return this.modelInvocableCommandsProvider;
+  }
+
+  /**
+   * Registers an executor that can invoke a model-invocable command by name
+   * (e.g., MCP prompts). Returns the prompt content as a string, or null if
+   * the command cannot be found or executed. Called by the CLI layer.
+   */
+  setModelInvocableCommandsExecutor(
+    executor: (name: string, args?: string) => Promise<string | null>,
+  ): void {
+    this.modelInvocableCommandsExecutor = executor;
+  }
+
+  /**
+   * Returns the registered model-invocable commands executor, or null if none
+   * has been registered (e.g., in SDK mode).
+   */
+  getModelInvocableCommandsExecutor():
+    | ((name: string, args?: string) => Promise<string | null>)
+    | null {
+    return this.modelInvocableCommandsExecutor;
+  }
+
   getPermissionManager(): PermissionManager | null {
     return this.permissionManager;
   }
@@ -2579,6 +2619,14 @@ export class Config {
     await registerLazy(ToolNames.AGENT, async () => {
       const { AgentTool } = await import('../tools/agent/agent.js');
       return new AgentTool(this);
+    });
+    await registerLazy(ToolNames.TASK_STOP, async () => {
+      const { TaskStopTool } = await import('../tools/task-stop.js');
+      return new TaskStopTool(this);
+    });
+    await registerLazy(ToolNames.SEND_MESSAGE, async () => {
+      const { SendMessageTool } = await import('../tools/send-message.js');
+      return new SendMessageTool(this);
     });
     await registerLazy(ToolNames.SKILL, async () => {
       const { SkillTool } = await import('../tools/skill.js');
@@ -2664,13 +2712,6 @@ export class Config {
       const { WebFetchTool } = await import('../tools/web-fetch.js');
       return new WebFetchTool(this);
     });
-    // Conditionally register web search tool if web search provider is configured
-    if (this.getWebSearchConfig()) {
-      await registerLazy(ToolNames.WEB_SEARCH, async () => {
-        const { WebSearchTool } = await import('../tools/web-search/index.js');
-        return new WebSearchTool(this);
-      });
-    }
     if (this.isLspEnabled() && this.getLspClient()) {
       await registerLazy(ToolNames.LSP, async () => {
         const { LspTool } = await import('../tools/lsp.js');

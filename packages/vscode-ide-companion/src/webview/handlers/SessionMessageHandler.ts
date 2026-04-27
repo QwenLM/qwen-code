@@ -15,6 +15,21 @@ import {
 } from '../utils/imageHandler.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
+import { stripZeroWidthSpaces } from '@qwen-code/webui';
+import {
+  exportSessionToFile,
+  parseExportSlashCommand,
+  type SessionExportFormat,
+} from '../../services/sessionExportService.js';
+
+function formatExportSuccessMessage(
+  formatLabel: string,
+  filename: string,
+  filePath: string,
+): string {
+  const markdownLinkPath = vscode.Uri.file(filePath).toString();
+  return `Session exported to ${formatLabel}: [${filename}](${markdownLinkPath})`;
+}
 
 /**
  * Session message handler
@@ -287,6 +302,73 @@ export class SessionMessageHandler extends BaseMessageHandler {
     return isAuthenticationRequiredError(error);
   }
 
+  private async resolveSessionWorkingDir(sessionId: string): Promise<string> {
+    try {
+      const sessions = await this.agentManager.getSessionList();
+      const match = sessions.find(
+        (session) =>
+          session.sessionId === sessionId || session.id === sessionId,
+      );
+      if (typeof match?.cwd === 'string' && match.cwd.length > 0) {
+        return match.cwd;
+      }
+    } catch (error) {
+      console.warn(
+        '[SessionMessageHandler] Failed to resolve export session cwd:',
+        error,
+      );
+    }
+
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    return workspaceFolder?.uri.fsPath || process.cwd();
+  }
+
+  private async handleExportCommand(
+    format: SessionExportFormat,
+  ): Promise<void> {
+    // Prefer the active ACP session id. The local conversation id may still be
+    // a webview-only `conv_*` placeholder after starting a fresh session.
+    const sessionId =
+      this.agentManager.currentSessionId ?? this.currentConversationId;
+    if (!sessionId) {
+      const errorMsg = 'No active session found to export.';
+      this.sendToWebView({
+        type: 'error',
+        data: { message: errorMsg },
+      });
+      return;
+    }
+
+    try {
+      const cwd = await this.resolveSessionWorkingDir(sessionId);
+      const result = await exportSessionToFile({ sessionId, cwd, format });
+      if (!result) {
+        // User cancelled the save dialog
+        return;
+      }
+      const formatLabel = format.toUpperCase();
+      this.sendToWebView({
+        type: 'message',
+        data: {
+          role: 'assistant',
+          content: formatExportSuccessMessage(
+            formatLabel,
+            result.filename,
+            result.uri.fsPath,
+          ),
+          timestamp: Date.now(),
+        },
+      });
+    } catch (error) {
+      const errorMsg = this.getErrorMessage(error);
+      console.error('[SessionMessageHandler] Failed to export session:', error);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: `Failed to export session: ${errorMsg}` },
+      });
+    }
+  }
+
   /**
    * Handle send message request
    */
@@ -311,10 +393,25 @@ export class SessionMessageHandler extends BaseMessageHandler {
     // Guard: do not process empty or whitespace-only messages.
     // This prevents ghost user-message bubbles when slash-command completions
     // or model-selector interactions clear the input but still trigger a submit.
-    const trimmedText = text.replace(/\u200B/g, '').trim();
+    const trimmedText = stripZeroWidthSpaces(text).trim();
     const hasAttachments = (attachments?.length ?? 0) > 0;
     if (!trimmedText && !hasAttachments) {
       console.warn('[SessionMessageHandler] Ignoring empty message');
+      return;
+    }
+
+    try {
+      const exportFormat = parseExportSlashCommand(trimmedText);
+      if (exportFormat) {
+        await this.handleExportCommand(exportFormat);
+        return;
+      }
+    } catch (error) {
+      const errorMsg = this.getErrorMessage(error);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: errorMsg },
+      });
       return;
     }
 

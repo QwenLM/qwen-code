@@ -12,7 +12,7 @@ import { DiffRenderer } from './DiffRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
 import { AnsiOutputText, ShellStatsBar } from '../AnsiOutput.js';
 import type { ShellStatsBarProps } from '../AnsiOutput.js';
-import { MaxSizedBox } from '../shared/MaxSizedBox.js';
+import { MaxSizedBox, MINIMUM_MAX_HEIGHT } from '../shared/MaxSizedBox.js';
 import { TodoDisplay } from '../TodoDisplay.js';
 import type {
   TodoResultDisplay,
@@ -31,6 +31,7 @@ import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../../config/settings.js';
 import { useCompactMode } from '../../contexts/CompactModeContext.js';
+import { getCachedStringWidth, toCodePoints } from '../../utils/textUtils.js';
 
 import {
   ToolStatusIndicator,
@@ -47,6 +48,65 @@ const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
 // outputs that will get truncated further MaxSizedBox anyway.
 const MAXIMUM_RESULT_DISPLAY_CHARACTERS = 1000000;
 export type TextEmphasis = 'high' | 'medium' | 'low';
+
+function sliceTextForMaxHeight(
+  text: string,
+  maxHeight: number | undefined,
+  maxWidth: number,
+): { text: string; hiddenLinesCount: number } {
+  if (maxHeight === undefined) {
+    return { text, hiddenLinesCount: 0 };
+  }
+
+  const targetMaxHeight = Math.max(Math.round(maxHeight), MINIMUM_MAX_HEIGHT);
+  const visibleContentHeight = targetMaxHeight - 1;
+  const visualWidth = Math.max(1, Math.floor(maxWidth));
+  const visibleLines: string[] = [];
+  let visualLineCount = 0;
+  let currentLine = '';
+  let currentLineWidth = 0;
+
+  const appendVisibleLine = (line: string) => {
+    visualLineCount += 1;
+    visibleLines.push(line);
+    if (visibleLines.length > visibleContentHeight) {
+      visibleLines.shift();
+    }
+  };
+
+  const flushCurrentLine = () => {
+    appendVisibleLine(currentLine);
+    currentLine = '';
+    currentLineWidth = 0;
+  };
+
+  for (const char of toCodePoints(text)) {
+    if (char === '\n') {
+      flushCurrentLine();
+      continue;
+    }
+
+    const charWidth = Math.max(getCachedStringWidth(char), 1);
+    if (currentLineWidth > 0 && currentLineWidth + charWidth > visualWidth) {
+      flushCurrentLine();
+    }
+
+    currentLine += char;
+    currentLineWidth += charWidth;
+  }
+
+  flushCurrentLine();
+
+  if (visualLineCount <= targetMaxHeight) {
+    return { text, hiddenLinesCount: 0 };
+  }
+
+  const hiddenLinesCount = visualLineCount - visibleContentHeight;
+  return {
+    text: visibleLines.join('\n'),
+    hiddenLinesCount,
+  };
+}
 
 type DisplayRendererResult =
   | { type: 'none' }
@@ -147,7 +207,6 @@ const useResultDisplayRenderer = (
         stats: {
           totalLines: display.totalLines,
           totalBytes: display.totalBytes,
-          timeoutMs: display.timeoutMs,
         },
       };
     }
@@ -235,11 +294,21 @@ const StringResultRenderer: React.FC<{
     );
   }
 
+  const sliced = sliceTextForMaxHeight(
+    displayData,
+    availableHeight,
+    childWidth,
+  );
+
   return (
-    <MaxSizedBox maxHeight={availableHeight} maxWidth={childWidth}>
+    <MaxSizedBox
+      maxHeight={availableHeight}
+      maxWidth={childWidth}
+      additionalHiddenLinesCount={sliced.hiddenLinesCount}
+    >
       <Box>
         <Text wrap="wrap" color={theme.text.primary}>
-          {displayData}
+          {sliced.text}
         </Text>
       </Box>
     </MaxSizedBox>
@@ -312,6 +381,21 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     if (resultDisplay) {
       setLastUpdateTime(new Date());
     }
+  }, [resultDisplay]);
+
+  // Shell tools surface their configured timeout via AnsiOutputDisplay as
+  // soon as streaming starts. Feed it into ToolElapsedTime so the budget is
+  // shown inline (`(elapsed · timeout N)`) instead of in a separate stats
+  // row.
+  const shellTimeoutMs = React.useMemo(() => {
+    if (
+      typeof resultDisplay === 'object' &&
+      resultDisplay !== null &&
+      'ansiOutput' in resultDisplay
+    ) {
+      return (resultDisplay as AnsiOutputDisplay).timeoutMs;
+    }
+    return undefined;
   }, [resultDisplay]);
 
   React.useEffect(() => {
@@ -410,6 +494,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         <ToolElapsedTime
           status={status}
           executionStartTime={executionStartTime}
+          timeoutMs={shellTimeoutMs}
         />
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>

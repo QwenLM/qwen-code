@@ -45,8 +45,11 @@ import { SettingsContext } from './ui/contexts/SettingsContext.js';
 import { VimModeProvider } from './ui/contexts/VimModeContext.js';
 import { AgentViewProvider } from './ui/contexts/AgentViewContext.js';
 import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
-import { themeManager } from './ui/themes/theme-manager.js';
-import { detectAndEnableKittyProtocol } from './ui/utils/kittyProtocolDetector.js';
+import { themeManager, AUTO_THEME_NAME } from './ui/themes/theme-manager.js';
+import {
+  detectAndEnableKittyProtocol,
+  disableKittyProtocol,
+} from './ui/utils/kittyProtocolDetector.js';
 import { checkForUpdates } from './ui/utils/updateCheck.js';
 import {
   cleanupCheckpoints,
@@ -74,6 +77,7 @@ import {
   startEarlyInputCapture,
   stopAndGetCapturedInput,
 } from './utils/earlyInputCapture.js';
+import { preconnectApi } from './utils/apiPreconnect.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
@@ -82,6 +86,7 @@ import { DualOutputContext } from './dualOutput/DualOutputContext.js';
 import { RemoteInputWatcher } from './remoteInput/RemoteInputWatcher.js';
 import { RemoteInputContext } from './remoteInput/RemoteInputContext.js';
 import { installTerminalRedrawOptimizer } from './ui/utils/terminalRedrawOptimizer.js';
+import { installSynchronizedOutput } from './ui/utils/synchronizedOutput.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -170,6 +175,10 @@ export async function startInteractiveUI(
   const restoreTerminalRedrawOptimizer =
     process.stdout.isTTY && !config.getScreenReader()
       ? installTerminalRedrawOptimizer(process.stdout)
+      : () => {};
+  const restoreSynchronizedOutput =
+    process.stdout.isTTY && !config.getScreenReader()
+      ? installSynchronizedOutput(process.stdout)
       : () => {};
 
   // Create dual output bridge if --json-fd or --json-file is specified.
@@ -289,7 +298,12 @@ export async function startInteractiveUI(
   registerCleanup(async () => {
     remoteInputWatcher?.shutdown();
     await dualOutputBridge?.shutdown();
+    // Explicitly disable the Kitty keyboard protocol before unmounting Ink so
+    // that the disable escape sequence is written while stdout is still fully
+    // operational, preventing garbled terminal output after the app exits.
+    disableKittyProtocol();
     instance.unmount();
+    restoreSynchronizedOutput();
     restoreTerminalRedrawOptimizer();
   });
 }
@@ -332,14 +346,21 @@ export async function main() {
   // Load custom themes from settings
   themeManager.loadCustomThemes(settings.merged.ui?.customThemes);
 
-  if (settings.merged.ui?.theme) {
-    if (!themeManager.setActiveTheme(settings.merged.ui?.theme)) {
+  const configuredTheme = settings.merged.ui?.theme;
+  if (configuredTheme && configuredTheme !== AUTO_THEME_NAME) {
+    if (!themeManager.setActiveTheme(configuredTheme)) {
       // If the theme is not found during initial load, log a warning and continue.
       // The useThemeCommand hook in AppContainer.tsx will handle opening the dialog.
-      writeStderrLine(
-        `Warning: Theme "${settings.merged.ui?.theme}" not found.`,
-      );
+      writeStderrLine(`Warning: Theme "${configuredTheme}" not found.`);
     }
+  } else {
+    // 'auto' or unset: resolve a synchronous baseline (COLORFGBG + macOS)
+    // so non-interactive runs and any pre-render UI (e.g. the --resume
+    // session picker) already have a sensible theme. The interactive
+    // startup block refines this with an OSC 11 probe later on, which is
+    // intentionally deferred to run inside the early-capture window so
+    // terminal response bytes cannot leak into the TUI input.
+    themeManager.setActiveTheme(AUTO_THEME_NAME);
   }
 
   // hop into sandbox if we are outside and sandboxing is enabled
@@ -508,6 +529,21 @@ export async function main() {
     // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
 
+    // Startup optimization: preconnect API to warm TCP+TLS connection
+    // Fires early; cost is one HEAD request even for local-only commands
+    try {
+      const modelsConfig = config.getModelsConfig();
+      const authType = modelsConfig.getCurrentAuthType();
+      const resolvedBaseUrl = modelsConfig.getGenerationConfig().baseUrl;
+      const proxy = config.getProxy();
+      preconnectApi(authType, { resolvedBaseUrl, proxy });
+    } catch (error) {
+      // If we can't get authType, skip preconnect - it's optional optimization
+      debugLogger.debug(
+        `Preconnect skipped due to error getting authType: ${error}`,
+      );
+    }
+
     // FIXME: list extensions after the config initialize
     // if (config.getListExtensions()) {
     //   console.log('Installed extensions:');
@@ -519,6 +555,7 @@ export async function main() {
 
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
+    let themeAutoDetectionComplete: Promise<void> | undefined;
     if (config.isInteractive() && !wasRaw && process.stdin.isTTY) {
       // Set this as early as possible to avoid spurious characters from
       // input showing up in the output.
@@ -539,6 +576,24 @@ export async function main() {
 
       // Detect and enable Kitty keyboard protocol once at startup.
       kittyProtocolDetectionComplete = detectAndEnableKittyProtocol();
+
+      // Auto-detect theme (OSC 11 + COLORFGBG + macOS) when the user has
+      // opted into 'auto' or has not configured a theme at all. Kicked off
+      // here without awaiting so the OSC 11 timeout overlaps with the
+      // heavier startup work below (initializeApp, warnings) instead of
+      // blocking the critical path. The synchronous baseline picked above
+      // keeps the active theme valid in the meantime; this probe only
+      // refines it. Running inside the early-capture window is deliberate:
+      // the filter in startEarlyInputCapture absorbs the OSC 11 response
+      // bytes so they cannot leak into the TUI input, even though our
+      // probe attaches its own listener to parse the RGB value.
+      if (!configuredTheme || configuredTheme === AUTO_THEME_NAME) {
+        themeAutoDetectionComplete = themeManager
+          .resolveAutoThemeAsync()
+          .catch((err) => {
+            debugLogger.warn('Async theme auto-detection failed:', err);
+          });
+      }
     }
 
     setMaxSizedBoxDebugging(isDebugMode);
@@ -590,6 +645,11 @@ export async function main() {
     if (config.isInteractive()) {
       // Need kitty detection to be complete before we can start the interactive UI.
       await kittyProtocolDetectionComplete;
+      // Drain the auto-theme probe before render so the OSC 11 response is
+      // absorbed by the early-capture filter (which is closed inside
+      // startInteractiveUI) and so the first paint uses the refined theme
+      // when the probe finishes in time.
+      await themeAutoDetectionComplete;
       await startInteractiveUI(
         config,
         settings,

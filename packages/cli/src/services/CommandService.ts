@@ -34,9 +34,8 @@ export class CommandService {
    *
    * This factory method orchestrates the entire command loading process. It
    * runs all provided loaders in parallel, aggregates their results, handles
-   * name conflicts for extension commands by renaming them, optionally filters
-   * out disabled commands, and then returns a fully constructed
-   * `CommandService` instance.
+   * name conflicts for extension commands by renaming them, and then returns a
+   * fully constructed `CommandService` instance.
    *
    * Conflict resolution:
    * - Extension commands that conflict with existing commands are renamed to
@@ -102,8 +101,12 @@ export class CommandService {
         if (trimmed) normalizedDisabled.add(trimmed.toLowerCase());
       }
       if (normalizedDisabled.size > 0) {
-        for (const name of Array.from(commandMap.keys())) {
-          if (normalizedDisabled.has(name.toLowerCase())) {
+        for (const [name, cmd] of Array.from(commandMap.entries())) {
+          const matchesPrimary = normalizedDisabled.has(name.toLowerCase());
+          const matchesAlias = (cmd.altNames ?? []).some((a) =>
+            normalizedDisabled.has(a.toLowerCase()),
+          );
+          if (matchesPrimary || matchesAlias) {
             commandMap.delete(name);
           }
         }

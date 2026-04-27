@@ -216,7 +216,7 @@ const exploreExtensionsCommand: SlashCommand = {
     return t('Open extensions page in your browser');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
+  supportedModes: ['interactive'] as const,
   action: exploreAction,
   completion: completeExtensionsExplore,
 };
@@ -227,7 +227,7 @@ const manageExtensionsCommand: SlashCommand = {
     return t('Manage installed extensions');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
+  supportedModes: ['interactive'] as const,
   action: listAction,
 };
 
@@ -237,7 +237,7 @@ const installCommand: SlashCommand = {
     return t('Install an extension from a git repo or local path');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
+  supportedModes: ['interactive'] as const,
   action: installAction,
 };
 
@@ -247,7 +247,7 @@ export const extensionsCommand: SlashCommand = {
     return t('Manage extensions');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
+  supportedModes: ['interactive'] as const,
   subCommands: [
     manageExtensionsCommand,
     installCommand,

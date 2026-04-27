@@ -75,4 +75,75 @@ describe('statsCommand', () => {
       expect.any(Number),
     );
   });
+
+  describe('non-interactive mode', () => {
+    let nonInteractiveContext: ReturnType<typeof createMockCommandContext>;
+
+    beforeEach(() => {
+      nonInteractiveContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+      });
+      nonInteractiveContext.session.stats.sessionStartTime = startTime;
+    });
+
+    it('should return text stats without calling addItem', async () => {
+      if (!statsCommand.action) throw new Error('Command has no action');
+
+      const result = (await statsCommand.action(nonInteractiveContext, '')) as {
+        type: string;
+        messageType: string;
+        content: string;
+      };
+
+      expect(result.type).toBe('message');
+      expect(result.messageType).toBe('info');
+      expect(result.content).toContain('Session duration');
+      expect(result.content).toContain('Prompts');
+      expect(nonInteractiveContext.ui.addItem).not.toHaveBeenCalled();
+    });
+
+    it('should return error if sessionStartTime is not available', async () => {
+      if (!statsCommand.action) throw new Error('Command has no action');
+
+      nonInteractiveContext.session.stats.sessionStartTime = undefined;
+
+      const result = (await statsCommand.action(nonInteractiveContext, '')) as {
+        type: string;
+        messageType: string;
+      };
+
+      expect(result.type).toBe('message');
+      expect(result.messageType).toBe('error');
+    });
+
+    it('stats model subcommand should return text in non-interactive mode', async () => {
+      const modelSubCommand = statsCommand.subCommands?.find(
+        (sc) => sc.name === 'model',
+      );
+      if (!modelSubCommand?.action) throw new Error('Subcommand has no action');
+
+      const result = (await modelSubCommand.action(
+        nonInteractiveContext,
+        '',
+      )) as { type: string; content: string };
+
+      expect(result.type).toBe('message');
+      expect(nonInteractiveContext.ui.addItem).not.toHaveBeenCalled();
+    });
+
+    it('stats tools subcommand should return text in non-interactive mode', async () => {
+      const toolsSubCommand = statsCommand.subCommands?.find(
+        (sc) => sc.name === 'tools',
+      );
+      if (!toolsSubCommand?.action) throw new Error('Subcommand has no action');
+
+      const result = (await toolsSubCommand.action(
+        nonInteractiveContext,
+        '',
+      )) as { type: string; content: string };
+
+      expect(result.type).toBe('message');
+      expect(nonInteractiveContext.ui.addItem).not.toHaveBeenCalled();
+    });
+  });
 });
