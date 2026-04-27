@@ -55,7 +55,8 @@ case "$cmd" in
     fi
 
     mkdir -p "$outdir"
-    tmux new-session -d -s "$session" -x 200 -y 50 -c "$workdir" "$*"
+    shell_command=$(printf '%q ' "$@")
+    tmux new-session -d -s "$session" -x 200 -y 50 -c "$workdir" "$shell_command"
     # Eval-friendly: source this output to get SESSION/OUTDIR/LOG in your shell
     printf 'export SESSION=%q\n' "$session"
     printf 'export OUTDIR=%q\n' "$outdir"
