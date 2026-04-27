@@ -57,6 +57,7 @@ describe('App', () => {
     streamingState: StreamingState.Idle,
     quittingMessages: null,
     dialogsVisible: false,
+    stickyTodos: null,
     mainControlsRef: { current: null },
     historyManager: {
       addItem: vi.fn(),

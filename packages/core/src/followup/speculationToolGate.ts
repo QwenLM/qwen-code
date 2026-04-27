@@ -48,7 +48,6 @@ const BOUNDARY_TOOLS = new Set<string>([
   ToolNames.ASK_USER_QUESTION,
   ToolNames.EXIT_PLAN_MODE,
   ToolNames.WEB_FETCH,
-  ToolNames.WEB_SEARCH,
 ]);
 
 /**

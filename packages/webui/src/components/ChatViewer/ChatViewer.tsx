@@ -187,8 +187,7 @@ function getToolCallComponent(toolCall: BaseToolCallData) {
     case 'fetch':
     case 'web_fetch':
     case 'webfetch':
-    case 'web_search':
-    case 'websearch':
+    case 'web_search': // compatibility alias for legacy persisted tool-call records
       return WebFetchToolCall;
     default:
       return GenericToolCall;

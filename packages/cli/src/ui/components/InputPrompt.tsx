@@ -194,6 +194,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const midInputGhostTextRef = useRef<{
     text: string;
     insertPosition: number;
+    acceptText?: string;
+    showCursorBeforeText?: boolean;
   } | null>(null);
   midInputGhostTextRef.current = completion.midInputGhostText;
 
@@ -280,6 +282,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     [],
   );
 
+  // Ref to inputHistory.resetHistoryNav, populated after useInputHistory runs.
+  // Needed because handleSubmitAndClear is passed into useInputHistory as
+  // onSubmit, so we can't reference inputHistory directly here without a cycle.
+  const resetHistoryNavRef = useRef<() => void>(() => {});
+
   const handleSubmitAndClear = useCallback(
     (submittedValue: string) => {
       // Expand any large paste placeholders to their full content before submitting
@@ -316,6 +323,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // if onSubmit triggers a re-render while the buffer still holds the old value.
       buffer.setText('');
       onSubmit(finalValue);
+
+      // Reset history navigation so the next Up-arrow starts from the newest
+      // entry rather than advancing from whatever index the user picked.
+      resetHistoryNavRef.current();
 
       // Dismiss follow-up suggestion after submit
       followup.dismiss();
@@ -359,6 +370,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     currentQuery: buffer.text,
     onChange: customSetTextAndResetCompletionSignal,
   });
+
+  resetHistoryNavRef.current = inputHistory.resetHistoryNav;
 
   // When an arena session starts (agents appear), reset history position so
   // that pressing down-arrow immediately focuses the agent tab bar instead
@@ -816,9 +829,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !key.paste &&
         !key.shift &&
         !completion.showSuggestions &&
-        midInputGhostTextRef.current
+        midInputGhostTextRef.current?.acceptText
       ) {
-        buffer.insert(midInputGhostTextRef.current.text);
+        buffer.insert(midInputGhostTextRef.current.acceptText);
         return true;
       }
 
@@ -1158,18 +1171,29 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // Check for mid-input ghost text (only renders when cursor is at end of input)
         const ghostText = midInputGhostTextRef.current;
         if (ghostText && showCursorOpt && ghostText.text.length > 0) {
-          // First ghost char: inverted (as cursor). Rest: dimmed gray.
-          const firstChar = ghostText.text[0]!;
-          const rest = ghostText.text.slice(firstChar.length);
-          renderedLine.push(
-            <Text key="ghost-cursor">{chalk.inverse(firstChar)}</Text>,
-          );
-          if (rest.length > 0) {
+          if (ghostText.showCursorBeforeText) {
+            renderedLine.push(
+              <Text key="ghost-cursor">{chalk.inverse(' ')}</Text>,
+            );
             renderedLine.push(
               <Text key="ghost-rest" color={theme.text.secondary}>
-                {rest}
+                {ghostText.text}
               </Text>,
             );
+          } else {
+            // First ghost char: inverted (as cursor). Rest: dimmed gray.
+            const firstChar = ghostText.text[0]!;
+            const rest = ghostText.text.slice(firstChar.length);
+            renderedLine.push(
+              <Text key="ghost-cursor">{chalk.inverse(firstChar)}</Text>,
+            );
+            if (rest.length > 0) {
+              renderedLine.push(
+                <Text key="ghost-rest" color={theme.text.secondary}>
+                  {rest}
+                </Text>,
+              );
+            }
           }
           renderedLine.push(<Text key="ghost-zwsp">{`\u200B`}</Text>);
         } else {
