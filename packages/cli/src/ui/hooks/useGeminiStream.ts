@@ -1705,6 +1705,10 @@ export const useGeminiStream = (
         (t) => !t.request.isClientInitiated,
       );
 
+      for (const toolCall of geminiTools) {
+        geminiClient?.recordCompletedToolCall(toolCall.request.name);
+      }
+
       if (geminiTools.length === 0) {
         return;
       }

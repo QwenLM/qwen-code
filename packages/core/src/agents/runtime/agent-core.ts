@@ -74,6 +74,7 @@ import { type ContextState, templateString } from './agent-headless.js';
  */
 export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
+  ToolNames.SKILL_MANAGE,
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
@@ -334,7 +335,12 @@ export class AgentCore {
           ),
         );
       }
-      toolsList.push(...onlyInlineDecls);
+      // Also filter inline FunctionDeclaration[] passed directly in toolConfig.
+      toolsList.push(
+        ...onlyInlineDecls.filter(
+          (d) => !(d.name && excludedFromSubagents.has(d.name)),
+        ),
+      );
     } else {
       // Inherit all available tools by default when not specified.
       toolsList.push(

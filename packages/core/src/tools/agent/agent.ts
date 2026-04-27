@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
+import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from '../../agents/runtime/agent-core.js';
 import type {
   ToolResult,
   ToolResultDisplay,
@@ -694,12 +695,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // the parent, not an isolated subagent, so the general subagent
       // exclusion list does not apply. Recursive forks are blocked by the
       // ALS-based `isInForkExecution()` guard.
+      // However, we still exclude tools that must never be available to
+      // any subagent (agent, skill_manage, cron tools).
       const parentToolDecls: FunctionDeclaration[] =
         (
           generationConfig.tools as Array<{
             functionDeclarations?: FunctionDeclaration[];
           }>
-        )?.flatMap((t) => t.functionDeclarations ?? []) ?? [];
+        )
+          ?.flatMap((t) => t.functionDeclarations ?? [])
+          .filter(
+            (d) => !(d.name && EXCLUDED_TOOLS_FOR_SUBAGENTS.has(d.name)),
+          ) ?? [];
 
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as

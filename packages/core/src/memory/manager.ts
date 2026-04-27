@@ -40,6 +40,7 @@ import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { logMemoryExtract, MemoryExtractEvent } from '../telemetry/index.js';
+import { ToolNames } from '../tools/tool-names.js';
 import { isAutoMemPath } from './paths.js';
 import {
   getAutoMemoryConsolidationLockPath,
@@ -65,6 +66,7 @@ import { getManagedAutoMemoryStatus } from './status.js';
 import { appendManagedAutoMemoryToUserMemory } from './prompt.js';
 import { writeDreamManualRunToMetadata } from './dream.js';
 import { buildConsolidationTaskPrompt } from './dreamAgentPlanner.js';
+import { runSkillReviewByAgent } from './skillReviewAgentPlanner.js';
 import type { AutoMemoryMetadata } from './types.js';
 
 // ─── Re-export public types consumed by callers ───────────────────────────────
@@ -91,7 +93,7 @@ export type MemoryTaskStatus =
 
 export interface MemoryTaskRecord {
   id: string;
-  taskType: 'extract' | 'dream';
+  taskType: 'extract' | 'dream' | 'skill-review';
   projectRoot: string;
   sessionId?: string;
   status: MemoryTaskStatus;
@@ -110,6 +112,30 @@ export interface ScheduleExtractParams {
   history: Content[];
   now?: Date;
   config?: Config;
+}
+
+export interface ScheduleSkillReviewParams {
+  projectRoot: string;
+  sessionId: string;
+  history: Content[];
+  toolCallCount: number;
+  now?: Date;
+  config?: Config;
+  enabled?: boolean;
+  threshold?: number;
+  maxTurns?: number;
+  timeoutMs?: number;
+}
+
+export interface SkillReviewScheduleResult {
+  status: 'scheduled' | 'skipped';
+  taskId?: string;
+  skippedReason?:
+    | 'below_threshold'
+    | 'skill_manage_called'
+    | 'disabled'
+    | 'merged_with_extract';
+  promise?: Promise<MemoryTaskRecord>;
 }
 
 // AutoMemoryExtractResult is re-used as the return type
@@ -157,6 +183,8 @@ export interface DrainOptions {
 
 export const EXTRACT_TASK_TYPE = 'managed-auto-memory-extraction' as const;
 export const DREAM_TASK_TYPE = 'managed-auto-memory-dream' as const;
+export const SKILL_REVIEW_TASK_TYPE = 'managed-skill-extractor' as const;
+export const AUTO_SKILL_THRESHOLD = 20;
 
 export const DEFAULT_AUTO_DREAM_MIN_HOURS = 24;
 export const DEFAULT_AUTO_DREAM_MIN_SESSIONS = 5;
@@ -174,7 +202,7 @@ const WRITE_TOOL_NAMES = new Set([
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 function makeTaskRecord(
-  type: 'extract' | 'dream',
+  type: MemoryTaskRecord['taskType'],
   projectRoot: string,
   sessionId?: string,
 ): MemoryTaskRecord {
@@ -225,6 +253,14 @@ function historyWritesToMemory(
 ): boolean {
   return history.some((msg) =>
     (msg.parts ?? []).some((p) => partWritesToMemory(p, projectRoot)),
+  );
+}
+
+function historyCallsSkillManage(history: Content[]): boolean {
+  return history.some((msg) =>
+    (msg.parts ?? []).some(
+      (p) => p.functionCall?.name === ToolNames.SKILL_MANAGE,
+    ),
   );
 }
 
@@ -420,7 +456,7 @@ export class MemoryManager {
 
   /** Return task records filtered by type and optionally by projectRoot. */
   listTasksByType(
-    taskType: 'extract' | 'dream',
+    taskType: MemoryTaskRecord['taskType'],
     projectRoot?: string,
   ): MemoryTaskRecord[] {
     return [...this.tasks.values()]
@@ -644,6 +680,139 @@ export class MemoryManager {
       queued.taskId,
       this.runExtract(queued.taskId, queued.params),
     );
+  }
+
+  // ─── Skill review ─────────────────────────────────────────────────────────────
+
+  scheduleSkillReview(
+    params: ScheduleSkillReviewParams,
+  ): SkillReviewScheduleResult {
+    if (params.enabled === false) {
+      return { status: 'skipped', skippedReason: 'disabled' };
+    }
+
+    if (historyCallsSkillManage(params.history)) {
+      return { status: 'skipped', skippedReason: 'skill_manage_called' };
+    }
+
+    const threshold = params.threshold ?? AUTO_SKILL_THRESHOLD;
+    if (params.toolCallCount < threshold) {
+      return { status: 'skipped', skippedReason: 'below_threshold' };
+    }
+
+    if (!params.config) {
+      return { status: 'skipped', skippedReason: 'disabled' };
+    }
+
+    // Check if extract is already running and eligible for merge
+    const pendingExtractTaskId = this.findPendingOrRunningExtractTask(
+      params.projectRoot,
+    );
+    if (pendingExtractTaskId) {
+      // Mark extract record to include skill review in its execution
+      const extractRecord = this.tasks.get(pendingExtractTaskId);
+      if (extractRecord && extractRecord.metadata) {
+        extractRecord.metadata['shouldReviewSkillsAlso'] = true;
+        extractRecord.metadata['skillReviewParams'] = {
+          toolCallCount: params.toolCallCount,
+          threshold,
+        };
+        this.notify();
+      }
+      // Create a lightweight task record for tracking but return merged status
+      const record = makeTaskRecord(
+        'skill-review',
+        params.projectRoot,
+        params.sessionId,
+      );
+      this.storeWith(record, {
+        status: 'skipped',
+        progressText: 'Merged into extract task for combined review.',
+        metadata: {
+          mergedWithTaskId: pendingExtractTaskId,
+          historyLength: params.history.length,
+          toolCallCount: params.toolCallCount,
+          threshold,
+        },
+      });
+      return {
+        status: 'skipped',
+        taskId: record.id,
+        skippedReason: 'merged_with_extract',
+      };
+    }
+
+    const record = makeTaskRecord(
+      'skill-review',
+      params.projectRoot,
+      params.sessionId,
+    );
+    this.storeWith(record, {
+      status: 'running',
+      progressText: 'Running managed skill review.',
+      metadata: {
+        historyLength: params.history.length,
+        toolCallCount: params.toolCallCount,
+        threshold,
+      },
+    });
+
+    const promise = this.track(record.id, this.runSkillReview(record, params));
+    return { status: 'scheduled', taskId: record.id, promise };
+  }
+
+  private findPendingOrRunningExtractTask(
+    projectRoot: string,
+  ): string | undefined {
+    // Check currently running extract
+    const currentTaskId = this.extractCurrentTaskId.get(projectRoot);
+    if (currentTaskId) {
+      return currentTaskId;
+    }
+
+    // Check queued extract
+    const queued = this.extractQueued.get(projectRoot);
+    if (queued) {
+      return queued.taskId;
+    }
+
+    // Check for recently created but not yet running extract task
+    const records = this.listTasksByType('extract', projectRoot);
+    for (const record of records) {
+      if (record.status === 'pending' || record.status === 'running') {
+        return record.id;
+      }
+    }
+
+    return undefined;
+  }
+
+  private async runSkillReview(
+    record: MemoryTaskRecord,
+    params: ScheduleSkillReviewParams,
+  ): Promise<MemoryTaskRecord> {
+    try {
+      const result = await runSkillReviewByAgent({
+        config: params.config!,
+        projectRoot: params.projectRoot,
+        history: params.history,
+        maxTurns: params.maxTurns,
+        timeoutMs: params.timeoutMs,
+      });
+      this.update(record, {
+        status: 'completed',
+        progressText:
+          result.systemMessage ??
+          'Managed skill review completed without durable changes.',
+        metadata: { touchedSkillFiles: result.touchedSkillFiles },
+      });
+    } catch (error) {
+      this.update(record, {
+        status: 'failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return record;
   }
 
   // ─── Dream ────────────────────────────────────────────────────────────────────

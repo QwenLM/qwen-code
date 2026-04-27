@@ -460,6 +460,11 @@
           "description": "Enable automatic consolidation (dream) of collected memories.",
           "type": "boolean",
           "default": false
+        },
+        "enableAutoSkill": {
+          "description": "Enable background review for reusable project skills after tool-heavy sessions.",
+          "type": "boolean",
+          "default": false
         }
       }
     },
