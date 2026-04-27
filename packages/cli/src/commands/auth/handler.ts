@@ -840,7 +840,9 @@ export async function showAuthStatus(): Promise<void> {
       );
       const detectedCodingPlanRegion = activeConfig
         ? providerCodingPlanRegion
-        : codingPlanRegion;
+        : !modelName
+          ? codingPlanRegion
+          : false;
       const isActiveStandard =
         activeConfig &&
         activeConfig.envKey === DASHSCOPE_STANDARD_API_KEY_ENV_KEY &&
@@ -997,11 +999,12 @@ export async function showAuthStatus(): Promise<void> {
         const hasCodingPlanKey =
           !!process.env[CODING_PLAN_ENV_KEY] ||
           !!mergedSettings.env?.[CODING_PLAN_ENV_KEY];
-        const hasCodingPlanMetadata = !!codingPlanRegion || !!codingPlanVersion;
         const hasGenericApiKey =
           !!process.env['OPENAI_API_KEY'] ||
           !!mergedSettings.env?.['OPENAI_API_KEY'] ||
           !!mergedSettings.security?.auth?.apiKey;
+        const hasCodingPlanMetadata =
+          !modelName && (!!codingPlanRegion || !!codingPlanVersion);
 
         if (hasGenericApiKey) {
           writeStdoutLine(

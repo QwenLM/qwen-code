@@ -27,12 +27,14 @@ describe('showAuthStatus', () => {
     vi.clearAllMocks();
     vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     delete process.env[CODING_PLAN_ENV_KEY];
+    delete process.env['OPENAI_API_KEY'];
     delete process.env['OPENROUTER_API_KEY'];
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     delete process.env[CODING_PLAN_ENV_KEY];
+    delete process.env['OPENAI_API_KEY'];
     delete process.env['OPENROUTER_API_KEY'];
   });
 
@@ -261,6 +263,36 @@ describe('showAuthStatus', () => {
       expect.stringContaining('OpenAI-compatible Provider'),
     );
     expect(process.exit).toHaveBeenCalledWith(0);
+  });
+
+  it('should not fall back to stale Coding Plan metadata when model selection is unmatched', async () => {
+    process.env['OPENAI_API_KEY'] = 'test-openai-key';
+
+    vi.mocked(loadSettings).mockReturnValue(
+      createMockSettings({
+        security: {
+          auth: {
+            selectedType: AuthType.USE_OPENAI,
+          },
+        },
+        codingPlan: {
+          region: 'global',
+          version: 'abc123def456',
+        },
+        model: {
+          name: 'manual-provider-model',
+        },
+      }),
+    );
+
+    await showAuthStatus();
+
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('OpenAI-compatible Provider'),
+    );
+    expect(writeStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Alibaba Cloud Coding Plan'),
+    );
   });
 
   it('should show Coding Plan region for china', async () => {
