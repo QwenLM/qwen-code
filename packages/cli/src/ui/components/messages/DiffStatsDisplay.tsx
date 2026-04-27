@@ -8,6 +8,7 @@ import type React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import type { DiffRenderModel, DiffRenderRow } from '../../types.js';
+import { computeDiffColumnWidths } from '../../commands/diffCommand.js';
 import { t } from '../../../i18n/index.js';
 
 interface DiffStatsDisplayProps {
@@ -24,19 +25,10 @@ export const DiffStatsDisplay: React.FC<DiffStatsDisplayProps> = ({
   model,
 }) => {
   const { filesCount, linesAdded, linesRemoved, rows, hiddenCount } = model;
-
-  // Reproduce the numeric-column alignment of the text renderer so the
-  // interactive and non-interactive outputs are visually interchangeable.
-  let maxAdded = 0;
-  let maxRemoved = 0;
-  for (const r of rows) {
-    if (r.isBinary) continue;
-    if ((r.added ?? 0) > maxAdded) maxAdded = r.added ?? 0;
-    if ((r.removed ?? 0) > maxRemoved) maxRemoved = r.removed ?? 0;
-  }
-  const addWidth = String(maxAdded).length;
-  const remWidth = String(maxRemoved).length;
-  const statColumnWidth = 1 + addWidth + 1 + 1 + remWidth;
+  // Single source of truth shared with `renderDiffModelText`, so the
+  // interactive Ink output and the non-interactive plain text never drift
+  // out of column alignment.
+  const { addWidth, remWidth, statColumnWidth } = computeDiffColumnWidths(rows);
 
   const headerLabel =
     filesCount === 1

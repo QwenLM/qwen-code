@@ -6,7 +6,7 @@
 
 import type { Mock } from 'vitest';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { diffCommand } from './diffCommand.js';
+import { computeDiffColumnWidths, diffCommand } from './diffCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { fetchGitDiff, type GitDiffResult } from '@qwen-code/qwen-code-core';
@@ -337,6 +337,83 @@ describe('diffCommand interactive mode', () => {
     const call = (ctx.ui.addItem as Mock).mock.calls[0][0];
     expect(call.model.hiddenCount).toBe(59);
     expect(call.model.rows).toHaveLength(1);
+  });
+});
+
+describe('computeDiffColumnWidths', () => {
+  // Direct contract test — both the Ink component and the plain-text
+  // renderer call this helper, so its output binds their column alignment.
+  // If anyone changes the formula, both paths must shift together.
+
+  it('reports min widths of 1 for an empty row list', () => {
+    expect(computeDiffColumnWidths([])).toEqual({
+      addWidth: 1,
+      remWidth: 1,
+      statColumnWidth: 5, // `+_ -_` with single-digit padding
+    });
+  });
+
+  it('sizes columns to the widest non-binary row', () => {
+    const widths = computeDiffColumnWidths([
+      {
+        filename: 'a',
+        added: 9999,
+        removed: 5,
+        isBinary: false,
+        isUntracked: false,
+        truncated: false,
+      },
+      {
+        filename: 'b',
+        added: 2,
+        removed: 100,
+        isBinary: false,
+        isUntracked: false,
+        truncated: false,
+      },
+    ]);
+    // 1 (`+`) + 4 (digits) + 1 (` `) + 1 (`-`) + 3 (digits) = 10
+    expect(widths).toEqual({ addWidth: 4, remWidth: 3, statColumnWidth: 10 });
+  });
+
+  it('ignores binary rows when computing widths', () => {
+    // A binary row must not push the numeric column wider, otherwise the
+    // `~` placeholder ends up padded to a column that no real number ever
+    // occupies.
+    const widths = computeDiffColumnWidths([
+      {
+        filename: 'a',
+        added: 1,
+        removed: 1,
+        isBinary: false,
+        isUntracked: false,
+        truncated: false,
+      },
+      {
+        filename: 'b.bin',
+        isBinary: true,
+        isUntracked: false,
+        truncated: false,
+      },
+    ]);
+    expect(widths).toEqual({ addWidth: 1, remWidth: 1, statColumnWidth: 5 });
+  });
+
+  it('counts untracked text rows in width calculation', () => {
+    // Untracked rows render as `+N -0  filename (new)`; their `added`
+    // value must be allowed to widen the column.
+    const widths = computeDiffColumnWidths([
+      {
+        filename: 'fresh.log',
+        added: 12345,
+        removed: 0,
+        isBinary: false,
+        isUntracked: true,
+        truncated: false,
+      },
+    ]);
+    expect(widths.addWidth).toBe(5);
+    expect(widths.statColumnWidth).toBe(1 + 5 + 1 + 1 + 1);
   });
 });
 

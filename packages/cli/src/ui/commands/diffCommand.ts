@@ -82,7 +82,7 @@ async function diffAction(
   // plain-text MessageActionReturn path so pipes, logs, and transports that
   // don't speak Ink still see legible output.
   if (context.executionMode === 'interactive') {
-    const item: Omit<HistoryItemDiffStats, 'id'> = {
+    const item: HistoryItemDiffStats = {
       type: MessageType.DIFF_STATS,
       model,
     };
@@ -137,6 +137,38 @@ function toRow(filename: string, s: PerFileStats): DiffRenderRow {
 }
 
 /**
+ * Single source of truth for the per-row column layout. Used by both the
+ * Ink component and the plain-text renderer so the two paths can never
+ * silently disagree on alignment.
+ */
+export interface DiffColumnWidths {
+  /** Digits in the widest non-binary `added` value (min 1). */
+  addWidth: number;
+  /** Digits in the widest non-binary `removed` value (min 1). */
+  remWidth: number;
+  /** Visual width of the `+X -Y` stat column, used to pad the binary `~`
+   *  marker so it lines up with the numeric rows. */
+  statColumnWidth: number;
+}
+
+export function computeDiffColumnWidths(
+  rows: readonly DiffRenderRow[],
+): DiffColumnWidths {
+  let maxAdded = 0;
+  let maxRemoved = 0;
+  for (const r of rows) {
+    if (r.isBinary) continue;
+    if ((r.added ?? 0) > maxAdded) maxAdded = r.added ?? 0;
+    if ((r.removed ?? 0) > maxRemoved) maxRemoved = r.removed ?? 0;
+  }
+  const addWidth = String(maxAdded).length;
+  const remWidth = String(maxRemoved).length;
+  // `+` + addDigits + ' ' + `-` + remDigits.
+  const statColumnWidth = 1 + addWidth + 1 + 1 + remWidth;
+  return { addWidth, remWidth, statColumnWidth };
+}
+
+/**
  * Plain-text rendering of a `DiffRenderModel`. Used in non-interactive / ACP
  * modes where no Ink renderer is available, and as the source of truth for
  * the text column layout the Ink component mirrors.
@@ -168,16 +200,7 @@ export function renderDiffModelText(model: DiffRenderModel): string {
 
 function formatRowsText(rows: DiffRenderRow[]): string[] {
   if (rows.length === 0) return [];
-  let maxAdded = 0;
-  let maxRemoved = 0;
-  for (const r of rows) {
-    if (r.isBinary) continue;
-    if ((r.added ?? 0) > maxAdded) maxAdded = r.added ?? 0;
-    if ((r.removed ?? 0) > maxRemoved) maxRemoved = r.removed ?? 0;
-  }
-  const addWidth = String(maxAdded).length;
-  const remWidth = String(maxRemoved).length;
-  const statColumnWidth = 1 + addWidth + 1 + 1 + remWidth;
+  const { addWidth, remWidth, statColumnWidth } = computeDiffColumnWidths(rows);
 
   const out: string[] = [];
   for (const r of rows) {
