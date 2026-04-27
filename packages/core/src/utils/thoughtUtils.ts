@@ -14,6 +14,80 @@ export type ThoughtSummary = {
 const START_DELIMITER = '**';
 const END_DELIMITER = '**';
 
+// Think tag delimiters
+const THINK_START_TAG = '<think>';
+const THINK_END_TAG = '</think>';
+
+/**
+ * Extracts thinking content from text containing <think>...</think> tags.
+ *
+ * This function handles models that output their reasoning process wrapped
+ * in XML-style think tags (common in DeepSeek, Qwen, and other open-source
+ * models). It extracts the thinking content and separates it from the
+ * actual response.
+ *
+ * @param text The raw text that may contain <think> tags.
+ * @returns An object containing:
+ *   - thinkingContent: The extracted thinking content (empty string if no tags found)
+ *   - responseContent: The remaining text after removing think tags
+ *   - hasThinkTags: Boolean indicating whether think tags were found
+ *
+ * @example
+ * // Single think tag
+ * extractThinkTags('<think>Let me analyze this...</think>The answer is 42')
+ * // Returns: { thinkingContent: 'Let me analyze this...', responseContent: 'The answer is 42', hasThinkTags: true }
+ *
+ * @example
+ * // No think tags
+ * extractThinkTags('Just a regular response')
+ * // Returns: { thinkingContent: '', responseContent: 'Just a regular response', hasThinkTags: false }
+ */
+export function extractThinkTags(text: string): {
+  thinkingContent: string;
+  responseContent: string;
+  hasThinkTags: boolean;
+} {
+  if (!text || typeof text !== 'string') {
+    return { thinkingContent: '', responseContent: text || '', hasThinkTags: false };
+  }
+
+  const thinkStartIndex = text.indexOf(THINK_START_TAG);
+
+  // No think tags found
+  if (thinkStartIndex === -1) {
+    return { thinkingContent: '', responseContent: text, hasThinkTags: false };
+  }
+
+  const thinkContentStart = thinkStartIndex + THINK_START_TAG.length;
+  const thinkEndIndex = text.indexOf(THINK_END_TAG, thinkContentStart);
+
+  // Opening tag found but no closing tag - treat entire remaining text as thinking
+  if (thinkEndIndex === -1) {
+    const thinkingContent = text.substring(thinkContentStart).trim();
+    const responseContent = text.substring(0, thinkStartIndex).trim();
+    return {
+      thinkingContent,
+      responseContent,
+      hasThinkTags: true,
+    };
+  }
+
+  // Both tags found, extract content
+  const thinkingContent = text
+    .substring(thinkContentStart, thinkEndIndex)
+    .trim();
+  const responseContent = (
+    text.substring(0, thinkStartIndex) +
+    text.substring(thinkEndIndex + THINK_END_TAG.length)
+  ).trim();
+
+  return {
+    thinkingContent,
+    responseContent,
+    hasThinkTags: true,
+  };
+}
+
 /**
  * Parses a raw thought string into a structured ThoughtSummary object.
  *

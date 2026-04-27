@@ -26,6 +26,7 @@ import {
   convertSchema,
   type SchemaComplianceMode,
 } from '../../utils/schemaConverter.js';
+import { extractThinkTags } from '../../utils/thoughtUtils.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
 
@@ -813,7 +814,7 @@ export function convertOpenAIResponseToGemini(
   if (choice) {
     const parts: Part[] = [];
 
-    // Handle reasoning content (thoughts)
+    // Handle reasoning content (thoughts) from API fields
     const reasoningText =
       (choice.message as ExtendedCompletionMessage).reasoning_content ??
       (choice.message as ExtendedCompletionMessage).reasoning;
@@ -821,9 +822,25 @@ export function convertOpenAIResponseToGemini(
       parts.push({ text: reasoningText, thought: true });
     }
 
-    // Handle text content
+    // Handle text content - extract <think> tags if present
     if (choice.message.content) {
-      parts.push({ text: choice.message.content });
+      const { thinkingContent, responseContent, hasThinkTags } = extractThinkTags(
+        choice.message.content,
+      );
+
+      // If think tags found, add thinking content as thought part
+      if (hasThinkTags) {
+        if (thinkingContent) {
+          parts.push({ text: thinkingContent, thought: true });
+        }
+        // Add remaining response content
+        if (responseContent) {
+          parts.push({ text: responseContent });
+        }
+      } else {
+        // No think tags, add content as-is
+        parts.push({ text: choice.message.content });
+      }
     }
 
     // Handle tool calls
@@ -935,6 +952,7 @@ export function convertOpenAIChunkToGemini(
   if (choice) {
     const parts: Part[] = [];
 
+    // Handle reasoning content (thoughts) from API fields
     const reasoningText =
       (choice.delta as ExtendedCompletionChunkDelta)?.reasoning_content ??
       (choice.delta as ExtendedCompletionChunkDelta)?.reasoning;
@@ -942,10 +960,38 @@ export function convertOpenAIChunkToGemini(
       parts.push({ text: reasoningText, thought: true });
     }
 
-    // Handle text content
-    if (choice.delta?.content) {
-      if (typeof choice.delta.content === 'string') {
-        parts.push({ text: choice.delta.content });
+    // Handle text content - extract <think> tags if present
+    const newContent = choice.delta?.content;
+    if (newContent && typeof newContent === 'string') {
+      // Accumulate content for think tag detection across chunks
+      requestContext.streamContentAccumulator =
+        (requestContext.streamContentAccumulator || '') + newContent;
+
+      const accumulated = requestContext.streamContentAccumulator;
+      const { thinkingContent, responseContent, hasThinkTags } =
+        extractThinkTags(accumulated);
+
+      if (hasThinkTags) {
+        // Clear accumulator and emit separated content
+        requestContext.streamContentAccumulator = '';
+
+        if (thinkingContent) {
+          parts.push({ text: thinkingContent, thought: true });
+        }
+        if (responseContent) {
+          parts.push({ text: responseContent });
+        }
+      } else {
+        // Check if we might be accumulating a think tag (starts with <think> but no closing yet)
+        const hasOpenThinkTag =
+          accumulated.includes('<think>') && !accumulated.includes('</think>');
+        if (hasOpenThinkTag) {
+          // Still accumulating - emit as-is, will be processed when complete
+          parts.push({ text: newContent });
+        } else {
+          // No think tags or complete separation - emit normally
+          parts.push({ text: newContent });
+        }
       }
     }
 

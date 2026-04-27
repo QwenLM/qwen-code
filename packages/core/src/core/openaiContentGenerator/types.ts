@@ -18,6 +18,11 @@ export interface RequestContext {
   modalities: InputModalities;
   startTime: number;
   toolCallParser?: StreamingToolCallParser;
+  /**
+   * Accumulator for streaming content to handle think tags that span multiple chunks.
+   * Stores the raw text content accumulated so far for the current chunk stream.
+   */
+  streamContentAccumulator?: string;
 }
 
 export interface ErrorHandler {
