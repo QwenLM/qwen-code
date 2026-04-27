@@ -679,24 +679,29 @@ Skill 3 content`);
     function mockReaddirForLevels(levels: Set<string>) {
       vi.mocked(fs.readdir).mockImplementation((dirPath) => {
         const pathStr = String(dirPath);
-        const isBundled =
-          pathStr.endsWith(bundledDirSegment) && !pathStr.includes('.qwen');
+        const isBundled = pathStr.endsWith(bundledDirSegment);
         const isProject =
           pathStr.includes(projectDirSegment) &&
           pathStr.startsWith(projectPrefix);
         const isUser =
           pathStr.includes(userDirSegment) && pathStr.startsWith(userPrefix);
 
-        if (
-          (levels.has('bundled') && isBundled) ||
-          (levels.has('project') && isProject) ||
-          (levels.has('user') && isUser)
-        ) {
-        const isBundled = pathStr.endsWith(bundledDirSegment);
+        if (levels.has('bundled') && isBundled) {
+          return Promise.resolve([
             reviewDirEntry,
             simplifyDirEntry,
           ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
         }
+
+        if (
+          (levels.has('project') && isProject) ||
+          (levels.has('user') && isUser)
+        ) {
+          return Promise.resolve([reviewDirEntry] as unknown as Awaited<
+            ReturnType<typeof fs.readdir>
+          >);
+        }
+
         return Promise.resolve(emptyDir);
       });
     }
