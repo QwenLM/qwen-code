@@ -39,6 +39,7 @@ import type {
   LspConnectionInterface,
   LspServerHandle,
   LspServerStatus,
+  LspStatusSnapshot,
   NativeLspServiceOptions,
 } from './types.js';
 import * as path from 'path';
@@ -169,6 +170,76 @@ export class NativeLspService {
    */
   getStatus(): Map<string, LspServerStatus> {
     return this.serverManager.getStatus();
+  }
+
+  /**
+   * Get all server handles for status reporting.
+   */
+  getServerHandles(): ReadonlyMap<string, LspServerHandle> {
+    return this.serverManager.getHandles();
+  }
+
+  /**
+   * Get detailed LSP server status for UI and debug logging.
+   */
+  getStatusSnapshot(): LspStatusSnapshot {
+    const counts = { ready: 0, failed: 0, inProgress: 0, notStarted: 0 };
+    const servers = Array.from(this.serverManager.getHandles().entries()).map(
+      ([name, handle]) => {
+        // Count statuses in a single pass
+        if (handle.status === 'READY') counts.ready++;
+        else if (handle.status === 'FAILED') counts.failed++;
+        else if (handle.status === 'IN_PROGRESS') counts.inProgress++;
+        else if (handle.status === 'NOT_STARTED') counts.notStarted++;
+
+        const error =
+          handle.error instanceof Error
+            ? handle.error.message
+            : handle.error
+              ? String(handle.error)
+              : undefined;
+
+        return {
+          name,
+          status: handle.status,
+          languages: handle.config.languages,
+          transport: handle.config.transport,
+          ...(handle.config.command ? { command: handle.config.command } : {}),
+          ...(handle.config.args ? { args: handle.config.args } : {}),
+          ...(handle.config.rootUri ? { rootUri: handle.config.rootUri } : {}),
+          ...(handle.config.workspaceFolder
+            ? { workspaceFolder: handle.config.workspaceFolder }
+            : {}),
+          ...(handle.process?.pid ? { pid: handle.process.pid } : {}),
+          ...(handle.warmedUp !== undefined
+            ? { warmedUp: handle.warmedUp }
+            : {}),
+          ...(handle.restartAttempts !== undefined
+            ? { restartAttempts: handle.restartAttempts }
+            : {}),
+          ...(handle.processDiagnostics?.stderrTail
+            ? { stderrTail: handle.processDiagnostics.stderrTail }
+            : {}),
+          ...(handle.processDiagnostics?.exitCode !== undefined
+            ? { exitCode: handle.processDiagnostics.exitCode }
+            : {}),
+          ...(handle.processDiagnostics?.exitSignal !== undefined
+            ? { exitSignal: handle.processDiagnostics.exitSignal }
+            : {}),
+          ...(error ? { error } : {}),
+        };
+      },
+    );
+
+    return {
+      enabled: true,
+      configuredServers: servers.length,
+      readyServers: counts.ready,
+      failedServers: counts.failed,
+      inProgressServers: counts.inProgress,
+      notStartedServers: counts.notStarted,
+      servers,
+    };
   }
 
   /**

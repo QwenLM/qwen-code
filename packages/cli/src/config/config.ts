@@ -1260,10 +1260,26 @@ export async function loadCliConfig(
       );
 
       await lspService.discoverAndPrepare();
+      if (config.getDebugMode()) {
+        debugLogger.debug(
+          'Native LSP status after discovery:',
+          lspService.getStatusSnapshot(),
+        );
+      }
       await lspService.start();
+      if (config.getDebugMode()) {
+        debugLogger.debug(
+          'Native LSP status after startup:',
+          lspService.getStatusSnapshot(),
+        );
+      }
       lspClient = new NativeLspClient(lspService);
       config.setLspClient(lspClient);
+      config.setLspInitializationError(undefined);
     } catch (err) {
+      config.setLspInitializationError(
+        err instanceof Error ? err : String(err),
+      );
       debugLogger.warn('Failed to initialize native LSP service:', err);
     }
   }

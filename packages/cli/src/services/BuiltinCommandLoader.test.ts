@@ -125,6 +125,7 @@ describe('BuiltinCommandLoader', () => {
       getUseModelRouter: () => false,
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
+      isLspEnabled: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     restoreCommandMock.mockReturnValue({
