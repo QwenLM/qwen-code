@@ -684,6 +684,7 @@ export class Config {
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
   private readonly memoryManager: MemoryManager;
+  private readonly modelChangeListeners = new Set<(model: string) => void>();
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
@@ -1373,6 +1374,20 @@ export class Config {
     return this.contentGeneratorConfig?.model || this.modelsConfig.getModel();
   }
 
+  onModelChange(listener: (model: string) => void): () => void {
+    this.modelChangeListeners.add(listener);
+    return () => {
+      this.modelChangeListeners.delete(listener);
+    };
+  }
+
+  private notifyModelChangeListeners(): void {
+    const model = this.getModel();
+    for (const listener of this.modelChangeListeners) {
+      listener(model);
+    }
+  }
+
   /**
    * Returns the fast model if one is configured and valid for the current auth type,
    * otherwise returns undefined. Background agents (memory extraction, dream, /btw)
@@ -1409,6 +1424,7 @@ export class Config {
     if (this.contentGeneratorConfig) {
       this.contentGeneratorConfig.model = newModel;
     }
+    this.notifyModelChangeListeners();
   }
 
   /**
@@ -1532,6 +1548,7 @@ export class Config {
     options?: { requireCachedCredentials?: boolean },
   ): Promise<void> {
     await this.modelsConfig.switchModel(authType, modelId, options);
+    this.notifyModelChangeListeners();
   }
 
   getMaxSessionTurns(): number {
