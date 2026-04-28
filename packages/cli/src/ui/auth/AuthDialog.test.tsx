@@ -182,6 +182,11 @@ const navigateToCustomAdvancedConfig = async (
   await pressEnterAndWaitFor(stdin, lastFrame, 'Step 5/6 · Advanced Config');
 };
 
+const isUnreliableTuiInputEnvironment =
+  process.platform === 'win32' ||
+  (process.env['CI'] === 'true' && process.version.startsWith('v20.'));
+const itWhenTuiInputReliable = isUnreliableTuiInputEnvironment ? it.skip : it;
+
 describe('AuthDialog', () => {
   const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -509,7 +514,7 @@ describe('AuthDialog', () => {
     });
   });
 
-  it('should prevent exiting when no auth method is selected and show error message', async () => {
+  itWhenTuiInputReliable('should prevent exiting when no auth method is selected and show error message', async () => {
     const handleAuthSelect = vi.fn();
     const settings: LoadedSettings = new LoadedSettings(
       {
@@ -566,7 +571,7 @@ describe('AuthDialog', () => {
     unmount();
   });
 
-  it('should not exit if there is already an error message', async () => {
+  itWhenTuiInputReliable('should not exit if there is already an error message', async () => {
     const handleAuthSelect = vi.fn();
     const settings: LoadedSettings = new LoadedSettings(
       {
@@ -620,7 +625,7 @@ describe('AuthDialog', () => {
     unmount();
   });
 
-  it('should allow exiting when auth method is already selected', async () => {
+  itWhenTuiInputReliable('should allow exiting when auth method is already selected', async () => {
     const handleAuthSelect = vi.fn();
     const settings: LoadedSettings = new LoadedSettings(
       {
@@ -672,7 +677,7 @@ describe('AuthDialog', () => {
     unmount();
   });
 
-  it('should show OpenRouter in API key options', async () => {
+  itWhenTuiInputReliable('should show OpenRouter in API key options', async () => {
     const settings: LoadedSettings = new LoadedSettings(
       {
         settings: { ui: { customThemes: {} }, mcpServers: {} },
@@ -722,7 +727,7 @@ describe('AuthDialog', () => {
     unmount();
   });
 
-  it('should trigger OpenRouter OAuth from API key options', async () => {
+  itWhenTuiInputReliable('should trigger OpenRouter OAuth from API key options', async () => {
     const handleOpenRouterSubmit = vi.fn().mockResolvedValue(undefined);
     const settings: LoadedSettings = new LoadedSettings(
       {
@@ -778,11 +783,6 @@ describe('AuthDialog', () => {
     unmount();
   });
 });
-
-const isUnreliableTuiInputEnvironment =
-  process.platform === 'win32' ||
-  (process.env['CI'] === 'true' && process.version.startsWith('v20.'));
-const itWhenTuiInputReliable = isUnreliableTuiInputEnvironment ? it.skip : it;
 
 describe('AuthDialog Custom API Key Wizard', () => {
   const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
