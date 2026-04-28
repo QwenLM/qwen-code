@@ -62,6 +62,7 @@ import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
+import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -547,6 +548,7 @@ export class Config {
   private subagentManager!: SubagentManager;
   private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
   private readonly monitorRegistry = new MonitorRegistry();
+  private readonly backgroundShellRegistry = new BackgroundShellRegistry();
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
@@ -1613,6 +1615,7 @@ export class Config {
 
       this.backgroundTaskRegistry.abortAll();
       this.monitorRegistry.abortAll();
+      this.backgroundShellRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
     } catch (error) {
@@ -2494,6 +2497,10 @@ export class Config {
 
   getMonitorRegistry(): MonitorRegistry {
     return this.monitorRegistry;
+  }
+
+  getBackgroundShellRegistry(): BackgroundShellRegistry {
+    return this.backgroundShellRegistry;
   }
 
   /**

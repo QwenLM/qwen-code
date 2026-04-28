@@ -1435,6 +1435,13 @@ describe('AgentTool', () => {
         getFinalText: vi.fn().mockReturnValue('Monitor done'),
         getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
         getExecutionSummary: vi.fn().mockReturnValue({}),
+        // Background spawn subscribes to the core's event emitter to
+        // populate the entry's recentActivities buffer. Return a stub
+        // whose getEventEmitter() yields a minimal on/off surface so the
+        // test-time listener hookup doesn't throw.
+        getCore: vi.fn().mockReturnValue({
+          getEventEmitter: () => ({ on: vi.fn(), off: vi.fn() }),
+        }),
       } as unknown as AgentHeadless;
 
       mockContextState = { set: vi.fn() } as unknown as ContextState;
