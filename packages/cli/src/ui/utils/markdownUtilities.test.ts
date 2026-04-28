@@ -46,5 +46,39 @@ describe('markdownUtilities', () => {
       const content = 'Single line of text';
       expect(findLastSafeSplitPoint(content)).toBe(content.length);
     });
+
+    it('should split after a closed fenced code block before pending tail text', () => {
+      const content =
+        'Intro\n```ts\nconst value = 1;\n```\nTail text without paragraph break';
+      expect(findLastSafeSplitPoint(content)).toBe(content.indexOf('Tail'));
+    });
+
+    it('should return content.length when a closed fenced code block ends the content', () => {
+      const content = '```ts\nconst value = 1;\n```\n';
+      expect(findLastSafeSplitPoint(content)).toBe(content.length);
+    });
+
+    it('should split after a complete markdown table before pending tail text', () => {
+      const content =
+        '| Name | Value |\n| --- | --- |\n| Alpha | 1 |\nTail text without paragraph break';
+      expect(findLastSafeSplitPoint(content)).toBe(content.indexOf('Tail'));
+    });
+
+    it('should not treat pipe text without a separator row as a table boundary', () => {
+      const content =
+        'Use foo | bar in prose\nTail text without paragraph break';
+      expect(findLastSafeSplitPoint(content)).toBe(content.length);
+    });
+
+    it('should split after a list segment before pending tail text', () => {
+      const content =
+        '- first item\n- second item\nTail text without paragraph break';
+      expect(findLastSafeSplitPoint(content)).toBe(content.indexOf('Tail'));
+    });
+
+    it('should not split list-like lines inside an open code block', () => {
+      const content = '```md\n- first item\n- second item\nTail text';
+      expect(findLastSafeSplitPoint(content)).toBe(0);
+    });
   });
 });

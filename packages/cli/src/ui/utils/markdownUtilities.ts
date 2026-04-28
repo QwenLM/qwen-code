@@ -35,91 +35,197 @@ This function aims to find an *intelligent* or "safe" index within the provided 
 **In essence, `findSafeSplitPoint` tries to be a good Markdown citizen when forced to divide content, preferring structural boundaries over arbitrary character limits, with a strong emphasis on not corrupting code blocks.**
 */
 
-/**
- * Checks if a given character index within a string is inside a fenced (```) code block.
- * @param content The full string content.
- * @param indexToTest The character index to test.
- * @returns True if the index is inside a code block's content, false otherwise.
- */
-const isIndexInsideCodeBlock = (
-  content: string,
-  indexToTest: number,
-): boolean => {
-  let fenceCount = 0;
-  let searchPos = 0;
-  while (searchPos < content.length) {
-    const nextFence = content.indexOf('```', searchPos);
-    if (nextFence === -1 || nextFence >= indexToTest) {
+interface MarkdownLine {
+  text: string;
+  start: number;
+  endWithNewline: number;
+}
+
+interface FenceMarker {
+  char: '`' | '~';
+  length: number;
+}
+
+interface OpenFence extends FenceMarker {
+  start: number;
+}
+
+const fenceLineRegex = /^ {0,3}(`{3,}|~{3,})/;
+const listItemRegex = /^ {0,3}(?:[-+*]\s+\S|\d{1,9}[.)]\s+\S)/;
+const indentedContinuationRegex = /^[ \t]{2,}\S/;
+
+const getMarkdownLines = (content: string): MarkdownLine[] => {
+  const lines: MarkdownLine[] = [];
+  let start = 0;
+
+  while (start < content.length) {
+    const newlineIndex = content.indexOf('\n', start);
+    if (newlineIndex === -1) {
+      lines.push({
+        text: content.slice(start),
+        start,
+        endWithNewline: content.length,
+      });
       break;
     }
-    fenceCount++;
-    searchPos = nextFence + 3;
+
+    lines.push({
+      text: content.slice(start, newlineIndex),
+      start,
+      endWithNewline: newlineIndex + 1,
+    });
+    start = newlineIndex + 1;
   }
-  return fenceCount % 2 === 1;
+
+  return lines;
 };
 
 /**
- * Finds the starting index of the code block that encloses the given index.
- * Returns -1 if the index is not inside a code block.
- * @param content The markdown content.
- * @param index The index to check.
- * @returns Start index of the enclosing code block or -1.
+ * Fenced Markdown blocks/tables/lists can safely move from the live pending
+ * region to Static once a whole block has been received. Keeping only the
+ * unfinished tail live reduces reflow churn on narrow terminals.
  */
-const findEnclosingCodeBlockStart = (
+const getFenceMarker = (line: string): FenceMarker | undefined => {
+  const match = fenceLineRegex.exec(line);
+  const marker = match?.[1];
+  if (!marker) {
+    return undefined;
+  }
+
+  return {
+    char: marker[0] as '`' | '~',
+    length: marker.length,
+  };
+};
+
+const isClosingFence = (marker: FenceMarker, openFence: OpenFence): boolean =>
+  marker.char === openFence.char && marker.length >= openFence.length;
+
+const getTableCells = (line: string): string[] => {
+  const trimmed = line.trim();
+  if (!trimmed.includes('|')) {
+    return [];
+  }
+
+  return trimmed
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map((cell) => cell.trim());
+};
+
+const isTableRow = (line: string): boolean => {
+  const cells = getTableCells(line);
+  return cells.length >= 2 && cells.some((cell) => cell.length > 0);
+};
+
+const isTableSeparatorRow = (line: string): boolean => {
+  const cells = getTableCells(line);
+  return (
+    cells.length >= 2 &&
+    cells.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s+/g, '')))
+  );
+};
+
+const isListLine = (line: string, isInListRun: boolean): boolean =>
+  listItemRegex.test(line) ||
+  (isInListRun && indentedContinuationRegex.test(line));
+
+const chooseLastSafePoint = (
   content: string,
-  index: number,
+  safeSplitPoints: number[],
 ): number => {
-  if (!isIndexInsideCodeBlock(content, index)) {
-    return -1;
-  }
-  let currentSearchPos = 0;
-  while (currentSearchPos < index) {
-    const blockStartIndex = content.indexOf('```', currentSearchPos);
-    if (blockStartIndex === -1 || blockStartIndex >= index) {
-      break;
+  const sortedSafeSplitPoints = [...new Set(safeSplitPoints)]
+    .filter((point) => point > 0)
+    .sort((a, b) => a - b);
+
+  for (let i = sortedSafeSplitPoints.length - 1; i >= 0; i--) {
+    const point = sortedSafeSplitPoints[i];
+    if (point >= content.length) {
+      return content.length;
     }
-    const blockEndIndex = content.indexOf('```', blockStartIndex + 3);
-    if (blockStartIndex < index) {
-      if (blockEndIndex === -1 || index < blockEndIndex + 3) {
-        return blockStartIndex;
-      }
+
+    if (content.slice(point).trim().length > 0) {
+      return point;
     }
-    if (blockEndIndex === -1) break;
-    currentSearchPos = blockEndIndex + 3;
   }
-  return -1;
+
+  return content.length;
 };
 
 export const findLastSafeSplitPoint = (content: string) => {
-  const enclosingBlockStart = findEnclosingCodeBlockStart(
-    content,
-    content.length,
-  );
-  if (enclosingBlockStart !== -1) {
+  const lines = getMarkdownLines(content);
+  const safeSplitPoints: number[] = [];
+  let openFence: OpenFence | undefined;
+  let tableRunEnd: number | undefined;
+  let tableRunHasSeparator = false;
+  let listRunEnd: number | undefined;
+
+  const closeTableRun = () => {
+    if (tableRunEnd !== undefined && tableRunHasSeparator) {
+      safeSplitPoints.push(tableRunEnd);
+    }
+    tableRunEnd = undefined;
+    tableRunHasSeparator = false;
+  };
+
+  const closeListRun = () => {
+    if (listRunEnd !== undefined) {
+      safeSplitPoints.push(listRunEnd);
+    }
+    listRunEnd = undefined;
+  };
+
+  for (const line of lines) {
+    const fenceMarker = getFenceMarker(line.text);
+
+    if (openFence) {
+      if (fenceMarker && isClosingFence(fenceMarker, openFence)) {
+        openFence = undefined;
+        safeSplitPoints.push(line.endWithNewline);
+      }
+      continue;
+    }
+
+    if (fenceMarker) {
+      closeTableRun();
+      closeListRun();
+      openFence = {
+        ...fenceMarker,
+        start: line.start,
+      };
+      continue;
+    }
+
+    if (line.text.trim().length === 0) {
+      closeTableRun();
+      closeListRun();
+      safeSplitPoints.push(line.endWithNewline);
+      continue;
+    }
+
+    if (isTableRow(line.text)) {
+      tableRunEnd = line.endWithNewline;
+      tableRunHasSeparator =
+        tableRunHasSeparator || isTableSeparatorRow(line.text);
+    } else {
+      closeTableRun();
+    }
+
+    if (isListLine(line.text, listRunEnd !== undefined)) {
+      listRunEnd = line.endWithNewline;
+    } else {
+      closeListRun();
+    }
+  }
+
+  if (openFence) {
     // The end of the content is contained in a code block. Split right before.
-    return enclosingBlockStart;
+    return openFence.start;
   }
 
-  // Search for the last double newline (\n\n) not in a code block.
-  let searchStartIndex = content.length;
-  while (searchStartIndex >= 0) {
-    const dnlIndex = content.lastIndexOf('\n\n', searchStartIndex);
-    if (dnlIndex === -1) {
-      // No more double newlines found.
-      break;
-    }
+  closeTableRun();
+  closeListRun();
 
-    const potentialSplitPoint = dnlIndex + 2;
-    if (!isIndexInsideCodeBlock(content, potentialSplitPoint)) {
-      return potentialSplitPoint;
-    }
-
-    // If potentialSplitPoint was inside a code block,
-    // the next search should start *before* the \n\n we just found to ensure progress.
-    searchStartIndex = dnlIndex - 1;
-  }
-
-  // If no safe double newline is found, return content.length
-  // to keep the entire content as one piece.
-  return content.length;
+  return chooseLastSafePoint(content, safeSplitPoints);
 };

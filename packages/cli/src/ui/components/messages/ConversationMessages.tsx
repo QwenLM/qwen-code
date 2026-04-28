@@ -82,7 +82,7 @@ interface ContinuationMarkdownMessageProps {
 }
 
 const MIN_PENDING_PREVIEW_HEIGHT = 2;
-const PENDING_PREVIEW_RESERVED_ROWS = 4;
+const PENDING_PREVIEW_MARKER_ROWS = 1;
 
 function getPrefixWidth(prefix: string): number {
   // Reserve one extra column so text never touches the prefix glyph.
@@ -94,9 +94,24 @@ function slicePendingTextForHeight(
   maxHeight: number | undefined,
   maxWidth: number,
 ): { text: string; hiddenLinesCount: number } {
+  const uncappedOverflowCheck = sliceTextByVisualHeight(
+    text,
+    maxHeight,
+    maxWidth,
+    {
+      minHeight: MIN_PENDING_PREVIEW_HEIGHT,
+      reservedRows: 0,
+      overflowDirection: 'top',
+    },
+  );
+
+  if (uncappedOverflowCheck.hiddenLinesCount === 0) {
+    return uncappedOverflowCheck;
+  }
+
   return sliceTextByVisualHeight(text, maxHeight, maxWidth, {
     minHeight: MIN_PENDING_PREVIEW_HEIGHT,
-    reservedRows: PENDING_PREVIEW_RESERVED_ROWS,
+    reservedRows: PENDING_PREVIEW_MARKER_ROWS,
     overflowDirection: 'top',
   });
 }

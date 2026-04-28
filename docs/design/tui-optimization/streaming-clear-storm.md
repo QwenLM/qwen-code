@@ -7,6 +7,9 @@ targets the remaining classes that were still reproducible with local evidence:
 
 - long pending assistant/thought streaming output can grow taller than the
   terminal and make Ink clear the whole screen;
+- narrow streaming Markdown can keep complete tables/lists/code blocks in the
+  live pending region too long, so overflow falls back to a flat text tail
+  instead of moving completed blocks into rendered Static history;
 - terminal resize, view switches, compact-history replacement, rewind, auth
   refresh, resume, and editor-close refresh can force a static-history remount
   and emit a full-screen clear even when the user has not requested `/clear`;
@@ -85,6 +88,17 @@ was correct once content overflowed, but it treated exactly-fit output as
 overflow too. A six-line result in a six-line budget lost the first visible line
 and rendered a misleading hidden-line banner.
 
+### 7. Narrow Streaming Markdown Pending Too Long
+
+`useGeminiStream` commits stable assistant/thought prefixes to `<Static>` only
+after `findLastSafeSplitPoint()` returns a safe boundary. The older helper only
+recognized paragraph breaks. If a response streamed a table, list, or fenced
+code block without a blank line before the next sentence, the entire block
+stayed in the live pending message. When the terminal was narrow and the block
+overflowed, `ConversationMessages` had to render the bounded tail as plain
+wrapped text, losing table layout, code coloring, and other Markdown structure
+until the response completed.
+
 ## Implementation
 
 ### Shared Visual-Height Slicing
@@ -94,9 +108,10 @@ and rendered a misleading hidden-line banner.
 using cached display width and Unicode code points, so a single long JSON,
 base64 payload, or minified log line is bounded before it reaches Ink/Yoga.
 Reserved rows are subtracted before the overflow decision. This matters in
-narrow streaming: footer/status rows and existing static history can grow while
-a response is pending, and waiting until the unreserved height is exceeded lets
-Ink briefly full-clear before the slicer activates.
+narrow streaming: when overflow is real, the hidden-line marker must fit inside
+the same dynamic height budget as the pending tail. Exactly-fit pending output
+is checked with no reserved rows first; only overflowing output reserves the
+single marker row.
 
 The helper supports two modes:
 
@@ -115,6 +130,30 @@ newest tail plus a marker such as:
 
 Completed assistant messages still render through the existing full
 `MarkdownDisplay` path, so final transcript fidelity is unchanged.
+
+The visual budget comes from `AppContainer`'s measured
+`availableTerminalHeight`, which already subtracts controls, footer, tab bar,
+and static-history overhead. `ConversationMessages` therefore does not keep a
+separate fixed four-row footer reserve. It first checks exact fit with
+`reservedRows: 0`; on true overflow it reruns the slicer with one reserved row
+for the hidden-line marker.
+
+### Streaming Markdown Safe Split
+
+`findLastSafeSplitPoint()` now recognizes more completed Markdown block
+boundaries before the unfinished tail:
+
+- matched fenced code blocks, including backtick and tilde fences;
+- table segments that include a separator row;
+- consecutive Markdown list segments, including indented continuation lines;
+- paragraph breaks outside fenced code blocks.
+
+If the pending text still ends inside an open fenced block, the split point
+remains before that block, preserving the existing safety invariant. Otherwise,
+the newest completed table/list/code block can move into `<Static>` before the
+next tail sentence finishes. This directly targets #3279 narrow Markdown
+streaming: the live pending region is smaller, and completed blocks retain the
+normal `MarkdownDisplay` rendering instead of degrading to flat wrapped text.
 
 ### Tool And Subagent Output
 
@@ -236,6 +275,19 @@ Evidence levels:
 This scenario is not the proof for shell live-output duplication. The old GIF
 could show raw clear metrics, but it could not reliably show the shell-specific
 duplicate viewport event. The shell-specific proof is the next scenario.
+
+### Narrow Markdown Streaming Scenario
+
+- stream a deterministic response containing a fenced code block, a Markdown
+  table, and a list without blank-line separators before the following tail;
+- run in a narrow terminal where the full pending content would exceed the
+  dynamic budget;
+- pass requires completed code/table/list blocks to be committed before the
+  tail and rendered through `MarkdownDisplay`, while the live pending tail stays
+  bounded by `availableTerminalHeight`;
+- source-level proof is `findLastSafeSplitPoint()` coverage for closed
+  code/table/list boundaries plus pending exact-fit/overflow coverage in
+  `ConversationMessages`.
 
 ### Shell Live Reflow Scenario
 
@@ -405,6 +457,14 @@ Additional source-level revalidation after the April 28 optimization pass:
 | Shell final transcript | fixed branch | strict pass | throttled live text, complete final output     | passed |
 | Tmux spinner cadence   | fixed branch | strict pass | 750 ms frame transition under fixed-width dots | passed |
 
+Additional review follow-up validation for #3279:
+
+| Scenario                         | Branch       | Expected    | Metric                                             | Result |
+| -------------------------------- | ------------ | ----------- | -------------------------------------------------- | ------ |
+| Markdown safe split              | fixed branch | strict pass | code/table/list boundaries split outside open code | passed |
+| Pending assistant exact fit      | fixed branch | strict pass | six-row pending text in six-row budget is visible  | passed |
+| Pending assistant overflow bound | fixed branch | strict pass | only one marker row is reserved on real overflow   | passed |
+
 ## Gemini CLI Cross-Check
 
 The Gemini CLI scan supports the same direction, but also warns against copying a
@@ -435,6 +495,10 @@ large renderer wholesale:
 - The streaming fix is complete for the reproduced assistant/thought
   clear-storm class because pending dynamic height is bounded below the
   terminal viewport before Ink layout.
+- The #3279 narrow Markdown path is covered by two guards: complete
+  code/table/list blocks leave the pending region earlier, and the remaining
+  pending tail uses the measured dynamic height budget instead of a fixed
+  footer reserve.
 - The static refresh fix replaces non-explicit `clearTerminal` refresh paths
   with a viewport repaint. This covers resize, view switch, compact replacement,
   rewind, auth/resume, and editor-close refresh while keeping `/clear` explicit.
