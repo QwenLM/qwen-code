@@ -188,6 +188,36 @@ describe('SessionRouter', () => {
       router.removeSession('ch', 'alice', 'chat1');
       expect(router.getTarget(sid)).toBeUndefined();
     });
+
+    it('does not collide on sender IDs with shared prefix', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      const sidA = await router.resolve('ch', 'user1', 'chat1');
+      const sidB = await router.resolve('ch', 'user12', 'chat1');
+
+      // hasSession must distinguish 'user1' from 'user12'
+      expect(router.hasSession('ch', 'user1')).toBe(true);
+      expect(router.hasSession('ch', 'user12')).toBe(true);
+
+      // Removing 'user1' must NOT touch 'user12'
+      const removed = router.removeSession('ch', 'user1');
+      expect(removed).toEqual([sidA]);
+      expect(router.hasSession('ch', 'user1')).toBe(false);
+      expect(router.hasSession('ch', 'user12')).toBe(true);
+      expect(router.getTarget(sidB)).toBeDefined();
+    });
+
+    it('finds and removes sessions under thread scope without senderId in key', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      router.setChannelScope('ch', 'thread');
+      const sid = await router.resolve('ch', 'alice', 'chat1', 'thread-1');
+
+      // Under thread scope, the key is `ch:thread-1` — no senderId.
+      // hasSession/removeSession by senderId must still find it via target metadata.
+      expect(router.hasSession('ch', 'alice')).toBe(true);
+      const removed = router.removeSession('ch', 'alice');
+      expect(removed).toEqual([sid]);
+      expect(router.hasSession('ch', 'alice')).toBe(false);
+    });
   });
 
   describe('getAll', () => {
