@@ -239,3 +239,33 @@ describe('clearRuntimeStatus', () => {
     await clearRuntimeStatus(path.join(tmpDir, 'does-not-exist', 'r.json'));
   });
 });
+
+describe('same-PID session swap', () => {
+  // Models the /clear, /reset, /new and /resume flow: same PID transitions
+  // from session A to session B. The old sidecar must be removed before the
+  // new one is written so external observers can't double-claim the PID.
+  it('clears the old sidecar before writing the new one', async () => {
+    const oldPath = path.join(tmpDir, 'session-a.runtime.json');
+    const newPath = path.join(tmpDir, 'session-b.runtime.json');
+    await writeRuntimeStatus(oldPath, {
+      sessionId: 'session-a',
+      workDir: '/w',
+      pid: 4242,
+      qwenVersion: '0.0.0-test',
+    });
+    expect(await readRuntimeStatus(oldPath)).not.toBeNull();
+
+    await clearRuntimeStatus(oldPath);
+    await writeRuntimeStatus(newPath, {
+      sessionId: 'session-b',
+      workDir: '/w',
+      pid: 4242,
+      qwenVersion: '0.0.0-test',
+    });
+
+    expect(await readRuntimeStatus(oldPath)).toBeNull();
+    const after = await readRuntimeStatus(newPath);
+    expect(after?.sessionId).toBe('session-b');
+    expect(after?.pid).toBe(4242);
+  });
+});

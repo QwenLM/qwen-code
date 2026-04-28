@@ -111,6 +111,10 @@ import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import { Storage } from './storage.js';
 import { ChatRecordingService } from '../services/chatRecordingService.js';
 import {
+  clearRuntimeStatus,
+  writeRuntimeStatus,
+} from '../utils/runtimeStatus.js';
+import {
   SessionService,
   type ResumedSessionData,
 } from '../services/sessionService.js';
@@ -1327,6 +1331,7 @@ export class Config {
       // Best-effort — don't block session switch
     }
 
+    const previousSessionId = this.sessionId;
     this.sessionId = sessionId ?? randomUUID();
     this.sessionData = sessionData;
     setDebugLogSession(this);
@@ -1337,6 +1342,33 @@ export class Config {
     if (this.initialized) {
       logStartSession(this, new StartSessionEvent(this));
     }
+
+    // Refresh the runtime.json sidecar so external observers (terminal
+    // multiplexers, IDE integrations, status daemons) see the new
+    // session id rather than a stale claim against a still-live PID.
+    // /clear, /reset, /new, and /resume all flow through this method,
+    // so handling the swap centrally covers every same-PID session
+    // transition. Best-effort: must never block /clear or /resume.
+    if (previousSessionId !== this.sessionId) {
+      const oldPath = this.storage.getRuntimeStatusPath(previousSessionId);
+      const newPath = this.storage.getRuntimeStatusPath(this.sessionId);
+      const cliVersion = this.cliVersion ?? null;
+      const workDir = this.targetDir;
+      const newSessionId = this.sessionId;
+      void (async () => {
+        try {
+          await clearRuntimeStatus(oldPath);
+          await writeRuntimeStatus(newPath, {
+            sessionId: newSessionId,
+            workDir,
+            qwenVersion: cliVersion,
+          });
+        } catch {
+          // ignored: best-effort cleanup
+        }
+      })();
+    }
+
     return this.sessionId;
   }
 
