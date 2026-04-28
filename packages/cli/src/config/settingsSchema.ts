@@ -106,6 +106,20 @@ export interface SettingsSchema {
 }
 
 /**
+ * Source for a single tier of custom ASCII art. Either an inline string
+ * or a reference to a file on disk that contains the art.
+ */
+export type AsciiArtSource = string | { path: string };
+
+/**
+ * Setting value for `ui.customAsciiArt`. Accepts a bare source (treated as
+ * both width tiers), or a width-aware `{small, large}` object.
+ */
+export type CustomAsciiArtSetting =
+  | AsciiArtSource
+  | { small?: AsciiArtSource; large?: AsciiArtSource };
+
+/**
  * Common items schema for hook definitions.
  * Used by all hook event types in the hooks configuration.
  */
@@ -716,6 +730,35 @@ const SETTINGS_SCHEMA = {
         description:
           'Max number of shell output lines shown inline. Set to 0 to disable the cap and show full output. The hidden line count is still surfaced via the `+N lines` indicator.',
         showInDialog: true,
+      },
+      hideBanner: {
+        type: 'boolean',
+        label: 'Hide Banner',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description: 'Hide the startup ASCII banner and info panel.',
+        showInDialog: true,
+      },
+      customBannerTitle: {
+        type: 'string',
+        label: 'Custom Banner Title',
+        category: 'UI',
+        requiresRestart: false,
+        default: '' as string,
+        description:
+          'Replace the default ">_ Qwen Code" title shown in the banner info panel. The version suffix is always appended.',
+        showInDialog: false,
+      },
+      customAsciiArt: {
+        type: 'object',
+        label: 'Custom ASCII Art',
+        category: 'UI',
+        requiresRestart: false,
+        default: undefined as CustomAsciiArtSetting | undefined,
+        description:
+          'Replace the default QWEN ASCII art. Accepts an inline string, {"path": "..."}, or {"small": ..., "large": ...} for width-aware selection.',
+        showInDialog: false,
       },
     },
   },
