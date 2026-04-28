@@ -74,6 +74,7 @@ web_fetch(url="https://developers.cloudflare.com/fundamentals/reference/markdown
 - **Content negotiation:** The tool supports "Markdown for Agents" content negotiation. When using `format="auto"` (default), it sends `Accept: text/markdown, text/html` headers, allowing servers that support markdown to return it directly instead of HTML. This can reduce token usage by up to 80%.
 - **Content processing:** The tool fetches content directly and processes it using an AI model. When the server returns HTML, it converts it to readable text format. When the server returns markdown or plain text, it uses the content as-is.
 - **Output quality:** The quality of the output will depend on the clarity of the instructions in the prompt.
+- **Model routing:** The content-processing LLM call uses the configured [`fastModel`](../../users/configuration/settings.md#fastmodel) when available, falling back to the main session model. Because the work is a compression/extraction task rather than deep reasoning, routing through a smaller model reduces latency and cost when `fastModel` is configured.
 - **MCP tools:** If an MCP-provided web fetch tool is available (starting with "mcp\_\_"), prefer using that tool as it may have fewer restrictions.
 
 ## Markdown for Agents Support

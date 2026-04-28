@@ -153,6 +153,13 @@ ${textContent}
         `[WebFetchTool] Processing content with prompt: "${this.params.prompt}"`,
       );
 
+      const model =
+        this.config.getFastModel() ??
+        (this.config.getModel() || DEFAULT_QWEN_MODEL);
+      this.debugLogger.debug(
+        `[WebFetchTool] Processing content with model: ${model}`,
+      );
+
       const result = await geminiClient.generateContent(
         [{ role: 'user', parts: [{ text: fallbackPrompt }] }],
         {
@@ -161,7 +168,7 @@ ${textContent}
             'Be concise and accurate. Respond only with the requested information.',
         },
         signal,
-        this.config.getModel() || DEFAULT_QWEN_MODEL,
+        model,
       );
       const resultText = getResponseText(result) || '';
 

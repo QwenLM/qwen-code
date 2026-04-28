@@ -38,6 +38,7 @@ describe('WebFetchTool', () => {
       getGeminiClient: mockGetGeminiClient,
       getSessionId: vi.fn(() => 'test-session-id'),
       getModel: vi.fn(() => 'qwen-coder'),
+      getFastModel: vi.fn(() => undefined),
     } as unknown as Config;
   });
 
@@ -239,6 +240,56 @@ describe('WebFetchTool', () => {
       await invocation.execute(new AbortController().signal);
 
       expect(receivedContent).toContain('Plain text content here');
+    });
+  });
+
+  describe('model routing', () => {
+    it('should use fastModel when configured', async () => {
+      vi.spyOn(fetchUtils, 'fetchWithTimeout').mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'text/plain' }),
+        text: () => Promise.resolve('Some content'),
+      } as Response);
+      mockGenerateContent.mockResolvedValue({
+        response: { text: () => 'Summary' },
+      });
+
+      const testConfig = {
+        ...mockConfig,
+        getFastModel: vi.fn(() => 'qwen-fast'),
+      } as unknown as Config;
+      const tool = new WebFetchTool(testConfig);
+      const params = { url: 'https://example.com', prompt: 'summarize' };
+      await tool.build(params).execute(new AbortController().signal);
+
+      expect(mockGenerateContent).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        'qwen-fast',
+      );
+    });
+
+    it('should fall back to main model when fastModel is not configured', async () => {
+      vi.spyOn(fetchUtils, 'fetchWithTimeout').mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'text/plain' }),
+        text: () => Promise.resolve('Some content'),
+      } as Response);
+      mockGenerateContent.mockResolvedValue({
+        response: { text: () => 'Summary' },
+      });
+
+      const tool = new WebFetchTool(mockConfig);
+      const params = { url: 'https://example.com', prompt: 'summarize' };
+      await tool.build(params).execute(new AbortController().signal);
+
+      expect(mockGenerateContent).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        'qwen-coder',
+      );
     });
   });
 
