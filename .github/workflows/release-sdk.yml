@@ -114,9 +114,6 @@ jobs:
             VERSION_ARGS+=(--type=nightly)
           elif [[ "${IS_PREVIEW}" == "true" ]]; then
             VERSION_ARGS+=(--type=preview)
-            if [[ -n "${MANUAL_VERSION}" ]]; then
-              VERSION_ARGS+=("--preview_version_override=${MANUAL_VERSION}")
-            fi
           else
             VERSION_ARGS+=(--type=stable)
             if [[ -n "${MANUAL_VERSION}" ]]; then
