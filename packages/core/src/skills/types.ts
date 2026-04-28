@@ -101,6 +101,16 @@ export interface SkillConfig {
    * field in SKILL.md.
    */
   disableModelInvocation?: boolean;
+
+  /**
+   * Optional glob patterns that gate when this skill is offered to the model.
+   * When present and non-empty, the skill is a "conditional skill": it stays
+   * out of the SkillTool listing until a tool invocation touches a file path
+   * matching one of these patterns, at which point the skill is activated for
+   * the rest of the session. Patterns are resolved relative to the project
+   * root and matched via picomatch. Parsed from the `paths` frontmatter field.
+   */
+  paths?: string[];
 }
 
 /**
@@ -128,6 +138,26 @@ export function parseModelField(
     return undefined;
   }
   return trimmed;
+}
+
+/**
+ * Parse the `paths` field from skill frontmatter into normalized glob
+ * patterns. Returns `undefined` when the field is omitted, an empty array,
+ * or contains only blank entries — those cases mean "no path gating, treat
+ * as unconditional". Throws when `paths` is present but not an array.
+ */
+export function parsePathsField(
+  frontmatter: Record<string, unknown>,
+): string[] | undefined {
+  const raw = frontmatter['paths'];
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(raw)) {
+    throw new Error('"paths" must be an array of glob patterns');
+  }
+  const cleaned = raw.map((p) => String(p).trim()).filter((p) => p.length > 0);
+  return cleaned.length > 0 ? cleaned : undefined;
 }
 
 /**

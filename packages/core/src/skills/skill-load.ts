@@ -2,6 +2,7 @@ import {
   type SkillConfig,
   type SkillValidationResult,
   parseModelField,
+  parsePathsField,
 } from './types.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -119,6 +120,10 @@ export function parseSkillContent(
       ? frontmatter['argument-hint']
       : undefined;
 
+  // Optional `paths` frontmatter: glob patterns that gate when this skill
+  // is offered to the model (conditional skill).
+  const paths = parsePathsField(frontmatter);
+
   const config: SkillConfig = {
     name,
     description,
@@ -128,6 +133,7 @@ export function parseSkillContent(
     filePath,
     body: body.trim(),
     level: 'extension',
+    paths,
   };
 
   // Validate the parsed configuration

@@ -1713,6 +1713,21 @@ export class CoreToolScheduler {
               `<system-reminder>\n${rulesCtx}\n</system-reminder>`,
             );
           }
+
+          // Activate any conditional skills (skills with `paths:` frontmatter)
+          // whose globs match this file. Newly activated skills appear in the
+          // SkillTool listing on the next turn; announce them to the model via
+          // a system-reminder so it knows they became available.
+          const activatedSkills = this.config
+            .getSkillManager()
+            ?.matchAndActivateByPath(filePath);
+          if (activatedSkills && activatedSkills.length > 0) {
+            const names = activatedSkills.join(', ');
+            content = appendAdditionalContext(
+              content,
+              `<system-reminder>\nThe following skill(s) are now available via the Skill tool based on the file you just accessed: ${names}. Use them if relevant to the task.\n</system-reminder>`,
+            );
+          }
         }
 
         const response = convertToFunctionResponse(toolName, callId, content);

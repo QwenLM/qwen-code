@@ -35,6 +35,12 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
 
   private skillManager: SkillManager;
   private availableSkills: SkillConfig[] = [];
+  // Conditional skills (with `paths:`) that exist on disk but have not yet
+  // been activated by a matching tool invocation. Tracked separately so
+  // validateToolParams can give a distinct error message when the model
+  // names one of these: "gated by paths:, access a matching file first"
+  // instead of the generic "not found".
+  private pendingConditionalSkillNames: Set<string> = new Set();
   private modelInvocableCommands: ReadonlyArray<{
     name: string;
     description: string;
@@ -85,22 +91,45 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
    */
   async refreshSkills(): Promise<void> {
     try {
-      this.availableSkills = (await this.skillManager.listSkills()).filter(
-        (s) => !s.disableModelInvocation,
+      // Include a skill in the tool description only when (a) it is not
+      // hidden from the model (`disable-model-invocation`), and (b) it is
+      // either unconditional or already activated by a matching file path
+      // in this session. This keeps the tool description small in large
+      // monorepos where most conditional skills are not yet relevant.
+      const allSkills = await this.skillManager.listSkills();
+      this.availableSkills = allSkills.filter(
+        (s) => !s.disableModelInvocation && this.skillManager.isSkillActive(s),
       );
-      // Merge in model-invocable commands from CommandService (injected via Config),
-      // but exclude any whose names already appear as file-based skills to avoid
-      // showing the same skill in both <available_skills> and <available_commands>.
+      // Track still-pending conditional skills so validateToolParams can
+      // distinguish "not found" from "registered but not yet activated".
+      this.pendingConditionalSkillNames = new Set(
+        allSkills
+          .filter(
+            (s) =>
+              !s.disableModelInvocation &&
+              s.paths &&
+              s.paths.length > 0 &&
+              !this.skillManager.isSkillActive(s),
+          )
+          .map((s) => s.name),
+      );
+      // Merge in model-invocable commands from CommandService (injected via
+      // Config), but exclude any whose names appear as ANY file-based skill —
+      // including pending conditional skills. Using `availableSkills` (active
+      // only) here would let a path-gated skill leak through the
+      // <available_commands> listing and bypass validateToolParams's
+      // pendingConditionalSkillNames check, breaking the activation contract.
       const provider = this.config.getModelInvocableCommandsProvider();
       const allCommands = provider ? provider() : [];
-      const skillNames = new Set(this.availableSkills.map((s) => s.name));
+      const fileBasedSkillNames = new Set(allSkills.map((s) => s.name));
       this.modelInvocableCommands = allCommands.filter(
-        (cmd) => !skillNames.has(cmd.name),
+        (cmd) => !fileBasedSkillNames.has(cmd.name),
       );
       this.updateDescriptionAndSchema();
     } catch (error) {
       debugLogger.warn('Failed to load skills for Skills tool:', error);
       this.availableSkills = [];
+      this.pendingConditionalSkillNames = new Set();
       this.modelInvocableCommands = [];
       this.updateDescriptionAndSchema();
     } finally {
@@ -207,6 +236,15 @@ ${skillDescriptions}
       (cmd) => cmd.name === params.skill,
     );
     if (commandExists) return null;
+
+    // Distinct error for a conditional skill (registered via `paths:`
+    // frontmatter) that has not yet been activated by a matching tool call.
+    // Without this branch the model can't tell the difference between "no
+    // such skill exists" and "exists but you need to access a matching file
+    // to unlock it."
+    if (this.pendingConditionalSkillNames.has(params.skill)) {
+      return `Skill "${params.skill}" is gated by path-based activation (paths: frontmatter) and is not yet available. Access a file matching its paths patterns first to activate it.`;
+    }
 
     const availableNames = [
       ...this.availableSkills.map((s) => s.name),

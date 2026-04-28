@@ -97,6 +97,27 @@ Recommended conventions (not strictly enforced yet):
 - Use lowercase letters, numbers, and hyphens in `name`
 - Make `description` specific: include both **what** the Skill does and **when** to use it (key words users will naturally mention)
 
+### Optional: gate a Skill on file paths (`paths:`)
+
+For Skills that only matter to specific parts of a codebase, add a `paths:` list of glob patterns. The Skill stays out of the model's available-skills listing until a tool call touches a matching file:
+
+```yaml
+---
+name: tsx-helper
+description: React TSX component helper
+paths:
+  - 'src/**/*.tsx'
+  - 'packages/*/src/**/*.tsx'
+---
+```
+
+Notes:
+
+- Globs are matched relative to the project root with [picomatch](https://github.com/micromatch/picomatch); files outside the project root never trigger activation.
+- A path-gated Skill **stays activated for the rest of the session** once a matching file is touched. A new session, or a `refreshCache` triggered by editing any Skill file, resets activations.
+- `paths:` only gates **model** discovery. You can still invoke a path-gated Skill yourself at any time via `/<skill-name>` or the `/skills` picker — gating does not require waiting for activation.
+- Combining `paths:` with `disable-model-invocation: true` is allowed but the gate has no effect — the Skill is hidden from the model regardless, so path activation never advertises it.
+
 ## Add supporting files
 
 Create additional files alongside `SKILL.md`:
@@ -144,6 +165,14 @@ To view available Skills, ask Qwen Code directly:
 
 ```text
 What Skills are available?
+```
+
+> **Heads up — model vs. user view.** Asking the model only surfaces Skills the model can currently see. If a Skill uses `paths:` (see "Optional: gate a Skill on file paths" above), it stays out of that listing until a matching file has been touched. The full set is always visible to you via the `/skills` slash command and on disk.
+
+Or browse the full list with the slash command (always shows every Skill, including path-gated ones that have not activated yet):
+
+```text
+/skills
 ```
 
 Or inspect the filesystem:
