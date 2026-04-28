@@ -1,5 +1,6 @@
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import type { BackendHostRuntimeContext } from '../types.ts';
 import {
@@ -37,6 +38,33 @@ function firstExistingPath(candidates: string[]): string | undefined {
     if (existsSync(candidate)) return candidate;
   }
   return undefined;
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function qwenSourceCliCandidates(root: string): string[] {
+  return [
+    join(root, 'dist', 'cli.js'),
+    join(root, 'cli.js'),
+    join(root, 'packages', 'cli', 'dist', 'index.js'),
+  ];
+}
+
+function resolveQwenCliOverride(): string | undefined {
+  const override = process.env.QWEN_CODE_CLI
+    || process.env.QWEN_CODE_PATH
+    || process.env.QWEN_CODE_ROOT;
+  if (!override || !existsSync(override)) return undefined;
+  if (isDirectory(override)) {
+    return firstExistingPath(qwenSourceCliCandidates(override));
+  }
+  return override;
 }
 
 /**
@@ -149,28 +177,50 @@ function resolveServerPath(hostRuntime: BackendHostRuntimeContext, serverName: s
 }
 
 function resolveQwenCliPath(hostRuntime: BackendHostRuntimeContext): string | undefined {
-  const envOverride = process.env.QWEN_CODE_CLI || process.env.QWEN_CODE_PATH;
-  if (envOverride && existsSync(envOverride)) return envOverride;
+  const envOverride = resolveQwenCliOverride();
+  if (envOverride) return envOverride;
 
+  const packagedCliRelative = join('vendor', 'qwen-code', 'dist', 'cli.js');
+  const packagedRootCliRelative = join('vendor', 'qwen-code', 'cli.js');
+  const packagedIndexRelative = join('vendor', 'qwen-code', 'packages', 'cli', 'dist', 'index.js');
   const packageCliRelative = join('node_modules', '@qwen-code', 'qwen-code', 'dist', 'cli.js');
+  const packageRootCliRelative = join('node_modules', '@qwen-code', 'qwen-code', 'cli.js');
   const packageIndexRelative = join('node_modules', '@qwen-code', 'qwen-code', 'packages', 'cli', 'dist', 'index.js');
   const siblingCliRelative = join('..', 'qwen-code', 'dist', 'cli.js');
   const siblingIndexRelative = join('..', 'qwen-code', 'packages', 'cli', 'dist', 'index.js');
+  const localSourceCandidates = !hostRuntime.isPackaged ? [
+    ...qwenSourceCliCandidates(join(homedir(), 'Documents', 'qwen-code')),
+    ...qwenSourceCliCandidates(join(homedir(), 'qwen-code')),
+  ] : [];
 
   const fromHostRoot = firstExistingPath([
+    join(hostRuntime.appRootPath, packagedCliRelative),
+    join(hostRuntime.appRootPath, packagedRootCliRelative),
+    join(hostRuntime.appRootPath, packagedIndexRelative),
+    ...(hostRuntime.resourcesPath ? [
+      join(hostRuntime.resourcesPath, 'app', packagedCliRelative),
+      join(hostRuntime.resourcesPath, 'app', packagedRootCliRelative),
+      join(hostRuntime.resourcesPath, 'app', packagedIndexRelative),
+    ] : []),
     join(hostRuntime.appRootPath, packageCliRelative),
+    join(hostRuntime.appRootPath, packageRootCliRelative),
     join(hostRuntime.appRootPath, packageIndexRelative),
     join(hostRuntime.appRootPath, '..', '..', packageCliRelative),
+    join(hostRuntime.appRootPath, '..', '..', packageRootCliRelative),
     join(hostRuntime.appRootPath, '..', '..', packageIndexRelative),
     // Local development layout documented in docs/acp-capability-context-spec.md.
     join(hostRuntime.appRootPath, siblingCliRelative),
     join(hostRuntime.appRootPath, siblingIndexRelative),
     join(process.cwd(), siblingCliRelative),
     join(process.cwd(), siblingIndexRelative),
+    ...localSourceCandidates,
   ]);
   if (fromHostRoot) return fromHostRoot;
 
+  if (hostRuntime.isPackaged) return undefined;
+
   const walked = resolveUpwards(hostRuntime.appRootPath, packageCliRelative, 10)
+    ?? resolveUpwards(hostRuntime.appRootPath, packageRootCliRelative, 10)
     ?? resolveUpwards(hostRuntime.appRootPath, packageIndexRelative, 10)
     ?? resolveUpwards(hostRuntime.appRootPath, siblingCliRelative, 10)
     ?? resolveUpwards(hostRuntime.appRootPath, siblingIndexRelative, 10);

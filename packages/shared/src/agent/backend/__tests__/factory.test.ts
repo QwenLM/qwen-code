@@ -21,6 +21,7 @@ import {
   connectionAuthTypeToBackendAuthType,
   providerTypeToAgentProvider,
   resolveSetupTestConnectionHint,
+  resolveBackendContext,
   createBackendFromConnection,
   testBackendConnection,
   validateStoredBackendConnection,
@@ -323,6 +324,18 @@ describe('phase4 backend abstraction APIs', () => {
     expect(resolveSetupTestConnectionHint({
       provider: 'qwen',
     })).toEqual({ providerType: 'qwen' });
+  });
+
+  it('resolveBackendContext treats qwen-code as a built-in connection', () => {
+    const context = resolveBackendContext({
+      sessionConnectionSlug: 'qwen-code',
+    });
+
+    expect(context.connection?.slug).toBe('qwen-code');
+    expect(context.connection?.providerType).toBe('qwen');
+    expect(context.connection?.authType).toBe('none');
+    expect(context.provider).toBe('qwen');
+    expect(context.capabilities.listsSessions).toBe(true);
   });
 
   it('fetchBackendModels dispatches for pi provider', async () => {

@@ -39,6 +39,7 @@ export interface BackendResolutionContext {
   resolvedModel: string;
   capabilities: {
     needsHttpPoolServer: boolean;
+    listsSessions: boolean;
   };
 }
 

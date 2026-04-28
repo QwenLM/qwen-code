@@ -58,6 +58,8 @@ files:
   - vendor/codex/**/*
   # Include bundled Copilot CLI binary (platform-specific, copied from node_modules by build script)
   - vendor/copilot/**/*
+  # Include bundled Qwen Code CLI package (downloaded by build script)
+  - vendor/qwen-code/**/*
   # Exclude everything from node_modules (will use extraResources for SDK)
   - "!node_modules/**/*"
 
