@@ -406,6 +406,32 @@ describe('fetchGitDiffHunks', () => {
     );
   });
 
+  it('keys hunks by the real path for files with tabs in the name (C-quoted in diff output)', async () => {
+    // Real git output for a tracked file named `tab\there.txt` looks like
+    // `+++ "b/tab\there.txt"` even with `core.quotepath=false` — C-quoting
+    // for tabs/newlines/quotes is independent of that config. Without the
+    // unquote step in `extractFilePath`, fetchGitDiffHunks would silently
+    // drop the file's hunks.
+    const weirdName = 'tab\there.txt';
+    try {
+      await fs.writeFile(path.join(repo, weirdName), 'x\n');
+    } catch {
+      return; // Filesystem refused tab in name (e.g. Windows NTFS).
+    }
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+    await fs.writeFile(path.join(repo, weirdName), 'y\n');
+
+    const hunks = await fetchGitDiffHunks(repo);
+    expect([...hunks.keys()]).toEqual([weirdName]);
+    expect(hunks.get(weirdName)![0].lines.some((l) => l.startsWith('-x'))).toBe(
+      true,
+    );
+    expect(hunks.get(weirdName)![0].lines.some((l) => l.startsWith('+y'))).toBe(
+      true,
+    );
+  });
+
   it('keys hunks by the real path for files whose name contains " b/"', async () => {
     await fs.mkdir(path.join(repo, 'a b'), { recursive: true });
     await fs.writeFile(path.join(repo, 'a b', 'c.txt'), 'x\n');
@@ -434,6 +460,41 @@ describe('fetchGitDiffHunks', () => {
     const fileHunks = hunks.get('big.txt');
     expect(fileHunks).toBeDefined();
     expect(fileHunks!.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('parseGitDiff C-quoted path support', () => {
+  it('decodes `+++ "b/..."` headers for files with tabs in the name', () => {
+    // Reproduces wenshao Critical (PR #3491 line 615): without C-quote
+    // decoding, `extractFilePath` rejects the quoted +++ line and the
+    // hunks are silently dropped.
+    const diff = `diff --git "a/tab\\there.txt" "b/tab\\there.txt"
+index 1111111..2222222 100644
+--- "a/tab\\there.txt"
++++ "b/tab\\there.txt"
+@@ -1 +1,2 @@
+ a
++b
+`;
+    const result = parseGitDiff(diff);
+    expect([...result.keys()]).toEqual(['tab\there.txt']);
+    expect(result.get('tab\there.txt')![0].lines).toEqual([' a', '+b']);
+  });
+
+  it('decodes octal escapes in quoted paths (legacy quotepath=true output)', () => {
+    // Even with `core.quotepath=false` set on our git invocations, callers
+    // could feed us output produced by a different command. \346\226\207
+    // is the UTF-8 byte sequence for `文`.
+    const diff = `diff --git "a/\\346\\226\\207.txt" "b/\\346\\226\\207.txt"
+index 1111111..2222222 100644
+--- "a/\\346\\226\\207.txt"
++++ "b/\\346\\226\\207.txt"
+@@ -1 +1 @@
+-x
++y
+`;
+    const result = parseGitDiff(diff);
+    expect([...result.keys()]).toEqual(['文.txt']);
   });
 });
 
@@ -815,6 +876,50 @@ describe('fetchGitDiff invocation from a subdirectory', () => {
         'sub/tracked.txt',
       ]);
       expect(result!.stats.filesCount).toBe(3);
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('fetchGitDiff fast path with untracked-only workspaces', () => {
+  it('takes the >MAX_FILES_FOR_DETAILS short-circuit when shortstat is empty', async () => {
+    // Reproduces wenshao Critical (PR #3491 line 146). 0 tracked changes
+    // + many untracked previously left `quickStats` null, so the fast
+    // path was skipped and the slow path under-reported `linesAdded`
+    // because it line-counted only the first MAX_FILES untracked files.
+    // The fix makes the threshold fire on tracked + untracked even when
+    // shortstat returns nothing.
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdiff-fp-'));
+    try {
+      await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+      await execFileAsync('git', ['config', 'user.email', 't@e.com'], {
+        cwd: repo,
+      });
+      await execFileAsync('git', ['config', 'user.name', 'T'], { cwd: repo });
+      await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+        cwd: repo,
+      });
+      await fs.writeFile(path.join(repo, 'seed.txt'), 'x\n');
+      await execFileAsync('git', ['add', '.'], { cwd: repo });
+      await execFileAsync('git', ['commit', '-q', '-m', 'seed'], { cwd: repo });
+
+      // Plant 501 untracked files (just over MAX_FILES_FOR_DETAILS = 500)
+      // and zero tracked changes.
+      const N = 501;
+      const writes: Array<Promise<void>> = [];
+      for (let i = 0; i < N; i++) {
+        writes.push(fs.writeFile(path.join(repo, `u${i}.txt`), 'a\n'));
+      }
+      await Promise.all(writes);
+
+      const result = await fetchGitDiff(repo);
+      expect(result).not.toBeNull();
+      // Header includes every untracked file in `filesCount`.
+      expect(result!.stats.filesCount).toBe(N);
+      // `perFileStats` is empty because we took the summary-only path,
+      // which is the whole point of the guardrail.
+      expect(result!.perFileStats.size).toBe(0);
     } finally {
       await fs.rm(repo, { recursive: true, force: true });
     }

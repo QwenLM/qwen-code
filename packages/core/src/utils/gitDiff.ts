@@ -60,6 +60,14 @@ export const MAX_DIFF_SIZE_BYTES = 1_000_000;
 export const MAX_LINES_PER_FILE = 400;
 /** Skip per-file parsing when the diff touches more than this many files. */
 export const MAX_FILES_FOR_DETAILS = 500;
+/** Sentinel used when `git diff --shortstat` returns nothing — most often
+ *  because there are no tracked changes at all. The fast-path threshold
+ *  is then driven entirely by the untracked count. */
+const EMPTY_STATS: GitDiffStats = {
+  filesCount: 0,
+  linesAdded: 0,
+  linesRemoved: 0,
+};
 /** How much of an untracked file to read when counting its lines. */
 const UNTRACKED_READ_CAP_BYTES = MAX_DIFF_SIZE_BYTES;
 /** Per-file read buffer for line counting. With up to MAX_FILES (=50) files
@@ -142,23 +150,24 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
   ]);
   const untrackedCount = countNulDelimited(untrackedOut);
 
-  if (shortstatOut != null) {
-    const quickStats = parseShortstat(shortstatOut);
-    // Base the short-circuit on tracked + untracked so repos with relatively
-    // few edits but a flood of untracked files (e.g. large generated
-    // workspaces) still take the summary-only path.
-    if (
-      quickStats &&
-      quickStats.filesCount + untrackedCount > MAX_FILES_FOR_DETAILS
-    ) {
-      return {
-        stats: {
-          ...quickStats,
-          filesCount: quickStats.filesCount + untrackedCount,
-        },
-        perFileStats: new Map(),
-      };
-    }
+  // Apply the >500-file fast path on tracked + untracked, treating "no
+  // shortstat output" (no tracked changes) and "shortstat unparseable"
+  // both as zero tracked stats. Without this fall-through, a workspace
+  // with 0 tracked + 501 untracked files would slip past the guardrail:
+  // shortstat would be empty, parseShortstat would return null, and the
+  // slow path would only line-count the first MAX_FILES untracked
+  // entries — leaving `filesCount: 501` paired with a `linesAdded` that
+  // missed the other 451 files.
+  const quickStats =
+    (shortstatOut != null && parseShortstat(shortstatOut)) || EMPTY_STATS;
+  if (quickStats.filesCount + untrackedCount > MAX_FILES_FOR_DETAILS) {
+    return {
+      stats: {
+        ...quickStats,
+        filesCount: quickStats.filesCount + untrackedCount,
+      },
+      perFileStats: new Map(),
+    };
   }
 
   // Numstat gives us +/- counts; name-status tells us *why* a row exists
@@ -243,8 +252,16 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
 }
 
 /**
- * Fetch structured hunks for the current working tree vs HEAD. Separate from
- * `fetchGitDiff` so callers that only need stats do not pay the full diff cost.
+ * Fetch structured hunks for the current working tree vs HEAD. Separate
+ * from `fetchGitDiff` so callers that only need stats do not pay the full
+ * diff cost.
+ *
+ * NOTE on memory: this reads the full `git diff HEAD` stdout via `execFile`
+ * before applying parser caps (`MAX_FILES`, `MAX_DIFF_SIZE_BYTES`,
+ * `MAX_LINES_PER_FILE`). For very large diffs we can buffer up to the
+ * `runGit` `maxBuffer` (64 MB) before dropping content. Streaming the
+ * parser would let us terminate `git` early at `MAX_FILES`; that's a
+ * reasonable follow-up but out of scope for this utility's first cut.
  */
 export async function fetchGitDiffHunks(
   cwd: string,
@@ -446,6 +463,86 @@ export function parseGitDiff(stdout: string): Map<string, Hunk[]> {
 }
 
 /**
+ * Decode a path field from a `diff --git` header — handles both unquoted
+ * (`b/foo.txt`) and C-style quoted (`"b/tab\there.txt"`) forms.
+ *
+ * Git wraps a path in `"..."` and applies C-style escaping (`\t`, `\n`,
+ * `\r`, `\"`, `\\`, plus octal `\NNN` for non-ASCII bytes) whenever the
+ * raw path contains a character that breaks the simple space-delimited
+ * format. `core.quotepath=false` disables ONLY the octal escaping for
+ * non-ASCII bytes; control chars and quotes are still escaped, so we
+ * must decode them ourselves to preserve the real on-disk filename.
+ *
+ * Octal escapes are decoded as raw byte values then UTF-8-decoded en
+ * masse so multi-byte sequences like `\346\226\207` (文) round-trip
+ * correctly even though we never set quotepath=true ourselves.
+ */
+function unquoteCStylePath(s: string): string {
+  if (!s.startsWith('"') || !s.endsWith('"') || s.length < 2) return s;
+  const inner = s.slice(1, -1);
+  // Build raw bytes first so octal `\NNN` sequences (each one byte of a
+  // potentially multi-byte UTF-8 character) reassemble correctly.
+  const bytes: number[] = [];
+  let i = 0;
+  while (i < inner.length) {
+    const c = inner.charCodeAt(i);
+    if (c !== 0x5c /* '\' */) {
+      // Encode this character (which may be a multi-byte UTF-8 char from
+      // the input string) into bytes. JS strings are UTF-16; use a helper.
+      bytes.push(...Buffer.from(inner[i] ?? '', 'utf8'));
+      i++;
+      continue;
+    }
+    const next = inner[i + 1];
+    if (next === undefined) {
+      bytes.push(0x5c);
+      i++;
+      continue;
+    }
+    switch (next) {
+      case 't':
+        bytes.push(0x09);
+        i += 2;
+        break;
+      case 'n':
+        bytes.push(0x0a);
+        i += 2;
+        break;
+      case 'r':
+        bytes.push(0x0d);
+        i += 2;
+        break;
+      case '"':
+        bytes.push(0x22);
+        i += 2;
+        break;
+      case '\\':
+        bytes.push(0x5c);
+        i += 2;
+        break;
+      default:
+        if (next >= '0' && next <= '7') {
+          let octal = '';
+          while (
+            octal.length < 3 &&
+            i + 1 + octal.length < inner.length &&
+            (inner[i + 1 + octal.length] ?? '') >= '0' &&
+            (inner[i + 1 + octal.length] ?? '') <= '7'
+          ) {
+            octal += inner[i + 1 + octal.length];
+          }
+          bytes.push(parseInt(octal, 8) & 0xff);
+          i += 1 + octal.length;
+        } else {
+          bytes.push(...Buffer.from(next, 'utf8'));
+          i += 2;
+        }
+    }
+  }
+  return Buffer.from(bytes).toString('utf8');
+}
+
+/**
  * Extract the real filename from a `diff --git` file block, avoiding the
  * ambiguity of `diff --git a/X b/Y` when `X` itself contains ` b/`.
  *
@@ -456,8 +553,12 @@ export function parseGitDiff(stdout: string): Map<string, Hunk[]> {
  *      to `--- a/<path>` for the old name.
  *   3. `--- a/<path>` alone — for the rare case where `+++` is absent.
  *
- * Git appends a TAB after the path on `---` / `+++` / `rename to` lines when
- * the path contains whitespace; `stripTab` cuts at that marker.
+ * Each candidate path goes through `stripTab` (cut at the trailing TAB git
+ * appends after whitespace-containing paths) and `unquoteCStylePath`
+ * (decode `"..."` C-quoted form for paths whose raw bytes include tabs,
+ * newlines, quotes, or non-ASCII characters that core.quotepath does not
+ * suppress). Without the unquote step, fetchGitDiffHunks would silently
+ * drop hunks for any tracked file whose name contains those characters.
  *
  * Returns `null` when the block has no hunks or no recognizable path line
  * (mode-only changes, for example).
@@ -478,20 +579,23 @@ function extractFilePath(lines: string[]): string | null {
     const t = s.indexOf('\t');
     return t >= 0 ? s.slice(0, t) : s;
   };
-  if (renameTo !== null) return stripTab(renameTo);
-  if (copyTo !== null) return stripTab(copyTo);
+  // Strip the TAB-end-of-path marker first, then C-unquote — git emits the
+  // TAB AFTER the closing quote on quoted paths.
+  const normalize = (s: string): string => unquoteCStylePath(stripTab(s));
+  if (renameTo !== null) return normalize(renameTo);
+  if (copyTo !== null) return normalize(copyTo);
   if (plus !== null) {
-    const p = stripTab(plus);
+    const p = normalize(plus);
     if (p !== '/dev/null' && p.startsWith('b/')) return p.slice(2);
     // Deleted file — fall back to the old path.
     if (minus !== null) {
-      const m = stripTab(minus);
+      const m = normalize(minus);
       if (m !== '/dev/null' && m.startsWith('a/')) return m.slice(2);
     }
     return null;
   }
   if (minus !== null) {
-    const m = stripTab(minus);
+    const m = normalize(minus);
     if (m !== '/dev/null' && m.startsWith('a/')) return m.slice(2);
   }
   return null;
