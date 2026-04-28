@@ -28,7 +28,6 @@ import {
   SettingsMenuSelect,
   SettingsToggle,
 } from '@/components/settings'
-import * as storage from '@/lib/local-storage'
 import { useWorkspaceIcons } from '@/hooks/useWorkspaceIcon'
 import { Info_DataTable, SortableHeader } from '@/components/info/Info_DataTable'
 import { Info_Badge } from '@/components/info/Info_Badge'
@@ -126,15 +125,6 @@ export default function AppearanceSettingsPage() {
 
   // Resolved path to tool-icons.json (needed for EditPopover and "Edit File" action)
   const [toolIconsJsonPath, setToolIconsJsonPath] = useState<string | null>(null)
-
-  // Connection icon visibility toggle
-  const [showConnectionIcons, setShowConnectionIcons] = useState(() =>
-    storage.get(storage.KEYS.showConnectionIcons, true)
-  )
-  const handleConnectionIconsChange = useCallback((checked: boolean) => {
-    setShowConnectionIcons(checked)
-    storage.set(storage.KEYS.showConnectionIcons, checked)
-  }, [])
 
   // Rich tool descriptions toggle (persisted in config.json, read by SDK subprocess)
   const [richToolDescriptions, setRichToolDescriptions] = useState(true)
@@ -352,12 +342,6 @@ export default function AppearanceSettingsPage() {
               {/* Interface */}
               <SettingsSection title={t("settings.appearance.interface")}>
                 <SettingsCard>
-                  <SettingsToggle
-                    label={t("settings.appearance.connectionIcons")}
-                    description={t("settings.appearance.connectionIconsDesc")}
-                    checked={showConnectionIcons}
-                    onCheckedChange={handleConnectionIconsChange}
-                  />
                   <SettingsToggle
                     label={t("settings.appearance.richToolDescriptions")}
                     description={t("settings.appearance.richToolDescriptionsDesc")}

@@ -18,7 +18,7 @@ import {
   type BackendHostRuntimeContext,
   type PostInitResult,
 } from '@craft-agent/shared/agent/backend'
-import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars } from '@craft-agent/shared/config'
+import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars, updateLlmConnection, type ModelDefinition } from '@craft-agent/shared/config'
 import { PrivilegedExecutionBroker } from '@craft-agent/server-core/services'
 import { isValidWorkingDirectory } from '../utils/path-validation'
 import { InitGate } from '@craft-agent/server-core/domain'
@@ -1448,6 +1448,30 @@ export class SessionManager implements ISessionManager {
     this.eventSink(RPC_CHANNELS.llmConnections.CHANGED, { to: 'all' })
   }
 
+  private updateQwenConnectionModels(slug: string, models: ModelDefinition[], currentModelId?: string): void {
+    const connection = getLlmConnection(slug)
+    if (!connection || connection.providerType !== 'qwen' || models.length === 0) return
+
+    const currentModelIds = (connection.models ?? []).map(model => typeof model === 'string' ? model : model.id)
+    const nextModelIds = models.map(model => model.id)
+    const sameModels = currentModelIds.length === nextModelIds.length
+      && currentModelIds.every((id, index) => id === nextModelIds[index])
+
+    const currentDefault = connection.defaultModel
+    const defaultStillValid = !!currentDefault && nextModelIds.includes(currentDefault)
+    const reportedDefault = currentModelId && nextModelIds.includes(currentModelId) ? currentModelId : undefined
+    const nextDefault = defaultStillValid ? currentDefault : (reportedDefault ?? nextModelIds[0])
+    const sameDefault = (connection.defaultModel ?? '') === (nextDefault ?? '')
+
+    if (sameModels && sameDefault) return
+
+    updateLlmConnection(slug, {
+      models,
+      ...(nextDefault ? { defaultModel: nextDefault } : {}),
+    })
+    this.broadcastLlmConnectionsChanged()
+  }
+
   private broadcastSkillsChanged(workspaceId: string, skills: import('@craft-agent/shared/skills').LoadedSkill[]): void {
     if (!this.eventSink) return
     sessionLog.info(`Broadcasting skills changed (${skills.length} skills)`)
@@ -2754,56 +2778,59 @@ export class SessionManager implements ISessionManager {
         context: backendContext,
         hostRuntime: buildBackendHostRuntimeContext(),
         coreConfig: {
-        workspace: managed.workspace,
-        miniModel,
-        thinkingLevel: managed.thinkingLevel,
-        session: sessionConfig,
-        onSdkSessionIdUpdate,
-        onSdkSessionIdCleared,
-        getRecoveryMessages,
-        getBranchFallbackMessages,
-        getBranchSeedMessages,
-        markBranchSeedApplied,
-        getTransferredSessionSummary,
-        markTransferredSessionSummaryApplied,
-        mcpPool: managed.mcpPool,
-        poolServerUrl,
-        envOverrides,
-        // Claude-specific
-        isHeadless: !AGENT_FLAGS.defaultModesEnabled,
-        skipConfigWatcher: true, // Server owns workspace-level ConfigWatcher — don't duplicate in agents
-        automationSystem: this.automationSystems.get(managed.workspace.rootPath),
-        systemPromptPreset: managed.systemPromptPreset,
-        debugMode: _platform?.isDebugMode ? { enabled: true, logFilePath: _platform.getLogFilePath?.() } : undefined,
-        enable1MContext: await (async () => { const { getEnable1MContext } = await import('@craft-agent/shared/config/storage'); return getEnable1MContext(); })(),
-        // Image resize callback — prevents oversized images from entering conversation history
-        onImageResize: async (filePath: string, maxSizeBytes: number): Promise<string | null> => {
-          try {
-            const buffer = await readFile(filePath)
-            const result = await resizeImageForAPI(buffer, { maxSizeBytes })
-            if (!result) return null
+          workspace: managed.workspace,
+          miniModel,
+          thinkingLevel: managed.thinkingLevel,
+          session: sessionConfig,
+          onSdkSessionIdUpdate,
+          onSdkSessionIdCleared,
+          onAvailableModelsUpdate: connection?.providerType === 'qwen'
+            ? (models, currentModelId) => this.updateQwenConnectionModels(connection.slug, models, currentModelId)
+            : undefined,
+          getRecoveryMessages,
+          getBranchFallbackMessages,
+          getBranchSeedMessages,
+          markBranchSeedApplied,
+          getTransferredSessionSummary,
+          markTransferredSessionSummaryApplied,
+          mcpPool: managed.mcpPool,
+          poolServerUrl,
+          envOverrides,
+          // Claude-specific
+          isHeadless: !AGENT_FLAGS.defaultModesEnabled,
+          skipConfigWatcher: true, // Server owns workspace-level ConfigWatcher — don't duplicate in agents
+          automationSystem: this.automationSystems.get(managed.workspace.rootPath),
+          systemPromptPreset: managed.systemPromptPreset,
+          debugMode: _platform?.isDebugMode ? { enabled: true, logFilePath: _platform.getLogFilePath?.() } : undefined,
+          enable1MContext: await (async () => { const { getEnable1MContext } = await import('@craft-agent/shared/config/storage'); return getEnable1MContext(); })(),
+          // Image resize callback — prevents oversized images from entering conversation history
+          onImageResize: async (filePath: string, maxSizeBytes: number): Promise<string | null> => {
+            try {
+              const buffer = await readFile(filePath)
+              const result = await resizeImageForAPI(buffer, { maxSizeBytes })
+              if (!result) return null
 
-            // Write to session tmp directory (cleaned up with session)
-            const sessionTmpDir = join(sessionPath, 'tmp')
-            await mkdir(sessionTmpDir, { recursive: true })
-            const ext = result.format === 'jpeg' ? 'jpg' : 'png'
-            const outPath = join(sessionTmpDir, `resized-${randomUUID()}.${ext}`)
-            await writeFile(outPath, result.buffer)
+              // Write to session tmp directory (cleaned up with session)
+              const sessionTmpDir = join(sessionPath, 'tmp')
+              await mkdir(sessionTmpDir, { recursive: true })
+              const ext = result.format === 'jpeg' ? 'jpg' : 'png'
+              const outPath = join(sessionTmpDir, `resized-${randomUUID()}.${ext}`)
+              await writeFile(outPath, result.buffer)
 
-            sessionLog.info(`Image resized for Read: ${(buffer.length / 1024 / 1024).toFixed(1)}MB → ${(result.buffer.length / 1024 / 1024).toFixed(1)}MB (→ ${result.width}×${result.height})`)
-            return outPath
-          } catch (err) {
-            sessionLog.error('Image resize failed:', err)
-            return null
-          }
-        },
-        // Source configs for postInit() — backends set up their own bridge/config
-        initialSources: {
-          enabledSources,
-          mcpServers,
-          apiServers,
-          enabledSlugs,
-        },
+              sessionLog.info(`Image resized for Read: ${(buffer.length / 1024 / 1024).toFixed(1)}MB → ${(result.buffer.length / 1024 / 1024).toFixed(1)}MB (→ ${result.width}×${result.height})`)
+              return outPath
+            } catch (err) {
+              sessionLog.error('Image resize failed:', err)
+              return null
+            }
+          },
+          // Source configs for postInit() — backends set up their own bridge/config
+          initialSources: {
+            enabledSources,
+            mcpServers,
+            apiServers,
+            enabledSlugs,
+          },
         },
       }) as AgentInstance
 

@@ -15,11 +15,13 @@ import {
   type Client,
   type ContentBlock,
   type McpServer,
+  type ModelInfo,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 import type { AgentEvent } from '@craft-agent/core/types';
 import type { FileAttachment } from '../utils/files.ts';
+import type { ModelDefinition } from '../config/models.ts';
 import { getProxyEnvVars } from '../config/proxy-env.ts';
 import { getCoAuthorPreference } from '../config/preferences.ts';
 import { getSessionPlansPath } from '../sessions/storage.ts';
@@ -70,6 +72,21 @@ function asString(value: unknown): string | undefined {
 
 function asNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function toQwenModelDefinition(value: unknown): ModelDefinition | null {
+  const model = toRecord(value as ModelInfo);
+  const id = asString(model.modelId);
+  if (!id) return null;
+  const name = asString(model.name) || id;
+  return {
+    id,
+    name,
+    shortName: name,
+    description: asString(model.description) || '',
+    provider: 'qwen',
+    contextWindow: QWEN_CONTEXT_WINDOW,
+  };
 }
 
 function toRecord(value: unknown): JsonRecord {
@@ -444,15 +461,7 @@ export class QwenAgent extends BaseAgent {
 
   override setModel(model: string): void {
     super.setModel(model);
-    const sessionId = this.qwenSessionId;
-    if (!model || !sessionId) return;
-    void this.callAcp('session/set_config_option', (connection) => connection.setSessionConfigOption({
-      sessionId,
-      configId: 'model',
-      value: model,
-    }), 10_000).catch((error) => {
-      this.debug(`Qwen model switch failed: ${error instanceof Error ? error.message : String(error)}`);
-    });
+    void this.forwardModel(model);
   }
 
   override async setSourceServers(
@@ -569,8 +578,8 @@ export class QwenAgent extends BaseAgent {
     const connection = new ClientSideConnection(
       () => this.createAcpClient(),
       ndJsonStream(
-        Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>,
-        Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>,
+        Writable.toWeb(child.stdin!) as unknown as WritableStream<Uint8Array>,
+        Readable.toWeb(child.stdout!) as unknown as ReadableStream<Uint8Array>,
       ),
     );
     this.connection = connection;
@@ -719,13 +728,14 @@ export class QwenAgent extends BaseAgent {
     if (existingSessionId) {
       this.suppressedSessionUpdates.add(existingSessionId);
       try {
-        await this.callAcp('session/load', (connection) => connection.loadSession({
+        const result = toRecord(await this.callAcp('session/load', (connection) => connection.loadSession({
           sessionId: existingSessionId,
           cwd,
           mcpServers,
-        }), 60_000);
+        }), 60_000));
         this.qwenSessionId = existingSessionId;
         this.persistedQwenSessionId = existingSessionId;
+        this.recordSessionModels(result);
         this.config.onSdkSessionIdUpdate?.(existingSessionId);
         await this.applySessionSettings(existingSessionId);
         return;
@@ -746,6 +756,7 @@ export class QwenAgent extends BaseAgent {
 
     this.qwenSessionId = sessionId;
     this.persistedQwenSessionId = sessionId;
+    this.recordSessionModels(result);
     this.config.onSdkSessionIdUpdate?.(sessionId);
     await this.applySessionSettings(sessionId);
   }
@@ -759,20 +770,51 @@ export class QwenAgent extends BaseAgent {
     if (!sessionId) {
       throw new Error('Qwen ACP did not return a sessionId for mini completion');
     }
+    this.recordSessionModels(result);
     return sessionId;
+  }
+
+  private recordSessionModels(result: JsonRecord): void {
+    const modelState = toRecord(result.models);
+    const availableModels = Array.isArray(modelState.availableModels)
+      ? modelState.availableModels.map(toQwenModelDefinition).filter((model): model is ModelDefinition => !!model)
+      : [];
+    const currentModelId = asString(modelState.currentModelId);
+
+    if (!this._model && currentModelId) {
+      super.setModel(currentModelId);
+    }
+
+    if (availableModels.length > 0) {
+      this.config.onAvailableModelsUpdate?.(availableModels, currentModelId);
+    }
+  }
+
+  private async forwardModel(model: string, sessionId = this.qwenSessionId): Promise<void> {
+    if (!model || !sessionId) return;
+
+    try {
+      await this.callAcp('session/set_model', (connection) => connection.unstable_setSessionModel({
+        sessionId,
+        modelId: model,
+      }), 10_000);
+    } catch (error) {
+      this.debug(`Qwen session/set_model failed: ${error instanceof Error ? error.message : String(error)}`);
+      await this.callAcp('session/set_config_option', (connection) => connection.setSessionConfigOption({
+        sessionId,
+        configId: 'model',
+        value: model,
+      }), 10_000).catch((fallbackError) => {
+        this.debug(`Qwen model config fallback failed: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`);
+      });
+    }
   }
 
   private async applySessionSettings(sessionId: string): Promise<void> {
     await this.forwardPermissionMode(this.getPermissionMode(), sessionId);
 
     if (this._model) {
-      await this.callAcp('session/set_config_option', (connection) => connection.setSessionConfigOption({
-        sessionId,
-        configId: 'model',
-        value: this._model,
-      }), 10_000).catch((error) => {
-        this.debug(`Qwen initial model switch failed: ${error instanceof Error ? error.message : String(error)}`);
-      });
+      await this.forwardModel(this._model, sessionId);
     }
   }
 

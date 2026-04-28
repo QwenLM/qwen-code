@@ -706,7 +706,7 @@
   "settings.ai.credentialOtherMachine": "检测到来自其他设备的凭证。请在此设备上重新认证。",
   "settings.ai.defaultSection": "默认",
   "settings.ai.defaultSectionDesc": "未设置 Workspace 覆盖时新聊天的设置。",
-  "settings.ai.description": "模型、思考、连接",
+  "settings.ai.description": "模型与思考",
   "settings.ai.enterConnectionName": "输入连接名称...",
   "settings.ai.extendedContext": "扩展上下文 (1M)",
   "settings.ai.extendedContextDesc": "为 Opus 4.7 使用 1M token 上下文窗口。禁用则使用 200K 以节省用量配额。",

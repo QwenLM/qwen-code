@@ -516,6 +516,7 @@ export default function App() {
   })
 
   const DRAFT_SAVE_DEBOUNCE_MS = 500
+  const qwenModelRefreshInFlightRef = useRef<Promise<void> | null>(null)
 
   const resolveDefaultConnectionSlug = useCallback((connections: LlmConnectionWithStatus[]) => {
     return connections.find(c => c.isDefault)?.slug ?? connections[0]?.slug
@@ -530,6 +531,29 @@ export default function App() {
     if (windowWorkspaceId) {
       const settings = await window.electronAPI.getWorkspaceSettings(windowWorkspaceId)
       setWorkspaceDefaultLlmConnection(settings?.defaultLlmConnection)
+    }
+
+    const qwenConnectionWithoutModels = connections.find(connection =>
+      connection.providerType === 'qwen' && (!connection.models || connection.models.length === 0)
+    )
+    if (qwenConnectionWithoutModels && !qwenModelRefreshInFlightRef.current) {
+      qwenModelRefreshInFlightRef.current = (async () => {
+        try {
+          const result = await window.electronAPI.refreshLlmConnectionModels(qwenConnectionWithoutModels.slug)
+          if (!result.success) {
+            console.warn('[App] Qwen model refresh failed:', result.error)
+            return
+          }
+
+          const refreshedConnections = await window.electronAPI.listLlmConnectionsWithStatus()
+          setLlmConnections(refreshedConnections)
+          setDefaultLlmConnectionSlug(resolveDefaultConnectionSlug(refreshedConnections))
+        } catch (error) {
+          console.warn('[App] Qwen model refresh failed:', error)
+        } finally {
+          qwenModelRefreshInFlightRef.current = null
+        }
+      })()
     }
   }, [resolveDefaultConnectionSlug, windowWorkspaceId])
 
@@ -650,10 +674,7 @@ export default function App() {
     }).catch(() => { /* non-fatal startup check */ })
     void loadSessionsFromServer()
     // Load LLM connections with authentication status
-    window.electronAPI.listLlmConnectionsWithStatus().then((connections) => {
-      setLlmConnections(connections)
-      setDefaultLlmConnectionSlug(resolveDefaultConnectionSlug(connections))
-    })
+    void refreshLlmConnections()
     // Load persisted input drafts into ref (no re-render needed).
     // Attachment files are not read here — hydration happens lazily when the session
     // is opened so app startup isn't delayed by reading potentially large files.
@@ -664,7 +685,7 @@ export default function App() {
     })
     // Load app-level theme
     window.electronAPI.getAppTheme().then(setAppTheme)
-  }, [appState, loadSessionsFromServer, resolveDefaultConnectionSlug])
+  }, [appState, loadSessionsFromServer, refreshLlmConnections])
 
   // Subscribe to theme change events (live updates when theme.json changes)
   useEffect(() => {

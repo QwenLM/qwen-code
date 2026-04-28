@@ -55,6 +55,8 @@ export type LlmProviderType =
   | 'pi_compat'
   | 'qwen';
 
+export const QWEN_CODE_CONNECTION_SLUG = 'qwen-code';
+
 /**
  * @deprecated Use LlmProviderType instead. Kept for migration compatibility.
  */
@@ -539,10 +541,12 @@ export function resolveEffectiveConnectionSlug(
   workspaceDefault: string | undefined,
   connections: Pick<LlmConnectionWithStatus, 'slug' | 'isDefault'>[],
 ): string | undefined {
-  return sessionConnection
-    ?? workspaceDefault
-    ?? connections.find(c => c.isDefault)?.slug
-    ?? connections[0]?.slug
+  const hasConnection = (slug: string | undefined): slug is string =>
+    !!slug && connections.some(c => c.slug === slug);
+
+  if (hasConnection(sessionConnection)) return sessionConnection;
+  if (hasConnection(workspaceDefault)) return workspaceDefault;
+  return connections.find(c => c.isDefault)?.slug ?? connections[0]?.slug
 }
 
 /**
@@ -560,6 +564,7 @@ export function isSessionConnectionUnavailable(
   connections: Pick<LlmConnectionWithStatus, 'slug'>[],
 ): boolean {
   if (!sessionConnection) return false
+  if (connections.some(c => c.slug === QWEN_CODE_CONNECTION_SLUG)) return false
   return !connections.some(c => c.slug === sessionConnection)
 }
 

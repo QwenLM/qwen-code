@@ -27,7 +27,7 @@ import type { SourceManager } from '../core/source-manager.ts';
 import { AbortReason, type RecoveryMessage } from '../core/index.ts';
 export { AbortReason, type RecoveryMessage };
 
-import type { ModelProvider } from '../../config/models.ts';
+import type { ModelDefinition, ModelProvider } from '../../config/models.ts';
 
 // Import LLM connection types for auth
 import type { LlmAuthType, LlmProviderType } from '../../config/llm-connections.ts';
@@ -210,6 +210,9 @@ export interface CoreBackendConfig {
 
   /** Callback when SDK session ID is cleared (e.g., after failed resume) */
   onSdkSessionIdCleared?: () => void;
+
+  /** Callback when a backend reports its live model list for the session. */
+  onAvailableModelsUpdate?: (models: ModelDefinition[], currentModelId?: string) => void;
 
   /** Callback to get recent messages for recovery context */
   getRecoveryMessages?: () => RecoveryMessage[];

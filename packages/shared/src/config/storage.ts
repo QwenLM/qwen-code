@@ -42,7 +42,7 @@ import type { Workspace, AuthType } from '@craft-agent/core/types';
 
 // Import LLM connection types and constants
 import type { LlmConnection } from './llm-connections.ts';
-import { isValidProviderAuthCombination, getDefaultModelsForConnection, getDefaultModelForConnection, isPiProvider, toBedrockNativeId, type LlmProviderType } from './llm-connections.ts';
+import { isValidProviderAuthCombination, getDefaultModelsForConnection, getDefaultModelForConnection, isPiProvider, toBedrockNativeId, QWEN_CODE_CONNECTION_SLUG, type LlmProviderType } from './llm-connections.ts';
 import {
   getModelProvider,
   getModelById,
@@ -2167,6 +2167,56 @@ export function migrateLegacyLlmConnectionsConfig(): void {
     return changed;
   };
 
+  const normalizeToQwenCodeOnly = (target: StoredConfig): boolean => {
+    const existingQwen = target.llmConnections?.find(c => c.slug === QWEN_CODE_CONNECTION_SLUG)
+      ?? target.llmConnections?.find(c => c.providerType === 'qwen');
+
+    const qwenConnection: LlmConnection = {
+      slug: QWEN_CODE_CONNECTION_SLUG,
+      name: 'Qwen Code',
+      providerType: 'qwen',
+      authType: 'none',
+      models: existingQwen?.models ?? getDefaultModelsForConnection('qwen'),
+      defaultModel: existingQwen?.defaultModel ?? getDefaultModelForConnection('qwen'),
+      createdAt: existingQwen?.createdAt ?? Date.now(),
+      lastUsedAt: existingQwen?.lastUsedAt,
+    };
+
+    const previousConnections = target.llmConnections ?? [];
+    const removedConnectionSlugs = previousConnections
+      .filter(c => c.slug !== QWEN_CODE_CONNECTION_SLUG && c.providerType !== 'qwen')
+      .map(c => c.slug);
+
+    let changed = previousConnections.length !== 1
+      || JSON.stringify(previousConnections[0] ?? null) !== JSON.stringify(qwenConnection)
+      || target.defaultLlmConnection !== QWEN_CODE_CONNECTION_SLUG;
+
+    target.llmConnections = [qwenConnection];
+    target.defaultLlmConnection = QWEN_CODE_CONNECTION_SLUG;
+
+    for (const slug of removedConnectionSlugs) {
+      getCredentialManager().deleteLlmCredentials(slug).catch((error) => {
+        console.error(`[storage] Failed to delete credentials for removed connection '${slug}':`, error);
+      });
+    }
+
+    try {
+      const workspaces = getWorkspaces();
+      for (const ws of workspaces) {
+        const wsConfig = loadWorkspaceConfig(ws.rootPath);
+        if (wsConfig?.defaults?.defaultLlmConnection) {
+          delete wsConfig.defaults.defaultLlmConnection;
+          saveWorkspaceConfig(ws.rootPath, wsConfig);
+          changed = true;
+        }
+      }
+    } catch (error) {
+      console.error('Failed to clean up workspace default connection references:', error);
+    }
+
+    return changed;
+  };
+
   // Already migrated - llmConnections array exists
   if (config.llmConnections !== undefined) {
     // Clean up any remaining legacy fields from previous runs
@@ -2194,6 +2244,11 @@ export function migrateLegacyLlmConnectionsConfig(): void {
       delete configAny.model;
       needsSave = true;
     }
+
+    if (normalizeToQwenCodeOnly(config)) {
+      needsSave = true;
+    }
+
     // Note: applyCompatDefaults() is NOT called here for already-migrated configs.
     // Compat connections are user-owned after creation — the app should not
     // silently extend or override the user's model list on every startup.
@@ -2356,6 +2411,7 @@ export function migrateLegacyLlmConnectionsConfig(): void {
   migrateCodexCopilotToPi(config);
   backfillAllConnectionModels(config);
   migrateModelDefaultsToConnections(config);
+  normalizeToQwenCodeOnly(config);
 
   saveConfig(config);
 }

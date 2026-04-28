@@ -706,7 +706,7 @@
   "settings.ai.credentialOtherMachine": "Credentials from another machine detected. Please re-authenticate on this device.",
   "settings.ai.defaultSection": "Default",
   "settings.ai.defaultSectionDesc": "Settings for new chats when no workspace override is set.",
-  "settings.ai.description": "Model, thinking, connections",
+  "settings.ai.description": "Model and thinking",
   "settings.ai.enterConnectionName": "Enter connection name...",
   "settings.ai.extendedContext": "Extended Context (1M)",
   "settings.ai.extendedContextDesc": "Use 1M token context window for Opus 4.7. Disable to use 200K and conserve usage limits.",
