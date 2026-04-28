@@ -100,6 +100,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e 'packages/sdk-python[dev]' build
 
+      - name: 'Build qwen CLI bundle'
+        if: |-
+          ${{ github.event.inputs.force_skip_tests != 'true' }}
+        run: |
+          npm run build
+          npm run bundle
+
       - name: 'Get the version'
         id: 'version'
         run: |
@@ -182,7 +189,7 @@ jobs:
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
         run: |
-          python packages/sdk-python/scripts/smoke_real.py --qwen qwen --cwd "${GITHUB_WORKSPACE}" --json-only
+          python packages/sdk-python/scripts/smoke_real.py --qwen "${GITHUB_WORKSPACE}/dist/cli.js" --cwd "${GITHUB_WORKSPACE}" --json-only
 
       - name: 'Build Python package'
         working-directory: 'packages/sdk-python'
