@@ -479,6 +479,60 @@ describe('AppContainer State Management', () => {
       );
     });
 
+    it('rewind refresh repaints the viewport without clearing scrollback', () => {
+      const userItem = { id: 1, type: 'user', text: 'hello' } as const;
+      const addItem = vi.fn();
+      const loadHistory = vi.fn();
+      const setText = vi.fn();
+      const truncateHistory = vi.fn();
+      const stripThoughtsFromHistory = vi.fn();
+
+      mockedUseHistory.mockReturnValue({
+        history: [userItem, { id: 2, type: 'gemini', text: 'answer' }],
+        addItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory,
+      });
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText,
+      });
+      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([
+          {
+            role: 'user',
+            parts: [{ text: 'hello' }],
+          },
+        ]),
+        truncateHistory,
+        stripThoughtsFromHistory,
+      } as unknown as GeminiClient);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      mockStdout.write.mockClear();
+
+      capturedUIActions.handleRewindConfirm(userItem);
+
+      expect(truncateHistory).toHaveBeenCalledWith(0);
+      expect(stripThoughtsFromHistory).toHaveBeenCalled();
+      expect(loadHistory).toHaveBeenCalledWith([]);
+      expect(setText).toHaveBeenCalledWith('hello');
+      expect(mockStdout.write).toHaveBeenCalledWith(
+        `${ansiEscapes.cursorTo(0, 0)}${ansiEscapes.eraseDown}`,
+      );
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearTerminal,
+      );
+    });
+
     it('handleClearScreen avoids a second clearTerminal write', () => {
       const clearSpy = vi.spyOn(console, 'clear').mockImplementation(() => {});
 

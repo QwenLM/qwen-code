@@ -10,6 +10,7 @@ import { GeminiSpinner } from './GeminiRespondingSpinner.js';
 
 describe('<GeminiSpinner />', () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllEnvs();
   });
 
@@ -19,5 +20,17 @@ describe('<GeminiSpinner />', () => {
     const { lastFrame } = render(<GeminiSpinner />);
 
     expect(lastFrame()).toContain('.');
+  });
+
+  it('advances the tmux indicator at the low-frequency cadence', async () => {
+    vi.useFakeTimers();
+    vi.stubEnv('TMUX', '/tmp/tmux-1000/default,12345,0');
+
+    const { lastFrame } = render(<GeminiSpinner />);
+    expect(lastFrame()).toContain('.');
+
+    await vi.advanceTimersByTimeAsync(750);
+
+    expect(lastFrame()).toContain('..');
   });
 });

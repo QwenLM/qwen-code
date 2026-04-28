@@ -203,6 +203,16 @@ two screenshot samples. The comparison GIF therefore must include the raw ANSI
 clear metric/event annotation and the actual narrow-frame UI, so reviewers can
 verify both the metric fix and the absence of garbled narrow output.
 
+Evidence levels:
+
+- raw ANSI metrics are authoritative for full-screen clear/flicker claims;
+- event metrics are authoritative for shell live-output duplication claims;
+- source-level unit tests are authoritative for exact-fit output, throttle, and
+  terminal-specific fallback behavior;
+- GIFs and videos are required for reviewer comprehension, but they are
+  explanatory artifacts and must not be used without the matching metric from
+  the same run.
+
 ### Streaming Clear-Storm Scenario
 
 - fake OpenAI-compatible server streams 220 long text chunks at 70 ms/chunk;
@@ -386,6 +396,14 @@ Additional source-level regressions validated on April 28, 2026:
 | ------------------- | ------------ | ----------- | --------------------------------------- | ------ |
 | Shell text throttle | fixed branch | strict pass | first update immediate, burst collapsed | passed |
 | Tmux spinner        | fixed branch | strict pass | fixed-width dots fallback under `TMUX`  | passed |
+
+Additional source-level revalidation after the April 28 optimization pass:
+
+| Scenario               | Branch       | Expected    | Metric                                         | Result |
+| ---------------------- | ------------ | ----------- | ---------------------------------------------- | ------ |
+| Rewind static refresh  | fixed branch | strict pass | viewport repaint, no `clearTerminal`           | passed |
+| Shell final transcript | fixed branch | strict pass | throttled live text, complete final output     | passed |
+| Tmux spinner cadence   | fixed branch | strict pass | 750 ms frame transition under fixed-width dots | passed |
 
 ## Gemini CLI Cross-Check
 

@@ -573,9 +573,10 @@ describe('ShellTool', () => {
         expect(updateOutputMock).toHaveBeenCalledTimes(2);
         expect(updateOutputMock).toHaveBeenLastCalledWith('line 3');
 
+        const finalOutput = 'line 1\nline 2\nline 3';
         resolveExecutionPromise({
-          rawOutput: Buffer.from('line 1\nline 2\nline 3'),
-          output: 'line 1\nline 2\nline 3',
+          rawOutput: Buffer.from(finalOutput),
+          output: finalOutput,
           exitCode: 0,
           signal: null,
           error: null,
@@ -583,7 +584,10 @@ describe('ShellTool', () => {
           pid: 12345,
           executionMethod: 'child_process',
         });
-        await promise;
+        const result = await promise;
+
+        expect(result.returnDisplay).toBe(finalOutput);
+        expect(result.llmContent).toContain(`Output: ${finalOutput}`);
       });
     });
 
