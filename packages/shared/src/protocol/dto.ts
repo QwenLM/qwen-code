@@ -367,7 +367,7 @@ export interface LlmConnectionSetup {
 }
 
 export interface TestLlmConnectionParams {
-  provider: 'anthropic' | 'pi'
+  provider: 'anthropic' | 'pi' | 'qwen'
   apiKey: string
   baseUrl?: string
   model?: string

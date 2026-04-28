@@ -84,6 +84,11 @@ describe('getDefaultModelForConnection', () => {
     const defaultModel = getDefaultModelForConnection('pi_compat')
     expect(defaultModel).toBe('')
   })
+
+  it('returns empty string for qwen (models reported by Qwen Code)', () => {
+    const defaultModel = getDefaultModelForConnection('qwen')
+    expect(defaultModel).toBe('')
+  })
 })
 
 // ============================================================
@@ -102,6 +107,10 @@ describe('isCompatProvider', () => {
   it('returns false for pi', () => {
     expect(isCompatProvider('pi')).toBe(false)
   })
+
+  it('returns false for qwen', () => {
+    expect(isCompatProvider('qwen')).toBe(false)
+  })
 })
 
 describe('isAnthropicProvider', () => {
@@ -111,6 +120,10 @@ describe('isAnthropicProvider', () => {
 
   it('returns false for pi', () => {
     expect(isAnthropicProvider('pi')).toBe(false)
+  })
+
+  it('returns false for qwen', () => {
+    expect(isAnthropicProvider('qwen')).toBe(false)
   })
 })
 
@@ -125,6 +138,10 @@ describe('isPiProvider', () => {
 
   it('returns false for anthropic', () => {
     expect(isPiProvider('anthropic')).toBe(false)
+  })
+
+  it('returns false for qwen', () => {
+    expect(isPiProvider('qwen')).toBe(false)
   })
 })
 

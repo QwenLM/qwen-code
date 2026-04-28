@@ -18,6 +18,7 @@ export interface BackendRuntimePaths {
   node?: string;
   bridgeServer?: string;
   piServer?: string;
+  qwenCli?: string;
 }
 
 export interface BackendRuntimePayload extends Record<string, unknown> {
@@ -119,5 +120,7 @@ export function getDefaultProviderType(provider: AgentProvider): LlmProviderType
       return 'anthropic';
     case 'pi':
       return 'pi';
+    case 'qwen':
+      return 'qwen';
   }
 }

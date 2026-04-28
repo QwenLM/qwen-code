@@ -44,6 +44,7 @@ export function registerPiModelResolver(resolver: PiModelResolver): void {
  * - 'anthropic': Direct Anthropic API (api.anthropic.com) — uses Claude Agent SDK
  * - 'pi': Pi unified LLM API (20+ providers via @mariozechner/pi-ai)
  * - 'pi_compat': Pi with custom endpoint (Ollama, self-hosted models, Anthropic-compat endpoints)
+ * - 'qwen': Qwen Code ACP backend (uses Qwen Code's own auth/config)
  *
  * Legacy values (bedrock, vertex, anthropic_compat) are migrated on startup
  * by migrateLegacyProviderTypes() in storage.ts.
@@ -51,7 +52,8 @@ export function registerPiModelResolver(resolver: PiModelResolver): void {
 export type LlmProviderType =
   | 'anthropic'
   | 'pi'
-  | 'pi_compat';
+  | 'pi_compat'
+  | 'qwen';
 
 /**
  * @deprecated Use LlmProviderType instead. Kept for migration compatibility.
@@ -424,6 +426,10 @@ export function getModelsForProviderType(providerType: LlmProviderType, piAuthPr
     return _piModelResolver(piAuthProvider);
   }
 
+  if (providerType === 'qwen') {
+    return [];
+  }
+
   // Anthropic uses Claude models with bare Anthropic IDs.
   return ANTHROPIC_MODELS;
 }
@@ -494,6 +500,7 @@ export function getDefaultModelsForConnection(providerType: LlmProviderType, piA
     return models;
   }
   if (providerType === 'pi_compat') return [];  // Dynamic — user specifies
+  if (providerType === 'qwen') return [];        // Dynamic — Qwen Code reports models at session startup
   // anthropic
   return ANTHROPIC_MODELS;
 }
@@ -581,6 +588,7 @@ export function isValidProviderAuthCombination(
     anthropic: ['api_key', 'oauth'],
     pi: ['api_key', 'oauth', 'iam_credentials', 'environment', 'none'],
     pi_compat: ['api_key_with_endpoint', 'none'],
+    qwen: ['none'],
   };
 
   return validCombinations[providerType]?.includes(authType) ?? false;

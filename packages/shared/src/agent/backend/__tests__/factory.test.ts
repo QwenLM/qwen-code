@@ -30,6 +30,7 @@ import type { Workspace, LlmConnection } from '../../../config/storage.ts';
 import type { SessionConfig as Session } from '../../../sessions/storage.ts';
 import { ClaudeAgent } from '../../claude-agent.ts';
 import { PiAgent } from '../../pi-agent.ts';
+import { QwenAgent } from '../../qwen-agent.ts';
 import { isValidProviderAuthCombination } from '../../../config/llm-connections.ts';
 
 // Test helpers
@@ -102,6 +103,15 @@ describe('createBackend / createAgent', () => {
     });
   });
 
+  describe('Qwen provider', () => {
+    it('should create QwenAgent for qwen provider', () => {
+      const config = createTestConfig({ provider: 'qwen' });
+      const agent = createBackend(config);
+
+      expect(agent).toBeInstanceOf(QwenAgent);
+    });
+  });
+
   describe('Unknown provider', () => {
     it('should throw for unknown provider', () => {
       const config = createTestConfig({ provider: 'unknown' as any });
@@ -118,12 +128,13 @@ describe('createBackend / createAgent', () => {
 });
 
 describe('getAvailableProviders', () => {
-  it('should return anthropic and pi', () => {
+  it('should return anthropic, pi, and qwen', () => {
     const providers = getAvailableProviders();
 
     expect(providers).toContain('anthropic');
     expect(providers).toContain('pi');
-    expect(providers).toHaveLength(2);
+    expect(providers).toContain('qwen');
+    expect(providers).toHaveLength(3);
   });
 });
 
@@ -134,6 +145,10 @@ describe('isProviderAvailable', () => {
 
   it('should return true for pi', () => {
     expect(isProviderAvailable('pi')).toBe(true);
+  });
+
+  it('should return true for qwen', () => {
+    expect(isProviderAvailable('qwen')).toBe(true);
   });
 
   it('should return false for unknown provider', () => {
@@ -189,6 +204,12 @@ describe('providerTypeToAgentProvider', () => {
       expect(providerTypeToAgentProvider('pi_compat')).toBe('pi');
     });
   });
+
+  describe('Qwen ACP provider', () => {
+    it('should map qwen to qwen', () => {
+      expect(providerTypeToAgentProvider('qwen')).toBe('qwen');
+    });
+  });
 });
 
 // ============================================================
@@ -235,6 +256,16 @@ describe('isValidProviderAuthCombination', () => {
 
     it('should accept none auth (for local models like Ollama)', () => {
       expect(isValidProviderAuthCombination('pi_compat', 'none')).toBe(true);
+    });
+  });
+
+  describe('Qwen provider', () => {
+    it('should accept none auth', () => {
+      expect(isValidProviderAuthCombination('qwen', 'none')).toBe(true);
+    });
+
+    it('should reject api_key auth', () => {
+      expect(isValidProviderAuthCombination('qwen', 'api_key')).toBe(false);
     });
   });
 
@@ -288,6 +319,10 @@ describe('phase4 backend abstraction APIs', () => {
       baseUrl: 'https://my-anthropic-proxy.internal/v1',
       customEndpoint: { api: 'anthropic-messages' },
     })).toEqual({ providerType: 'pi_compat', piAuthProvider: 'anthropic', customEndpoint: { api: 'anthropic-messages' } });
+
+    expect(resolveSetupTestConnectionHint({
+      provider: 'qwen',
+    })).toEqual({ providerType: 'qwen' });
   });
 
   it('fetchBackendModels dispatches for pi provider', async () => {

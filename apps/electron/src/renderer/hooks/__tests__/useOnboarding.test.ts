@@ -34,7 +34,7 @@ describe('resolveSlugForMethod', () => {
   it('works for all setup methods', () => {
     const methods: ApiSetupMethod[] = [
       'anthropic_api_key', 'claude_oauth',
-      'pi_chatgpt_oauth', 'pi_copilot_oauth', 'pi_api_key',
+      'pi_chatgpt_oauth', 'pi_copilot_oauth', 'pi_api_key', 'qwen_code',
     ]
     for (const method of methods) {
       const slug = resolveSlugForMethod(method, null, new Set())
@@ -99,6 +99,12 @@ describe('apiSetupMethodToConnectionSetup', () => {
     expect(setup.credential).toBe('sk-pi')
     expect(setup.piAuthProvider).toBe('anthropic')
     expect(setup.modelSelectionMode).toBe('userDefined3Tier')
+  })
+
+  it('qwen_code maps to qwen-code slug without credentials', () => {
+    const setup = apiSetupMethodToConnectionSetup('qwen_code', {}, null, new Set())
+    expect(setup.slug).toBe('qwen-code')
+    expect(setup.credential).toBeUndefined()
   })
 
   it('uses editingSlug when editing', () => {

@@ -51,7 +51,7 @@ export function parseTestConnectionError(msg: string): string {
  * Guard against ambiguous Pi custom endpoint tests where no provider routing is selected.
  */
 export function validateSetupTestInput(params: {
-  provider: 'anthropic' | 'pi'
+  provider: 'anthropic' | 'pi' | 'qwen'
   baseUrl?: string
   piAuthProvider?: string
 }): { valid: true } | { valid: false; error: string } {
@@ -132,6 +132,11 @@ export const BUILT_IN_CONNECTION_TEMPLATES: Record<string, {
     providerType: 'pi',
     authType: 'api_key',
     // piAuthProvider set dynamically from setup.piAuthProvider
+  },
+  'qwen-code': {
+    name: 'Qwen Code',
+    providerType: 'qwen',
+    authType: 'none',
   },
 }
 

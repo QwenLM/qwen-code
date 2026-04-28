@@ -57,6 +57,7 @@ const providerDisplayNames: Record<string, string> = {
   openrouter: 'OpenRouter',
   pi: 'Craft Agents Backend',
   pi_compat: 'Craft Agents Backend',
+  qwen: 'Qwen Code',
   vercel: 'Vercel',
 }
 

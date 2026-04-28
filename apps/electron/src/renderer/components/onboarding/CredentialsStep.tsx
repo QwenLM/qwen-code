@@ -7,7 +7,7 @@
 
 import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
-import { Check, ExternalLink } from "lucide-react"
+import { Check, ExternalLink, SquareTerminal } from "lucide-react"
 import type { ApiSetupMethod } from "./APISetupStep"
 import { StepFormLayout, BackButton, ContinueButton } from "./primitives"
 import {
@@ -62,6 +62,7 @@ export function CredentialsStep({
   const isClaudeOAuth = apiSetupMethod === 'claude_oauth'
   const isChatGptOAuth = apiSetupMethod === 'pi_chatgpt_oauth'
   const isCopilotOAuth = apiSetupMethod === 'pi_copilot_oauth'
+  const isQwenCode = apiSetupMethod === 'qwen_code'
   const isAnthropicApiKey = apiSetupMethod === 'anthropic_api_key'
   const isPiApiKey = apiSetupMethod === 'pi_api_key'
   const isApiKey = isAnthropicApiKey || isPiApiKey
@@ -254,6 +255,46 @@ export function CredentialsStep({
           onSubmitAuthCode={onSubmitAuthCode}
           onCancelOAuth={onCancelOAuth}
         />
+      </StepFormLayout>
+    )
+  }
+
+  // --- Qwen Code flow (local CLI auth/config) ---
+  if (isQwenCode) {
+    return (
+      <StepFormLayout
+        title="Connect Qwen Code"
+        description="Use your locally installed Qwen Code CLI as a backend."
+        actions={
+          <>
+            <BackButton onClick={onBack} disabled={status === 'validating'} />
+            <ContinueButton
+              onClick={() => onSubmit({ apiKey: '' })}
+              className="gap-2"
+              loading={status === 'validating'}
+              loadingText={t("common.connecting")}
+            >
+              <SquareTerminal className="size-4" />
+              Connect Qwen Code
+            </ContinueButton>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div className="rounded-xl bg-foreground-2 p-4 text-sm text-muted-foreground">
+            <p>Craft will launch qwen --acp and use Qwen Code's existing login and configuration.</p>
+          </div>
+          {status === 'error' && errorMessage && (
+            <div className="rounded-lg bg-destructive/10 text-destructive text-sm p-3">
+              {errorMessage}
+            </div>
+          )}
+          {status === 'success' && (
+            <div className="rounded-lg bg-success/10 text-success text-sm p-3">
+              Connected! Qwen Code is ready.
+            </div>
+          )}
+        </div>
       </StepFormLayout>
     )
   }

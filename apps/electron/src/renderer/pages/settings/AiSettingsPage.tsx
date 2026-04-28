@@ -74,6 +74,14 @@ function getModelOptionsForConnection(
     })
   }
 
+  if (connection.providerType === 'qwen') {
+    return [{
+      value: '',
+      label: 'Qwen Code default',
+      description: 'Uses the model configured in Qwen Code.',
+    }]
+  }
+
   // Fall back to registry models for this provider type
   const registryModels = getModelsForProviderType(connection.providerType, connection.piAuthProvider)
   return registryModels.map((m) => ({
@@ -230,6 +238,7 @@ function ConnectionRow({ connection, isLastConnection, onRenameClick, onDelete, 
         break
       }
       case 'pi_compat': parts.push('Craft Agents Backend Compatible'); break
+      case 'qwen': parts.push('Qwen Code CLI'); break
       default: parts.push(provider || 'Unknown')
     }
 
@@ -504,6 +513,7 @@ function WorkspaceOverrideCard({ workspace, llmConnections, onSettingsChange }: 
                     label: conn.name,
                     description: conn.providerType === 'anthropic' ? 'Anthropic' :
                                  conn.providerType === 'pi' ? 'Craft Agents Backend' :
+                                 conn.providerType === 'qwen' ? 'Qwen Code' :
                                  conn.providerType || 'Unknown',
                   })),
                 ]}
@@ -549,6 +559,7 @@ function WorkspaceOverrideCard({ workspace, llmConnections, onSettingsChange }: 
 /** Map a connection's provider type to the corresponding API key setup method. */
 function getApiKeyMethodForConnection(conn: LlmConnectionWithStatus): ApiSetupMethod {
   const provider = conn.providerType || conn.type
+  if (provider === 'qwen') return 'qwen_code'
   if (provider === 'pi' || provider === 'pi_compat') return 'pi_api_key'
   return 'anthropic_api_key'
 }
@@ -920,6 +931,7 @@ export default function AiSettingsPage() {
                       description: conn.providerType === 'anthropic' ? 'Anthropic API' :
                                    conn.providerType === 'pi' ? 'Craft Agents Backend' :
                                    conn.providerType === 'pi_compat' ? 'Craft Agents Backend Compatible' :
+                                   conn.providerType === 'qwen' ? 'Qwen Code' :
                                    conn.providerType || 'Unknown',
                     }))}
                   />

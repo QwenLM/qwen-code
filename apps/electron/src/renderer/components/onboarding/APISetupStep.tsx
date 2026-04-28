@@ -1,12 +1,12 @@
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import { cn } from "@/lib/utils"
-import { Check, CreditCard, Key, Cpu } from "lucide-react"
+import { Check, CreditCard, Key, Cpu, SquareTerminal } from "lucide-react"
 import { StepFormLayout, BackButton, ContinueButton } from "./primitives"
 import type { LlmAuthType, LlmProviderType } from "@craft-agent/shared/config/llm-connections"
 
 /** Provider segment for the segmented control */
-export type ProviderSegment = 'anthropic' | 'pi'
+export type ProviderSegment = 'anthropic' | 'pi' | 'qwen'
 
 const BetaBadge = ({ label }: { label: string }) => (
   <span className="inline px-1.5 pt-[2px] pb-[3px] text-[10px] font-accent font-bold rounded-[4px] bg-accent text-background ml-1 relative -top-[1px]">
@@ -23,6 +23,7 @@ const BetaBadge = ({ label }: { label: string }) => (
  * - 'pi_chatgpt_oauth' → pi + oauth
  * - 'pi_copilot_oauth' → pi + oauth
  * - 'pi_api_key' → pi + api_key
+ * - 'qwen_code' → qwen + none
  */
 export type ApiSetupMethod =
   | 'anthropic_api_key'
@@ -30,6 +31,7 @@ export type ApiSetupMethod =
   | 'pi_chatgpt_oauth'
   | 'pi_copilot_oauth'
   | 'pi_api_key'
+  | 'qwen_code'
 
 /**
  * Map ApiSetupMethod to the underlying LLM connection types.
@@ -49,6 +51,8 @@ export function apiSetupMethodToConnectionTypes(method: ApiSetupMethod): {
       return { providerType: 'pi', authType: 'oauth' };
     case 'pi_api_key':
       return { providerType: 'pi', authType: 'api_key' };
+    case 'qwen_code':
+      return { providerType: 'qwen', authType: 'none' };
   }
 }
 
@@ -66,6 +70,7 @@ const API_SETUP_ICONS: Record<ApiSetupMethod, React.ReactNode> = {
   pi_chatgpt_oauth: <Cpu className="size-4" />,
   pi_copilot_oauth: <Cpu className="size-4" />,
   pi_api_key: <Key className="size-4" />,
+  qwen_code: <SquareTerminal className="size-4" />,
 }
 
 interface APISetupStepProps {
@@ -148,7 +153,7 @@ function ProviderSegmentedControl({
   onSegmentChange: (segment: ProviderSegment) => void
   segmentLabels: Record<ProviderSegment, string>
 }) {
-  const segments: ProviderSegment[] = ['anthropic', 'pi']
+  const segments: ProviderSegment[] = ['anthropic', 'pi', 'qwen']
 
   return (
     <div className="flex rounded-xl bg-foreground/[0.03] p-1 mb-4">
@@ -191,11 +196,13 @@ export function APISetupStep({
   const SEGMENT_LABELS: Record<ProviderSegment, string> = {
     anthropic: t("onboarding.apiSetup.claude"),
     pi: t("onboarding.apiSetup.craftAgentsBackend"),
+    qwen: 'Qwen Code',
   }
 
   const SEGMENT_DESCRIPTIONS: Record<ProviderSegment, React.ReactNode> = {
     anthropic: <>{t("onboarding.apiSetup.claudeDesc")}</>,
     pi: <>{t("onboarding.apiSetup.piDesc")}<BetaBadge label={t("onboarding.apiSetup.beta")} /></>,
+    qwen: <>Use the Qwen Code CLI as the main agent. Authentication stays in Qwen Code.</>,
   }
 
   const API_SETUP_OPTIONS: ApiSetupOption[] = [
@@ -233,6 +240,13 @@ export function APISetupStep({
       description: t("onboarding.apiSetup.apiKeyDesc"),
       icon: API_SETUP_ICONS.pi_api_key,
       providerType: 'pi',
+    },
+    {
+      id: 'qwen_code',
+      name: 'Qwen Code',
+      description: 'Use your local Qwen Code CLI through ACP. No API key is stored in Craft.',
+      icon: API_SETUP_ICONS.qwen_code,
+      providerType: 'qwen',
     },
   ]
 

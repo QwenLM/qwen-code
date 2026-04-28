@@ -25,6 +25,7 @@ import type {
 } from './types.ts';
 import { ClaudeAgent } from '../claude-agent.ts';
 import { PiAgent } from '../pi-agent.ts';
+import { QwenAgent } from '../qwen-agent.ts';
 import {
   getLlmConnection,
   getDefaultLlmConnection,
@@ -59,10 +60,12 @@ import {
 } from './internal/runtime-resolver.ts';
 import { anthropicDriver } from './internal/drivers/anthropic.ts';
 import { piDriver } from './internal/drivers/pi.ts';
+import { qwenDriver } from './internal/drivers/qwen.ts';
 
 const DRIVER_REGISTRY: Record<AgentProvider, ProviderDriver> = {
   anthropic: anthropicDriver,
   pi: piDriver,
+  qwen: qwenDriver,
 };
 
 function getProviderDriver(provider: AgentProvider): ProviderDriver {
@@ -139,6 +142,10 @@ export function createBackend(config: BackendConfig): AgentBackend {
       // PiAgent implements AgentBackend directly
       // Auth is API key based via Pi's AuthStorage
       return new PiAgent(config);
+
+    case 'qwen':
+      // QwenAgent speaks ACP to the Qwen Code CLI.
+      return new QwenAgent(config);
 
     default:
       throw new Error(`Unknown provider: ${config.provider}`);
@@ -221,7 +228,7 @@ export function resolveBackendHostTooling(args: {
  * @returns Array of provider identifiers that have working implementations
  */
 export function getAvailableProviders(): AgentProvider[] {
-  return ['anthropic', 'pi'];
+  return ['anthropic', 'pi', 'qwen'];
 }
 
 /**
@@ -258,6 +265,9 @@ export function providerTypeToAgentProvider(providerType: LlmProviderType): Agen
     case 'pi':
     case 'pi_compat':
       return 'pi';
+
+    case 'qwen':
+      return 'qwen';
 
     default:
       // Exhaustive check
@@ -402,6 +412,10 @@ export function resolveSetupTestConnectionHint(args: {
       providerType: 'pi',
       piAuthProvider: args.piAuthProvider,
     };
+  }
+
+  if (args.provider === 'qwen') {
+    return { providerType: 'qwen' };
   }
 
   return {
@@ -588,6 +602,7 @@ export const BACKEND_CAPABILITIES: Record<AgentProvider, {
 }> = {
   anthropic: { needsHttpPoolServer: false },
   pi: { needsHttpPoolServer: false },
+  qwen: { needsHttpPoolServer: true },
 };
 
 // ============================================================
@@ -604,6 +619,7 @@ export function getDefaultAuthType(provider: AgentProvider): LlmAuthType | undef
   switch (provider) {
     case 'anthropic': return undefined;
     case 'pi':        return 'api_key';
+    case 'qwen':      return 'none';
     default:          return undefined;
   }
 }
@@ -640,6 +656,7 @@ export function resolveModelForProvider(
 
   switch (provider) {
     case 'pi':
+    case 'qwen':
       return managedModel || connection?.defaultModel || '';
     default:
       return managedModel || connection?.defaultModel || DEFAULT_MODEL;
@@ -679,7 +696,7 @@ export async function testBackendConnection(args: {
   connection?: Pick<LlmConnection, 'providerType' | 'piAuthProvider' | 'customEndpoint'>;
 }): Promise<{ success: boolean; error?: string }> {
   const trimmedKey = args.apiKey.trim();
-  if (!trimmedKey && !args.allowEmptyApiKey) {
+  if (!trimmedKey && !args.allowEmptyApiKey && args.provider !== 'qwen') {
     return { success: false, error: 'API key is required' };
   }
 
@@ -693,11 +710,11 @@ export async function testBackendConnection(args: {
     const testModel = args.model;
     const providerType = args.connection?.providerType ?? getDefaultProviderType(args.provider);
     const now = Date.now();
-    const authType: LlmAuthType = (
-      providerType === 'pi_compat'
-    )
-      ? 'api_key_with_endpoint'
-      : 'api_key';
+    const authType: LlmAuthType = args.provider === 'qwen'
+      ? 'none'
+      : providerType === 'pi_compat'
+        ? 'api_key_with_endpoint'
+        : 'api_key';
 
     const syntheticConnection = {
       slug: tempSlug,
@@ -834,6 +851,10 @@ export async function validateConnection(
 
     case 'pi':
       // Pi validates on connect via its auth storage — no pre-flight check available
+      return { success: true };
+
+    case 'qwen':
+      // Qwen Code owns its auth state and reports auth-required when ACP starts.
       return { success: true };
 
     default:

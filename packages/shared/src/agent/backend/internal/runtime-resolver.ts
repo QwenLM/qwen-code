@@ -23,6 +23,7 @@ export interface ResolvedBackendRuntimePaths {
   sessionServerPath?: string;
   bridgeServerPath?: string;
   piServerPath?: string;
+  qwenCliPath?: string;
   nodeRuntimePath?: string;
   bundledRuntimePath?: string;
 }
@@ -147,6 +148,45 @@ function resolveServerPath(hostRuntime: BackendHostRuntimeContext, serverName: s
   );
 }
 
+function resolveQwenCliPath(hostRuntime: BackendHostRuntimeContext): string | undefined {
+  const envOverride = process.env.QWEN_CODE_CLI || process.env.QWEN_CODE_PATH;
+  if (envOverride && existsSync(envOverride)) return envOverride;
+
+  const packageCliRelative = join('node_modules', '@qwen-code', 'qwen-code', 'dist', 'cli.js');
+  const packageIndexRelative = join('node_modules', '@qwen-code', 'qwen-code', 'packages', 'cli', 'dist', 'index.js');
+  const siblingCliRelative = join('..', 'qwen-code', 'dist', 'cli.js');
+  const siblingIndexRelative = join('..', 'qwen-code', 'packages', 'cli', 'dist', 'index.js');
+
+  const fromHostRoot = firstExistingPath([
+    join(hostRuntime.appRootPath, packageCliRelative),
+    join(hostRuntime.appRootPath, packageIndexRelative),
+    join(hostRuntime.appRootPath, '..', '..', packageCliRelative),
+    join(hostRuntime.appRootPath, '..', '..', packageIndexRelative),
+    // Local development layout documented in docs/acp-capability-context-spec.md.
+    join(hostRuntime.appRootPath, siblingCliRelative),
+    join(hostRuntime.appRootPath, siblingIndexRelative),
+    join(process.cwd(), siblingCliRelative),
+    join(process.cwd(), siblingIndexRelative),
+  ]);
+  if (fromHostRoot) return fromHostRoot;
+
+  const walked = resolveUpwards(hostRuntime.appRootPath, packageCliRelative, 10)
+    ?? resolveUpwards(hostRuntime.appRootPath, packageIndexRelative, 10)
+    ?? resolveUpwards(hostRuntime.appRootPath, siblingCliRelative, 10)
+    ?? resolveUpwards(hostRuntime.appRootPath, siblingIndexRelative, 10);
+  if (walked) return walked;
+
+  if (!hostRuntime.isPackaged) {
+    try {
+      const whichCmd = process.platform === 'win32' ? 'where' : 'which';
+      const systemQwen = execFileSync(whichCmd, ['qwen'], { encoding: 'utf-8' }).trim();
+      if (systemQwen && existsSync(systemQwen)) return systemQwen;
+    } catch { /* system qwen not found */ }
+  }
+
+  return undefined;
+}
+
 function resolveRipgrepPath(hostRuntime: BackendHostRuntimeContext): string | undefined {
   const platform = process.platform === 'win32'
     ? 'x64-win32'
@@ -200,6 +240,7 @@ export function resolveBackendRuntimePaths(hostRuntime: BackendHostRuntimeContex
     sessionServerPath: resolveServerPath(hostRuntime, 'session-mcp-server'),
     bridgeServerPath: resolveServerPath(hostRuntime, 'bridge-mcp-server'),
     piServerPath: resolveServerPath(hostRuntime, 'pi-agent-server'),
+    qwenCliPath: resolveQwenCliPath(hostRuntime),
     nodeRuntimePath: hostRuntime.nodeRuntimePath || bundledRuntimePath || process.execPath,
     bundledRuntimePath,
   };
@@ -245,4 +286,3 @@ export function applyAnthropicRuntimeBootstrap(
     }
   }
 }
-

@@ -22,6 +22,10 @@ const PROVIDER_METADATA: Record<string, ProviderMetadata> = {
     statusPageUrl: 'https://status.anthropic.com',
     dashboardUrl: 'https://console.anthropic.com',
   },
+  qwen: {
+    name: 'Qwen Code',
+    dashboardUrl: 'https://chat.qwen.ai',
+  },
   openai: {
     name: 'OpenAI',
     statusPageUrl: 'https://status.openai.com',
@@ -82,6 +86,9 @@ export function getProviderMetadata(
 ): ProviderMetadata | undefined {
   if (providerType === 'anthropic') {
     return PROVIDER_METADATA.anthropic
+  }
+  if (providerType === 'qwen') {
+    return PROVIDER_METADATA.qwen
   }
   if (piAuthProvider) {
     return PROVIDER_METADATA[piAuthProvider]

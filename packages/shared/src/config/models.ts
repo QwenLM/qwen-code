@@ -51,7 +51,7 @@ function bedrockToBarId(modelId: string): string {
 /**
  * Provider identifier for AI backends.
  */
-export type ModelProvider = 'anthropic' | 'pi';
+export type ModelProvider = 'anthropic' | 'pi' | 'qwen';
 
 /**
  * Full model definition with capabilities and costs.

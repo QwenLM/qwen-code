@@ -299,7 +299,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
   server.handle(RPC_CHANNELS.settings.TEST_LLM_CONNECTION_SETUP, async (_ctx, params: import('@craft-agent/shared/protocol').TestLlmConnectionParams): Promise<import('@craft-agent/shared/protocol').TestLlmConnectionResult> => {
     const { provider, apiKey, baseUrl, model, piAuthProvider, customEndpoint } = params
     const trimmedKey = apiKey?.trim() ?? ''
-    const allowEmptyApiKey = !setupTestRequiresApiKey(baseUrl)
+    const allowEmptyApiKey = provider === 'qwen' || !setupTestRequiresApiKey(baseUrl)
 
     if (!trimmedKey && !allowEmptyApiKey) {
       return { success: false, error: 'API key is required' }

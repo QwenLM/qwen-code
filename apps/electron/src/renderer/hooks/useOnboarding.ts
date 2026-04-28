@@ -97,6 +97,7 @@ export const BASE_SLUG_FOR_METHOD: Record<ApiSetupMethod, string> = {
   pi_chatgpt_oauth: 'chatgpt-plus',
   pi_copilot_oauth: 'github-copilot',
   pi_api_key: 'pi-api-key',
+  qwen_code: 'qwen-code',
 }
 
 /**
@@ -187,6 +188,10 @@ export function apiSetupMethodToConnectionSetup(
         iamCredentials: options.iamCredentials,
         awsRegion: options.awsRegion,
         bedrockAuthMethod: options.bedrockAuthMethod,
+      }
+    case 'qwen_code':
+      return {
+        slug,
       }
   }
 }
@@ -381,8 +386,33 @@ export function useOnboarding({
     setState(s => ({ ...s, credentialStatus: 'validating', errorMessage: undefined }))
 
     const isPiApiKeyFlow = state.apiSetupMethod === 'pi_api_key'
+    const isQwenCodeFlow = state.apiSetupMethod === 'qwen_code'
 
     try {
+      if (isQwenCodeFlow) {
+        const testResult = await window.electronAPI.testLlmConnectionSetup({
+          provider: 'qwen',
+          apiKey: '',
+        })
+
+        if (!testResult.success) {
+          setState(s => ({
+            ...s,
+            credentialStatus: 'error',
+            errorMessage: testResult.error || 'Qwen Code connection test failed',
+          }))
+          return
+        }
+
+        const saved = await handleSaveConfig()
+        if (saved) {
+          setState(s => ({ ...s, credentialStatus: 'success', step: 'complete' }))
+        } else {
+          setState(s => ({ ...s, credentialStatus: 'error' }))
+        }
+        return
+      }
+
       // Bedrock (Pi+amazon-bedrock) — skip API key validation and connection test
       if (data.bedrockAuthMethod) {
         const saved = await handleSaveConfig(undefined, {
@@ -635,6 +665,7 @@ export function useOnboarding({
       claude: 'claude_oauth',
       chatgpt: 'pi_chatgpt_oauth',
       copilot: 'pi_copilot_oauth',
+      qwen: 'qwen_code',
       api_key: 'pi_api_key',
     }
 
