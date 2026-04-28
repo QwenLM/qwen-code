@@ -19,6 +19,8 @@ const INLINE_CODE_MARKER_LENGTH = 1; // For "`"
 const UNDERLINE_TAG_START_LENGTH = 3; // For "<u>"
 const UNDERLINE_TAG_END_LENGTH = 4; // For "</u>"
 const INLINE_MATH_MARKER_LENGTH = 1; // For "$"
+const INLINE_MATH_PATTERN =
+  /(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,240}\S\$)[^$\n]{1,240}\$(?![\w$])/g;
 
 const debugLogger = createDebugLogger('INLINE_MARKDOWN');
 
@@ -44,7 +46,7 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
   const nodes: React.ReactNode[] = [];
   let lastIndex = 0;
   const inlineRegex = enableInlineMath
-    ? /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|\$[^$\n]{1,240}\$|<u>.*?<\/u>|https?:\/\/\S+)/g
+    ? /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,240}\S\$)[^$\n]{1,240}\$(?![\w$])|<u>.*?<\/u>|https?:\/\/\S+)/g
     : /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|<u>.*?<\/u>|https?:\/\/\S+)/g;
   let match;
 
@@ -201,8 +203,12 @@ export const getPlainTextLength = (
     .replace(/_(.*?)_/g, '$1')
     .replace(/~~(.*?)~~/g, '$1')
     .replace(/`(.*?)`/g, '$1')
-    .replace(/\$([^$\n]{1,240})\$/g, (_match, expr: string) =>
-      enableInlineMath ? renderInlineLatex(expr) : _match,
+    .replace(INLINE_MATH_PATTERN, (match: string) =>
+      enableInlineMath
+        ? renderInlineLatex(
+            match.slice(INLINE_MATH_MARKER_LENGTH, -INLINE_MATH_MARKER_LENGTH),
+          )
+        : match,
     )
     .replace(/<u>(.*?)<\/u>/g, '$1')
     .replace(/.*\[(.*?)\]\(.*\)/g, '$1');

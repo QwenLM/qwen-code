@@ -25,4 +25,12 @@ describe('<RenderInline />', () => {
     expect(lastFrame()).toContain('α');
     expect(lastFrame()).not.toContain('$\\alpha$');
   });
+
+  it('does not parse ordinary dollar amounts as inline math', () => {
+    const { lastFrame } = renderWithProviders(
+      <RenderInline text="cost is $5 and $10 later" enableInlineMath />,
+    );
+
+    expect(lastFrame()).toContain('cost is $5 and $10 later');
+  });
 });

@@ -42,7 +42,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
 
   const lines = text.split(/\r?\n/);
   const headerRegex = /^ *(#{1,4}) +(.*)/;
-  const codeFenceRegex = /^ *(`{3,}|~{3,}) *(\w*?) *$/;
+  const codeFenceRegex = /^ *(`{3,}|~{3,}) *([^`]*)$/;
   const ulItemRegex = /^([ \t]*)([-*+]) +(.*)/;
   const olItemRegex = /^([ \t]*)(\d+)\. +(.*)/;
   const hrRegex = /^ *([-*_] *){3,} *$/;
@@ -146,7 +146,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     if (codeFenceMatch) {
       inCodeBlock = true;
       codeBlockFence = codeFenceMatch[1];
-      codeBlockLang = codeFenceMatch[2] || null;
+      codeBlockLang = codeFenceMatch[2]?.trim().split(/\s+/)[0] || null;
     } else if (mathFenceMatch) {
       inMathBlock = true;
       mathBlockContent = [];

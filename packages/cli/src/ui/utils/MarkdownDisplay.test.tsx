@@ -401,6 +401,15 @@ $$
       expect(output).toContain('Σᵢ₌₁ⁿ xᵢ');
     });
 
+    it('does not treat ordinary dollar amounts as inline math', () => {
+      const text = 'The cost is $5 and $10 later.'.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+
+      expect(lastFrame()).toContain('The cost is $5 and $10 later.');
+    });
+
     it('renders mermaid flowcharts as a visual preview', () => {
       const text = `
 \`\`\`mermaid
@@ -416,6 +425,23 @@ flowchart LR
       expect(output).toContain('Client');
       expect(output).toContain('API');
       expect(output).toContain('▶');
+      expect(output).not.toContain('flowchart LR');
+    });
+
+    it('renders mermaid fences with info-string metadata as a visual preview', () => {
+      const text = `
+\`\`\`mermaid title="Flow"
+flowchart LR
+  A[Client] --> B[API]
+\`\`\`
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('Mermaid flowchart (LR)');
+      expect(output).toContain('Client');
+      expect(output).toContain('API');
       expect(output).not.toContain('flowchart LR');
     });
 

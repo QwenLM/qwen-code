@@ -59,6 +59,7 @@ const CACHE_LIMIT = 40;
 const PNG_CACHE_LIMIT = 20;
 const DEFAULT_RENDER_TIMEOUT_MS = 8000;
 const DEFAULT_MERMAID_RENDER_WIDTH = 1280;
+const MAX_MERMAID_PNG_BYTES = 8 * 1024 * 1024;
 const NPX_MERMAID_CLI = 'npx:@mermaid-js/mermaid-cli@11.12.0';
 const PNG_SIGNATURE = '89504e470d0a1a0a';
 const KITTY_PLACEHOLDER = '\u{10EEEE}';
@@ -648,6 +649,13 @@ function renderPngWithMmdc(
     }
     if (!fs.existsSync(outputPath)) {
       return { ok: false, error: 'Mermaid CLI did not write an output file.' };
+    }
+    const outputSize = fs.statSync(outputPath).size;
+    if (outputSize > MAX_MERMAID_PNG_BYTES) {
+      return {
+        ok: false,
+        error: `Mermaid CLI output exceeded ${MAX_MERMAID_PNG_BYTES} bytes.`,
+      };
     }
 
     return { ok: true, png: fs.readFileSync(outputPath) };

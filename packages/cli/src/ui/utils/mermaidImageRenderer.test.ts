@@ -25,17 +25,18 @@ const PNG_1X1 = Buffer.from(
 
 const tempDirs: string[] = [];
 
-function createFakeMmdc(binDir: string): void {
+function createFakeMmdc(binDir: string, bodyLines?: string[]): void {
   const fakeMmdcScript = path.join(binDir, 'fake-mmdc.cjs');
+  const defaultBodyLines = [
+    'const fs = require("node:fs");',
+    'const out = process.argv[process.argv.indexOf("-o") + 1];',
+    `fs.writeFileSync(out, Buffer.from("${PNG_1X1.toString(
+      'base64',
+    )}", "base64"));`,
+  ];
   fs.writeFileSync(
     fakeMmdcScript,
-    [
-      'const fs = require("node:fs");',
-      'const out = process.argv[process.argv.indexOf("-o") + 1];',
-      `fs.writeFileSync(out, Buffer.from("${PNG_1X1.toString(
-        'base64',
-      )}", "base64"));`,
-    ].join('\n'),
+    (bodyLines ?? defaultBodyLines).join('\n'),
     'utf8',
   );
 
@@ -46,14 +47,7 @@ function createFakeMmdc(binDir: string): void {
   const command =
     process.platform === 'win32'
       ? `@echo off\r\n"${process.execPath}" "${fakeMmdcScript}" %*\r\n`
-      : [
-          '#!/usr/bin/env node',
-          'const fs = require("node:fs");',
-          'const out = process.argv[process.argv.indexOf("-o") + 1];',
-          `fs.writeFileSync(out, Buffer.from("${PNG_1X1.toString(
-            'base64',
-          )}", "base64"));`,
-        ].join('\n');
+      : ['#!/usr/bin/env node', ...(bodyLines ?? defaultBodyLines)].join('\n');
   fs.writeFileSync(fakeMmdc, command, 'utf8');
   fs.chmodSync(fakeMmdc, 0o755);
 }
@@ -203,5 +197,32 @@ describe('mermaid image renderer', () => {
     expect(
       result.kind === 'terminal-image' && result.placeholder?.lines[0],
     ).toContain('\u{10EEEE}');
+  });
+
+  it('rejects oversized Mermaid PNG output before reading it', () => {
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-mmdc-'));
+    tempDirs.push(binDir);
+    createFakeMmdc(binDir, [
+      'const fs = require("node:fs");',
+      'const out = process.argv[process.argv.indexOf("-o") + 1];',
+      'fs.closeSync(fs.openSync(out, "w"));',
+      'fs.truncateSync(out, 8 * 1024 * 1024 + 1);',
+    ]);
+
+    const result = renderMermaidImageSync({
+      source: 'flowchart TD\n  A[Start] --> B[End]',
+      contentWidth: 80,
+      availableTerminalHeight: 20,
+      env: {
+        PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'kitty',
+      },
+    });
+
+    expect(result.kind).toBe('unavailable');
+    expect(result.kind === 'unavailable' && result.reason).toContain(
+      'exceeded',
+    );
   });
 });
