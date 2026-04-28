@@ -5,7 +5,9 @@
 
 import { spawn, type Subprocess } from "bun";
 import { existsSync, rmSync, cpSync, readFileSync, statSync, mkdirSync } from "fs";
-import { join, basename } from "path";
+import { createHash } from "crypto";
+import { execFileSync } from "child_process";
+import { join, basename, dirname } from "path";
 import * as esbuild from "esbuild";
 import { downloadUv, type Platform, type Arch } from "./build/common";
 
@@ -74,23 +76,106 @@ async function ensureBundledUvForCurrentPlatform(): Promise<void> {
   });
 }
 
-// Multi-instance detection (matches detect-instance.sh logic)
-// Detects instance number from folder name suffix (e.g., craft-agents-1 → instance 1)
-function detectInstance(): void {
-  // Don't override if already set (e.g., by sourcing detect-instance.sh first)
-  if (process.env.CRAFT_VITE_PORT) return;
+type DevInstanceConfig = {
+  instanceNumber: string;
+  vitePort: string;
+  appName: string;
+  configDir: string;
+  deeplinkScheme: string;
+  label: string;
+};
 
+function hashNumber(value: string): number {
+  const hex = createHash("sha256").update(value).digest("hex").slice(0, 8);
+  return parseInt(hex, 16);
+}
+
+function sanitizeInstanceLabel(value: string): string {
+  return value
+    .trim()
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32)
+    .toLowerCase() || "worktree";
+}
+
+function gitOutput(args: string[]): string | undefined {
+  try {
+    return execFileSync("git", args, {
+      cwd: ROOT_DIR,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isLinkedGitWorktree(): boolean {
+  const gitPath = join(ROOT_DIR, ".git");
+  if (!existsSync(gitPath)) return false;
+  try {
+    return !statSync(gitPath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function resolveWorktreeInstanceConfig(): DevInstanceConfig | null {
+  if (!isLinkedGitWorktree()) return null;
+
+  const hash = hashNumber(ROOT_DIR);
+  const branchName = gitOutput(["branch", "--show-current"]);
+  const parentName = basename(dirname(ROOT_DIR));
+  const label = sanitizeInstanceLabel(branchName || parentName || ROOT_DIR);
+  const shortHash = hash.toString(36).slice(0, 6);
+
+  return {
+    instanceNumber: String((hash % 90) + 10),
+    vitePort: String(41_000 + (hash % 20_000)),
+    appName: `Craft Agents [${label}]`,
+    configDir: join(process.env.HOME || "", `.craft-agent-${label}-${shortHash}`),
+    deeplinkScheme: `craftagents${shortHash}`,
+    label,
+  };
+}
+
+function applyInstanceDefaults(config: DevInstanceConfig, source: string): void {
+  process.env.CRAFT_INSTANCE_NUMBER ||= config.instanceNumber;
+  process.env.CRAFT_VITE_PORT ||= config.vitePort;
+  process.env.CRAFT_APP_NAME ||= config.appName;
+  process.env.CRAFT_CONFIG_DIR ||= config.configDir;
+  process.env.CRAFT_DEEPLINK_SCHEME ||= config.deeplinkScheme;
+
+  console.log(
+    `🔢 ${source} detected (${config.label}): ` +
+    `port=${process.env.CRAFT_VITE_PORT}, app="${process.env.CRAFT_APP_NAME}", config=${process.env.CRAFT_CONFIG_DIR}`
+  );
+}
+
+// Multi-instance detection.
+// 1. Explicit numbered folders still map craft-agents-1 → ~/.craft-agent-1.
+// 2. Linked git worktrees get stable path-derived instances automatically.
+function detectInstance(): void {
   const folderName = basename(ROOT_DIR);
   const match = folderName.match(/-(\d+)$/);
 
   if (match) {
     const instanceNum = match[1];
-    process.env.CRAFT_INSTANCE_NUMBER = instanceNum;
-    process.env.CRAFT_VITE_PORT = `${instanceNum}173`;
-    process.env.CRAFT_APP_NAME = `Craft Agents [${instanceNum}]`;
-    process.env.CRAFT_CONFIG_DIR = join(process.env.HOME || "", `.craft-agent-${instanceNum}`);
-    process.env.CRAFT_DEEPLINK_SCHEME = `craftagents${instanceNum}`;
-    console.log(`🔢 Instance ${instanceNum} detected: port=${process.env.CRAFT_VITE_PORT}, config=${process.env.CRAFT_CONFIG_DIR}`);
+    applyInstanceDefaults({
+      instanceNumber: instanceNum,
+      vitePort: `${instanceNum}173`,
+      appName: `Craft Agents [${instanceNum}]`,
+      configDir: join(process.env.HOME || "", `.craft-agent-${instanceNum}`),
+      deeplinkScheme: `craftagents${instanceNum}`,
+      label: instanceNum,
+    }, "Numbered dev instance");
+    return;
+  }
+
+  const worktreeConfig = resolveWorktreeInstanceConfig();
+  if (worktreeConfig) {
+    applyInstanceDefaults(worktreeConfig, "Git worktree dev instance");
   }
 }
 
