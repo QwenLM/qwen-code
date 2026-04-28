@@ -358,6 +358,14 @@ export async function runNonInteractive(
         },
       );
 
+      monitorRegistry.setRegisterCallback((entry) => {
+        adapter.emitSystemMessage('task_started', {
+          task_id: entry.monitorId,
+          tool_use_id: entry.toolUseId,
+          description: entry.description,
+        });
+      });
+
       let isFirstTurn = true;
       let modelOverride: string | undefined;
       while (true) {
@@ -732,14 +740,16 @@ export async function runNonInteractive(
               await handleCancellationError(config);
             }
             await drainLocalQueue();
-            const running = registry.getRunning();
-            if (running.length === 0 && localQueue.length === 0) break;
+            const agentsRunning = registry.getRunning();
+            const monitorsRunning = monitorRegistry.getRunning();
+            if (
+              agentsRunning.length === 0 &&
+              monitorsRunning.length === 0 &&
+              localQueue.length === 0
+            )
+              break;
             await new Promise((r) => setTimeout(r, 100));
           }
-
-          // Abort any still-running monitors before exit — monitors are designed
-          // to run indefinitely, so we stop them rather than wait.
-          monitorRegistry.abortAll();
 
           const metrics = uiTelemetryService.getMetrics();
           const usage = computeUsageFromMetrics(metrics);
@@ -793,7 +803,9 @@ export async function runNonInteractive(
       const reg = config.getBackgroundTaskRegistry();
       reg.setNotificationCallback(undefined);
       reg.setRegisterCallback(undefined);
-      config.getMonitorRegistry().setNotificationCallback(undefined);
+      const monReg = config.getMonitorRegistry();
+      monReg.setNotificationCallback(undefined);
+      monReg.setRegisterCallback(undefined);
 
       process.stdout.removeListener('error', stdoutErrorHandler);
       // Cleanup signal handlers

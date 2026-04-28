@@ -61,14 +61,25 @@ export type MonitorNotificationCallback = (
   meta: MonitorNotificationMeta,
 ) => void;
 
+export type MonitorRegisterCallback = (entry: MonitorEntry) => void;
+
 export class MonitorRegistry {
   private readonly monitors = new Map<string, MonitorEntry>();
   private notificationCallback?: MonitorNotificationCallback;
+  private registerCallback?: MonitorRegisterCallback;
 
   register(entry: MonitorEntry): void {
     this.monitors.set(entry.monitorId, entry);
     debugLogger.info(`Registered monitor: ${entry.monitorId}`);
     this.resetIdleTimer(entry);
+
+    if (this.registerCallback) {
+      try {
+        this.registerCallback(entry);
+      } catch (error) {
+        debugLogger.error('Failed to emit register callback:', error);
+      }
+    }
   }
 
   /**
@@ -154,6 +165,10 @@ export class MonitorRegistry {
 
   setNotificationCallback(cb: MonitorNotificationCallback | undefined): void {
     this.notificationCallback = cb;
+  }
+
+  setRegisterCallback(cb: MonitorRegisterCallback | undefined): void {
+    this.registerCallback = cb;
   }
 
   abortAll(): void {
