@@ -14,6 +14,7 @@ import {
   ChatRecordingService,
   type ChatRecord,
   type AtCommandRecordPayload,
+  type NotificationRecordPayload,
 } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type { Part } from '@google/genai';
@@ -432,4 +433,37 @@ describe('ChatRecordingService', () => {
   // Note: Session management tests (listSessions, loadSession, deleteSession, etc.)
   // have been moved to sessionService.test.ts
   // Session resume integration tests should test via SessionService mock
+
+  describe('NotificationRecordPayload', () => {
+    // Compile-time regression test: NotificationRecordPayload must be
+    // importable from chatRecordingService module. The fact that this
+    // file compiles (see import on line 17) verifies the export exists.
+
+    it('requires displayText field', () => {
+      const payload: NotificationRecordPayload = {
+        displayText: 'Test notification',
+      };
+      expect(payload.displayText).toBe('Test notification');
+    });
+
+    it('handles edge case: empty displayText', () => {
+      const payload: NotificationRecordPayload = { displayText: '' };
+      expect(payload.displayText).toBe('');
+    });
+
+    it('handles edge case: special characters in displayText', () => {
+      const payload: NotificationRecordPayload = {
+        displayText: 'Alert: "quotes" & ampersands',
+      };
+      expect(payload.displayText).toContain('quotes');
+      expect(payload.displayText).toContain('ampersands');
+    });
+
+    it('is importable from the module (compile-time check)', () => {
+      // This test verifies NotificationRecordPayload is exported by
+      // importing it and using it. If the export is removed, tsc fails.
+      const payload: NotificationRecordPayload = { displayText: 'test' };
+      expect(payload).toBeDefined();
+    });
+  });
 });

@@ -21,7 +21,9 @@ import {
   buildApiHistoryFromConversation,
   getResumePromptTokenCount,
   type ConversationRecord,
+  SESSION_TITLE_MAX_LENGTH,
 } from './sessionService.js';
+import { sanitizeTitle } from './sessionTitle.js';
 import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
@@ -904,5 +906,29 @@ describe('SessionService', () => {
         { text: 'final answer' },
       ]);
     });
+  });
+});
+
+describe('SESSION_TITLE_MAX_LENGTH', () => {
+  it('is exported and has correct value', async () => {
+    const module = await import('../../src/services/sessionService.js');
+    expect(module.SESSION_TITLE_MAX_LENGTH).toBe(200);
+    expect(SESSION_TITLE_MAX_LENGTH).toBe(200);
+  });
+
+  it('truncates titles longer than the limit via sanitizeTitle', () => {
+    const longTitle = 'a'.repeat(300);
+    const result = sanitizeTitle(longTitle);
+    expect(result.length).toBeLessThanOrEqual(SESSION_TITLE_MAX_LENGTH);
+  });
+
+  it('does not truncate titles at or under the limit', () => {
+    const exactTitle = 'b'.repeat(SESSION_TITLE_MAX_LENGTH);
+    const result = sanitizeTitle(exactTitle);
+    expect(result).toBe(exactTitle);
+  });
+
+  it('handles empty title', () => {
+    expect(sanitizeTitle('')).toBe('');
   });
 });
