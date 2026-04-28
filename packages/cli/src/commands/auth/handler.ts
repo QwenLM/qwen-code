@@ -55,6 +55,8 @@ interface MergedSettingsWithCodingPlan {
   security?: {
     auth?: {
       selectedType?: string;
+      apiKey?: string;
+      baseUrl?: string;
     };
   };
   codingPlan?: CodingPlanSettings;
@@ -832,9 +834,15 @@ export async function showAuthStatus(): Promise<void> {
       const isActiveOpenRouter = activeConfig
         ? isOpenRouterConfig(activeConfig)
         : false;
-      const isActiveCodingPlan =
-        activeConfig &&
-        isCodingPlanConfig(activeConfig.baseUrl, activeConfig.envKey) !== false;
+      const providerCodingPlanRegion = isCodingPlanConfig(
+        activeConfig?.baseUrl,
+        activeConfig?.envKey,
+      );
+      const detectedCodingPlanRegion = activeConfig
+        ? providerCodingPlanRegion
+        : !modelName
+          ? codingPlanRegion
+          : false;
       const isActiveStandard =
         activeConfig &&
         activeConfig.envKey === DASHSCOPE_STANDARD_API_KEY_ENV_KEY &&
@@ -849,11 +857,13 @@ export async function showAuthStatus(): Promise<void> {
       if (isActiveOpenRouter) {
         if (hasOpenRouterApiKey) {
           writeStdoutLine(t('✓ Authentication Method: OpenRouter'));
+
           if (modelName) {
             writeStdoutLine(
               t('  Current Model: {{model}}', { model: modelName }),
             );
           }
+
           writeStdoutLine(t('  Status: API key configured\n'));
         } else {
           writeStdoutLine(
@@ -864,7 +874,7 @@ export async function showAuthStatus(): Promise<void> {
           );
           writeStdoutLine(t('  Run `qwen auth openrouter` to re-configure.\n'));
         }
-      } else if (isActiveCodingPlan) {
+      } else if (detectedCodingPlanRegion) {
         const hasCodingPlanKey =
           !!process.env[CODING_PLAN_ENV_KEY] ||
           !!mergedSettings.env?.[CODING_PLAN_ENV_KEY];
@@ -874,9 +884,10 @@ export async function showAuthStatus(): Promise<void> {
             t('✓ Authentication Method: Alibaba Cloud Coding Plan'),
           );
 
-          if (codingPlanRegion) {
+          const displayRegion = codingPlanRegion || detectedCodingPlanRegion;
+          if (displayRegion) {
             const regionDisplay =
-              codingPlanRegion === CodingPlanRegion.CHINA
+              displayRegion === CodingPlanRegion.CHINA
                 ? t('中国 (China) - 阿里云百炼')
                 : t('Global - Alibaba Cloud');
             writeStdoutLine(
@@ -943,13 +954,21 @@ export async function showAuthStatus(): Promise<void> {
           writeStdoutLine(t('  Run `qwen auth api-key` to re-configure.\n'));
         }
       } else if (activeConfig) {
-        const envKey = activeConfig.envKey;
-        const hasKey =
-          envKey && (!!process.env[envKey] || !!mergedSettings.env?.[envKey]);
+        let hasApiKey: boolean;
+        if (activeConfig.envKey) {
+          hasApiKey =
+            !!process.env[activeConfig.envKey] ||
+            !!mergedSettings.env?.[activeConfig.envKey];
+        } else {
+          hasApiKey =
+            !!process.env['OPENAI_API_KEY'] ||
+            !!mergedSettings.env?.['OPENAI_API_KEY'] ||
+            !!mergedSettings.security?.auth?.apiKey;
+        }
 
-        if (hasKey || !envKey) {
+        if (hasApiKey) {
           writeStdoutLine(
-            t('✓ Authentication Method: OpenAI-compatible API Key'),
+            t('✓ Authentication Method: OpenAI-compatible Provider'),
           );
 
           if (modelName) {
@@ -958,34 +977,53 @@ export async function showAuthStatus(): Promise<void> {
             );
           }
 
-          writeStdoutLine(t('  Status: Configured\n'));
+          const baseUrl =
+            activeConfig.baseUrl || mergedSettings.security?.auth?.baseUrl;
+          if (baseUrl) {
+            writeStdoutLine(t('  Base URL: {{baseUrl}}', { baseUrl }));
+          }
+
+          writeStdoutLine(t('  Status: API key configured\n'));
         } else {
           writeStdoutLine(
             t(
-              '⚠️  Authentication Method: OpenAI-compatible API Key (Incomplete)',
+              '⚠️  Authentication Method: OpenAI-compatible Provider (Incomplete)',
             ),
           );
           writeStdoutLine(
-            t(
-              '  Issue: API key {{envKey}} not found in environment or settings\n',
-              {
-                envKey,
-              },
-            ),
+            t('  Issue: API key not found in environment or settings\n'),
           );
-          writeStdoutLine(
-            t(
-              '  Configure it in settings.json or set the environment variable.\n',
-            ),
-          );
+          writeStdoutLine(t('  Run `qwen auth` to re-configure.\n'));
         }
       } else {
         const hasCodingPlanKey =
           !!process.env[CODING_PLAN_ENV_KEY] ||
           !!mergedSettings.env?.[CODING_PLAN_ENV_KEY];
-        const hasCodingPlanMetadata = !!codingPlanRegion || !!codingPlanVersion;
+        const hasGenericApiKey =
+          !!process.env['OPENAI_API_KEY'] ||
+          !!mergedSettings.env?.['OPENAI_API_KEY'] ||
+          !!mergedSettings.security?.auth?.apiKey;
+        const hasCodingPlanMetadata =
+          !modelName && (!!codingPlanRegion || !!codingPlanVersion);
 
-        if (hasCodingPlanKey) {
+        if (hasGenericApiKey) {
+          writeStdoutLine(
+            t('✓ Authentication Method: OpenAI-compatible Provider'),
+          );
+
+          if (modelName) {
+            writeStdoutLine(
+              t('  Current Model: {{model}}', { model: modelName }),
+            );
+          }
+
+          const baseUrl = mergedSettings.security?.auth?.baseUrl;
+          if (baseUrl) {
+            writeStdoutLine(t('  Base URL: {{baseUrl}}', { baseUrl }));
+          }
+
+          writeStdoutLine(t('  Status: API key configured\n'));
+        } else if (hasCodingPlanKey) {
           writeStdoutLine(
             t('✓ Authentication Method: Alibaba Cloud Coding Plan'),
           );
@@ -1030,13 +1068,11 @@ export async function showAuthStatus(): Promise<void> {
         } else {
           writeStdoutLine(
             t(
-              '⚠️  Authentication Method: OpenAI-compatible API Key (Incomplete)',
+              '⚠️  Authentication Method: OpenAI-compatible Provider (Incomplete)',
             ),
           );
           writeStdoutLine(
-            t(
-              '  Issue: No model provider configuration found for the selected model.\n',
-            ),
+            t('  Issue: API key not found in environment or settings\n'),
           );
           writeStdoutLine(t('  Run `qwen auth` to re-configure.\n'));
         }
