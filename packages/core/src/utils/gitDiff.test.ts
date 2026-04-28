@@ -817,6 +817,67 @@ describe('fetchGitDiff invocation from a subdirectory', () => {
   });
 });
 
+describe('fetchGitDiffHunks ignores external diff drivers', () => {
+  it('does not invoke GIT_EXTERNAL_DIFF when reading hunks', async () => {
+    // Reproduces wenshao Critical (PR #3491 line 219). Plain `git diff`
+    // honors `GIT_EXTERNAL_DIFF` / `diff.<name>.command`, so a malicious
+    // worktree could execute arbitrary commands when a caller of
+    // `fetchGitDiffHunks` only wants to inspect hunks. The fix is
+    // `--no-ext-diff`; this test plants an env-var driver that touches a
+    // sentinel file and asserts it never fires.
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdiff-ext-'));
+    const sentinel = path.join(os.tmpdir(), `qwen-ext-fired-${Date.now()}`);
+    const driverScript = path.join(repo, 'evil-diff.sh');
+    try {
+      await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+      await execFileAsync('git', ['config', 'user.email', 't@e.com'], {
+        cwd: repo,
+      });
+      await execFileAsync('git', ['config', 'user.name', 'T'], { cwd: repo });
+      await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+        cwd: repo,
+      });
+      await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
+      await execFileAsync('git', ['add', '.'], { cwd: repo });
+      await execFileAsync('git', ['commit', '-q', '-m', 'init'], { cwd: repo });
+      await fs.writeFile(path.join(repo, 'a.txt'), 'two\n');
+
+      // Driver writes the sentinel as a side effect when invoked.
+      await fs.writeFile(
+        driverScript,
+        `#!/bin/sh\necho fired > "${sentinel}"\n`,
+        { mode: 0o755 },
+      );
+
+      // Set GIT_EXTERNAL_DIFF for the rest of this test. fetchGitDiffHunks
+      // calls runGit which spawns child processes that inherit our env.
+      const prev = process.env['GIT_EXTERNAL_DIFF'];
+      process.env['GIT_EXTERNAL_DIFF'] = driverScript;
+      try {
+        const hunks = await fetchGitDiffHunks(repo);
+        expect(hunks.get('a.txt')).toBeDefined();
+      } finally {
+        if (prev === undefined) delete process.env['GIT_EXTERNAL_DIFF'];
+        else process.env['GIT_EXTERNAL_DIFF'] = prev;
+      }
+
+      // The sentinel must NOT exist — `--no-ext-diff` should have stopped
+      // git from running the driver.
+      let driverFired = false;
+      try {
+        await fs.stat(sentinel);
+        driverFired = true;
+      } catch {
+        // ENOENT — driver never ran. Expected.
+      }
+      expect(driverFired).toBe(false);
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true });
+      await fs.rm(sentinel, { force: true });
+    }
+  });
+});
+
 describe('fetchGitDiff deletion detection', () => {
   let repo: string;
   beforeEach(async () => {

@@ -98,8 +98,18 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
   // numstat cost. For untracked we hold the raw stdout rather than the parsed
   // list so the fast path only has to count NUL bytes instead of allocating
   // a full path array.
+  // Every `git diff` invocation passes `--no-ext-diff` so a malicious
+  // repo-local or user-global config that registers an external diff driver
+  // (`GIT_EXTERNAL_DIFF` or `diff.<name>.command`) can never run when /diff
+  // touches the worktree. In practice the stats variants (`--shortstat`,
+  // `--numstat`, `--name-status`) do not invoke external drivers, but
+  // pinning the flag everywhere is defense-in-depth — git's behavior
+  // around external drivers has shifted between versions before.
   const [shortstatOut, untrackedOut] = await Promise.all([
-    runGit(['--no-optional-locks', 'diff', 'HEAD', '--shortstat'], gitRoot),
+    runGit(
+      ['--no-optional-locks', 'diff', '--no-ext-diff', 'HEAD', '--shortstat'],
+      gitRoot,
+    ),
     runGit(
       [
         '--no-optional-locks',
@@ -137,9 +147,26 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
   // because numstat alone can't distinguish a delete (`0\tN\tpath`) from
   // a heavy edit that drops N lines.
   const [numstatOut, nameStatusOut] = await Promise.all([
-    runGit(['--no-optional-locks', 'diff', 'HEAD', '--numstat', '-z'], gitRoot),
     runGit(
-      ['--no-optional-locks', 'diff', 'HEAD', '--name-status', '-z'],
+      [
+        '--no-optional-locks',
+        'diff',
+        '--no-ext-diff',
+        'HEAD',
+        '--numstat',
+        '-z',
+      ],
+      gitRoot,
+    ),
+    runGit(
+      [
+        '--no-optional-locks',
+        'diff',
+        '--no-ext-diff',
+        'HEAD',
+        '--name-status',
+        '-z',
+      ],
       gitRoot,
     ),
   ]);
@@ -210,8 +237,13 @@ export async function fetchGitDiffHunks(
   if (!gitRoot) return new Map();
   if (await isInTransientGitState(gitRoot)) return new Map();
 
+  // `--no-ext-diff` is critical here: without it, a repo-local or user-
+  // global config that sets `GIT_EXTERNAL_DIFF` or `diff.<name>.command`
+  // would let `git diff` execute arbitrary commands when this read-only
+  // utility is invoked. The stats variants in `fetchGitDiff` already
+  // bypass external drivers, but plain `git diff` honors them.
   const diffOut = await runGit(
-    ['--no-optional-locks', 'diff', 'HEAD'],
+    ['--no-optional-locks', 'diff', '--no-ext-diff', 'HEAD'],
     gitRoot,
   );
   if (diffOut == null) return new Map();
