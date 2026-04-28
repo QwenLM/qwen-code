@@ -448,6 +448,40 @@ describe('copyCommand', () => {
     });
   });
 
+  it('should not copy LaTeX blocks from fenced code blocks', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistory.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: [
+              '```md',
+              '$$',
+              'ignored_code_math',
+              '$$',
+              '```',
+              '$$',
+              '\\alpha + \\beta',
+              '$$',
+            ].join('\n'),
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, 'latex 1');
+
+    expect(mockCopyToClipboard).toHaveBeenCalledWith('\\alpha + \\beta');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'LaTeX block 1 copied to the clipboard',
+    });
+  });
+
   it('should copy the last inline LaTeX expression with /copy latex inline', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 

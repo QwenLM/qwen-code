@@ -180,12 +180,31 @@ function selectInlineLatexExpression(
 function parseLatexBlocks(markdown: string): LatexBlock[] {
   const blocks: LatexBlock[] = [];
   const lines = markdown.split(/\r?\n/);
+  const codeFenceRegex = /^ *(`{3,}|~{3,}) *([^`]*)$/;
   const mathFenceRegex = /^ *\$\$ *$/;
+  let activeCodeFence: string | null = null;
   let inLatexBlock = false;
   let activeLines: string[] = [];
 
   for (const line of lines) {
+    const codeFenceMatch = line.match(codeFenceRegex);
+    if (activeCodeFence) {
+      if (
+        codeFenceMatch &&
+        codeFenceMatch[1].startsWith(activeCodeFence[0]) &&
+        codeFenceMatch[1].length >= activeCodeFence.length
+      ) {
+        activeCodeFence = null;
+      }
+      continue;
+    }
+
     if (!inLatexBlock) {
+      if (codeFenceMatch) {
+        activeCodeFence = codeFenceMatch[1];
+        continue;
+      }
+
       if (mathFenceRegex.test(line)) {
         inLatexBlock = true;
         activeLines = [];

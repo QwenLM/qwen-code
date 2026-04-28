@@ -167,11 +167,13 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
           {visual.warning}
         </Text>
       )}
-      {!isPending && image?.kind === 'unavailable' && (
-        <Text color={theme.text.secondary} wrap="wrap">
-          Image rendering unavailable: {image.reason}
-        </Text>
-      )}
+      {!isPending &&
+        image?.kind === 'unavailable' &&
+        image.showReason !== false && (
+          <Text color={theme.text.secondary} wrap="wrap">
+            Image rendering unavailable: {image.reason}
+          </Text>
+        )}
     </Box>
   );
 };

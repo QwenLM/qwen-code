@@ -37,6 +37,7 @@ export interface MermaidAnsiImageResult {
 export interface MermaidImageUnavailableResult {
   kind: 'unavailable';
   reason: string;
+  showReason?: boolean;
 }
 
 export type MermaidImageRenderResult =
@@ -202,6 +203,10 @@ const cachedPngResults = new Map<
 export function detectTerminalImageProtocol(
   env: NodeJS.ProcessEnv = process.env,
 ): TerminalImageProtocol | null {
+  if (env['QWEN_CODE_DISABLE_MERMAID_IMAGES'] === '1') {
+    return null;
+  }
+
   const forced = env['QWEN_CODE_MERMAID_IMAGE_PROTOCOL']?.toLowerCase();
   if (forced) {
     if (forced === 'kitty') return 'kitty';
@@ -210,7 +215,6 @@ export function detectTerminalImageProtocol(
   }
 
   if (
-    env['QWEN_CODE_DISABLE_MERMAID_IMAGES'] === '1' ||
     !process.stdout.isTTY ||
     env['TMUX'] ||
     env['SSH_TTY'] ||
@@ -334,6 +338,7 @@ export function renderMermaidImageSync({
       kind: 'unavailable',
       reason:
         'Mermaid image rendering is disabled by default. Set QWEN_CODE_MERMAID_IMAGE_RENDERING=1 to enable external renderers.',
+      showReason: false,
     };
   }
 

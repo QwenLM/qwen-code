@@ -745,6 +745,7 @@ flowchart TD
       const output = lastFrame() ?? '';
 
       expect(output).not.toContain('Rendering Mermaid image');
+      expect(output).not.toContain('Image rendering unavailable');
       expect(output).toContain('Start');
       expect(output).toContain('End');
     });

@@ -126,6 +126,15 @@ describe('mermaid image renderer', () => {
     ).toBeNull();
   });
 
+  it('honors the Mermaid image disable flag over forced protocols', () => {
+    expect(
+      detectTerminalImageProtocol({
+        QWEN_CODE_DISABLE_MERMAID_IMAGES: '1',
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'kitty',
+      }),
+    ).toBeNull();
+  });
+
   it('encodes PNG data for terminal image protocols', () => {
     expect(readPngSize(PNG_1X1)).toEqual({ width: 1, height: 1 });
     expect(encodeITerm2InlineImage(PNG_1X1, 40, 10)).toContain(
