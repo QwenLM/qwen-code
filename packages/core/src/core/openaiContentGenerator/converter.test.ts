@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OpenAIContentConverter } from './converter.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
+import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { RequestContext } from './types.js';
 import {
   Type,
@@ -44,6 +45,21 @@ describe('OpenAIContentConverter', () => {
     return {
       ...requestContext,
       toolCallParser,
+    };
+  }
+
+  function withTaggedThinkingOptions(): RequestContext {
+    return {
+      ...requestContext,
+      responseParsingOptions: { taggedThinkingTags: true },
+    };
+  }
+
+  function withTaggedThinkingStreamParser(): RequestContext {
+    return {
+      ...withStreamParser(),
+      responseParsingOptions: { taggedThinkingTags: true },
+      taggedThinkingParser: new TaggedThinkingParser(),
     };
   }
 
@@ -1890,6 +1906,241 @@ describe('OpenAIContentConverter', () => {
 
       const parts = chunk.candidates?.[0]?.content?.parts;
       expect(parts).toEqual([]);
+    });
+  });
+
+  describe('OpenAI -> Gemini tagged thinking content', () => {
+    it('should convert MiniMax <think> content to thought parts for non-streaming responses', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-minimax-1',
+          created: 123,
+          model: 'MiniMax-M2.7',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: '<think>internal reasoning</think>final answer',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        withTaggedThinkingOptions(),
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'internal reasoning', thought: true },
+        { text: 'final answer' },
+      ]);
+    });
+
+    it('should preserve ordering around <thinking> blocks', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-minimax-2',
+          created: 123,
+          model: 'MiniMax-M2.7',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: 'before<thinking>hidden</thinking>after',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        withTaggedThinkingOptions(),
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'before' },
+        { text: 'hidden', thought: true },
+        { text: 'after' },
+      ]);
+    });
+
+    it('should parse multiple tagged thinking blocks case-insensitively', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-minimax-3',
+          created: 123,
+          model: 'MiniMax-M2.7',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: '<THINK>a</THINK>visible<Thinking>b</Thinking>',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        withTaggedThinkingOptions(),
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'a', thought: true },
+        { text: 'visible' },
+        { text: 'b', thought: true },
+      ]);
+    });
+
+    it('should leave tags visible when tagged thinking parsing is disabled', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-openai-1',
+          created: 123,
+          model: 'gpt-test',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: '<think>visible xml example</think>',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: '<think>visible xml example</think>' },
+      ]);
+    });
+
+    it('should preserve incomplete tags as visible text on final non-streaming parse', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-minimax-4',
+          created: 123,
+          model: 'MiniMax-M2.7',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: 'final answer <thi',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        withTaggedThinkingOptions(),
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'final answer <thi' },
+      ]);
+    });
+
+    it('should parse streaming tags split across chunks', () => {
+      const context = withTaggedThinkingStreamParser();
+
+      const firstChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-minimax-1',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'pre <thi' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'MiniMax-M2.7',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const secondChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-minimax-2',
+          created: 457,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'nk>hidden</thi' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'MiniMax-M2.7',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const finalChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-minimax-3',
+          created: 458,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'nk> visible' },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          model: 'MiniMax-M2.7',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'pre ' },
+      ]);
+      expect(secondChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'hidden', thought: true },
+      ]);
+      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: ' visible' },
+      ]);
+    });
+
+    it('should flush unclosed streaming thinking content on finish', () => {
+      const context = withTaggedThinkingStreamParser();
+
+      const chunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-minimax-unclosed',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'answer <think>still thinking' },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          model: 'MiniMax-M2.7',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(chunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'answer ' },
+        { text: 'still thinking', thought: true },
+      ]);
     });
   });
 
