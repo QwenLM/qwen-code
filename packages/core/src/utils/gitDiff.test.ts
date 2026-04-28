@@ -583,7 +583,11 @@ describe('resolveGitDir', () => {
 
       const resolved = await resolveGitDir(wtPath);
       expect(resolved).not.toBeNull();
-      expect(resolved).toContain(path.join('.git', 'worktrees'));
+      // Git writes the linked-worktree pointer with forward slashes even on
+      // Windows (`gitdir: C:/.../main/.git/worktrees/wt`), and we surface
+      // that string verbatim. Match either separator so the assertion is
+      // platform-independent.
+      expect(resolved).toMatch(/[/\\]\.git[/\\]worktrees[/\\]/);
 
       // Fake a merge-in-progress inside the linked worktree's gitdir and
       // confirm `fetchGitDiff` short-circuits, which would silently fail if
