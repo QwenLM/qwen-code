@@ -195,6 +195,57 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 }
 ```
 
+### MiniMax (`openai`)
+
+MiniMax provides OpenAI-compatible chat models. Configure using the `openai` auth type with MiniMax's base URL. MiniMax requires temperature to be in the range `(0.0, 1.0]` — the provider enforces this automatically.
+
+| Model ID                 | Description                                              |
+| ------------------------ | -------------------------------------------------------- |
+| `MiniMax-M2.7`           | Peak performance, ultimate value — handles complex tasks |
+| `MiniMax-M2.7-highspeed` | Same performance, faster and more agile                  |
+
+```json
+{
+  "env": {
+    "MINIMAX_API_KEY": "your-minimax-api-key"
+  },
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "MiniMax-M2.7",
+        "name": "MiniMax-M2.7",
+        "envKey": "MINIMAX_API_KEY",
+        "baseUrl": "https://api.minimax.io/v1",
+        "generationConfig": {
+          "contextWindowSize": 200000,
+          "samplingParams": {
+            "temperature": 1.0,
+            "max_tokens": 65536
+          }
+        }
+      },
+      {
+        "id": "MiniMax-M2.7-highspeed",
+        "name": "MiniMax-M2.7-highspeed",
+        "envKey": "MINIMAX_API_KEY",
+        "baseUrl": "https://api.minimax.io/v1",
+        "generationConfig": {
+          "contextWindowSize": 200000,
+          "samplingParams": {
+            "temperature": 1.0,
+            "max_tokens": 65536
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+> [!note]
+>
+> **Domestic mirror**: Users in mainland China can replace `api.minimax.io` with `api.minimaxi.com` (note the extra `i`).
+
 ### Local Self-Hosted Models (via OpenAI-compatible API)
 
 Most local inference servers (vLLM, Ollama, LM Studio, etc.) provide an OpenAI-compatible API endpoint. Configure them using the `openai` auth type with a local `baseUrl`:
