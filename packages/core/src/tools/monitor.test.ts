@@ -23,12 +23,25 @@ vi.mock('../utils/shell-utils.js', () => ({
     shell: 'bash',
   }),
   getCommandRoot: (cmd: string) => cmd.split(/\s+/)[0],
+  splitCommands: (cmd: string) =>
+    cmd
+      .split(/\s*&&\s*/)
+      .map((part) => part.trim())
+      .filter(Boolean),
   stripShellWrapper: (cmd: string) => cmd,
+}));
+
+const mockIsShellCommandReadOnlyAST = vi.hoisted(() => vi.fn());
+const mockExtractCommandRules = vi.hoisted(() => vi.fn());
+vi.mock('../utils/shellAstParser.js', () => ({
+  isShellCommandReadOnlyAST: mockIsShellCommandReadOnlyAST,
+  extractCommandRules: mockExtractCommandRules,
 }));
 
 import { MonitorTool } from './monitor.js';
 import type { Config } from '../config/config.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
+import type { ToolCallConfirmationDetails } from './tools.js';
 
 /**
  * Create a mock child process with controllable stdout/stderr/events.
@@ -78,10 +91,15 @@ describe('MonitorTool', () => {
 
     monitorRegistry = new MonitorRegistry();
     mockIsPathWithinWorkspace = vi.fn().mockReturnValue(true);
+    mockIsShellCommandReadOnlyAST.mockResolvedValue(false);
+    mockExtractCommandRules.mockImplementation(async (command: string) => [
+      `${command.split(/\s+/).slice(0, 2).join(' ')} *`,
+    ]);
 
     mockConfig = {
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
       getMonitorRegistry: vi.fn().mockReturnValue(monitorRegistry),
+      getPermissionManager: vi.fn().mockReturnValue(undefined),
       getWorkspaceContext: vi.fn().mockReturnValue({
         isPathWithinWorkspace: mockIsPathWithinWorkspace,
       }),
@@ -110,12 +128,75 @@ describe('MonitorTool', () => {
     (
       monitorTool as unknown as {
         createInvocation: (p: Record<string, unknown>) => {
+          getConfirmationDetails: (
+            s: AbortSignal,
+          ) => Promise<ToolCallConfirmationDetails>;
           execute: (
             s: AbortSignal,
           ) => Promise<{ llmContent: string; returnDisplay: string }>;
         };
       }
     ).createInvocation(params);
+
+  describe('confirmation details', () => {
+    it('includes command-scoped permission rules for monitor commands', async () => {
+      const invocation = createInvocation({
+        command: 'tail -f /tmp/app.log',
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as ToolCallConfirmationDetails & {
+        permissionRules?: string[];
+      };
+
+      expect(details.type).toBe('exec');
+      expect(details.permissionRules).toEqual(['Bash(tail -f *)']);
+    });
+
+    it('filters already-allowed subcommands from permission rules', async () => {
+      const pm = {
+        isCommandAllowed: vi
+          .fn()
+          .mockResolvedValueOnce('allow')
+          .mockResolvedValueOnce('ask'),
+      };
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(pm);
+
+      const invocation = createInvocation({
+        command: 'git add file && git commit -m "msg"',
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as ToolCallConfirmationDetails & {
+        permissionRules?: string[];
+      };
+
+      expect(pm.isCommandAllowed).toHaveBeenNthCalledWith(1, 'git add file');
+      expect(pm.isCommandAllowed).toHaveBeenNthCalledWith(
+        2,
+        'git commit -m "msg"',
+      );
+      expect(details.permissionRules).toEqual(['Bash(git commit *)']);
+    });
+
+    it('falls back to a Bash-scoped rule if command extraction fails', async () => {
+      mockExtractCommandRules.mockRejectedValueOnce(new Error('parse failed'));
+
+      const invocation = createInvocation({
+        command: 'python -c "print(1)"',
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as ToolCallConfirmationDetails & {
+        permissionRules?: string[];
+      };
+
+      expect(details.permissionRules).toEqual(['Bash(python -c "print(1)")']);
+    });
+  });
 
   describe('validation', () => {
     it('rejects empty command', () => {

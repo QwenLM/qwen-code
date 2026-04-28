@@ -36,10 +36,15 @@ import { getErrorMessage } from '../utils/errors.js';
 import {
   getCommandRoot,
   getShellConfiguration,
+  splitCommands,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { MonitorEntry } from '../services/monitorRegistry.js';
+import {
+  extractCommandRules,
+  isShellCommandReadOnlyAST,
+} from '../utils/shellAstParser.js';
 
 const debugLogger = createDebugLogger('MONITOR');
 
@@ -91,13 +96,66 @@ class MonitorToolInvocation extends BaseToolInvocation<
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
     const command = stripShellWrapper(this.params.command);
-    const rootCommand = getCommandRoot(command) ?? command;
+    const pm = this.config.getPermissionManager?.();
+    const subCommands = splitCommands(command);
+    const confirmableSubCommands: string[] = [];
+
+    for (const sub of subCommands) {
+      let isReadOnly = false;
+      try {
+        isReadOnly = await isShellCommandReadOnlyAST(sub);
+      } catch {
+        // Conservative fallback: if AST analysis fails, keep the sub-command
+        // in the confirmation scope instead of accidentally dropping it.
+      }
+
+      if (isReadOnly) {
+        continue;
+      }
+
+      if (pm) {
+        try {
+          if ((await pm.isCommandAllowed(sub)) === 'allow') {
+            continue;
+          }
+        } catch (e) {
+          debugLogger.warn('PermissionManager command check failed:', e);
+        }
+      }
+
+      confirmableSubCommands.push(sub);
+    }
+
+    const effectiveSubCommands =
+      confirmableSubCommands.length > 0 ? confirmableSubCommands : subCommands;
+    const rootCommands = [
+      ...new Set(
+        effectiveSubCommands
+          .map((sub) => getCommandRoot(sub))
+          .filter((sub): sub is string => !!sub),
+      ),
+    ];
+
+    let permissionRules: string[] = [];
+    try {
+      const allRules: string[] = [];
+      for (const sub of effectiveSubCommands) {
+        const rules = await extractCommandRules(sub);
+        allRules.push(...rules);
+      }
+      permissionRules = [...new Set(allRules)].map((rule) => `Bash(${rule})`);
+    } catch (e) {
+      debugLogger.warn('Failed to extract monitor command rules:', e);
+      permissionRules = [`Bash(${command})`];
+    }
 
     return {
       type: 'exec',
       title: 'Monitor',
       command,
-      rootCommand,
+      rootCommand:
+        rootCommands.join(', ') || (getCommandRoot(command) ?? command),
+      permissionRules,
       onConfirm: async (
         _outcome: ToolConfirmationOutcome,
         _payload?: ToolConfirmationPayload,
