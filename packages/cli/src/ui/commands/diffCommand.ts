@@ -129,6 +129,7 @@ function toRow(filename: string, s: PerFileStats): DiffRenderRow {
       filename,
       isBinary: true,
       isUntracked: Boolean(s.isUntracked),
+      isDeleted: Boolean(s.isDeleted),
       truncated: false,
     };
   }
@@ -138,6 +139,7 @@ function toRow(filename: string, s: PerFileStats): DiffRenderRow {
     removed: s.isUntracked ? 0 : s.removed,
     isBinary: false,
     isUntracked: Boolean(s.isUntracked),
+    isDeleted: Boolean(s.isDeleted),
     truncated: Boolean(s.truncated),
   };
 }
@@ -213,7 +215,9 @@ function formatRowsText(rows: DiffRenderRow[]): string[] {
     if (r.isBinary) {
       const suffix = r.isUntracked
         ? ` ${t('(binary, new)')}`
-        : ` ${t('(binary)')}`;
+        : r.isDeleted
+          ? ` ${t('(binary, deleted)')}`
+          : ` ${t('(binary)')}`;
       out.push(`  ${padMarker('~', statColumnWidth)}  ${r.filename}${suffix}`);
       continue;
     }
@@ -222,6 +226,8 @@ function formatRowsText(rows: DiffRenderRow[]): string[] {
     let suffix = '';
     if (r.isUntracked) {
       suffix = r.truncated ? ` ${t('(new, partial)')}` : ` ${t('(new)')}`;
+    } else if (r.isDeleted) {
+      suffix = ` ${t('(deleted)')}`;
     }
     out.push(`  ${added} ${removed}  ${r.filename}${suffix}`);
   }

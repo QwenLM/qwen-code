@@ -196,6 +196,39 @@ describe('diffCommand', () => {
     expect(row).not.toContain(' (new)');
   });
 
+  it('marks deleted tracked files with (deleted)', async () => {
+    if (!diffCommand.action) throw new Error('Command has no action');
+    mockFetchGitDiff.mockResolvedValue({
+      stats: { filesCount: 1, linesAdded: 0, linesRemoved: 5 },
+      perFileStats: new Map([
+        [
+          'gone.txt',
+          { added: 0, removed: 5, isBinary: false, isDeleted: true },
+        ],
+      ]),
+    } satisfies GitDiffResult);
+    const result = await diffCommand.action(mockContext, '');
+    const content = (result as { content: string }).content;
+    const row = content.split('\n').find((l) => l.includes('gone.txt'))!;
+    expect(row).toContain('(deleted)');
+    expect(row).toContain('-5');
+  });
+
+  it('marks deleted binary tracked files with (binary, deleted)', async () => {
+    if (!diffCommand.action) throw new Error('Command has no action');
+    mockFetchGitDiff.mockResolvedValue({
+      stats: { filesCount: 1, linesAdded: 0, linesRemoved: 0 },
+      perFileStats: new Map([
+        ['gone.bin', { added: 0, removed: 0, isBinary: true, isDeleted: true }],
+      ]),
+    } satisfies GitDiffResult);
+    const result = await diffCommand.action(mockContext, '');
+    const content = (result as { content: string }).content;
+    const row = content.split('\n').find((l) => l.includes('gone.bin'))!;
+    expect(row).toContain('(binary, deleted)');
+    expect(row.trimStart().startsWith('~')).toBe(true);
+  });
+
   it('marks binary untracked files with (binary, new) and no line count', async () => {
     if (!diffCommand.action) throw new Error('Command has no action');
     mockFetchGitDiff.mockResolvedValue({
@@ -361,6 +394,7 @@ describe('computeDiffColumnWidths', () => {
         removed: 5,
         isBinary: false,
         isUntracked: false,
+        isDeleted: false,
         truncated: false,
       },
       {
@@ -369,6 +403,7 @@ describe('computeDiffColumnWidths', () => {
         removed: 100,
         isBinary: false,
         isUntracked: false,
+        isDeleted: false,
         truncated: false,
       },
     ]);
@@ -387,12 +422,14 @@ describe('computeDiffColumnWidths', () => {
         removed: 1,
         isBinary: false,
         isUntracked: false,
+        isDeleted: false,
         truncated: false,
       },
       {
         filename: 'b.bin',
         isBinary: true,
         isUntracked: false,
+        isDeleted: false,
         truncated: false,
       },
     ]);
@@ -409,6 +446,7 @@ describe('computeDiffColumnWidths', () => {
         removed: 0,
         isBinary: false,
         isUntracked: true,
+        isDeleted: false,
         truncated: false,
       },
     ]);

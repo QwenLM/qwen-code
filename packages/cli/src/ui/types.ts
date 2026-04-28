@@ -189,6 +189,9 @@ export interface DiffRenderRow {
   removed?: number;
   isBinary: boolean;
   isUntracked: boolean;
+  /** `true` when the file is removed from the worktree relative to HEAD.
+   *  Mutually exclusive with `isUntracked`. */
+  isDeleted: boolean;
   /** Only set for untracked text files that exceeded the read cap. */
   truncated: boolean;
 }

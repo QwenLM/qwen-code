@@ -83,7 +83,11 @@ const DiffRow: React.FC<DiffRowProps> = ({
 }) => {
   if (row.isBinary) {
     const marker = padRight('~', statColumnWidth);
-    const suffix = row.isUntracked ? t('(binary, new)') : t('(binary)');
+    const suffix = row.isUntracked
+      ? t('(binary, new)')
+      : row.isDeleted
+        ? t('(binary, deleted)')
+        : t('(binary)');
     return (
       <Box>
         <Text>
@@ -101,6 +105,8 @@ const DiffRow: React.FC<DiffRowProps> = ({
   let suffix: string | null = null;
   if (row.isUntracked) {
     suffix = row.truncated ? t('(new, partial)') : t('(new)');
+  } else if (row.isDeleted) {
+    suffix = t('(deleted)');
   }
   return (
     <Box>

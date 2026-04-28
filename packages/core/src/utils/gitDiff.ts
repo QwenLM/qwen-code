@@ -28,6 +28,12 @@ export interface PerFileStats {
   removed: number;
   isBinary: boolean;
   isUntracked?: boolean;
+  /** `true` when the file is removed in the worktree relative to HEAD.
+   *  Mutually exclusive with `isUntracked`. Detected via
+   *  `git diff HEAD --name-status -z` (status letter `D`); a row like
+   *  `0\t10\tfoo.ts` from numstat alone is not enough to distinguish
+   *  "deleted" from "heavy edit that drops 10 lines". */
+  isDeleted?: boolean;
   /** Only meaningful for untracked files: `true` when the file exceeded the
    *  line-counting read cap and `added` is therefore a lower bound. */
   truncated?: boolean;
@@ -126,13 +132,27 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
     }
   }
 
-  const numstatOut = await runGit(
-    ['--no-optional-locks', 'diff', 'HEAD', '--numstat', '-z'],
-    gitRoot,
-  );
+  // Numstat gives us +/- counts; name-status tells us *why* a row exists
+  // (D = deleted, M = modified, R<score> = rename, etc.). We need both
+  // because numstat alone can't distinguish a delete (`0\tN\tpath`) from
+  // a heavy edit that drops N lines.
+  const [numstatOut, nameStatusOut] = await Promise.all([
+    runGit(['--no-optional-locks', 'diff', 'HEAD', '--numstat', '-z'], gitRoot),
+    runGit(
+      ['--no-optional-locks', 'diff', 'HEAD', '--name-status', '-z'],
+      gitRoot,
+    ),
+  ]);
   if (numstatOut == null) return null;
 
   const { stats, perFileStats } = parseGitNumstat(numstatOut);
+  const deletedPaths =
+    nameStatusOut != null ? parseDeletedFromNameStatus(nameStatusOut) : null;
+  if (deletedPaths && deletedPaths.size > 0) {
+    for (const [filename, s] of perFileStats) {
+      if (deletedPaths.has(filename)) s.isDeleted = true;
+    }
+  }
 
   if (untrackedCount > 0) {
     // Count every untracked file in the totals, even if the per-file map is
@@ -445,6 +465,39 @@ export function parseShortstat(stdout: string): GitDiffStats | null {
     linesAdded: parseInt(match[2] ?? '0', 10),
     linesRemoved: parseInt(match[3] ?? '0', 10),
   };
+}
+
+/**
+ * Parse `git diff HEAD --name-status -z` output and return the paths whose
+ * status is `D` (deleted in the worktree).
+ *
+ * Wire format with `-z`: `<status>\0<path>\0` per entry, except renames and
+ * copies which span three tokens: `R<score>\0<oldpath>\0<newpath>\0` (and
+ * `C<score>\0...`). We only care about deletions here, so renames/copies
+ * are walked past — neither half of a rename pair is "deleted" in the
+ * user-facing sense (the file still exists under the new name).
+ */
+export function parseDeletedFromNameStatus(stdout: string): Set<string> {
+  const tokens = stdout.split('\0');
+  if (tokens.length > 0 && tokens[tokens.length - 1] === '') tokens.pop();
+
+  const deleted = new Set<string>();
+  let i = 0;
+  while (i < tokens.length) {
+    const status = tokens[i] ?? '';
+    i++;
+    if (status === '') continue;
+    const head = status[0];
+    // Rename / copy entries are followed by TWO path tokens.
+    if (head === 'R' || head === 'C') {
+      i += 2;
+      continue;
+    }
+    const path = tokens[i] ?? '';
+    i++;
+    if (head === 'D' && path !== '') deleted.add(path);
+  }
+  return deleted;
 }
 
 function countNulDelimited(stdout: string | null): number {

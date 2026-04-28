@@ -28,6 +28,7 @@ describe('DiffStatsDisplay', () => {
           removed: 2,
           isBinary: false,
           isUntracked: false,
+          isDeleted: false,
           truncated: false,
         },
         {
@@ -36,6 +37,7 @@ describe('DiffStatsDisplay', () => {
           removed: 1,
           isBinary: false,
           isUntracked: false,
+          isDeleted: false,
           truncated: false,
         },
       ],
@@ -64,6 +66,7 @@ describe('DiffStatsDisplay', () => {
           removed: 0,
           isBinary: false,
           isUntracked: true,
+          isDeleted: false,
           truncated: false,
         },
       ],
@@ -88,6 +91,7 @@ describe('DiffStatsDisplay', () => {
           removed: 0,
           isBinary: false,
           isUntracked: true,
+          isDeleted: false,
           truncated: true,
         },
       ],
@@ -96,6 +100,32 @@ describe('DiffStatsDisplay', () => {
       render(<DiffStatsDisplay model={model} />).lastFrame() ?? '',
     );
     expect(visible).toContain('(new, partial)');
+  });
+
+  it('renders the (deleted) marker for tracked files removed from the worktree', () => {
+    const model: DiffRenderModel = {
+      filesCount: 1,
+      linesAdded: 0,
+      linesRemoved: 5,
+      hiddenCount: 0,
+      rows: [
+        {
+          filename: 'gone.txt',
+          added: 0,
+          removed: 5,
+          isBinary: false,
+          isUntracked: false,
+          isDeleted: true,
+          truncated: false,
+        },
+      ],
+    };
+    const visible = stripAnsi(
+      render(<DiffStatsDisplay model={model} />).lastFrame() ?? '',
+    );
+    const row = visible.split('\n').find((l) => l.includes('gone.txt'))!;
+    expect(row).toContain('(deleted)');
+    expect(row).toContain('-5');
   });
 
   it('renders binary rows with a ~ marker and no +N/-M', () => {
@@ -109,6 +139,7 @@ describe('DiffStatsDisplay', () => {
           filename: 'img.png',
           isBinary: true,
           isUntracked: false,
+          isDeleted: false,
           truncated: false,
         },
       ],
@@ -135,6 +166,7 @@ describe('DiffStatsDisplay', () => {
           removed: 0,
           isBinary: false,
           isUntracked: false,
+          isDeleted: false,
           truncated: false,
         },
       ],

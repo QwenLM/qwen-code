@@ -16,6 +16,7 @@ import {
   MAX_DIFF_SIZE_BYTES,
   MAX_FILES,
   MAX_LINES_PER_FILE,
+  parseDeletedFromNameStatus,
   parseGitDiff,
   parseGitNumstat,
   parseShortstat,
@@ -106,6 +107,36 @@ describe('parseGitNumstat', () => {
     const { stats, perFileStats } = parseGitNumstat(out);
     expect(stats.filesCount).toBe(1);
     expect(perFileStats.has('src/old.ts => src/new.ts')).toBe(true);
+  });
+});
+
+describe('parseDeletedFromNameStatus', () => {
+  it('extracts D-status paths and ignores M/A entries', () => {
+    const out = 'D\0gone.txt\0M\0kept.txt\0A\0added.txt\0D\0also-gone.txt\0';
+    expect(parseDeletedFromNameStatus(out)).toEqual(
+      new Set(['gone.txt', 'also-gone.txt']),
+    );
+  });
+
+  it('skips both halves of rename and copy entries', () => {
+    // Renames/copies span three tokens: `R<score>\0<old>\0<new>\0`. Neither
+    // path is "deleted" in the user sense — the file still exists under
+    // the new name.
+    const out =
+      'R100\0old.txt\0new.txt\0' + 'C75\0src.txt\0copy.txt\0' + 'D\0gone.txt\0';
+    expect(parseDeletedFromNameStatus(out)).toEqual(new Set(['gone.txt']));
+  });
+
+  it('preserves NUL-safe paths (tabs, non-ASCII)', () => {
+    // -z keeps raw bytes — same guarantee as the numstat path.
+    const out = 'D\0tab\there.txt\0D\0日本語.txt\0';
+    expect(parseDeletedFromNameStatus(out)).toEqual(
+      new Set(['tab\there.txt', '日本語.txt']),
+    );
+  });
+
+  it('handles empty input', () => {
+    expect(parseDeletedFromNameStatus('')).toEqual(new Set());
   });
 });
 
@@ -782,6 +813,60 @@ describe('fetchGitDiff invocation from a subdirectory', () => {
       expect(result!.stats.filesCount).toBe(3);
     } finally {
       await fs.rm(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('fetchGitDiff deletion detection', () => {
+  let repo: string;
+  beforeEach(async () => {
+    repo = await makeRepo();
+  });
+  afterEach(async () => {
+    await fs.rm(repo, { recursive: true, force: true });
+  });
+
+  it('marks tracked files removed from the worktree as isDeleted', async () => {
+    await fs.writeFile(path.join(repo, 'kept.txt'), 'one\ntwo\n');
+    await fs.writeFile(path.join(repo, 'gone.txt'), 'a\nb\nc\n');
+    await fs.writeFile(
+      path.join(repo, 'gone.bin'),
+      Buffer.from([0x89, 0x00, 0xff]),
+    );
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+
+    // Modify one tracked file (heavy edit), and remove two others.
+    await fs.writeFile(path.join(repo, 'kept.txt'), '');
+    await fs.rm(path.join(repo, 'gone.txt'));
+    await fs.rm(path.join(repo, 'gone.bin'));
+
+    const result = await fetchGitDiff(repo);
+    expect(result).not.toBeNull();
+    // Heavy edit must NOT be marked deleted, even though numstat shows
+    // `0\t2\tkept.txt` (which looks identical to a delete shape).
+    expect(result!.perFileStats.get('kept.txt')?.isDeleted).toBeFalsy();
+    expect(result!.perFileStats.get('gone.txt')?.isDeleted).toBe(true);
+    expect(result!.perFileStats.get('gone.bin')).toMatchObject({
+      isBinary: true,
+      isDeleted: true,
+    });
+  });
+
+  it('does not mark either side of a rename as deleted', async () => {
+    await fs.writeFile(path.join(repo, 'old.txt'), 'x\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+    await git(repo, 'mv', 'old.txt', 'new.txt');
+
+    const result = await fetchGitDiff(repo);
+    expect(result).not.toBeNull();
+    // The rename collapses to a single "old => new" entry; it must not
+    // be flagged as deleted.
+    const keys = [...result!.perFileStats.keys()];
+    expect(keys.some((k) => k.includes('=>'))).toBe(true);
+    for (const s of result!.perFileStats.values()) {
+      expect(s.isDeleted).toBeFalsy();
     }
   });
 });
