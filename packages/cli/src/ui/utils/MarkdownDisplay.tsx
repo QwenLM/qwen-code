@@ -13,7 +13,7 @@ import { RenderInline } from './InlineMarkdownRenderer.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
-import { useMarkdownRendering } from '../contexts/MarkdownRenderingContext.js';
+import { useRenderMode } from '../contexts/RenderModeContext.js';
 
 interface MarkdownDisplayProps {
   text: string;
@@ -39,10 +39,10 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   contentWidth,
   textColor = theme.text.primary,
 }) => {
-  const { markdownRenderMode } = useMarkdownRendering();
+  const { renderMode } = useRenderMode();
   if (!text) return <></>;
 
-  const renderVisualBlocks = markdownRenderMode === 'visual';
+  const renderVisualBlocks = renderMode === 'render';
   const lines = text.split(/\r?\n/);
   const headerRegex = /^ *(#{1,4}) +(.*)/;
   const codeFenceRegex = /^ *(`{3,}|~{3,}) *([^`]*)$/;
@@ -80,6 +80,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   let codeBlockLang: string | null = null;
   let codeBlockFence = '';
   let inMathBlock = false;
+  let mathBlockIndex = 0;
+  let currentMathBlockIndex = 0;
   let mathBlockContent: string[] = [];
   let inTable = false;
   let tableRows: string[][] = [];
@@ -133,10 +135,12 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           <RenderMathBlock
             key={key}
             content={mathBlockContent}
+            sourceCopyCommand={`/copy latex ${currentMathBlockIndex}`}
             contentWidth={contentWidth}
           />,
         );
         inMathBlock = false;
+        currentMathBlockIndex = 0;
         mathBlockContent = [];
       } else {
         mathBlockContent.push(line);
@@ -171,6 +175,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       }
     } else if (mathFenceMatch && renderVisualBlocks) {
       inMathBlock = true;
+      mathBlockIndex += 1;
+      currentMathBlockIndex = mathBlockIndex;
       mathBlockContent = [];
     } else if (tableRowMatch && !inTable && renderVisualBlocks) {
       // Potential table start - check if next line is separator with matching column count
@@ -403,6 +409,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       <RenderMathBlock
         key="math-eof"
         content={mathBlockContent}
+        sourceCopyCommand={`/copy latex ${currentMathBlockIndex}`}
         contentWidth={contentWidth}
       />,
     );
@@ -446,11 +453,11 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
   contentWidth,
 }) => {
   const settings = useSettings();
-  const { markdownRenderMode } = useMarkdownRendering();
+  const { renderMode } = useRenderMode();
   const MIN_LINES_FOR_MESSAGE = 1; // Minimum lines to show before the "generating more" message
   const RESERVED_LINES = 2; // Lines reserved for the message itself and potential padding
 
-  if (lang?.toLowerCase() === 'mermaid' && markdownRenderMode === 'visual') {
+  if (lang?.toLowerCase() === 'mermaid' && renderMode === 'render') {
     if (isPending) {
       return (
         <RenderPendingMermaidBlock
@@ -570,11 +577,13 @@ const RenderPendingMermaidBlock = React.memo(RenderPendingMermaidBlockInternal);
 
 interface RenderMathBlockProps {
   content: string[];
+  sourceCopyCommand: string;
   contentWidth: number;
 }
 
 const RenderMathBlockInternal: React.FC<RenderMathBlockProps> = ({
   content,
+  sourceCopyCommand,
   contentWidth,
 }) => {
   const rendered = renderInlineLatex(content.join(' '));
@@ -585,6 +594,9 @@ const RenderMathBlockInternal: React.FC<RenderMathBlockProps> = ({
       width={contentWidth}
       flexShrink={0}
     >
+      <Text bold color={theme.text.accent}>
+        LaTeX block · source: {sourceCopyCommand}
+      </Text>
       <Text color={theme.text.accent} wrap="wrap">
         {rendered}
       </Text>

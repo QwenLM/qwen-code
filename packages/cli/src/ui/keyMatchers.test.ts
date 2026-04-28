@@ -61,7 +61,7 @@ describe('keyMatchers', () => {
     [Command.SHOW_MORE_LINES]: (key: Key) => key.ctrl && key.name === 's',
     [Command.RETRY_LAST]: (key: Key) => key.ctrl && key.name === 'y',
     [Command.TOGGLE_COMPACT_MODE]: (key: Key) => key.ctrl && key.name === 'o',
-    [Command.TOGGLE_MARKDOWN_RENDER_MODE]: (key: Key) =>
+    [Command.TOGGLE_RENDER_MODE]: (key: Key) =>
       (key.meta && key.name === 'm') ||
       (key.sequence === 'µ' && !key.ctrl && !key.meta && !key.paste),
     [Command.REVERSE_SEARCH]: (key: Key) => key.ctrl && key.name === 'r',
@@ -290,7 +290,7 @@ describe('keyMatchers', () => {
       negative: [createKey('f')],
     },
     {
-      command: Command.TOGGLE_MARKDOWN_RENDER_MODE,
+      command: Command.TOGGLE_RENDER_MODE,
       positive: [
         createKey('m', { meta: true }),
         createKey('', { sequence: 'µ' }),

@@ -145,7 +145,7 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
         return;
       }
 
-      if (keyMatchers[Command.TOGGLE_MARKDOWN_RENDER_MODE](key)) {
+      if (keyMatchers[Command.TOGGLE_RENDER_MODE](key)) {
         return;
       }
 

@@ -21,6 +21,16 @@ interface SelectedCodeBlock {
   label: string;
 }
 
+interface LatexBlock {
+  content: string;
+  index: number;
+}
+
+interface SelectedLatexBlock {
+  block: LatexBlock;
+  label: string;
+}
+
 function parseFencedCodeBlocks(markdown: string): FencedCodeBlock[] {
   const blocks: FencedCodeBlock[] = [];
   const lines = markdown.split(/\r?\n/);
@@ -71,6 +81,66 @@ function parseFencedCodeBlocks(markdown: string): FencedCodeBlock[] {
   }
 
   return blocks;
+}
+
+function parseLatexBlocks(markdown: string): LatexBlock[] {
+  const blocks: LatexBlock[] = [];
+  const lines = markdown.split(/\r?\n/);
+  const mathFenceRegex = /^ *\$\$ *$/;
+  let inLatexBlock = false;
+  let activeLines: string[] = [];
+
+  for (const line of lines) {
+    if (!inLatexBlock) {
+      if (mathFenceRegex.test(line)) {
+        inLatexBlock = true;
+        activeLines = [];
+      }
+      continue;
+    }
+
+    if (mathFenceRegex.test(line)) {
+      blocks.push({
+        content: activeLines.join('\n'),
+        index: blocks.length + 1,
+      });
+      inLatexBlock = false;
+      activeLines = [];
+      continue;
+    }
+
+    activeLines.push(line);
+  }
+
+  return blocks;
+}
+
+function selectLatexBlock(
+  markdown: string,
+  args: string,
+): SelectedLatexBlock | null | undefined {
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
+  const firstToken = tokens[0]?.toLowerCase();
+  if (firstToken !== 'latex' && firstToken !== 'math') return undefined;
+
+  const blocks = parseLatexBlocks(markdown);
+  if (blocks.length === 0) return null;
+
+  let requestedIndex: number | null = null;
+  for (const token of tokens.slice(1)) {
+    if (/^\d+$/.test(token)) {
+      requestedIndex = Number(token);
+    }
+  }
+
+  const selected =
+    requestedIndex !== null
+      ? blocks.find((block) => block.index === requestedIndex)
+      : blocks[blocks.length - 1];
+
+  return selected
+    ? { block: selected, label: `LaTeX block ${selected.index}` }
+    : null;
 }
 
 function selectCodeBlock(
@@ -161,6 +231,24 @@ export const copyCommand: SlashCommand = {
 
     if (lastAiOutput) {
       try {
+        const selectedLatexBlock = selectLatexBlock(lastAiOutput, _args);
+        if (selectedLatexBlock === null) {
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: 'No matching LaTeX block found in the last AI output.',
+          };
+        }
+        if (selectedLatexBlock !== undefined) {
+          await copyToClipboard(selectedLatexBlock.block.content);
+
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: `${selectedLatexBlock.label} copied to the clipboard`,
+          };
+        }
+
         const selectedCodeBlock = selectCodeBlock(lastAiOutput, _args);
         if (selectedCodeBlock === null) {
           return {

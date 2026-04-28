@@ -60,7 +60,7 @@ describe('BaseTextInput', () => {
     vi.clearAllMocks();
   });
 
-  it('does not type the Markdown render-mode shortcut into the buffer', () => {
+  it('does not type the render-mode shortcut into the buffer', () => {
     const buffer = createBuffer();
 
     render(<BaseTextInput buffer={buffer} onSubmit={vi.fn()} />);

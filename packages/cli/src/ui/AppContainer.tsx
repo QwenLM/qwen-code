@@ -127,9 +127,9 @@ import {
 import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import {
-  MarkdownRenderingProvider,
-  type MarkdownRenderMode,
-} from './contexts/MarkdownRenderingContext.js';
+  RenderModeProvider,
+  type RenderMode,
+} from './contexts/RenderModeContext.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
 import {
   useBackgroundTaskViewState,
@@ -1536,17 +1536,16 @@ export const AppContainer = (props: AppContainerProps) => {
   const [compactMode, setCompactMode] = useState<boolean>(
     settings.merged.ui?.compactMode ?? false,
   );
-  const [markdownRenderMode, setMarkdownRenderMode] =
-    useState<MarkdownRenderMode>('visual');
-  const markdownRenderModeMountedRef = useRef(false);
+  const [renderMode, setRenderMode] = useState<RenderMode>('render');
+  const renderModeMountedRef = useRef(false);
   useEffect(() => {
-    if (!markdownRenderModeMountedRef.current) {
-      markdownRenderModeMountedRef.current = true;
+    if (!renderModeMountedRef.current) {
+      renderModeMountedRef.current = true;
       return;
     }
 
     refreshStatic();
-  }, [markdownRenderMode, refreshStatic]);
+  }, [renderMode, refreshStatic]);
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
@@ -2166,10 +2165,8 @@ export const AppContainer = (props: AppContainerProps) => {
         setCompactMode(newValue);
         void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
         refreshStatic();
-      } else if (keyMatchers[Command.TOGGLE_MARKDOWN_RENDER_MODE](key)) {
-        setMarkdownRenderMode(
-          markdownRenderMode === 'visual' ? 'source' : 'visual',
-        );
+      } else if (keyMatchers[Command.TOGGLE_RENDER_MODE](key)) {
+        setRenderMode(renderMode === 'render' ? 'raw' : 'render');
       }
     },
     [
@@ -2205,8 +2202,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isAuthenticating,
       compactMode,
       setCompactMode,
-      markdownRenderMode,
-      setMarkdownRenderMode,
+      renderMode,
+      setRenderMode,
       refreshStatic,
       handleDoubleEscRewind,
     ],
@@ -2686,9 +2683,9 @@ export const AppContainer = (props: AppContainerProps) => {
     () => ({ compactMode, setCompactMode }),
     [compactMode, setCompactMode],
   );
-  const markdownRenderingValue = useMemo(
-    () => ({ markdownRenderMode, setMarkdownRenderMode }),
-    [markdownRenderMode, setMarkdownRenderMode],
+  const renderModeValue = useMemo(
+    () => ({ renderMode, setRenderMode }),
+    [renderMode, setRenderMode],
   );
 
   return (
@@ -2702,11 +2699,11 @@ export const AppContainer = (props: AppContainerProps) => {
             }}
           >
             <CompactModeProvider value={compactModeValue}>
-              <MarkdownRenderingProvider value={markdownRenderingValue}>
+              <RenderModeProvider value={renderModeValue}>
                 <ShellFocusContext.Provider value={isFocused}>
                   <App />
                 </ShellFocusContext.Provider>
-              </MarkdownRenderingProvider>
+              </RenderModeProvider>
             </CompactModeProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>

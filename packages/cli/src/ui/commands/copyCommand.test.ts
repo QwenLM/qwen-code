@@ -384,6 +384,90 @@ describe('copyCommand', () => {
     });
   });
 
+  it('should copy the last LaTeX block with /copy latex', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistory.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: [
+              '$$',
+              '\\alpha + \\beta',
+              '$$',
+              '$$',
+              '\\sum_{i=1}^{n} x_i',
+              '$$',
+            ].join('\n'),
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, 'latex');
+
+    expect(mockCopyToClipboard).toHaveBeenCalledWith('\\sum_{i=1}^{n} x_i');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'LaTeX block 2 copied to the clipboard',
+    });
+  });
+
+  it('should copy a numbered LaTeX block with /copy latex 1', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistory.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: [
+              '$$',
+              '\\alpha + \\beta',
+              '$$',
+              '$$',
+              '\\gamma + \\delta',
+              '$$',
+            ].join('\n'),
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, 'latex 1');
+
+    expect(mockCopyToClipboard).toHaveBeenCalledWith('\\alpha + \\beta');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'LaTeX block 1 copied to the clipboard',
+    });
+  });
+
+  it('should report when /copy latex has no matching LaTeX block', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistory.mockReturnValue([
+      {
+        role: 'model',
+        parts: [{ text: 'No math block here.' }],
+      },
+    ]);
+
+    const result = await copyCommand.action(mockContext, 'latex');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'No matching LaTeX block found in the last AI output.',
+    });
+    expect(mockCopyToClipboard).not.toHaveBeenCalled();
+  });
+
   it('should report when /copy code has no matching code block', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 

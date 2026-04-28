@@ -9,7 +9,7 @@ import { MarkdownDisplay } from './MarkdownDisplay.js';
 import { LoadedSettings } from '../../config/settings.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { renderMermaidVisual } from './mermaidVisualRenderer.js';
-import { MarkdownRenderingProvider } from '../contexts/MarkdownRenderingContext.js';
+import { RenderModeProvider } from '../contexts/RenderModeContext.js';
 
 describe('<MarkdownDisplay />', () => {
   const baseProps = {
@@ -399,6 +399,7 @@ $$
       );
       const output = lastFrame();
       expect(output).toContain('x² + α');
+      expect(output).toContain('LaTeX block · source: /copy latex 1');
       expect(output).toContain('Σᵢ₌₁ⁿ xᵢ');
     });
 
@@ -467,7 +468,7 @@ flowchart LR
       expect(output).not.toContain('source: /copy code 2');
     });
 
-    it('can render mermaid fences as source when source mode is active', () => {
+    it('can render mermaid fences as source when raw mode is active', () => {
       const text = `
 \`\`\`mermaid
 flowchart LR
@@ -475,14 +476,14 @@ flowchart LR
 \`\`\`
 `.replace(/\n/g, eol);
       const { lastFrame } = renderWithProviders(
-        <MarkdownRenderingProvider
+        <RenderModeProvider
           value={{
-            markdownRenderMode: 'source',
-            setMarkdownRenderMode: () => undefined,
+            renderMode: 'raw',
+            setRenderMode: () => undefined,
           }}
         >
           <MarkdownDisplay {...baseProps} text={text} />
-        </MarkdownRenderingProvider>,
+        </RenderModeProvider>,
       );
       const output = lastFrame();
       expect(output).toContain('flowchart LR');
@@ -490,7 +491,7 @@ flowchart LR
       expect(output).not.toContain('Mermaid flowchart');
     });
 
-    it('keeps enhanced markdown blocks as markdown source in source mode', () => {
+    it('keeps enhanced markdown blocks as markdown source in raw mode', () => {
       const text = `
 | Name | Value |
 |------|-------|
@@ -501,14 +502,14 @@ $$
 $$
 `.replace(/\n/g, eol);
       const { lastFrame } = renderWithProviders(
-        <MarkdownRenderingProvider
+        <RenderModeProvider
           value={{
-            markdownRenderMode: 'source',
-            setMarkdownRenderMode: () => undefined,
+            renderMode: 'raw',
+            setRenderMode: () => undefined,
           }}
         >
           <MarkdownDisplay {...baseProps} text={text} />
-        </MarkdownRenderingProvider>,
+        </RenderModeProvider>,
       );
 
       const output = lastFrame();
