@@ -17,13 +17,21 @@ import type { LoadedSettings } from '../../config/settings.js';
 vi.mock('../hooks/useTerminalSize.js');
 const useTerminalSizeMock = vi.mocked(useTerminalSize.useTerminalSize);
 
-const createSettings = (options?: { hideTips?: boolean }): LoadedSettings =>
+const createSettings = (options?: {
+  hideTips?: boolean;
+  hideBanner?: boolean;
+}): LoadedSettings =>
   ({
     merged: {
       ui: {
         hideTips: options?.hideTips ?? true,
+        hideBanner: options?.hideBanner,
       },
     },
+    system: { settings: {}, originalSettings: {}, path: '' },
+    systemDefaults: { settings: {}, originalSettings: {}, path: '' },
+    user: { settings: {}, originalSettings: {}, path: '' },
+    workspace: { settings: {}, originalSettings: {}, path: '' },
   }) as never;
 
 const createMockConfig = (overrides = {}) => ({
@@ -90,5 +98,14 @@ describe('<AppHeader />', () => {
     expect(lastFrame()).toContain('>_ Qwen Code');
     expect(lastFrame()).toContain('gemini-pro');
     expect(lastFrame()).toContain('/projects/qwen-code');
+  });
+
+  it('hides the banner when ui.hideBanner is set, but keeps tips intact', () => {
+    const { lastFrame } = renderWithProviders(
+      createMockUIState(),
+      createSettings({ hideTips: false, hideBanner: true }),
+    );
+    expect(lastFrame()).not.toContain('>_ Qwen Code');
+    expect(lastFrame()).not.toContain('██╔═══██╗');
   });
 });

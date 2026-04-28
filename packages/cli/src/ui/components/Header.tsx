@@ -13,6 +13,7 @@ import { shortAsciiLogo } from './AsciiArt.js';
 import { getAsciiArtWidth, getCachedStringWidth } from '../utils/textUtils.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { getRenderableGradientColors } from '../utils/gradientUtils.js';
+import { pickAsciiArtTier } from '../utils/customBanner.js';
 
 /**
  * Auth display type for the Header component.
@@ -26,7 +27,20 @@ export enum AuthDisplayType {
 }
 
 interface HeaderProps {
-  customAsciiArt?: string; // For user-defined ASCII art
+  /**
+   * Width-aware override for the logo column. Each tier is a sanitized
+   * ASCII string; the renderer picks `large` when it fits, then `small`,
+   * then falls through to the default Qwen logo. Either tier may be
+   * omitted: a missing tier simply skips that step.
+   */
+  customAsciiArt?: { small?: string; large?: string };
+  /**
+   * Sanitized replacement for the bold ">_ Qwen Code" title in the info
+   * panel. The version suffix is always appended. When undefined or empty
+   * the default title is used; the leading `>_` glyph is part of the
+   * default brand and is dropped when a custom title is set.
+   */
+  customBannerTitle?: string;
   version: string;
   authDisplayType?: AuthDisplayType;
   model: string;
@@ -35,6 +49,7 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({
   customAsciiArt,
+  customBannerTitle,
   version,
   authDisplayType,
   model,
@@ -42,8 +57,6 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const { columns: terminalWidth } = useTerminalSize();
 
-  const displayLogo = customAsciiArt ?? shortAsciiLogo;
-  const logoWidth = getAsciiArtWidth(displayLogo);
   const formattedAuthType = authDisplayType ?? AuthDisplayType.UNKNOWN;
 
   // Calculate available space properly:
@@ -61,7 +74,22 @@ export const Header: React.FC<HeaderProps> = ({
     terminalWidth - containerMarginX * 2,
   );
 
-  // Check if we have enough space for logo + gap + minimum info panel
+  // Pick the widest custom tier that fits. If neither tier fits or no
+  // custom art was provided, fall through to the bundled `shortAsciiLogo`.
+  const customTier = pickAsciiArtTier(
+    customAsciiArt?.small,
+    customAsciiArt?.large,
+    availableTerminalWidth,
+    logoGap,
+    minInfoPanelWidth,
+    getAsciiArtWidth,
+  );
+  const displayLogo = customTier ?? shortAsciiLogo;
+  const logoWidth = getAsciiArtWidth(displayLogo);
+
+  // Check if we have enough space for logo + gap + minimum info panel.
+  // For the default logo this can still be false on very narrow terminals;
+  // for a custom tier we already proved it fits inside `pickAsciiArtTier`.
   const showLogo =
     availableTerminalWidth >= logoWidth + logoGap + minInfoPanelWidth;
 
@@ -138,10 +166,11 @@ export const Header: React.FC<HeaderProps> = ({
         flexGrow={showLogo ? 0 : 1}
         width={showLogo ? availableInfoPanelWidth : undefined}
       >
-        {/* Title line: >_ Qwen Code (v{version}) */}
+        {/* Title line: customBannerTitle (already sanitized) or the default
+            ">_ Qwen Code" brand. Version suffix is always appended. */}
         <Text>
           <Text bold color={theme.text.accent}>
-            &gt;_ Qwen Code
+            {customBannerTitle ? customBannerTitle : '>_ Qwen Code'}
           </Text>
           <Text color={theme.text.secondary}> (v{version})</Text>
         </Text>

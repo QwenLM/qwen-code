@@ -100,4 +100,50 @@ describe('<Header />', () => {
 
     expect(lastFrame()).toContain('██╔═══██╗');
   });
+
+  it('renders the custom banner title in place of the default brand', () => {
+    const { lastFrame } = render(
+      <Header {...defaultProps} customBannerTitle="Acme CLI" />,
+    );
+    expect(lastFrame()).toContain('Acme CLI');
+    expect(lastFrame()).not.toContain('>_ Qwen Code');
+    // version suffix is still appended
+    expect(lastFrame()).toContain('v1.0.0');
+  });
+
+  it('renders the custom large tier when it fits', () => {
+    const { lastFrame } = render(
+      <Header
+        {...defaultProps}
+        customAsciiArt={{ small: 'SMALL', large: 'LARGE_LOGO' }}
+      />,
+    );
+    expect(lastFrame()).toContain('LARGE_LOGO');
+    expect(lastFrame()).not.toContain('██╔═══██╗');
+  });
+
+  it('falls back to the small tier when the large one does not fit', () => {
+    useTerminalSizeMock.mockReturnValue({ columns: 70, rows: 24 });
+    const { lastFrame } = render(
+      <Header
+        {...defaultProps}
+        customAsciiArt={{
+          small: 'sm',
+          large: 'X'.repeat(60),
+        }}
+      />,
+    );
+    expect(lastFrame()).toContain('sm');
+    expect(lastFrame()).not.toContain('X'.repeat(60));
+  });
+
+  it('falls back to the default Qwen logo when no custom tier fits', () => {
+    const { lastFrame } = render(
+      <Header
+        {...defaultProps}
+        customAsciiArt={{ small: 'X'.repeat(150), large: 'Y'.repeat(150) }}
+      />,
+    );
+    expect(lastFrame()).toContain('██╔═══██╗');
+  });
 });
