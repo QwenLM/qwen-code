@@ -510,15 +510,18 @@ describe('MemoryManager', () => {
     });
   });
 
-  // ─── scheduleSkillReview: merge with running extract ──────────────────────
+  // ─── scheduleSkillReview: concurrent extract ──────────────────────────────
 
-  describe('scheduleSkillReview(): merged_with_extract (checklist 6)', () => {
-    it('returns merged_with_extract when extract is already running for same project', async () => {
+  describe('scheduleSkillReview(): concurrent extract (checklist 6)', () => {
+    it('schedules skill review independently even when extract is already running', async () => {
       // arrange: extract never resolves so it stays "running"
       vi.mocked(runAutoMemoryExtract).mockReturnValue(new Promise(() => {}));
+      vi.mocked(runSkillReviewByAgent).mockResolvedValue({
+        touchedSkillFiles: [],
+      });
 
       const mgr = new MemoryManager();
-      const projectRoot = '/test-project-merge';
+      const projectRoot = '/test-project-concurrent';
       const config = makeMockConfig();
 
       // Start extract (will stay in-flight)
@@ -529,7 +532,7 @@ describe('MemoryManager', () => {
         config,
       });
 
-      // Now schedule skill review while extract is running
+      // Skill review must be scheduled independently, not silently dropped
       const result = mgr.scheduleSkillReview({
         projectRoot,
         sessionId: 'sess-extract',
@@ -540,40 +543,8 @@ describe('MemoryManager', () => {
         config,
       });
 
-      expect(result.status).toBe('skipped');
-      expect(result.skippedReason).toBe('merged_with_extract');
+      expect(result.status).toBe('scheduled');
       expect(result.taskId).toBeDefined();
-    });
-
-    it('marks the extract record with shouldReviewSkillsAlso metadata', async () => {
-      vi.mocked(runAutoMemoryExtract).mockReturnValue(new Promise(() => {}));
-
-      const mgr = new MemoryManager();
-      const projectRoot = '/test-project-metadata';
-      const config = makeMockConfig();
-
-      void mgr.scheduleExtract({
-        projectRoot,
-        sessionId: 'sess-meta',
-        history: [{ role: 'user', parts: [{ text: 'work' }] }],
-        config,
-      });
-
-      mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'sess-meta',
-        history: [{ role: 'user', parts: [{ text: 'work' }] }],
-        toolCallCount: 30,
-        threshold: 20,
-        enabled: true,
-        config,
-      });
-
-      // The extract task record should now carry the merge flag
-      const extractRecords = mgr.listTasksByType('extract', projectRoot);
-      expect(extractRecords.length).toBeGreaterThan(0);
-      const extractRecord = extractRecords[0]!;
-      expect(extractRecord.metadata?.['shouldReviewSkillsAlso']).toBe(true);
     });
 
     it('schedules skill review independently when no extract is running', () => {

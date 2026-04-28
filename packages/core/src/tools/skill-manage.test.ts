@@ -16,7 +16,7 @@ import { ToolNames } from '../tools/tool-names.js';
 // ─── Checklist 5: skill_manage excluded from subagents ───────────────────────
 
 describe('EXCLUDED_TOOLS_FOR_SUBAGENTS – skill_manage isolation', () => {
-  it('contains skill_manage so task-execution subagents cannot call it', () => {
+  it('contains skill_manage so wildcard/inherit subagents cannot call it', () => {
     expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL_MANAGE)).toBe(true);
   });
 

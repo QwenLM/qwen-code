@@ -130,11 +130,7 @@ export interface ScheduleSkillReviewParams {
 export interface SkillReviewScheduleResult {
   status: 'scheduled' | 'skipped';
   taskId?: string;
-  skippedReason?:
-    | 'below_threshold'
-    | 'skill_manage_called'
-    | 'disabled'
-    | 'merged_with_extract';
+  skippedReason?: 'below_threshold' | 'skill_manage_called' | 'disabled';
   promise?: Promise<MemoryTaskRecord>;
 }
 
@@ -704,44 +700,6 @@ export class MemoryManager {
       return { status: 'skipped', skippedReason: 'disabled' };
     }
 
-    // Check if extract is already running and eligible for merge
-    const pendingExtractTaskId = this.findPendingOrRunningExtractTask(
-      params.projectRoot,
-    );
-    if (pendingExtractTaskId) {
-      // Mark extract record to include skill review in its execution
-      const extractRecord = this.tasks.get(pendingExtractTaskId);
-      if (extractRecord && extractRecord.metadata) {
-        extractRecord.metadata['shouldReviewSkillsAlso'] = true;
-        extractRecord.metadata['skillReviewParams'] = {
-          toolCallCount: params.toolCallCount,
-          threshold,
-        };
-        this.notify();
-      }
-      // Create a lightweight task record for tracking but return merged status
-      const record = makeTaskRecord(
-        'skill-review',
-        params.projectRoot,
-        params.sessionId,
-      );
-      this.storeWith(record, {
-        status: 'skipped',
-        progressText: 'Merged into extract task for combined review.',
-        metadata: {
-          mergedWithTaskId: pendingExtractTaskId,
-          historyLength: params.history.length,
-          toolCallCount: params.toolCallCount,
-          threshold,
-        },
-      });
-      return {
-        status: 'skipped',
-        taskId: record.id,
-        skippedReason: 'merged_with_extract',
-      };
-    }
-
     const record = makeTaskRecord(
       'skill-review',
       params.projectRoot,
@@ -759,32 +717,6 @@ export class MemoryManager {
 
     const promise = this.track(record.id, this.runSkillReview(record, params));
     return { status: 'scheduled', taskId: record.id, promise };
-  }
-
-  private findPendingOrRunningExtractTask(
-    projectRoot: string,
-  ): string | undefined {
-    // Check currently running extract
-    const currentTaskId = this.extractCurrentTaskId.get(projectRoot);
-    if (currentTaskId) {
-      return currentTaskId;
-    }
-
-    // Check queued extract
-    const queued = this.extractQueued.get(projectRoot);
-    if (queued) {
-      return queued.taskId;
-    }
-
-    // Check for recently created but not yet running extract task
-    const records = this.listTasksByType('extract', projectRoot);
-    for (const record of records) {
-      if (record.status === 'pending' || record.status === 'running') {
-        return record.id;
-      }
-    }
-
-    return undefined;
   }
 
   private async runSkillReview(
