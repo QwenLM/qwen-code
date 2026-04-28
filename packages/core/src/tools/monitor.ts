@@ -104,6 +104,14 @@ class MonitorToolInvocation extends BaseToolInvocation<
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
+    // Early-abort: if the turn was cancelled before we start, don't spawn.
+    if (_signal.aborted) {
+      return {
+        llmContent: 'Monitor was cancelled before it could start.',
+        returnDisplay: 'Monitor cancelled.',
+      };
+    }
+
     const command = this.params.command.trim();
     const description = this.params.description || command;
     const maxEvents = Math.min(

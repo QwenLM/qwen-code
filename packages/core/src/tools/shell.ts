@@ -830,8 +830,7 @@ export class ShellTool extends BaseDeclarativeTool<
       if (sleepPattern !== null) {
         return (
           `Blocked: ${sleepPattern}. ` +
-          'Run blocking commands in the background with is_background: true ' +
-          "— you'll get a completion notification when done. " +
+          'Run blocking commands in the background with is_background: true. ' +
           'For streaming events (watching logs, polling APIs), use the Monitor tool. ' +
           'If you genuinely need a delay (rate limiting, deliberate pacing), keep it under 2 seconds.'
         );
