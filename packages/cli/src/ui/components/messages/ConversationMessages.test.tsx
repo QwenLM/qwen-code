@@ -34,7 +34,7 @@ describe('<ConversationMessages />', () => {
     expect(output).toContain('line 6');
   });
 
-  it('reserves only the overflow marker row for pending assistant output', () => {
+  it('keeps the newest overflow tail without emitting live marker rows', () => {
     const text = [
       'line 1',
       'line 2',
@@ -55,9 +55,9 @@ describe('<ConversationMessages />', () => {
     );
     const output = lastFrame() ?? '';
 
-    expect(output).toContain('... first 2 lines hidden ...');
-    expect(output).not.toContain('line 2');
-    expect(output).toContain('line 3');
+    expect(output).not.toContain('lines hidden');
+    expect(output).not.toContain('line 1');
+    expect(output).toContain('line 2');
     expect(output).toContain('line 7');
   });
 
@@ -79,7 +79,7 @@ describe('<ConversationMessages />', () => {
     const output = lastFrame() ?? '';
 
     expect(output.split('\n')).toHaveLength(10);
-    expect(output).toContain('lines hidden');
+    expect(output).not.toContain('lines hidden');
     expect(output).toContain('preserving');
   });
 
@@ -100,11 +100,11 @@ describe('<ConversationMessages />', () => {
     const output = lastFrame() ?? '';
 
     expect(output.split('\n')).toHaveLength(12);
-    expect(output).toContain('lines hidden');
-    expect(output).not.toMatch(/(?:```mermaid.*\n){12,}/);
+    expect(output).not.toContain('lines hidden');
+    expect(output).not.toContain('```mermaid');
   });
 
-  it('does not invoke rich markdown rendering for pending fenced code blocks (#3279)', () => {
+  it('suppresses pending fenced code delimiters before they reach scrollback (#3279)', () => {
     // Mermaid code block source: MarkdownDisplay would render this through
     // RenderCodeBlock + colorizeCode, which adds line-number prefixes and
     // narrows the wrap width below markdownWidth, making rendered height
@@ -123,13 +123,9 @@ describe('<ConversationMessages />', () => {
     );
     const output = lastFrame() ?? '';
 
-    // Raw fence visible — proves we did not enter MarkdownDisplay's code
-    // block branch (which would have stripped the fence and emitted a
-    // line-number-prefixed render).
-    expect(output).toContain('```mermaid');
+    expect(output).not.toContain('```mermaid');
     expect(output).toContain('flowchart TD');
     expect(output).not.toMatch(/^\s*1\s+flowchart TD$/m);
-    expect(output).not.toContain('streaming line');
   });
 
   it('renders rich markdown once the assistant message is committed', () => {

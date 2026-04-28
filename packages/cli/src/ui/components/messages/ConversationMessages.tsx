@@ -83,8 +83,8 @@ interface ContinuationMarkdownMessageProps {
 }
 
 const MIN_PENDING_PREVIEW_HEIGHT = 2;
-const PENDING_PREVIEW_MARKER_ROWS = 1;
 const MAX_PENDING_PREVIEW_HEIGHT = 12;
+const markdownFenceDelimiterRegex = /^ {0,3}(`{3,}|~{3,}).*$/;
 
 function getPrefixWidth(prefix: string): number {
   // Reserve one extra column so text never touches the prefix glyph.
@@ -96,24 +96,14 @@ function slicePendingTextForHeight(
   maxHeight: number | undefined,
   maxWidth: number,
 ): { text: string; hiddenLinesCount: number } {
-  const uncappedOverflowCheck = sliceTextByVisualHeight(
-    text,
-    maxHeight,
-    maxWidth,
-    {
-      minHeight: MIN_PENDING_PREVIEW_HEIGHT,
-      reservedRows: 0,
-      overflowDirection: 'top',
-    },
-  );
+  const previewText = text
+    .split('\n')
+    .filter((line) => !markdownFenceDelimiterRegex.test(line))
+    .join('\n');
 
-  if (uncappedOverflowCheck.hiddenLinesCount === 0) {
-    return uncappedOverflowCheck;
-  }
-
-  return sliceTextByVisualHeight(text, maxHeight, maxWidth, {
+  return sliceTextByVisualHeight(previewText, maxHeight, maxWidth, {
     minHeight: MIN_PENDING_PREVIEW_HEIGHT,
-    reservedRows: PENDING_PREVIEW_MARKER_ROWS,
+    reservedRows: 0,
     overflowDirection: 'top',
   });
 }
@@ -145,7 +135,13 @@ function getPendingPreviewHeight(
 // tail stays plain. The pre-sliced tail is capped to a small live viewport and
 // still wrapped in MaxSizedBox as a hard guard, so any remaining source-vs-Ink
 // measurement mismatch cannot grow the dynamic region enough to scroll the
-// terminal and leak previous frames into scrollback.
+// terminal and leak previous frames into scrollback. The live preview also
+// suppresses synthetic hidden-line banners and Markdown fence delimiters. Claude
+// Code uses a richer streaming Markdown path for the same reason: control rows
+// and syntax delimiter rows should not be written into the main-screen
+// scrollback on every streaming frame. Qwen keeps the final transcript rich by
+// rendering committed messages through MarkdownDisplay after they move into
+// Static.
 const PendingTextPreview: React.FC<{
   text: string;
   hiddenLinesCount: number;
@@ -157,6 +153,7 @@ const PendingTextPreview: React.FC<{
     maxHeight={maxHeight}
     maxWidth={maxWidth}
     additionalHiddenLinesCount={hiddenLinesCount}
+    showHiddenLinesMessage={false}
   >
     {text.split('\n').map((line, index) => (
       <Box key={index}>

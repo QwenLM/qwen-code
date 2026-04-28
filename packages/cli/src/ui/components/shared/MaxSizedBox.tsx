@@ -60,6 +60,7 @@ interface MaxSizedBoxProps {
   maxHeight: number | undefined;
   overflowDirection?: 'top' | 'bottom';
   additionalHiddenLinesCount?: number;
+  showHiddenLinesMessage?: boolean;
 }
 
 /**
@@ -107,6 +108,7 @@ export const MaxSizedBox: React.FC<MaxSizedBoxProps> = ({
   maxHeight,
   overflowDirection = 'top',
   additionalHiddenLinesCount = 0,
+  showHiddenLinesMessage = true,
 }) => {
   const id = useId();
   const { addOverflowingId, removeOverflowingId } = useOverflowActions() || {};
@@ -145,7 +147,9 @@ export const MaxSizedBox: React.FC<MaxSizedBoxProps> = ({
       laidOutStyledText.length > targetMaxHeight) ||
     additionalHiddenLinesCount > 0;
   const visibleContentHeight =
-    contentWillOverflow && targetMaxHeight !== undefined
+    contentWillOverflow &&
+    targetMaxHeight !== undefined &&
+    showHiddenLinesMessage
       ? targetMaxHeight - 1
       : targetMaxHeight;
 
@@ -190,19 +194,23 @@ export const MaxSizedBox: React.FC<MaxSizedBoxProps> = ({
 
   return (
     <Box flexDirection="column" width={maxWidth} flexShrink={0}>
-      {totalHiddenLines > 0 && overflowDirection === 'top' && (
-        <Text color={theme.text.secondary} wrap="truncate">
-          ... first {totalHiddenLines} line{totalHiddenLines === 1 ? '' : 's'}{' '}
-          hidden ...
-        </Text>
-      )}
+      {showHiddenLinesMessage &&
+        totalHiddenLines > 0 &&
+        overflowDirection === 'top' && (
+          <Text color={theme.text.secondary} wrap="truncate">
+            ... first {totalHiddenLines} line{totalHiddenLines === 1 ? '' : 's'}{' '}
+            hidden ...
+          </Text>
+        )}
       {visibleLines}
-      {totalHiddenLines > 0 && overflowDirection === 'bottom' && (
-        <Text color={theme.text.secondary} wrap="truncate">
-          ... last {totalHiddenLines} line{totalHiddenLines === 1 ? '' : 's'}{' '}
-          hidden ...
-        </Text>
-      )}
+      {showHiddenLinesMessage &&
+        totalHiddenLines > 0 &&
+        overflowDirection === 'bottom' && (
+          <Text color={theme.text.secondary} wrap="truncate">
+            ... last {totalHiddenLines} line{totalHiddenLines === 1 ? '' : 's'}{' '}
+            hidden ...
+          </Text>
+        )}
     </Box>
   );
 };

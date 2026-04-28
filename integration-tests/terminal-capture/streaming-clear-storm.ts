@@ -74,6 +74,8 @@ type Summary = Counts & {
   requestCount: number;
   hiddenMarkerCount: number;
   rawMermaidFenceCount: number;
+  maxFrameHiddenMarkerCount: number;
+  maxFrameRawMermaidFenceCount: number;
   terminal: {
     cols: number;
     rows: number;
@@ -462,6 +464,20 @@ async function main(): Promise<void> {
     env,
   });
   const frames: string[] = [];
+  const frameHiddenMarkerCounts: number[] = [];
+  const frameRawMermaidFenceCounts: number[] = [];
+
+  const recordMarkdownFrameMetrics = async () => {
+    if (streamPayload !== 'markdown') {
+      return;
+    }
+
+    const screen = await terminal.getScreenText();
+    frameHiddenMarkerCounts.push(
+      countPattern(screen, /\.\.\. first \d+ lines hidden \.\.\./g),
+    );
+    frameRawMermaidFenceCounts.push(countOccurrences(screen, '```mermaid'));
+  };
 
   try {
     await terminal.spawn('node', qwenArgs(fakeServer.baseUrl));
@@ -489,6 +505,7 @@ async function main(): Promise<void> {
       await sleep(FRAME_INTERVAL_MS);
       const filename = `02-stream-${String(index + 1).padStart(2, '0')}.png`;
       frames.push(await terminal.capture(filename));
+      await recordMarkdownFrameMetrics();
     }
 
     await terminal.idle(3000, 90000);
@@ -504,10 +521,18 @@ async function main(): Promise<void> {
       /\.\.\. first \d+ lines hidden \.\.\./g,
     );
     const rawMermaidFenceCount = countOccurrences(finalScreen, '```mermaid');
+    const maxFrameHiddenMarkerCount = Math.max(0, ...frameHiddenMarkerCounts);
+    const maxFrameRawMermaidFenceCount = Math.max(
+      0,
+      ...frameRawMermaidFenceCounts,
+    );
     const gifPath = generateGif(frames, outputDir);
     const markdownPass =
       streamPayload !== 'markdown' ||
-      (hiddenMarkerCount === 0 && rawMermaidFenceCount === 0);
+      (hiddenMarkerCount === 0 &&
+        rawMermaidFenceCount === 0 &&
+        maxFrameHiddenMarkerCount === 0 &&
+        maxFrameRawMermaidFenceCount === 0);
     const pass =
       counts.clearTerminalPairCount >= minClearTerminalPairs &&
       counts.clearTerminalPairCount <= maxClearTerminalPairs &&
@@ -529,6 +554,8 @@ async function main(): Promise<void> {
       requestCount: fakeServer.getRequestCount(),
       hiddenMarkerCount,
       rawMermaidFenceCount,
+      maxFrameHiddenMarkerCount,
+      maxFrameRawMermaidFenceCount,
       terminal: {
         cols: terminalCols,
         rows: terminalRows,

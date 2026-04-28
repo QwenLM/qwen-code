@@ -108,10 +108,10 @@ until the response completed.
 using cached display width and Unicode code points, so a single long JSON,
 base64 payload, or minified log line is bounded before it reaches Ink/Yoga.
 Reserved rows are subtracted before the overflow decision. This matters in
-narrow streaming: when overflow is real, the hidden-line marker must fit inside
-the same dynamic height budget as the pending tail. Exactly-fit pending output
-is checked with no reserved rows first; only overflowing output reserves the
-single marker row.
+narrow output: marker rows must be budgeted only on paths that actually render
+them. Pending assistant/thought streaming now uses no live marker row at all,
+while tool/static truncation paths still reserve a row when they show a
+hidden-line banner.
 
 The helper supports two modes:
 
@@ -122,21 +122,15 @@ The helper supports two modes:
 
 `ConversationMessages` uses the shared slicer only while the item is pending.
 When the pending text exceeds the visual budget, the live viewport shows the
-newest tail plus a marker such as:
-
-```text
-... first N lines hidden ...
-```
-
-Completed assistant messages still render through the existing full
-`MarkdownDisplay` path, so final transcript fidelity is unchanged.
+newest tail without a synthetic hidden-line marker. Completed assistant
+messages still render through the existing full `MarkdownDisplay` path, so final
+transcript fidelity is unchanged.
 
 The visual budget comes from `AppContainer`'s measured
 `availableTerminalHeight`, which already subtracts controls, footer, tab bar,
 and static-history overhead. `ConversationMessages` therefore does not keep a
-separate fixed four-row footer reserve. It first checks exact fit with
-`reservedRows: 0`; on true overflow it reruns the slicer with one reserved row
-for the hidden-line marker.
+separate fixed four-row footer reserve. It slices with `reservedRows: 0` because
+live pending output no longer renders a marker row.
 
 The pre-sliced pending tail is also rendered through `MaxSizedBox` and capped to
 a small live viewport. This is a second, actual-Ink-layout guard for the #3279
@@ -147,6 +141,16 @@ log-update. The cap is intentionally lower than the whole terminal budget,
 because recently committed Static prefix text can still be visible above the
 pending tail during streaming; allowing the tail to consume the full dynamic
 budget can still scroll marker/fence rows into the terminal scrollback.
+
+The live pending preview intentionally does not render synthetic hidden-line
+marker rows. Those markers are useful in final/static output, but in a
+main-screen live renderer they can become their own repeated scrollback artifact
+if the terminal scrolls while a frame is being patched. The preview also
+suppresses Markdown fence delimiter rows such as ` ```mermaid ` and
+` ``` `. The code content remains visible while streaming, and the final
+committed message still renders through `MarkdownDisplay`, so transcript
+fidelity is preserved without writing control/syntax rows into the live
+scrollback every frame.
 
 ### Streaming Markdown Safe Split
 
@@ -295,6 +299,9 @@ duplicate viewport event. The shell-specific proof is the next scenario.
 - pass requires completed code/table/list blocks to be committed before the
   tail and rendered through `MarkdownDisplay`, while the live pending tail stays
   bounded by `availableTerminalHeight`;
+- pass also requires every captured live frame's xterm scrollback to contain
+  zero pending hidden-line markers and zero raw ` ```mermaid ` fence
+  delimiter rows, not only the final settled screen;
 - source-level proof is `findLastSafeSplitPoint()` coverage for closed
   code/table/list boundaries plus pending exact-fit/overflow coverage in
   `ConversationMessages`.
@@ -479,19 +486,68 @@ Additional source-level revalidation after the April 28 optimization pass:
 
 Additional review follow-up validation for #3279:
 
-| Scenario                         | Branch       | Expected    | Metric                                             | Result |
-| -------------------------------- | ------------ | ----------- | -------------------------------------------------- | ------ |
-| Markdown safe split              | fixed branch | strict pass | code/table/list boundaries split outside open code | passed |
-| Pending assistant exact fit      | fixed branch | strict pass | six-row pending text in six-row budget is visible  | passed |
-| Pending assistant overflow bound | fixed branch | strict pass | only one marker row is reserved on real overflow   | passed |
-| Pending assistant hard bound     | fixed branch | strict pass | actual Ink frame rows stay within height budget    | passed |
-| Pending assistant live cap       | fixed branch | strict pass | tall terminal budgets still render <= 12 live rows | passed |
+| Scenario                         | Branch       | Expected    | Metric                                              | Result |
+| -------------------------------- | ------------ | ----------- | --------------------------------------------------- | ------ |
+| Markdown safe split              | fixed branch | strict pass | code/table/list boundaries split outside open code  | passed |
+| Pending assistant exact fit      | fixed branch | strict pass | six-row pending text in six-row budget is visible   | passed |
+| Pending assistant overflow bound | fixed branch | strict pass | newest tail stays bounded without live marker rows  | passed |
+| Pending assistant hard bound     | fixed branch | strict pass | actual Ink frame rows stay within height budget     | passed |
+| Pending assistant live cap       | fixed branch | strict pass | tall terminal budgets still render <= 12 live rows  | passed |
+| Pending live marker suppression  | fixed branch | strict pass | no synthetic marker rows in live pending preview    | passed |
+| Pending live fence suppression   | fixed branch | strict pass | no raw fence delimiter rows in live pending preview | passed |
 
 Additional Mermaid/narrow-scrollback E2E validation:
 
 | Scenario                         | Branch       | Expected    | Clear pairs | Hidden markers | Raw mermaid fences | Frames | Result |
 | -------------------------------- | ------------ | ----------- | ----------: | -------------: | -----------------: | -----: | ------ |
 | Narrow Markdown + Mermaid resize | fixed branch | strict pass |           0 |              0 |                  0 |     93 | passed |
+
+Revalidated after the Claude Code cross-check and live-preview suppression:
+
+| Scenario                         | Branch       | Expected    | Clear pairs | Final hidden markers | Final raw fences | Max frame hidden markers | Max frame raw fences | Frames | Result |
+| -------------------------------- | ------------ | ----------- | ----------: | -------------------: | ---------------: | -----------------------: | -------------------: | -----: | ------ |
+| Narrow Markdown + Mermaid resize | fixed branch | strict pass |           0 |                    0 |                0 |                        0 |                    0 |     93 | passed |
+
+## Claude Code Cross-Check
+
+Claude Code does not avoid this class by relying on a larger per-message
+truncate threshold. Its local source shows three renderer-level safeguards that
+explain why repeated pending Markdown delimiters and hidden markers do not show
+up in normal use:
+
+- `src/screens/REPL.tsx` only exposes complete streaming lines to the message
+  renderer: `visibleStreamingText` is truncated to the last newline before it is
+  rendered. This avoids char-by-char source-line churn.
+- `src/components/Markdown.tsx` uses `StreamingMarkdown`, which lexes Markdown
+  from the current stable boundary and treats the last token as the growing
+  block. `marked.lexer()` treats unclosed code fences as one Markdown token, so
+  fence delimiters are structure rather than ordinary live text rows.
+- `src/ink/log-update.ts` tracks whether a diff would touch rows that already
+  moved into scrollback. If so, it emits an explicit reset instead of attempting
+  an unreachable incremental patch.
+- `src/ink/renderer.ts` and `src/ink/ink.tsx` make alt-screen frames a fixed
+  viewport, clamp the cursor inside that viewport, and anchor the physical
+  cursor before each diff. This prevents cursor-restore line feeds from pushing
+  exactly-full frames into scrollback.
+
+Those pieces are not a small drop-in dependency. Copying Claude's modified Ink
+fork would import a renderer, frame model, terminal writer, selection/search
+overlay, scrollbox behavior, and alt-screen lifecycle as one large maintenance
+surface. The practical Qwen path is to port the narrow principles:
+
+- live pending output must be a bounded viewport, not an ever-growing transcript;
+- live pending output must not write synthetic truncation markers or Markdown
+  delimiter rows that can become repeated scrollback artifacts;
+- completed/stable content should move to `<Static>` and render with full
+  Markdown fidelity;
+- evidence must inspect live-frame scrollback, not only the final settled
+  screen.
+
+This PR implements the second and fourth principles directly on top of the
+existing Qwen architecture, in addition to the earlier bounded live viewport and
+Static commit split. A future architecture PR can explore a Claude-style
+terminal renderer or alt-screen live region, but that is intentionally separate
+from this targeted, metric-backed fix.
 
 ## Gemini CLI Cross-Check
 
