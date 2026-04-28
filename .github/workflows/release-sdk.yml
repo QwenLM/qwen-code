@@ -405,7 +405,7 @@ jobs:
           PR_URL: '${{ steps.pr.outputs.PR_URL }}'
         run: |-
           set -euo pipefail
-          gh pr merge "${PR_URL}" --merge --auto --delete-branch
+          gh pr merge "${PR_URL}" --squash --auto --delete-branch
 
       - name: 'Create Issue on Failure'
         if: |-
