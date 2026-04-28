@@ -229,6 +229,18 @@ export class Storage {
     return path.join(this.getQwenDir(), 'commands');
   }
 
+  /**
+   * Path to the runtime-status sidecar JSON for this session.
+   *
+   * Co-located with the per-session chat log under
+   * `<projectDir>/chats/<sessionId>.runtime.json` so external observers
+   * (terminal multiplexers, IDE integrations, status daemons) can scan
+   * the same directory used for chat history to find live sessions.
+   */
+  getRuntimeStatusPath(sessionId: string): string {
+    return path.join(this.getProjectDir(), 'chats', `${sessionId}.runtime.json`);
+  }
+
   getProjectTempCheckpointsDir(): string {
     return path.join(this.getProjectTempDir(), 'checkpoints');
   }

@@ -15,6 +15,7 @@ import {
   SessionService,
   type Config,
   createDebugLogger,
+  writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
 import dns from 'node:dns';
@@ -173,6 +174,23 @@ export async function startInteractiveUI(
 ) {
   const version = await getCliVersion();
   setWindowTitle(basename(workspaceRoot), settings);
+
+  // Write a small runtime.json sidecar next to the chat log so external
+  // tools (terminal multiplexers, IDE integrations, status daemons) can
+  // map the running PID back to its session id and work directory.
+  // Best-effort: a read-only filesystem must not prevent the UI from
+  // starting up.
+  try {
+    const sessionId = config.getSessionId();
+    const runtimeStatusPath = config.storage.getRuntimeStatusPath(sessionId);
+    await writeRuntimeStatus(runtimeStatusPath, {
+      sessionId,
+      workDir: config.getTargetDir(),
+      qwenVersion: version,
+    });
+  } catch {
+    // ignored: best-effort, never block UI startup.
+  }
   const restoreTerminalRedrawOptimizer =
     process.stdout.isTTY && !config.getScreenReader()
       ? installTerminalRedrawOptimizer(process.stdout)
