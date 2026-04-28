@@ -13,7 +13,7 @@ import { renderMermaidImageSync } from './mermaidImageRenderer.js';
 
 interface MermaidDiagramProps {
   source: string;
-  sourceCodeIndex: number;
+  sourceCopyCommand: string;
   contentWidth: number;
   isPending: boolean;
   availableTerminalHeight?: number;
@@ -23,7 +23,7 @@ const MERMAID_PADDING = 1;
 
 const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
   source,
-  sourceCodeIndex,
+  sourceCopyCommand,
   contentWidth,
   isPending,
   availableTerminalHeight,
@@ -63,7 +63,7 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
   }, [kittySequence, write]);
 
   const titleWithSourceHint = (title: string) =>
-    `${title} · source: /copy code ${sourceCodeIndex}`;
+    `${title} · source: ${sourceCopyCommand}`;
 
   if (
     image?.kind === 'terminal-image' &&

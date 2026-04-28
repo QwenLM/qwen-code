@@ -313,7 +313,7 @@ describe('copyCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Code block 2 copied to the clipboard',
+      content: 'mermaid code block 2 copied to the clipboard',
     });
   });
 
@@ -347,7 +347,40 @@ describe('copyCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Code block 1 copied to the clipboard',
+      content: 'mermaid code block 1 copied to the clipboard',
+    });
+  });
+
+  it('should copy a numbered matching language block with /copy mermaid 1', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistory.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: [
+              '```ts',
+              'const before = true;',
+              '```',
+              '```mermaid',
+              'flowchart LR',
+              '  A --> B',
+              '```',
+            ].join('\n'),
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, 'mermaid 1');
+
+    expect(mockCopyToClipboard).toHaveBeenCalledWith('flowchart LR\n  A --> B');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'mermaid code block 1 copied to the clipboard',
     });
   });
 

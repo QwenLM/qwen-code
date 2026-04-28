@@ -71,6 +71,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   let inCodeBlock = false;
   let codeBlockIndex = 0;
   let currentCodeBlockIndex = 0;
+  let currentCodeBlockLangIndex = 0;
+  const codeBlockLanguageCounts = new Map<string, number>();
   let lastLineEmpty = true;
   let codeBlockContent: string[] = [];
   let codeBlockLang: string | null = null;
@@ -105,6 +107,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             content={codeBlockContent}
             lang={codeBlockLang}
             codeBlockIndex={currentCodeBlockIndex}
+            codeBlockLangIndex={currentCodeBlockLangIndex}
             isPending={isPending}
             availableTerminalHeight={availableTerminalHeight}
             contentWidth={contentWidth}
@@ -112,6 +115,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         );
         inCodeBlock = false;
         currentCodeBlockIndex = 0;
+        currentCodeBlockLangIndex = 0;
         codeBlockContent = [];
         codeBlockLang = null;
         codeBlockFence = '';
@@ -154,6 +158,15 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       currentCodeBlockIndex = codeBlockIndex;
       codeBlockFence = codeFenceMatch[1];
       codeBlockLang = codeFenceMatch[2]?.trim().split(/\s+/)[0] || null;
+      if (codeBlockLang) {
+        const normalizedLang = codeBlockLang.toLowerCase();
+        const nextLangIndex =
+          (codeBlockLanguageCounts.get(normalizedLang) ?? 0) + 1;
+        codeBlockLanguageCounts.set(normalizedLang, nextLangIndex);
+        currentCodeBlockLangIndex = nextLangIndex;
+      } else {
+        currentCodeBlockLangIndex = 0;
+      }
     } else if (mathFenceMatch) {
       inMathBlock = true;
       mathBlockContent = [];
@@ -372,6 +385,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         content={codeBlockContent}
         lang={codeBlockLang}
         codeBlockIndex={currentCodeBlockIndex}
+        codeBlockLangIndex={currentCodeBlockLangIndex}
         isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth}
@@ -411,6 +425,7 @@ interface RenderCodeBlockProps {
   content: string[];
   lang: string | null;
   codeBlockIndex: number;
+  codeBlockLangIndex: number;
   isPending: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
@@ -420,6 +435,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
   content,
   lang,
   codeBlockIndex,
+  codeBlockLangIndex,
   isPending,
   availableTerminalHeight,
   contentWidth,
@@ -443,7 +459,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
     return (
       <MermaidDiagram
         source={content.join('\n')}
-        sourceCodeIndex={codeBlockIndex}
+        sourceCopyCommand={`/copy mermaid ${codeBlockLangIndex || codeBlockIndex}`}
         isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth}

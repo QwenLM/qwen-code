@@ -175,7 +175,10 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.SHOW_MORE_LINES]: [{ key: 's', ctrl: true }],
   [Command.RETRY_LAST]: [{ key: 'y', ctrl: true }],
   [Command.TOGGLE_COMPACT_MODE]: [{ key: 'o', ctrl: true }],
-  [Command.TOGGLE_MARKDOWN_RENDER_MODE]: [{ key: 'm', meta: true }],
+  [Command.TOGGLE_MARKDOWN_RENDER_MODE]: [
+    { key: 'm', meta: true },
+    { sequence: 'µ' },
+  ],
 
   // Shell commands
   [Command.REVERSE_SEARCH]: [{ key: 'r', ctrl: true }],

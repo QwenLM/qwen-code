@@ -423,7 +423,7 @@ flowchart LR
       );
       const output = lastFrame();
       expect(output).toContain('Mermaid flowchart (LR)');
-      expect(output).toContain('source: /copy code 1');
+      expect(output).toContain('source: /copy mermaid 1');
       expect(output).toContain('Client');
       expect(output).toContain('API');
       expect(output).toContain('▶');
@@ -442,10 +442,29 @@ flowchart LR
       );
       const output = lastFrame();
       expect(output).toContain('Mermaid flowchart (LR)');
-      expect(output).toContain('source: /copy code 1');
+      expect(output).toContain('source: /copy mermaid 1');
       expect(output).toContain('Client');
       expect(output).toContain('API');
       expect(output).not.toContain('flowchart LR');
+    });
+
+    it('labels mermaid source hints with language-specific numbering', () => {
+      const text = `
+\`\`\`ts
+const before = true;
+\`\`\`
+
+\`\`\`mermaid
+flowchart LR
+  A[Client] --> B[API]
+\`\`\`
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('source: /copy mermaid 1');
+      expect(output).not.toContain('source: /copy code 2');
     });
 
     it('can render mermaid fences as source when source mode is active', () => {

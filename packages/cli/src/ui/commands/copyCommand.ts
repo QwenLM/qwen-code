@@ -13,14 +13,22 @@ interface FencedCodeBlock {
   lang: string | null;
   content: string;
   index: number;
+  langIndex: number | null;
+}
+
+interface SelectedCodeBlock {
+  block: FencedCodeBlock;
+  label: string;
 }
 
 function parseFencedCodeBlocks(markdown: string): FencedCodeBlock[] {
   const blocks: FencedCodeBlock[] = [];
   const lines = markdown.split(/\r?\n/);
   const fenceRegex = /^ *(`{3,}|~{3,}) *([^`]*)$/;
+  const languageCounts = new Map<string, number>();
   let activeFence: string | null = null;
   let activeLang: string | null = null;
+  let activeLangIndex: number | null = null;
   let activeLines: string[] = [];
 
   for (const line of lines) {
@@ -29,6 +37,13 @@ function parseFencedCodeBlocks(markdown: string): FencedCodeBlock[] {
       if (match) {
         activeFence = match[1];
         activeLang = match[2]?.trim().split(/\s+/)[0]?.toLowerCase() || null;
+        if (activeLang) {
+          const nextLangIndex = (languageCounts.get(activeLang) ?? 0) + 1;
+          languageCounts.set(activeLang, nextLangIndex);
+          activeLangIndex = nextLangIndex;
+        } else {
+          activeLangIndex = null;
+        }
         activeLines = [];
       }
       continue;
@@ -43,9 +58,11 @@ function parseFencedCodeBlocks(markdown: string): FencedCodeBlock[] {
         lang: activeLang,
         content: activeLines.join('\n'),
         index: blocks.length + 1,
+        langIndex: activeLangIndex,
       });
       activeFence = null;
       activeLang = null;
+      activeLangIndex = null;
       activeLines = [];
       continue;
     }
@@ -59,19 +76,26 @@ function parseFencedCodeBlocks(markdown: string): FencedCodeBlock[] {
 function selectCodeBlock(
   markdown: string,
   args: string,
-): FencedCodeBlock | null | undefined {
+): SelectedCodeBlock | null | undefined {
   const tokens = args.trim().split(/\s+/).filter(Boolean);
-  if (tokens[0]?.toLowerCase() !== 'code') return undefined;
+  const firstToken = tokens[0]?.toLowerCase();
+  if (!firstToken) return undefined;
 
   const blocks = parseFencedCodeBlocks(markdown);
   if (blocks.length === 0) return null;
 
   let lang: string | null = null;
   let requestedIndex: number | null = null;
-  for (const token of tokens.slice(1)) {
+  const selectorTokens =
+    firstToken === 'code' ? tokens.slice(1) : tokens.map((token) => token);
+  if (firstToken !== 'code') {
+    lang = firstToken;
+  }
+
+  for (const token of selectorTokens) {
     if (/^\d+$/.test(token)) {
       requestedIndex = Number(token);
-    } else {
+    } else if (token.toLowerCase() !== 'code') {
       lang = token.toLowerCase();
     }
   }
@@ -83,12 +107,27 @@ function selectCodeBlock(
 
   if (requestedIndex !== null) {
     const requested = lang
-      ? candidates[requestedIndex - 1]
+      ? candidates.find((block) => block.langIndex === requestedIndex)
       : blocks.find((block) => block.index === requestedIndex);
-    return requested ?? null;
+    return requested
+      ? { block: requested, label: formatCodeBlockLabel(requested, lang) }
+      : null;
   }
 
-  return candidates[candidates.length - 1] ?? null;
+  const selected = candidates[candidates.length - 1];
+  return selected
+    ? { block: selected, label: formatCodeBlockLabel(selected, lang) }
+    : null;
+}
+
+function formatCodeBlockLabel(
+  block: FencedCodeBlock,
+  selectedLanguage: string | null,
+): string {
+  if (selectedLanguage && block.langIndex !== null) {
+    return `${selectedLanguage} code block ${block.langIndex}`;
+  }
+  return `Code block ${block.index}`;
 }
 
 export const copyCommand: SlashCommand = {
@@ -131,14 +170,14 @@ export const copyCommand: SlashCommand = {
           };
         }
 
-        const copiedText = selectedCodeBlock?.content ?? lastAiOutput;
+        const copiedText = selectedCodeBlock?.block.content ?? lastAiOutput;
         await copyToClipboard(copiedText);
 
         return {
           type: 'message',
           messageType: 'info',
           content: selectedCodeBlock
-            ? `Code block ${selectedCodeBlock.index} copied to the clipboard`
+            ? `${selectedCodeBlock.label} copied to the clipboard`
             : 'Last output copied to the clipboard',
         };
       } catch (error) {

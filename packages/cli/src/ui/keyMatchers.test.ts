@@ -62,7 +62,7 @@ describe('keyMatchers', () => {
     [Command.RETRY_LAST]: (key: Key) => key.ctrl && key.name === 'y',
     [Command.TOGGLE_COMPACT_MODE]: (key: Key) => key.ctrl && key.name === 'o',
     [Command.TOGGLE_MARKDOWN_RENDER_MODE]: (key: Key) =>
-      key.meta && key.name === 'm',
+      (key.meta && key.name === 'm') || key.sequence === 'µ',
     [Command.REVERSE_SEARCH]: (key: Key) => key.ctrl && key.name === 'r',
     [Command.SUBMIT_REVERSE_SEARCH]: (key: Key) =>
       key.name === 'return' && !key.ctrl,
@@ -290,7 +290,10 @@ describe('keyMatchers', () => {
     },
     {
       command: Command.TOGGLE_MARKDOWN_RENDER_MODE,
-      positive: [createKey('m', { meta: true })],
+      positive: [
+        createKey('m', { meta: true }),
+        createKey('', { sequence: 'µ' }),
+      ],
       negative: [createKey('m'), createKey('m', { ctrl: true })],
     },
   ];
