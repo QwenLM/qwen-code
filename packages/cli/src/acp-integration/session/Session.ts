@@ -81,6 +81,7 @@ import {
   type NonInteractiveSlashCommandResult,
 } from '../../nonInteractiveCliCommands.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
+import { CommandKind } from '../../ui/commands/types.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 
@@ -976,14 +977,28 @@ export class Session implements SessionContext {
         'acp',
       );
 
-      // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol
-      const availableCommands: AvailableCommand[] = slashCommands.map(
-        (cmd) => ({
+      // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol.
+      // Commands that accept arguments get input: { hint } so the client can
+      // let users type arguments before submitting.  Commands with no argument
+      // support get input: null so the client auto-submits them on selection.
+      //
+      // A command is considered to accept arguments when any of:
+      //   - it is not a BUILT_IN command (skills, file commands, etc.)
+      //   - it has a completion function
+      //   - it declares an argumentHint
+      //   - it has subCommands
+      const availableCommands: AvailableCommand[] = slashCommands.map((cmd) => {
+        const acceptsInput =
+          cmd.kind !== CommandKind.BUILT_IN ||
+          cmd.completion != null ||
+          cmd.argumentHint != null ||
+          (cmd.subCommands != null && cmd.subCommands.length > 0);
+        return {
           name: cmd.name,
           description: cmd.description,
-          input: cmd.argumentHint ? { hint: cmd.argumentHint } : null,
-        }),
-      );
+          input: acceptsInput ? { hint: cmd.argumentHint ?? '' } : null,
+        };
+      });
 
       let availableSkills: string[] | undefined;
       try {
