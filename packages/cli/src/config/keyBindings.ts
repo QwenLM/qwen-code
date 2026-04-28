@@ -52,6 +52,7 @@ export enum Command {
   SHOW_MORE_LINES = 'showMoreLines',
   RETRY_LAST = 'retryLast',
   TOGGLE_COMPACT_MODE = 'toggleCompactMode',
+  TOGGLE_RENDER_MODE = 'toggleRenderMode',
 
   // Shell commands
   REVERSE_SEARCH = 'reverseSearch',
@@ -174,6 +175,10 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.SHOW_MORE_LINES]: [{ key: 's', ctrl: true }],
   [Command.RETRY_LAST]: [{ key: 'y', ctrl: true }],
   [Command.TOGGLE_COMPACT_MODE]: [{ key: 'o', ctrl: true }],
+  [Command.TOGGLE_RENDER_MODE]: [
+    { key: 'm', meta: true },
+    { sequence: 'µ', ctrl: false, meta: false, paste: false },
+  ],
 
   // Shell commands
   [Command.REVERSE_SEARCH]: [{ key: 'r', ctrl: true }],

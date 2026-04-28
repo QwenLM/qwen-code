@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MarkdownDisplay } from './MarkdownDisplay.js';
 import { LoadedSettings } from '../../config/settings.js';
 import { renderWithProviders } from '../../test-utils/render.js';
+import { renderMermaidVisual } from './mermaidVisualRenderer.js';
+import { RenderModeProvider } from '../contexts/RenderModeContext.js';
 
 describe('<MarkdownDisplay />', () => {
   const baseProps = {
@@ -165,7 +167,7 @@ Some text before.
       const { lastFrame } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} />,
       );
-      const output = lastFrame();
+      const output = lastFrame() ?? '';
       expect(output).toContain('Name');
       expect(output).toContain('Alice');
       expect(output).toContain('Bob');
@@ -196,7 +198,7 @@ Some text before.
       const { lastFrame } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} />,
       );
-      const output = lastFrame();
+      const output = lastFrame() ?? '';
       expect(output).toContain('A | B');
       expect(output).toContain('C');
     });
@@ -209,7 +211,7 @@ next line
       const { lastFrame } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} />,
       );
-      const output = lastFrame();
+      const output = lastFrame() ?? '';
       expect(output).toContain('| just text |');
       expect(output).not.toContain('┌');
     });
@@ -223,7 +225,7 @@ next line
       const { lastFrame } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} />,
       );
-      const output = lastFrame();
+      const output = lastFrame() ?? '';
       expect(output).toContain('| A | B |');
       expect(output).not.toContain('┌');
     });
@@ -237,7 +239,7 @@ next line
       const { lastFrame } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} />,
       );
-      const output = lastFrame();
+      const output = lastFrame() ?? '';
       expect(output).toContain('| A | B |');
       expect(output).not.toContain('┌');
     });
@@ -251,7 +253,7 @@ data
       const { lastFrame } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} />,
       );
-      const output = lastFrame();
+      const output = lastFrame() ?? '';
       // `---` without any `|` is a horizontal rule, not a table separator
       expect(output).toContain('| Header |');
       expect(output).not.toContain('┌');
@@ -359,6 +361,408 @@ Another paragraph.
       );
       expect(lastFrame()).toMatchSnapshot();
       expect(lastFrame()).toContain(' 1 ');
+    });
+
+    it('renders task list items with checkbox markers', () => {
+      const text = `
+- [x] Done
+- [ ] Todo
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('✓ Done');
+      expect(output).toContain('○ Todo');
+    });
+
+    it('renders blockquotes as quoted text', () => {
+      const text = '> Important **note**'.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('│');
+      expect(output).toContain('Important note');
+    });
+
+    it('renders inline and block math with unicode substitutions', () => {
+      const text = `
+Inline math: $x^2 + \\alpha$
+
+$$
+\\sum_{i=1}^{n} x_i
+$$
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('x² + α');
+      expect(output).toContain('LaTeX block · source: /copy latex 1');
+      expect(output).toContain('Σᵢ₌₁ⁿ xᵢ');
+    });
+
+    it('does not treat ordinary dollar amounts as inline math', () => {
+      const text = 'The cost is $5 and $10 later.'.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+
+      expect(lastFrame()).toContain('The cost is $5 and $10 later.');
+    });
+
+    it('renders mermaid flowcharts as a visual preview', () => {
+      const text = `
+\`\`\`mermaid
+flowchart LR
+  A[Client] --> B[API]
+\`\`\`
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('Mermaid flowchart (LR)');
+      expect(output).toContain('source: /copy mermaid 1');
+      expect(output).toContain('Client');
+      expect(output).toContain('API');
+      expect(output).toContain('▶');
+      expect(output).not.toContain('flowchart LR');
+    });
+
+    it('renders mermaid fences with info-string metadata as a visual preview', () => {
+      const text = `
+\`\`\`mermaid title="Flow"
+flowchart LR
+  A[Client] --> B[API]
+\`\`\`
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('Mermaid flowchart (LR)');
+      expect(output).toContain('source: /copy mermaid 1');
+      expect(output).toContain('Client');
+      expect(output).toContain('API');
+      expect(output).not.toContain('flowchart LR');
+    });
+
+    it('labels mermaid source hints with language-specific numbering', () => {
+      const text = `
+\`\`\`ts
+const before = true;
+\`\`\`
+
+\`\`\`mermaid
+flowchart LR
+  A[Client] --> B[API]
+\`\`\`
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('source: /copy mermaid 1');
+      expect(output).not.toContain('source: /copy code 2');
+    });
+
+    it('can render mermaid fences as source when raw mode is active', () => {
+      const text = `
+\`\`\`mermaid
+flowchart LR
+  A[Client] --> B[API]
+\`\`\`
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <RenderModeProvider
+          value={{
+            renderMode: 'raw',
+            setRenderMode: () => undefined,
+          }}
+        >
+          <MarkdownDisplay {...baseProps} text={text} />
+        </RenderModeProvider>,
+      );
+      const output = lastFrame();
+      expect(output).toContain('flowchart LR');
+      expect(output).toContain('A[Client] --> B[API]');
+      expect(output).not.toContain('Mermaid flowchart');
+    });
+
+    it('keeps enhanced markdown blocks as markdown source in raw mode', () => {
+      const text = `
+| Name | Value |
+|------|-------|
+| Alpha | $x^2$ |
+
+$$
+\\alpha + \\beta
+$$
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <RenderModeProvider
+          value={{
+            renderMode: 'raw',
+            setRenderMode: () => undefined,
+          }}
+        >
+          <MarkdownDisplay {...baseProps} text={text} />
+        </RenderModeProvider>,
+      );
+
+      const output = lastFrame();
+      expect(output).toContain('| Name | Value |');
+      expect(output).toContain('|------|-------|');
+      expect(output).toContain('$x^2$');
+      expect(output).toContain('$$');
+      expect(output).toContain('\\alpha + \\beta');
+      expect(output).not.toContain('┌');
+      expect(output).not.toContain('x²');
+      expect(output).not.toContain('α + β');
+    });
+
+    it('applies source copy offsets from previous assistant chunks', () => {
+      const text = `
+\`\`\`mermaid
+sequenceDiagram
+  A->>B: hello
+\`\`\`
+
+$$
+\\gamma + \\delta
+$$
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          sourceCopyIndexOffsets={{
+            codeBlockLanguageCounts: new Map([['mermaid', 1]]),
+            mathBlockCount: 2,
+          }}
+        />,
+      );
+
+      const output = lastFrame();
+      expect(output).toContain('source: /copy mermaid 2');
+      expect(output).toContain('source: /copy latex 3');
+    });
+
+    it('reuses mermaid node labels when later edges reference node ids', () => {
+      const text = `
+\`\`\`mermaid
+flowchart TD
+  A[Developer writes code] --> B{Tests pass?}
+  B -->|Yes| C[Create Pull Request]
+  B -->|No| D[Fix failing tests]
+\`\`\`
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('Developer writes code');
+      expect(output).toContain('Tests pass?');
+      expect(output).toContain('Create Pull Request');
+      expect(output).toContain('Fix failing tests');
+      expect(output).toContain('Yes');
+      expect(output).toContain('No');
+      expect(output).toContain('▼');
+      expect(output.match(/Tests pass\?/g)?.length).toBe(1);
+      expect(output.match(/Create Pull Request/g)?.length).toBe(1);
+      expect(output.match(/Fix failing tests/g)?.length).toBe(1);
+      expect(output).not.toContain('│ B ');
+    });
+
+    it('does not duplicate branch nodes when a mermaid flowchart loops back', () => {
+      const text = `
+\`\`\`mermaid
+flowchart TD
+  A[Start] --> B{Is it working?}
+  B -->|Yes| C[Great!]
+  B -->|No| D[Debug]
+  D --> B
+\`\`\`
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('No');
+      expect(output).toContain('Debug');
+      expect(output).toContain('↩');
+      expect(output).toContain('Cycles:');
+      expect(output).toContain('Debug ↩ to Is it working?');
+      expect(output.match(/│ Debug │/g)?.length).toBe(1);
+    });
+
+    it('resizes mermaid flowchart wireframes to the available width', () => {
+      const source = `
+flowchart TD
+  A[Start] --> B{Is it working?}
+  B -->|Yes| C[Great!]
+  B -->|No| D[Debug]
+  D --> B
+`;
+      const narrow = renderMermaidVisual(source, 44).lines;
+      const wide = renderMermaidVisual(source, 72).lines;
+      const narrowOutput = narrow.join('\n');
+      const wideOutput = wide.join('\n');
+
+      expect(narrowOutput).toContain('◇ Is it working? ◇');
+      expect(narrowOutput).toContain('↩');
+      expect(narrowOutput).toContain('Cycles:');
+      expect(narrow.every((line) => line.length <= 44)).toBe(true);
+      expect(wide.every((line) => line.length <= 72)).toBe(true);
+      expect(wideOutput).not.toBe(narrowOutput);
+    });
+
+    it('bounds large mermaid flowchart previews before layout', () => {
+      const source = [
+        'flowchart TD',
+        ...Array.from({ length: 200 }, (_, index) => {
+          const next = index + 1;
+          return `N${index}[Node ${index}] --> N${next}[Node ${next}]`;
+        }),
+      ].join('\n');
+
+      const preview = renderMermaidVisual(source, 80);
+
+      expect(preview.warning).toContain('Preview limited');
+      expect(preview.lines.length).toBeLessThanOrEqual(80);
+    });
+
+    it('renders mermaid sequence diagrams as a visual preview', () => {
+      const text = `
+\`\`\`mermaid
+sequenceDiagram
+  participant U as User
+  participant A as API
+  U->>A: request
+\`\`\`
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('Mermaid sequence diagram');
+      expect(output).toContain('Participants: User | API');
+      expect(output).toContain('User → API: request');
+      expect(output).not.toContain('sequenceDiagram');
+    });
+
+    it('renders common non-flowchart mermaid diagrams as readable previews', () => {
+      const classPreview = renderMermaidVisual(
+        `
+classDiagram
+  Animal <|-- Duck
+  Animal: +int age
+  Duck: +swim()
+`,
+        80,
+      );
+      const erPreview = renderMermaidVisual(
+        `
+erDiagram
+  CUSTOMER ||--o{ ORDER : places
+  CUSTOMER {
+    string name
+  }
+`,
+        80,
+      );
+      const piePreview = renderMermaidVisual(
+        `
+pie title Pets
+  "Dogs" : 40
+  "Cats" : 60
+`,
+        80,
+      );
+
+      expect(classPreview.title).toBe('Mermaid class diagram');
+      expect(classPreview.lines.join('\n')).toContain('Animal');
+      expect(classPreview.lines.join('\n')).toContain('Duck');
+      expect(erPreview.title).toBe('Mermaid ER diagram');
+      expect(erPreview.lines.join('\n')).toContain('CUSTOMER');
+      expect(erPreview.lines.join('\n')).toContain('ORDER');
+      expect(piePreview.title).toBe('Mermaid pie chart');
+      expect(piePreview.lines.join('\n')).toContain('Dogs');
+      expect(piePreview.lines.join('\n')).toContain('Cats');
+    });
+
+    it('falls back to mermaid source for unsupported diagrams', () => {
+      const text = `
+\`\`\`mermaid
+timeline
+  title History
+  2024 : Start
+\`\`\`
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame() ?? '';
+
+      expect(output).toContain('Mermaid source (timeline)');
+      expect(output).toContain('```mermaid');
+      expect(output).toContain('timeline');
+      expect(output).toContain('2024 : Start');
+      expect(output).not.toContain('Visual preview unavailable');
+    });
+
+    it('falls back to mermaid source when a known diagram cannot be previewed', () => {
+      const preview = renderMermaidVisual(
+        `
+stateDiagram-v2
+  note right of StillReadable
+    Notes are not parsed by the text preview yet.
+  end note
+`,
+        80,
+      );
+      const output = preview.lines.join('\n');
+
+      expect(preview.title).toBe('Mermaid source (stateDiagram)');
+      expect(output).toContain('```mermaid');
+      expect(output).toContain('stateDiagram-v2');
+      expect(output).toContain('Notes are not parsed');
+      expect(output).not.toContain('No previewable');
+    });
+
+    it('does not leave mermaid image rendering placeholders in finalized output', () => {
+      const text = `
+\`\`\`mermaid
+flowchart TD
+  A[Start] --> B[End]
+\`\`\`
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={false} />,
+      );
+      const output = lastFrame() ?? '';
+
+      expect(output).not.toContain('Rendering Mermaid image');
+      expect(output).not.toContain('Image rendering unavailable');
+      expect(output).toContain('Start');
+      expect(output).toContain('End');
+    });
+
+    it('does not fully render mermaid diagrams while the code block is pending', () => {
+      const text = `
+\`\`\`mermaid
+flowchart TD
+  A[Start] --> B[End]
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+
+      expect(output).toContain('Mermaid diagram is being written');
+      expect(output).not.toContain('Mermaid flowchart');
     });
   });
 

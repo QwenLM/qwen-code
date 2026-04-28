@@ -61,6 +61,9 @@ describe('keyMatchers', () => {
     [Command.SHOW_MORE_LINES]: (key: Key) => key.ctrl && key.name === 's',
     [Command.RETRY_LAST]: (key: Key) => key.ctrl && key.name === 'y',
     [Command.TOGGLE_COMPACT_MODE]: (key: Key) => key.ctrl && key.name === 'o',
+    [Command.TOGGLE_RENDER_MODE]: (key: Key) =>
+      (key.meta && key.name === 'm') ||
+      (key.sequence === 'µ' && !key.ctrl && !key.meta && !key.paste),
     [Command.REVERSE_SEARCH]: (key: Key) => key.ctrl && key.name === 'r',
     [Command.SUBMIT_REVERSE_SEARCH]: (key: Key) =>
       key.name === 'return' && !key.ctrl,
@@ -285,6 +288,18 @@ describe('keyMatchers', () => {
       command: Command.TOGGLE_SHELL_INPUT_FOCUS,
       positive: [createKey('f', { ctrl: true })],
       negative: [createKey('f')],
+    },
+    {
+      command: Command.TOGGLE_RENDER_MODE,
+      positive: [
+        createKey('m', { meta: true }),
+        createKey('', { sequence: 'µ' }),
+      ],
+      negative: [
+        createKey('m'),
+        createKey('m', { ctrl: true }),
+        createKey('', { sequence: 'µ', paste: true }),
+      ],
     },
   ];
 

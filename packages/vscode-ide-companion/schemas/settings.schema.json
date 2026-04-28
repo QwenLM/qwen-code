@@ -190,6 +190,14 @@
           "type": "boolean",
           "default": true
         },
+        "renderMode": {
+          "description": "Default Markdown display mode. Use \"render\" for rich visual previews, or \"raw\" to show source-oriented Markdown by default. Toggle during a session with Alt/Option+M. Options: render, raw",
+          "enum": [
+            "render",
+            "raw"
+          ],
+          "default": "render"
+        },
         "showCitations": {
           "description": "Show citations for generated text in the chat.",
           "type": "boolean",

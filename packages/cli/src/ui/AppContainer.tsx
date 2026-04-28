@@ -126,6 +126,10 @@ import {
 } from './hooks/useExtensionUpdates.js';
 import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
+import {
+  RenderModeProvider,
+  type RenderMode,
+} from './contexts/RenderModeContext.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
 import {
   useBackgroundTaskViewState,
@@ -1532,6 +1536,22 @@ export const AppContainer = (props: AppContainerProps) => {
   const [compactMode, setCompactMode] = useState<boolean>(
     settings.merged.ui?.compactMode ?? false,
   );
+  const configuredRenderMode = settings.merged.ui?.renderMode;
+  const [renderMode, setRenderMode] = useState<RenderMode>(
+    configuredRenderMode === 'raw' ? 'raw' : 'render',
+  );
+  useEffect(() => {
+    setRenderMode(configuredRenderMode === 'raw' ? 'raw' : 'render');
+  }, [configuredRenderMode]);
+  const renderModeMountedRef = useRef(false);
+  useEffect(() => {
+    if (!renderModeMountedRef.current) {
+      renderModeMountedRef.current = true;
+      return;
+    }
+
+    refreshStatic();
+  }, [renderMode, refreshStatic]);
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
@@ -2151,6 +2171,8 @@ export const AppContainer = (props: AppContainerProps) => {
         setCompactMode(newValue);
         void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
         refreshStatic();
+      } else if (keyMatchers[Command.TOGGLE_RENDER_MODE](key)) {
+        setRenderMode(renderMode === 'render' ? 'raw' : 'render');
       }
     },
     [
@@ -2186,6 +2208,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isAuthenticating,
       compactMode,
       setCompactMode,
+      renderMode,
+      setRenderMode,
       refreshStatic,
       handleDoubleEscRewind,
     ],
@@ -2665,6 +2689,10 @@ export const AppContainer = (props: AppContainerProps) => {
     () => ({ compactMode, setCompactMode }),
     [compactMode, setCompactMode],
   );
+  const renderModeValue = useMemo(
+    () => ({ renderMode, setRenderMode }),
+    [renderMode, setRenderMode],
+  );
 
   return (
     <UIStateContext.Provider value={uiState}>
@@ -2677,9 +2705,11 @@ export const AppContainer = (props: AppContainerProps) => {
             }}
           >
             <CompactModeProvider value={compactModeValue}>
-              <ShellFocusContext.Provider value={isFocused}>
-                <App />
-              </ShellFocusContext.Provider>
+              <RenderModeProvider value={renderModeValue}>
+                <ShellFocusContext.Provider value={isFocused}>
+                  <App />
+                </ShellFocusContext.Provider>
+              </RenderModeProvider>
             </CompactModeProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>

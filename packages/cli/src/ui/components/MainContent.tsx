@@ -17,6 +17,11 @@ import { useAppContext } from '../contexts/AppContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
+import { useRenderMode } from '../contexts/RenderModeContext.js';
+import {
+  countMarkdownSourceBlocks,
+  type MarkdownSourceCopyIndexOffsets,
+} from '../utils/MarkdownDisplay.js';
 import {
   isForceExpandGroup,
   mergeCompactToolGroups,
@@ -28,11 +33,40 @@ import {
 // usage.
 const MAX_GEMINI_MESSAGE_LINES = 65536;
 
+function createEmptySourceCopyOffsets(): MarkdownSourceCopyIndexOffsets {
+  return {
+    codeBlockLanguageCounts: new Map<string, number>(),
+    mathBlockCount: 0,
+  };
+}
+
+function cloneSourceCopyOffsets(
+  offsets: MarkdownSourceCopyIndexOffsets,
+): MarkdownSourceCopyIndexOffsets {
+  return {
+    codeBlockLanguageCounts: new Map(offsets.codeBlockLanguageCounts),
+    mathBlockCount: offsets.mathBlockCount,
+  };
+}
+
+function addSourceBlockCounts(
+  offsets: MarkdownSourceCopyIndexOffsets,
+  text: string,
+) {
+  const counts = countMarkdownSourceBlocks(text);
+  for (const [lang, count] of counts.codeBlockLanguageCounts) {
+    const current = offsets.codeBlockLanguageCounts.get(lang) ?? 0;
+    offsets.codeBlockLanguageCounts.set(lang, current + count);
+  }
+  offsets.mathBlockCount += counts.mathBlockCount;
+}
+
 export const MainContent = () => {
   const { version } = useAppContext();
   const uiState = useUIState();
   const uiActions = useUIActions();
   const { compactMode } = useCompactMode();
+  const { renderMode } = useRenderMode();
   const {
     pendingHistoryItems,
     terminalWidth,
@@ -176,28 +210,56 @@ export const MainContent = () => {
     prevMergedLengthRef.current = currMLen;
   }, [compactMode, uiState.history, mergedHistory, uiActions]);
 
+  const historyItemsWithSourceCopyOffsets = useMemo(() => {
+    let runningOffsets = createEmptySourceCopyOffsets();
+
+    return mergedHistory.map((item) => {
+      if (item.type === 'gemini') {
+        runningOffsets = createEmptySourceCopyOffsets();
+        const offsets = cloneSourceCopyOffsets(runningOffsets);
+        addSourceBlockCounts(runningOffsets, item.text);
+        return { item, sourceCopyIndexOffsets: offsets };
+      }
+
+      if (item.type === 'gemini_content') {
+        const offsets = cloneSourceCopyOffsets(runningOffsets);
+        addSourceBlockCounts(runningOffsets, item.text);
+        return { item, sourceCopyIndexOffsets: offsets };
+      }
+
+      if (item.type === 'user') {
+        runningOffsets = createEmptySourceCopyOffsets();
+      }
+
+      return { item, sourceCopyIndexOffsets: undefined };
+    });
+  }, [mergedHistory]);
+
   return (
     <>
       <Static
-        key={`${uiState.historyRemountKey}-${uiState.currentModel}`}
+        key={`${uiState.historyRemountKey}-${uiState.currentModel}-${renderMode}`}
         items={[
           <AppHeader key="app-header" version={version} />,
           <DebugModeNotification key="debug-notification" />,
           <Notifications key="notifications" />,
-          ...mergedHistory.map((h) => (
-            <HistoryItemDisplay
-              terminalWidth={terminalWidth}
-              mainAreaWidth={mainAreaWidth}
-              availableTerminalHeight={staticAreaMaxItemHeight}
-              availableTerminalHeightGemini={MAX_GEMINI_MESSAGE_LINES}
-              key={h.id}
-              item={h}
-              isPending={false}
-              commands={uiState.slashCommands}
-              compactLabel={getCompactLabel(h)}
-              summaryAbsorbed={isSummaryAbsorbed(h)}
-            />
-          )),
+          ...historyItemsWithSourceCopyOffsets.map(
+            ({ item: h, sourceCopyIndexOffsets }) => (
+              <HistoryItemDisplay
+                terminalWidth={terminalWidth}
+                mainAreaWidth={mainAreaWidth}
+                availableTerminalHeight={staticAreaMaxItemHeight}
+                availableTerminalHeightGemini={MAX_GEMINI_MESSAGE_LINES}
+                key={h.id}
+                item={h}
+                isPending={false}
+                commands={uiState.slashCommands}
+                compactLabel={getCompactLabel(h)}
+                summaryAbsorbed={isSummaryAbsorbed(h)}
+                sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+              />
+            ),
+          ),
         ]}
       >
         {(item) => item}
