@@ -1124,6 +1124,16 @@ const SETTINGS_SCHEMA = {
           'Enable automatic consolidation (dream) of collected memories.',
         showInDialog: false,
       },
+      enableAutoSkill: {
+        type: 'boolean',
+        label: 'Enable Auto Skill',
+        category: 'Memory',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Enable background review for reusable project skills after tool-heavy sessions.',
+        showInDialog: false,
+      },
     },
   },
 

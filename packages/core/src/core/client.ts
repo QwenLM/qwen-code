@@ -128,6 +128,7 @@ const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
 export class GeminiClient {
   private chat?: GeminiChat;
   private sessionTurnCount = 0;
+  private toolCallCount = 0;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
 
   private readonly loopDetector: LoopDetectionService;
@@ -505,11 +506,10 @@ export class GeminiClient {
   private runManagedAutoMemoryBackgroundTasks(
     messageType: SendMessageType,
   ): void {
-    if (messageType !== SendMessageType.UserQuery) {
-      return;
-    }
-
-    if (!this.config.getManagedAutoMemoryEnabled()) {
+    if (
+      messageType !== SendMessageType.UserQuery &&
+      messageType !== SendMessageType.ToolResult
+    ) {
       return;
     }
 
@@ -517,6 +517,34 @@ export class GeminiClient {
     const sessionId = this.config.getSessionId();
     const history = this.getHistory();
     const mgr = this.config.getMemoryManager();
+    const autoSkillEnabled = this.config.getAutoSkillEnabled();
+
+    if (autoSkillEnabled) {
+      const skillReviewResult = mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId,
+        history,
+        config: this.config,
+        toolCallCount: this.toolCallCount,
+        enabled: autoSkillEnabled,
+        threshold: 20,
+        maxTurns: 8,
+        timeoutMs: 120_000,
+      });
+      if (skillReviewResult.promise) {
+        this.pendingMemoryTaskPromises.push(
+          skillReviewResult.promise.then((record) => {
+            const touched = record.metadata?.['touchedSkillFiles'];
+            return Array.isArray(touched) ? touched.length : 0;
+          }),
+        );
+      }
+    }
+    this.toolCallCount = 0;
+
+    if (!this.config.getManagedAutoMemoryEnabled()) {
+      return;
+    }
 
     const extractPromise = mgr
       .scheduleExtract({
@@ -571,6 +599,14 @@ export class GeminiClient {
     const promises = this.pendingMemoryTaskPromises;
     this.pendingMemoryTaskPromises = [];
     return promises;
+  }
+
+  recordCompletedToolCall(toolName: string): void {
+    if (toolName === 'skill_manage') {
+      this.toolCallCount = 0;
+      return;
+    }
+    this.toolCallCount += 1;
   }
 
   async *sendMessageStream(

@@ -51,6 +51,7 @@ const MockedGeminiClientClass = vi.hoisted(() =>
     this.sendMessageStream = mockSendMessageStream;
     this.addHistory = vi.fn();
     this.consumePendingMemoryTaskPromises = vi.fn().mockReturnValue([]);
+    this.recordCompletedToolCall = vi.fn();
     this.getChatRecordingService = vi.fn().mockReturnValue({
       recordThought: vi.fn(),
       initialize: vi.fn(),

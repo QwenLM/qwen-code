@@ -81,6 +81,7 @@ import { type ContextState, templateString } from './agent-headless.js';
  */
 export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
+  ToolNames.SKILL_MANAGE,
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
@@ -347,6 +348,11 @@ export class AgentCore {
     const toolsList: FunctionDeclaration[] = [];
 
     const excludedFromSubagents = EXCLUDED_TOOLS_FOR_SUBAGENTS;
+    // When a subagent has an explicit tools list (not wildcard), only the
+    // recursive-spawn guard (AgentTool) is enforced. Other exclusions like
+    // SKILL_MANAGE are intentionally bypassed because the caller has
+    // explicitly opted in to those tools (e.g. the skill review agent).
+    const recursionGuardOnly = new Set<string>([ToolNames.AGENT]);
 
     if (this.toolConfig) {
       const asStrings = this.toolConfig.tools.filter(
@@ -367,13 +373,19 @@ export class AgentCore {
             .filter((t) => !(t.name && excludedFromSubagents.has(t.name))),
         );
       } else {
+        // Explicit tool list: only prevent recursive agent spawning.
         toolsList.push(
           ...toolRegistry.getFunctionDeclarationsFiltered(
-            asStrings.filter((name) => !excludedFromSubagents.has(name)),
+            asStrings.filter((name) => !recursionGuardOnly.has(name)),
           ),
         );
       }
-      toolsList.push(...onlyInlineDecls);
+      // Also filter inline FunctionDeclaration[] passed directly in toolConfig.
+      toolsList.push(
+        ...onlyInlineDecls.filter(
+          (d) => !(d.name && recursionGuardOnly.has(d.name)),
+        ),
+      );
     } else {
       // Inherit all available tools by default when not specified.
       toolsList.push(

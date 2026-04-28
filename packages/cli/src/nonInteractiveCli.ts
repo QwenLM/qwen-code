@@ -457,6 +457,9 @@ export async function runNonInteractive(
             }
 
             adapter.emitToolResult(finalRequestInfo, toolResponse);
+            config
+              .getGeminiClient()
+              .recordCompletedToolCall(finalRequestInfo.name);
 
             if (toolResponse.responseParts) {
               toolResponseParts.push(...toolResponse.responseParts);
@@ -605,6 +608,9 @@ export async function runNonInteractive(
                   }
 
                   adapter.emitToolResult(requestInfo, toolResponse);
+                  config
+                    .getGeminiClient()
+                    .recordCompletedToolCall(requestInfo.name);
 
                   if (toolResponse.responseParts) {
                     itemToolResponseParts.push(...toolResponse.responseParts);
@@ -721,6 +727,13 @@ export async function runNonInteractive(
             if (!registry.hasUnfinalizedTasks() && localQueue.length === 0)
               break;
             await new Promise((r) => setTimeout(r, 100));
+          }
+
+          const memoryTaskPromises = config
+            .getGeminiClient()
+            .consumePendingMemoryTaskPromises();
+          if (memoryTaskPromises.length > 0) {
+            await Promise.allSettled(memoryTaskPromises);
           }
 
           const metrics = uiTelemetryService.getMetrics();
