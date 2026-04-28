@@ -12,6 +12,7 @@ on:
       - 'README.md'
       - 'package.json'
       - '.github/workflows/sdk-python.yml'
+      - '.github/workflows/release-sdk-python.yml'
   push:
     branches:
       - 'main'
@@ -23,6 +24,7 @@ on:
       - 'README.md'
       - 'package.json'
       - '.github/workflows/sdk-python.yml'
+      - '.github/workflows/release-sdk-python.yml'
 
 jobs:
   sdk-python:
