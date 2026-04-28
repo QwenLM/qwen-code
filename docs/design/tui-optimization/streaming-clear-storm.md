@@ -138,11 +138,15 @@ separate fixed four-row footer reserve. It first checks exact fit with
 `reservedRows: 0`; on true overflow it reruns the slicer with one reserved row
 for the hidden-line marker.
 
-The pre-sliced pending tail is also rendered through `MaxSizedBox`. This is a
-second, actual-Ink-layout guard for the #3279 scrollback leak shown in narrow
-terminals: if source-text visual-height estimation is still off because of
-wrapping, prefix width, or renderer layout details, `MaxSizedBox` clips the
-plain pending tail to `availableTerminalHeight` before it reaches log-update.
+The pre-sliced pending tail is also rendered through `MaxSizedBox` and capped to
+a small live viewport. This is a second, actual-Ink-layout guard for the #3279
+scrollback leak shown in narrow terminals: if source-text visual-height
+estimation is still off because of wrapping, prefix width, or renderer layout
+details, `MaxSizedBox` clips the plain pending tail before it reaches
+log-update. The cap is intentionally lower than the whole terminal budget,
+because recently committed Static prefix text can still be visible above the
+pending tail during streaming; allowing the tail to consume the full dynamic
+budget can still scroll marker/fence rows into the terminal scrollback.
 
 ### Streaming Markdown Safe Split
 
@@ -367,6 +371,9 @@ QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
 npm run capture:narrow-streaming-regression
 
 QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
+npm run capture:narrow-markdown-regression
+
+QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
 npm run capture:resize-clear-regression
 
 QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
@@ -389,6 +396,13 @@ QWEN_TUI_E2E_MIN_CLEAR_PAIRS=1 \
 QWEN_TUI_E2E_MAX_CLEAR_PAIRS=Infinity \
 QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
 npm run capture:narrow-streaming-regression
+
+QWEN_TUI_E2E_REPO=/path/to/main-checkout \
+QWEN_TUI_E2E_OUT=/tmp/qwen-tui/main-narrow-markdown \
+QWEN_TUI_E2E_MIN_CLEAR_PAIRS=1 \
+QWEN_TUI_E2E_MAX_CLEAR_PAIRS=Infinity \
+QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
+npm run capture:narrow-markdown-regression
 
 QWEN_TUI_E2E_REPO=/path/to/main-checkout \
 QWEN_TUI_E2E_OUT=/tmp/qwen-tui/main-resize \
@@ -471,6 +485,13 @@ Additional review follow-up validation for #3279:
 | Pending assistant exact fit      | fixed branch | strict pass | six-row pending text in six-row budget is visible  | passed |
 | Pending assistant overflow bound | fixed branch | strict pass | only one marker row is reserved on real overflow   | passed |
 | Pending assistant hard bound     | fixed branch | strict pass | actual Ink frame rows stay within height budget    | passed |
+| Pending assistant live cap       | fixed branch | strict pass | tall terminal budgets still render <= 12 live rows | passed |
+
+Additional Mermaid/narrow-scrollback E2E validation:
+
+| Scenario                         | Branch       | Expected    | Clear pairs | Hidden markers | Raw mermaid fences | Frames | Result |
+| -------------------------------- | ------------ | ----------- | ----------: | -------------: | -----------------: | -----: | ------ |
+| Narrow Markdown + Mermaid resize | fixed branch | strict pass |           0 |              0 |                  0 |     93 | passed |
 
 ## Gemini CLI Cross-Check
 
@@ -505,9 +526,10 @@ large renderer wholesale:
 - The #3279 narrow Markdown path is covered by two guards: complete
   code/table/list blocks leave the pending region earlier, and the remaining
   pending tail uses the measured dynamic height budget instead of a fixed
-  footer reserve. The pending tail is then clipped through `MaxSizedBox` as a
-  hard actual-render-height guard, preventing residual source-vs-Ink height
-  mismatch from leaking repeated rows into scrollback.
+  footer reserve. The pending tail is then capped and clipped through
+  `MaxSizedBox` as a hard actual-render-height guard, preventing residual
+  source-vs-Ink height mismatch or visible Static prefix rows from leaking
+  repeated marker/fence rows into scrollback.
 - The static refresh fix replaces non-explicit `clearTerminal` refresh paths
   with a viewport repaint. This covers resize, view switch, compact replacement,
   rewind, auth/resume, and editor-close refresh while keeping `/clear` explicit.

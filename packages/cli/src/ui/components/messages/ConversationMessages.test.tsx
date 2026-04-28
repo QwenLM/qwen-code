@@ -83,6 +83,27 @@ describe('<ConversationMessages />', () => {
     expect(output).toContain('preserving');
   });
 
+  it('caps tall pending assistant budgets to avoid scrollback frame leakage (#3279)', () => {
+    const text = Array.from(
+      { length: 80 },
+      () => '```mermaid\nflowchart TD\n    A --> B',
+    ).join('\n');
+
+    const { lastFrame } = renderWithProviders(
+      <AssistantMessage
+        text={text}
+        isPending={true}
+        availableTerminalHeight={40}
+        contentWidth={32}
+      />,
+    );
+    const output = lastFrame() ?? '';
+
+    expect(output.split('\n')).toHaveLength(12);
+    expect(output).toContain('lines hidden');
+    expect(output).not.toMatch(/(?:```mermaid.*\n){12,}/);
+  });
+
   it('does not invoke rich markdown rendering for pending fenced code blocks (#3279)', () => {
     // Mermaid code block source: MarkdownDisplay would render this through
     // RenderCodeBlock + colorizeCode, which adds line-number prefixes and

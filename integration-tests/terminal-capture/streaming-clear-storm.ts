@@ -65,12 +65,15 @@ type Summary = Counts & {
   repoRoot: string;
   outputDir: string;
   gifPath: string | null;
+  streamPayload: string;
   framesCaptured: number;
   rawBytes: number;
   streamDeltaBytes: number;
   finalScreenLines: number;
   finalDoneCount: number;
   requestCount: number;
+  hiddenMarkerCount: number;
+  rawMermaidFenceCount: number;
   terminal: {
     cols: number;
     rows: number;
@@ -161,7 +164,33 @@ function captureCounts(raw: string): Counts {
   };
 }
 
-function streamOpenAIResponse(res: ServerResponse): void {
+function markdownChunks(): string[] {
+  const lines = [
+    "Here's another Mermaid flowchart example - this one models a CI/CD pipeline:",
+    '',
+    '```mermaid',
+    'flowchart TD',
+    '    A[Commit pushed] --> B[Install dependencies]',
+    '    B --> C[Run lint]',
+    '    C --> D[Run unit tests]',
+    '    D --> E[Build package]',
+    '    E --> F[Publish artifacts]',
+    '```',
+    '',
+    '**Note:** The retry loop uses exponential backoff to avoid hammering the API while preserving delivery.',
+  ];
+
+  return lines.flatMap((line) => [line, '\n']);
+}
+
+function defaultChunks(): string[] {
+  return Array.from({ length: STREAM_CHUNK_COUNT }, (_, index) => {
+    const marker = String(index).padStart(3, '0');
+    return `clear-storm-${marker}-alpha clear-storm-${marker}-beta clear-storm-${marker}-gamma `;
+  });
+}
+
+function streamOpenAIResponse(res: ServerResponse, payload: string): void {
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
     'cache-control': 'no-cache, no-transform',
@@ -183,10 +212,7 @@ function streamOpenAIResponse(res: ServerResponse): void {
     choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
   });
 
-  const chunks = Array.from({ length: STREAM_CHUNK_COUNT }, (_, index) => {
-    const marker = String(index).padStart(3, '0');
-    return `clear-storm-${marker}-alpha clear-storm-${marker}-beta clear-storm-${marker}-gamma `;
-  });
+  const chunks = payload === 'markdown' ? markdownChunks() : defaultChunks();
   chunks.push(STREAM_DONE);
 
   let index = 0;
@@ -217,7 +243,7 @@ function streamOpenAIResponse(res: ServerResponse): void {
   }, STREAM_INTERVAL_MS);
 }
 
-async function startFakeOpenAIServer(): Promise<FakeServer> {
+async function startFakeOpenAIServer(payload: string): Promise<FakeServer> {
   let requestCount = 0;
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     requestCount += 1;
@@ -232,7 +258,7 @@ async function startFakeOpenAIServer(): Promise<FakeServer> {
     });
     req.on('end', () => {
       if (body.includes('"stream":true')) {
-        streamOpenAIResponse(res);
+        streamOpenAIResponse(res, payload);
         return;
       }
 
@@ -403,13 +429,14 @@ async function main(): Promise<void> {
     1,
     envNumber('QWEN_TUI_E2E_STREAMING_RESIZE_EVERY_FRAMES', 8),
   );
+  const streamPayload = process.env['QWEN_TUI_E2E_STREAM_PAYLOAD'] ?? 'default';
 
   if (existsSync(outputDir)) {
     rmSync(outputDir, { recursive: true });
   }
   mkdirSync(outputDir, { recursive: true });
 
-  const fakeServer = await startFakeOpenAIServer();
+  const fakeServer = await startFakeOpenAIServer(streamPayload);
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     DEV: 'true',
@@ -472,17 +499,27 @@ async function main(): Promise<void> {
     const raw = terminal.getRawOutput();
     const streamDelta = raw.slice(rawBefore);
     const counts = captureCounts(streamDelta);
+    const hiddenMarkerCount = countPattern(
+      finalScreen,
+      /\.\.\. first \d+ lines hidden \.\.\./g,
+    );
+    const rawMermaidFenceCount = countOccurrences(finalScreen, '```mermaid');
     const gifPath = generateGif(frames, outputDir);
+    const markdownPass =
+      streamPayload !== 'markdown' ||
+      (hiddenMarkerCount === 0 && rawMermaidFenceCount === 0);
     const pass =
       counts.clearTerminalPairCount >= minClearTerminalPairs &&
       counts.clearTerminalPairCount <= maxClearTerminalPairs &&
       frames.length >= minFrames &&
-      countOccurrences(finalScreen, STREAM_DONE) === 1;
+      countOccurrences(finalScreen, STREAM_DONE) === 1 &&
+      markdownPass;
 
     const summary: Summary = {
       repoRoot,
       outputDir,
       gifPath,
+      streamPayload,
       framesCaptured: frames.length,
       rawBytes: raw.length,
       streamDeltaBytes: streamDelta.length,
@@ -490,6 +527,8 @@ async function main(): Promise<void> {
       finalScreenLines: finalScreen.split('\n').length,
       finalDoneCount: countOccurrences(finalScreen, STREAM_DONE),
       requestCount: fakeServer.getRequestCount(),
+      hiddenMarkerCount,
+      rawMermaidFenceCount,
       terminal: {
         cols: terminalCols,
         rows: terminalRows,

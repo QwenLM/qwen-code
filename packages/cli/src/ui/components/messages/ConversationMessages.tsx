@@ -84,6 +84,7 @@ interface ContinuationMarkdownMessageProps {
 
 const MIN_PENDING_PREVIEW_HEIGHT = 2;
 const PENDING_PREVIEW_MARKER_ROWS = 1;
+const MAX_PENDING_PREVIEW_HEIGHT = 12;
 
 function getPrefixWidth(prefix: string): number {
   // Reserve one extra column so text never touches the prefix glyph.
@@ -117,6 +118,20 @@ function slicePendingTextForHeight(
   });
 }
 
+function getPendingPreviewHeight(
+  availableTerminalHeight: number | undefined,
+): number | undefined {
+  if (availableTerminalHeight === undefined) {
+    return undefined;
+  }
+
+  if (availableTerminalHeight <= MAX_PENDING_PREVIEW_HEIGHT) {
+    return availableTerminalHeight;
+  }
+
+  return MAX_PENDING_PREVIEW_HEIGHT;
+}
+
 // Streaming pending output is always rendered as plain text (not through
 // MarkdownDisplay) so that the visual height we use for slicing matches the
 // height that actually reaches Ink/Yoga. MarkdownDisplay's code blocks,
@@ -127,9 +142,10 @@ function slicePendingTextForHeight(
 // every frame, producing the duplicate output in #3279. Once a stable
 // prefix is promoted into <Static>, the committed message is rendered
 // through MarkdownDisplay with full formatting; only the still-streaming
-// tail stays plain. The pre-sliced tail is still wrapped in MaxSizedBox as a
-// hard guard, so any remaining source-vs-Ink measurement mismatch cannot grow
-// the dynamic region past the measured terminal budget.
+// tail stays plain. The pre-sliced tail is capped to a small live viewport and
+// still wrapped in MaxSizedBox as a hard guard, so any remaining source-vs-Ink
+// measurement mismatch cannot grow the dynamic region enough to scroll the
+// terminal and leak previous frames into scrollback.
 const PendingTextPreview: React.FC<{
   text: string;
   hiddenLinesCount: number;
@@ -165,6 +181,8 @@ const PendingMarkdownContent: React.FC<{
   availableTerminalHeight,
   contentWidth,
 }) => {
+  const previewHeight = getPendingPreviewHeight(availableTerminalHeight);
+
   if (availableTerminalHeight === undefined) {
     return (
       <Text wrap="wrap" color={textColor}>
@@ -178,7 +196,7 @@ const PendingMarkdownContent: React.FC<{
       text={text}
       hiddenLinesCount={hiddenLinesCount}
       textColor={textColor}
-      maxHeight={availableTerminalHeight}
+      maxHeight={previewHeight}
       maxWidth={contentWidth}
     />
   );
@@ -228,9 +246,10 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
 }) => {
   const prefixWidth = getPrefixWidth(prefix);
   const markdownWidth = Math.max(1, contentWidth - prefixWidth);
+  const pendingPreviewHeight = getPendingPreviewHeight(availableTerminalHeight);
   const effectiveTextColor = textColor ?? theme.text.primary;
   const pendingSlice = isPending
-    ? slicePendingTextForHeight(text, availableTerminalHeight, markdownWidth)
+    ? slicePendingTextForHeight(text, pendingPreviewHeight, markdownWidth)
     : { text, hiddenLinesCount: 0 };
 
   return (
@@ -275,9 +294,10 @@ const ContinuationMarkdownMessage: React.FC<
 }) => {
   const prefixWidth = getPrefixWidth(basePrefix);
   const markdownWidth = Math.max(1, contentWidth - prefixWidth);
+  const pendingPreviewHeight = getPendingPreviewHeight(availableTerminalHeight);
   const effectiveTextColor = textColor ?? theme.text.primary;
   const pendingSlice = isPending
-    ? slicePendingTextForHeight(text, availableTerminalHeight, markdownWidth)
+    ? slicePendingTextForHeight(text, pendingPreviewHeight, markdownWidth)
     : { text, hiddenLinesCount: 0 };
 
   return (
