@@ -17,6 +17,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import stripAnsi from 'strip-ansi';
 import type { Config } from '../config/config.js';
@@ -57,6 +58,7 @@ export interface MonitorToolParams {
   description?: string;
   max_events?: number;
   idle_timeout_ms?: number;
+  directory?: string;
 }
 
 class MonitorToolInvocation extends BaseToolInvocation<
@@ -149,7 +151,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
     let child;
     try {
       child = spawn(executable, [...argsPrefix, command], {
-        cwd: this.config.getTargetDir(),
+        cwd: this.params.directory || this.config.getTargetDir(),
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: true,
         env: {
@@ -349,6 +351,11 @@ export class MonitorTool extends BaseDeclarativeTool<
             description:
               'Stop the monitor if no output for this many milliseconds. Default 300000 (5 min). Max 600000.',
           },
+          directory: {
+            type: 'string',
+            description:
+              '(OPTIONAL) The absolute path of the directory to run the command in. If not provided, the project root directory is used. Must be within the workspace.',
+          },
         },
         required: ['command'],
         additionalProperties: false,
@@ -384,6 +391,18 @@ export class MonitorTool extends BaseDeclarativeTool<
       }
       if (params.idle_timeout_ms > MAX_IDLE_TIMEOUT_MS) {
         return `idle_timeout_ms cannot exceed ${MAX_IDLE_TIMEOUT_MS}ms (10 minutes).`;
+      }
+    }
+    if (params.directory) {
+      if (!path.isAbsolute(params.directory)) {
+        return 'Directory must be an absolute path.';
+      }
+      const workspaceDirs = this.config.getWorkspaceContext().getDirectories();
+      const isWithinWorkspace = workspaceDirs.some((wsDir) =>
+        params.directory!.startsWith(wsDir),
+      );
+      if (!isWithinWorkspace) {
+        return `Directory '${params.directory}' is not within any of the registered workspace directories.`;
       }
     }
     return null;

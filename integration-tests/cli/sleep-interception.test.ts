@@ -32,18 +32,8 @@ describe('sleep-interception', () => {
     const foundShell = await rig.waitForToolCall('run_shell_command');
     expect(foundShell).toBeTruthy();
 
-    // The tool result should contain the blocked message
-    const toolLogs = rig.readToolLogs();
-    const shellCall = toolLogs.find(
-      (t) => t.toolRequest.name === 'run_shell_command',
-    );
-    if (shellCall?.toolResult) {
-      const resultStr =
-        typeof shellCall.toolResult === 'string'
-          ? shellCall.toolResult
-          : JSON.stringify(shellCall.toolResult);
-      expect(resultStr.toLowerCase()).toContain('blocked');
-    }
+    // The model's output should mention it was blocked
+    expect(result.toLowerCase()).toContain('blocked');
   }, 30000);
 
   it('should allow sleep < 2s', async () => {
