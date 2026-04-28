@@ -1383,13 +1383,37 @@ function mergeConsecutiveAssistantMessages(
         // Combine tool calls
         const combinedToolCalls = [...lastToolCalls, ...currentToolCalls];
 
-        // Update the last message with combined data
+        // Combine reasoning_content. Without this merge, the second message's
+        // reasoning would be silently dropped, which can cause DeepSeek thinking
+        // mode to reject the next request with HTTP 400 (issue #3619). The
+        // merge typically fires when cleanOrphanedToolCalls removes the tool
+        // message between two assistant turns, leaving them adjacent.
+        const lastReasoning =
+          'reasoning_content' in lastMessage
+            ? ((lastMessage as ExtendedChatCompletionAssistantMessageParam)
+                .reasoning_content ?? '')
+            : '';
+        const currentReasoning =
+          'reasoning_content' in message
+            ? ((message as ExtendedChatCompletionAssistantMessageParam)
+                .reasoning_content ?? '')
+            : '';
+        const combinedReasoning = [lastReasoning, currentReasoning]
+          .filter(Boolean)
+          .join('');
+
+        // Update the last message with combined data.
+        // When reasoning_content is present, fall back to "" instead of null
+        // for empty content. Some OpenAI-compatible providers (e.g. Ollama)
+        // reject content: null when reasoning_content is set (issue #3499).
+        // processContent already enforces this rule for single messages; we
+        // mirror it here so the merged result stays compatible.
         (
           lastMessage as OpenAI.Chat.ChatCompletionMessageParam & {
             content: string | OpenAI.Chat.ChatCompletionContentPart[] | null;
             tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
           }
-        ).content = combinedContent || null;
+        ).content = combinedContent || (combinedReasoning ? '' : null);
         if (combinedToolCalls.length > 0) {
           (
             lastMessage as OpenAI.Chat.ChatCompletionMessageParam & {
@@ -1397,6 +1421,11 @@ function mergeConsecutiveAssistantMessages(
               tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
             }
           ).tool_calls = combinedToolCalls;
+        }
+        if (combinedReasoning) {
+          (
+            lastMessage as ExtendedChatCompletionAssistantMessageParam
+          ).reasoning_content = combinedReasoning;
         }
 
         continue; // Skip adding the current message since it's been merged
