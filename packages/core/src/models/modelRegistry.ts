@@ -176,12 +176,21 @@ export class ModelRegistry {
   ): ResolvedModelConfig {
     this.validateModelConfig(config, authType);
 
+    const generationConfig = { ...(config.generationConfig ?? {}) };
+    // Auto-fill modalities from the model name when the provider didn't set
+    // them explicitly. Without this, downstream consumers that read straight
+    // from the registry (e.g. sub-agents via getResolvedModel) would inherit
+    // the parent session's modalities instead of the agent's own.
+    if (generationConfig.modalities === undefined) {
+      generationConfig.modalities = defaultModalities(config.id);
+    }
+
     return {
       ...config,
       authType,
       name: config.name || config.id,
       baseUrl: config.baseUrl || this.getDefaultBaseUrl(authType),
-      generationConfig: config.generationConfig ?? {},
+      generationConfig,
       capabilities: config.capabilities || {},
     };
   }

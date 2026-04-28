@@ -35,12 +35,8 @@ import type {
 } from '../agents/runtime/agent-events.js';
 import type { Config } from '../config/config.js';
 import { APPROVAL_MODES } from '../config/config.js';
-import {
-  type AuthType,
-  type ContentGenerator,
-  type ContentGeneratorConfig,
-  createContentGenerator,
-} from '../core/contentGenerator.js';
+import { createContentGenerator } from '../core/contentGenerator.js';
+import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
@@ -639,22 +635,24 @@ export class SubagentManager {
       const runtimeConfig = await this.convertToRuntimeConfig(config);
 
       // When the model selector specifies a different provider, build a
-      // per-agent Config with a dedicated ContentGenerator so the subagent
-      // talks to the right API without affecting the parent process.
-      const agentContext = await this.maybeOverrideContentGenerator(
+      // dedicated ContentGenerator + view so the subagent talks to the
+      // right API without affecting the parent process. The view is
+      // applied via AsyncLocalStorage when the agent runs.
+      const runtimeView = await this.buildAgentRuntimeView(
         config,
         runtimeContext,
       );
 
       return await AgentHeadless.create(
         config.name,
-        agentContext,
+        runtimeContext,
         runtimeConfig.promptConfig,
         runtimeConfig.modelConfig,
         runtimeConfig.runConfig,
         runtimeConfig.toolConfig,
         options?.eventEmitter,
         options?.hooks,
+        runtimeView,
       );
     } catch (error) {
       if (error instanceof Error) {
@@ -670,17 +668,17 @@ export class SubagentManager {
 
   /**
    * When a subagent's model selector specifies a model (bare ID or
-   * authType-prefixed), build a Config override with a dedicated
-   * ContentGenerator so the model actually reaches the API.
-   * Returns the original context unchanged for inherit selectors.
+   * authType-prefixed), build a dedicated ContentGenerator and the view
+   * the agent runtime should publish via AsyncLocalStorage during the
+   * run. Returns `undefined` for inherit selectors (no override needed).
    */
-  private async maybeOverrideContentGenerator(
+  private async buildAgentRuntimeView(
     config: SubagentConfig,
     base: Config,
-  ): Promise<Config> {
+  ): Promise<RuntimeContentGeneratorView | undefined> {
     const selection = parseSubagentModelSelection(config.model);
     if (selection.inherits) {
-      return base;
+      return undefined;
     }
 
     const authType =
@@ -700,20 +698,14 @@ export class SubagentManager {
       base,
     );
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const override = Object.create(base) as any;
-    override.getContentGenerator = (): ContentGenerator => agentGenerator;
-    override.getContentGeneratorConfig = (): ContentGeneratorConfig =>
-      agentGeneratorConfig;
-    override.getAuthType = (): AuthType | undefined =>
-      agentGeneratorConfig.authType;
-    override.getModel = (): string => agentGeneratorConfig.model;
-
     debugLogger.info(
       `Created per-agent ContentGenerator for subagent "${config.name}": authType=${authType}, model=${agentGeneratorConfig.model}`,
     );
 
-    return override as Config;
+    return {
+      contentGenerator: agentGenerator,
+      contentGeneratorConfig: agentGeneratorConfig,
+    };
   }
 
   /**

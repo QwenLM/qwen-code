@@ -15,6 +15,7 @@
  */
 
 import type { Config } from '../../config/config.js';
+import type { RuntimeContentGeneratorView } from './agent-context.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import type {
   AgentEventEmitter,
@@ -163,6 +164,7 @@ export class AgentHeadless {
     toolConfig?: ToolConfig,
     eventEmitter?: AgentEventEmitter,
     hooks?: AgentHooks,
+    runtimeView?: RuntimeContentGeneratorView,
   ): Promise<AgentHeadless> {
     const core = new AgentCore(
       name,
@@ -173,6 +175,7 @@ export class AgentHeadless {
       toolConfig,
       eventEmitter,
       hooks,
+      runtimeView,
     );
     return new AgentHeadless(core);
   }

@@ -39,7 +39,10 @@ import {
   isInForkExecution,
   runInForkContext,
 } from './fork-subagent.js';
-import { getCurrentAgentId, runWithAgentContext } from './agent-context.js';
+import {
+  getCurrentAgentId,
+  runWithAgentContext,
+} from '../../agents/runtime/agent-context.js';
 import {
   AgentEventEmitter,
   AgentEventType,
@@ -1248,7 +1251,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // from this subagent's model record this agent's id as their
         // `parentAgentId` in the sidecar meta.
         const framedBgBody = () =>
-          runWithAgentContext({ agentId: hookOpts.agentId }, bgBody);
+          runWithAgentContext(hookOpts.agentId, bgBody);
         void (isFork ? runInForkContext(framedBgBody) : framedBgBody());
 
         this.updateDisplay({ status: 'background' as const }, updateOutput);
@@ -1269,7 +1272,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // subagent can also launch nested agents, and those nested launches
       // need to see this subagent's id as their `parentAgentId`.
       const runFramed = () =>
-        runWithAgentContext({ agentId: hookOpts.agentId }, () =>
+        runWithAgentContext(hookOpts.agentId, () =>
           this.runSubagentWithHooks(subagent, contextState, hookOpts),
         );
 
