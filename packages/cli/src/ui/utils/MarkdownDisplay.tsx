@@ -21,6 +21,70 @@ interface MarkdownDisplayProps {
   availableTerminalHeight?: number;
   contentWidth: number;
   textColor?: string;
+  sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
+}
+
+export interface MarkdownSourceCopyIndexOffsets {
+  codeBlockLanguageCounts: Map<string, number>;
+  mathBlockCount: number;
+}
+
+export interface MarkdownSourceBlockCounts {
+  codeBlockLanguageCounts: Map<string, number>;
+  mathBlockCount: number;
+}
+
+export function countMarkdownSourceBlocks(
+  text: string,
+): MarkdownSourceBlockCounts {
+  const codeBlockLanguageCounts = new Map<string, number>();
+  const lines = text.split(/\r?\n/);
+  const codeFenceRegex = /^ *(`{3,}|~{3,}) *([^`]*)$/;
+  const mathFenceRegex = /^ *\$\$ *$/;
+  let activeCodeFence: string | null = null;
+  let inMathBlock = false;
+  let mathBlockCount = 0;
+
+  for (const line of lines) {
+    const codeFenceMatch = line.match(codeFenceRegex);
+    if (activeCodeFence) {
+      if (
+        codeFenceMatch &&
+        codeFenceMatch[1].startsWith(activeCodeFence[0]) &&
+        codeFenceMatch[1].length >= activeCodeFence.length
+      ) {
+        activeCodeFence = null;
+      }
+      continue;
+    }
+
+    if (inMathBlock) {
+      if (mathFenceRegex.test(line)) {
+        inMathBlock = false;
+      }
+      continue;
+    }
+
+    if (codeFenceMatch) {
+      activeCodeFence = codeFenceMatch[1];
+      const lang =
+        codeFenceMatch[2]?.trim().split(/\s+/)[0]?.toLowerCase() || null;
+      if (lang) {
+        codeBlockLanguageCounts.set(
+          lang,
+          (codeBlockLanguageCounts.get(lang) ?? 0) + 1,
+        );
+      }
+      continue;
+    }
+
+    if (mathFenceRegex.test(line)) {
+      inMathBlock = true;
+      mathBlockCount += 1;
+    }
+  }
+
+  return { codeBlockLanguageCounts, mathBlockCount };
 }
 
 // Constants for Markdown parsing and rendering
@@ -38,6 +102,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   availableTerminalHeight,
   contentWidth,
   textColor = theme.text.primary,
+  sourceCopyIndexOffsets,
 }) => {
   const { renderMode } = useRenderMode();
   if (!text) return <></>;
@@ -74,13 +139,15 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   let codeBlockIndex = 0;
   let currentCodeBlockIndex = 0;
   let currentCodeBlockLangIndex = 0;
-  const codeBlockLanguageCounts = new Map<string, number>();
+  const codeBlockLanguageCounts = new Map<string, number>(
+    sourceCopyIndexOffsets?.codeBlockLanguageCounts,
+  );
   let lastLineEmpty = true;
   let codeBlockContent: string[] = [];
   let codeBlockLang: string | null = null;
   let codeBlockFence = '';
   let inMathBlock = false;
-  let mathBlockIndex = 0;
+  let mathBlockIndex = sourceCopyIndexOffsets?.mathBlockCount ?? 0;
   let currentMathBlockIndex = 0;
   let mathBlockContent: string[] = [];
   let inTable = false;

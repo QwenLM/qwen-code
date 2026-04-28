@@ -523,6 +523,33 @@ $$
       expect(output).not.toContain('α + β');
     });
 
+    it('applies source copy offsets from previous assistant chunks', () => {
+      const text = `
+\`\`\`mermaid
+sequenceDiagram
+  A->>B: hello
+\`\`\`
+
+$$
+\\gamma + \\delta
+$$
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          sourceCopyIndexOffsets={{
+            codeBlockLanguageCounts: new Map([['mermaid', 1]]),
+            mathBlockCount: 2,
+          }}
+        />,
+      );
+
+      const output = lastFrame();
+      expect(output).toContain('source: /copy mermaid 2');
+      expect(output).toContain('source: /copy latex 3');
+    });
+
     it('reuses mermaid node labels when later edges reference node ids', () => {
       const text = `
 \`\`\`mermaid
