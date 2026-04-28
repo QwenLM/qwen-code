@@ -323,13 +323,16 @@ export function renderMermaidImageSync({
   availableTerminalHeight,
   env = process.env,
 }: MermaidImageRenderOptions): MermaidImageRenderResult {
+  const imageRendering = env['QWEN_CODE_MERMAID_IMAGE_RENDERING'];
   if (
-    env['QWEN_CODE_MERMAID_IMAGE_RENDERING'] === '0' ||
-    env['QWEN_CODE_MERMAID_IMAGE_RENDERING'] === 'off'
+    imageRendering !== '1' &&
+    imageRendering?.toLowerCase() !== 'on' &&
+    imageRendering?.toLowerCase() !== 'true'
   ) {
     return {
       kind: 'unavailable',
-      reason: 'Mermaid image rendering is disabled.',
+      reason:
+        'Mermaid image rendering is disabled by default. Set QWEN_CODE_MERMAID_IMAGE_RENDERING=1 to enable external renderers.',
     };
   }
 
@@ -551,12 +554,37 @@ function findExecutable(
     }
   };
 
-  addCandidates(path.join(process.cwd(), 'node_modules', '.bin'));
+  const allowLocalRenderers =
+    env['QWEN_CODE_MERMAID_ALLOW_LOCAL_RENDERERS'] === '1';
+  const localRendererDir = normalizeExecutableDir(
+    process.cwd(),
+    'node_modules',
+    '.bin',
+  );
+
+  if (allowLocalRenderers) {
+    addCandidates(localRendererDir);
+  }
   for (const dir of (env['PATH'] ?? '').split(path.delimiter).filter(Boolean)) {
+    if (
+      !allowLocalRenderers &&
+      normalizeExecutableDir(dir) === localRendererDir
+    ) {
+      continue;
+    }
     addCandidates(dir);
   }
 
   return candidates.find(isExecutable) ?? null;
+}
+
+function normalizeExecutableDir(...segments: string[]): string {
+  const dir = path.resolve(...segments);
+  try {
+    return fs.realpathSync.native(dir);
+  } catch {
+    return dir;
+  }
 }
 
 function isExecutable(filePath: string): boolean {

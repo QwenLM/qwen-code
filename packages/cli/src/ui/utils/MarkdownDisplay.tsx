@@ -173,7 +173,11 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         addContentBlock(
           <Box key={key}>
             <Text wrap="wrap">
-              <RenderInline text={line} textColor={textColor} />
+              <RenderInline
+                text={line}
+                textColor={textColor}
+                enableInlineMath
+              />
             </Text>
           </Box>,
         );
@@ -217,7 +221,11 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         addContentBlock(
           <Box key={key}>
             <Text wrap="wrap">
-              <RenderInline text={line} textColor={textColor} />
+              <RenderInline
+                text={line}
+                textColor={textColor}
+                enableInlineMath
+              />
             </Text>
           </Box>,
         );
@@ -244,35 +252,55 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         case 1:
           headerNode = (
             <Text bold color={textColor}>
-              <RenderInline text={headerText} textColor={textColor} />
+              <RenderInline
+                text={headerText}
+                textColor={textColor}
+                enableInlineMath
+              />
             </Text>
           );
           break;
         case 2:
           headerNode = (
             <Text bold color={textColor}>
-              <RenderInline text={headerText} textColor={textColor} />
+              <RenderInline
+                text={headerText}
+                textColor={textColor}
+                enableInlineMath
+              />
             </Text>
           );
           break;
         case 3:
           headerNode = (
             <Text bold color={textColor}>
-              <RenderInline text={headerText} textColor={textColor} />
+              <RenderInline
+                text={headerText}
+                textColor={textColor}
+                enableInlineMath
+              />
             </Text>
           );
           break;
         case 4:
           headerNode = (
             <Text italic color={textColor}>
-              <RenderInline text={headerText} textColor={textColor} />
+              <RenderInline
+                text={headerText}
+                textColor={textColor}
+                enableInlineMath
+              />
             </Text>
           );
           break;
         default:
           headerNode = (
             <Text color={textColor}>
-              <RenderInline text={headerText} textColor={textColor} />
+              <RenderInline
+                text={headerText}
+                textColor={textColor}
+                enableInlineMath
+              />
             </Text>
           );
           break;
@@ -318,7 +346,11 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         addContentBlock(
           <Box key={key}>
             <Text wrap="wrap" color={textColor}>
-              <RenderInline text={line} textColor={textColor} />
+              <RenderInline
+                text={line}
+                textColor={textColor}
+                enableInlineMath
+              />
             </Text>
           </Box>,
         );
@@ -385,18 +417,29 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
   const settings = useSettings();
   const MIN_LINES_FOR_MESSAGE = 1; // Minimum lines to show before the "generating more" message
   const RESERVED_LINES = 2; // Lines reserved for the message itself and potential padding
-  const fullContent = content.join('\n');
 
   if (lang?.toLowerCase() === 'mermaid') {
+    if (isPending) {
+      return (
+        <RenderPendingMermaidBlock
+          content={content}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={contentWidth}
+        />
+      );
+    }
+
     return (
       <MermaidDiagram
-        source={fullContent}
+        source={content.join('\n')}
         isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth}
       />
     );
   }
+
+  const fullContent = content.join('\n');
 
   if (isPending && availableTerminalHeight !== undefined) {
     const MAX_CODE_LINES_WHEN_PENDING = Math.max(
@@ -456,6 +499,42 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
 
 const RenderCodeBlock = React.memo(RenderCodeBlockInternal);
 
+interface RenderPendingMermaidBlockProps {
+  content: string[];
+  availableTerminalHeight?: number;
+  contentWidth: number;
+}
+
+const RenderPendingMermaidBlockInternal: React.FC<
+  RenderPendingMermaidBlockProps
+> = ({ content, availableTerminalHeight, contentWidth }) => {
+  const maxPreviewLines =
+    availableTerminalHeight === undefined
+      ? 6
+      : Math.max(0, availableTerminalHeight - 2);
+  const previewLines = content.slice(0, maxPreviewLines);
+  return (
+    <Box
+      paddingLeft={CODE_BLOCK_PREFIX_PADDING}
+      flexDirection="column"
+      width={contentWidth}
+      flexShrink={0}
+    >
+      <Text color={theme.text.accent}>Mermaid diagram is being written...</Text>
+      {previewLines.map((line, index) => (
+        <Text key={index} color={theme.text.secondary} wrap="truncate-end">
+          {line || ' '}
+        </Text>
+      ))}
+      {content.length > previewLines.length && (
+        <Text color={theme.text.secondary}>... generating more ...</Text>
+      )}
+    </Box>
+  );
+};
+
+const RenderPendingMermaidBlock = React.memo(RenderPendingMermaidBlockInternal);
+
 interface RenderMathBlockProps {
   content: string[];
   contentWidth: number;
@@ -495,7 +574,7 @@ const RenderBlockquoteInternal: React.FC<RenderBlockquoteProps> = ({
     <Text color={theme.text.secondary}>│ </Text>
     <Box flexGrow={LIST_ITEM_TEXT_FLEX_GROW}>
       <Text wrap="wrap" color={textColor} italic>
-        <RenderInline text={quoteText} textColor={textColor} />
+        <RenderInline text={quoteText} textColor={textColor} enableInlineMath />
       </Text>
     </Box>
   </Box>
@@ -540,7 +619,11 @@ const RenderListItemInternal: React.FC<RenderListItemProps> = ({
       </Box>
       <Box flexGrow={LIST_ITEM_TEXT_FLEX_GROW}>
         <Text wrap="wrap" color={textColor}>
-          <RenderInline text={effectiveItemText} textColor={textColor} />
+          <RenderInline
+            text={effectiveItemText}
+            textColor={textColor}
+            enableInlineMath
+          />
         </Text>
       </Box>
     </Box>

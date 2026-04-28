@@ -49,6 +49,10 @@ const FLOW_START_RE = /^(?:flowchart|graph)\s+([A-Za-z]{2})/i;
 const SEQUENCE_START_RE = /^sequenceDiagram\b/i;
 const LINE_COMMENT_RE = /^%%/;
 const MAX_RENDERED_LINES = 80;
+const MAX_FLOWCHART_PREVIEW_LINES = 120;
+const MAX_FLOWCHART_PREVIEW_EDGES = 80;
+const MAX_SEQUENCE_PREVIEW_LINES = 160;
+const MAX_SEQUENCE_PREVIEW_MESSAGES = 80;
 const MIN_CANVAS_WIDTH = 24;
 const NODE_GAP_X = 4;
 const NODE_GAP_Y = 4;
@@ -790,19 +794,29 @@ function renderFlowchart(
   source: string,
   contentWidth: number,
 ): MermaidVisualResult {
-  const rawLines = source
+  const allRawLines = source
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0 && !LINE_COMMENT_RE.test(line));
+  const rawLines = allRawLines.slice(0, MAX_FLOWCHART_PREVIEW_LINES);
+  const lineBudgetExceeded = allRawLines.length > rawLines.length;
   const first = rawLines[0] ?? '';
   const direction = FLOW_START_RE.exec(first)?.[1]?.toUpperCase() ?? 'TD';
   const lines = rawLines.slice(FLOW_START_RE.test(first) ? 1 : 0);
-  const edgeLines = lines.flatMap((line) =>
-    line
-      .split(';')
-      .map((part) => part.trim())
-      .filter(Boolean),
-  );
+  const edgeLines: string[] = [];
+  let edgeBudgetExceeded = false;
+  for (const line of lines) {
+    for (const part of line.split(';')) {
+      const statement = part.trim();
+      if (!statement) continue;
+      if (edgeLines.length >= MAX_FLOWCHART_PREVIEW_EDGES) {
+        edgeBudgetExceeded = true;
+        break;
+      }
+      edgeLines.push(statement);
+    }
+    if (edgeBudgetExceeded) break;
+  }
   const edges = edgeLines
     .map(parseFlowEdge)
     .filter((edge): edge is FlowEdge => edge !== null);
@@ -831,9 +845,19 @@ function renderFlowchart(
     title: `Mermaid flowchart (${direction})`,
     lines: rendered.slice(0, MAX_RENDERED_LINES),
     warning:
-      rendered.length > MAX_RENDERED_LINES
-        ? `Preview truncated to ${MAX_RENDERED_LINES} lines.`
-        : undefined,
+      [
+        lineBudgetExceeded
+          ? `Preview limited to ${MAX_FLOWCHART_PREVIEW_LINES} source lines.`
+          : undefined,
+        edgeBudgetExceeded
+          ? `Preview limited to ${MAX_FLOWCHART_PREVIEW_EDGES} edges.`
+          : undefined,
+        rendered.length > MAX_RENDERED_LINES
+          ? `Preview truncated to ${MAX_RENDERED_LINES} rendered lines.`
+          : undefined,
+      ]
+        .filter(Boolean)
+        .join(' ') || undefined,
   };
 }
 
@@ -851,7 +875,7 @@ function renderSequence(
   source: string,
   contentWidth: number,
 ): MermaidVisualResult {
-  const rawLines = source
+  const allRawLines = source
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(
@@ -860,8 +884,11 @@ function renderSequence(
         !LINE_COMMENT_RE.test(line) &&
         !SEQUENCE_START_RE.test(line),
     );
+  const rawLines = allRawLines.slice(0, MAX_SEQUENCE_PREVIEW_LINES);
+  const lineBudgetExceeded = allRawLines.length > rawLines.length;
   const participants = new Map<string, string>();
   const messages: string[] = [];
+  let messageBudgetExceeded = false;
 
   for (const line of rawLines) {
     const participant = parseParticipant(line);
@@ -879,6 +906,10 @@ function renderSequence(
     const message = stripMermaidPunctuation(messageMatch[4]!);
     if (!participants.has(from)) participants.set(from, from);
     if (!participants.has(to)) participants.set(to, to);
+    if (messages.length >= MAX_SEQUENCE_PREVIEW_MESSAGES) {
+      messageBudgetExceeded = true;
+      continue;
+    }
     messages.push(
       truncateToWidth(
         `${participants.get(from) ?? from} ${arrow} ${participants.get(to) ?? to}: ${message}`,
@@ -900,9 +931,19 @@ function renderSequence(
     title: 'Mermaid sequence diagram',
     lines: lines.slice(0, MAX_RENDERED_LINES),
     warning:
-      messages.length === 0
-        ? 'Sequence preview supports A->>B: message style arrows.'
-        : undefined,
+      [
+        messages.length === 0
+          ? 'Sequence preview supports A->>B: message style arrows.'
+          : undefined,
+        lineBudgetExceeded
+          ? `Preview limited to ${MAX_SEQUENCE_PREVIEW_LINES} source lines.`
+          : undefined,
+        messageBudgetExceeded
+          ? `Preview limited to ${MAX_SEQUENCE_PREVIEW_MESSAGES} messages.`
+          : undefined,
+      ]
+        .filter(Boolean)
+        .join(' ') || undefined,
   };
 }
 

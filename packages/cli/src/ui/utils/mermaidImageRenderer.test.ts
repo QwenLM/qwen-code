@@ -32,6 +32,55 @@ afterEach(() => {
 });
 
 describe('mermaid image renderer', () => {
+  it('keeps external image rendering disabled unless explicitly enabled', () => {
+    const result = renderMermaidImageSync({
+      source: 'flowchart TD\n  A[Start] --> B[End]',
+      contentWidth: 80,
+      availableTerminalHeight: 20,
+      env: {
+        PATH: process.env['PATH'] ?? '',
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'kitty',
+      },
+    });
+
+    expect(result.kind).toBe('unavailable');
+    expect(result.kind === 'unavailable' && result.reason).toContain(
+      'disabled by default',
+    );
+  });
+
+  it('does not auto-discover repo-local renderers from the current working directory', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-local-mmdc-'));
+    tempDirs.push(tempDir);
+    const binDir = path.join(tempDir, 'node_modules', '.bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    const localMmdc = path.join(binDir, 'mmdc');
+    fs.writeFileSync(localMmdc, '#!/bin/sh\nexit 1\n', 'utf8');
+    fs.chmodSync(localMmdc, 0o755);
+
+    const originalCwd = process.cwd();
+    process.chdir(tempDir);
+    try {
+      const result = renderMermaidImageSync({
+        source: 'flowchart TD\n  A[Start] --> B[End]',
+        contentWidth: 80,
+        availableTerminalHeight: 20,
+        env: {
+          PATH: binDir,
+          QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
+          QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'kitty',
+        },
+      });
+
+      expect(result.kind).toBe('unavailable');
+      expect(result.kind === 'unavailable' && result.reason).toContain(
+        'Mermaid CLI (mmdc) was not found',
+      );
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
   it('detects forced terminal image protocols', () => {
     expect(
       detectTerminalImageProtocol({
@@ -97,6 +146,7 @@ describe('mermaid image renderer', () => {
       availableTerminalHeight: 20,
       env: {
         PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
         QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'iterm2',
       },
     });
@@ -132,6 +182,7 @@ describe('mermaid image renderer', () => {
       availableTerminalHeight: 20,
       env: {
         PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
         QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'kitty',
       },
     });

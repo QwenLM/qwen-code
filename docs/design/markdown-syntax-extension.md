@@ -60,25 +60,27 @@ same PNG is rendered as ANSI block graphics. If neither image protocol nor
 `chafa` is available, the renderer falls back to the synchronous terminal text
 preview described below.
 
-The image render is scheduled after the first React paint. Users see the
-wireframe preview immediately with an explicit rendering status, then the
-terminal image replaces it when Mermaid CLI finishes. This avoids a confusing
-blank pause during slow `mmdc` startup, especially when the opt-in `npx` path
-is cold.
+The image render is not attempted while a response is still streaming. During
+streaming, Mermaid blocks show a bounded pending preview. Once the response is
+finalized, the image path is attempted only when explicitly enabled. This keeps
+slow `mmdc` startup, especially the opt-in `npx` path, out of the default
+interactive render path.
 
 PNG generation is cached independently from terminal placement. Repeated
 renders of the same Mermaid source, including terminal resize updates, reuse
 the generated PNG and only recompute the Kitty/iTerm2 placement dimensions.
 
-The image path is intentionally capability-gated instead of always bundling
-Puppeteer/Chromium into the hot CLI path. A user can enable the image path by
-installing `@mermaid-js/mermaid-cli` so `mmdc` is on `PATH`, or by setting
+The image path is intentionally opt-in and capability-gated instead of always
+bundling or invoking Puppeteer/Chromium from the hot CLI path. A user can enable
+the image path with `QWEN_CODE_MERMAID_IMAGE_RENDERING=1`, then provide
+`@mermaid-js/mermaid-cli` by installing `mmdc` on `PATH` or by setting
 `QWEN_CODE_MERMAID_MMD_CLI` to the binary path. For ad-hoc local verification,
 `QWEN_CODE_MERMAID_ALLOW_NPX=1` allows the renderer to invoke
 `npx -y @mermaid-js/mermaid-cli@11.12.0`; this is intentionally opt-in because
-the first run may install Puppeteer/Chromium and block rendering. Terminal
-protocol selection can be forced with
-`QWEN_CODE_MERMAID_IMAGE_PROTOCOL=kitty|iterm2|off`.
+the first run may install Puppeteer/Chromium and block rendering. Repo-local
+`node_modules/.bin` renderers are not auto-discovered unless
+`QWEN_CODE_MERMAID_ALLOW_LOCAL_RENDERERS=1` is set. Terminal protocol selection
+can be forced with `QWEN_CODE_MERMAID_IMAGE_PROTOCOL=kitty|iterm2|off`.
 
 For Kitty-compatible terminals such as Ghostty, the renderer uses Kitty
 Unicode placeholders instead of writing the image payload as Ink text. The PNG
@@ -109,6 +111,8 @@ model instead of printing one edge at a time:
   terminal fonts while keeping the loop semantics visible.
 - The graph is recomputed from `contentWidth`, so resize changes node width,
   spacing, and connector paths.
+- Large previews are bounded before graph layout so very large Mermaid blocks
+  do not allocate an unbounded terminal canvas during render.
 
 Example:
 

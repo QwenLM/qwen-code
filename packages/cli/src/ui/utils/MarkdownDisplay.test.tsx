@@ -488,6 +488,21 @@ flowchart TD
       expect(wideOutput).not.toBe(narrowOutput);
     });
 
+    it('bounds large mermaid flowchart previews before layout', () => {
+      const source = [
+        'flowchart TD',
+        ...Array.from({ length: 200 }, (_, index) => {
+          const next = index + 1;
+          return `N${index}[Node ${index}] --> N${next}[Node ${next}]`;
+        }),
+      ].join('\n');
+
+      const preview = renderMermaidVisual(source, 80);
+
+      expect(preview.warning).toContain('Preview limited');
+      expect(preview.lines.length).toBeLessThanOrEqual(80);
+    });
+
     it('renders mermaid sequence diagrams as a visual preview', () => {
       const text = `
 \`\`\`mermaid
@@ -522,6 +537,21 @@ flowchart TD
       expect(output).not.toContain('Rendering Mermaid image');
       expect(output).toContain('Start');
       expect(output).toContain('End');
+    });
+
+    it('does not fully render mermaid diagrams while the code block is pending', () => {
+      const text = `
+\`\`\`mermaid
+flowchart TD
+  A[Start] --> B[End]
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+
+      expect(output).toContain('Mermaid diagram is being written');
+      expect(output).not.toContain('Mermaid flowchart');
     });
   });
 

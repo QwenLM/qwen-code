@@ -25,21 +25,27 @@ const debugLogger = createDebugLogger('INLINE_MARKDOWN');
 interface RenderInlineProps {
   text: string;
   textColor?: string;
+  enableInlineMath?: boolean;
 }
 
 const RenderInlineInternal: React.FC<RenderInlineProps> = ({
   text,
   textColor = theme.text.primary,
+  enableInlineMath = false,
 }) => {
   // Early return for plain text without markdown or URLs
-  if (!/[*_~`<[$]|https?:/.test(text)) {
+  if (
+    !/[*_~`<[]|https?:/.test(text) &&
+    !(enableInlineMath && text.includes('$'))
+  ) {
     return <Text color={textColor}>{text}</Text>;
   }
 
   const nodes: React.ReactNode[] = [];
   let lastIndex = 0;
-  const inlineRegex =
-    /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|\$(?:\\.|[^$\n])+\$|<u>.*?<\/u>|https?:\/\/\S+)/g;
+  const inlineRegex = enableInlineMath
+    ? /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|\$[^$\n]{1,240}\$|<u>.*?<\/u>|https?:\/\/\S+)/g
+    : /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|<u>.*?<\/u>|https?:\/\/\S+)/g;
   let match;
 
   while ((match = inlineRegex.exec(text)) !== null) {
@@ -141,6 +147,7 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
           </Text>
         );
       } else if (
+        enableInlineMath &&
         fullMatch.startsWith('$') &&
         fullMatch.endsWith('$') &&
         fullMatch.length > INLINE_MATH_MARKER_LENGTH * 2
@@ -184,14 +191,19 @@ export const RenderInline = React.memo(RenderInlineInternal);
  * Utility function to get the plain text length of a string with markdown formatting
  * This is useful for calculating column widths in tables
  */
-export const getPlainTextLength = (text: string): number => {
+export const getPlainTextLength = (
+  text: string,
+  enableInlineMath = false,
+): number => {
   const cleanText = text
     .replace(/\*\*(.*?)\*\*/g, '$1')
     .replace(/\*(.*?)\*/g, '$1')
     .replace(/_(.*?)_/g, '$1')
     .replace(/~~(.*?)~~/g, '$1')
     .replace(/`(.*?)`/g, '$1')
-    .replace(/\$(.*?)\$/g, (_match, expr: string) => renderInlineLatex(expr))
+    .replace(/\$([^$\n]{1,240})\$/g, (_match, expr: string) =>
+      enableInlineMath ? renderInlineLatex(expr) : _match,
+    )
     .replace(/<u>(.*?)<\/u>/g, '$1')
     .replace(/.*\[(.*?)\]\(.*\)/g, '$1');
   return stringWidth(cleanText);
