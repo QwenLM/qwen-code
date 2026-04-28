@@ -8,6 +8,7 @@ import { render } from 'ink-testing-library';
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import { ModelStatsDisplay } from './ModelStatsDisplay.js';
 import * as SessionContext from '../contexts/SessionContext.js';
+import * as SettingsContext from '../contexts/SettingsContext.js';
 import type {
   ModelMetrics,
   ModelMetricsCore,
@@ -29,11 +30,23 @@ vi.mock('../contexts/SessionContext.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../contexts/SettingsContext.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof SettingsContext>();
+  return {
+    ...actual,
+    useSettings: vi.fn(),
+  };
+});
+
 const useSessionStatsMock = vi.mocked(SessionContext.useSessionStats);
 
-const renderWithMockedStats = (metrics: SessionMetrics) => {
+const renderWithMockedStats = (
+  metrics: SessionMetrics,
+  billing?: Record<string, unknown>,
+) => {
   useSessionStatsMock.mockReturnValue({
     stats: {
+      sessionId: 'session-1',
       sessionStartTime: new Date(),
       metrics,
       lastPromptTokenCount: 0,
@@ -44,7 +57,23 @@ const renderWithMockedStats = (metrics: SessionMetrics) => {
     startNewPrompt: vi.fn(),
   });
 
-  return render(<ModelStatsDisplay />);
+  if (!billing) {
+    return render(<ModelStatsDisplay />);
+  }
+
+  return render(
+    <SettingsContext.SettingsContext.Provider
+      value={
+        {
+          merged: {
+            billing,
+          },
+        } as ReturnType<typeof SettingsContext.useSettings>
+      }
+    >
+      <ModelStatsDisplay />
+    </SettingsContext.SettingsContext.Provider>,
+  );
 };
 
 describe('<ModelStatsDisplay />', () => {
@@ -324,5 +353,55 @@ describe('<ModelStatsDisplay />', () => {
       expect(output).toContain('glm-5 (main)');
       expect(output).toContain('glm-5 (echoer)');
     });
+  });
+
+  it('displays cached-input-aware billing when model prices are configured', () => {
+    const { lastFrame } = renderWithMockedStats(
+      {
+        models: {
+          'gpt-4o': mainOnly({
+            api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+            tokens: {
+              prompt: 1_000_000,
+              candidates: 500_000,
+              total: 1_500_000,
+              cached: 250_000,
+              thoughts: 0,
+              tool: 0,
+            },
+          }),
+        },
+        tools: {
+          totalCalls: 0,
+          totalSuccess: 0,
+          totalFail: 0,
+          totalDurationMs: 0,
+          totalDecisions: { accept: 0, reject: 0, modify: 0 },
+          byName: {},
+        },
+        files: {
+          totalLinesAdded: 0,
+          totalLinesRemoved: 0,
+        },
+      },
+      {
+        currency: 'USD',
+        modelPrices: {
+          'gpt-4o': { input: 5, cachedInput: 1, output: 15 },
+        },
+      },
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('Billing');
+    expect(output).toContain('Uncached Input Cost');
+    expect(output).toContain('Cached Input Cost');
+    expect(output).toContain('Output Cost');
+    expect(output).toContain('Model Total');
+    expect(output).toContain('Current Session Total');
+    expect(output).toContain('$3.75');
+    expect(output).toContain('$0.25');
+    expect(output).toContain('$7.5');
+    expect(output).toContain('$11.5');
   });
 });

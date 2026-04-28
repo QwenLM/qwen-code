@@ -18,6 +18,22 @@
       "type": "object",
       "additionalProperties": true
     },
+    "billing": {
+      "description": "Model token price configuration for estimated session cost display.",
+      "type": "object",
+      "properties": {
+        "currency": {
+          "description": "Currency code used when displaying estimated costs. Defaults to USD.",
+          "type": "string",
+          "default": "USD"
+        },
+        "modelPrices": {
+          "description": "Per-million token prices keyed by model or authType:model. Each price may include input, output, cachedInput, and optional discounts.input/discounts.cachedInput/discounts.output multipliers.",
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
     "codingPlan": {
       "description": "Coding Plan template version tracking and configuration.",
       "type": "object",

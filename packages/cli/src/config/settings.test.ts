@@ -354,6 +354,64 @@ describe('Settings Loading and Merging', () => {
       });
     });
 
+    it('should merge billing model price maps across user and workspace settings', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      const userSettingsContent = {
+        billing: {
+          currency: 'CNY',
+          modelPrices: {
+            'qwen3.5-plus': {
+              input: 0.8,
+              cachedInput: 0.08,
+              output: 4.8,
+            },
+          },
+        },
+      };
+      const workspaceSettingsContent = {
+        billing: {
+          modelPrices: {
+            'deepseek-v4-flash': {
+              input: 1,
+              cachedInput: 0.2,
+              output: 2,
+            },
+          },
+        },
+      };
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(settings.merged.billing).toEqual({
+        currency: 'CNY',
+        modelPrices: {
+          'qwen3.5-plus': {
+            input: 0.8,
+            cachedInput: 0.08,
+            output: 4.8,
+          },
+          'deepseek-v4-flash': {
+            input: 1,
+            cachedInput: 0.2,
+            output: 2,
+          },
+        },
+      });
+    });
+
     it('should correctly migrate a complex legacy (v1) settings file', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p === USER_SETTINGS_PATH,

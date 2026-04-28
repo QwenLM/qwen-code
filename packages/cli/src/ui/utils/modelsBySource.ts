@@ -30,6 +30,12 @@ export interface ModelSourceEntry {
   label: string;
   /** Backing metrics — either the model aggregate or one source bucket. */
   metrics: ModelMetricsCore;
+  /** Raw model name used for settings lookups. */
+  modelName: string;
+  /** Auth types observed for the model during the current session. */
+  authTypes?: readonly string[];
+  /** Per-auth-type metrics, present only when this entry is model-wide. */
+  authTypeMetrics?: Readonly<Record<string, ModelMetricsCore>>;
 }
 
 /**
@@ -71,6 +77,9 @@ export function flattenModelsBySource(
         key: modelName,
         label: displayName,
         metrics: modelMetrics,
+        modelName,
+        authTypes: modelMetrics.authTypes,
+        authTypeMetrics: modelMetrics.byAuthType,
       });
       continue;
     }
@@ -82,6 +91,9 @@ export function flattenModelsBySource(
         key: modelName,
         label: displayName,
         metrics: modelMetrics.bySource[MAIN_SOURCE] ?? modelMetrics,
+        modelName,
+        authTypes: modelMetrics.authTypes,
+        authTypeMetrics: modelMetrics.byAuthType,
       });
       continue;
     }
@@ -92,6 +104,8 @@ export function flattenModelsBySource(
         key: `${modelName}::${source}`,
         label: `${displayName} (${source})`,
         metrics: modelMetrics.bySource[source],
+        modelName,
+        authTypes: modelMetrics.authTypes,
       });
     }
   }

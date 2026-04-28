@@ -55,6 +55,14 @@ function areModelMetricsCoreEqual(
 
 function areModelMetricsEqual(a: ModelMetrics, b: ModelMetrics): boolean {
   if (!areModelMetricsCoreEqual(a, b)) return false;
+  const aAuthTypes = a.authTypes ?? [];
+  const bAuthTypes = b.authTypes ?? [];
+  if (
+    aAuthTypes.length !== bAuthTypes.length ||
+    aAuthTypes.some((authType, index) => authType !== bAuthTypes[index])
+  ) {
+    return false;
+  }
 
   const aKeys = Object.keys(a.bySource);
   const bKeys = Object.keys(b.bySource);
@@ -64,6 +72,21 @@ function areModelMetricsEqual(a: ModelMetrics, b: ModelMetrics): boolean {
     const aSource = a.bySource[key];
     const bSource = b.bySource[key];
     if (!bSource || !areModelMetricsCoreEqual(aSource, bSource)) {
+      return false;
+    }
+  }
+
+  const aAuthKeys = Object.keys(a.byAuthType ?? {});
+  const bAuthKeys = Object.keys(b.byAuthType ?? {});
+  if (aAuthKeys.length !== bAuthKeys.length) return false;
+  for (const key of aAuthKeys) {
+    const aAuthMetrics = a.byAuthType?.[key];
+    const bAuthMetrics = b.byAuthType?.[key];
+    if (
+      !aAuthMetrics ||
+      !bAuthMetrics ||
+      !areModelMetricsCoreEqual(aAuthMetrics, bAuthMetrics)
+    ) {
       return false;
     }
   }

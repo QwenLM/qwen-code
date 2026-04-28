@@ -5,6 +5,7 @@
  */
 
 import type React from 'react';
+import { useContext } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { formatDuration } from '../utils/formatters.js';
@@ -15,6 +16,12 @@ import {
 } from '../utils/computeStats.js';
 import type { ModelMetricsCore } from '../contexts/SessionContext.js';
 import { useSessionStats } from '../contexts/SessionContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
+import { getCurrentSessionBillingTotal } from '../utils/sessionBilling.js';
+import {
+  formatModelCost,
+  getModelBillingBreakdown,
+} from '../utils/modelBilling.js';
 import { flattenModelsBySource } from '../utils/modelsBySource.js';
 import { t } from '../../i18n/index.js';
 
@@ -63,8 +70,45 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
   width,
 }) => {
   const { stats } = useSessionStats();
+  const settings = useContext(SettingsContext);
   const { models } = stats.metrics;
   const entries = flattenModelsBySource(models);
+
+  const getModelValues = (
+    getter: (metrics: ModelMetricsCore) => string | React.ReactElement,
+  ) => entries.map(({ metrics }) => getter(metrics));
+
+  const hasThoughts = entries.some(
+    ({ metrics }) => metrics.tokens.thoughts > 0,
+  );
+  const hasTool = entries.some(({ metrics }) => metrics.tokens.tool > 0);
+  const hasCached = entries.some(({ metrics }) => metrics.tokens.cached > 0);
+  const billingSettings = settings?.merged.billing;
+  const billingBreakdowns = entries.map((entry) =>
+    getModelBillingBreakdown(
+      billingSettings,
+      entry.modelName,
+      entry.metrics,
+      entry.authTypes,
+      entry.authTypeMetrics,
+    ),
+  );
+  const hasBilling = billingBreakdowns.some(
+    (breakdown) => breakdown !== undefined,
+  );
+  const currentSessionTotalCost = billingBreakdowns.reduce(
+    (sum, breakdown) => sum + (breakdown?.totalCost ?? 0),
+    0,
+  );
+  const currentSessionBillingTotal = getCurrentSessionBillingTotal(
+    billingSettings,
+    stats.metrics,
+  );
+  const billingCurrency =
+    currentSessionBillingTotal?.currency ??
+    billingBreakdowns.find((breakdown) => breakdown !== undefined)?.currency ??
+    billingSettings?.currency ??
+    'USD';
 
   if (entries.length === 0) {
     return (
@@ -81,16 +125,6 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
       </Box>
     );
   }
-
-  const getModelValues = (
-    getter: (metrics: ModelMetricsCore) => string | React.ReactElement,
-  ) => entries.map(({ metrics }) => getter(metrics));
-
-  const hasThoughts = entries.some(
-    ({ metrics }) => metrics.tokens.thoughts > 0,
-  );
-  const hasTool = entries.some(({ metrics }) => metrics.tokens.tool > 0);
-  const hasCached = entries.some(({ metrics }) => metrics.tokens.cached > 0);
 
   return (
     <Box
@@ -211,6 +245,61 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
         isSubtle
         values={getModelValues((m) => m.tokens.candidates.toLocaleString())}
       />
+
+      {hasBilling && (
+        <>
+          <Box height={1} />
+          <StatRow title={t('Billing')} values={[]} isSection />
+          <StatRow
+            title={t('Uncached Input Cost')}
+            isSubtle
+            values={billingBreakdowns.map((breakdown) =>
+              breakdown
+                ? formatModelCost(breakdown.inputCost, breakdown.currency)
+                : t('n/a'),
+            )}
+          />
+          <StatRow
+            title={t('Cached Input Cost')}
+            isSubtle
+            values={billingBreakdowns.map((breakdown) =>
+              breakdown
+                ? formatModelCost(breakdown.cachedInputCost, breakdown.currency)
+                : t('n/a'),
+            )}
+          />
+          <StatRow
+            title={t('Output Cost')}
+            isSubtle
+            values={billingBreakdowns.map((breakdown) =>
+              breakdown
+                ? formatModelCost(breakdown.outputCost, breakdown.currency)
+                : t('n/a'),
+            )}
+          />
+          <StatRow
+            title={t('Model Total')}
+            values={billingBreakdowns.map((breakdown) =>
+              breakdown
+                ? formatModelCost(breakdown.totalCost, breakdown.currency)
+                : t('n/a'),
+            )}
+          />
+          <StatRow
+            title={t('Current Session Total')}
+            values={[
+              <Text key="session-total" color={theme.status.warning}>
+                {formatModelCost(
+                  currentSessionBillingTotal?.totalCost ??
+                    currentSessionTotalCost,
+                  billingCurrency,
+                )}
+              </Text>,
+              ...entries.slice(1).map(() => ''),
+            ]}
+          />
+        </>
+      )}
     </Box>
   );
 };

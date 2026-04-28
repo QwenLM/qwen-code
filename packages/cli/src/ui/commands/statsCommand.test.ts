@@ -44,13 +44,13 @@ describe('statsCommand', () => {
     );
   });
 
-  it('should display model stats when using the "model" subcommand', () => {
+  it('should display model stats when using the "model" subcommand', async () => {
     const modelSubCommand = statsCommand.subCommands?.find(
       (sc) => sc.name === 'model',
     );
     if (!modelSubCommand?.action) throw new Error('Subcommand has no action');
 
-    modelSubCommand.action(mockContext, '');
+    await modelSubCommand.action(mockContext, '');
 
     expect(mockContext.ui.addItem).toHaveBeenCalledWith(
       {
@@ -129,6 +129,64 @@ describe('statsCommand', () => {
 
       expect(result.type).toBe('message');
       expect(nonInteractiveContext.ui.addItem).not.toHaveBeenCalled();
+    });
+
+    it('stats model subcommand should include estimated cost when prices are configured', async () => {
+      const modelSubCommand = statsCommand.subCommands?.find(
+        (sc) => sc.name === 'model',
+      );
+      if (!modelSubCommand?.action) throw new Error('Subcommand has no action');
+
+      nonInteractiveContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        services: {
+          settings: {
+            merged: {
+              billing: {
+                currency: 'USD',
+                modelPrices: {
+                  'gpt-4o': { input: 5, cachedInput: 1, output: 15 },
+                },
+              },
+            },
+          },
+        },
+        session: {
+          stats: {
+            metrics: {
+              models: {
+                'gpt-4o': {
+                  api: {
+                    totalRequests: 1,
+                    totalErrors: 0,
+                    totalLatencyMs: 100,
+                  },
+                  tokens: {
+                    prompt: 1_000_000,
+                    candidates: 500_000,
+                    total: 1_500_000,
+                    cached: 250_000,
+                    thoughts: 0,
+                    tool: 0,
+                  },
+                  bySource: {},
+                },
+              },
+            },
+          },
+        },
+      });
+
+      const result = (await modelSubCommand.action(
+        nonInteractiveContext,
+        '',
+      )) as { type: string; content: string };
+
+      expect(result.type).toBe('message');
+      expect(result.content).toContain(
+        'gpt-4o: prompt=1000000, output=500000, cached=250000, uncached_input_cost=$3.75, cached_input_cost=$0.25, output_cost=$7.5, cost=$11.5',
+      );
+      expect(result.content).toContain('Total cost: $11.5');
     });
 
     it('stats tools subcommand should return text in non-interactive mode', async () => {

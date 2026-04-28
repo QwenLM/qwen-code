@@ -105,6 +105,45 @@ export interface SettingsSchema {
   [key: string]: SettingDefinition;
 }
 
+export interface ModelTokenDiscounts {
+  /**
+   * Discount multiplier for uncached input tokens. Defaults to 1.
+   * For example, 0.25 means 25% of the configured input price.
+   */
+  input?: number;
+  /**
+   * Discount multiplier for cached input tokens. Defaults to input discount
+   * when cachedInput is not configured, otherwise 1.
+   */
+  cachedInput?: number;
+  /** Discount multiplier for output tokens. Defaults to 1. */
+  output?: number;
+}
+
+export interface ModelTokenPrice {
+  /** Input token price per million tokens. Omit to leave input unpriced. */
+  input?: number;
+  /** Output token price per million tokens. Omit to leave output unpriced. */
+  output?: number;
+  /**
+   * Cached input token price per million tokens. Defaults to input price when
+   * input is configured; omit both to leave cached input unpriced.
+   */
+  cachedInput?: number;
+  /** Optional discount multipliers for each token price bucket. */
+  discounts?: ModelTokenDiscounts;
+}
+
+export interface BillingSettings {
+  /** Currency code used when displaying estimated model costs. */
+  currency?: string;
+  /**
+   * Token prices keyed by either `model` or `authType:model`.
+   * Prices are per million tokens.
+   */
+  modelPrices?: Record<string, ModelTokenPrice>;
+}
+
 /**
  * Common items schema for hook definitions.
  * Used by all hook event types in the hooks configuration.
@@ -249,6 +288,40 @@ const SETTINGS_SCHEMA = {
       'Model providers configuration grouped by authType. Each authType contains an array of model configurations.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.REPLACE,
+  },
+
+  billing: {
+    type: 'object',
+    label: 'Billing',
+    category: 'Model',
+    requiresRestart: false,
+    default: {} as BillingSettings,
+    description:
+      'Model token price configuration for estimated session cost display.',
+    showInDialog: false,
+    properties: {
+      currency: {
+        type: 'string',
+        label: 'Billing Currency',
+        category: 'Model',
+        requiresRestart: false,
+        default: 'USD',
+        description:
+          'Currency code used when displaying estimated costs. Defaults to USD.',
+        showInDialog: false,
+      },
+      modelPrices: {
+        type: 'object',
+        label: 'Model Prices',
+        category: 'Model',
+        requiresRestart: false,
+        default: {} as Record<string, ModelTokenPrice>,
+        description:
+          'Per-million token prices keyed by model or authType:model. Each price may include input, output, cachedInput, and optional discounts.input/discounts.cachedInput/discounts.output multipliers.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+      },
+    },
   },
 
   // Coding Plan configuration

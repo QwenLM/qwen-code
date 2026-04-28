@@ -212,6 +212,71 @@ The `extra_body` field allows you to add custom parameters to the request body s
 | ----------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | `fastModel` | string | Model used for generating [prompt suggestions](../features/followup-suggestions) and speculative execution. Leave empty to use the main model. A smaller/faster model (e.g., `qwen3-coder-flash`) reduces latency and cost. Can also be set via `/model --fast`. | `""`    |
 
+#### billing
+
+The `billing` settings configure estimated model costs in `/stats model` and
+the session summary. Prices are stored in your settings only; Qwen Code does not
+fetch provider pricing automatically.
+
+Add `billing` as a top-level object in a Qwen Code settings file, at the same
+level as `modelProviders`, `model`, and `security`. Use
+`~/.qwen/settings.json` for user-wide prices, or `<project>/.qwen/settings.json`
+for prices that should apply only to one project. If your `modelProviders` are
+defined in user settings, keeping `billing` in the same user settings file is
+usually the simplest option.
+
+| Setting                             | Type   | Description                                                                                                                  | Default |
+| ----------------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `billing.currency`                  | string | Currency code used when displaying estimated costs.                                                                          | `"USD"` |
+| `billing.modelPrices`               | object | Per-million token prices keyed by model ID, or by `authType:model` for provider-specific pricing.                            | `{}`    |
+| `billing.modelPrices.*.input`       | number | Uncached input-token price per million tokens. Omit to leave uncached input unpriced.                                        |         |
+| `billing.modelPrices.*.cachedInput` | number | Cached input-token price per million tokens. If omitted, cached input uses the `input` price when one is configured.         |         |
+| `billing.modelPrices.*.output`      | number | Output-token price per million tokens. Omit to leave output unpriced.                                                        |         |
+| `billing.modelPrices.*.discounts`   | object | Optional multipliers for `input`, `cachedInput`, and `output`. For example, `0.25` charges 25% of that token bucket's price. |         |
+
+Use bare model IDs when the same price applies regardless of provider. Use
+`authType:model` keys when the same model name can be served by different
+providers with different prices.
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "qwen3-coder-plus",
+        "envKey": "DASHSCOPE_API_KEY",
+        "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      }
+    ]
+  },
+  "model": {
+    "name": "qwen3-coder-plus"
+  },
+  "billing": {
+    "currency": "USD",
+    "modelPrices": {
+      "qwen3-coder-plus": {
+        "input": 1.0,
+        "cachedInput": 0.1,
+        "output": 5.0
+      },
+      "openai:gpt-4o": {
+        "input": 2.5,
+        "cachedInput": 1.25,
+        "output": 10.0,
+        "discounts": {
+          "cachedInput": 0.5
+        }
+      }
+    }
+  }
+}
+```
+
+Cost display is enabled only when at least one matching price is configured.
+The estimates are based on recorded prompt, cached input, and output token
+counts, so they may differ from the final bill shown by your provider.
+
 #### context
 
 | Setting                                                  | Type                       | Description                                                                                                                                                                                                                                                                                                                                                           | Default     |

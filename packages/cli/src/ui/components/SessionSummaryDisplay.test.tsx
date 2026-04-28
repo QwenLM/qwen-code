@@ -15,6 +15,7 @@ import type {
 } from '../contexts/SessionContext.js';
 import { MAIN_SOURCE } from '@qwen-code/qwen-code-core';
 import { ConfigContext } from '../contexts/ConfigContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
 
 const mainOnly = (core: ModelMetricsCore): ModelMetrics => ({
   ...core,
@@ -36,6 +37,7 @@ const renderWithMockedStats = (
   sessionId: string = 'test-session-id-12345',
   promptCount: number = 5,
   chatRecordingEnabled: boolean = true,
+  billing?: Record<string, unknown>,
 ) => {
   useSessionStatsMock.mockReturnValue({
     stats: {
@@ -57,9 +59,19 @@ const renderWithMockedStats = (
   };
 
   return render(
-    <ConfigContext.Provider value={mockConfig as never}>
-      <SessionSummaryDisplay duration="1h 23m 45s" />
-    </ConfigContext.Provider>,
+    <SettingsContext.Provider
+      value={
+        {
+          merged: {
+            billing,
+          },
+        } as never
+      }
+    >
+      <ConfigContext.Provider value={mockConfig as never}>
+        <SessionSummaryDisplay duration="1h 23m 45s" />
+      </ConfigContext.Provider>
+    </SettingsContext.Provider>,
   );
 };
 
@@ -160,5 +172,100 @@ describe('<SessionSummaryDisplay />', () => {
     expect(output).toContain('Agent powering down. Goodbye!');
     expect(output).not.toContain('To continue this session, run');
     expect(output).not.toContain('qwen --resume');
+  });
+
+  it('shows current session billing total when model prices are configured', () => {
+    const metrics: SessionMetrics = {
+      models: {
+        'gpt-4o': mainOnly({
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+          tokens: {
+            prompt: 1_000_000,
+            candidates: 500_000,
+            total: 1_500_000,
+            cached: 250_000,
+            thoughts: 0,
+            tool: 0,
+          },
+        }),
+      },
+      tools: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        totalDecisions: { accept: 0, reject: 0, modify: 0 },
+        byName: {},
+      },
+      files: {
+        totalLinesAdded: 0,
+        totalLinesRemoved: 0,
+      },
+    };
+
+    const { lastFrame } = renderWithMockedStats(
+      metrics,
+      'test-session-id-12345',
+      5,
+      true,
+      {
+        currency: 'USD',
+        modelPrices: {
+          'gpt-4o': { input: 5, cachedInput: 1, output: 15 },
+        },
+      },
+    );
+    const output = lastFrame();
+
+    expect(output).toContain('Billing');
+    expect(output).toContain('Current Session Total');
+    expect(output).toContain('$11.5');
+  });
+
+  it('does not show billing when no configured price matches', () => {
+    const metrics: SessionMetrics = {
+      models: {
+        'gpt-4o': mainOnly({
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+          tokens: {
+            prompt: 1_000_000,
+            candidates: 500_000,
+            total: 1_500_000,
+            cached: 0,
+            thoughts: 0,
+            tool: 0,
+          },
+        }),
+      },
+      tools: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        totalDecisions: { accept: 0, reject: 0, modify: 0 },
+        byName: {},
+      },
+      files: {
+        totalLinesAdded: 0,
+        totalLinesRemoved: 0,
+      },
+    };
+
+    const { lastFrame } = renderWithMockedStats(
+      metrics,
+      'test-session-id-12345',
+      5,
+      true,
+      {
+        currency: 'USD',
+        modelPrices: {
+          'other-model': { input: 5, output: 15 },
+        },
+      },
+    );
+    const output = lastFrame();
+
+    expect(output).not.toContain('Billing');
+    expect(output).not.toContain('Current Session Total');
   });
 });

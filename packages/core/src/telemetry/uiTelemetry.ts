@@ -74,6 +74,18 @@ export interface ModelMetrics extends ModelMetricsCore {
    * record so the two views stay consistent.
    */
   bySource: Record<string, ModelMetricsCore>;
+  /**
+   * Per-auth-type breakdown used for provider-specific billing. Attached as
+   * non-enumerable runtime metadata to avoid changing serialized snapshots.
+   */
+  byAuthType?: Record<string, ModelMetricsCore>;
+  /**
+   * Auth types observed for this model during the session. This is attached as
+   * non-enumerable runtime metadata so existing stats snapshots keep their
+   * historical shape while billing code can disambiguate provider-specific
+   * price keys such as `openai:gpt-4o`.
+   */
+  authTypes?: string[];
 }
 
 export interface SessionMetrics {
@@ -225,14 +237,68 @@ export class UiTelemetryService extends EventEmitter {
     return modelMetrics.bySource[source];
   }
 
+  private getOrCreateAuthTypeMetrics(
+    modelMetrics: ModelMetrics,
+    authType: string | undefined,
+  ): ModelMetricsCore | undefined {
+    if (!authType) {
+      return undefined;
+    }
+
+    let byAuthType = modelMetrics.byAuthType;
+    if (!byAuthType) {
+      byAuthType = Object.create(null) as Record<string, ModelMetricsCore>;
+      Object.defineProperty(modelMetrics, 'byAuthType', {
+        value: byAuthType,
+        enumerable: false,
+        writable: true,
+      });
+    }
+
+    if (!byAuthType[authType]) {
+      byAuthType[authType] = createInitialModelMetricsCore();
+    }
+    return byAuthType[authType];
+  }
+
+  private recordModelAuthType(
+    modelMetrics: ModelMetrics,
+    authType: string | undefined,
+  ): void {
+    if (!authType) {
+      return;
+    }
+
+    if (!modelMetrics.authTypes) {
+      Object.defineProperty(modelMetrics, 'authTypes', {
+        value: [],
+        enumerable: false,
+        writable: true,
+      });
+    }
+
+    const authTypes = modelMetrics.authTypes;
+    if (authTypes && !authTypes.includes(authType)) {
+      authTypes.push(authType);
+    }
+  }
+
   private processApiResponse(event: ApiResponseEvent) {
     const modelMetrics = this.getOrCreateModelMetrics(event.model);
+    this.recordModelAuthType(modelMetrics, event.auth_type);
     const sourceMetrics = this.getOrCreateSourceMetrics(
       modelMetrics,
       event.subagent_name ?? MAIN_SOURCE,
     );
+    const authTypeMetrics = this.getOrCreateAuthTypeMetrics(
+      modelMetrics,
+      event.auth_type,
+    );
 
-    for (const bucket of [modelMetrics, sourceMetrics]) {
+    for (const bucket of [modelMetrics, sourceMetrics, authTypeMetrics]) {
+      if (!bucket) {
+        continue;
+      }
       bucket.api.totalRequests++;
       bucket.api.totalLatencyMs += event.duration_ms;
 
@@ -247,12 +313,20 @@ export class UiTelemetryService extends EventEmitter {
 
   private processApiError(event: ApiErrorEvent) {
     const modelMetrics = this.getOrCreateModelMetrics(event.model);
+    this.recordModelAuthType(modelMetrics, event.auth_type);
     const sourceMetrics = this.getOrCreateSourceMetrics(
       modelMetrics,
       event.subagent_name ?? MAIN_SOURCE,
     );
+    const authTypeMetrics = this.getOrCreateAuthTypeMetrics(
+      modelMetrics,
+      event.auth_type,
+    );
 
-    for (const bucket of [modelMetrics, sourceMetrics]) {
+    for (const bucket of [modelMetrics, sourceMetrics, authTypeMetrics]) {
+      if (!bucket) {
+        continue;
+      }
       bucket.api.totalRequests++;
       bucket.api.totalErrors++;
       bucket.api.totalLatencyMs += event.duration_ms;

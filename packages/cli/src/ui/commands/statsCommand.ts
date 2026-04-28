@@ -6,6 +6,10 @@
 
 import type { HistoryItemStats } from '../types.js';
 import { MessageType } from '../types.js';
+import {
+  formatModelCost,
+  getModelBillingBreakdown,
+} from '../utils/modelBilling.js';
 import { formatDuration } from '../utils/formatters.js';
 import {
   type CommandContext,
@@ -90,15 +94,61 @@ export const statsCommand: SlashCommand = {
         if (context.executionMode !== 'interactive') {
           const { metrics } = context.session.stats;
           const lines: string[] = [];
-          for (const [modelName, modelMetrics] of Object.entries(
-            metrics.models,
-          )) {
+          const modelEntries = Object.entries(metrics.models).map(
+            ([modelName, modelMetrics]) => ({
+              modelName,
+              modelMetrics,
+              billing: getModelBillingBreakdown(
+                context.services.settings.merged.billing,
+                modelName,
+                modelMetrics,
+                modelMetrics.authTypes,
+                modelMetrics.byAuthType,
+              ),
+            }),
+          );
+          const hasBilling = modelEntries.some(
+            ({ billing }) => billing !== undefined,
+          );
+          const totalCost = modelEntries.reduce(
+            (sum, { billing }) => sum + (billing?.totalCost ?? 0),
+            0,
+          );
+          const costCurrency =
+            modelEntries.find(({ billing }) => billing !== undefined)?.billing
+              ?.currency ??
+            context.services.settings.merged.billing?.currency ??
+            'USD';
+
+          for (const { modelName, modelMetrics, billing } of modelEntries) {
             lines.push(
-              `${modelName}: prompt=${modelMetrics.tokens.prompt}, output=${modelMetrics.tokens.candidates}, cached=${modelMetrics.tokens.cached}`,
+              `${modelName}: prompt=${modelMetrics.tokens.prompt}, output=${modelMetrics.tokens.candidates}, cached=${modelMetrics.tokens.cached}${
+                hasBilling
+                  ? billing
+                    ? `, uncached_input_cost=${formatModelCost(
+                        billing.inputCost,
+                        billing.currency,
+                      )}, cached_input_cost=${formatModelCost(
+                        billing.cachedInputCost,
+                        billing.currency,
+                      )}, output_cost=${formatModelCost(
+                        billing.outputCost,
+                        billing.currency,
+                      )}, cost=${formatModelCost(
+                        billing.totalCost,
+                        billing.currency,
+                      )}`
+                    : ', cost=n/a'
+                  : ''
+              }`,
             );
           }
           if (lines.length === 0) {
             lines.push('No model usage data yet.');
+          } else if (hasBilling) {
+            lines.push(
+              `Total cost: ${formatModelCost(totalCost, costCurrency)}`,
+            );
           }
           return {
             type: 'message',
