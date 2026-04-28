@@ -2167,19 +2167,8 @@ export const AppContainer = (props: AppContainerProps) => {
         void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
         refreshStatic();
       } else if (keyMatchers[Command.TOGGLE_MARKDOWN_RENDER_MODE](key)) {
-        const nextMermaidRenderMode =
-          mermaidRenderMode === 'visual' ? 'source' : 'visual';
-        setMermaidRenderMode(nextMermaidRenderMode);
-        historyManager.addItem(
-          {
-            type: MessageType.INFO,
-            text: `Markdown Mermaid rendering switched to ${
-              nextMermaidRenderMode === 'source'
-                ? 'source code'
-                : 'visual preview'
-            }. Press Alt/Option+M to switch back.`,
-          },
-          Date.now(),
+        setMermaidRenderMode(
+          mermaidRenderMode === 'visual' ? 'source' : 'visual',
         );
       }
     },
@@ -2219,7 +2208,6 @@ export const AppContainer = (props: AppContainerProps) => {
       mermaidRenderMode,
       setMermaidRenderMode,
       refreshStatic,
-      historyManager,
       handleDoubleEscRewind,
     ],
   );
