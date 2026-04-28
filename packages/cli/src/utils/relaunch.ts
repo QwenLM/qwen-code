@@ -5,6 +5,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { basename } from 'node:path';
 import { RELAUNCH_EXIT_CODE } from './processUtils.js';
 import { writeStderrLine } from './stdioHelpers.js';
 
@@ -34,19 +35,35 @@ export async function relaunchAppInChildProcess(
   }
 
   const runner = () => {
-    // process.argv is [node, script, ...args]
-    // We want to construct [ ...nodeArgs, script, ...scriptArgs]
-    const script = process.argv[1];
-    const scriptArgs = process.argv.slice(2);
+    // Check if running as standard Node or Bun interpreter
+    // Covers 'node', 'node.exe', 'bun', 'bun.exe'
+    const execName = basename(process.execPath).toLowerCase();
+    const isInterpreter =
+      execName.startsWith('node') || execName.startsWith('bun');
 
-    const nodeArgs = [
-      ...process.execArgv,
-      ...additionalNodeArgs,
-      script,
-      ...additionalScriptArgs,
-      ...scriptArgs,
-    ];
+    let nodeArgs: string[];
     const newEnv = { ...process.env, QWEN_CODE_NO_RELAUNCH: 'true' };
+
+    if (isInterpreter) {
+      // process.argv is [node, script, ...args]
+      // We want to construct [ ...nodeArgs, script, ...scriptArgs]
+      const script = process.argv[1];
+      const scriptArgs = process.argv.slice(2);
+
+      nodeArgs = [
+        ...process.execArgv,
+        ...additionalNodeArgs,
+        script,
+        ...additionalScriptArgs,
+        ...scriptArgs,
+      ];
+    } else {
+      // We are likely running as a compiled binary (e.g. Bun compile)
+      // process.argv is [binary, ...args]
+      // We want to construct [ ...args, ...additionalScriptArgs ]
+      // Note: We ignore additionalNodeArgs (e.g. V8 flags) as they are likely incompatible or unsupported
+      nodeArgs = [...process.argv.slice(2), ...additionalScriptArgs];
+    }
 
     // The parent process should not be reading from stdin while the child is running.
     process.stdin.pause();

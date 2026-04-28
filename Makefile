@@ -7,6 +7,7 @@ help:
 	@echo ""
 	@echo "Usage:"
 	@echo "  make install          - Install npm dependencies"
+	@echo "  make build-binary     - Build the binary for all platforms"
 	@echo "  make build            - Build the main project"
 	@echo "  make build-all        - Build the main project and sandbox"
 	@echo "  make test             - Run the test suite"
@@ -22,6 +23,9 @@ help:
 
 install:
 	npm install
+
+build-binary:
+	npm run bundle && node scripts/build_bun_binary.js
 
 build:
 	npm run build
