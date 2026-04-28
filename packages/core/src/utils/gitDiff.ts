@@ -5,11 +5,12 @@
  */
 
 import { execFile } from 'node:child_process';
+import { constants as fsConstants } from 'node:fs';
 import { access, lstat, open, readFile, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import type { Hunk } from 'diff';
-import { findGitRoot, isGitRepository } from './gitUtils.js';
+import { findGitRoot } from './gitUtils.js';
 
 /** Re-export so consumers don't need to depend on `diff` directly. */
 export type GitDiffHunk = Hunk;
@@ -54,6 +55,13 @@ const UNTRACKED_READ_CAP_BYTES = MAX_DIFF_SIZE_BYTES;
 const UNTRACKED_READ_CHUNK_BYTES = 64 * 1024;
 /** Scan the first N bytes for NUL to detect binary files (matches git's heuristic). */
 const BINARY_SNIFF_BYTES = 8 * 1024;
+/** Open flags for line counting. `O_NOFOLLOW` closes the TOCTOU window
+ *  between the `lstat` symlink check and `open` — if the path is replaced
+ *  with a symlink in that gap, `open` rejects with `ELOOP` instead of
+ *  silently dereferencing it. Falls back to plain `O_RDONLY` on platforms
+ *  that don't expose the flag (Windows constants omit `O_NOFOLLOW`). */
+const UNTRACKED_OPEN_FLAGS =
+  fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
 
 /**
  * Fetch numstat-based git diff stats (files changed, lines added/removed) and
@@ -66,17 +74,17 @@ const BINARY_SNIFF_BYTES = 8 * 1024;
  * made by the user.
  */
 export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
-  if (!isGitRepository(cwd)) return null;
-  if (await isInTransientGitState(cwd)) return null;
-
-  // Pin every git invocation (and on-disk file probe) to the repo root.
-  // `git diff` already emits repo-root-relative paths regardless of cwd, but
-  // `git ls-files --others` is scoped to cwd — running both from the same
-  // root keeps the path keys consistent and ensures untracked files in
-  // sibling directories aren't silently dropped when /diff is invoked from
-  // a subdirectory of the worktree.
+  // Walk ancestors once to find the worktree root; reuse the result for the
+  // transient-state probe and every git invocation below. `findGitRoot`
+  // doubles as the "is this a git repo" check — a non-null return implies a
+  // repo. `git diff` already emits repo-root-relative paths regardless of
+  // cwd, but `git ls-files --others` is scoped to cwd, so pinning everything
+  // to the same root keeps the path keys consistent and ensures untracked
+  // files in sibling directories aren't silently dropped when /diff is
+  // invoked from a subdirectory of the worktree.
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return null;
+  if (await isInTransientGitState(gitRoot)) return null;
 
   // Shortstat probe + untracked scan run in parallel — both are needed
   // regardless of which path we take, and shortstat is O(1) memory so it can
@@ -175,12 +183,12 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
 export async function fetchGitDiffHunks(
   cwd: string,
 ): Promise<Map<string, Hunk[]>> {
-  if (!isGitRepository(cwd)) return new Map();
-  if (await isInTransientGitState(cwd)) return new Map();
-  // Run from the repo root so hunk keys are repo-root-relative regardless of
-  // which subdirectory the caller is in.
+  // Walk ancestors once; reuse for the transient-state probe and the diff
+  // call. Running from the repo root also keeps hunk keys repo-root-relative
+  // regardless of which subdirectory the caller is in.
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return new Map();
+  if (await isInTransientGitState(gitRoot)) return new Map();
 
   const diffOut = await runGit(
     ['--no-optional-locks', 'diff', 'HEAD'],
@@ -481,16 +489,23 @@ async function countUntrackedLines(
   try {
     st = await lstat(absPath);
   } catch {
-    return { added: 0, isBinary: false, truncated: false };
+    // File raced out from under ls-files (deleted, permission revoked, etc.).
+    // Surface it as a binary row to be consistent with the open-failure /
+    // non-regular-file branches below — `+0 (new)` would lie about it being
+    // an empty text file when we genuinely have no signal.
+    return { added: 0, isBinary: true, truncated: false };
   }
   if (!st.isFile()) {
     return { added: 0, isBinary: true, truncated: false };
   }
   let fh;
   try {
-    fh = await open(absPath, 'r');
+    fh = await open(absPath, UNTRACKED_OPEN_FLAGS);
   } catch {
-    return { added: 0, isBinary: false, truncated: false };
+    // ELOOP from O_NOFOLLOW (path raced into a symlink between lstat and
+    // open) and any other open error all collapse to a binary row so the
+    // file appears once in the listing without contributing line counts.
+    return { added: 0, isBinary: true, truncated: false };
   }
   try {
     // Stream the file in fixed-size chunks instead of allocating one full
@@ -549,7 +564,10 @@ async function countUntrackedLines(
     if (!truncated && lastByte !== 0x0a) lines++;
     return { added: lines, isBinary: false, truncated };
   } catch {
-    return { added: 0, isBinary: false, truncated: false };
+    // Mid-read failure (EIO, fh.stat throwing, etc.). Discard the partial
+    // count and surface as binary — same opaque marker as every other
+    // "we couldn't read this" branch in this function.
+    return { added: 0, isBinary: true, truncated: false };
   } finally {
     await fh.close().catch(() => {});
   }
@@ -563,6 +581,15 @@ async function countUntrackedLines(
 export async function resolveGitDir(cwd: string): Promise<string | null> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return null;
+  return resolveGitDirFromRoot(gitRoot);
+}
+
+/**
+ * Same contract as `resolveGitDir`, but skips the ancestor walk when the
+ * caller has already resolved the worktree root. Used by `fetchGitDiff` /
+ * `fetchGitDiffHunks` so they walk ancestors at most once per invocation.
+ */
+async function resolveGitDirFromRoot(gitRoot: string): Promise<string | null> {
   const dotGit = path.join(gitRoot, '.git');
   try {
     const s = await stat(dotGit);
@@ -578,8 +605,8 @@ export async function resolveGitDir(cwd: string): Promise<string | null> {
   }
 }
 
-async function isInTransientGitState(cwd: string): Promise<boolean> {
-  const gitDir = await resolveGitDir(cwd);
+async function isInTransientGitState(gitRoot: string): Promise<boolean> {
+  const gitDir = await resolveGitDirFromRoot(gitRoot);
   if (!gitDir) return false;
 
   // Rebase-in-progress is signalled by a directory, not a ref file. Both
