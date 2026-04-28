@@ -293,9 +293,6 @@ export class Session implements SessionContext {
         // Increment turn counter for each user prompt
         this.turn += 1;
 
-        // Always fetch the current chat from GeminiClient so that /clear's
-        // resetChat() (which replaces the chat instance) is reflected here.
-        const chat = this.config.getGeminiClient()!.getChat();
         const promptId = this.config.getSessionId() + '########' + this.turn;
 
         // Extract text from all text blocks to construct the full prompt text for logging
@@ -411,7 +408,7 @@ export class Session implements SessionContext {
 
         while (nextMessage !== null) {
           if (pendingSend.signal.aborted) {
-            chat.addHistory(nextMessage);
+            this.#getCurrentChat().addHistory(nextMessage);
             return { stopReason: 'cancelled' };
           }
 
@@ -420,16 +417,12 @@ export class Session implements SessionContext {
           const streamStartTime = Date.now();
 
           try {
-            const responseStream = await chat.sendMessageStream(
-              this.config.getModel(),
-              {
-                message: nextMessage?.parts ?? [],
-                config: {
-                  abortSignal: pendingSend.signal,
-                },
-              },
-              promptId,
-            );
+            const responseStream =
+              await this.#sendMessageStreamWithAutoCompression(
+                promptId,
+                nextMessage?.parts ?? [],
+                pendingSend.signal,
+              );
             nextMessage = null;
 
             for await (const resp of responseStream) {
@@ -539,7 +532,6 @@ export class Session implements SessionContext {
         // Fire Stop hook loop (aligned with core path in client.ts)
         // This is triggered after model response completes with no pending tool calls
         return this.#handleStopHookLoop(
-          chat,
           pendingSend,
           promptId,
           hooksEnabled,
@@ -555,7 +547,6 @@ export class Session implements SessionContext {
    * If a Stop hook requests continuation, it sends a follow-up message and loops back.
    * Maximum iterations (100) prevent infinite loops.
    *
-   * @param chat - The GeminiChat instance
    * @param pendingSend - The abort controller for the current prompt
    * @param promptId - The prompt ID for tracking
    * @param hooksEnabled - Whether hooks are enabled
@@ -563,7 +554,6 @@ export class Session implements SessionContext {
    * @returns The stop reason ('end_turn' or 'cancelled')
    */
   async #handleStopHookLoop(
-    chat: GeminiChat,
     pendingSend: AbortController,
     promptId: string,
     hooksEnabled: boolean,
@@ -584,7 +574,7 @@ export class Session implements SessionContext {
       }
 
       // Get response text from the chat history
-      const history = chat.getHistory();
+      const history = this.#getCurrentChat().getHistory();
       const lastModelMessage = history
         .filter((msg: Content) => msg.role === 'model')
         .pop();
@@ -664,16 +654,12 @@ export class Session implements SessionContext {
           const streamStartTime = Date.now();
 
           try {
-            const continueResponseStream = await chat.sendMessageStream(
-              this.config.getModel(),
-              {
-                message: nextMessage?.parts ?? [],
-                config: {
-                  abortSignal: pendingSend.signal,
-                },
-              },
-              promptId + '_stop_hook_' + stopHookIterationCount,
-            );
+            const continueResponseStream =
+              await this.#sendMessageStreamWithAutoCompression(
+                promptId + '_stop_hook_' + stopHookIterationCount,
+                nextMessage?.parts ?? [],
+                pendingSend.signal,
+              );
             nextMessage = null;
 
             for await (const resp of continueResponseStream) {
@@ -793,6 +779,29 @@ export class Session implements SessionContext {
     await this.client.sessionUpdate(params);
   }
 
+  #getCurrentChat(): GeminiChat {
+    return this.config.getGeminiClient()!.getChat();
+  }
+
+  async #sendMessageStreamWithAutoCompression(
+    promptId: string,
+    message: Part[],
+    abortSignal: AbortSignal,
+  ) {
+    const geminiClient = this.config.getGeminiClient()!;
+    await geminiClient.tryCompressChat(promptId, false, abortSignal);
+    return geminiClient.getChat().sendMessageStream(
+      this.config.getModel(),
+      {
+        message,
+        config: {
+          abortSignal,
+        },
+      },
+      promptId,
+    );
+  }
+
   /**
    * Starts the cron scheduler if cron is enabled and jobs exist.
    * The scheduler runs in the background, pushing fired prompts into
@@ -883,16 +892,11 @@ export class Session implements SessionContext {
               null;
             const streamStartTime = Date.now();
 
-            const responseStream = await this.config
-              .getGeminiClient()!
-              .getChat()
-              .sendMessageStream(
-                this.config.getModel(),
-                {
-                  message: nextMessage.parts ?? [],
-                  config: { abortSignal: ac.signal },
-                },
+            const responseStream =
+              await this.#sendMessageStreamWithAutoCompression(
                 promptId,
+                nextMessage.parts ?? [],
+                ac.signal,
               );
             nextMessage = null;
 
