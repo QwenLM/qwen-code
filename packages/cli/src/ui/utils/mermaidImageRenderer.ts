@@ -630,6 +630,7 @@ function renderPngWithMmdc(
         ...process.env,
         ...env,
       },
+      shell: shouldRunThroughShell(command),
       timeout: Number(
         env['QWEN_CODE_MERMAID_RENDER_TIMEOUT_MS'] ?? DEFAULT_RENDER_TIMEOUT_MS,
       ),
@@ -653,6 +654,10 @@ function renderPngWithMmdc(
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+}
+
+function shouldRunThroughShell(command: string): boolean {
+  return process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command);
 }
 
 function getMermaidRenderWidth(env: NodeJS.ProcessEnv): number {
