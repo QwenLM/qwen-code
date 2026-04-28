@@ -740,11 +740,14 @@ export async function runNonInteractive(
               await handleCancellationError(config);
             }
             await drainLocalQueue();
-            const agentsRunning = registry.getRunning();
-            const monitorsRunning = monitorRegistry.getRunning();
+            // Wait for every task's terminal notification, not just the
+            // running ones: cancel() marks status 'cancelled' synchronously
+            // but the notification is emitted later by the natural handler,
+            // and SDK consumers need every task_started paired with one.
+            // Also wait for running monitors to finish streaming events.
             if (
-              agentsRunning.length === 0 &&
-              monitorsRunning.length === 0 &&
+              !registry.hasUnfinalizedTasks() &&
+              monitorRegistry.getRunning().length === 0 &&
               localQueue.length === 0
             )
               break;

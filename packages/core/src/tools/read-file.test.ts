@@ -40,6 +40,7 @@ describe('ReadFileTool', () => {
       getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
       storage: {
         getProjectTempDir: () => path.join(tempRootDir, '.temp'),
+        getProjectDir: () => path.join(tempRootDir, '.project'),
         getUserSkillsDirs: () => [path.join(os.homedir(), '.qwen', 'skills')],
       },
       getTruncateToolOutputThreshold: () => 2500,
@@ -162,6 +163,21 @@ describe('ReadFileTool', () => {
       const tempDir = path.join(tempRootDir, '.temp');
       const params: ReadFileToolParams = {
         file_path: path.join(tempDir, 'temp-file.txt'),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return allow for paths within the subagent transcripts dir', async () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(
+          tempRootDir,
+          '.project',
+          'subagents',
+          'session-1',
+          'agent-a.jsonl',
+        ),
       };
       const invocation = tool.build(params);
       const permission = await invocation.getDefaultPermission();

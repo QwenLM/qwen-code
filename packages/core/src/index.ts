@@ -148,6 +148,7 @@ export * from './services/sessionTitle.js';
 export { stripTerminalControlSequences } from './utils/terminalSafe.js';
 export * from './services/shellExecutionService.js';
 export * from './services/monitorRegistry.js';
+export * from './services/toolUseSummary.js';
 export * from './utils/bareMode.js';
 
 // ============================================================================

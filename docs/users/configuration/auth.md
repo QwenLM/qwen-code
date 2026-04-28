@@ -330,6 +330,7 @@ You'll see a selector with arrow-key navigation:
 Select authentication method:
 
   Alibaba Cloud Coding Plan - Paid · Up to 6,000 requests/5 hrs · All Alibaba Cloud Coding Plan Models
+  API Key - Bring your own API key
   Qwen OAuth - Discontinued — switch to Coding Plan or API Key
 
 (Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)
@@ -340,9 +341,10 @@ Select authentication method:
 | Command                                              | Description                                       |
 | ---------------------------------------------------- | ------------------------------------------------- |
 | `qwen auth`                                          | Interactive authentication setup                  |
-| `qwen auth qwen-oauth`                               | Authenticate with Qwen OAuth                      |
 | `qwen auth coding-plan`                              | Authenticate with Alibaba Cloud Coding Plan       |
 | `qwen auth coding-plan --region china --key sk-sp-…` | Non-interactive Coding Plan setup (for scripting) |
+| `qwen auth api-key`                                  | Authenticate with an API key                      |
+| `qwen auth qwen-oauth`                               | Authenticate with Qwen OAuth (discontinued)       |
 | `qwen auth status`                                   | Show current authentication status                |
 
 **Examples:**
@@ -356,6 +358,9 @@ qwen auth coding-plan
 
 # Set up Coding Plan non-interactively (useful for CI/scripting)
 qwen auth coding-plan --region china --key sk-sp-xxxxxxxxx
+
+# Set up API key (ModelStudio Standard or custom provider)
+qwen auth api-key
 
 # Check your current auth configuration
 qwen auth status
