@@ -632,9 +632,7 @@ function renderPngWithMmdc(
         ...env,
       },
       shell: shouldRunThroughShell(command),
-      timeout: Number(
-        env['QWEN_CODE_MERMAID_RENDER_TIMEOUT_MS'] ?? DEFAULT_RENDER_TIMEOUT_MS,
-      ),
+      timeout: getMermaidRenderTimeout(env),
     });
 
     if (result.error) {
@@ -674,6 +672,14 @@ function getMermaidRenderWidth(env: NodeJS.ProcessEnv): number {
     return Math.max(320, Math.min(1800, Math.round(configuredWidth)));
   }
   return DEFAULT_MERMAID_RENDER_WIDTH;
+}
+
+function getMermaidRenderTimeout(env: NodeJS.ProcessEnv): number {
+  const configuredTimeout = Number(env['QWEN_CODE_MERMAID_RENDER_TIMEOUT_MS']);
+  if (Number.isFinite(configuredTimeout) && configuredTimeout > 0) {
+    return Math.round(configuredTimeout);
+  }
+  return DEFAULT_RENDER_TIMEOUT_MS;
 }
 
 function renderPngWithChafa(

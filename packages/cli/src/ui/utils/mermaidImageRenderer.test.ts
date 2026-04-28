@@ -172,6 +172,27 @@ describe('mermaid image renderer', () => {
     );
   });
 
+  it('falls back to the default render timeout when configured timeout is invalid', () => {
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-mmdc-'));
+    tempDirs.push(binDir);
+    createFakeMmdc(binDir);
+
+    const result = renderMermaidImageSync({
+      source: 'flowchart TD\n  A[Start] --> B[End invalid timeout]',
+      contentWidth: 80,
+      availableTerminalHeight: 20,
+      env: {
+        PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'iterm2',
+        QWEN_CODE_MERMAID_RENDER_TIMEOUT_MS: 'not-a-number',
+      },
+    });
+
+    expect(result.kind).toBe('terminal-image');
+    expect(result.kind === 'terminal-image' && result.protocol).toBe('iterm2');
+  });
+
   it('renders Kitty terminal images as virtual placements', () => {
     const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-mmdc-'));
     tempDirs.push(binDir);
