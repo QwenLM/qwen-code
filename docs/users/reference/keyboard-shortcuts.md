@@ -13,6 +13,7 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | `Ctrl+O`                       | Toggle compact mode (hide/show tool output and thinking).                                                             |
 | `Ctrl+S`                       | Allows long responses to print fully, disabling truncation. Use your terminal's scrollback to view the entire output. |
 | `Ctrl+T`                       | Toggle the display of tool descriptions.                                                                              |
+| `Alt/Option+M`                 | Toggle Markdown output between rich rendered previews and raw/source mode.                                            |
 | `Shift+Tab` (`Tab` on Windows) | Cycle approval modes (`plan` → `default` → `auto-edit` → `yolo`)                                                      |
 
 ## Input Prompt

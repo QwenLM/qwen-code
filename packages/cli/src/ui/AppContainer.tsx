@@ -1536,7 +1536,13 @@ export const AppContainer = (props: AppContainerProps) => {
   const [compactMode, setCompactMode] = useState<boolean>(
     settings.merged.ui?.compactMode ?? false,
   );
-  const [renderMode, setRenderMode] = useState<RenderMode>('render');
+  const configuredRenderMode = settings.merged.ui?.renderMode;
+  const [renderMode, setRenderMode] = useState<RenderMode>(
+    configuredRenderMode === 'raw' ? 'raw' : 'render',
+  );
+  useEffect(() => {
+    setRenderMode(configuredRenderMode === 'raw' ? 'raw' : 'render');
+  }, [configuredRenderMode]);
   const renderModeMountedRef = useRef(false);
   useEffect(() => {
     if (!renderModeMountedRef.current) {

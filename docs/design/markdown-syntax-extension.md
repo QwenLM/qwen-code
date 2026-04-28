@@ -43,6 +43,10 @@ Included in the first implementation:
   substitutions.
 - Existing Markdown tables continue to use `TableRenderer`.
 - Existing non-Mermaid fenced code blocks continue to use `CodeColorizer`.
+- Rendered visual blocks keep source reachable through `/copy mermaid N`,
+  `/copy latex N`, `/copy latex inline N`, and raw mode.
+- `ui.renderMode` controls whether sessions start in rendered or raw/source
+  mode, while `Alt/Option+M` toggles the active session view.
 
 ## Mermaid Rendering Strategy
 
@@ -133,9 +137,9 @@ entities/relationships, Gantt tasks, pie slices, journey steps, mindmap trees,
 git graph entries, and requirement trees. If a diagram type is unknown or not
 previewable, the renderer shows the original fenced Mermaid source rather than
 a placeholder so the content remains readable and selectable/copyable in the
-terminal. A dedicated one-key "copy Mermaid source" interaction is still a
-separate UI affordance for a future PR because the current message renderer
-does not expose per-block actions.
+terminal. Rendered Mermaid headings also show the Mermaid-specific copy command,
+for example `/copy mermaid 2`, so users can recover the original diagram source
+without switching the whole view to raw mode.
 
 The fallback is still not a complete Mermaid engine. It is a fast,
 dependency-light preview layer for common LLM-generated diagrams when
