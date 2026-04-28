@@ -66,7 +66,7 @@ try {
 const buildMtime = getMtime(buildTimestampPath);
 if (!buildMtime) {
   // If build is missing, write that as a warning and exit(0) so app can display it
-  const errorMessage = `ERROR: Build timestamp file (${path.relative(process.cwd(), buildTimestampPath)}) not found. Run \`npm run build\` first.`;
+  const errorMessage = `ERROR: Build timestamp file (${path.relative(process.cwd(), buildTimestampPath)}) not found. Run \`bun run build\` first.`;
   console.error(errorMessage); // Still log error here
   try {
     fs.writeFileSync(warningsFilePath, errorMessage);
@@ -119,7 +119,7 @@ for (const file of allSourceFiles) {
 
 if (newerSourceFileFound) {
   const finalWarning =
-    '\nRun "npm run build" to incorporate changes before starting.';
+    '\nRun "bun run build" to incorporate changes before starting.';
   warningMessages.push(finalWarning);
   console.warn(finalWarning);
 
