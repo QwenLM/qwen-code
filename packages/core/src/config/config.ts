@@ -61,6 +61,7 @@ import { PermissionManager } from '../permissions/permission-manager.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
+import { MonitorRegistry } from '../services/monitorRegistry.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -544,6 +545,7 @@ export class Config {
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
   private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
+  private readonly monitorRegistry = new MonitorRegistry();
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
@@ -1604,6 +1606,7 @@ export class Config {
       }
 
       this.backgroundTaskRegistry.abortAll();
+      this.monitorRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
     } catch (error) {
@@ -2467,6 +2470,10 @@ export class Config {
     return this.backgroundTaskRegistry;
   }
 
+  getMonitorRegistry(): MonitorRegistry {
+    return this.monitorRegistry;
+  }
+
   /**
    * Whether interactive permission prompts should be auto-denied.
    * True for background agents that have no UI to show prompts.
@@ -2707,6 +2714,12 @@ export class Config {
         return new CronDeleteTool(this);
       });
     }
+
+    // Register monitor tool
+    await registerLazy(ToolNames.MONITOR, async () => {
+      const { MonitorTool } = await import('../tools/monitor.js');
+      return new MonitorTool(this);
+    });
 
     if (!options?.skipDiscovery) {
       await registry.discoverAllTools();

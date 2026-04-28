@@ -1,0 +1,65 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect, afterEach } from 'vitest';
+import { TestRig, validateModelOutput } from '../test-helper.js';
+
+describe('sleep-interception', () => {
+  let rig: TestRig;
+
+  afterEach(async () => {
+    if (rig) {
+      await rig.cleanup();
+    }
+  });
+
+  it('should block sleep >= 2s and mention Monitor in guidance', async () => {
+    rig = new TestRig();
+    await rig.setup('sleep-blocked');
+
+    const result = await rig.run(
+      'Run this exact shell command: sleep 5. ' +
+        'If the command is blocked, say "BLOCKED" and explain why. ' +
+        'If it succeeds, say "SUCCESS".',
+    );
+
+    validateModelOutput(result, null, 'sleep blocked');
+
+    // The model should report being blocked, since sleep 5 triggers interception
+    const foundShell = await rig.waitForToolCall('run_shell_command');
+    expect(foundShell).toBeTruthy();
+
+    // The tool result should contain the blocked message
+    const toolLogs = rig.readToolLogs();
+    const shellCall = toolLogs.find(
+      (t) => t.toolRequest.name === 'run_shell_command',
+    );
+    if (shellCall?.toolResult) {
+      const resultStr =
+        typeof shellCall.toolResult === 'string'
+          ? shellCall.toolResult
+          : JSON.stringify(shellCall.toolResult);
+      expect(resultStr.toLowerCase()).toContain('blocked');
+    }
+  }, 30000);
+
+  it('should allow sleep < 2s', async () => {
+    rig = new TestRig();
+    await rig.setup('sleep-allowed');
+
+    const result = await rig.run(
+      'Run this exact shell command: sleep 1. Then say "DONE".',
+    );
+
+    validateModelOutput(result, null, 'sleep allowed');
+
+    const foundShell = await rig.waitForToolCall('run_shell_command');
+    expect(foundShell).toBeTruthy();
+
+    // Should not be blocked — model should complete successfully
+    expect(result.toLowerCase()).not.toContain('blocked');
+  }, 30000);
+});

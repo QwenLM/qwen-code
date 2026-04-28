@@ -49,6 +49,28 @@ const debugLogger = createDebugLogger('SHELL');
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
 
+/**
+ * Detect standalone or leading `sleep N` patterns that should use Monitor
+ * instead. Catches `sleep 5`, `sleep 5 && check`, `sleep 5; check` — but
+ * not sleep inside pipelines, subshells, or scripts (those are fine).
+ */
+export function detectBlockedSleepPattern(command: string): string | null {
+  const parts = splitCommands(command);
+  if (parts.length === 0) return null;
+  const first = (parts[0] ?? '').trim();
+  // Bare `sleep N` as the first subcommand.
+  // Float durations (sleep 0.5) are allowed — those are legit pacing.
+  const m = /^sleep\s+(\d+)\s*$/.exec(first);
+  if (!m) return null;
+  const secs = parseInt(m[1]!, 10);
+  if (secs < 2) return null;
+
+  const rest = parts.slice(1).join(' ').trim();
+  return rest
+    ? `sleep ${secs} followed by: ${rest}`
+    : `standalone sleep ${secs}`;
+}
+
 export interface ShellToolParams {
   command: string;
   is_background: boolean;
@@ -729,6 +751,19 @@ export class ShellTool extends BaseDeclarativeTool<
 
       if (!isWithinWorkspace) {
         return `Directory '${params.directory}' is not within any of the registered workspace directories.`;
+      }
+    }
+    // Sleep interception: block sleep >= 2s in foreground, suggest Monitor
+    if (!params.is_background) {
+      const sleepPattern = detectBlockedSleepPattern(params.command);
+      if (sleepPattern !== null) {
+        return (
+          `Blocked: ${sleepPattern}. ` +
+          'Run blocking commands in the background with is_background: true ' +
+          "— you'll get a completion notification when done. " +
+          'For streaming events (watching logs, polling APIs), use the Monitor tool. ' +
+          'If you genuinely need a delay (rate limiting, deliberate pacing), keep it under 2 seconds.'
+        );
       }
     }
     return null;

@@ -24,6 +24,7 @@ vi.mock('crypto');
 
 import { isCommandAllowed } from '../utils/shell-utils.js';
 import { ShellTool } from './shell.js';
+import { detectBlockedSleepPattern } from './shell.js';
 import { type Config } from '../config/config.js';
 import {
   type ShellExecutionResult,
@@ -1214,7 +1215,7 @@ describe('ShellTool', () => {
     it('should handle timeout vs user cancellation correctly', async () => {
       const userAbortController = new AbortController();
       const invocation = shellTool.build({
-        command: 'sleep 10',
+        command: 'long-running-command',
         is_background: false,
         timeout: 5000,
       });
@@ -1295,5 +1296,44 @@ describe('ShellTool', () => {
         {},
       );
     });
+  });
+});
+
+describe('detectBlockedSleepPattern', () => {
+  it('blocks standalone sleep >= 2s', () => {
+    expect(detectBlockedSleepPattern('sleep 5')).toBe('standalone sleep 5');
+    expect(detectBlockedSleepPattern('sleep 10')).toBe('standalone sleep 10');
+  });
+
+  it('blocks sleep followed by another command', () => {
+    expect(detectBlockedSleepPattern('sleep 5 && curl http://localhost')).toBe(
+      'sleep 5 followed by: curl http://localhost',
+    );
+    expect(detectBlockedSleepPattern('sleep 3; echo done')).toBe(
+      'sleep 3 followed by: echo done',
+    );
+  });
+
+  it('allows sleep < 2s', () => {
+    expect(detectBlockedSleepPattern('sleep 1')).toBeNull();
+    expect(detectBlockedSleepPattern('sleep 0')).toBeNull();
+  });
+
+  it('allows float sleep durations (not matched by integer regex)', () => {
+    expect(detectBlockedSleepPattern('sleep 0.5')).toBeNull();
+    expect(detectBlockedSleepPattern('sleep 1.5')).toBeNull();
+  });
+
+  it('allows sleep not as first subcommand', () => {
+    expect(detectBlockedSleepPattern('echo hello && sleep 5')).toBeNull();
+  });
+
+  it('allows non-sleep commands', () => {
+    expect(detectBlockedSleepPattern('cat file.txt')).toBeNull();
+    expect(detectBlockedSleepPattern('npm run dev')).toBeNull();
+  });
+
+  it('returns null for empty command', () => {
+    expect(detectBlockedSleepPattern('')).toBeNull();
   });
 });
