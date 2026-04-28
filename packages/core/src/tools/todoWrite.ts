@@ -15,14 +15,12 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { TodoItem } from '../hooks/types.js';
+import { detectTodoChanges, HookPhase } from '../hooks/types.js';
+import type { AggregatedHookResult } from '../hooks/hookAggregator.js';
+export type { TodoItem } from '../hooks/types.js';
 
 const debugLogger = createDebugLogger('TODO_WRITE');
-
-export interface TodoItem {
-  id: string;
-  content: string;
-  status: 'pending' | 'in_progress' | 'completed';
-}
 
 export interface TodoWriteParams {
   todos: TodoItem[];
@@ -315,6 +313,9 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
     const sessionId = this.config.getSessionId();
 
     try {
+      // 1. Read current todos (for change detection)
+      const oldTodos = await readTodosFromFile(sessionId);
+
       let finalTodos: TodoItem[];
 
       if (modified_by_user && modified_content !== undefined) {
@@ -326,12 +327,101 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         finalTodos = todos;
       }
 
+      // 2. Detect changes
+      const changes = detectTodoChanges(oldTodos, finalTodos);
+      const oldTodosMap = new Map(oldTodos.map((t) => [t.id, t]));
+
+      // 3. VALIDATION PHASE: Execute all hooks with Validation phase
+      // Hooks should only check and return block/approve decisions, no side effects
+      const hookSystem = this.config.getHookSystem();
+
+      // Validate TodoCreated hooks
+      if (hookSystem && changes.created.length > 0) {
+        for (const todo of changes.created) {
+          const result: AggregatedHookResult =
+            await hookSystem.fireTodoCreatedEvent(
+              todo.id,
+              todo.content,
+              todo.status,
+              finalTodos,
+              HookPhase.Validation,
+              _signal,
+            );
+
+          // If blocking, throw WITHOUT writing (no side effects executed yet)
+          if (result.finalOutput?.decision === 'block') {
+            throw new Error(
+              `TodoCreated hook feedback: ${result.finalOutput.reason || 'Hook blocked todo creation'}`,
+            );
+          }
+        }
+      }
+
+      // Validate TodoCompleted hooks
+      if (hookSystem && changes.completed.length > 0) {
+        for (const todo of changes.completed) {
+          const oldTodo = oldTodosMap.get(todo.id);
+          const previousStatus = oldTodo?.status ?? 'pending';
+
+          const result: AggregatedHookResult =
+            await hookSystem.fireTodoCompletedEvent(
+              todo.id,
+              todo.content,
+              previousStatus as 'pending' | 'in_progress',
+              finalTodos,
+              HookPhase.Validation,
+              _signal,
+            );
+
+          // If blocking, throw WITHOUT writing
+          if (result.finalOutput?.decision === 'block') {
+            throw new Error(
+              `TodoCompleted hook feedback: ${result.finalOutput.reason || 'Hook blocked todo completion'}`,
+            );
+          }
+        }
+      }
+
+      // 4. Write new todos AFTER all validation passes
       await writeTodosToFile(finalTodos, sessionId);
 
-      // Create structured display object for rich UI rendering
+      // 5. POST-WRITE PHASE: Execute hooks for side effects (logging, HTTP sync, etc.)
+      // These hooks can now safely perform side effects knowing data is persisted
+      // We don't check for blocking here since validation already passed
+      if (hookSystem && changes.created.length > 0) {
+        for (const todo of changes.created) {
+          await hookSystem.fireTodoCreatedEvent(
+            todo.id,
+            todo.content,
+            todo.status,
+            finalTodos,
+            HookPhase.PostWrite,
+            _signal,
+          );
+        }
+      }
+
+      if (hookSystem && changes.completed.length > 0) {
+        for (const todo of changes.completed) {
+          const oldTodo = oldTodosMap.get(todo.id);
+          const previousStatus = oldTodo?.status ?? 'pending';
+
+          await hookSystem.fireTodoCompletedEvent(
+            todo.id,
+            todo.content,
+            previousStatus as 'pending' | 'in_progress',
+            finalTodos,
+            HookPhase.PostWrite,
+            _signal,
+          );
+        }
+      }
+
+      // 6. Create structured display object for rich UI rendering
       const todoResultDisplay = {
         type: 'todo_list' as const,
         todos: finalTodos,
+        changes,
       };
 
       // Create plain string format with system reminder
@@ -350,7 +440,7 @@ Your todo list is now empty. DO NOT mention this explicitly to the user. You hav
         llmContent = `Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable
 
 <system-reminder>
-Your todo list has changed. DO NOT mention this explicitly to the user. Here are the latest contents of your todo list: 
+Your todo list has changed. DO NOT mention this explicitly to the user. Here are the latest contents of your todo list:
 
 ${todosJson}. Continue on with the tasks at hand if applicable.
 </system-reminder>`;

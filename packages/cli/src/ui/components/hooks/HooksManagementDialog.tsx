@@ -89,29 +89,52 @@ function isValidHookDefinition(def: unknown): def is HookDefinition {
 
 /**
  * Type guard to check if a value is a valid hooks record
+ * Note: This validates the structure but allows individual events to have
+ * invalid configs - those will be filtered out during processing.
  */
-function isValidHooksRecord(
-  hooks: unknown,
-): hooks is Record<string, HookDefinition[]> {
+function isValidHooksRecord(hooks: unknown): hooks is Record<string, unknown> {
   if (typeof hooks !== 'object' || hooks === null) {
     return false;
   }
+  // Basic structure check - must be a record with array values for event keys
   const record = hooks as Record<string, unknown>;
   for (const [key, value] of Object.entries(record)) {
     // Skip non-event configuration fields
     if (HOOKS_CONFIG_FIELDS.includes(key)) {
       continue;
     }
+    // Event values should be arrays (even if contents are invalid)
     if (!Array.isArray(value)) {
       return false;
     }
-    for (const def of value) {
-      if (!isValidHookDefinition(def)) {
-        return false;
-      }
-    }
   }
   return true;
+}
+
+/**
+ * Safely extract hook definitions for a specific event
+ * Returns empty array if the definitions are invalid
+ */
+function getValidHookDefinitions(
+  hooksRecord: Record<string, unknown>,
+  eventName: string,
+): HookDefinition[] {
+  const value = hooksRecord[eventName];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const result: HookDefinition[] = [];
+  for (const def of value) {
+    if (isValidHookDefinition(def)) {
+      result.push(def);
+    } else {
+      debugLogger.warn(
+        `Skipping invalid hook definition for ${eventName}:`,
+        def,
+      );
+    }
+  }
+  return result;
 }
 
 export function HooksManagementDialog({
@@ -247,11 +270,12 @@ export function HooksManagementDialog({
     for (const eventName of DISPLAY_HOOK_EVENTS) {
       const hookInfo = createEmptyHookEventInfo(eventName);
 
-      // Get hooks from user settings (with type validation)
+      // Get hooks from user settings (with per-event validation)
       const userSettingsRecord = userSettings as Record<string, unknown>;
       const userHooksRaw = userSettingsRecord?.['hooks'];
-      if (isValidHooksRecord(userHooksRaw) && userHooksRaw[eventName]) {
-        for (const def of userHooksRaw[eventName]) {
+      if (isValidHooksRecord(userHooksRaw)) {
+        const userDefs = getValidHookDefinitions(userHooksRaw, eventName);
+        for (const def of userDefs) {
           for (const hookConfig of def.hooks) {
             hookInfo.configs.push({
               config: hookConfig,
@@ -263,17 +287,18 @@ export function HooksManagementDialog({
         }
       }
 
-      // Get hooks from workspace settings (with type validation)
+      // Get hooks from workspace settings (with per-event validation)
       const workspaceSettingsRecord = workspaceSettings as Record<
         string,
         unknown
       >;
       const workspaceHooksRaw = workspaceSettingsRecord?.['hooks'];
-      if (
-        isValidHooksRecord(workspaceHooksRaw) &&
-        workspaceHooksRaw[eventName]
-      ) {
-        for (const def of workspaceHooksRaw[eventName]) {
+      if (isValidHooksRecord(workspaceHooksRaw)) {
+        const workspaceDefs = getValidHookDefinitions(
+          workspaceHooksRaw,
+          eventName,
+        );
+        for (const def of workspaceDefs) {
           for (const hookConfig of def.hooks) {
             hookInfo.configs.push({
               config: hookConfig,

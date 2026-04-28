@@ -5,8 +5,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import type { TodoWriteParams, TodoItem } from './todoWrite.js';
+import type { TodoWriteParams } from './todoWrite.js';
 import { TodoWriteTool, listTodoSessions } from './todoWrite.js';
+import type { TodoItem } from '../hooks/types.js';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'node:path';
@@ -28,6 +29,7 @@ describe('TodoWriteTool', () => {
   beforeEach(() => {
     mockConfig = {
       getSessionId: () => 'test-session-123',
+      getHookSystem: () => undefined,
     } as Config;
     tool = new TodoWriteTool(mockConfig);
     mockAbortSignal = new AbortController().signal;
@@ -135,8 +137,10 @@ describe('TodoWriteTool', () => {
         ],
       };
 
-      // Mock file not existing
-      mockFs.readFile.mockRejectedValue({ code: 'ENOENT' });
+      // Mock file not existing (use proper Error object)
+      const enoentError = new Error('ENOENT') as Error & { code: string };
+      enoentError.code = 'ENOENT';
+      mockFs.readFile.mockRejectedValue(enoentError);
       mockFs.mkdir.mockResolvedValue(undefined);
       mockFs.writeFile.mockResolvedValue(undefined);
 
@@ -149,7 +153,7 @@ describe('TodoWriteTool', () => {
       expect(result.llmContent).toContain('<system-reminder>');
       expect(result.llmContent).toContain('Your todo list has changed');
       expect(result.llmContent).toContain(JSON.stringify(params.todos));
-      expect(result.returnDisplay).toEqual({
+      expect(result.returnDisplay).toMatchObject({
         type: 'todo_list',
         todos: [
           { id: '1', content: 'Task 1', status: 'pending' },
@@ -191,7 +195,7 @@ describe('TodoWriteTool', () => {
       expect(result.llmContent).toContain('<system-reminder>');
       expect(result.llmContent).toContain('Your todo list has changed');
       expect(result.llmContent).toContain(JSON.stringify(params.todos));
-      expect(result.returnDisplay).toEqual({
+      expect(result.returnDisplay).toMatchObject({
         type: 'todo_list',
         todos: [
           { id: '1', content: 'Updated Task', status: 'completed' },
@@ -213,7 +217,10 @@ describe('TodoWriteTool', () => {
         ],
       };
 
-      mockFs.readFile.mockRejectedValue({ code: 'ENOENT' });
+      // Mock readTodosFromFile returning empty array (file not existing)
+      const enoentError = new Error('ENOENT') as Error & { code: string };
+      enoentError.code = 'ENOENT';
+      mockFs.readFile.mockRejectedValue(enoentError);
       mockFs.mkdir.mockResolvedValue(undefined);
       mockFs.writeFile.mockRejectedValue(new Error('Write failed'));
 
@@ -234,6 +241,12 @@ describe('TodoWriteTool', () => {
 
       mockFs.mkdir.mockResolvedValue(undefined);
       mockFs.writeFile.mockResolvedValue(undefined);
+      // Mock readTodosFromFile returning existing todos
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          todos: [{ id: '1', content: 'Old Task', status: 'pending' }],
+        }),
+      );
 
       const invocation = tool.build(params);
       const result = await invocation.execute(mockAbortSignal);
@@ -242,7 +255,7 @@ describe('TodoWriteTool', () => {
       expect(result.llmContent).toContain('<system-reminder>');
       expect(result.llmContent).toContain('Your todo list is now empty');
       expect(result.llmContent).toContain('no pending tasks');
-      expect(result.returnDisplay).toEqual({
+      expect(result.returnDisplay).toMatchObject({
         type: 'todo_list',
         todos: [],
       });
@@ -314,6 +327,7 @@ describe('TodoWriteTool – runtime output directory', () => {
   beforeEach(() => {
     mockConfig = {
       getSessionId: () => 'runtime-session',
+      getHookSystem: () => undefined,
     } as Config;
     tool = new TodoWriteTool(mockConfig);
     mockAbortSignal = new AbortController().signal;
@@ -340,7 +354,10 @@ describe('TodoWriteTool – runtime output directory', () => {
       todos: [{ id: '1', content: 'Task 1', status: 'pending' }],
     };
 
-    mockFs.readFile.mockRejectedValue({ code: 'ENOENT' });
+    // Use proper Error object for ENOENT
+    const enoentError = new Error('ENOENT') as Error & { code: string };
+    enoentError.code = 'ENOENT';
+    mockFs.readFile.mockRejectedValue(enoentError);
     mockFs.mkdir.mockResolvedValue(undefined);
     mockFs.writeFile.mockResolvedValue(undefined);
 
@@ -361,7 +378,10 @@ describe('TodoWriteTool – runtime output directory', () => {
       todos: [{ id: '1', content: 'Task 1', status: 'pending' }],
     };
 
-    mockFs.readFile.mockRejectedValue({ code: 'ENOENT' });
+    // Use proper Error object for ENOENT
+    const enoentError = new Error('ENOENT') as Error & { code: string };
+    enoentError.code = 'ENOENT';
+    mockFs.readFile.mockRejectedValue(enoentError);
     mockFs.mkdir.mockResolvedValue(undefined);
     mockFs.writeFile.mockResolvedValue(undefined);
 
@@ -377,7 +397,10 @@ describe('TodoWriteTool – runtime output directory', () => {
       todos: [{ id: '1', content: 'Task 1', status: 'pending' }],
     };
 
-    mockFs.readFile.mockRejectedValue({ code: 'ENOENT' });
+    // Use proper Error object for ENOENT
+    const enoentError = new Error('ENOENT') as Error & { code: string };
+    enoentError.code = 'ENOENT';
+    mockFs.readFile.mockRejectedValue(enoentError);
     mockFs.mkdir.mockResolvedValue(undefined);
     mockFs.writeFile.mockResolvedValue(undefined);
 
