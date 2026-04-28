@@ -101,6 +101,38 @@ describe('BackgroundShellRegistry', () => {
     });
   });
 
+  describe('requestCancel', () => {
+    it('aborts the signal but leaves status running and endTime undefined', () => {
+      const reg = new BackgroundShellRegistry();
+      const ac = new AbortController();
+      reg.register(makeEntry({ shellId: 'a', abortController: ac }));
+
+      reg.requestCancel('a');
+
+      const e = reg.get('a')!;
+      expect(e.status).toBe('running');
+      expect(e.endTime).toBeUndefined();
+      expect(ac.signal.aborted).toBe(true);
+    });
+
+    it('is a no-op on a terminal entry', () => {
+      const reg = new BackgroundShellRegistry();
+      const ac = new AbortController();
+      reg.register(makeEntry({ shellId: 'a', abortController: ac }));
+      reg.complete('a', 0, 1500);
+
+      reg.requestCancel('a');
+
+      expect(reg.get('a')!.status).toBe('completed');
+      expect(ac.signal.aborted).toBe(false);
+    });
+
+    it('is a no-op for unknown id', () => {
+      const reg = new BackgroundShellRegistry();
+      expect(() => reg.requestCancel('missing')).not.toThrow();
+    });
+  });
+
   describe('abortAll', () => {
     it('cancels every running entry and leaves terminal entries alone', () => {
       const reg = new BackgroundShellRegistry();

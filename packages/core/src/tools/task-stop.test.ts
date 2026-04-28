@@ -118,7 +118,12 @@ describe('TaskStopTool', () => {
       expect(result.llmContent).toContain('background shell "bg_a1b2c3d4"');
       expect(result.llmContent).toContain('npm run dev');
       expect(result.llmContent).toContain('/tmp/bg-out/shell-bg_a1b2c3d4.output');
-      expect(shellRegistry.get('bg_a1b2c3d4')!.status).toBe('cancelled');
+      // task_stop only requests cancellation — the entry stays `running`
+      // until the spawn handler observes the abort and settles the entry
+      // with the real exit moment. Without this guarantee, /tasks would
+      // report a terminal-but-still-draining shell.
+      expect(shellRegistry.get('bg_a1b2c3d4')!.status).toBe('running');
+      expect(shellRegistry.get('bg_a1b2c3d4')!.endTime).toBeUndefined();
       expect(ac.signal.aborted).toBe(true);
     });
 

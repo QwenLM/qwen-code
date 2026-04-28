@@ -76,12 +76,17 @@ class TaskStopInvocation extends BaseToolInvocation<
       if (shellEntry.status !== 'running') {
         return notRunningError('shell', taskId, shellEntry.status);
       }
-      shellRegistry.cancel(taskId, Date.now());
+      // requestCancel triggers the AbortController only — the registry's
+      // settle path records the real terminal status + endTime once the
+      // process actually drains. Calling cancel(id, Date.now()) here would
+      // mark the entry terminal immediately and lose the real exit info.
+      shellRegistry.requestCancel(taskId);
       return {
         llmContent:
           `Cancellation requested for background shell "${taskId}". ` +
-          `Final status will be visible via /tasks; captured output remains ` +
-          `at ${shellEntry.outputPath}.\nCommand: ${shellEntry.command}`,
+          `Final status will be visible via /tasks once the process drains; ` +
+          `captured output remains at ${shellEntry.outputPath}.\n` +
+          `Command: ${shellEntry.command}`,
         returnDisplay: `Cancelled shell: ${shellEntry.command}`,
       };
     }
