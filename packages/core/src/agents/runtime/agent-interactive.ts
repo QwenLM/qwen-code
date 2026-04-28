@@ -14,11 +14,9 @@
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { type AgentEventEmitter, AgentEventType } from './agent-events.js';
 import type {
-  AgentRoundTextEvent,
-  AgentToolCallEvent,
-  AgentToolResultEvent,
-  AgentToolOutputUpdateEvent,
   AgentApprovalRequestEvent,
+  AgentToolOutputUpdateEvent,
+  AgentToolResultEvent,
 } from './agent-events.js';
 import type { AgentStatsSummary } from './agent-statistics.js';
 import type { AgentCore } from './agent-core.js';
@@ -54,7 +52,6 @@ export class AgentInteractive {
   readonly config: AgentInteractiveConfig;
   private readonly core: AgentCore;
   private readonly queue = new AsyncMessageQueue<string>();
-  private readonly messages: AgentMessage[] = [];
 
   private status: AgentStatus = AgentStatus.INITIALIZING;
   private error: string | undefined;
@@ -67,28 +64,11 @@ export class AgentInteractive {
   private processing = false;
   private roundCancelledByUser = false;
 
-  // Pending tool approval requests. Keyed by callId.
-  // Populated by TOOL_WAITING_APPROVAL, removed by TOOL_RESULT or when
-  // the user responds. The UI reads this to show confirmation dialogs.
-  private readonly pendingApprovals = new Map<
-    string,
-    ToolCallConfirmationDetails
-  >();
-
-  // Live streaming output for currently-executing tools. Keyed by callId.
-  // Populated by TOOL_OUTPUT_UPDATE (replaces previous), cleared on TOOL_RESULT.
-  // The UI reads this via getLiveOutputs() to show real-time stdout.
-  private readonly liveOutputs = new Map<string, ToolResultDisplay>();
-
-  // PTY PIDs for currently-executing shell tools. Keyed by callId.
-  // Populated by TOOL_OUTPUT_UPDATE when pid is present, cleared on TOOL_RESULT.
-  // The UI reads this via getShellPids() to enable interactive shell input.
-  private readonly shellPids = new Map<string, number>();
-
   // Wall-clock timestamp when each currently-executing tool transitioned into
   // the scheduler's `executing` state. Keyed by callId. First TOOL_OUTPUT_UPDATE
   // carrying executionStartTime wins; later events that re-carry it are ignored
-  // so the timer is stable.
+  // so the timer is stable. Lives on InteractiveAgent (not AgentCore) because
+  // it's only consumed by the interactive UI's elapsed-time indicator.
   private readonly executionStartTimes = new Map<string, number>();
 
   constructor(config: AgentInteractiveConfig, core: AgentCore) {
@@ -233,7 +213,7 @@ export class AgentInteractive {
   cancelCurrentRound(): void {
     this.roundCancelledByUser = true;
     this.roundAbortController?.abort();
-    this.pendingApprovals.clear();
+    this.core.clearPendingApprovals();
     this.addMessage('info', 'Agent round cancelled.', {
       metadata: { level: 'warning' },
     });
@@ -261,7 +241,7 @@ export class AgentInteractive {
   abort(): void {
     this.masterAbortController.abort();
     this.queue.drain();
-    this.pendingApprovals.clear();
+    this.core.clearPendingApprovals();
   }
 
   // ─── Message Queue ─────────────────────────────────────────
@@ -276,10 +256,10 @@ export class AgentInteractive {
     }
   }
 
-  // ─── State Accessors ───────────────────────────────────────
+  // ─── State Accessors (delegates to AgentCore) ──────────────
 
   getMessages(): readonly AgentMessage[] {
-    return this.messages;
+    return this.core.getMessages();
   }
 
   getStatus(): AgentStatus {
@@ -307,7 +287,7 @@ export class AgentInteractive {
     return this.core;
   }
 
-  getEventEmitter(): AgentEventEmitter | undefined {
+  getEventEmitter(): AgentEventEmitter {
     return this.core.getEventEmitter();
   }
 
@@ -317,7 +297,7 @@ export class AgentInteractive {
    * The UI reads this to render confirmation dialogs inside ToolGroupMessage.
    */
   getPendingApprovals(): ReadonlyMap<string, ToolCallConfirmationDetails> {
-    return this.pendingApprovals;
+    return this.core.getPendingApprovals();
   }
 
   /**
@@ -326,7 +306,7 @@ export class AgentInteractive {
    * Entries are cleared when TOOL_RESULT arrives for the call.
    */
   getLiveOutputs(): ReadonlyMap<string, ToolResultDisplay> {
-    return this.liveOutputs;
+    return this.core.getLiveOutputs();
   }
 
   /**
@@ -336,7 +316,7 @@ export class AgentInteractive {
    * interactive shell input via HistoryItemDisplay's activeShellPtyId prop.
    */
   getShellPids(): ReadonlyMap<string, number> {
-    return this.shellPids;
+    return this.core.getShellPids();
   }
 
   /**
@@ -394,53 +374,20 @@ export class AgentInteractive {
     content: string,
     options?: { thought?: boolean; metadata?: Record<string, unknown> },
   ): void {
-    const message: AgentMessage = {
-      role,
-      content,
-      timestamp: Date.now(),
-    };
-    if (options?.thought) {
-      message.thought = true;
-    }
-    if (options?.metadata) {
-      message.metadata = options.metadata;
-    }
-    this.messages.push(message);
+    this.core.pushMessage(role, content, options);
   }
 
+  /**
+   * Wraps TOOL_WAITING_APPROVAL's onConfirm so a Cancel outcome aborts
+   * the current round (headless agents bypass this path entirely).
+   * Core already owns the message / live-output / shell-PID listeners.
+   */
   private setupEventListeners(): void {
     const emitter = this.core.eventEmitter;
-    if (!emitter) return;
-
-    emitter.on(AgentEventType.ROUND_TEXT, (event: AgentRoundTextEvent) => {
-      if (event.thoughtText) {
-        this.addMessage('assistant', event.thoughtText, { thought: true });
-      }
-      if (event.text) {
-        this.addMessage('assistant', event.text);
-      }
-    });
-
-    emitter.on(AgentEventType.TOOL_CALL, (event: AgentToolCallEvent) => {
-      this.addMessage('tool_call', `Tool call: ${event.name}`, {
-        metadata: {
-          callId: event.callId,
-          toolName: event.name,
-          args: event.args,
-          description: event.description,
-          renderOutputAsMarkdown: event.isOutputMarkdown,
-          round: event.round,
-        },
-      });
-    });
 
     emitter.on(
       AgentEventType.TOOL_OUTPUT_UPDATE,
       (event: AgentToolOutputUpdateEvent) => {
-        this.liveOutputs.set(event.callId, event.outputChunk);
-        if (event.pid !== undefined) {
-          this.shellPids.set(event.callId, event.pid);
-        }
         if (
           event.executionStartTime !== undefined &&
           !this.executionStartTimes.has(event.callId)
@@ -451,25 +398,7 @@ export class AgentInteractive {
     );
 
     emitter.on(AgentEventType.TOOL_RESULT, (event: AgentToolResultEvent) => {
-      this.liveOutputs.delete(event.callId);
-      this.shellPids.delete(event.callId);
       this.executionStartTimes.delete(event.callId);
-      this.pendingApprovals.delete(event.callId);
-
-      const statusText = event.success ? 'succeeded' : 'failed';
-      const summary = event.error
-        ? `Tool ${event.name} ${statusText}: ${event.error}`
-        : `Tool ${event.name} ${statusText}`;
-      this.addMessage('tool_result', summary, {
-        metadata: {
-          callId: event.callId,
-          toolName: event.name,
-          success: event.success,
-          resultDisplay: event.resultDisplay,
-          outputFile: event.outputFile,
-          round: event.round,
-        },
-      });
     });
 
     emitter.on(
@@ -481,17 +410,17 @@ export class AgentInteractive {
             outcome: Parameters<ToolCallConfirmationDetails['onConfirm']>[0],
             payload?: Parameters<ToolCallConfirmationDetails['onConfirm']>[1],
           ) => {
-            this.pendingApprovals.delete(event.callId);
+            this.core.deletePendingApproval(event.callId);
             // Nudge the UI to re-render so the tool transitions visually
             // from Confirming → Executing without waiting for the first
             // real TOOL_OUTPUT_UPDATE from the tool's execution.
-            this.core.eventEmitter?.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+            this.core.eventEmitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
               subagentId: this.core.subagentId,
               round: event.round,
               callId: event.callId,
               outputChunk: '',
               timestamp: Date.now(),
-            } as AgentToolOutputUpdateEvent);
+            });
             await event.respond(outcome, payload);
             // When the user denies a tool, cancel the round immediately
             // so the agent doesn't waste a turn "acknowledging" the denial.
@@ -501,7 +430,7 @@ export class AgentInteractive {
           },
         } as ToolCallConfirmationDetails;
 
-        this.pendingApprovals.set(event.callId, fullDetails);
+        this.core.setPendingApproval(event.callId, fullDetails);
       },
     );
   }

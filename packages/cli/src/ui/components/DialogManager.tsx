@@ -47,6 +47,8 @@ import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
 import { SessionPicker } from './SessionPicker.js';
 import { RewindSelector } from './RewindSelector.js';
 import { MemoryDialog } from './MemoryDialog.js';
+import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.js';
+import { useBackgroundTaskViewState } from '../contexts/BackgroundTaskViewContext.js';
 import { t } from '../../i18n/index.js';
 
 interface DialogManagerProps {
@@ -64,6 +66,7 @@ export const DialogManager = ({
 
   const uiState = useUIState();
   const uiActions = useUIActions();
+  const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
   const { constrainHeight, terminalHeight, staticExtraHeight, mainAreaWidth } =
     uiState;
 
@@ -432,6 +435,20 @@ export const DialogManager = ({
         history={uiState.history}
         onRewind={uiActions.handleRewindConfirm}
         onCancel={uiActions.closeRewindSelector}
+      />
+    );
+  }
+
+  // Background tasks dialog — lowest priority so other dialogs
+  // (permissions, trust prompts, auth, etc.) always take precedence. The
+  // dialog is part of the shared dialogsVisible machinery (see
+  // AppContainer) so its visibility mutes the composer and the global
+  // Ctrl+C / Esc handlers route through `closeAnyOpenDialog`.
+  if (bgTasksDialogOpen) {
+    return (
+      <BackgroundTasksDialog
+        availableTerminalHeight={terminalHeight - staticExtraHeight}
+        terminalWidth={mainAreaWidth}
       />
     );
   }

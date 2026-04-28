@@ -246,7 +246,7 @@ describe('BackgroundTaskRegistry', () => {
 
     registry.complete('a', 'done');
 
-    const running = registry.getRunning();
+    const running = registry.getAll().filter((e) => e.status === 'running');
     expect(running).toHaveLength(1);
     expect(running[0].agentId).toBe('b');
   });
@@ -455,6 +455,190 @@ describe('BackgroundTaskRegistry', () => {
     const [, modelText, meta] = callback.mock.calls[0];
     expect(modelText).not.toContain('<tool-use-id>');
     expect(meta.toolUseId).toBeUndefined();
+  });
+
+  it('getAll returns every entry regardless of status', () => {
+    registry.register({
+      agentId: 'a',
+      description: 'agent a',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+    registry.register({
+      agentId: 'b',
+      description: 'agent b',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+    registry.register({
+      agentId: 'c',
+      description: 'agent c',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    registry.complete('a', 'done');
+    registry.fail('b', 'boom');
+
+    const all = registry.getAll();
+    expect(all).toHaveLength(3);
+    expect(all.map((e) => e.status).sort()).toEqual([
+      'completed',
+      'failed',
+      'running',
+    ]);
+    // Callers that need only running entries filter getAll() themselves.
+    expect(
+      registry
+        .getAll()
+        .filter((e) => e.status === 'running')
+        .map((e) => e.agentId),
+    ).toEqual(['c']);
+  });
+
+  it('statusChange callback fires on register and every state transition', () => {
+    const seen: Array<{ id: string; status: string }> = [];
+    registry.setStatusChangeCallback((entry) => {
+      seen.push({ id: entry.agentId, status: entry.status });
+    });
+
+    registry.register({
+      agentId: 'a',
+      description: 'agent a',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+    registry.register({
+      agentId: 'b',
+      description: 'agent b',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+    registry.complete('a', 'ok');
+    registry.fail('b', 'err');
+
+    expect(seen).toEqual([
+      { id: 'a', status: 'running' },
+      { id: 'b', status: 'running' },
+      { id: 'a', status: 'completed' },
+      { id: 'b', status: 'failed' },
+    ]);
+  });
+
+  it('statusChange callback errors do not break registry operations', () => {
+    registry.setStatusChangeCallback(() => {
+      throw new Error('listener broke');
+    });
+
+    // Should not throw even though the callback does.
+    expect(() =>
+      registry.register({
+        agentId: 'a',
+        description: 'agent a',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      }),
+    ).not.toThrow();
+    expect(registry.get('a')?.status).toBe('running');
+  });
+
+  it('statusChange callback can be cleared with undefined', () => {
+    const cb = vi.fn();
+    registry.setStatusChangeCallback(cb);
+    registry.setStatusChangeCallback(undefined);
+
+    registry.register({
+      agentId: 'a',
+      description: 'agent a',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it('appendActivity builds a rolling buffer capped at 5', () => {
+    registry.register({
+      agentId: 'a',
+      description: 'agent a',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    for (let i = 0; i < 7; i++) {
+      registry.appendActivity('a', {
+        name: `Tool${i}`,
+        description: `call ${i}`,
+        at: i,
+      });
+    }
+
+    const activities = registry.get('a')!.recentActivities ?? [];
+    expect(activities.map((a) => a.name)).toEqual([
+      'Tool2',
+      'Tool3',
+      'Tool4',
+      'Tool5',
+      'Tool6',
+    ]);
+  });
+
+  it('appendActivity no-ops after the agent terminates', () => {
+    registry.register({
+      agentId: 'a',
+      description: 'agent a',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    registry.complete('a', 'done');
+    registry.appendActivity('a', { name: 'Late', description: 'x', at: 99 });
+
+    expect(registry.get('a')!.recentActivities ?? []).toHaveLength(0);
+  });
+
+  it('appendActivity fires activityChange, not statusChange', () => {
+    const statusCb = vi.fn();
+    const activityCb = vi.fn();
+    registry.setStatusChangeCallback(statusCb);
+    registry.setActivityChangeCallback(activityCb);
+
+    registry.register({
+      agentId: 'a',
+      description: 'agent a',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+    statusCb.mockClear();
+    activityCb.mockClear();
+
+    registry.appendActivity('a', { name: 'T', description: 'd', at: 0 });
+
+    expect(statusCb).not.toHaveBeenCalled();
+    expect(activityCb).toHaveBeenCalledOnce();
+    expect(activityCb.mock.calls[0][0].agentId).toBe('a');
+  });
+
+  it('stores prompt verbatim on the entry', () => {
+    registry.register({
+      agentId: 'a',
+      description: 'agent a',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Run sleep 30 and report done.',
+    });
+    expect(registry.get('a')!.prompt).toBe('Run sleep 30 and report done.');
   });
 
   it('escapes XML metacharacters in interpolated fields', () => {

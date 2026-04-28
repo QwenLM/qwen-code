@@ -26,6 +26,10 @@ import {
   useAgentViewActions,
   type RegisteredAgent,
 } from '../../contexts/AgentViewContext.js';
+import {
+  useBackgroundTaskViewState,
+  useBackgroundTaskViewActions,
+} from '../../contexts/BackgroundTaskViewContext.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { useUIState } from '../../contexts/UIStateContext.js';
 import { theme } from '../../semantic-colors.js';
@@ -59,9 +63,16 @@ function statusIndicator(agent: RegisteredAgent): {
 export const AgentTabBar: React.FC = () => {
   const { activeView, agents, agentShellFocused, agentTabBarFocused } =
     useAgentViewState();
-  const { switchToNext, switchToPrevious, setAgentTabBarFocused } =
-    useAgentViewActions();
+  const {
+    switchToNext,
+    switchToPrevious,
+    switchToMain,
+    setAgentTabBarFocused,
+  } = useAgentViewActions();
+  const { entries: bgEntries } = useBackgroundTaskViewState();
+  const { setPillFocused: setBgPillFocused } = useBackgroundTaskViewActions();
   const { embeddedShellFocused } = useUIState();
+  const hasBgAgents = bgEntries.length > 0;
 
   useKeypress(
     (key) => {
@@ -74,6 +85,15 @@ export const AgentTabBar: React.FC = () => {
         switchToNext();
       } else if (key.name === 'up') {
         setAgentTabBarFocused(false);
+      } else if (key.name === 'down') {
+        // Switch to main first — the footer pill only renders under the
+        // main view, so focusing it from an agent tab would strand focus
+        // on an offscreen surface.
+        if (hasBgAgents) {
+          setAgentTabBarFocused(false);
+          switchToMain();
+          setBgPillFocused(true);
+        }
       } else if (
         key.sequence &&
         key.sequence.length === 1 &&
