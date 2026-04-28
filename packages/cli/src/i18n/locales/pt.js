@@ -1645,6 +1645,7 @@ export default {
     'Encontrado {{count}} arquivo de comando TOML:',
   'Found {{count}} TOML command files:':
     'Encontrados {{count}} arquivos de comando TOML:',
+  'Current tasks': 'Tarefas atuais',
   '... and {{count}} more': '... e mais {{count}}',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'O formato TOML está obsoleto. Você gostaria de migrá-los para o formato Markdown?',

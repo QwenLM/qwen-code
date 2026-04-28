@@ -991,6 +991,8 @@ export default {
     '進捗: {{done}}/{{total}} タスク完了',
   ', {{inProgress}} in progress': '、{{inProgress}} 進行中',
   'Pending Tasks:': '保留中のタスク:',
+  'Current tasks': '現在のタスク',
+  '... and {{count}} more': '... 他 {{count}} 件',
   'What would you like to do?': '何をしますか?',
   'Choose how to proceed with your session:':
     'セッションの続行方法を選択してください:',

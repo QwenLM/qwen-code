@@ -58,7 +58,13 @@ import {
   type WaitingToolCall,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
-import { getStickyTodos } from './utils/todoSnapshot.js';
+import {
+  getStickyTodos,
+  getStickyTodoMaxVisibleItems,
+  getStickyTodosLayoutKey,
+  getStickyTodosRenderKey,
+} from './utils/todoSnapshot.js';
+import type { TodoItem } from './components/TodoDisplay.js';
 import { validateAuthMethod } from '../config/auth.js';
 import { loadHierarchicalGeminiMemory } from '../config/config.js';
 import process from 'node:process';
@@ -164,6 +170,20 @@ function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
     }
     return false;
   });
+}
+
+function useStableStickyTodos(todos: TodoItem[] | null): TodoItem[] | null {
+  const renderKey = getStickyTodosRenderKey(todos);
+  const stableTodosRef = useRef<{
+    renderKey: string;
+    todos: TodoItem[] | null;
+  } | null>(null);
+
+  if (stableTodosRef.current?.renderKey !== renderKey) {
+    stableTodosRef.current = { renderKey, todos };
+  }
+
+  return stableTodosRef.current.todos;
 }
 
 // Exported for tests. Given a newest-first list of messages, return a list
@@ -1262,10 +1282,11 @@ export const AppContainer = (props: AppContainerProps) => {
     () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
     [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
   );
-  const stickyTodos = useMemo(
+  const rawStickyTodos = useMemo(
     () => getStickyTodos(historyManager.history, pendingHistoryItems),
     [historyManager.history, pendingHistoryItems],
   );
+  const stickyTodos = useStableStickyTodos(rawStickyTodos);
 
   // Terminal tab progress bar (OSC 9;4) for iTerm2/Ghostty
   useTerminalProgress(streamingState, isToolExecuting(pendingHistoryItems));
@@ -1607,24 +1628,39 @@ export const AppContainer = (props: AppContainerProps) => {
     !dialogsVisible &&
     !isFeedbackDialogOpen &&
     streamingState !== StreamingState.WaitingForConfirmation;
+  const stickyTodoWidth = Math.min(mainAreaWidth, 64);
+  const stickyTodoMaxVisibleItems =
+    getStickyTodoMaxVisibleItems(terminalHeight);
+  const stickyTodosLayoutKey = shouldShowStickyTodos
+    ? getStickyTodosLayoutKey(
+        stickyTodos,
+        stickyTodoWidth,
+        stickyTodoMaxVisibleItems,
+      )
+    : 'hidden';
   const [controlsHeight, setControlsHeight] = useState(0);
 
   useLayoutEffect(() => {
     if (!mainControlsRef.current) {
-      setControlsHeight(0);
+      setControlsHeight((previousHeight) =>
+        previousHeight === 0 ? previousHeight : 0,
+      );
       return;
     }
 
     const fullFooterMeasurement = measureElement(mainControlsRef.current);
-    setControlsHeight(fullFooterMeasurement.height);
+    setControlsHeight((previousHeight) =>
+      previousHeight === fullFooterMeasurement.height
+        ? previousHeight
+        : fullFooterMeasurement.height,
+    );
   }, [
     buffer,
     terminalWidth,
     terminalHeight,
     btwItem,
     dialogsVisible,
-    shouldShowStickyTodos,
-    stickyTodos,
+    stickyTodosLayoutKey,
   ]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
