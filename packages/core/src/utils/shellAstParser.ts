@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type {} from '../types/bun.js';
+
 /**
  * Shell AST Parser — powered by web-tree-sitter + tree-sitter-bash.
  *
@@ -49,17 +51,23 @@ async function loadWasmBinary(
     !moduleFilePath.includes(path.join('src', '')) &&
     !moduleFilePath.includes(path.join('dist', 'src', ''));
 
-  try {
-    if (isBundleMode) {
-      // Bundle mode: esbuild replaces `?binary` imports with inline Uint8Array.
-      const mod = await dynamicImport();
-      const wasmBinary = (mod as { default?: unknown }).default;
-      if (wasmBinary instanceof Uint8Array && wasmBinary.byteLength > 0) {
-        return wasmBinary;
+  // Skip dynamic import in Bun build - Bun doesn't support ?binary syntax
+  const isBunBuild =
+    typeof Bun !== 'undefined' && process.env['BUILD_TARGET'] === 'native';
+
+  if (!isBunBuild) {
+    try {
+      if (isBundleMode) {
+        // Bundle mode: esbuild replaces `?binary` imports with inline Uint8Array.
+        const mod = await dynamicImport();
+        const wasmBinary = (mod as { default?: unknown }).default;
+        if (wasmBinary instanceof Uint8Array && wasmBinary.byteLength > 0) {
+          return wasmBinary;
+        }
       }
+    } catch {
+      // Fall through to node_modules lookup below.
     }
-  } catch {
-    // Fall through to node_modules lookup below.
   }
 
   // Source / dev mode: read the file directly from node_modules.

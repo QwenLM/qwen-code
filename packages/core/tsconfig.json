@@ -4,7 +4,7 @@
     "outDir": "dist",
     "lib": ["DOM", "DOM.Iterable", "ES2023"],
     "composite": true,
-    "types": ["node", "vitest/globals"],
+    "types": ["node", "vitest/globals", "./src/types/bun"],
     "paths": {
       "@lydell/node-pty": ["../../node_modules/@lydell/node-pty/node-pty.d.ts"]
     }
