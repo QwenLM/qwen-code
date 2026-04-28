@@ -56,6 +56,10 @@ describe('Session', () => {
   let currentAuthType: AuthType;
   let switchModelSpy: ReturnType<typeof vi.fn>;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
+  let mockGeminiClient: {
+    getChat: ReturnType<typeof vi.fn>;
+    tryCompressChat: ReturnType<typeof vi.fn>;
+  };
   let mockToolRegistry: {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
@@ -75,6 +79,14 @@ describe('Session', () => {
       addHistory: vi.fn(),
       getHistory: vi.fn().mockReturnValue([]),
     } as unknown as GeminiChat;
+    mockGeminiClient = {
+      getChat: vi.fn().mockReturnValue(mockChat),
+      tryCompressChat: vi.fn().mockResolvedValue({
+        originalTokenCount: 0,
+        newTokenCount: 0,
+        compressionStatus: core.CompressionStatus.NOOP,
+      }),
+    };
 
     mockToolRegistry = {
       getTool: vi.fn(),
@@ -102,6 +114,7 @@ describe('Session', () => {
         recordUserMessage: vi.fn(),
         recordUiTelemetryEvent: vi.fn(),
         recordToolResult: vi.fn(),
+        recordSlashCommand: vi.fn(),
       }),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       // #buildInitialSystemReminders iterates listSubagents() on every
@@ -117,9 +130,7 @@ describe('Session', () => {
       getDebugMode: vi.fn().mockReturnValue(false),
       getAuthType: vi.fn().mockImplementation(() => currentAuthType),
       isCronEnabled: vi.fn().mockReturnValue(false),
-      getGeminiClient: vi
-        .fn()
-        .mockReturnValue({ getChat: vi.fn().mockReturnValue(mockChat) }),
+      getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
     } as unknown as Config;
 
     mockClient = {
@@ -155,6 +166,7 @@ describe('Session', () => {
     mockConfig = undefined as unknown as Config;
     mockClient = undefined as unknown as AgentSideConnection;
     mockSettings = undefined as unknown as LoadedSettings;
+    mockGeminiClient = undefined as unknown as typeof mockGeminiClient;
     mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
@@ -297,6 +309,140 @@ describe('Session', () => {
   });
 
   describe('prompt', () => {
+    describe('auto-compress', () => {
+      it('runs automatic compression before sending an ACP prompt', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledWith(
+          'test-session-id########1',
+          false,
+          expect.any(AbortSignal),
+        );
+
+        const sendMessageStream = mockChat.sendMessageStream as ReturnType<
+          typeof vi.fn
+        >;
+        expect(
+          mockGeminiClient.tryCompressChat.mock.invocationCallOrder[0],
+        ).toBeLessThan(sendMessageStream.mock.invocationCallOrder[0]);
+      });
+
+      it('uses the current chat after automatic compression replaces it', async () => {
+        const compressedChat = {
+          sendMessageStream: vi.fn().mockResolvedValue(createEmptyStream()),
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+        } as unknown as GeminiChat;
+
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        mockGeminiClient.tryCompressChat.mockImplementation(async () => {
+          mockGeminiClient.getChat.mockReturnValue(compressedChat);
+          return {
+            originalTokenCount: 1000,
+            newTokenCount: 200,
+            compressionStatus: core.CompressionStatus.COMPRESSED,
+          };
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(compressedChat.sendMessageStream).toHaveBeenCalledWith(
+          'qwen3-code-plus',
+          {
+            message: expect.any(Array),
+            config: { abortSignal: expect.any(AbortSignal) },
+          },
+          'test-session-id########1',
+        );
+      });
+
+      it('also runs automatic compression before tool response follow-up sends', async () => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledTimes(2);
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenNthCalledWith(
+          2,
+          'test-session-id########1',
+          false,
+          expect.any(AbortSignal),
+        );
+      });
+
+      it('does not auto-compress slash commands handled without a model send', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'message',
+          messageType: 'info',
+          content: 'Already compressed.',
+        });
+        mockChat.sendMessageStream = vi.fn();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress' }],
+        });
+
+        expect(mockGeminiClient.tryCompressChat).not.toHaveBeenCalled();
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      });
+    });
+
     it('passes resolved paths to read_many_files tool', async () => {
       const tempDir = await fs.mkdtemp(
         path.join(os.tmpdir(), 'qwen-acp-session-'),
