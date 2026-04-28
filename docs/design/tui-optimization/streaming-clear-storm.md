@@ -125,7 +125,7 @@ When the pending text exceeds the visual budget, the live viewport shows the
 newest tail plus a marker such as:
 
 ```text
-... first N streaming lines hidden ...
+... first N lines hidden ...
 ```
 
 Completed assistant messages still render through the existing full
@@ -137,6 +137,12 @@ and static-history overhead. `ConversationMessages` therefore does not keep a
 separate fixed four-row footer reserve. It first checks exact fit with
 `reservedRows: 0`; on true overflow it reruns the slicer with one reserved row
 for the hidden-line marker.
+
+The pre-sliced pending tail is also rendered through `MaxSizedBox`. This is a
+second, actual-Ink-layout guard for the #3279 scrollback leak shown in narrow
+terminals: if source-text visual-height estimation is still off because of
+wrapping, prefix width, or renderer layout details, `MaxSizedBox` clips the
+plain pending tail to `availableTerminalHeight` before it reaches log-update.
 
 ### Streaming Markdown Safe Split
 
@@ -464,6 +470,7 @@ Additional review follow-up validation for #3279:
 | Markdown safe split              | fixed branch | strict pass | code/table/list boundaries split outside open code | passed |
 | Pending assistant exact fit      | fixed branch | strict pass | six-row pending text in six-row budget is visible  | passed |
 | Pending assistant overflow bound | fixed branch | strict pass | only one marker row is reserved on real overflow   | passed |
+| Pending assistant hard bound     | fixed branch | strict pass | actual Ink frame rows stay within height budget    | passed |
 
 ## Gemini CLI Cross-Check
 
@@ -498,7 +505,9 @@ large renderer wholesale:
 - The #3279 narrow Markdown path is covered by two guards: complete
   code/table/list blocks leave the pending region earlier, and the remaining
   pending tail uses the measured dynamic height budget instead of a fixed
-  footer reserve.
+  footer reserve. The pending tail is then clipped through `MaxSizedBox` as a
+  hard actual-render-height guard, preventing residual source-vs-Ink height
+  mismatch from leaking repeated rows into scrollback.
 - The static refresh fix replaces non-explicit `clearTerminal` refresh paths
   with a viewport repaint. This covers resize, view switch, compact replacement,
   rewind, auth/resume, and editor-close refresh while keeping `/clear` explicit.

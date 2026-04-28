@@ -10,6 +10,7 @@ import stringWidth from 'string-width';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
 import { theme } from '../../semantic-colors.js';
 import { sliceTextByVisualHeight } from '../../utils/textUtils.js';
+import { MaxSizedBox } from '../shared/MaxSizedBox.js';
 import {
   SCREEN_READER_MODEL_PREFIX,
   SCREEN_READER_USER_PREFIX,
@@ -126,24 +127,62 @@ function slicePendingTextForHeight(
 // every frame, producing the duplicate output in #3279. Once a stable
 // prefix is promoted into <Static>, the committed message is rendered
 // through MarkdownDisplay with full formatting; only the still-streaming
-// tail stays plain.
+// tail stays plain. The pre-sliced tail is still wrapped in MaxSizedBox as a
+// hard guard, so any remaining source-vs-Ink measurement mismatch cannot grow
+// the dynamic region past the measured terminal budget.
 const PendingTextPreview: React.FC<{
   text: string;
   hiddenLinesCount: number;
   textColor: string;
-}> = ({ text, hiddenLinesCount, textColor }) => (
-  <Box flexDirection="column">
-    {hiddenLinesCount > 0 && (
-      <Text color={theme.text.secondary} wrap="truncate">
-        ... first {hiddenLinesCount} streaming line
-        {hiddenLinesCount === 1 ? '' : 's'} hidden ...
-      </Text>
-    )}
-    <Text wrap="wrap" color={textColor}>
-      {text}
-    </Text>
-  </Box>
+  maxHeight: number | undefined;
+  maxWidth: number;
+}> = ({ text, hiddenLinesCount, textColor, maxHeight, maxWidth }) => (
+  <MaxSizedBox
+    maxHeight={maxHeight}
+    maxWidth={maxWidth}
+    additionalHiddenLinesCount={hiddenLinesCount}
+  >
+    {text.split('\n').map((line, index) => (
+      <Box key={index}>
+        <Text wrap="wrap" color={textColor}>
+          {line}
+        </Text>
+      </Box>
+    ))}
+  </MaxSizedBox>
 );
+
+const PendingMarkdownContent: React.FC<{
+  text: string;
+  hiddenLinesCount: number;
+  textColor: string;
+  availableTerminalHeight: number | undefined;
+  contentWidth: number;
+}> = ({
+  text,
+  hiddenLinesCount,
+  textColor,
+  availableTerminalHeight,
+  contentWidth,
+}) => {
+  if (availableTerminalHeight === undefined) {
+    return (
+      <Text wrap="wrap" color={textColor}>
+        {text}
+      </Text>
+    );
+  }
+
+  return (
+    <PendingTextPreview
+      text={text}
+      hiddenLinesCount={hiddenLinesCount}
+      textColor={textColor}
+      maxHeight={availableTerminalHeight}
+      maxWidth={contentWidth}
+    />
+  );
+};
 
 const PrefixedTextMessage: React.FC<PrefixedTextMessageProps> = ({
   text,
@@ -203,10 +242,12 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
       </Box>
       <Box flexGrow={1} flexDirection="column">
         {isPending ? (
-          <PendingTextPreview
+          <PendingMarkdownContent
             text={pendingSlice.text}
             hiddenLinesCount={pendingSlice.hiddenLinesCount}
             textColor={effectiveTextColor}
+            availableTerminalHeight={availableTerminalHeight}
+            contentWidth={markdownWidth}
           />
         ) : (
           <MarkdownDisplay
@@ -242,10 +283,12 @@ const ContinuationMarkdownMessage: React.FC<
   return (
     <Box flexDirection="column" paddingLeft={prefixWidth}>
       {isPending ? (
-        <PendingTextPreview
+        <PendingMarkdownContent
           text={pendingSlice.text}
           hiddenLinesCount={pendingSlice.hiddenLinesCount}
           textColor={effectiveTextColor}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={markdownWidth}
         />
       ) : (
         <MarkdownDisplay

@@ -55,10 +55,32 @@ describe('<ConversationMessages />', () => {
     );
     const output = lastFrame() ?? '';
 
-    expect(output).toContain('... first 2 streaming lines hidden ...');
+    expect(output).toContain('... first 2 lines hidden ...');
     expect(output).not.toContain('line 2');
     expect(output).toContain('line 3');
     expect(output).toContain('line 7');
+  });
+
+  it('hard-bounds pending assistant output after actual Ink wrapping (#3279)', () => {
+    const text = Array.from(
+      { length: 30 },
+      (_, index) =>
+        `> **Note:** The retry loop (${index}) uses exponential backoff to avoid hammering the API while preserving delivery.`,
+    ).join('\n');
+
+    const { lastFrame } = renderWithProviders(
+      <AssistantMessage
+        text={text}
+        isPending={true}
+        availableTerminalHeight={10}
+        contentWidth={32}
+      />,
+    );
+    const output = lastFrame() ?? '';
+
+    expect(output.split('\n')).toHaveLength(10);
+    expect(output).toContain('lines hidden');
+    expect(output).toContain('preserving');
   });
 
   it('does not invoke rich markdown rendering for pending fenced code blocks (#3279)', () => {
