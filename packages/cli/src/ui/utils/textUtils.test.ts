@@ -9,9 +9,51 @@ import type {
   ToolCallConfirmationDetails,
   ToolEditConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
-import { escapeAnsiCtrlCodes, sanitizeSensitiveText } from './textUtils.js';
+import {
+  escapeAnsiCtrlCodes,
+  sanitizeSensitiveText,
+  sliceTextByVisualHeight,
+} from './textUtils.js';
 
 describe('textUtils', () => {
+  describe('sliceTextByVisualHeight', () => {
+    it('bounds a single long line by soft-wrapped visual rows', () => {
+      const sliced = sliceTextByVisualHeight('abcdefghijklmnop', 3, 4, {
+        minHeight: 2,
+        reservedRows: 1,
+        overflowDirection: 'top',
+      });
+
+      expect(sliced).toEqual({
+        text: 'ijkl\nmnop',
+        hiddenLinesCount: 2,
+      });
+    });
+
+    it('can keep the beginning for prompt-style detail views', () => {
+      const sliced = sliceTextByVisualHeight('a\nb\nc\nd', 3, 80, {
+        overflowDirection: 'bottom',
+      });
+
+      expect(sliced).toEqual({
+        text: 'a\nb\nc',
+        hiddenLinesCount: 1,
+      });
+    });
+
+    it('starts slicing when content exceeds the height left after reserved rows', () => {
+      const sliced = sliceTextByVisualHeight('a\nb\nc', 4, 80, {
+        reservedRows: 2,
+        overflowDirection: 'top',
+      });
+
+      expect(sliced).toEqual({
+        text: 'b\nc',
+        hiddenLinesCount: 1,
+      });
+    });
+  });
+
   describe('escapeAnsiCtrlCodes', () => {
     describe('escapeAnsiCtrlCodes string case study', () => {
       it('should replace ANSI escape codes with a visible representation', () => {

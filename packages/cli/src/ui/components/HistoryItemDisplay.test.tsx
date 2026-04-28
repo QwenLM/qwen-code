@@ -114,6 +114,33 @@ describe('<HistoryItemDisplay />', () => {
     );
   });
 
+  it('bounds pending gemini_content plain text by visual height', () => {
+    const longSingleLine = Array.from(
+      { length: 120 },
+      (_, i) => `token-${String(i).padStart(3, '0')}`,
+    ).join(' ');
+    const item: HistoryItem = {
+      id: 1,
+      type: 'gemini_content',
+      text: longSingleLine,
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay
+        item={item}
+        isPending={true}
+        terminalWidth={40}
+        availableTerminalHeight={6}
+      />,
+    );
+    const output = lastFrame()!;
+
+    expect(output).toContain('streaming lines hidden');
+    expect(output).not.toContain('token-000');
+    expect(output).toContain('token-119');
+    expect(output.split('\n').length).toBeLessThanOrEqual(7);
+  });
+
   it('renders ToolStatsDisplay for "tool_stats" type', () => {
     const item: HistoryItem = {
       ...baseItem,

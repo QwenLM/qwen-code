@@ -142,6 +142,99 @@ export const getCachedStringWidth = (str: string): number => {
   return width;
 };
 
+export interface VisualHeightSlice {
+  text: string;
+  hiddenLinesCount: number;
+}
+
+interface SliceTextByVisualHeightOptions {
+  minHeight?: number;
+  reservedRows?: number;
+  overflowDirection?: 'top' | 'bottom';
+}
+
+/**
+ * Bounds text by terminal visual rows before it reaches Ink/Yoga layout.
+ *
+ * Explicit newlines and soft wraps caused by narrow terminals both count as
+ * visual rows. `overflowDirection: "top"` keeps the newest tail, which is
+ * useful for streaming logs; `"bottom"` keeps the beginning, which is useful
+ * for task prompts.
+ */
+export function sliceTextByVisualHeight(
+  text: string,
+  maxHeight: number | undefined,
+  maxWidth: number,
+  options: SliceTextByVisualHeightOptions = {},
+): VisualHeightSlice {
+  if (maxHeight === undefined) {
+    return { text, hiddenLinesCount: 0 };
+  }
+
+  const targetMaxHeight = Math.max(
+    Math.round(maxHeight),
+    options.minHeight ?? 1,
+  );
+  const visibleContentHeight = Math.max(
+    1,
+    targetMaxHeight - (options.reservedRows ?? 0),
+  );
+  const visualWidth = Math.max(1, Math.floor(maxWidth));
+  const overflowDirection = options.overflowDirection ?? 'top';
+  const visibleLines: string[] = [];
+  let visualLineCount = 0;
+  let currentLine = '';
+  let currentLineWidth = 0;
+
+  const appendVisibleLine = (line: string) => {
+    visualLineCount += 1;
+
+    if (overflowDirection === 'bottom') {
+      if (visibleLines.length < visibleContentHeight) {
+        visibleLines.push(line);
+      }
+      return;
+    }
+
+    visibleLines.push(line);
+    if (visibleLines.length > visibleContentHeight) {
+      visibleLines.shift();
+    }
+  };
+
+  const flushCurrentLine = () => {
+    appendVisibleLine(currentLine);
+    currentLine = '';
+    currentLineWidth = 0;
+  };
+
+  for (const char of toCodePoints(text)) {
+    if (char === '\n') {
+      flushCurrentLine();
+      continue;
+    }
+
+    const charWidth = Math.max(getCachedStringWidth(char), 1);
+    if (currentLineWidth > 0 && currentLineWidth + charWidth > visualWidth) {
+      flushCurrentLine();
+    }
+
+    currentLine += char;
+    currentLineWidth += charWidth;
+  }
+
+  flushCurrentLine();
+
+  if (visualLineCount <= visibleContentHeight) {
+    return { text, hiddenLinesCount: 0 };
+  }
+
+  return {
+    text: visibleLines.join('\n'),
+    hiddenLinesCount: visualLineCount - visibleContentHeight,
+  };
+}
+
 /**
  * Clear the string width cache
  */

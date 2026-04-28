@@ -9,6 +9,7 @@ import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
 import { theme } from '../../semantic-colors.js';
+import { sliceTextByVisualHeight } from '../../utils/textUtils.js';
 import {
   SCREEN_READER_MODEL_PREFIX,
   SCREEN_READER_USER_PREFIX,
@@ -80,10 +81,41 @@ interface ContinuationMarkdownMessageProps {
   textColor?: string;
 }
 
+const MIN_PENDING_PREVIEW_HEIGHT = 2;
+const PENDING_PREVIEW_RESERVED_ROWS = 4;
+
 function getPrefixWidth(prefix: string): number {
   // Reserve one extra column so text never touches the prefix glyph.
   return stringWidth(prefix) + 1;
 }
+
+function slicePendingTextForHeight(
+  text: string,
+  maxHeight: number | undefined,
+  maxWidth: number,
+): { text: string; hiddenLinesCount: number } {
+  return sliceTextByVisualHeight(text, maxHeight, maxWidth, {
+    minHeight: MIN_PENDING_PREVIEW_HEIGHT,
+    reservedRows: PENDING_PREVIEW_RESERVED_ROWS,
+    overflowDirection: 'top',
+  });
+}
+
+const PendingTextPreview: React.FC<{
+  text: string;
+  hiddenLinesCount: number;
+  textColor: string;
+}> = ({ text, hiddenLinesCount, textColor }) => (
+  <Box flexDirection="column">
+    <Text color={theme.text.secondary} wrap="truncate">
+      ... first {hiddenLinesCount} streaming line
+      {hiddenLinesCount === 1 ? '' : 's'} hidden ...
+    </Text>
+    <Text wrap="wrap" color={textColor}>
+      {text}
+    </Text>
+  </Box>
+);
 
 const PrefixedTextMessage: React.FC<PrefixedTextMessageProps> = ({
   text,
@@ -128,6 +160,11 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
   textColor,
 }) => {
   const prefixWidth = getPrefixWidth(prefix);
+  const markdownWidth = Math.max(1, contentWidth - prefixWidth);
+  const effectiveTextColor = textColor ?? theme.text.primary;
+  const pendingSlice = isPending
+    ? slicePendingTextForHeight(text, availableTerminalHeight, markdownWidth)
+    : { text, hiddenLinesCount: 0 };
 
   return (
     <Box flexDirection="row">
@@ -137,13 +174,21 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
         </Text>
       </Box>
       <Box flexGrow={1} flexDirection="column">
-        <MarkdownDisplay
-          text={text}
-          isPending={isPending}
-          availableTerminalHeight={availableTerminalHeight}
-          contentWidth={contentWidth - prefixWidth}
-          textColor={textColor}
-        />
+        {pendingSlice.hiddenLinesCount > 0 ? (
+          <PendingTextPreview
+            text={pendingSlice.text}
+            hiddenLinesCount={pendingSlice.hiddenLinesCount}
+            textColor={effectiveTextColor}
+          />
+        ) : (
+          <MarkdownDisplay
+            text={text}
+            isPending={isPending}
+            availableTerminalHeight={availableTerminalHeight}
+            contentWidth={markdownWidth}
+            textColor={textColor}
+          />
+        )}
       </Box>
     </Box>
   );
@@ -160,16 +205,29 @@ const ContinuationMarkdownMessage: React.FC<
   textColor,
 }) => {
   const prefixWidth = getPrefixWidth(basePrefix);
+  const markdownWidth = Math.max(1, contentWidth - prefixWidth);
+  const effectiveTextColor = textColor ?? theme.text.primary;
+  const pendingSlice = isPending
+    ? slicePendingTextForHeight(text, availableTerminalHeight, markdownWidth)
+    : { text, hiddenLinesCount: 0 };
 
   return (
     <Box flexDirection="column" paddingLeft={prefixWidth}>
-      <MarkdownDisplay
-        text={text}
-        isPending={isPending}
-        availableTerminalHeight={availableTerminalHeight}
-        contentWidth={contentWidth - prefixWidth}
-        textColor={textColor}
-      />
+      {pendingSlice.hiddenLinesCount > 0 ? (
+        <PendingTextPreview
+          text={pendingSlice.text}
+          hiddenLinesCount={pendingSlice.hiddenLinesCount}
+          textColor={effectiveTextColor}
+        />
+      ) : (
+        <MarkdownDisplay
+          text={text}
+          isPending={isPending}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={markdownWidth}
+          textColor={textColor}
+        />
+      )}
     </Box>
   );
 };

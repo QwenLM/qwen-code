@@ -658,6 +658,8 @@ export class ShellExecutionService {
         const MAX_SNIFF_SIZE = 4096;
         let sniffedBytes = 0;
         let totalBytesReceived = 0;
+        let renderableOutputVersion = 0;
+        let lastEmittedRenderableOutputVersion = 0;
         let isWriting = false;
         let hasStartedOutput = false;
         let renderTimeout: NodeJS.Timeout | null = null;
@@ -708,8 +710,13 @@ export class ShellExecutionService {
               ? newOutputComparison
               : trimmedOutputComparison;
 
-          if (!areAnsiOutputsEqual(outputComparison, finalOutputComparison)) {
+          if (
+            !areAnsiOutputsEqual(outputComparison, finalOutputComparison) &&
+            (outputComparison === null ||
+              renderableOutputVersion !== lastEmittedRenderableOutputVersion)
+          ) {
             outputComparison = finalOutputComparison;
+            lastEmittedRenderableOutputVersion = renderableOutputVersion;
             onOutputEvent({
               type: 'data',
               chunk: finalOutput,
@@ -792,6 +799,9 @@ export class ShellExecutionService {
 
                 if (isStreamingRawContent) {
                   const decodedChunk = decoder!.decode(data, { stream: true });
+                  if (decodedChunk.replace(/\r/g, '').length > 0) {
+                    renderableOutputVersion += 1;
+                  }
                   isWriting = true;
                   headlessTerminal.write(decodedChunk, () => {
                     render();

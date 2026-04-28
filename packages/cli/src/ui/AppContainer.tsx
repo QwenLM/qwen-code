@@ -513,6 +513,11 @@ export const AppContainer = (props: AppContainerProps) => {
     remountStaticHistory();
   }, [remountStaticHistory, stdout]);
 
+  const repaintStaticViewport = useCallback(() => {
+    stdout.write(`${ansiEscapes.cursorTo(0, 0)}${ansiEscapes.eraseDown}`);
+    remountStaticHistory();
+  }, [remountStaticHistory, stdout]);
+
   const {
     isThemeDialogOpen,
     openThemeDialog,
@@ -1644,7 +1649,7 @@ export const AppContainer = (props: AppContainerProps) => {
     pager: settings.merged.tools?.shell?.pager,
     showColor: settings.merged.tools?.shell?.showColor,
   });
-  const isInitialMount = useRef(true);
+  const previousTerminalWidthRef = useRef(terminalWidth);
 
   useEffect(() => {
     if (activePtyId) {
@@ -1657,26 +1662,20 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [terminalWidth, availableTerminalHeight, activePtyId]);
 
   useEffect(() => {
+    if (previousTerminalWidthRef.current === terminalWidth) {
+      return;
+    }
+
+    previousTerminalWidthRef.current = terminalWidth;
+    repaintStaticViewport();
+  }, [terminalWidth, repaintStaticViewport]);
+
+  useEffect(() => {
     if (ideNeedsRestart) {
       // IDE trust changed, force a restart.
       setShowIdeRestartPrompt(true);
     }
   }, [ideNeedsRestart]);
-
-  useEffect(() => {
-    if (isInitialMount.current) {
-      isInitialMount.current = false;
-      return;
-    }
-
-    const handler = setTimeout(() => {
-      refreshStatic();
-    }, 300);
-
-    return () => {
-      clearTimeout(handler);
-    };
-  }, [terminalWidth, refreshStatic]);
 
   useEffect(() => {
     const unsubscribe = ideContextStore.subscribe(setIdeContextState);
