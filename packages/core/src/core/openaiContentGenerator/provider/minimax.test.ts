@@ -33,18 +33,31 @@ describe('MiniMaxOpenAICompatibleProvider', () => {
       ).toBe(true);
     });
 
-    it('matches MiniMax subdomains', () => {
+    it('matches the official international OpenAI-compatible MiniMax API host', () => {
+      expect(
+        MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(
+          createConfig('https://api.minimax.io/v1'),
+        ),
+      ).toBe(true);
+    });
+
+    it('does not match unrelated MiniMax hosts', () => {
       expect(
         MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(
           createConfig('https://gateway.minimaxi.com/v1'),
         ),
-      ).toBe(true);
+      ).toBe(false);
     });
 
     it('does not match unrelated or invalid URLs', () => {
       expect(
         MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(
           createConfig('https://api.openai.com/v1'),
+        ),
+      ).toBe(false);
+      expect(
+        MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(
+          createConfig('https://minimax.io/v1'),
         ),
       ).toBe(false);
       expect(
@@ -71,7 +84,7 @@ describe('MiniMaxOpenAICompatibleProvider', () => {
 
   it('is selected by the OpenAI-compatible provider factory', () => {
     const provider = determineProvider(
-      createConfig('https://api.minimaxi.com/v1'),
+      createConfig('https://api.minimax.io/v1'),
       mockCliConfig,
     );
 

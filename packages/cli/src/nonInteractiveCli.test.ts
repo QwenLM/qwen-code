@@ -167,6 +167,8 @@ describe('runNonInteractive', () => {
         setNotificationCallback: vi.fn(),
         setRegisterCallback: vi.fn(),
         getRunning: vi.fn().mockReturnValue([]),
+        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+        abortAll: vi.fn(),
       }),
     } as unknown as Config;
 

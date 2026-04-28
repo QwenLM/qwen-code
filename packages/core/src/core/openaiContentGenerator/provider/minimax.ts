@@ -8,13 +8,18 @@ import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import type { OpenAIResponseParsingOptions } from '../responseParsingOptions.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 
+const MINIMAX_OPENAI_COMPATIBLE_HOSTS = new Set([
+  'api.minimaxi.com',
+  'api.minimax.io',
+]);
+
 export class MiniMaxOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   static isMiniMaxProvider(config: ContentGeneratorConfig): boolean {
     if (!config.baseUrl) return false;
 
     try {
       const hostname = new URL(config.baseUrl).hostname.toLowerCase();
-      return hostname.endsWith('.minimaxi.com');
+      return MINIMAX_OPENAI_COMPATIBLE_HOSTS.has(hostname);
     } catch {
       return false;
     }
