@@ -47,12 +47,24 @@ interface PositionedNode {
 
 const FLOW_START_RE = /^(?:flowchart|graph)\s+([A-Za-z]{2})/i;
 const SEQUENCE_START_RE = /^sequenceDiagram\b/i;
+const CLASS_START_RE = /^classDiagram(?:-v2)?\b/i;
+const STATE_START_RE = /^stateDiagram(?:-v2)?\b/i;
+const ER_START_RE = /^erDiagram\b/i;
+const GANTT_START_RE = /^gantt\b/i;
+const PIE_START_RE = /^pie\b/i;
+const JOURNEY_START_RE = /^journey\b/i;
+const GIT_GRAPH_START_RE = /^gitGraph\b/i;
+const MINDMAP_START_RE = /^mindmap\b/i;
+const REQUIREMENT_START_RE = /^requirementDiagram\b/i;
 const LINE_COMMENT_RE = /^%%/;
 const MAX_RENDERED_LINES = 80;
 const MAX_FLOWCHART_PREVIEW_LINES = 120;
 const MAX_FLOWCHART_PREVIEW_EDGES = 80;
 const MAX_SEQUENCE_PREVIEW_LINES = 160;
 const MAX_SEQUENCE_PREVIEW_MESSAGES = 80;
+const MAX_GENERIC_PREVIEW_LINES = 80;
+const MAX_SOURCE_FALLBACK_LINES = 80;
+const MAX_PREVIEW_SOURCE_LINE_LENGTH = 1000;
 const MIN_CANVAS_WIDTH = 24;
 const NODE_GAP_X = 4;
 const NODE_GAP_Y = 4;
@@ -80,6 +92,13 @@ function stripMermaidPunctuation(text: string): string {
     .trim();
 }
 
+function normalizePreviewLine(line: string): string {
+  const trimmed = line.trim();
+  return trimmed.length > MAX_PREVIEW_SOURCE_LINE_LENGTH
+    ? trimmed.slice(0, MAX_PREVIEW_SOURCE_LINE_LENGTH)
+    : trimmed;
+}
+
 function normalizeNodeLabel(label: string): string {
   return label
     .replace(/^["']|["']$/g, '')
@@ -96,6 +115,60 @@ function nodeLabelLines(label: string): string[] {
 
 function singleLineLabel(label: string): string {
   return nodeLabelLines(label).join(' ');
+}
+
+function previewSourceFallback(
+  source: string,
+  contentWidth: number,
+  type: string,
+  warning?: string,
+): MermaidVisualResult {
+  const allSourceLines = source.trim().split(/\r?\n/);
+  const sourceLines = allSourceLines.slice(0, MAX_SOURCE_FALLBACK_LINES);
+  const truncated = allSourceLines.length > sourceLines.length;
+  const lines = ['```mermaid', ...sourceLines, '```'].map((line) =>
+    truncateToWidth(line, contentWidth),
+  );
+
+  return {
+    title: `Mermaid source (${type})`,
+    lines,
+    warning:
+      [
+        warning ??
+          'Visual preview is not available; showing source so it remains readable and copyable.',
+        truncated
+          ? `Source truncated to ${MAX_SOURCE_FALLBACK_LINES} lines.`
+          : undefined,
+      ]
+        .filter(Boolean)
+        .join(' ') || undefined,
+  };
+}
+
+function diagramLines(
+  source: string,
+  startRe: RegExp,
+  maxLines = MAX_GENERIC_PREVIEW_LINES,
+): { lines: string[]; truncated: boolean } {
+  const allLines = source
+    .split(/\r?\n/)
+    .map(normalizePreviewLine)
+    .filter(
+      (line) =>
+        line.length > 0 && !LINE_COMMENT_RE.test(line) && !startRe.test(line),
+    );
+  return {
+    lines: allLines.slice(0, maxLines),
+    truncated: allLines.length > maxLines,
+  };
+}
+
+function budgetWarning(
+  truncated: boolean,
+  maxLines = MAX_GENERIC_PREVIEW_LINES,
+): string | undefined {
+  return truncated ? `Preview limited to ${maxLines} source lines.` : undefined;
 }
 
 function parseNodeToken(rawToken: string): FlowNode | null {
@@ -796,7 +869,7 @@ function renderFlowchart(
 ): MermaidVisualResult {
   const allRawLines = source
     .split(/\r?\n/)
-    .map((line) => line.trim())
+    .map(normalizePreviewLine)
     .filter((line) => line.length > 0 && !LINE_COMMENT_RE.test(line));
   const rawLines = allRawLines.slice(0, MAX_FLOWCHART_PREVIEW_LINES);
   const lineBudgetExceeded = allRawLines.length > rawLines.length;
@@ -823,15 +896,12 @@ function renderFlowchart(
   const normalizedEdges = normalizeFlowNodeLabels(edges);
 
   if (normalizedEdges.length === 0) {
-    return {
-      title: 'Mermaid flowchart',
-      lines: [
-        '┌ Mermaid diagram ┐',
-        '│ No previewable edges found. │',
-        '└─────────────────┘',
-      ],
-      warning: 'Flowchart preview supports simple A --> B style edges.',
-    };
+    return previewSourceFallback(
+      source,
+      contentWidth,
+      'flowchart',
+      'Flowchart preview supports simple A --> B style edges; showing source instead.',
+    );
   }
 
   const horizontal = direction.includes('LR') || direction.includes('RL');
@@ -877,7 +947,7 @@ function renderSequence(
 ): MermaidVisualResult {
   const allRawLines = source
     .split(/\r?\n/)
-    .map((line) => line.trim())
+    .map(normalizePreviewLine)
     .filter(
       (line) =>
         line.length > 0 &&
@@ -922,19 +992,23 @@ function renderSequence(
     participants.size > 0
       ? `Participants: ${Array.from(participants.values()).join(' | ')}`
       : 'Participants: not declared';
+  if (messages.length === 0) {
+    return previewSourceFallback(
+      source,
+      contentWidth,
+      'sequenceDiagram',
+      'Sequence preview supports A->>B: message style arrows; showing source instead.',
+    );
+  }
+
   const lines = [truncateToWidth(header, contentWidth), ''];
-  lines.push(
-    ...(messages.length > 0 ? messages : ['No previewable messages found.']),
-  );
+  lines.push(...messages);
 
   return {
     title: 'Mermaid sequence diagram',
     lines: lines.slice(0, MAX_RENDERED_LINES),
     warning:
       [
-        messages.length === 0
-          ? 'Sequence preview supports A->>B: message style arrows.'
-          : undefined,
         lineBudgetExceeded
           ? `Preview limited to ${MAX_SEQUENCE_PREVIEW_LINES} source lines.`
           : undefined,
@@ -944,6 +1018,430 @@ function renderSequence(
       ]
         .filter(Boolean)
         .join(' ') || undefined,
+  };
+}
+
+function renderClassDiagram(
+  source: string,
+  contentWidth: number,
+): MermaidVisualResult {
+  const { lines: rawLines, truncated } = diagramLines(source, CLASS_START_RE);
+  const classes = new Set<string>();
+  const relationships: string[] = [];
+  const members: string[] = [];
+  let currentClass: string | null = null;
+
+  for (const line of rawLines) {
+    const classBlockMatch = /^class\s+([A-Za-z0-9_.$:-]+)\s*\{?$/i.exec(line);
+    if (classBlockMatch) {
+      currentClass = classBlockMatch[1]!;
+      classes.add(currentClass);
+      continue;
+    }
+    if (line === '}') {
+      currentClass = null;
+      continue;
+    }
+
+    const relationMatch =
+      /^([A-Za-z0-9_.$:-]+)\s+([<|*o.]*--[|>*o.]*|<\|--|--\|>|\*--|o--|-->|<--|\.\.>)\s+([A-Za-z0-9_.$:-]+)(?:\s*:\s*(.+))?$/i.exec(
+        line,
+      );
+    if (relationMatch) {
+      const from = relationMatch[1]!;
+      const relation = relationMatch[2]!;
+      const to = relationMatch[3]!;
+      const label = stripMermaidPunctuation(relationMatch[4] ?? '');
+      classes.add(from);
+      classes.add(to);
+      relationships.push(
+        truncateToWidth(
+          `${from} ${relation} ${to}${label ? `: ${label}` : ''}`,
+          contentWidth,
+        ),
+      );
+      continue;
+    }
+
+    const inlineMemberMatch = /^([A-Za-z0-9_.$:-]+)\s*:\s*(.+)$/i.exec(line);
+    if (inlineMemberMatch) {
+      classes.add(inlineMemberMatch[1]!);
+      members.push(
+        truncateToWidth(
+          `${inlineMemberMatch[1]}: ${stripMermaidPunctuation(inlineMemberMatch[2]!)}`,
+          contentWidth,
+        ),
+      );
+      continue;
+    }
+
+    if (currentClass) {
+      members.push(
+        truncateToWidth(
+          `${currentClass}: ${stripMermaidPunctuation(line)}`,
+          contentWidth,
+        ),
+      );
+    }
+  }
+
+  if (
+    classes.size === 0 &&
+    relationships.length === 0 &&
+    members.length === 0
+  ) {
+    return previewSourceFallback(
+      source,
+      contentWidth,
+      'classDiagram',
+      'Class preview found no previewable classes or relationships; showing source instead.',
+    );
+  }
+
+  const output = [
+    truncateToWidth(
+      `Classes: ${Array.from(classes).join(' | ') || 'not declared'}`,
+      contentWidth,
+    ),
+    '',
+    ...(relationships.length > 0
+      ? ['Relationships:', ...relationships]
+      : ['Relationships: none previewed']),
+    ...(members.length > 0 ? ['', 'Members:', ...members.slice(0, 24)] : []),
+  ];
+
+  return {
+    title: 'Mermaid class diagram',
+    lines: output.slice(0, MAX_RENDERED_LINES),
+    warning: budgetWarning(truncated),
+  };
+}
+
+function renderStateDiagram(
+  source: string,
+  contentWidth: number,
+): MermaidVisualResult {
+  const { lines: rawLines, truncated } = diagramLines(source, STATE_START_RE);
+  const transitions: string[] = [];
+  const declarations: string[] = [];
+
+  for (const line of rawLines) {
+    const transitionMatch = /^(.+?)\s*-->\s*(.+?)(?:\s*:\s*(.+))?$/.exec(line);
+    if (transitionMatch) {
+      const from = stripMermaidPunctuation(transitionMatch[1]!);
+      const to = stripMermaidPunctuation(transitionMatch[2]!);
+      const label = stripMermaidPunctuation(transitionMatch[3] ?? '');
+      transitions.push(
+        truncateToWidth(
+          `${from} → ${to}${label ? `: ${label}` : ''}`,
+          contentWidth,
+        ),
+      );
+      continue;
+    }
+
+    const stateMatch = /^state\s+(.+?)(?:\s+as\s+(.+))?$/i.exec(line);
+    if (stateMatch) {
+      declarations.push(
+        truncateToWidth(
+          stripMermaidPunctuation(stateMatch[2] ?? stateMatch[1]!),
+          contentWidth,
+        ),
+      );
+    }
+  }
+
+  if (declarations.length === 0 && transitions.length === 0) {
+    return previewSourceFallback(
+      source,
+      contentWidth,
+      'stateDiagram',
+      'State preview found no previewable states or transitions; showing source instead.',
+    );
+  }
+
+  const output = [
+    ...(declarations.length > 0
+      ? ['States:', ...declarations.slice(0, 20), '']
+      : []),
+    ...(transitions.length > 0
+      ? ['Transitions:', ...transitions]
+      : ['Transitions: none previewed']),
+  ];
+
+  return {
+    title: 'Mermaid state diagram',
+    lines: output.slice(0, MAX_RENDERED_LINES),
+    warning: budgetWarning(truncated),
+  };
+}
+
+function renderErDiagram(
+  source: string,
+  contentWidth: number,
+): MermaidVisualResult {
+  const { lines: rawLines, truncated } = diagramLines(source, ER_START_RE);
+  const entities = new Set<string>();
+  const relationships: string[] = [];
+  const attributes: string[] = [];
+  let currentEntity: string | null = null;
+
+  for (const line of rawLines) {
+    const entityBlock = /^([A-Za-z0-9_.$:-]+)\s*\{$/.exec(line);
+    if (entityBlock) {
+      currentEntity = entityBlock[1]!;
+      entities.add(currentEntity);
+      continue;
+    }
+    if (line === '}') {
+      currentEntity = null;
+      continue;
+    }
+
+    const relationMatch =
+      /^([A-Za-z0-9_.$:-]+)\s+([|o}{]{1,2}--[|o}{]{1,2})\s+([A-Za-z0-9_.$:-]+)(?:\s*:\s*(.+))?$/i.exec(
+        line,
+      );
+    if (relationMatch) {
+      entities.add(relationMatch[1]!);
+      entities.add(relationMatch[3]!);
+      relationships.push(
+        truncateToWidth(
+          `${relationMatch[1]} ${relationMatch[2]} ${relationMatch[3]}${relationMatch[4] ? `: ${stripMermaidPunctuation(relationMatch[4])}` : ''}`,
+          contentWidth,
+        ),
+      );
+      continue;
+    }
+
+    if (currentEntity) {
+      attributes.push(
+        truncateToWidth(
+          `${currentEntity}: ${stripMermaidPunctuation(line)}`,
+          contentWidth,
+        ),
+      );
+    }
+  }
+
+  if (
+    entities.size === 0 &&
+    relationships.length === 0 &&
+    attributes.length === 0
+  ) {
+    return previewSourceFallback(
+      source,
+      contentWidth,
+      'erDiagram',
+      'ER preview found no previewable entities or relationships; showing source instead.',
+    );
+  }
+
+  return {
+    title: 'Mermaid ER diagram',
+    lines: [
+      truncateToWidth(
+        `Entities: ${Array.from(entities).join(' | ') || 'not declared'}`,
+        contentWidth,
+      ),
+      '',
+      ...(relationships.length > 0
+        ? ['Relationships:', ...relationships]
+        : ['Relationships: none previewed']),
+      ...(attributes.length > 0
+        ? ['', 'Attributes:', ...attributes.slice(0, 24)]
+        : []),
+    ].slice(0, MAX_RENDERED_LINES),
+    warning: budgetWarning(truncated),
+  };
+}
+
+function renderPieDiagram(
+  source: string,
+  contentWidth: number,
+): MermaidVisualResult {
+  const { lines: rawLines, truncated } = diagramLines(source, PIE_START_RE);
+  const titleLine = rawLines.find((line) => /^title\b/i.test(line));
+  const slices = rawLines
+    .map((line) => /^["']?(.+?)["']?\s*:\s*([0-9.]+)\s*$/.exec(line))
+    .filter((match): match is RegExpExecArray => match !== null)
+    .map((match) =>
+      truncateToWidth(
+        `${stripMermaidPunctuation(match[1]!)}: ${match[2]}`,
+        contentWidth,
+      ),
+    );
+
+  if (slices.length === 0) {
+    return previewSourceFallback(
+      source,
+      contentWidth,
+      'pie',
+      'Pie preview found no previewable slices; showing source instead.',
+    );
+  }
+
+  return {
+    title: 'Mermaid pie chart',
+    lines: [
+      ...(titleLine
+        ? [
+            truncateToWidth(stripMermaidPunctuation(titleLine), contentWidth),
+            '',
+          ]
+        : []),
+      ...slices,
+    ],
+    warning: budgetWarning(truncated),
+  };
+}
+
+function renderGanttDiagram(
+  source: string,
+  contentWidth: number,
+): MermaidVisualResult {
+  const { lines: rawLines, truncated } = diagramLines(source, GANTT_START_RE);
+  const output: string[] = [];
+
+  for (const line of rawLines) {
+    if (
+      /^(dateFormat|axisFormat|tickInterval|weekday|excludes|todayMarker)\b/i.test(
+        line,
+      )
+    ) {
+      continue;
+    }
+    const section = /^section\s+(.+)$/i.exec(line);
+    if (section) {
+      output.push('');
+      output.push(
+        truncateToWidth(
+          `Section: ${stripMermaidPunctuation(section[1]!)}`,
+          contentWidth,
+        ),
+      );
+      continue;
+    }
+    const title = /^title\s+(.+)$/i.exec(line);
+    if (title) {
+      output.push(
+        truncateToWidth(
+          `Title: ${stripMermaidPunctuation(title[1]!)}`,
+          contentWidth,
+        ),
+      );
+      continue;
+    }
+    output.push(
+      truncateToWidth(`• ${stripMermaidPunctuation(line)}`, contentWidth),
+    );
+  }
+
+  if (output.length === 0) {
+    return previewSourceFallback(
+      source,
+      contentWidth,
+      'gantt',
+      'Gantt preview found no previewable tasks; showing source instead.',
+    );
+  }
+
+  return {
+    title: 'Mermaid gantt chart',
+    lines: output.slice(0, MAX_RENDERED_LINES),
+    warning: budgetWarning(truncated),
+  };
+}
+
+function renderJourneyDiagram(
+  source: string,
+  contentWidth: number,
+): MermaidVisualResult {
+  const { lines: rawLines, truncated } = diagramLines(source, JOURNEY_START_RE);
+  const output: string[] = [];
+
+  for (const line of rawLines) {
+    const title = /^title\s+(.+)$/i.exec(line);
+    if (title) {
+      output.push(
+        truncateToWidth(
+          `Title: ${stripMermaidPunctuation(title[1]!)}`,
+          contentWidth,
+        ),
+      );
+      continue;
+    }
+    const section = /^section\s+(.+)$/i.exec(line);
+    if (section) {
+      output.push('');
+      output.push(
+        truncateToWidth(
+          `Section: ${stripMermaidPunctuation(section[1]!)}`,
+          contentWidth,
+        ),
+      );
+      continue;
+    }
+    output.push(
+      truncateToWidth(`• ${stripMermaidPunctuation(line)}`, contentWidth),
+    );
+  }
+
+  if (output.length === 0) {
+    return previewSourceFallback(
+      source,
+      contentWidth,
+      'journey',
+      'Journey preview found no previewable steps; showing source instead.',
+    );
+  }
+
+  return {
+    title: 'Mermaid journey diagram',
+    lines: output.slice(0, MAX_RENDERED_LINES),
+    warning: budgetWarning(truncated),
+  };
+}
+
+function renderIndentedTreeDiagram(
+  source: string,
+  contentWidth: number,
+  startRe: RegExp,
+  title: string,
+  sourceType: string,
+): MermaidVisualResult {
+  const allLines = source
+    .split(/\r?\n/)
+    .filter(
+      (line) =>
+        normalizePreviewLine(line).length > 0 &&
+        !LINE_COMMENT_RE.test(normalizePreviewLine(line)) &&
+        !startRe.test(normalizePreviewLine(line)),
+    );
+  const rawLines = allLines.slice(0, MAX_GENERIC_PREVIEW_LINES);
+  const truncated = allLines.length > rawLines.length;
+  const lines = rawLines.map((line) => {
+    const indentation = /^\s*/.exec(line)?.[0].length ?? 0;
+    const depth = Math.floor(indentation / 2);
+    return truncateToWidth(
+      `${'  '.repeat(depth)}• ${line.trim()}`,
+      contentWidth,
+    );
+  });
+
+  if (lines.length === 0) {
+    return previewSourceFallback(
+      source,
+      contentWidth,
+      sourceType,
+      `${title} preview found no previewable nodes; showing source instead.`,
+    );
+  }
+
+  return {
+    title,
+    lines: lines.slice(0, MAX_RENDERED_LINES),
+    warning: budgetWarning(truncated),
   };
 }
 
@@ -959,16 +1457,52 @@ export function renderMermaidVisual(
   if (SEQUENCE_START_RE.test(firstLine)) {
     return renderSequence(trimmed, contentWidth);
   }
+  if (CLASS_START_RE.test(firstLine)) {
+    return renderClassDiagram(trimmed, contentWidth);
+  }
+  if (STATE_START_RE.test(firstLine)) {
+    return renderStateDiagram(trimmed, contentWidth);
+  }
+  if (ER_START_RE.test(firstLine)) {
+    return renderErDiagram(trimmed, contentWidth);
+  }
+  if (GANTT_START_RE.test(firstLine)) {
+    return renderGanttDiagram(trimmed, contentWidth);
+  }
+  if (PIE_START_RE.test(firstLine)) {
+    return renderPieDiagram(trimmed, contentWidth);
+  }
+  if (JOURNEY_START_RE.test(firstLine)) {
+    return renderJourneyDiagram(trimmed, contentWidth);
+  }
+  if (MINDMAP_START_RE.test(firstLine)) {
+    return renderIndentedTreeDiagram(
+      trimmed,
+      contentWidth,
+      MINDMAP_START_RE,
+      'Mermaid mindmap',
+      'mindmap',
+    );
+  }
+  if (GIT_GRAPH_START_RE.test(firstLine)) {
+    return renderIndentedTreeDiagram(
+      trimmed,
+      contentWidth,
+      GIT_GRAPH_START_RE,
+      'Mermaid git graph',
+      'gitGraph',
+    );
+  }
+  if (REQUIREMENT_START_RE.test(firstLine)) {
+    return renderIndentedTreeDiagram(
+      trimmed,
+      contentWidth,
+      REQUIREMENT_START_RE,
+      'Mermaid requirement diagram',
+      'requirementDiagram',
+    );
+  }
 
   const type = firstLine.split(/\s+/)[0] || 'unknown';
-  return {
-    title: `Mermaid ${type} diagram`,
-    lines: [
-      '┌─────────────────────────────┐',
-      '│ Visual preview unavailable. │',
-      '└─────────────────────────────┘',
-    ],
-    warning:
-      'First preview supports flowchart/graph and sequenceDiagram diagrams.',
-  };
+  return previewSourceFallback(trimmed, contentWidth, type);
 }

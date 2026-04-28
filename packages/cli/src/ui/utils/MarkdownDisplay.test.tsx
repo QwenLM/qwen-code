@@ -522,6 +522,85 @@ sequenceDiagram
       expect(output).not.toContain('sequenceDiagram');
     });
 
+    it('renders common non-flowchart mermaid diagrams as readable previews', () => {
+      const classPreview = renderMermaidVisual(
+        `
+classDiagram
+  Animal <|-- Duck
+  Animal: +int age
+  Duck: +swim()
+`,
+        80,
+      );
+      const erPreview = renderMermaidVisual(
+        `
+erDiagram
+  CUSTOMER ||--o{ ORDER : places
+  CUSTOMER {
+    string name
+  }
+`,
+        80,
+      );
+      const piePreview = renderMermaidVisual(
+        `
+pie title Pets
+  "Dogs" : 40
+  "Cats" : 60
+`,
+        80,
+      );
+
+      expect(classPreview.title).toBe('Mermaid class diagram');
+      expect(classPreview.lines.join('\n')).toContain('Animal');
+      expect(classPreview.lines.join('\n')).toContain('Duck');
+      expect(erPreview.title).toBe('Mermaid ER diagram');
+      expect(erPreview.lines.join('\n')).toContain('CUSTOMER');
+      expect(erPreview.lines.join('\n')).toContain('ORDER');
+      expect(piePreview.title).toBe('Mermaid pie chart');
+      expect(piePreview.lines.join('\n')).toContain('Dogs');
+      expect(piePreview.lines.join('\n')).toContain('Cats');
+    });
+
+    it('falls back to mermaid source for unsupported diagrams', () => {
+      const text = `
+\`\`\`mermaid
+timeline
+  title History
+  2024 : Start
+\`\`\`
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame() ?? '';
+
+      expect(output).toContain('Mermaid source (timeline)');
+      expect(output).toContain('```mermaid');
+      expect(output).toContain('timeline');
+      expect(output).toContain('2024 : Start');
+      expect(output).not.toContain('Visual preview unavailable');
+    });
+
+    it('falls back to mermaid source when a known diagram cannot be previewed', () => {
+      const preview = renderMermaidVisual(
+        `
+stateDiagram-v2
+  note right of StillReadable
+    Notes are not parsed by the text preview yet.
+  end note
+`,
+        80,
+      );
+      const output = preview.lines.join('\n');
+
+      expect(preview.title).toBe('Mermaid source (stateDiagram)');
+      expect(output).toContain('```mermaid');
+      expect(output).toContain('stateDiagram-v2');
+      expect(output).toContain('Notes are not parsed');
+      expect(output).not.toContain('No previewable');
+    });
+
     it('does not leave mermaid image rendering placeholders in finalized output', () => {
       const text = `
 \`\`\`mermaid

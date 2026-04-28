@@ -27,12 +27,16 @@ not separate feature PRs.
 Included in the first implementation:
 
 - Mermaid code blocks render visually in the TUI.
-- Mermaid diagrams render through PNG terminal images when `mmdc` and a
-  supported terminal image path are available.
+- Mermaid diagrams render through PNG terminal images when image rendering is
+  explicitly enabled, `mmdc` is available, and the terminal supports an image
+  path.
 - `flowchart` / `graph` Mermaid diagrams fall back to box-and-arrow previews.
 - `sequenceDiagram` Mermaid diagrams fall back to participant-arrow previews.
-- Unsupported Mermaid types render a compact visual placeholder instead of a
-  raw source block.
+- Basic `classDiagram`, `stateDiagram`, `erDiagram`, `gantt`, `pie`,
+  `journey`, `mindmap`, `gitGraph`, and `requirementDiagram` blocks fall back
+  to bounded text previews.
+- Mermaid types without a text preview fall back to their original fenced
+  source so the user can still read and copy the diagram definition.
 - Task list items render checked/unchecked markers.
 - Blockquotes render with a visible quote bar.
 - Inline `$...$` math and block `$$...$$` math render with common Unicode
@@ -123,8 +127,18 @@ flowchart LR
 
 renders as a terminal visual preview rather than Mermaid source.
 
+Other common Mermaid diagram families use bounded text summaries rather than a
+full layout engine: class relationships/members, state transitions, ER
+entities/relationships, Gantt tasks, pie slices, journey steps, mindmap trees,
+git graph entries, and requirement trees. If a diagram type is unknown or not
+previewable, the renderer shows the original fenced Mermaid source rather than
+a placeholder so the content remains readable and selectable/copyable in the
+terminal. A dedicated one-key "copy Mermaid source" interaction is still a
+separate UI affordance for a future PR because the current message renderer
+does not expose per-block actions.
+
 The fallback is still not a complete Mermaid engine. It is a fast,
-dependency-light wireframe preview for common LLM-generated diagrams when
+dependency-light preview layer for common LLM-generated diagrams when
 high-fidelity rendering is not available.
 
 ### Future providers
