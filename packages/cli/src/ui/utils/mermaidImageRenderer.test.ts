@@ -25,6 +25,39 @@ const PNG_1X1 = Buffer.from(
 
 const tempDirs: string[] = [];
 
+function createFakeMmdc(binDir: string): void {
+  const fakeMmdcScript = path.join(binDir, 'fake-mmdc.cjs');
+  fs.writeFileSync(
+    fakeMmdcScript,
+    [
+      'const fs = require("node:fs");',
+      'const out = process.argv[process.argv.indexOf("-o") + 1];',
+      `fs.writeFileSync(out, Buffer.from("${PNG_1X1.toString(
+        'base64',
+      )}", "base64"));`,
+    ].join('\n'),
+    'utf8',
+  );
+
+  const fakeMmdc =
+    process.platform === 'win32'
+      ? path.join(binDir, 'mmdc.cmd')
+      : path.join(binDir, 'mmdc');
+  const command =
+    process.platform === 'win32'
+      ? `@echo off\r\n"${process.execPath}" "${fakeMmdcScript}" %*\r\n`
+      : [
+          '#!/usr/bin/env node',
+          'const fs = require("node:fs");',
+          'const out = process.argv[process.argv.indexOf("-o") + 1];',
+          `fs.writeFileSync(out, Buffer.from("${PNG_1X1.toString(
+            'base64',
+          )}", "base64"));`,
+        ].join('\n');
+  fs.writeFileSync(fakeMmdc, command, 'utf8');
+  fs.chmodSync(fakeMmdc, 0o755);
+}
+
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -125,20 +158,7 @@ describe('mermaid image renderer', () => {
   it('renders Mermaid through mmdc when terminal images are available', () => {
     const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-mmdc-'));
     tempDirs.push(binDir);
-    const fakeMmdc = path.join(binDir, 'mmdc');
-    fs.writeFileSync(
-      fakeMmdc,
-      [
-        '#!/usr/bin/env node',
-        'const fs = require("node:fs");',
-        'const out = process.argv[process.argv.indexOf("-o") + 1];',
-        `fs.writeFileSync(out, Buffer.from("${PNG_1X1.toString(
-          'base64',
-        )}", "base64"));`,
-      ].join('\n'),
-      'utf8',
-    );
-    fs.chmodSync(fakeMmdc, 0o755);
+    createFakeMmdc(binDir);
 
     const result = renderMermaidImageSync({
       source: 'flowchart TD\n  A[Start] --> B[End]',
@@ -161,20 +181,7 @@ describe('mermaid image renderer', () => {
   it('renders Kitty terminal images as virtual placements', () => {
     const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-mmdc-'));
     tempDirs.push(binDir);
-    const fakeMmdc = path.join(binDir, 'mmdc');
-    fs.writeFileSync(
-      fakeMmdc,
-      [
-        '#!/usr/bin/env node',
-        'const fs = require("node:fs");',
-        'const out = process.argv[process.argv.indexOf("-o") + 1];',
-        `fs.writeFileSync(out, Buffer.from("${PNG_1X1.toString(
-          'base64',
-        )}", "base64"));`,
-      ].join('\n'),
-      'utf8',
-    );
-    fs.chmodSync(fakeMmdc, 0o755);
+    createFakeMmdc(binDir);
 
     const result = renderMermaidImageSync({
       source: 'flowchart TD\n  A[Start] --> B[End]',
