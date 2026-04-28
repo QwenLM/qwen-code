@@ -44,9 +44,9 @@ export const DiffStatsDisplay: React.FC<DiffStatsDisplayProps> = ({
         <Text color={theme.text.secondary}> / </Text>
         <Text color={theme.status.error}>-{linesRemoved}</Text>
       </Text>
-      {rows.map((row, i) => (
+      {rows.map((row) => (
         <DiffRow
-          key={`${i}-${row.filename}`}
+          key={row.filename}
           row={row}
           addWidth={addWidth}
           remWidth={remWidth}

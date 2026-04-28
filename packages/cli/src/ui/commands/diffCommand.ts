@@ -99,8 +99,14 @@ async function diffAction(
 
 /**
  * Convert the raw `fetchGitDiff` result into a display-ready structure that
- * both the Ink component and the plain-text renderer consume. Order of rows
- * mirrors git's numstat output (which uses alphabetical or insertion order).
+ * both the Ink component and the plain-text renderer consume.
+ *
+ * Row order is the iteration order of `result.perFileStats`, which is a
+ * `Map` and therefore preserves insertion order: tracked numstat entries
+ * first (alphabetical, as git emits them), then untracked entries appended
+ * by `fetchGitDiff` in their `ls-files --others` order. Renderers depend on
+ * this — if `perFileStats` ever switches to a different container, the row
+ * sequence must continue to be stable across runs.
  */
 export function buildDiffRenderModel(result: GitDiffResult): DiffRenderModel {
   const rows: DiffRenderRow[] = [];
