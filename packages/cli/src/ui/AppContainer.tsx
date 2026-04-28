@@ -70,6 +70,7 @@ import { useAuthCommand } from './auth/useAuth.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
+import { useManageModelsCommand } from './hooks/useManageModelsCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
@@ -126,6 +127,10 @@ import {
 import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
+import {
+  useBackgroundTaskViewState,
+  useBackgroundTaskViewActions,
+} from './contexts/BackgroundTaskViewContext.js';
 import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
@@ -137,6 +142,7 @@ import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useMemoryDialog } from './hooks/useMemoryDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
+import { buildTerminalNotification } from './hooks/useTerminalNotification.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
@@ -313,6 +319,20 @@ export const AppContainer = (props: AppContainerProps) => {
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
   const { stdin, setRawMode } = useStdin();
   const { stdout } = useStdout();
+
+  // Raw write function for terminal escape sequences.
+  // Uses process.stdout directly instead of Ink's useStdout() because
+  // standard Ink v6.2.3 proxies stdout writes through its rendering
+  // pipeline, which can corrupt binary escape sequences (OSC, DCS).
+  const writeRaw = useCallback((data: string) => {
+    process.stdout.write(data);
+  }, []);
+
+  // Terminal notification helpers (constructed directly, not via context)
+  const terminal = useMemo(
+    () => buildTerminalNotification(writeRaw),
+    [writeRaw],
+  );
 
   // Additional hooks moved from App.tsx
   const { stats: sessionStats, startNewSession } = useSessionStats();
@@ -518,10 +538,13 @@ export const AppContainer = (props: AppContainerProps) => {
     isAuthDialogOpen,
     isAuthenticating,
     pendingAuthType,
+    externalAuthState,
     qwenAuthState,
     handleAuthSelect,
     handleCodingPlanSubmit,
     handleAlibabaStandardSubmit,
+    handleOpenRouterSubmit,
+    handleCustomApiKeySubmit,
     openAuthDialog,
     cancelAuthentication,
   } = useAuthCommand(settings, config, historyManager.addItem, refreshStatic);
@@ -591,6 +614,11 @@ export const AppContainer = (props: AppContainerProps) => {
     openModelDialog,
     closeModelDialog,
   } = useModelCommand();
+  const {
+    isManageModelsDialogOpen,
+    openManageModelsDialog,
+    closeManageModelsDialog,
+  } = useManageModelsCommand();
   const { activeArenaDialog, openArenaDialog, closeArenaDialog } =
     useArenaCommand();
 
@@ -656,6 +684,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openMemoryDialog,
       openSettingsDialog,
       openModelDialog,
+      openManageModelsDialog,
       openTrustDialog,
       openArenaDialog,
       openPermissionsDialog,
@@ -687,6 +716,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openMemoryDialog,
       openSettingsDialog,
       openModelDialog,
+      openManageModelsDialog,
       openArenaDialog,
       setDebugMessage,
       dispatchExtensionStateUpdate,
@@ -874,6 +904,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const [hasSuggestionsVisible, setHasSuggestionsVisible] = useState(false);
 
   const agentViewState = useAgentViewState();
+  const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
+  const { closeDialog: closeBgTasksDialog } = useBackgroundTaskViewActions();
 
   // Prompt suggestion state
   const [promptSuggestion, setPromptSuggestion] = useState<string | null>(null);
@@ -1551,6 +1583,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isSettingsDialogOpen ||
     isMemoryDialogOpen ||
     isModelDialogOpen ||
+    isManageModelsDialogOpen ||
     isTrustDialogOpen ||
     activeArenaDialog !== null ||
     isPermissionsDialogOpen ||
@@ -1566,7 +1599,8 @@ export const AppContainer = (props: AppContainerProps) => {
     isResumeDialogOpen ||
     isDeleteDialogOpen ||
     isExtensionsManagerDialogOpen ||
-    isRewindSelectorOpen;
+    isRewindSelectorOpen ||
+    bgTasksDialogOpen;
   dialogsVisibleRef.current = dialogsVisible;
   const shouldShowStickyTodos =
     stickyTodos !== null &&
@@ -1867,6 +1901,8 @@ export const AppContainer = (props: AppContainerProps) => {
     elapsedTime,
     settings,
     config,
+    terminal,
+    pendingToolCalls,
   });
 
   // Dialog close functionality
@@ -1889,6 +1925,8 @@ export const AppContainer = (props: AppContainerProps) => {
     isFolderTrustDialogOpen,
     showWelcomeBackDialog,
     handleWelcomeBackClose,
+    isBackgroundTasksDialogOpen: bgTasksDialogOpen,
+    closeBackgroundTasksDialog: closeBgTasksDialog,
   });
 
   const handleExit = useCallback(
@@ -2237,6 +2275,7 @@ export const AppContainer = (props: AppContainerProps) => {
       authError,
       isAuthDialogOpen,
       pendingAuthType,
+      externalAuthState,
       // Qwen OAuth state
       qwenAuthState,
       editorError,
@@ -2247,6 +2286,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
+      isManageModelsDialogOpen,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -2356,6 +2396,7 @@ export const AppContainer = (props: AppContainerProps) => {
       authError,
       isAuthDialogOpen,
       pendingAuthType,
+      externalAuthState,
       // Qwen OAuth state
       qwenAuthState,
       editorError,
@@ -2366,6 +2407,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
+      isManageModelsDialogOpen,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -2484,12 +2526,16 @@ export const AppContainer = (props: AppContainerProps) => {
       cancelAuthentication,
       handleCodingPlanSubmit,
       handleAlibabaStandardSubmit,
+      handleOpenRouterSubmit,
+      handleCustomApiKeySubmit,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
       closeMemoryDialog,
       closeModelDialog,
       openModelDialog,
+      openManageModelsDialog,
+      closeManageModelsDialog,
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
@@ -2554,12 +2600,16 @@ export const AppContainer = (props: AppContainerProps) => {
       cancelAuthentication,
       handleCodingPlanSubmit,
       handleAlibabaStandardSubmit,
+      handleOpenRouterSubmit,
+      handleCustomApiKeySubmit,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
       closeMemoryDialog,
       closeModelDialog,
       openModelDialog,
+      openManageModelsDialog,
+      closeManageModelsDialog,
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,

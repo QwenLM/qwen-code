@@ -224,6 +224,11 @@ export function splitCommands(command: string): string[] {
     const char = command[i];
     const nextChar = command[i + 1];
 
+    if (!inSingleQuotes && char === '\\' && nextChar === '\n') {
+      i += 2;
+      continue;
+    }
+
     if (char === '\\' && i < command.length - 1) {
       currentCommand += char + command[i + 1];
       i += 2;

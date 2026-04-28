@@ -1,0 +1,132 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  _recoverObjectsFromLine,
+  _resetEnsuredDirsCacheForTest,
+  read,
+  readLines,
+} from './jsonl-utils.js';
+
+let tmpRoot: string;
+
+beforeAll(() => {
+  tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'jsonl-utils-test-'));
+});
+
+afterAll(() => {
+  fs.rmSync(tmpRoot, { recursive: true, force: true });
+});
+
+afterEach(() => {
+  _resetEnsuredDirsCacheForTest();
+});
+
+function tmpFile(content: string): string {
+  const p = path.join(
+    tmpRoot,
+    `t-${Math.random().toString(36).slice(2)}.jsonl`,
+  );
+  fs.writeFileSync(p, content, 'utf8');
+  return p;
+}
+
+describe('_recoverObjectsFromLine', () => {
+  it('returns single object for a well-formed JSON line', () => {
+    expect(_recoverObjectsFromLine<{ a: number }>('{"a":1}')).toEqual([
+      { a: 1 },
+    ]);
+  });
+
+  it('splits two concatenated objects with no separator', () => {
+    expect(
+      _recoverObjectsFromLine<{ a: number } | { b: number }>('{"a":1}{"b":2}'),
+    ).toEqual([{ a: 1 }, { b: 2 }]);
+  });
+
+  it('does not split on `}{` that appears inside a string value', () => {
+    const line = '{"text":"close-then-open: }{ here"}';
+    expect(_recoverObjectsFromLine<{ text: string }>(line)).toEqual([
+      { text: 'close-then-open: }{ here' },
+    ]);
+  });
+
+  it('handles escaped quotes inside strings', () => {
+    const line = '{"q":"he said \\"hi\\"","n":1}{"q":"x"}';
+    expect(_recoverObjectsFromLine<{ q: string; n?: number }>(line)).toEqual([
+      { q: 'he said "hi"', n: 1 },
+      { q: 'x' },
+    ]);
+  });
+
+  it('recovers objects around an unbalanced fragment', () => {
+    // Middle `{"oops":}` fails JSON.parse, surrounding objects still parse.
+    expect(
+      _recoverObjectsFromLine<{ a?: number; b?: number }>(
+        '{"a":1}{"oops":}{"b":2}',
+      ),
+    ).toEqual([{ a: 1 }, { b: 2 }]);
+  });
+
+  it('returns empty array when nothing balanced can be parsed', () => {
+    expect(_recoverObjectsFromLine('not json at all')).toEqual([]);
+    expect(_recoverObjectsFromLine('{"unterminated":')).toEqual([]);
+  });
+});
+
+describe('read() / readLines() with malformed lines', () => {
+  it('reads a clean file unchanged', async () => {
+    const file = tmpFile('{"a":1}\n{"a":2}\n{"a":3}\n');
+    expect(await read<{ a: number }>(file)).toEqual([
+      { a: 1 },
+      { a: 2 },
+      { a: 3 },
+    ]);
+  });
+
+  it('recovers concatenated records without losing later lines', async () => {
+    // The #3606 corruption shape: two records glued onto one physical line,
+    // with valid records before and after.
+    const file = tmpFile(
+      '{"uuid":"a","i":1}\n{"uuid":"b","i":2}{"uuid":"c","i":3}\n{"uuid":"d","i":4}\n',
+    );
+    const out = await read<{ uuid: string; i: number }>(file);
+    expect(out.map((r) => r.uuid)).toEqual(['a', 'b', 'c', 'd']);
+  });
+
+  it('skips a fully-garbage line and keeps reading', async () => {
+    const file = tmpFile('{"a":1}\nnot-json-at-all\n{"a":3}\n');
+    expect(await read<{ a: number }>(file)).toEqual([{ a: 1 }, { a: 3 }]);
+  });
+
+  it('returns [] for a missing file', async () => {
+    expect(await read(path.join(tmpRoot, 'does-not-exist.jsonl'))).toEqual([]);
+  });
+
+  it('readLines respects the limit when objects come from recovery', async () => {
+    // Two clean lines, then a glued pair. Asking for 3 should yield 3.
+    const file = tmpFile('{"i":1}\n{"i":2}\n{"i":3}{"i":4}\n{"i":5}\n');
+    expect((await readLines<{ i: number }>(file, 3)).map((r) => r.i)).toEqual([
+      1, 2, 3,
+    ]);
+  });
+
+  it('readLines recovers when the malformed line is within the first N', async () => {
+    const file = tmpFile('{"i":1}{"i":2}\n{"i":3}\n');
+    expect((await readLines<{ i: number }>(file, 5)).map((r) => r.i)).toEqual([
+      1, 2, 3,
+    ]);
+  });
+
+  it('skips blank lines', async () => {
+    const file = tmpFile('{"a":1}\n\n{"a":2}\n');
+    expect(await read<{ a: number }>(file)).toEqual([{ a: 1 }, { a: 2 }]);
+  });
+});

@@ -5,7 +5,7 @@
  */
 
 import type {
-  BackgroundAgentStatus,
+  BackgroundTaskStatus,
   Config,
   ToolCallRequestInfo,
 } from '@qwen-code/qwen-code-core';
@@ -302,7 +302,7 @@ export async function runNonInteractive(
         sdkNotification?: {
           task_id: string;
           tool_use_id?: string;
-          status: BackgroundAgentStatus;
+          status: BackgroundTaskStatus;
           usage?: {
             total_tokens: number;
             tool_uses: number;
@@ -714,8 +714,12 @@ export async function runNonInteractive(
               await handleCancellationError(config);
             }
             await drainLocalQueue();
-            const running = registry.getRunning();
-            if (running.length === 0 && localQueue.length === 0) break;
+            // Wait for every task's terminal notification, not just the
+            // running ones: cancel() marks status 'cancelled' synchronously
+            // but the notification is emitted later by the natural handler,
+            // and SDK consumers need every task_started paired with one.
+            if (!registry.hasUnfinalizedTasks() && localQueue.length === 0)
+              break;
             await new Promise((r) => setTimeout(r, 100));
           }
 

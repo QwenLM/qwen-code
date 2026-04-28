@@ -44,6 +44,7 @@ import { SessionStatsProvider } from './ui/contexts/SessionContext.js';
 import { SettingsContext } from './ui/contexts/SettingsContext.js';
 import { VimModeProvider } from './ui/contexts/VimModeContext.js';
 import { AgentViewProvider } from './ui/contexts/AgentViewContext.js';
+import { BackgroundTaskViewProvider } from './ui/contexts/BackgroundTaskViewContext.js';
 import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
 import { themeManager, AUTO_THEME_NAME } from './ui/themes/theme-manager.js';
 import {
@@ -251,13 +252,15 @@ export async function startInteractiveUI(
               <SessionStatsProvider sessionId={config.getSessionId()}>
                 <VimModeProvider settings={settings}>
                   <AgentViewProvider config={config}>
-                    <AppContainer
-                      config={config}
-                      settings={settings}
-                      startupWarnings={startupWarnings}
-                      version={version}
-                      initializationResult={initializationResult}
-                    />
+                    <BackgroundTaskViewProvider config={config}>
+                      <AppContainer
+                        config={config}
+                        settings={settings}
+                        startupWarnings={startupWarnings}
+                        version={version}
+                        initializationResult={initializationResult}
+                      />
+                    </BackgroundTaskViewProvider>
                   </AgentViewProvider>
                 </VimModeProvider>
               </SessionStatsProvider>
