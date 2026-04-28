@@ -12,6 +12,8 @@ targets the remaining classes that were still reproducible with local evidence:
   and emit a full-screen clear even when the user has not requested `/clear`;
 - narrow shell output can reflow without new visible bytes and be re-emitted as
   fresh live output;
+- high-volume live shell/tool text output and tmux spinner ticks can create
+  avoidable redraw pressure even when the visible state is only progress;
 - expanded subagent detail can exceed its assigned tool-message budget.
 
 The PR does not rely on terminal emulator support to hide the problem. The E2E
@@ -62,7 +64,20 @@ expanded modes previously had fixed item limits but did not derive their budget
 from the `availableHeight` assigned by `ToolGroupMessage`. In a small terminal,
 expanded detail could still occupy too much dynamic space.
 
-### 5. Exactly-Fit Tool Output
+### 5. High-Frequency Progress-Only Redraws
+
+The user shell command path already throttles plain text live updates, and the
+PTY viewport path is throttled/deduped in `ShellExecutionService`. The core
+shell tool `updateOutput` callback still treated every data event as an
+immediate UI update. That is unnecessary for plain text data bursts because the
+final `ToolResult` carries the complete output after command completion.
+
+Spinner ticks are another progress-only source. Inside tmux, frequent spinner
+control sequences can disturb adjacent panes or text selection even when the
+CLI itself is otherwise stable. Synchronized output intentionally stays disabled
+inside tmux, so the spinner needs its own lower-frequency fallback.
+
+### 6. Exactly-Fit Tool Output
 
 `ToolMessage` pre-slices string results before they reach `MaxSizedBox`. The
 first implementation always reserved one row for the hidden-line banner. That
@@ -149,6 +164,21 @@ emission requires both:
 The default `showColor=false` path compares unwrapped logical lines, matching
 the colored path. Resize-only soft-wrap changes do not emit new live chunks.
 
+The core `ShellTool` live `updateOutput` path also throttles plain text data to
+`OUTPUT_UPDATE_INTERVAL_MS` while keeping ANSI viewport updates immediate. This
+matches the existing user-shell throttling policy: live output remains useful,
+but high-volume text bursts no longer force a React render for every chunk. The
+completed result remains exact because the final command result is still added
+after the process exits.
+
+### Tmux-Safe Spinner Fallback
+
+`GeminiSpinner` keeps the normal Ink spinner outside tmux and keeps screen
+reader text unchanged. When `TMUX` is present, it renders a fixed-width
+three-character dots indicator and advances it every 750 ms. This borrows the
+safe part of the Gemini CLI tmux-spinner proposal without changing Qwen's
+synchronized-output allowlist or requiring terminal emulator support.
+
 ### Evidence Capture
 
 `TerminalCapture` now supports:
@@ -220,6 +250,24 @@ The comparison GIF intentionally renders the live-output event stream:
 That visual difference maps directly to the metric. If the left side does not
 show a second resize-only event, the test has not reproduced the narrow shell
 duplication bug and should not be used as evidence for that issue.
+
+### Shell Text Throttle Scenario
+
+- simulate multiple shell `data` events arriving inside one
+  `OUTPUT_UPDATE_INTERVAL_MS` window;
+- pass requires the first text event to update immediately, intermediate text
+  events inside the window to stay silent, and the next event after the interval
+  to publish the latest live text;
+- final command output is still verified through the resolved `ToolResult`, so
+  throttling cannot drop transcript content.
+
+### Tmux Spinner Scenario
+
+- run `GeminiSpinner` with `TMUX` set;
+- pass requires the rendered spinner to use the low-frequency dots fallback
+  rather than the normal high-frequency Ink spinner;
+- this is a redraw-pressure reduction, not a claim that tmux is covered by
+  synchronized output.
 
 ### Resize Clear-Regression Scenario
 
@@ -332,6 +380,38 @@ Revalidated on April 28, 2026 after the exact-fit tool-output fix and the
 | ----------------- | ------------ | ----------- | ----------: | -----------------: | ------ |
 | Shell live reflow | fixed branch | strict pass |           1 |                  0 | passed |
 
+Additional source-level regressions validated on April 28, 2026:
+
+| Scenario            | Branch       | Expected    | Metric                                  | Result |
+| ------------------- | ------------ | ----------- | --------------------------------------- | ------ |
+| Shell text throttle | fixed branch | strict pass | first update immediate, burst collapsed | passed |
+| Tmux spinner        | fixed branch | strict pass | fixed-width dots fallback under `TMUX`  | passed |
+
+## Gemini CLI Cross-Check
+
+The Gemini CLI scan supports the same direction, but also warns against copying a
+large renderer wholesale:
+
+- Gemini's `TerminalBuffer` PR (`google-gemini/gemini-cli#24512`) separates
+  static history from dynamic controls to reduce flicker, but the default was
+  later turned back off in `#24873` because long histories regressed. For Qwen,
+  a terminal-buffer style renderer should remain a later feature-flagged
+  experiment, not part of this PR.
+- Gemini's resize work (`#18969`, `#21924`) targets destructive clears and
+  resize-time history churn. Qwen's current fix follows the smaller proven part:
+  non-explicit `refreshStatic()` no longer emits `clearTerminal`, and resize has
+  a raw ANSI clear metric.
+- Gemini's copy-mode stabilization (`#22584`) uses a freeze-frame approach:
+  fixed controls height and paused nonessential dynamic widgets. The same idea is
+  the preferred follow-up for any remaining ctrl+f/detail/copy interaction
+  jitter in Qwen.
+- Gemini's shell-output PRs (`#25461`, `#25643`) throttle high-volume text data
+  while preserving final output. Qwen now applies the same policy to the core
+  shell tool and already applies it to the user-shell path.
+- Gemini's tmux spinner PR (`#22067`) avoids high-frequency spinner redraws
+  inside tmux. Qwen now uses a local tmux-safe dots fallback while keeping
+  synchronized output disabled in tmux by default.
+
 ## Review Notes
 
 - The streaming fix is complete for the reproduced assistant/thought
@@ -349,6 +429,9 @@ Revalidated on April 28, 2026 after the exact-fit tool-output fix and the
 - Tool and subagent detail paths are bounded by visual height/width, including
   single long lines, so they do not depend on explicit newline count. Exactly-fit
   string output is not pre-sliced into a false hidden-line state.
+- High-frequency shell text and tmux spinner updates are now treated as
+  redraw-pressure sources. They are throttled or downgraded without changing
+  final transcript/output fidelity.
 - Copying a heavily modified Ink fork is not the preferred fix for these
   reproductions. The verified root causes are unbounded dynamic children and a
   full-screen static refresh; local bounding plus targeted viewport repaint is

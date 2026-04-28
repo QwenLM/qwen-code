@@ -264,7 +264,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const cwd = this.params.directory || this.config.getTargetDir();
 
       let cumulativeOutput: string | AnsiOutput = '';
-      let lastUpdateTime = Date.now();
+      let lastUpdateTime = Number.NEGATIVE_INFINITY;
       let isBinaryStream = false;
       let totalLines = 0;
       let totalBytes = 0;
@@ -295,7 +295,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
                     0,
                   );
                 }
-                shouldUpdate = true;
+                // ANSI output is already throttled and semantically deduped by
+                // ShellExecutionService, so preserve its live responsiveness.
+                // Plain text data can arrive in bursts and does not need every
+                // chunk to force a React render; the final ToolResult still
+                // carries the complete output after command completion.
+                shouldUpdate =
+                  Array.isArray(event.chunk) ||
+                  Date.now() - lastUpdateTime > OUTPUT_UPDATE_INTERVAL_MS;
                 break;
               case 'binary_detected':
                 isBinaryStream = true;

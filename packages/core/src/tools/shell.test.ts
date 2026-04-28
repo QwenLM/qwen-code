@@ -552,6 +552,39 @@ describe('ShellTool', () => {
         });
         await promise;
       });
+
+      it('should throttle live text updates while preserving the latest output', async () => {
+        const invocation = shellTool.build({
+          command: 'npm test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+
+        mockShellOutputCallback({ type: 'data', chunk: 'line 1' });
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+        expect(updateOutputMock).toHaveBeenLastCalledWith('line 1');
+
+        mockShellOutputCallback({ type: 'data', chunk: 'line 2' });
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+
+        await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS + 1);
+
+        mockShellOutputCallback({ type: 'data', chunk: 'line 3' });
+        expect(updateOutputMock).toHaveBeenCalledTimes(2);
+        expect(updateOutputMock).toHaveBeenLastCalledWith('line 3');
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('line 1\nline 2\nline 3'),
+          output: 'line 1\nline 2\nline 3',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
     });
 
     describe('addCoAuthorToGitCommit', () => {

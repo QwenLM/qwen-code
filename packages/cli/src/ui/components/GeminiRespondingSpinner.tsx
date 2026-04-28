@@ -5,7 +5,8 @@
  */
 
 import type React from 'react';
-import { Text, useIsScreenReaderEnabled } from 'ink';
+import { useEffect, useState } from 'react';
+import { Box, Text, useIsScreenReaderEnabled } from 'ink';
 import Spinner from 'ink-spinner';
 import type { SpinnerName } from 'cli-spinners';
 import { useStreamingContext } from '../contexts/StreamingContext.js';
@@ -15,6 +16,9 @@ import {
   SCREEN_READER_RESPONDING,
 } from '../textConstants.js';
 import { theme } from '../semantic-colors.js';
+
+const TMUX_SPINNER_INTERVAL_MS = 750;
+const TMUX_SPINNER_FRAMES = ['.  ', '.. ', '...'];
 
 interface GeminiRespondingSpinnerProps {
   /**
@@ -57,9 +61,36 @@ export const GeminiSpinner: React.FC<GeminiSpinnerProps> = ({
   altText,
 }) => {
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
-  return isScreenReaderEnabled ? (
-    <Text>{altText}</Text>
-  ) : (
+  const isTmux = Boolean(process.env['TMUX']);
+  const [tmuxFrameIndex, setTmuxFrameIndex] = useState(0);
+
+  useEffect(() => {
+    if (isScreenReaderEnabled || !isTmux) {
+      return;
+    }
+
+    const interval = setInterval(() => {
+      setTmuxFrameIndex((index) => (index + 1) % TMUX_SPINNER_FRAMES.length);
+    }, TMUX_SPINNER_INTERVAL_MS);
+
+    return () => clearInterval(interval);
+  }, [isScreenReaderEnabled, isTmux]);
+
+  if (isScreenReaderEnabled) {
+    return <Text>{altText}</Text>;
+  }
+
+  if (isTmux) {
+    return (
+      <Box width={3}>
+        <Text color={theme.text.primary}>
+          {TMUX_SPINNER_FRAMES[tmuxFrameIndex]}
+        </Text>
+      </Box>
+    );
+  }
+
+  return (
     <Text color={theme.text.primary}>
       <Spinner type={spinnerType} />
     </Text>
