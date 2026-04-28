@@ -39,12 +39,18 @@ vi.mock('node:os', () => ({
   homedir: vi.fn(),
 }));
 
-vi.mock('node:path', () => ({
-  default: {
-    join: vi.fn(),
-    dirname: vi.fn(),
-  },
-}));
+vi.mock('node:path', async (importOriginal) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const actual: any = await importOriginal();
+  return {
+    ...actual,
+    default: {
+      ...actual.default,
+      join: vi.fn((...args: string[]) => actual.default.join(...args)),
+      dirname: vi.fn((p: string) => actual.default.dirname(p)),
+    },
+  };
+});
 
 /**
  * Helper to access private properties for testing

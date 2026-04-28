@@ -5,8 +5,8 @@
  */
 
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { Storage } from '../config/storage.js';
 import { QWEN_DIR, sanitizeCwd } from '../utils/paths.js';
 import type { AutoMemoryType } from './types.js';
 
@@ -81,13 +81,14 @@ function findCanonicalGitRoot(startPath: string): string | null {
 
 /**
  * Returns the base directory for all auto-memory storage.
- * Defaults to `~/.qwen`; overridable via QWEN_CODE_MEMORY_BASE_DIR for tests.
+ * Defaults to the global qwen dir (`~/.qwen` or `$QWEN_HOME`);
+ * overridable via QWEN_CODE_MEMORY_BASE_DIR for tests.
  */
 export function getMemoryBaseDir(): string {
   if (process.env['QWEN_CODE_MEMORY_BASE_DIR']) {
     return process.env['QWEN_CODE_MEMORY_BASE_DIR'];
   }
-  return path.join(os.homedir(), QWEN_DIR);
+  return Storage.getGlobalQwenDir();
 }
 
 // Memoize by projectRoot — findCanonicalGitRoot() walks the file system (existsSync

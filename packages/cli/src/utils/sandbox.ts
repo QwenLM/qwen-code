@@ -16,7 +16,7 @@ import {
 } from '../config/settings.js';
 import { promisify } from 'node:util';
 import type { Config, SandboxConfig } from '@qwen-code/qwen-code-core';
-import { FatalSandboxError } from '@qwen-code/qwen-code-core';
+import { FatalSandboxError, Storage } from '@qwen-code/qwen-code-core';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from './stdioHelpers.js';
 
@@ -219,6 +219,10 @@ export async function start_sandbox(
       `HOME_DIR=${fs.realpathSync(os.homedir())}`,
       '-D',
       `CACHE_DIR=${fs.realpathSync(execSync(`getconf DARWIN_USER_CACHE_DIR`).toString().trim())}`,
+      '-D',
+      `QWEN_DIR=${path.resolve(Storage.getGlobalQwenDir())}`,
+      '-D',
+      `RUNTIME_DIR=${path.resolve(Storage.getRuntimeBaseDir())}`,
     ];
 
     // Add included directories from the workspace context
@@ -433,6 +437,29 @@ export async function start_sandbox(
     args.push(
       '--volume',
       `${userSettingsDirOnHost}:${getContainerPath(userSettingsDirOnHost)}`,
+    );
+  }
+
+  // Pass QWEN_HOME so the sandboxed CLI resolves the global qwen dir to the
+  // same path the host did, instead of relying on the /home/node/.qwen mount
+  // being the default fallback.
+  args.push('--env', `QWEN_HOME=${getContainerPath(userSettingsDirOnHost)}`);
+
+  // Mount the runtime base dir and pass QWEN_RUNTIME_DIR when it diverges
+  // from the global qwen dir; otherwise the existing user-settings mount
+  // already covers it.
+  const runtimeBaseDirOnHost = Storage.getRuntimeBaseDir();
+  if (runtimeBaseDirOnHost !== userSettingsDirOnHost) {
+    if (!fs.existsSync(runtimeBaseDirOnHost)) {
+      fs.mkdirSync(runtimeBaseDirOnHost, { recursive: true });
+    }
+    args.push(
+      '--volume',
+      `${runtimeBaseDirOnHost}:${getContainerPath(runtimeBaseDirOnHost)}`,
+    );
+    args.push(
+      '--env',
+      `QWEN_RUNTIME_DIR=${getContainerPath(runtimeBaseDirOnHost)}`,
     );
   }
 

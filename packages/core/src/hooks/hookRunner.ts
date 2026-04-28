@@ -704,7 +704,11 @@ export class HookRunner {
             // Not JSON, convert plain text to structured output
             output = this.convertPlainTextToHookOutput(
               textToParse,
-              isBlockingError ? exitCode : exitCode || EXIT_CODE_SUCCESS,
+              isBlockingError
+                ? exitCode
+                : exitCode === EXIT_CODE_SUCCESS
+                  ? EXIT_CODE_SUCCESS
+                  : EXIT_CODE_NON_BLOCKING_ERROR,
             );
           }
         }

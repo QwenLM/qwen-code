@@ -539,14 +539,34 @@ export class ExtensionManager {
   async refreshCache(options?: { names?: string[] }): Promise<void> {
     this.extensionCache = new Map<string, Extension>();
     const requestedNames = options?.names?.filter(Boolean) ?? [];
-    const extensions =
-      requestedNames.length > 0
-        ? (
-            await Promise.all(
-              requestedNames.map((name) => this.loadExtensionByName(name)),
-            )
-          ).filter((extension): extension is Extension => extension !== null)
-        : await this.loadExtensionsFromDir(os.homedir());
+    let extensions: Extension[];
+    if (requestedNames.length > 0) {
+      extensions = (
+        await Promise.all(
+          requestedNames.map((name) => this.loadExtensionByName(name)),
+        )
+      ).filter((extension): extension is Extension => extension !== null);
+    } else {
+      // Default: load all extensions from QWEN_HOME-aware user extensions dir.
+      const userExtensionsDir = ExtensionStorage.getUserExtensionsDir();
+      let subdirs: string[];
+      try {
+        subdirs = fs.readdirSync(userExtensionsDir);
+      } catch {
+        return;
+      }
+      extensions = [];
+      for (const subdir of subdirs) {
+        const extensionDir = path.join(userExtensionsDir, subdir);
+        const extension = await this.loadExtension({
+          extensionDir,
+          workspaceDir: this.workspaceDir,
+        });
+        if (extension != null) {
+          extensions.push(extension);
+        }
+      }
+    }
     extensions.forEach((extension) => {
       this.extensionCache!.set(extension.name, extension);
     });

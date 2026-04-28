@@ -7,22 +7,45 @@
  */
 
 import { execSync } from 'node:child_process';
-import { join } from 'node:path';
+import path from 'node:path';
+const { join } = path;
 import { existsSync, readFileSync } from 'node:fs';
 
 const projectRoot = join(import.meta.dirname, '..');
 
-const SETTINGS_DIRECTORY_NAME = '.qwen';
-const USER_SETTINGS_DIR = join(
-  process.env.HOME || process.env.USERPROFILE || process.env.HOMEPATH || '',
-  SETTINGS_DIRECTORY_NAME,
-);
+// Expand tilde and resolve relative paths (mirrors Storage.resolvePath in core).
+function resolvePath(dir) {
+  let resolved = dir;
+  if (
+    resolved === '~' ||
+    resolved.startsWith('~/') ||
+    resolved.startsWith('~\\')
+  ) {
+    const segments =
+      resolved === '~'
+        ? []
+        : resolved
+            .slice(2)
+            .split(/[/\\]+/)
+            .filter(Boolean);
+    const home =
+      process.env.HOME || process.env.USERPROFILE || process.env.HOMEPATH || '';
+    resolved = path.join(home, ...segments);
+  }
+  if (!path.isAbsolute(resolved)) {
+    resolved = path.resolve(resolved);
+  }
+  return resolved;
+}
+
+const USER_SETTINGS_DIR = process.env.QWEN_HOME
+  ? resolvePath(process.env.QWEN_HOME)
+  : join(
+      process.env.HOME || process.env.USERPROFILE || process.env.HOMEPATH || '',
+      '.qwen',
+    );
 const USER_SETTINGS_PATH = join(USER_SETTINGS_DIR, 'settings.json');
-const WORKSPACE_SETTINGS_PATH = join(
-  projectRoot,
-  SETTINGS_DIRECTORY_NAME,
-  'settings.json',
-);
+const WORKSPACE_SETTINGS_PATH = join(projectRoot, '.qwen', 'settings.json');
 
 let settingsTarget = undefined;
 

@@ -59,7 +59,7 @@ function getMergeStrategyForPath(path: string[]): MergeStrategy | undefined {
 
 export type { Settings, MemoryImportFormat };
 
-export const SETTINGS_DIRECTORY_NAME = '.qwen';
+export const SETTINGS_DIRECTORY_NAME = QWEN_DIR;
 export const USER_SETTINGS_PATH = Storage.getGlobalSettingsPath();
 export const USER_SETTINGS_DIR = path.dirname(USER_SETTINGS_PATH);
 export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
@@ -482,6 +482,23 @@ export function createMinimalSettings(): LoadedSettings {
 }
 
 /**
+ * Returns the set of normalized .env file paths that count as user-level.
+ *
+ * User-level paths cover the home `.env` and the global Qwen config dir
+ * `.env` (which respects `QWEN_HOME`). These are used both to allow loading
+ * under untrusted workspaces and to opt out of the project-level excluded
+ * vars filter inside `loadEnvironment`.
+ */
+function getUserLevelEnvPaths(): Set<string> {
+  const homeDir = homedir();
+  const globalQwenDir = Storage.getGlobalQwenDir();
+  return new Set([
+    path.normalize(path.join(homeDir, '.env')),
+    path.normalize(path.join(globalQwenDir, '.env')),
+  ]);
+}
+
+/**
  * Finds the .env file to load, respecting workspace trust settings.
  *
  * When workspace is untrusted, only allow user-level .env files at:
@@ -493,20 +510,30 @@ function findEnvFile(settings: Settings, startDir: string): string | null {
   const isTrusted = isWorkspaceTrusted(settings).isTrusted;
 
   // Pre-compute user-level .env paths for fast comparison
-  const userLevelPaths = new Set([
-    path.normalize(path.join(homeDir, '.env')),
-    path.normalize(path.join(homeDir, QWEN_DIR, '.env')),
-  ]);
+  const globalQwenDir = Storage.getGlobalQwenDir();
+  const userLevelPaths = getUserLevelEnvPaths();
 
   // Determine if we can use this .env file based on trust settings
   const canUseEnvFile = (filePath: string): boolean =>
     isTrusted !== false || userLevelPaths.has(path.normalize(filePath));
 
+  // When QWEN_HOME overrides the default, skip legacy ~/.qwen/.env
+  // during walk-up so the fallback correctly picks up globalQwenDir/.env.
+  const legacyQwenDir = path.normalize(path.join(homeDir, QWEN_DIR));
+  const hasCustomConfigDir = path.normalize(globalQwenDir) !== legacyQwenDir;
+
   let currentDir = path.resolve(startDir);
   while (true) {
     // Prefer gemini-specific .env under QWEN_DIR
     const geminiEnvPath = path.join(currentDir, QWEN_DIR, '.env');
-    if (fs.existsSync(geminiEnvPath) && canUseEnvFile(geminiEnvPath)) {
+    const isLegacyHome =
+      hasCustomConfigDir &&
+      path.normalize(path.join(currentDir, QWEN_DIR)) === legacyQwenDir;
+    if (
+      !isLegacyHome &&
+      fs.existsSync(geminiEnvPath) &&
+      canUseEnvFile(geminiEnvPath)
+    ) {
       return geminiEnvPath;
     }
 
@@ -518,7 +545,7 @@ function findEnvFile(settings: Settings, startDir: string): string | null {
     const parentDir = path.dirname(currentDir);
     if (parentDir === currentDir || !parentDir) {
       // At home directory - check fallback .env files
-      const homeGeminiEnvPath = path.join(homeDir, QWEN_DIR, '.env');
+      const homeGeminiEnvPath = path.join(globalQwenDir, '.env');
       if (fs.existsSync(homeGeminiEnvPath)) {
         return homeGeminiEnvPath;
       }
@@ -580,7 +607,10 @@ export function loadEnvironment(settings: Settings): void {
 
       const excludedVars =
         settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
-      const isProjectEnvFile = !envFilePath.includes(QWEN_DIR);
+      const userLevelPaths = getUserLevelEnvPaths();
+      const normalizedEnvFilePath = path.normalize(envFilePath);
+      const isUserLevelEnvFile = userLevelPaths.has(normalizedEnvFilePath);
+      const isProjectEnvFile = !isUserLevelEnvFile;
 
       for (const key in parsedEnv) {
         if (Object.hasOwn(parsedEnv, key)) {

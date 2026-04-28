@@ -2955,6 +2955,57 @@ describe('Settings Loading and Merging', () => {
         expect(process.env['WORKSPACE_ENV_VAR']).toBeUndefined();
       });
     });
+
+    describe('QWEN_HOME custom directory', () => {
+      const originalQwenHome = process.env['QWEN_HOME'];
+
+      beforeEach(() => {
+        delete process.env['DEBUG'];
+        delete process.env['DEBUG_MODE'];
+        delete process.env['QWEN_HOME_TEST_VAR'];
+      });
+
+      afterEach(() => {
+        if (originalQwenHome === undefined) {
+          delete process.env['QWEN_HOME'];
+        } else {
+          process.env['QWEN_HOME'] = originalQwenHome;
+        }
+        delete process.env['DEBUG'];
+        delete process.env['DEBUG_MODE'];
+        delete process.env['QWEN_HOME_TEST_VAR'];
+      });
+
+      it('does not exclude DEBUG/DEBUG_MODE from .env in a QWEN_HOME dir not named .qwen', () => {
+        const customHome = '/tmp/qwen-home-custom';
+        process.env['QWEN_HOME'] = customHome;
+        const customGlobalEnvPath = path.join(customHome, '.env');
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, customGlobalEnvPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH) return JSON.stringify({});
+            if (p === customGlobalEnvPath)
+              return 'DEBUG=true\nDEBUG_MODE=1\nQWEN_HOME_TEST_VAR=hello';
+            return '{}';
+          },
+        );
+
+        loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
+
+        // All three should be set — DEBUG and DEBUG_MODE must NOT be excluded
+        // because the .env lives inside the user-level QWEN_HOME directory.
+        expect(process.env['DEBUG']).toEqual('true');
+        expect(process.env['DEBUG_MODE']).toEqual('1');
+        expect(process.env['QWEN_HOME_TEST_VAR']).toEqual('hello');
+      });
+    });
   });
 
   describe('needsMigration', () => {

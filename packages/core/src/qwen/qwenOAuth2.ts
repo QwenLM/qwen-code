@@ -7,7 +7,6 @@
 import crypto from 'crypto';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
-import * as os from 'os';
 import type { ChildProcess } from 'node:child_process';
 import open from 'open';
 import { EventEmitter } from 'events';
@@ -20,6 +19,7 @@ import {
   TokenManagerError,
   TokenError,
 } from './sharedTokenManager.js';
+import { Storage } from '../config/storage.js';
 
 const debugLogger = createDebugLogger('QWEN_OAUTH');
 
@@ -36,7 +36,6 @@ const QWEN_OAUTH_SCOPE = 'openid profile email model.completion';
 const QWEN_OAUTH_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
 
 // File System Configuration
-const QWEN_DIR = '.qwen';
 const QWEN_CREDENTIAL_FILENAME = 'oauth_creds.json';
 
 /**
@@ -1034,7 +1033,7 @@ export async function clearQwenCredentials(): Promise<void> {
 }
 
 function getQwenCachedCredentialPath(): string {
-  return path.join(os.homedir(), QWEN_DIR, QWEN_CREDENTIAL_FILENAME);
+  return path.join(Storage.getGlobalQwenDir(), QWEN_CREDENTIAL_FILENAME);
 }
 
 export const clearCachedCredentialFile = clearQwenCredentials;
