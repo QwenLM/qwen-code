@@ -27,7 +27,14 @@ describe('FileExporter.serialize', () => {
 
   afterEach(async () => {
     await exporter.shutdown();
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    // Windows occasionally returns ENOTEMPTY when the underlying file
+    // handle isn't fully released yet; retry a few times before failing.
+    fs.rmSync(tmpDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 50,
+    });
   });
 
   // Regression for upstream PR #4689: a raw JSON.stringify on a ReadableSpan
