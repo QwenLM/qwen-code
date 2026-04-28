@@ -177,7 +177,7 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.TOGGLE_COMPACT_MODE]: [{ key: 'o', ctrl: true }],
   [Command.TOGGLE_MARKDOWN_RENDER_MODE]: [
     { key: 'm', meta: true },
-    { sequence: 'µ' },
+    { sequence: 'µ', ctrl: false, meta: false, paste: false },
   ],
 
   // Shell commands

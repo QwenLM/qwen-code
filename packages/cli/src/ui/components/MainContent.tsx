@@ -17,6 +17,7 @@ import { useAppContext } from '../contexts/AppContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
+import { useMarkdownRendering } from '../contexts/MarkdownRenderingContext.js';
 import {
   isForceExpandGroup,
   mergeCompactToolGroups,
@@ -33,6 +34,7 @@ export const MainContent = () => {
   const uiState = useUIState();
   const uiActions = useUIActions();
   const { compactMode } = useCompactMode();
+  const { mermaidRenderMode } = useMarkdownRendering();
   const {
     pendingHistoryItems,
     terminalWidth,
@@ -179,7 +181,7 @@ export const MainContent = () => {
   return (
     <>
       <Static
-        key={`${uiState.historyRemountKey}-${uiState.currentModel}`}
+        key={`${uiState.historyRemountKey}-${uiState.currentModel}-${mermaidRenderMode}`}
         items={[
           <AppHeader key="app-header" version={version} />,
           <DebugModeNotification key="debug-notification" />,

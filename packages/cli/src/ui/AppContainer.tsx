@@ -1538,6 +1538,15 @@ export const AppContainer = (props: AppContainerProps) => {
   );
   const [mermaidRenderMode, setMermaidRenderMode] =
     useState<MermaidRenderMode>('visual');
+  const mermaidRenderModeMountedRef = useRef(false);
+  useEffect(() => {
+    if (!mermaidRenderModeMountedRef.current) {
+      mermaidRenderModeMountedRef.current = true;
+      return;
+    }
+
+    refreshStatic();
+  }, [mermaidRenderMode, refreshStatic]);
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
@@ -2158,10 +2167,20 @@ export const AppContainer = (props: AppContainerProps) => {
         void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
         refreshStatic();
       } else if (keyMatchers[Command.TOGGLE_MARKDOWN_RENDER_MODE](key)) {
-        setMermaidRenderMode((current) =>
-          current === 'visual' ? 'source' : 'visual',
+        const nextMermaidRenderMode =
+          mermaidRenderMode === 'visual' ? 'source' : 'visual';
+        setMermaidRenderMode(nextMermaidRenderMode);
+        historyManager.addItem(
+          {
+            type: MessageType.INFO,
+            text: `Markdown Mermaid rendering switched to ${
+              nextMermaidRenderMode === 'source'
+                ? 'source code'
+                : 'visual preview'
+            }. Press Alt/Option+M to switch back.`,
+          },
+          Date.now(),
         );
-        refreshStatic();
       }
     },
     [
@@ -2197,8 +2216,10 @@ export const AppContainer = (props: AppContainerProps) => {
       isAuthenticating,
       compactMode,
       setCompactMode,
+      mermaidRenderMode,
       setMermaidRenderMode,
       refreshStatic,
+      historyManager,
       handleDoubleEscRewind,
     ],
   );

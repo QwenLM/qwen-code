@@ -145,6 +145,10 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
         return;
       }
 
+      if (keyMatchers[Command.TOGGLE_MARKDOWN_RENDER_MODE](key)) {
+        return;
+      }
+
       // ── Standard readline shortcuts ──
 
       // Submit (Enter, no modifiers)
