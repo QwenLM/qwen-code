@@ -19,7 +19,7 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import type { AgentEvent } from '@craft-agent/core/types';
+import type { AgentEvent, Message } from '@craft-agent/core/types';
 import type { FileAttachment } from '../utils/files.ts';
 import type { ModelDefinition } from '../config/models.ts';
 import { getProxyEnvVars } from '../config/proxy-env.ts';
@@ -30,6 +30,8 @@ import { getSystemPrompt } from '../prompts/system.ts';
 import { BaseAgent } from './base-agent.ts';
 import type {
   BackendConfig,
+  BackendSessionListOptions,
+  BackendSessionListResult,
   ChatOptions,
   PermissionRequestType,
   SdkMcpServerConfig,
@@ -59,8 +61,13 @@ type MiniCollector = {
   outputTokens?: number;
 };
 
+type HistoryCollector = {
+  updates: JsonRecord[];
+};
+
 const QWEN_CONTEXT_WINDOW = 1_000_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_INITIALIZE_TIMEOUT_MS = 60_000;
 
 function isRecord(value: unknown): value is JsonRecord {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -99,6 +106,12 @@ function jsonStringify(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function qwenInitializeTimeoutMs(): number {
+  const raw = process.env.QWEN_ACP_INITIALIZE_TIMEOUT_MS || process.env.QWEN_INITIALIZE_TIMEOUT_MS;
+  const parsed = raw ? Number(raw) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_INITIALIZE_TIMEOUT_MS;
 }
 
 function mapPermissionModeToQwen(mode: PermissionMode): string {
@@ -239,6 +252,7 @@ export class QwenAgent extends BaseAgent {
 
   private pendingPermissions = new Map<string, PendingPermission>();
   private miniCollectors = new Map<string, MiniCollector>();
+  private historyCollectors = new Map<string, HistoryCollector>();
   private suppressedSessionUpdates = new Set<string>();
 
   private sourceMcpServers: Record<string, SdkMcpServerConfig> = {};
@@ -478,6 +492,75 @@ export class QwenAgent extends BaseAgent {
     return result.text.trim() || null;
   }
 
+  async listSessions(options: BackendSessionListOptions = {}): Promise<BackendSessionListResult> {
+    await this.ensureProcess();
+    const response = await this.callAcp(
+      'session/list',
+      (connection) => connection.listSessions({
+        cwd: options.cwd || this.resolvedCwd(),
+        cursor: options.cursor,
+        _meta: options.size && options.size > 0 ? { size: Math.floor(options.size) } : undefined,
+      }),
+      60_000,
+    );
+
+    return {
+      nextCursor: response.nextCursor ?? undefined,
+      sessions: response.sessions.map((session) => ({
+        sessionId: session.sessionId,
+        cwd: session.cwd,
+        title: session.title,
+        updatedAt: session.updatedAt,
+      })),
+    };
+  }
+
+  async deleteBackendSession(sessionId: string, options: { cwd?: string } = {}): Promise<boolean> {
+    await this.ensureProcess();
+    const result = toRecord(await this.callAcp(
+      'ext/deleteSession',
+      (connection) => connection.extMethod('deleteSession', {
+        sessionId,
+        cwd: options.cwd || this.resolvedCwd(),
+      }),
+      30_000,
+    ));
+    return result.success !== false;
+  }
+
+  async renameBackendSession(sessionId: string, title: string, options: { cwd?: string } = {}): Promise<boolean> {
+    await this.ensureProcess();
+    const result = toRecord(await this.callAcp(
+      'ext/renameSession',
+      (connection) => connection.extMethod('renameSession', {
+        sessionId,
+        title,
+        cwd: options.cwd || this.resolvedCwd(),
+      }),
+      30_000,
+    ));
+    return result.success !== false;
+  }
+
+  async loadSessionMessages(sessionId: string, options: { cwd?: string } = {}): Promise<Message[]> {
+    await this.ensureProcess();
+
+    const collector: HistoryCollector = { updates: [] };
+    this.historyCollectors.set(sessionId, collector);
+
+    try {
+      await this.callAcp('session/load', (connection) => connection.loadSession({
+        sessionId,
+        cwd: options.cwd || this.resolvedCwd(),
+        mcpServers: this.buildAcpMcpServers(),
+      }), 60_000);
+
+      return this.buildHistoryMessages(sessionId, collector.updates);
+    } finally {
+      this.historyCollectors.delete(sessionId);
+    }
+  }
+
   async queryLlm(request: LLMQueryRequest): Promise<LLMQueryResult> {
     await this.ensureProcess();
     const sessionId = await this.createEphemeralSession();
@@ -511,6 +594,9 @@ export class QwenAgent extends BaseAgent {
       };
     } finally {
       this.miniCollectors.delete(sessionId);
+      await this.deleteBackendSession(sessionId).catch((error) => {
+        this.debug(`Qwen mini session cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
     }
   }
 
@@ -519,6 +605,7 @@ export class QwenAgent extends BaseAgent {
     this.killSubprocess();
     this.pendingPermissions.clear();
     this.miniCollectors.clear();
+    this.historyCollectors.clear();
   }
 
   // ============================================================
@@ -557,7 +644,8 @@ export class QwenAgent extends BaseAgent {
     const { command, args } = this.buildSpawnCommand(qwenCliPath, nodePath);
     const cwd = this.resolvedCwd();
 
-    this.debug(`Spawning Qwen ACP process: ${command} ${args.join(' ')}`);
+    const commandDescription = `${command} ${args.join(' ')}`;
+    this.debug(`Spawning Qwen ACP process: ${commandDescription}`);
     this.stderrBuffer = [];
     this.stderrBufferBytes = 0;
 
@@ -607,13 +695,22 @@ export class QwenAgent extends BaseAgent {
       await this.withTimeout(connection.initialize({
         protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {},
-      }), 'initialize', 30_000);
+      }), 'initialize', qwenInitializeTimeoutMs());
       this.initialized = true;
     } catch (error) {
       if (this.subprocess === child) {
         this.killSubprocess();
       }
-      throw error;
+      const originalMessage = error instanceof Error ? error.message : String(error);
+      const recentStderr = this.getRecentStderr().trim();
+      const message = [
+        originalMessage,
+        `Qwen command: ${commandDescription}`,
+        recentStderr ? `Recent Qwen stderr:\n${recentStderr}` : undefined,
+      ].filter(Boolean).join('\n');
+      const wrapped = new Error(message);
+      (wrapped as Error & { cause?: unknown }).cause = error;
+      throw wrapped;
     }
   }
 
@@ -967,6 +1064,12 @@ export class QwenAgent extends BaseAgent {
       return;
     }
 
+    const historyCollector = this.historyCollectors.get(sessionId);
+    if (historyCollector) {
+      historyCollector.updates.push(update);
+      return;
+    }
+
     if (this.suppressedSessionUpdates.has(sessionId)) return;
     if (sessionId !== this.qwenSessionId || !this._isProcessing) return;
 
@@ -1002,6 +1105,154 @@ export class QwenAgent extends BaseAgent {
     if (content.type !== 'text') return;
     const text = asString(content.text);
     if (text) collector.chunks.push(text);
+  }
+
+  private buildHistoryMessages(sessionId: string, updates: JsonRecord[]): Message[] {
+    const messages: Message[] = [];
+    const toolMessages = new Map<string, Message>();
+    let idCounter = 0;
+    let fallbackTimestamp = Date.now();
+
+    const nextId = () => `qwen-${sessionId}-${++idCounter}`;
+    const timestampFor = (update: JsonRecord): number => {
+      const meta = toRecord(update._meta);
+      const timestamp = asNumber(meta.timestamp);
+      if (timestamp != null) return timestamp;
+      fallbackTimestamp += 1;
+      return fallbackTimestamp;
+    };
+
+    const appendTextMessage = (
+      role: 'user' | 'assistant',
+      text: string,
+      timestamp: number,
+      isIntermediate?: boolean,
+    ) => {
+      if (!text) return;
+      const previous = messages[messages.length - 1];
+      if (
+        previous
+        && previous.role === role
+        && previous.timestamp === timestamp
+        && !previous.toolUseId
+        && previous.isIntermediate === isIntermediate
+      ) {
+        previous.content += text;
+        return;
+      }
+
+      messages.push({
+        id: nextId(),
+        role,
+        content: text,
+        timestamp,
+        isIntermediate,
+      });
+    };
+
+    for (const update of updates) {
+      const timestamp = timestampFor(update);
+      const content = toRecord(update.content);
+      const text = content.type === 'text' ? asString(content.text) : undefined;
+
+      switch (update.sessionUpdate) {
+        case 'user_message_chunk':
+          appendTextMessage('user', text || '', timestamp);
+          break;
+
+        case 'agent_message_chunk':
+          appendTextMessage('assistant', text || '', timestamp);
+          break;
+
+        case 'agent_thought_chunk':
+          appendTextMessage('assistant', text || '', timestamp, true);
+          break;
+
+        case 'tool_call': {
+          const toolUseId = asString(update.toolCallId) || `qwen-history-tool-${++idCounter}`;
+          const rawInput = toRecord(update.rawInput);
+          const meta = toRecord(update._meta);
+          const kind = asString(update.kind);
+          const toolName = normalizeToolName(asString(meta.toolName) || asString(update.title), kind);
+          const toolMessage: Message = {
+            id: nextId(),
+            role: 'tool',
+            content: `Running ${toolName}...`,
+            timestamp,
+            toolName,
+            toolUseId,
+            toolInput: rawInput,
+            toolStatus: 'executing',
+            toolIntent: asString(update.title),
+            toolDisplayName: displayNameForTool(toolName, kind),
+          };
+          messages.push(toolMessage);
+          toolMessages.set(toolUseId, toolMessage);
+          break;
+        }
+
+        case 'tool_call_update': {
+          const toolUseId = asString(update.toolCallId) || `qwen-history-tool-${++idCounter}`;
+          const meta = toRecord(update._meta);
+          const toolName = normalizeToolName(asString(meta.toolName), asString(update.kind));
+          const result = this.formatToolResult(update);
+          const isError = update.status === 'failed';
+          const existing = toolMessages.get(toolUseId);
+
+          if (existing) {
+            existing.toolName = existing.toolName || toolName;
+            existing.toolResult = result;
+            existing.toolStatus = isError ? 'error' : 'completed';
+            existing.isError = isError;
+          } else {
+            const toolMessage: Message = {
+              id: nextId(),
+              role: 'tool',
+              content: '',
+              timestamp,
+              toolName,
+              toolUseId,
+              toolResult: result,
+              toolStatus: isError ? 'error' : 'completed',
+              isError,
+            };
+            messages.push(toolMessage);
+            toolMessages.set(toolUseId, toolMessage);
+          }
+          break;
+        }
+
+        case 'plan': {
+          const entries = Array.isArray(update.entries) ? update.entries : [];
+          const todos = entries
+            .filter(isRecord)
+            .map((entry) => ({
+              content: asString(entry.content) || '',
+              status: mapPlanStatus(entry.status),
+              activeForm: asString(entry.content) || '',
+            }))
+            .filter((todo) => todo.content);
+          messages.push({
+            id: nextId(),
+            role: 'tool',
+            content: 'Todo list updated',
+            timestamp,
+            toolName: 'TodoWrite',
+            toolUseId: `qwen-history-plan-${idCounter}`,
+            toolInput: { todos },
+            toolResult: 'Todo list updated',
+            toolStatus: 'completed',
+            toolDisplayName: 'Todo List Updated',
+          });
+          break;
+        }
+
+        default:
+          break;
+      }
+    }
+
+    return messages;
   }
 
   private handleAgentMessageChunk(update: JsonRecord): void {

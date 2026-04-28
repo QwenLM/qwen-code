@@ -57,6 +57,7 @@ Environment variables (from .env or environment):
   APPLE_ID                  - Apple ID for notarization
   APPLE_TEAM_ID             - Apple Team ID
   APPLE_APP_SPECIFIC_PASSWORD - App-specific password
+  QWEN_CODE_VERSION         - Bundled Qwen Code version (default: 0.15.2)
   S3_VERSIONS_BUCKET_*      - S3 credentials (for --upload)
 EOF
     exit 0
@@ -79,6 +80,7 @@ done
 
 # Configuration
 BUN_VERSION="bun-v1.3.9"  # Pinned version for reproducible builds
+QWEN_CODE_VERSION="${QWEN_CODE_VERSION:-0.15.2}"  # Pinned version for bundled ACP sessions
 
 echo "=== Building Craft Agents DMG (${ARCH}) using electron-builder ==="
 if [ "$UPLOAD" = true ]; then
@@ -121,7 +123,20 @@ unzip -o "$TEMP_DIR/${BUN_DOWNLOAD}.zip" -d "$TEMP_DIR"
 cp "$TEMP_DIR/${BUN_DOWNLOAD}/bun" "$ELECTRON_DIR/vendor/bun/"
 chmod +x "$ELECTRON_DIR/vendor/bun/bun"
 
-# 4. Copy SDK from root node_modules (monorepo hoisting)
+# 4. Download Qwen Code CLI package
+echo "Downloading Qwen Code ${QWEN_CODE_VERSION}..."
+QWEN_VENDOR_DIR="$ELECTRON_DIR/vendor/qwen-code"
+rm -rf "$QWEN_VENDOR_DIR"
+mkdir -p "$QWEN_VENDOR_DIR"
+QWEN_TARBALL="$TEMP_DIR/qwen-code-${QWEN_CODE_VERSION}.tgz"
+curl -fSL "https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-${QWEN_CODE_VERSION}.tgz" -o "$QWEN_TARBALL"
+tar -xzf "$QWEN_TARBALL" -C "$QWEN_VENDOR_DIR" --strip-components=1
+if [ ! -e "$QWEN_VENDOR_DIR/cli.js" ] && [ ! -e "$QWEN_VENDOR_DIR/dist/cli.js" ]; then
+    echo "ERROR: Qwen Code CLI not found after unpacking @qwen-code/qwen-code."
+    exit 1
+fi
+
+# 5. Copy SDK from root node_modules (monorepo hoisting)
 # Note: The SDK is hoisted to root node_modules by the package manager.
 # We copy it here because electron-builder only sees apps/electron/.
 SDK_SOURCE="$ROOT_DIR/node_modules/@anthropic-ai/claude-agent-sdk"
@@ -130,7 +145,7 @@ echo "Copying SDK..."
 mkdir -p "$ELECTRON_DIR/node_modules/@anthropic-ai"
 cp -r "$SDK_SOURCE" "$ELECTRON_DIR/node_modules/@anthropic-ai/"
 
-# 5. Copy interceptor
+# 6. Copy interceptor
 INTERCEPTOR_SOURCE="$ROOT_DIR/packages/shared/src/unified-network-interceptor.ts"
 require_path "$INTERCEPTOR_SOURCE" "Interceptor" "Ensure packages/shared/src/unified-network-interceptor.ts exists."
 echo "Copying interceptor..."
@@ -143,12 +158,12 @@ for dep in interceptor-common.ts feature-flags.ts interceptor-request-utils.ts; 
   fi
 done
 
-# 6. Build Electron app
+# 7. Build Electron app
 echo "Building Electron app..."
 cd "$ROOT_DIR"
 bun run electron:build
 
-# 7. Package with electron-builder
+# 8. Package with electron-builder
 echo "Packaging app with electron-builder..."
 cd "$ELECTRON_DIR"
 
@@ -182,7 +197,7 @@ fi
 # Run electron-builder
 npx electron-builder $BUILDER_ARGS
 
-# 8. Verify the DMG was built
+# 9. Verify the DMG was built
 # electron-builder.yml uses artifactName to output: Craft-Agents-${arch}.dmg
 DMG_NAME="Craft-Agents-${ARCH}.dmg"
 DMG_PATH="$ELECTRON_DIR/release/$DMG_NAME"
@@ -199,14 +214,14 @@ echo "=== Build Complete ==="
 echo "DMG: $ELECTRON_DIR/release/${DMG_NAME}"
 echo "Size: $(du -h "$ELECTRON_DIR/release/${DMG_NAME}" | cut -f1)"
 
-# 9. Create manifest.json for upload script
+# 10. Create manifest.json for upload script
 # Read version from package.json
 ELECTRON_VERSION=$(cat "$ELECTRON_DIR/package.json" | grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
 echo "Creating manifest.json (version: $ELECTRON_VERSION)..."
 mkdir -p "$ROOT_DIR/.build/upload"
 echo "{\"version\": \"$ELECTRON_VERSION\"}" > "$ROOT_DIR/.build/upload/manifest.json"
 
-# 10. Upload to S3 (if --upload flag is set)
+# 11. Upload to S3 (if --upload flag is set)
 if [ "$UPLOAD" = true ]; then
     echo ""
     echo "=== Uploading to S3 ==="

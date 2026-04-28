@@ -59,6 +59,62 @@ describe('resolveServerPath fallback', () => {
   });
 });
 
+describe('resolveQwenCliPath', () => {
+  const tmpBase = join(tmpdir(), `qwen-resolver-test-${Date.now()}`);
+  const originalEnv = {
+    QWEN_CODE_CLI: process.env.QWEN_CODE_CLI,
+    QWEN_CODE_PATH: process.env.QWEN_CODE_PATH,
+    QWEN_CODE_ROOT: process.env.QWEN_CODE_ROOT,
+  };
+
+  afterEach(() => {
+    try { rmSync(tmpBase, { recursive: true, force: true }); } catch {}
+    if (originalEnv.QWEN_CODE_CLI === undefined) delete process.env.QWEN_CODE_CLI;
+    else process.env.QWEN_CODE_CLI = originalEnv.QWEN_CODE_CLI;
+    if (originalEnv.QWEN_CODE_PATH === undefined) delete process.env.QWEN_CODE_PATH;
+    else process.env.QWEN_CODE_PATH = originalEnv.QWEN_CODE_PATH;
+    if (originalEnv.QWEN_CODE_ROOT === undefined) delete process.env.QWEN_CODE_ROOT;
+    else process.env.QWEN_CODE_ROOT = originalEnv.QWEN_CODE_ROOT;
+  });
+
+  it('finds bundled Qwen Code CLI in packaged apps', () => {
+    delete process.env.QWEN_CODE_CLI;
+    delete process.env.QWEN_CODE_PATH;
+    delete process.env.QWEN_CODE_ROOT;
+
+    const appRoot = join(tmpBase, 'packaged-qwen');
+    const qwenDir = join(appRoot, 'vendor', 'qwen-code');
+    mkdirSync(qwenDir, { recursive: true });
+    const qwenCli = join(qwenDir, 'cli.js');
+    writeFileSync(qwenCli, '#!/usr/bin/env node\n');
+
+    const paths = resolveBackendRuntimePaths({
+      appRootPath: appRoot,
+      resourcesPath: appRoot,
+      isPackaged: true,
+    });
+
+    expect(paths.qwenCliPath).toBe(qwenCli);
+  });
+
+  it('does not use developer Qwen fallbacks in packaged apps', () => {
+    delete process.env.QWEN_CODE_CLI;
+    delete process.env.QWEN_CODE_PATH;
+    delete process.env.QWEN_CODE_ROOT;
+
+    const appRoot = join(tmpBase, 'packaged-without-qwen');
+    mkdirSync(appRoot, { recursive: true });
+
+    const paths = resolveBackendRuntimePaths({
+      appRootPath: appRoot,
+      resourcesPath: appRoot,
+      isPackaged: true,
+    });
+
+    expect(paths.qwenCliPath).toBeUndefined();
+  });
+});
+
 describe('resolveRipgrepPath', () => {
   const tmpBase = join(tmpdir(), `rg-resolver-test-${Date.now()}`);
 

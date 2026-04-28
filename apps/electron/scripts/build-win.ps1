@@ -9,6 +9,7 @@ $RootDir = Split-Path -Parent (Split-Path -Parent $ElectronDir)
 
 # Configuration
 $BunVersion = "bun-v1.3.9"  # Pinned version for reproducible builds
+$QwenCodeVersion = if ($env:QWEN_CODE_VERSION) { $env:QWEN_CODE_VERSION } else { "0.15.2" }  # Pinned version for bundled ACP sessions
 
 Write-Host "=== Building Craft Agents Windows Installer using electron-builder ===" -ForegroundColor Cyan
 
@@ -154,7 +155,30 @@ try {
     Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue
 }
 
-# 4. Copy SDK from root node_modules (monorepo hoisting)
+# 4. Download Qwen Code CLI package
+Write-Host "Downloading Qwen Code $QwenCodeVersion..."
+$QwenVendorDir = "$ElectronDir\vendor\qwen-code"
+if (Test-Path $QwenVendorDir) {
+    Remove-Item -Recurse -Force $QwenVendorDir
+}
+New-Item -ItemType Directory -Force -Path $QwenVendorDir | Out-Null
+
+$QwenTempDir = Join-Path $env:TEMP "qwen-code-download-$(Get-Random)"
+New-Item -ItemType Directory -Force -Path $QwenTempDir | Out-Null
+try {
+    $QwenTarball = "$QwenTempDir\qwen-code-$QwenCodeVersion.tgz"
+    $QwenUrl = "https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-$QwenCodeVersion.tgz"
+    Invoke-WebRequest -Uri $QwenUrl -OutFile $QwenTarball
+    tar.exe -xzf $QwenTarball -C $QwenVendorDir --strip-components=1
+
+    if (-not (Test-Path "$QwenVendorDir\cli.js") -and -not (Test-Path "$QwenVendorDir\dist\cli.js")) {
+        throw "Qwen Code CLI not found after extraction"
+    }
+} finally {
+    Remove-Item -Recurse -Force $QwenTempDir -ErrorAction SilentlyContinue
+}
+
+# 5. Copy SDK from root node_modules (monorepo hoisting)
 $SdkSource = "$RootDir\node_modules\@anthropic-ai\claude-agent-sdk"
 if (-not (Test-Path $SdkSource)) {
     Write-Host "ERROR: SDK not found at $SdkSource" -ForegroundColor Red
@@ -165,7 +189,7 @@ Write-Host "Copying SDK..."
 New-Item -ItemType Directory -Force -Path "$ElectronDir\node_modules\@anthropic-ai" | Out-Null
 Copy-Item -Recurse -Force $SdkSource "$ElectronDir\node_modules\@anthropic-ai\"
 
-# 5. Copy interceptor
+# 6. Copy interceptor
 $InterceptorSource = "$RootDir\packages\shared\src\unified-network-interceptor.ts"
 if (-not (Test-Path $InterceptorSource)) {
     Write-Host "ERROR: Interceptor not found at $InterceptorSource" -ForegroundColor Red
@@ -182,7 +206,7 @@ foreach ($dep in @("interceptor-common.ts", "feature-flags.ts", "interceptor-req
     }
 }
 
-# 6. Build Electron app
+# 7. Build Electron app
 Write-Host "Building Electron app..."
 
 # Build main process with OAuth credentials
@@ -263,7 +287,7 @@ try {
     Pop-Location
 }
 
-# 7. Package with electron-builder
+# 8. Package with electron-builder
 Write-Host "Packaging app with electron-builder..."
 
 # Debug: Show bun.exe file info
@@ -391,7 +415,7 @@ if (-not $builderSuccess) {
     throw "electron-builder failed after $maxBuilderRetries attempts"
 }
 
-# 8. Verify the installer was built
+# 9. Verify the installer was built
 $InstallerPath = Get-ChildItem -Path "$ElectronDir\release" -Filter "*.exe" | Select-Object -First 1
 
 if (-not $InstallerPath) {

@@ -124,6 +124,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
     }
     const end = perf.start('rpc.getSessions')
     const workspaceId = ctx.workspaceId ?? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!)
+    await sessionManager.refreshExternalSessions?.(workspaceId ?? undefined)
     const sessions = sessionManager.getSessions(workspaceId ?? undefined)
     end()
     return sessions

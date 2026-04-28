@@ -337,18 +337,33 @@ export function resolveSessionConnection(
   if (sessionConnection) {
     const connection = getLlmConnection(sessionConnection);
     if (connection) return connection;
+    const builtInConnection = getBuiltInConnection(sessionConnection);
+    if (builtInConnection) return builtInConnection;
   }
 
   // 2. Workspace default
   if (workspaceDefaultConnection) {
     const connection = getLlmConnection(workspaceDefaultConnection);
     if (connection) return connection;
+    const builtInConnection = getBuiltInConnection(workspaceDefaultConnection);
+    if (builtInConnection) return builtInConnection;
   }
 
   // 3. Global default
   const defaultSlug = getDefaultLlmConnection();
   if (!defaultSlug) return null;
-  return getLlmConnection(defaultSlug);
+  return getLlmConnection(defaultSlug) ?? getBuiltInConnection(defaultSlug);
+}
+
+function getBuiltInConnection(slug: string): LlmConnection | null {
+  if (slug !== 'qwen-code') return null;
+  return {
+    slug: 'qwen-code',
+    name: 'Qwen Code',
+    providerType: 'qwen',
+    authType: 'none',
+    createdAt: 0,
+  };
 }
 
 /**
@@ -599,10 +614,12 @@ export function createBackendFromConnection(
 export const BACKEND_CAPABILITIES: Record<AgentProvider, {
   /** Whether the backend needs an HTTP pool server (external subprocess can't access McpClientPool directly) */
   needsHttpPoolServer: boolean;
+  /** Whether the backend can list provider-native sessions for history sync */
+  listsSessions: boolean;
 }> = {
-  anthropic: { needsHttpPoolServer: false },
-  pi: { needsHttpPoolServer: false },
-  qwen: { needsHttpPoolServer: true },
+  anthropic: { needsHttpPoolServer: false, listsSessions: false },
+  pi: { needsHttpPoolServer: false, listsSessions: false },
+  qwen: { needsHttpPoolServer: true, listsSessions: true },
 };
 
 // ============================================================

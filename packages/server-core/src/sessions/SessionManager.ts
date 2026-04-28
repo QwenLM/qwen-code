@@ -15,6 +15,7 @@ import {
   cleanupSourceRuntimeArtifacts,
   providerTypeToAgentProvider,
   type AgentBackend,
+  type BackendSessionInfo,
   type BackendHostRuntimeContext,
   type PostInitResult,
 } from '@craft-agent/shared/agent/backend'
@@ -167,6 +168,9 @@ export const AGENT_FLAGS = {
 const MAX_ADMIN_REMEMBER_MINUTES = 60
 const MAX_ANNOTATIONS_PER_MESSAGE = 200
 const MAX_ANNOTATION_JSON_BYTES = 32 * 1024
+const EXTERNAL_SESSION_LIST_SYNC_INTERVAL_MS = 5_000
+const EXTERNAL_SESSION_LIST_PAGE_SIZE = 100
+const EXTERNAL_SESSION_LIST_MAX_PAGES = 20
 
 /**
  * Text sent to the session when a plan is approved from outside the desktop
@@ -716,6 +720,7 @@ interface ManagedSession {
   isProcessing: boolean
   /** Set when user requests stop - allows event loop to drain before clearing isProcessing */
   stopRequested?: boolean
+  lastUsedAt?: number
   lastMessageAt: number
   streamingText: string
   // Incremented each time a new message starts processing.
@@ -824,6 +829,9 @@ interface ManagedSession {
   backgroundTaskOutputs: Map<string, { outputFile: string; summary: string; status: string; completedAt: number }>
   // Whether messages have been loaded from disk (for lazy loading)
   messagesLoaded: boolean
+  // Runtime guard: for provider-native sessions with empty local JSONL, try one
+  // native-history backfill even if a previous render path marked messages loaded.
+  externalMessagesLoadAttempted?: boolean
   // Pending auth request tracking (for unified auth flow)
   pendingAuthRequestId?: string
   pendingAuthRequest?: AuthRequest
@@ -939,6 +947,15 @@ export function createManagedSession(
   return managed
 }
 
+interface SessionManagerOptions {
+  createExternalSessionAgent?: (
+    workspace: Workspace,
+    backendContext: ReturnType<typeof resolveBackendContext>,
+  ) => AgentBackend
+}
+
+type ExternalMessageLoadResult = 'loaded' | 'empty' | 'unavailable' | 'failed'
+
 /**
  * Resolve supportsBranching for a managed session.
  * Prefers the live agent instance; falls back to true for all backends.
@@ -990,6 +1007,7 @@ interface PendingDelta {
 }
 
 export class SessionManager implements ISessionManager {
+  private readonly createExternalSessionAgentOverride?: SessionManagerOptions['createExternalSessionAgent']
   private sessions: Map<string, ManagedSession> = new Map()
   // Delta batching for performance - reduces IPC events from 50+/sec to ~20/sec
   private pendingDeltas: Map<string, PendingDelta> = new Map()
@@ -1016,6 +1034,9 @@ export class SessionManager implements ISessionManager {
   }> = new Map()
   // Promise deduplication for lazy-loading messages (prevents race conditions)
   private messageLoadingPromises: Map<string, Promise<void>> = new Map()
+  // Per-workspace provider-native history sync (currently Qwen ACP session/list).
+  private externalSessionListSyncAt: Map<string, number> = new Map()
+  private externalSessionListSyncPromises: Map<string, Promise<void>> = new Map()
   /**
    * Track which session the user is actively viewing (per workspace).
    * Map of workspaceId -> sessionId. Used to determine if a session should be
@@ -1028,6 +1049,10 @@ export class SessionManager implements ISessionManager {
   private taskOutputIndex: Map<string, string> = new Map()
   /** Monotonic clock to ensure strictly increasing message timestamps */
   private lastTimestamp = 0
+
+  constructor(options: SessionManagerOptions = {}) {
+    this.createExternalSessionAgentOverride = options.createExternalSessionAgent
+  }
 
   /**
    * Centralized setter for session processing state.
@@ -1676,6 +1701,285 @@ export class SessionManager implements ISessionManager {
     }
   }
 
+  async refreshExternalSessions(workspaceId?: string): Promise<void> {
+    const workspaces = getWorkspaces()
+      .filter(workspace => !workspaceId || workspace.id === workspaceId)
+
+    await Promise.all(workspaces.map(workspace => this.refreshExternalSessionsForWorkspace(workspace)))
+  }
+
+  private async refreshExternalSessionsForWorkspace(workspace: Workspace): Promise<void> {
+    const lastSync = this.externalSessionListSyncAt.get(workspace.id) ?? 0
+    if (Date.now() - lastSync < EXTERNAL_SESSION_LIST_SYNC_INTERVAL_MS) return
+
+    const inFlight = this.externalSessionListSyncPromises.get(workspace.id)
+    if (inFlight) {
+      await inFlight
+      return
+    }
+
+    const syncPromise = this.doRefreshExternalSessionsForWorkspace(workspace)
+      .catch(error => {
+        sessionLog.warn(`Failed to sync provider session list for workspace ${workspace.id}:`, error)
+      })
+      .finally(() => {
+        this.externalSessionListSyncAt.set(workspace.id, Date.now())
+        this.externalSessionListSyncPromises.delete(workspace.id)
+      })
+
+    this.externalSessionListSyncPromises.set(workspace.id, syncPromise)
+    await syncPromise
+  }
+
+  private async doRefreshExternalSessionsForWorkspace(workspace: Workspace): Promise<void> {
+    const workspaceConfig = loadWorkspaceConfig(workspace.rootPath)
+    const backendContext = resolveBackendContext({
+      workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
+    })
+
+    if (!backendContext.capabilities.listsSessions || !backendContext.connection) return
+
+    const agent = this.createExternalSessionListAgent(workspace, backendContext)
+    agent.onDebug = (msg: string) => sessionLog.debug(msg)
+
+    try {
+      if (!agent.listSessions) return
+
+      const listedSessions: BackendSessionInfo[] = []
+      let cursor: string | null | undefined
+      let reachedEnd = false
+
+      for (let page = 0; page < EXTERNAL_SESSION_LIST_MAX_PAGES; page++) {
+        const result = await agent.listSessions({
+          cwd: workspace.rootPath,
+          cursor,
+          size: EXTERNAL_SESSION_LIST_PAGE_SIZE,
+        })
+        listedSessions.push(...result.sessions)
+        cursor = result.nextCursor
+        if (!cursor) {
+          reachedEnd = true
+          break
+        }
+      }
+
+      const seenSdkSessionIds = new Set<string>()
+      for (const info of listedSessions) {
+        const didUpsert = await this.upsertExternalListedSession({
+          workspace,
+          info,
+          connectionSlug: backendContext.connection.slug,
+          model: backendContext.resolvedModel,
+          defaultThinkingLevel: normalizeThinkingLevel(workspaceConfig?.defaults?.thinkingLevel) ?? getDefaultThinkingLevel(),
+        })
+        if (didUpsert) seenSdkSessionIds.add(info.sessionId)
+      }
+
+      if (reachedEnd) {
+        await this.removeMissingExternalListedSessions(workspace, backendContext.connection.slug, seenSdkSessionIds)
+      }
+
+      if (listedSessions.length > 0) {
+        sessionLog.info(`Synced ${seenSdkSessionIds.size} provider session(s) for workspace ${workspace.id}`)
+      }
+    } finally {
+      agent.dispose()
+    }
+  }
+
+  private createExternalSessionListAgent(
+    workspace: Workspace,
+    backendContext: ReturnType<typeof resolveBackendContext>,
+  ): AgentBackend {
+    const overrideAgent = this.createExternalSessionAgentOverride?.(workspace, backendContext)
+    if (overrideAgent) return overrideAgent
+
+    return createBackendFromResolvedContext({
+      context: backendContext,
+      hostRuntime: buildBackendHostRuntimeContext(),
+      coreConfig: {
+        workspace,
+        miniModel: backendContext.connection?.defaultModel,
+        isHeadless: true,
+        skipConfigWatcher: true,
+        envOverrides: {
+          CRAFT_WORKSPACE_PATH: workspace.rootPath,
+        },
+      },
+    })
+  }
+
+  private async withExternalSessionAgent<T>(
+    managed: ManagedSession,
+    callback: (agent: AgentBackend) => Promise<T>,
+  ): Promise<T | undefined> {
+    const sessionConnectionSlug = this.resolveExternalSessionConnectionSlug(managed)
+    if (!sessionConnectionSlug) return undefined
+
+    const workspaceConfig = loadWorkspaceConfig(managed.workspace.rootPath)
+    const backendContext = resolveBackendContext({
+      sessionConnectionSlug,
+      workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
+      managedModel: managed.model,
+    })
+
+    if (!backendContext.capabilities.listsSessions || !backendContext.connection) return undefined
+
+    const agent = this.createExternalSessionListAgent(managed.workspace, backendContext)
+    agent.onDebug = (msg: string) => sessionLog.debug(msg)
+    try {
+      return await callback(agent)
+    } finally {
+      agent.dispose()
+    }
+  }
+
+  private resolveExternalSessionConnectionSlug(managed: ManagedSession): string | undefined {
+    if (managed.llmConnection) return managed.llmConnection
+
+    // Provider-native Qwen sessions are synced with local id === sdkSessionId.
+    // Older/partially migrated local headers may be missing llmConnection, so keep
+    // those sessions loadable through the built-in Qwen Code connection.
+    if (managed.sdkSessionId && managed.id === managed.sdkSessionId) {
+      return 'qwen-code'
+    }
+
+    return undefined
+  }
+
+  private async renameExternalBackendSessionIfSupported(managed: ManagedSession, title: string): Promise<void> {
+    if (!managed.sdkSessionId) return
+    try {
+      await this.withExternalSessionAgent(managed, async (agent) => {
+        if (!agent.renameBackendSession) return false
+        return agent.renameBackendSession(managed.sdkSessionId!, title, {
+          cwd: managed.workingDirectory || managed.sdkCwd || managed.workspace.rootPath,
+        })
+      })
+    } catch (error) {
+      sessionLog.warn(`Failed to rename provider session ${managed.sdkSessionId}:`, error)
+    }
+  }
+
+  private async deleteExternalBackendSessionIfSupported(managed: ManagedSession): Promise<void> {
+    if (!managed.sdkSessionId) return
+    try {
+      await this.withExternalSessionAgent(managed, async (agent) => {
+        if (!agent.deleteBackendSession) return false
+        return agent.deleteBackendSession(managed.sdkSessionId!, {
+          cwd: managed.workingDirectory || managed.sdkCwd || managed.workspace.rootPath,
+        })
+      })
+    } catch (error) {
+      sessionLog.warn(`Failed to delete provider session ${managed.sdkSessionId}:`, error)
+    }
+  }
+
+  private findManagedSessionBySdkSessionId(workspaceId: string, sdkSessionId: string): ManagedSession | undefined {
+    for (const managed of this.sessions.values()) {
+      if (managed.workspace.id !== workspaceId) continue
+      if (managed.sdkSessionId === sdkSessionId || managed.id === sdkSessionId) return managed
+    }
+    return undefined
+  }
+
+  private parseExternalSessionTimestamp(updatedAt?: string | null): number {
+    if (!updatedAt) return Date.now()
+    const parsed = Date.parse(updatedAt)
+    return Number.isFinite(parsed) ? parsed : Date.now()
+  }
+
+  private async upsertExternalListedSession(args: {
+    workspace: Workspace
+    info: BackendSessionInfo
+    connectionSlug: string
+    model: string
+    defaultThinkingLevel: ThinkingLevel
+  }): Promise<boolean> {
+    const { workspace, info, connectionSlug, model, defaultThinkingLevel } = args
+    if (!info.sessionId || !info.cwd) return false
+
+    const timestamp = this.parseExternalSessionTimestamp(info.updatedAt)
+    const title = info.title?.trim() || '(session)'
+    const managed = this.findManagedSessionBySdkSessionId(workspace.id, info.sessionId)
+
+    if (managed) {
+      managed.sdkSessionId = info.sessionId
+      managed.workingDirectory = info.cwd
+      managed.sdkCwd = info.cwd
+      managed.name = title
+      managed.lastUsedAt = Math.max(managed.lastUsedAt ?? 0, timestamp)
+      managed.lastMessageAt = Math.max(managed.lastMessageAt ?? 0, timestamp)
+      if (!managed.llmConnection) managed.llmConnection = connectionSlug
+      if (!managed.model && model) managed.model = model
+      if (!managed.thinkingLevel) managed.thinkingLevel = defaultThinkingLevel
+      return true
+    }
+
+    const storedSession: StoredSession = {
+      id: info.sessionId,
+      workspaceRootPath: workspace.rootPath,
+      sdkSessionId: info.sessionId,
+      sdkCwd: info.cwd,
+      workingDirectory: info.cwd,
+      name: title,
+      createdAt: timestamp,
+      lastUsedAt: timestamp,
+      lastMessageAt: timestamp,
+      permissionMode: 'ask',
+      llmConnection: connectionSlug,
+      connectionLocked: true,
+      model,
+      thinkingLevel: defaultThinkingLevel,
+      messages: [],
+      tokenUsage: { ...DEFAULT_TOKEN_USAGE },
+    }
+
+    await saveStoredSession(storedSession)
+
+    const storedMetadata = pickSessionFields(storedSession) as { id: string } & Partial<ManagedSession>
+    const imported = createManagedSession(storedMetadata, workspace, {
+      messagesLoaded: false,
+      tokenUsage: { ...storedSession.tokenUsage },
+    })
+    this.sessions.set(imported.id, imported)
+    setPermissionMode(imported.id, imported.permissionMode ?? 'ask', { changedBy: 'restore' })
+
+    const automationSystem = this.automationSystems.get(workspace.rootPath)
+    if (automationSystem) {
+      automationSystem.setInitialSessionMetadata(imported.id, {
+        permissionMode: imported.permissionMode,
+        labels: imported.labels,
+        isFlagged: imported.isFlagged,
+        sessionStatus: imported.sessionStatus,
+        sessionName: imported.name,
+      })
+    }
+
+    return true
+  }
+
+  private async removeMissingExternalListedSessions(
+    workspace: Workspace,
+    connectionSlug: string,
+    seenSdkSessionIds: Set<string>,
+  ): Promise<void> {
+    for (const managed of Array.from(this.sessions.values())) {
+      if (managed.workspace.id !== workspace.id) continue
+      if (managed.llmConnection !== connectionSlug) continue
+      if (!managed.sdkSessionId || managed.id !== managed.sdkSessionId) continue
+      if (seenSdkSessionIds.has(managed.sdkSessionId)) continue
+      if (managed.isProcessing) continue
+
+      this.sessions.delete(managed.id)
+      unregisterSessionScopedToolCallbacks(managed.id)
+      deleteStoredSession(workspace.rootPath, managed.id)
+
+      const automationSystem = this.automationSystems.get(workspace.rootPath)
+      automationSystem?.removeSessionMetadata(managed.id)
+    }
+  }
+
   // Persist a session to disk (async with debouncing)
   private persistSession(managed: ManagedSession): void {
     try {
@@ -2088,7 +2392,7 @@ export class SessionManager implements ISessionManager {
    * to load messages simultaneously.
    */
   private async ensureMessagesLoaded(managed: ManagedSession): Promise<void> {
-    if (managed.messagesLoaded) return
+    if (managed.messagesLoaded && !this.shouldAttemptExternalMessageLoad(managed)) return
 
     // Deduplicate concurrent loads - return existing promise if already loading
     const existingPromise = this.messageLoadingPromises.get(managed.id)
@@ -2096,7 +2400,9 @@ export class SessionManager implements ISessionManager {
       return existingPromise
     }
 
-    const loadPromise = this.loadMessagesFromDisk(managed)
+    const loadPromise = managed.messagesLoaded
+      ? this.loadExternalMessagesForEmptyLoadedSession(managed)
+      : this.loadMessagesFromDisk(managed)
     this.messageLoadingPromises.set(managed.id, loadPromise)
 
     try {
@@ -2110,6 +2416,7 @@ export class SessionManager implements ISessionManager {
    * Internal: Load messages from disk storage into the managed session.
    */
   private async loadMessagesFromDisk(managed: ManagedSession): Promise<void> {
+    let loadedExternalMessages = false
     const storedSession = loadStoredSession(managed.workspace.rootPath, managed.id)
     if (storedSession) {
       managed.messages = (storedSession.messages || []).map(storedToMessage)
@@ -2127,6 +2434,21 @@ export class SessionManager implements ISessionManager {
       }
       if (storedSession.connectionLocked) {
         managed.connectionLocked = storedSession.connectionLocked
+      }
+      if (storedSession.sdkSessionId) {
+        managed.sdkSessionId = storedSession.sdkSessionId
+      }
+      if (storedSession.sdkCwd) {
+        managed.sdkCwd = storedSession.sdkCwd
+      }
+      if (storedSession.workingDirectory) {
+        managed.workingDirectory = storedSession.workingDirectory
+      }
+      if (storedSession.model !== undefined) {
+        managed.model = storedSession.model
+      }
+      if (storedSession.thinkingLevel) {
+        managed.thinkingLevel = storedSession.thinkingLevel
       }
       // Sync transferred session summary state from disk
       managed.transferredSessionSummary = storedSession.transferredSessionSummary
@@ -2157,7 +2479,84 @@ export class SessionManager implements ISessionManager {
         }
       }
     }
+    if (this.shouldAttemptExternalMessageLoad(managed)) {
+      const externalLoadResult = await this.loadExternalSessionMessages(managed)
+      loadedExternalMessages = externalLoadResult === 'loaded'
+      managed.externalMessagesLoadAttempted = externalLoadResult !== 'unavailable'
+    }
     managed.messagesLoaded = true
+    if (loadedExternalMessages) {
+      this.persistSession(managed)
+      await this.flushSession(managed.id)
+    }
+  }
+
+  private shouldAttemptExternalMessageLoad(managed: ManagedSession): boolean {
+    return !!managed.sdkSessionId
+      && managed.messages.length === 0
+      && !managed.externalMessagesLoadAttempted
+  }
+
+  private async loadExternalMessagesForEmptyLoadedSession(managed: ManagedSession): Promise<void> {
+    if (!this.shouldAttemptExternalMessageLoad(managed)) return
+
+    const externalLoadResult = await this.loadExternalSessionMessages(managed)
+    managed.externalMessagesLoadAttempted = externalLoadResult !== 'unavailable'
+    if (externalLoadResult === 'loaded') {
+      this.persistSession(managed)
+      await this.flushSession(managed.id)
+    }
+  }
+
+  private async loadExternalSessionMessages(managed: ManagedSession): Promise<ExternalMessageLoadResult> {
+    if (!managed.sdkSessionId) return 'unavailable'
+
+    try {
+      const messages = await this.withExternalSessionAgent(managed, async (agent) => {
+        if (!agent.loadSessionMessages) return undefined
+        return agent.loadSessionMessages(managed.sdkSessionId!, {
+          cwd: managed.sdkCwd || managed.workingDirectory || managed.workspace.rootPath,
+        })
+      })
+
+      if (!messages) {
+        sessionLog.debug(`Provider-native message loader unavailable for session ${managed.id} (connection=${managed.llmConnection ?? 'unset'}, sdkSessionId=${managed.sdkSessionId})`)
+        return 'unavailable'
+      }
+      if (messages.length === 0) {
+        sessionLog.debug(`Provider-native message loader returned 0 messages for session ${managed.id} (sdkSessionId=${managed.sdkSessionId})`)
+        return 'empty'
+      }
+
+      managed.messages = messages
+      managed.messageCount = messages.length
+
+      const lastMessage = messages[messages.length - 1]
+      if (lastMessage) {
+        managed.lastMessageAt = lastMessage.timestamp
+        if (
+          lastMessage.role === 'user' ||
+          lastMessage.role === 'assistant' ||
+          lastMessage.role === 'tool' ||
+          lastMessage.role === 'plan' ||
+          lastMessage.role === 'error'
+        ) {
+          managed.lastMessageRole = lastMessage.role
+        }
+        managed.lastUsedAt = Math.max(managed.lastUsedAt ?? 0, lastMessage.timestamp)
+      }
+
+      const lastFinalAssistant = [...messages]
+        .reverse()
+        .find(message => message.role === 'assistant' && !message.isIntermediate)
+      managed.lastFinalMessageId = lastFinalAssistant?.id
+
+      sessionLog.info(`Loaded ${messages.length} provider-native message(s) for session ${managed.id}`)
+      return 'loaded'
+    } catch (error) {
+      sessionLog.warn(`Failed to load provider-native messages for session ${managed.id}:`, error)
+      return 'failed'
+    }
   }
 
   /**
@@ -4325,6 +4724,7 @@ export class SessionManager implements ISessionManager {
   async renameSession(sessionId: string, name: string): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (managed) {
+      await this.renameExternalBackendSessionIfSupported(managed, name)
       managed.name = name
       this.persistSession(managed)
       // Notify renderer of the name change
@@ -4426,6 +4826,7 @@ export class SessionManager implements ISessionManager {
       const title = await agent.regenerateTitle(userMessages, assistantResponse, titleOptions)
       sessionLog.info(`refreshTitle: regenerateTitle returned: ${title ? `"${title}"` : 'null'}`)
       if (title) {
+        await this.renameExternalBackendSessionIfSupported(managed, title)
         managed.name = title
         this.persistSession(managed)
         // title_generated will also clear isRegeneratingTitle via the event handler
@@ -4754,6 +5155,8 @@ export class SessionManager implements ISessionManager {
       // Prevents file corruption from overlapping writes during rapid delete operations.
       await new Promise(resolve => setTimeout(resolve, 100))
     }
+
+    await this.deleteExternalBackendSessionIfSupported(managed)
 
     // Revoke share if session was shared (prevent orphaned viewer copies)
     if (managed.sharedId) {
@@ -6064,6 +6467,7 @@ export class SessionManager implements ISessionManager {
       const genLangEntry = LOCALE_REGISTRY[genLangCode]
       const title = await agent.generateTitle(userMessage, { language: genLangEntry?.nativeName })
       if (title) {
+        await this.renameExternalBackendSessionIfSupported(managed, title)
         managed.name = title
         this.persistSession(managed)
         // Flush immediately to ensure disk is up-to-date before notifying renderer.

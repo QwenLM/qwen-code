@@ -12,7 +12,7 @@
  * - AsyncGenerator for streaming: Consistent with existing CraftAgent API
  */
 
-import type { AgentEvent } from '@craft-agent/core/types';
+import type { AgentEvent, Message } from '@craft-agent/core/types';
 import type { FileAttachment } from '../../utils/files.ts';
 import type { ThinkingLevel } from '../thinking-levels.ts';
 import type { PermissionMode } from '../mode-manager.ts';
@@ -277,6 +277,24 @@ export interface ChatOptions {
   thinkingOverride?: ThinkingLevel;
 }
 
+export interface BackendSessionInfo {
+  sessionId: string;
+  cwd: string;
+  title?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface BackendSessionListOptions {
+  cwd?: string;
+  cursor?: string | null;
+  size?: number;
+}
+
+export interface BackendSessionListResult {
+  sessions: BackendSessionInfo[];
+  nextCursor?: string | null;
+}
+
 /**
  * SDK-compatible MCP server configuration.
  * Supports HTTP/SSE (remote) and stdio (local subprocess) transports.
@@ -378,6 +396,23 @@ export interface AgentBackend {
    * Used for connection testing, title generation, and summarization.
    */
   runMiniCompletion(prompt: string): Promise<string | null>;
+
+  /**
+   * List provider-native sessions when supported by the backend.
+   *
+   * ACP-backed providers use this to expose CLI/native history to the app
+   * without parsing provider-private storage directly.
+   */
+  listSessions?(options?: BackendSessionListOptions): Promise<BackendSessionListResult>;
+
+  /** Delete a provider-native session when supported. */
+  deleteBackendSession?(sessionId: string, options?: { cwd?: string }): Promise<boolean>;
+
+  /** Rename a provider-native session when supported. */
+  renameBackendSession?(sessionId: string, title: string, options?: { cwd?: string }): Promise<boolean>;
+
+  /** Load provider-native transcript messages when supported. */
+  loadSessionMessages?(sessionId: string, options?: { cwd?: string }): Promise<Message[]>;
 
   /**
    * Clean up resources (MCP connections, watchers, etc.)
