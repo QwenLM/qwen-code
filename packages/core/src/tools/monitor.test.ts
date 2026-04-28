@@ -6,6 +6,7 @@
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import type { Readable } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
 
 // Mock child_process.spawn
@@ -33,20 +34,27 @@ import { MonitorRegistry } from '../services/monitorRegistry.js';
  * Create a mock child process with controllable stdout/stderr/events.
  */
 function createMockChild(): ChildProcess & {
-  stdout: EventEmitter;
-  stderr: EventEmitter;
+  stdout: Readable;
+  stderr: Readable;
   _emitExit: (code: number | null, signal?: string | null) => void;
   _emitError: (err: Error) => void;
 } {
-  const child = new EventEmitter() as ChildProcess & {
-    stdout: EventEmitter;
-    stderr: EventEmitter;
+  const child = new EventEmitter() as unknown as ChildProcess & {
+    stdout: Readable;
+    stderr: Readable;
     _emitExit: (code: number | null, signal?: string | null) => void;
     _emitError: (err: Error) => void;
   };
-  child.stdout = new EventEmitter();
-  child.stderr = new EventEmitter();
-  child.pid = 12345;
+  // Use Object.defineProperty to bypass readonly on the mock
+  Object.defineProperty(child, 'stdout', {
+    value: new EventEmitter(),
+    writable: true,
+  });
+  Object.defineProperty(child, 'stderr', {
+    value: new EventEmitter(),
+    writable: true,
+  });
+  Object.defineProperty(child, 'pid', { value: 12345, writable: true });
 
   child._emitExit = (code, signal = null) => {
     child.emit('exit', code, signal);
