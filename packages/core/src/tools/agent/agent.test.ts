@@ -32,7 +32,7 @@ import type {
 import { partToString } from '../../utils/partUtils.js';
 import type { HookSystem } from '../../hooks/hookSystem.js';
 import { PermissionMode } from '../../hooks/types.js';
-import { runWithAgentContext } from './agent-context.js';
+import { runWithAgentContext } from '../../agents/runtime/agent-context.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -1655,12 +1655,9 @@ describe('AgentTool', () => {
           invocation as unknown as { setCallId: (id: string) => void }
         ).setCallId('nested-1');
 
-        await runWithAgentContext(
-          { agentId: 'explore-parent-42' },
-          async () => {
-            await invocation.execute();
-          },
-        );
+        await runWithAgentContext('explore-parent-42', async () => {
+          await invocation.execute();
+        });
 
         const meta = readSidecar('monitor-nested-1');
         expect(meta.parentAgentId).toBe('explore-parent-42');

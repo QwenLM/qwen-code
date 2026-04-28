@@ -14,11 +14,10 @@
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import type { Config } from '../../config/config.js';
 import {
-  type AuthType,
   type ContentGenerator,
-  type ContentGeneratorConfig,
   createContentGenerator,
 } from '../../core/contentGenerator.js';
+import type { RuntimeContentGeneratorView } from '../runtime/agent-context.js';
 import type { ToolRegistry } from '../../tools/tool-registry.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
@@ -113,6 +112,8 @@ export class InProcessBackend implements Backend {
       runConfig,
       toolConfig,
       eventEmitter,
+      undefined,
+      perAgent.runtimeView,
     );
 
     const interactive = new AgentInteractive(
@@ -355,19 +356,26 @@ export class InProcessBackend implements Backend {
  * - `getFileService()` → FileDiscoveryService rooted at agent's cwd
  * - `getToolRegistry()` → per-agent tool registry with core tools bound to
  *   the agent Config
- * - `getContentGenerator()` / `getContentGeneratorConfig()` / `getAuthType()`
- *   → per-agent ContentGenerator when `authOverrides` is provided
- * - returned `contentGenerator` → the generator safe to use for summaries
+ *
+ * When `authOverrides` is provided, also returns a `runtimeView` describing
+ * the per-agent ContentGenerator. The agent runtime publishes the view via
+ * AsyncLocalStorage so the CG-related Config getters resolve to the
+ * agent's values during the run.
  */
 async function createPerAgentConfig(
   base: Config,
   cwd: string,
   modelId?: string,
   authOverrides?: InProcessSpawnConfig['authOverrides'],
-): Promise<{ config: Config; contentGenerator?: ContentGenerator }> {
+): Promise<{
+  config: Config;
+  contentGenerator?: ContentGenerator;
+  runtimeView?: RuntimeContentGeneratorView;
+}> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const override = Object.create(base) as any;
   let dedicatedContentGenerator: ContentGenerator | undefined;
+  let runtimeView: RuntimeContentGeneratorView | undefined;
 
   override.getWorkingDir = () => cwd;
   override.getTargetDir = () => cwd;
@@ -398,12 +406,10 @@ async function createPerAgentConfig(
         override as Config,
       );
       dedicatedContentGenerator = agentGenerator;
-      override.getContentGenerator = (): ContentGenerator => agentGenerator;
-      override.getContentGeneratorConfig = (): ContentGeneratorConfig =>
-        agentGeneratorConfig;
-      override.getAuthType = (): AuthType | undefined =>
-        agentGeneratorConfig.authType;
-      override.getModel = (): string => agentGeneratorConfig.model;
+      runtimeView = {
+        contentGenerator: agentGenerator,
+        contentGeneratorConfig: agentGeneratorConfig,
+      };
 
       debugLogger.info(
         `Created per-agent ContentGenerator: authType=${authOverrides.authType}, model=${agentGeneratorConfig.model}`,
@@ -421,5 +427,6 @@ async function createPerAgentConfig(
     contentGenerator:
       dedicatedContentGenerator ??
       (authOverrides?.authType ? undefined : base.getContentGenerator()),
+    runtimeView,
   };
 }

@@ -19,6 +19,10 @@
 import { reportError } from '../../utils/errorReporting.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
 import type { Config } from '../../config/config.js';
+import {
+  runWithRuntimeContentGenerator,
+  type RuntimeContentGeneratorView,
+} from './agent-context.js';
 import { type ToolCallRequestInfo } from '../../core/turn.js';
 import {
   CoreToolScheduler,
@@ -183,6 +187,14 @@ export class AgentCore {
   readonly eventEmitter: AgentEventEmitter;
   readonly hooks?: AgentHooks;
   readonly stats = new AgentStatistics();
+  /**
+   * When the agent runs with a model different from the parent session,
+   * this view is published via AsyncLocalStorage during execution so any
+   * `Config.getContentGenerator{,Config}()` call inside the run resolves
+   * to the agent's values — even from tools that captured the parent
+   * Config at construction.
+   */
+  readonly runtimeView?: RuntimeContentGeneratorView;
 
   // Observable state lives on Core (not a wrapper) so headless and
   // background agents can be observed with the same accessors as
@@ -236,6 +248,7 @@ export class AgentCore {
     toolConfig?: ToolConfig,
     eventEmitter?: AgentEventEmitter,
     hooks?: AgentHooks,
+    runtimeView?: RuntimeContentGeneratorView,
   ) {
     const randomPart = Math.random().toString(36).slice(2, 8);
     this.subagentId = `${name}-${randomPart}`;
@@ -247,6 +260,7 @@ export class AgentCore {
     this.toolConfig = toolConfig;
     this.eventEmitter = eventEmitter ?? new AgentEventEmitter();
     this.hooks = hooks;
+    this.runtimeView = runtimeView;
     this.setupStateListeners();
   }
 
@@ -427,19 +441,29 @@ export class AgentCore {
     abortController: AbortController,
     options?: ReasoningLoopOptions,
   ): Promise<ReasoningLoopResult> {
-    // Tag every API call emitted from this loop with the owning subagent's
-    // name so the `/stats` panel can attribute tokens/requests to the
-    // originating subagent. The store is read inside
-    // `LoggingContentGenerator` via `subagentNameContext.getStore()`.
-    return subagentNameContext.run(this.name, () =>
+    const inner = () =>
       this._runReasoningLoopInner(
         chat,
         initialMessages,
         toolsList,
         abortController,
         options,
-      ),
+      );
+    return subagentNameContext.run(this.name, () =>
+      this.withRuntimeView(inner),
     );
+  }
+
+  /**
+   * Wraps `fn` in this agent's runtime ContentGenerator view (when set), so
+   * `Config.getContentGenerator{,Config}()` calls inside resolve to the
+   * agent rather than to the parent Config that tools captured at
+   * construction time.
+   */
+  private withRuntimeView<T>(fn: () => Promise<T>): Promise<T> {
+    return this.runtimeView
+      ? runWithRuntimeContentGenerator(this.runtimeView, fn)
+      : fn();
   }
 
   private async _runReasoningLoopInner(
@@ -901,7 +925,12 @@ export class AgentCore {
               ) => {
                 if (responded.has(waiting.request.callId)) return;
                 responded.add(waiting.request.callId);
-                await waiting.confirmationDetails.onConfirm(outcome, payload);
+                // UI invokes this from its own async chain (outside the
+                // reasoning-loop ALS frame), so re-enter the agent's view
+                // before the resumed tool body runs.
+                await this.withRuntimeView(() =>
+                  waiting.confirmationDetails.onConfirm(outcome, payload),
+                );
               },
               timestamp: Date.now(),
             });

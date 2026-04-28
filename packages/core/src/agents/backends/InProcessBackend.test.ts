@@ -493,7 +493,7 @@ describe('InProcessBackend', () => {
       );
     });
 
-    it('should override getContentGenerator on per-agent config', async () => {
+    it('should pass per-agent ContentGenerator via runtimeView', async () => {
       const agentGenerator = { generateContentStream: vi.fn() };
       const mockCreate = createContentGenerator as ReturnType<typeof vi.fn>;
       mockCreate.mockResolvedValueOnce(agentGenerator);
@@ -510,14 +510,13 @@ describe('InProcessBackend', () => {
 
       const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
       const lastCall = MockAgentCore.mock.calls.at(-1);
-      const agentContext = lastCall![1] as {
-        getContentGenerator: () => unknown;
-        getAuthType: () => string | undefined;
-        getModel: () => string;
+      const runtimeView = lastCall![8] as {
+        contentGenerator: unknown;
+        contentGeneratorConfig: { authType: string };
       };
 
-      expect(agentContext.getContentGenerator()).toBe(agentGenerator);
-      expect(agentContext.getAuthType()).toBe('anthropic');
+      expect(runtimeView.contentGenerator).toBe(agentGenerator);
+      expect(runtimeView.contentGeneratorConfig.authType).toBe('anthropic');
       expect(backend.getAgentContentGenerator('agent-1')).toBe(agentGenerator);
     });
 
@@ -551,12 +550,9 @@ describe('InProcessBackend', () => {
 
       const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
       const lastCall = MockAgentCore.mock.calls.at(-1);
-      const agentContext = lastCall![1] as {
-        getContentGenerator: () => unknown;
-      };
 
-      // Falls back to parent's content generator
-      expect(agentContext.getContentGenerator()).toBe(mockContentGenerator);
+      // No runtimeView when per-agent creation failed; agent inherits parent.
+      expect(lastCall![8]).toBeUndefined();
       expect(backend.getAgentContentGenerator('agent-1')).toBeUndefined();
     });
 
@@ -587,16 +583,12 @@ describe('InProcessBackend', () => {
       const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
       const calls = MockAgentCore.mock.calls;
 
-      const ctx1 = calls.at(-2)![1] as {
-        getContentGenerator: () => unknown;
-      };
-      const ctx2 = calls.at(-1)![1] as {
-        getContentGenerator: () => unknown;
-      };
+      const view1 = calls.at(-2)![8] as { contentGenerator: unknown };
+      const view2 = calls.at(-1)![8] as { contentGenerator: unknown };
 
-      expect(ctx1.getContentGenerator()).toBe(gen1);
-      expect(ctx2.getContentGenerator()).toBe(gen2);
-      expect(ctx1.getContentGenerator()).not.toBe(ctx2.getContentGenerator());
+      expect(view1.contentGenerator).toBe(gen1);
+      expect(view2.contentGenerator).toBe(gen2);
+      expect(view1.contentGenerator).not.toBe(view2.contentGenerator);
     });
   });
 });

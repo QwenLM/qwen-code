@@ -1475,16 +1475,24 @@ System prompt 3`);
         expect(mockCreateContentGenerator).not.toHaveBeenCalled();
       });
 
-      it('should pass the overridden Config to AgentHeadless.create', async () => {
+      it('should pass the agent runtimeView to AgentHeadless.create', async () => {
         const config = { ...agentConfig, model: 'custom-model' };
         const fakeGenerator = { generateContentStream: vi.fn() };
         mockCreateContentGenerator.mockResolvedValue(fakeGenerator);
 
         await manager.createAgentHeadless(config, mockConfig);
 
-        const passedConfig = mockAgentHeadlessCreate.mock.calls[0][1];
-        expect(passedConfig.getContentGenerator()).toBe(fakeGenerator);
-        expect(passedConfig.getModel()).toBe('custom-model');
+        // AgentHeadless.create signature: (name, runtimeContext,
+        // promptConfig, modelConfig, runConfig, toolConfig?, eventEmitter?,
+        // hooks?, runtimeView?). The view replaces the per-method override.
+        const call = mockAgentHeadlessCreate.mock.calls[0];
+        expect(call[1]).toBe(mockConfig);
+        const runtimeView = call[8] as {
+          contentGenerator: unknown;
+          contentGeneratorConfig: { model: string };
+        };
+        expect(runtimeView.contentGenerator).toBe(fakeGenerator);
+        expect(runtimeView.contentGeneratorConfig.model).toBe('custom-model');
       });
     });
   });
