@@ -48,6 +48,10 @@ export const MAX_LINES_PER_FILE = 400;
 export const MAX_FILES_FOR_DETAILS = 500;
 /** How much of an untracked file to read when counting its lines. */
 const UNTRACKED_READ_CAP_BYTES = MAX_DIFF_SIZE_BYTES;
+/** Per-file read buffer for line counting. With up to MAX_FILES (=50) files
+ *  reading concurrently, the worst-case heap footprint is ~3.2 MB instead of
+ *  the ~50 MB a single full-cap allocation per file would cost. */
+const UNTRACKED_READ_CHUNK_BYTES = 64 * 1024;
 /** Scan the first N bytes for NUL to detect binary files (matches git's heuristic). */
 const BINARY_SNIFF_BYTES = 8 * 1024;
 
@@ -489,33 +493,60 @@ async function countUntrackedLines(
     return { added: 0, isBinary: false, truncated: false };
   }
   try {
-    const buf = Buffer.alloc(UNTRACKED_READ_CAP_BYTES);
-    const { bytesRead } = await fh.read(buf, 0, UNTRACKED_READ_CAP_BYTES, 0);
-    if (bytesRead === 0) {
+    // Stream the file in fixed-size chunks instead of allocating one full
+    // `UNTRACKED_READ_CAP_BYTES` buffer per call. With up to MAX_FILES
+    // line-counts running concurrently the heap footprint stays around
+    // `MAX_FILES * UNTRACKED_READ_CHUNK_BYTES` (~3.2 MB) rather than the
+    // ~50 MB a one-shot full-cap alloc would have cost on a constrained
+    // host. Behavior (line count, binary sniff, truncation flag) is
+    // identical to the single-shot path.
+    const buf = Buffer.allocUnsafe(UNTRACKED_READ_CHUNK_BYTES);
+    let totalRead = 0;
+    let lines = 0;
+    let lastByte = -1;
+    let sniffedBytes = 0;
+    while (totalRead < UNTRACKED_READ_CAP_BYTES) {
+      const remaining = UNTRACKED_READ_CAP_BYTES - totalRead;
+      const toRead = Math.min(buf.length, remaining);
+      const { bytesRead } = await fh.read(buf, 0, toRead, totalRead);
+      if (bytesRead === 0) break;
+
+      // Binary sniff on the first BINARY_SNIFF_BYTES across cumulative reads.
+      // Almost always completes inside the first chunk because chunk size
+      // (64 KB) is much larger than the sniff window (8 KB).
+      if (sniffedBytes < BINARY_SNIFF_BYTES) {
+        const sniffEnd = Math.min(bytesRead, BINARY_SNIFF_BYTES - sniffedBytes);
+        for (let i = 0; i < sniffEnd; i++) {
+          if (buf[i] === 0) {
+            return { added: 0, isBinary: true, truncated: false };
+          }
+        }
+        sniffedBytes += sniffEnd;
+      }
+
+      for (let i = 0; i < bytesRead; i++) {
+        if (buf[i] === 0x0a) lines++;
+      }
+      lastByte = buf[bytesRead - 1] ?? -1;
+      totalRead += bytesRead;
+    }
+
+    if (totalRead === 0) {
       return { added: 0, isBinary: false, truncated: false };
     }
-    const sniffEnd = Math.min(BINARY_SNIFF_BYTES, bytesRead);
-    for (let i = 0; i < sniffEnd; i++) {
-      if (buf[i] === 0) {
-        return { added: 0, isBinary: true, truncated: false };
-      }
+    // Truncated only when we hit the cap with more bytes still on disk.
+    // A `read()` returning 0 means EOF, so we naturally exit untruncated.
+    let truncated = false;
+    if (totalRead >= UNTRACKED_READ_CAP_BYTES) {
+      const { size } = await fh.stat();
+      truncated = size > totalRead;
     }
-    // Compare against real file size rather than "bytesRead === cap" —
-    // a file that happens to be exactly UNTRACKED_READ_CAP_BYTES isn't
-    // truncated, and a short-read against a larger file still is.
-    const { size } = await fh.stat();
-    const truncated = size > bytesRead;
-    let lines = 0;
-    for (let i = 0; i < bytesRead; i++) {
-      if (buf[i] === 0x0a) lines++;
-    }
-    // If the portion we read does not end on a newline, count the trailing
-    // partial line — but only when the read reached EOF. When the read was
-    // cut short by the cap, the "trailing partial" is actually a complete
-    // line that continues past the buffer and will be counted when the
-    // following `\n` is eventually seen by a future larger cap; counting it
-    // here would double-count once the cap is raised.
-    if (!truncated && buf[bytesRead - 1] !== 0x0a) lines++;
+    // If the portion we read ends mid-line (no trailing `\n`) and the read
+    // reached EOF, count that trailing partial line. When the read was cut
+    // short by the cap, the "trailing partial" is really a line that
+    // continues past the cap; counting it here would double-count once the
+    // cap is raised.
+    if (!truncated && lastByte !== 0x0a) lines++;
     return { added: lines, isBinary: false, truncated };
   } catch {
     return { added: 0, isBinary: false, truncated: false };
