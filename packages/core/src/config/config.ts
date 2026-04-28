@@ -61,6 +61,7 @@ import { PermissionManager } from '../permissions/permission-manager.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
+import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -545,6 +546,7 @@ export class Config {
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
   private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
+  private readonly backgroundShellRegistry = new BackgroundShellRegistry();
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
@@ -1423,11 +1425,9 @@ export class Config {
       return;
     }
 
-    // Strip thinking blocks from conversation history on model switch.
-    // reasoning_content is a non-standard field that causes strict
-    // OpenAI-compatible providers to reject requests with 422 errors
-    // when thought parts from a previous model leak into the payload (#3304).
-    this.geminiClient.stripThoughtsFromHistory();
+    // Keep full history (including thought parts) on model switch.
+    // Some OpenAI-compatible reasoning models (e.g. DeepSeek) require
+    // reasoning_content to be preserved across turns.
 
     // Hot update path: only supported for qwen-oauth.
     // For other auth types we always refresh to recreate the ContentGenerator.
@@ -1612,6 +1612,7 @@ export class Config {
       }
 
       this.backgroundTaskRegistry.abortAll();
+      this.backgroundShellRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
     } catch (error) {
@@ -2489,6 +2490,10 @@ export class Config {
 
   getBackgroundTaskRegistry(): BackgroundTaskRegistry {
     return this.backgroundTaskRegistry;
+  }
+
+  getBackgroundShellRegistry(): BackgroundShellRegistry {
+    return this.backgroundShellRegistry;
   }
 
   /**

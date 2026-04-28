@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'The version to release (e.g., v0.1.11). Required for manual patch releases.'
+        description: 'The version to release (e.g., v0.1.11 or v0.1.11-preview.0). Required for manual patch releases.'
         required: false
         type: 'string'
       ref:
@@ -31,7 +31,7 @@ on:
         type: 'boolean'
         default: false
       create_preview_release:
-        description: 'Auto apply the preview release tag, input version is ignored.'
+        description: 'Create a preview release. If version is X.Y.Z-preview.N, use it as-is. If version is X.Y.Z, derive X.Y.Z-preview.0.'
         required: false
         type: 'boolean'
         default: false
@@ -115,7 +115,15 @@ jobs:
           elif [[ "${IS_PREVIEW}" == "true" ]]; then
             VERSION_ARGS+=(--type=preview)
             if [[ -n "${MANUAL_VERSION}" ]]; then
-              VERSION_ARGS+=("--preview_version_override=${MANUAL_VERSION}")
+              MANUAL_CLEAN="${MANUAL_VERSION#v}"
+              if [[ "${MANUAL_CLEAN}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$ ]]; then
+                VERSION_ARGS+=("--preview_version_override=${MANUAL_CLEAN}")
+              elif [[ "${MANUAL_CLEAN}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                VERSION_ARGS+=("--preview_version_override=${MANUAL_CLEAN}-preview.0")
+              else
+                echo "::error::For preview releases, version must be X.Y.Z or X.Y.Z-preview.N; got ${MANUAL_VERSION}"
+                exit 1
+              fi
             fi
           else
             VERSION_ARGS+=(--type=stable)
@@ -405,7 +413,7 @@ jobs:
           PR_URL: '${{ steps.pr.outputs.PR_URL }}'
         run: |-
           set -euo pipefail
-          gh pr merge "${PR_URL}" --merge --auto --delete-branch
+          gh pr merge "${PR_URL}" --squash --auto --delete-branch
 
       - name: 'Create Issue on Failure'
         if: |-

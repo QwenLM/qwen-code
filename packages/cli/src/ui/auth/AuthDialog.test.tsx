@@ -514,279 +514,292 @@ describe('AuthDialog', () => {
     });
   });
 
-  itWhenTuiInputReliable('should prevent exiting when no auth method is selected and show error message', async () => {
-    const handleAuthSelect = vi.fn();
-    const settings: LoadedSettings = new LoadedSettings(
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      {
-        settings: {},
-        originalSettings: {},
-        path: '',
-      },
-      {
-        settings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+  itWhenTuiInputReliable(
+    'should prevent exiting when no auth method is selected and show error message',
+    async () => {
+      const handleAuthSelect = vi.fn();
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
         },
-        originalSettings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
         },
-        path: '',
-      },
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      true,
-      new Set(),
-    );
-
-    const { lastFrame, stdin, unmount } = renderAuthDialog(
-      settings,
-      {},
-      { handleAuthSelect },
-      undefined, // config.getAuthType() returns undefined
-    );
-    await wait();
-
-    // Simulate pressing escape key
-    stdin.write('\u001b'); // ESC key
-    await wait();
-
-    // Should show error message instead of calling handleAuthSelect
-    await vi.waitFor(() => {
-      const frame = lastFrame();
-      expect(frame).toContain('You must select an auth method');
-      expect(frame).toContain('Press Ctrl+C again to exit');
-    });
-    expect(handleAuthSelect).not.toHaveBeenCalled();
-    unmount();
-  });
-
-  itWhenTuiInputReliable('should not exit if there is already an error message', async () => {
-    const handleAuthSelect = vi.fn();
-    const settings: LoadedSettings = new LoadedSettings(
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      {
-        settings: {},
-        originalSettings: {},
-        path: '',
-      },
-      {
-        settings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+        {
+          settings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          originalSettings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          path: '',
         },
-        originalSettings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
         },
-        path: '',
-      },
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      true,
-      new Set(),
-    );
+        true,
+        new Set(),
+      );
 
-    const { lastFrame, stdin, unmount } = renderAuthDialog(
-      settings,
-      { authError: 'Initial error' },
-      { handleAuthSelect },
-      undefined, // config.getAuthType() returns undefined
-    );
-    await wait();
+      const { lastFrame, stdin, unmount } = renderAuthDialog(
+        settings,
+        {},
+        { handleAuthSelect },
+        undefined, // config.getAuthType() returns undefined
+      );
+      await wait();
 
-    expect(lastFrame()).toContain('Initial error');
+      // Simulate pressing escape key
+      stdin.write('\u001b'); // ESC key
+      await wait();
 
-    // Simulate pressing escape key
-    stdin.write('\u001b'); // ESC key
-    await wait();
+      // Should show error message instead of calling handleAuthSelect
+      await vi.waitFor(() => {
+        const frame = lastFrame();
+        expect(frame).toContain('You must select an auth method');
+        expect(frame).toContain('Press Ctrl+C again to exit');
+      });
+      expect(handleAuthSelect).not.toHaveBeenCalled();
+      unmount();
+    },
+  );
 
-    // Should not call handleAuthSelect
-    expect(handleAuthSelect).not.toHaveBeenCalled();
-    unmount();
-  });
-
-  itWhenTuiInputReliable('should allow exiting when auth method is already selected', async () => {
-    const handleAuthSelect = vi.fn();
-    const settings: LoadedSettings = new LoadedSettings(
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      {
-        settings: {},
-        originalSettings: {},
-        path: '',
-      },
-      {
-        settings: {
-          security: { auth: { selectedType: AuthType.USE_OPENAI } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+  itWhenTuiInputReliable(
+    'should not exit if there is already an error message',
+    async () => {
+      const handleAuthSelect = vi.fn();
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
         },
-        originalSettings: {
-          security: { auth: { selectedType: AuthType.USE_OPENAI } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
         },
-        path: '',
-      },
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      true,
-      new Set(),
-    );
-
-    const { stdin, unmount } = renderAuthDialog(
-      settings,
-      {},
-      { handleAuthSelect },
-      AuthType.USE_OPENAI, // config.getAuthType() returns USE_OPENAI
-    );
-    await wait();
-
-    // Simulate pressing escape key
-    stdin.write('\u001b'); // ESC key
-    await wait();
-
-    // Should call handleAuthSelect with undefined to exit
-    expect(handleAuthSelect).toHaveBeenCalledWith(undefined);
-    unmount();
-  });
-
-  itWhenTuiInputReliable('should show OpenRouter in API key options', async () => {
-    const settings: LoadedSettings = new LoadedSettings(
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      {
-        settings: {},
-        originalSettings: {},
-        path: '',
-      },
-      {
-        settings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+        {
+          settings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          originalSettings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          path: '',
         },
-        originalSettings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
         },
-        path: '',
-      },
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      true,
-      new Set(),
-    );
+        true,
+        new Set(),
+      );
 
-    const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
-    await wait();
+      const { lastFrame, stdin, unmount } = renderAuthDialog(
+        settings,
+        { authError: 'Initial error' },
+        { handleAuthSelect },
+        undefined, // config.getAuthType() returns undefined
+      );
+      await wait();
 
-    // OAuth is selected by default, press Enter to enter OAuth provider list
-    stdin.write('\r');
-    await wait();
+      expect(lastFrame()).toContain('Initial error');
 
-    await vi.waitFor(() => {
-      const frame = lastFrame();
-      expect(frame).toContain('OpenRouter');
-      expect(frame).toContain('Browser OAuth');
-    });
+      // Simulate pressing escape key
+      stdin.write('\u001b'); // ESC key
+      await wait();
 
-    unmount();
-  });
+      // Should not call handleAuthSelect
+      expect(handleAuthSelect).not.toHaveBeenCalled();
+      unmount();
+    },
+  );
 
-  itWhenTuiInputReliable('should trigger OpenRouter OAuth from API key options', async () => {
-    const handleOpenRouterSubmit = vi.fn().mockResolvedValue(undefined);
-    const settings: LoadedSettings = new LoadedSettings(
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      {
-        settings: {},
-        originalSettings: {},
-        path: '',
-      },
-      {
-        settings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+  itWhenTuiInputReliable(
+    'should allow exiting when auth method is already selected',
+    async () => {
+      const handleAuthSelect = vi.fn();
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
         },
-        originalSettings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
         },
-        path: '',
-      },
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      true,
-      new Set(),
-    );
+        {
+          settings: {
+            security: { auth: { selectedType: AuthType.USE_OPENAI } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          originalSettings: {
+            security: { auth: { selectedType: AuthType.USE_OPENAI } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
 
-    const { stdin, unmount } = renderAuthDialog(
-      settings,
-      {},
-      { handleOpenRouterSubmit },
-    );
-    await wait();
+      const { stdin, unmount } = renderAuthDialog(
+        settings,
+        {},
+        { handleAuthSelect },
+        AuthType.USE_OPENAI, // config.getAuthType() returns USE_OPENAI
+      );
+      await wait();
 
-    // OAuth is selected by default, press Enter to enter OAuth provider list
-    stdin.write('\r');
-    await wait();
-    // OpenRouter is the first option, press Enter to trigger OAuth
-    stdin.write('\r');
-    await wait();
+      // Simulate pressing escape key
+      stdin.write('\u001b'); // ESC key
+      await wait();
 
-    await vi.waitFor(() => {
-      expect(handleOpenRouterSubmit).toHaveBeenCalledTimes(1);
-    });
+      // Should call handleAuthSelect with undefined to exit
+      expect(handleAuthSelect).toHaveBeenCalledWith(undefined);
+      unmount();
+    },
+  );
 
-    unmount();
-  });
+  itWhenTuiInputReliable(
+    'should show OpenRouter in API key options',
+    async () => {
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
+        },
+        {
+          settings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          originalSettings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
+
+      const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+      await wait();
+
+      // OAuth is selected by default, press Enter to enter OAuth provider list
+      stdin.write('\r');
+      await wait();
+
+      await vi.waitFor(() => {
+        const frame = lastFrame();
+        expect(frame).toContain('OpenRouter');
+        expect(frame).toContain('Browser OAuth');
+      });
+
+      unmount();
+    },
+  );
+
+  itWhenTuiInputReliable(
+    'should trigger OpenRouter OAuth from API key options',
+    async () => {
+      const handleOpenRouterSubmit = vi.fn().mockResolvedValue(undefined);
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
+        },
+        {
+          settings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          originalSettings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
+
+      const { stdin, unmount } = renderAuthDialog(
+        settings,
+        {},
+        { handleOpenRouterSubmit },
+      );
+      await wait();
+
+      // OAuth is selected by default, press Enter to enter OAuth provider list
+      stdin.write('\r');
+      await wait();
+      // OpenRouter is the first option, press Enter to trigger OAuth
+      stdin.write('\r');
+      await wait();
+
+      await vi.waitFor(() => {
+        expect(handleOpenRouterSubmit).toHaveBeenCalledTimes(1);
+      });
+
+      unmount();
+    },
+  );
 });
 
 describe('AuthDialog Custom API Key Wizard', () => {
-  const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
-
   const createStandardSettings = (): LoadedSettings =>
     new LoadedSettings(
       {
@@ -820,102 +833,6 @@ describe('AuthDialog Custom API Key Wizard', () => {
       true,
       new Set(),
     );
-
-  itWhenTuiInputReliable(
-    'navigates to protocol selection when Custom API Key is selected',
-    async () => {
-      const settings = createStandardSettings();
-      const handleCustomApiKeySubmit = vi.fn();
-
-      const mockUIState = {
-        authError: null,
-        pendingAuthType: undefined,
-      } as UIState;
-
-      const mockUIActions = {
-        handleAuthSelect: vi.fn(),
-        handleCodingPlanSubmit: vi.fn(),
-        handleAlibabaStandardSubmit: vi.fn(),
-        handleOpenRouterSubmit: vi.fn(),
-        handleCustomApiKeySubmit,
-        onAuthError: vi.fn(),
-        handleRetryLastPrompt: vi.fn(),
-      } as unknown as UIActions;
-
-      const mockConfig = {
-        getAuthType: vi.fn(() => undefined),
-        getContentGeneratorConfig: vi.fn(() => ({})),
-      } as unknown as Config;
-
-      const { stdin, lastFrame, unmount } = renderWithProviders(
-        <UIStateContext.Provider value={mockUIState}>
-          <UIActionsContext.Provider value={mockUIActions}>
-            <AuthDialog />
-          </UIActionsContext.Provider>
-        </UIStateContext.Provider>,
-        { settings, config: mockConfig },
-      );
-
-      await navigateToCustomProtocolSelect(stdin, lastFrame);
-
-      await vi.waitFor(() => {
-        const frame = lastFrame();
-        expect(frame).toContain('Step 1/6 · Protocol');
-        expect(frame).toContain('OpenAI-compatible');
-        expect(frame).toContain('Anthropic-compatible');
-        expect(frame).toContain('Gemini-compatible');
-      });
-
-      unmount();
-    },
-  );
-
-  itWhenTuiInputReliable(
-    'navigates to base URL input after selecting a protocol',
-    async () => {
-      const settings = createStandardSettings();
-      const handleCustomApiKeySubmit = vi.fn();
-
-      const mockUIState = {
-        authError: null,
-        pendingAuthType: undefined,
-      } as UIState;
-
-      const mockUIActions = {
-        handleAuthSelect: vi.fn(),
-        handleCodingPlanSubmit: vi.fn(),
-        handleAlibabaStandardSubmit: vi.fn(),
-        handleOpenRouterSubmit: vi.fn(),
-        handleCustomApiKeySubmit,
-        onAuthError: vi.fn(),
-        handleRetryLastPrompt: vi.fn(),
-      } as unknown as UIActions;
-
-      const mockConfig = {
-        getAuthType: vi.fn(() => undefined),
-        getContentGeneratorConfig: vi.fn(() => ({})),
-      } as unknown as Config;
-
-      const { stdin, lastFrame, unmount } = renderWithProviders(
-        <UIStateContext.Provider value={mockUIState}>
-          <UIActionsContext.Provider value={mockUIActions}>
-            <AuthDialog />
-          </UIActionsContext.Provider>
-        </UIStateContext.Provider>,
-        { settings, config: mockConfig },
-      );
-
-      await navigateToCustomBaseUrlInput(stdin, lastFrame);
-
-      await vi.waitFor(() => {
-        const frame = lastFrame();
-        expect(frame).toContain('Step 2/6 · Base URL');
-        expect(frame).toContain('Enter the API endpoint');
-      });
-
-      unmount();
-    },
-  );
 
   itWhenTuiInputReliable(
     'shows review screen with JSON after entering model IDs',
@@ -968,224 +885,6 @@ describe('AuthDialog Custom API Key Wizard', () => {
         expect(frame).toContain('qwen/qwen3-coder');
         expect(frame).toContain('gpt-4.1');
         expect(frame).toContain('Enter to save');
-      });
-
-      unmount();
-    },
-  );
-
-  itWhenTuiInputReliable(
-    'calls handleCustomApiKeySubmit on Enter in review view',
-    async () => {
-      const settings = createStandardSettings();
-      const handleCustomApiKeySubmit = vi.fn().mockResolvedValue(undefined);
-
-      const mockUIState = {
-        authError: null,
-        pendingAuthType: undefined,
-      } as UIState;
-
-      const mockUIActions = {
-        handleAuthSelect: vi.fn(),
-        handleCodingPlanSubmit: vi.fn(),
-        handleAlibabaStandardSubmit: vi.fn(),
-        handleOpenRouterSubmit: vi.fn(),
-        handleCustomApiKeySubmit,
-        onAuthError: vi.fn(),
-        handleRetryLastPrompt: vi.fn(),
-      } as unknown as UIActions;
-
-      const mockConfig = {
-        getAuthType: vi.fn(() => undefined),
-        getContentGeneratorConfig: vi.fn(() => ({})),
-      } as unknown as Config;
-
-      const { stdin, lastFrame, unmount } = renderWithProviders(
-        <UIStateContext.Provider value={mockUIState}>
-          <UIActionsContext.Provider value={mockUIActions}>
-            <AuthDialog />
-          </UIActionsContext.Provider>
-        </UIStateContext.Provider>,
-        { settings, config: mockConfig },
-      );
-
-      await navigateToCustomAdvancedConfig(
-        stdin,
-        lastFrame,
-        'sk-test',
-        'model-1,model-2',
-      );
-      await pressEnterAndWaitFor(stdin, lastFrame, 'Step 6/6 · Review');
-
-      await vi.waitFor(() => {
-        const frame = lastFrame();
-        expect(frame).toContain('Enter to save');
-      });
-
-      stdin.write('\r'); // Enter to save
-      await wait();
-
-      await vi.waitFor(() => {
-        expect(handleCustomApiKeySubmit).toHaveBeenCalledWith(
-          AuthType.USE_OPENAI,
-          'https://api.openai.com/v1',
-          'sk-test',
-          'model-1,model-2',
-          undefined,
-        );
-      });
-
-      unmount();
-    },
-  );
-
-  itWhenTuiInputReliable(
-    'shows advanced config screen after entering model IDs',
-    async () => {
-      const settings = createStandardSettings();
-      const handleCustomApiKeySubmit = vi.fn();
-
-      const mockUIState = {
-        authError: null,
-        pendingAuthType: undefined,
-      } as UIState;
-
-      const mockUIActions = {
-        handleAuthSelect: vi.fn(),
-        handleCodingPlanSubmit: vi.fn(),
-        handleAlibabaStandardSubmit: vi.fn(),
-        handleOpenRouterSubmit: vi.fn(),
-        handleCustomApiKeySubmit,
-        onAuthError: vi.fn(),
-        handleRetryLastPrompt: vi.fn(),
-      } as unknown as UIActions;
-
-      const mockConfig = {
-        getAuthType: vi.fn(() => undefined),
-        getContentGeneratorConfig: vi.fn(() => ({})),
-      } as unknown as Config;
-
-      const { stdin, lastFrame, unmount } = renderWithProviders(
-        <UIStateContext.Provider value={mockUIState}>
-          <UIActionsContext.Provider value={mockUIActions}>
-            <AuthDialog />
-          </UIActionsContext.Provider>
-        </UIStateContext.Provider>,
-        { settings, config: mockConfig },
-      );
-
-      await navigateToCustomAdvancedConfig(
-        stdin,
-        lastFrame,
-        'sk-test',
-        'model-1,model-2',
-      );
-
-      await vi.waitFor(() => {
-        const frame = lastFrame();
-        expect(frame).toContain('Step 5/6 · Advanced Config');
-        expect(frame).toContain(
-          'Optional: configure advanced generation settings',
-        );
-        expect(frame).toContain('Enable thinking');
-        expect(frame).toContain('Enable modality');
-        expect(frame).toContain('Enter to continue');
-      });
-
-      unmount();
-    },
-  );
-
-  itWhenTuiInputReliable(
-    'passes generationConfig when advanced options are toggled',
-    async () => {
-      const settings = createStandardSettings();
-      const handleCustomApiKeySubmit = vi.fn().mockResolvedValue(undefined);
-
-      const mockUIState = {
-        authError: null,
-        pendingAuthType: undefined,
-      } as UIState;
-
-      const mockUIActions = {
-        handleAuthSelect: vi.fn(),
-        handleCodingPlanSubmit: vi.fn(),
-        handleAlibabaStandardSubmit: vi.fn(),
-        handleOpenRouterSubmit: vi.fn(),
-        handleCustomApiKeySubmit,
-        onAuthError: vi.fn(),
-        handleRetryLastPrompt: vi.fn(),
-      } as unknown as UIActions;
-
-      const mockConfig = {
-        getAuthType: vi.fn(() => undefined),
-        getContentGeneratorConfig: vi.fn(() => ({})),
-      } as unknown as Config;
-
-      const { stdin, lastFrame, unmount } = renderWithProviders(
-        <UIStateContext.Provider value={mockUIState}>
-          <UIActionsContext.Provider value={mockUIActions}>
-            <AuthDialog />
-          </UIActionsContext.Provider>
-        </UIStateContext.Provider>,
-        { settings, config: mockConfig },
-      );
-
-      await navigateToCustomAdvancedConfig(
-        stdin,
-        lastFrame,
-        'sk-test',
-        'model-1',
-      );
-
-      await vi.waitFor(() => {
-        const frame = lastFrame();
-        expect(frame).toContain('Step 5/6 · Advanced Config');
-      });
-
-      // Toggle thinking (press Space — thinking is initially focused)
-      stdin.write(' ');
-      await wait();
-
-      // Navigate down to modality, toggle (press ↓ then Space)
-      stdin.write('\u001b[B');
-      await wait();
-      stdin.write(' ');
-      await wait();
-
-      // Press Enter to continue to review
-      stdin.write('\r');
-      await wait();
-
-      // Verify review includes generationConfig
-      await vi.waitFor(() => {
-        const frame = lastFrame();
-        expect(frame).toContain('"generationConfig"');
-        expect(frame).toContain('"enable_thinking"');
-        expect(frame).toContain('"image": true');
-        expect(frame).toContain('"video": true');
-        expect(frame).toContain('"audio": true');
-      });
-
-      // Press Enter to save
-      stdin.write('\r');
-      await wait();
-
-      await vi.waitFor(() => {
-        expect(handleCustomApiKeySubmit).toHaveBeenCalledWith(
-          AuthType.USE_OPENAI,
-          'https://api.openai.com/v1',
-          'sk-test',
-          'model-1',
-          {
-            enableThinking: true,
-            multimodal: {
-              image: true,
-              video: true,
-              audio: true,
-            },
-          },
-        );
       });
 
       unmount();
