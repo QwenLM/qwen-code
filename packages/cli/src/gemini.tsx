@@ -46,6 +46,7 @@ import { VimModeProvider } from './ui/contexts/VimModeContext.js';
 import { AgentViewProvider } from './ui/contexts/AgentViewContext.js';
 import { BackgroundTaskViewProvider } from './ui/contexts/BackgroundTaskViewContext.js';
 import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
+import { setSessionProcessTitle } from './utils/processTitle.js';
 import { themeManager, AUTO_THEME_NAME } from './ui/themes/theme-manager.js';
 import {
   detectAndEnableKittyProtocol,
@@ -173,6 +174,7 @@ export async function startInteractiveUI(
 ) {
   const version = await getCliVersion();
   setWindowTitle(basename(workspaceRoot), settings);
+  setSessionProcessTitle(config.getSessionId(), config.getTargetDir());
   const restoreTerminalRedrawOptimizer =
     process.stdout.isTTY && !config.getScreenReader()
       ? installTerminalRedrawOptimizer(process.stdout)
