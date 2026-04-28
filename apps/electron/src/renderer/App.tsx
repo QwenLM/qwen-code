@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { flushSync } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import { useTheme } from '@/hooks/useTheme'
 import type { ThemeOverrides } from '@config/theme'
@@ -43,7 +44,6 @@ import {
   refreshSessionsMetadataAtom,
   sessionAtomFamily,
   sessionMetaMapAtom,
-  sessionIdsAtom,
   loadedSessionsAtom,
   forceSessionMessagesReloadAtom,
   backgroundTasksAtomFamily,
@@ -433,33 +433,40 @@ export default function App() {
     }
   }, [clearStreamingState, updateSessionDirect, syncSessionOptionsFromSession, reconcilePermissionModeState, store])
 
+  const applyLoadedSessions = useCallback((loadedSessions: Session[]) => {
+    // Initialize per-session atoms and metadata map.
+    // NOTE: No sessionsAtom used - sessions are only in per-session atoms.
+    initializeSessions(loadedSessions)
+
+    // Initialize unified sessionOptions from session data.
+    const optionsMap = new Map<string, SessionOptions>()
+    for (const s of loadedSessions) {
+      const hasNonDefaultMode = s.permissionMode && s.permissionMode !== 'ask'
+      const hasNonDefaultThinking = s.thinkingLevel && s.thinkingLevel !== DEFAULT_THINKING_LEVEL
+      if (hasNonDefaultMode || hasNonDefaultThinking) {
+        optionsMap.set(s.id, {
+          permissionMode: s.permissionMode ?? 'ask',
+          thinkingLevel: s.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
+        })
+      }
+    }
+    setSessionOptions(optionsMap)
+  }, [initializeSessions])
+
+  const reconcileLoadedSessionPermissionModes = useCallback((loadedSessions: Session[]) => {
+    return Promise.allSettled(
+      loadedSessions.map((s) => reconcilePermissionModeState(s.id))
+    )
+  }, [reconcilePermissionModeState])
+
   const loadSessionsFromServer = useCallback(async () => {
     setSessionLoadError(null)
 
     try {
       const loadedSessions = await window.electronAPI.getSessions()
 
-      // Initialize per-session atoms and metadata map
-      // NOTE: No sessionsAtom used - sessions are only in per-session atoms
-      initializeSessions(loadedSessions)
-
-      // Initialize unified sessionOptions from session data
-      const optionsMap = new Map<string, SessionOptions>()
-      for (const s of loadedSessions) {
-        const hasNonDefaultMode = s.permissionMode && s.permissionMode !== 'ask'
-        const hasNonDefaultThinking = s.thinkingLevel && s.thinkingLevel !== DEFAULT_THINKING_LEVEL
-        if (hasNonDefaultMode || hasNonDefaultThinking) {
-          optionsMap.set(s.id, {
-            permissionMode: s.permissionMode ?? 'ask',
-            thinkingLevel: s.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
-          })
-        }
-      }
-      setSessionOptions(optionsMap)
-
-      await Promise.allSettled(
-        loadedSessions.map((s) => reconcilePermissionModeState(s.id))
-      )
+      applyLoadedSessions(loadedSessions)
+      await reconcileLoadedSessionPermissionModes(loadedSessions)
 
       setSessionsLoaded(true)
 
@@ -483,7 +490,7 @@ export default function App() {
       setSessionLoadError(formatSessionLoadFailure(err))
       setSessionsLoaded(true)
     }
-  }, [initializeSessions, initialSessionId, reconcilePermissionModeState, windowWorkspaceId])
+  }, [applyLoadedSessions, initialSessionId, reconcileLoadedSessionPermissionModes, windowWorkspaceId])
 
   const refreshSessionListMetadataFromServer = useCallback(async (): Promise<Map<string, SessionMeta> | null> => {
     try {
@@ -1647,47 +1654,54 @@ export default function App() {
       // Open (or focus) the window for the selected workspace
       window.electronAPI.openWorkspace(workspaceId)
     } else {
-      // Switch workspace in current window
-      // 1. Update the main process's window-workspace mapping
+      setSessionLoadError(null)
+
+      const targetWorkspace = workspaces.find(w => w.id === workspaceId)
+      let loadedSessions: Session[] | null = null
+
+      // Local workspaces can be read before the active window context changes.
+      // That lets us commit the target workspace and its session list together.
+      if (!targetWorkspace?.remoteServer) {
+        try {
+          loadedSessions = await window.electronAPI.getSessionsForWorkspace(workspaceId)
+        } catch (error) {
+          console.warn(`[App] Failed to preload sessions for workspace ${workspaceId}:`, error)
+        }
+      }
+
+      // Switch workspace in current window.
       await window.electronAPI.switchWorkspace(workspaceId)
 
-      // 2. Update React state to trigger re-renders
-      setWindowWorkspaceId(workspaceId)
+      if (!loadedSessions) {
+        try {
+          loadedSessions = await window.electronAPI.getSessions()
+        } catch (error) {
+          console.error(`[App] Failed to load sessions while switching to workspace ${workspaceId}:`, error)
+          setSessionLoadError(formatSessionLoadFailure(error))
+          loadedSessions = []
+        }
+      }
 
-      // 3. Clear selected session - the old session belongs to the previous workspace
-      // and should not remain selected when switching to a new workspace.
-      // This prevents showing stale session data from the wrong workspace.
-      setSession({ selected: null })
-
-      // 4. Clear pending permissions/credentials (not relevant to new workspace)
-      setPendingPermissions(new Map())
-      setPendingCredentials(new Map())
-
-      // 5. Clear session options from previous workspace
-      // (session IDs are unique UUIDs, but clearing prevents unbounded memory growth
-      // and ensures no stale state from old workspace persists)
-      setSessionOptions(new Map())
-
-      // 6. Clear message drafts from previous workspace
-      // (prevents memory growth on repeated workspace switches)
       sessionDraftsRef.current.clear()
 
-      // 7. Reset sources and skills atoms to empty
-      // (prevents stale data flash during workspace switch - AppShell will reload)
-      store.set(sourcesAtom, [])
-      store.set(skillsAtom, [])
+      // Keep the switch visually atomic: the active workspace and its session
+      // metadata land in the same paint, instead of briefly rendering empty UI.
+      flushSync(() => {
+        setWindowWorkspaceId(workspaceId)
+        setSession({ selected: null })
+        setPendingPermissions(new Map())
+        setPendingCredentials(new Map())
+        applyLoadedSessions(loadedSessions)
+        setSessionsLoaded(true)
+      })
 
-      // 8. Clear session atoms BEFORE workspace switch
-      // This prevents stale session data from the previous workspace being visible.
-      store.set(sessionMetaMapAtom, new Map())
-      store.set(sessionIdsAtom, [])
-
+      void reconcileLoadedSessionPermissionModes(loadedSessions)
       // Note: NavigationContext detects the workspaceId change and handles
       // panel restoration from the stored workspace URL (or defaults to allSessions).
-      // Sessions and theme will reload automatically due to windowWorkspaceId dependency
-      // in useEffect hooks.
+      // Sessions and theme still refresh via windowWorkspaceId-dependent effects,
+      // but the first frame already has the target workspace's session metadata.
     }
-  }, [windowWorkspaceId, setSession, store])
+  }, [windowWorkspaceId, workspaces, setWindowWorkspaceId, setSession, applyLoadedSessions, reconcileLoadedSessionPermissionModes])
 
   // Handle workspace switch by slug (called by NavigationContext on popstate when ?ws= changes)
   const handleSwitchWorkspaceBySlug = useCallback((slug: string) => {

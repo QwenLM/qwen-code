@@ -40,7 +40,6 @@ import { SquarePenRounded } from "../icons/SquarePenRounded"
 import { useEffect, useRef, useState } from "react"
 import { BrowserTabStrip } from "../browser/BrowserTabStrip"
 import type { Workspace } from "../../../shared/types"
-import { WorkspaceSwitcher } from "./WorkspaceSwitcher"
 import { getDocUrl } from "@craft-agent/shared/docs/doc-links"
 
 // --- Menu rendering (moved from AppMenu) ---
@@ -167,10 +166,6 @@ interface TopBarProps {
 export function TopBar({
   workspaces,
   activeWorkspaceId,
-  onSelectWorkspace,
-  workspaceUnreadMap,
-  onWorkspaceCreated,
-  onWorkspaceRemoved,
   activeSessionId,
   onNewChat,
   onNewWindow,
@@ -377,7 +372,7 @@ export function TopBar({
         </DropdownMenu>
         </div>
 
-        {/* Back / Forward / Workspace selector (moved from center) */}
+        {/* Back / Forward */}
         <div className={cn("ml-1 flex min-w-0 items-center gap-1", isCompact ? "flex-1" : "w-[clamp(220px,42vw,640px)]")}>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -396,18 +391,6 @@ export function TopBar({
             </TooltipTrigger>
             <TooltipContent side="bottom">{t("common.forward")} {goForwardHotkey}</TooltipContent>
           </Tooltip>
-
-          <div className="min-w-0 flex-1">
-            <WorkspaceSwitcher
-              variant="topbar"
-              workspaces={workspaces}
-              activeWorkspaceId={activeWorkspaceId}
-              onSelect={onSelectWorkspace}
-              onWorkspaceCreated={onWorkspaceCreated}
-              onWorkspaceRemoved={onWorkspaceRemoved}
-              workspaceUnreadMap={workspaceUnreadMap}
-            />
-          </div>
         </div>
       </div>
 

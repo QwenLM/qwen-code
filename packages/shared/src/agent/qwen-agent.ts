@@ -575,13 +575,13 @@ export class QwenAgent extends BaseAgent {
     this.subprocess = child;
     this.initialized = false;
 
-    const connection = new ClientSideConnection(
-      () => this.createAcpClient(),
-      ndJsonStream(
-        Writable.toWeb(child.stdin!) as unknown as WritableStream<Uint8Array>,
-        Readable.toWeb(child.stdout!) as unknown as ReadableStream<Uint8Array>,
-      ),
-    );
+      const connection = new ClientSideConnection(
+        () => this.createAcpClient(),
+        ndJsonStream(
+          Writable.toWeb(child.stdin!) as unknown as WritableStream<Uint8Array>,
+          Readable.toWeb(child.stdout!) as unknown as ReadableStream<Uint8Array>,
+        ),
+      );
     this.connection = connection;
 
     child.stderr?.on('data', (data: Buffer) => {

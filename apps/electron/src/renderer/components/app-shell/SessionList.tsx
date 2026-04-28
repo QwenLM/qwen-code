@@ -37,7 +37,7 @@ export interface SessionListRow {
 }
 
 /** Grouping mode for chat list */
-export type ChatGroupingMode = 'date' | 'status'
+export type ChatGroupingMode = 'none' | 'date' | 'status'
 
 interface SessionListProps {
   items: SessionMeta[]
@@ -133,7 +133,7 @@ export function SessionList({
   evaluateViews,
   labels = [],
   onLabelsChange,
-  groupingMode = 'date',
+  groupingMode = 'none',
   workspaceId,
   statusFilter,
   labelFilterMap,
@@ -282,6 +282,13 @@ export function SessionList({
     // can insert header-only placeholder groups in the correct position.
     const rows: SessionListRow[] = flatItems.map(item => ({ item }))
 
+    if (groupingMode === 'none') {
+      return {
+        rows,
+        groups: undefined,
+      }
+    }
+
     if (groupingMode === 'status') {
       const statusOrder = new Map<string, number>()
       sessionStatuses.forEach((state, index) => statusOrder.set(state.id, index))
@@ -390,7 +397,9 @@ export function SessionList({
   const flatRows = rowData.rows
 
   const collapseAllGroups = useCallback(() => {
-    if (groupingMode === 'status') {
+    if (groupingMode === 'none') {
+      setCollapsedGroups(new Set())
+    } else if (groupingMode === 'status') {
       const allKeys = new Set(items.map(item => `status-${getSessionStatus(item)}`))
       setCollapsedGroups(allKeys)
     } else {
@@ -601,7 +610,7 @@ export function SessionList({
 
   // --- Empty state (non-search) — render before EntityList ---
   // Don't show empty state when there are collapsed groups with content
-  if (flatRows.length === 0 && rowData.groups.length === 0 && !searchActive) {
+  if (flatRows.length === 0 && (rowData.groups?.length ?? 0) === 0 && !searchActive) {
     if (currentFilter?.kind === 'archived') {
       return (
         <EntityListEmptyScreen
@@ -641,6 +650,7 @@ export function SessionList({
       <SessionListProvider value={listContext}>
       <EntityList<SessionListRow>
         groups={rowData.groups}
+        items={rowData.groups ? undefined : rowData.rows}
         getKey={(row) => row.item.id}
         renderItem={(row, _indexInGroup, isFirstInGroup) => {
           const flatIndex = rowIndexMap.get(row.item.id) ?? 0

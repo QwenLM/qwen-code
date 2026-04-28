@@ -53,7 +53,7 @@ export interface UseSessionSearchOptions {
   /** Collapsed group keys — collapsed items are excluded from pagination and flatItems */
   collapsedGroups?: Set<string>
   /** Grouping mode — needed to compute group keys for collapse-aware pagination */
-  groupingMode?: 'date' | 'status'
+  groupingMode?: 'none' | 'date' | 'status'
   /** Ref to the ScrollArea viewport element — used for scroll-based pagination */
   scrollViewportRef?: React.RefObject<HTMLDivElement>
 }
@@ -119,7 +119,7 @@ function groupSessionsByDate(sessions: SessionMeta[]): DateGroup[] {
     }))
 }
 
-function getCollapseGroupKey(item: SessionMeta, groupingMode?: 'date' | 'status'): string {
+function getCollapseGroupKey(item: SessionMeta, groupingMode?: 'none' | 'date' | 'status'): string {
   return groupingMode === 'status'
     ? `status-${getSessionStatus(item)}`
     : startOfDay(new Date(item.lastMessageAt || 0)).toISOString()
@@ -135,10 +135,10 @@ export function computeCollapsedPagination(
   items: SessionMeta[],
   displayLimit: number,
   collapsedGroups?: Set<string>,
-  groupingMode?: 'date' | 'status',
+  groupingMode?: 'none' | 'date' | 'status',
 ): CollapsedPaginationResult {
   // Fast path: no collapse state → original slice
-  if (!collapsedGroups || collapsedGroups.size === 0) {
+  if (groupingMode === 'none' || !collapsedGroups || collapsedGroups.size === 0) {
     return {
       paginatedItems: items.slice(0, displayLimit),
       hasMore: displayLimit < items.length,

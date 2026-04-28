@@ -83,6 +83,7 @@ async function scanSessionDirectory(dirPath: string): Promise<import('@craft-age
 
 export const HANDLED_CHANNELS = [
   RPC_CHANNELS.sessions.GET,
+  RPC_CHANNELS.sessions.GET_FOR_WORKSPACE,
   RPC_CHANNELS.sessions.GET_UNREAD_SUMMARY,
   RPC_CHANNELS.sessions.MARK_ALL_READ,
   RPC_CHANNELS.sessions.CREATE,
@@ -124,6 +125,21 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
     const end = perf.start('rpc.getSessions')
     const workspaceId = ctx.workspaceId ?? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!)
     const sessions = sessionManager.getSessions(workspaceId ?? undefined)
+    end()
+    return sessions
+  })
+
+  // Get lightweight session metadata for a specific local workspace.
+  // Used by the project sidebar to show sessions across workspaces without
+  // switching the current window context.
+  server.handle(RPC_CHANNELS.sessions.GET_FOR_WORKSPACE, async (_ctx, workspaceId: string) => {
+    try {
+      await sessionManager.waitForInit()
+    } catch (error) {
+      log.error('GET_SESSIONS_FOR_WORKSPACE continuing after initialization failure:', error)
+    }
+    const end = perf.start('rpc.getSessionsForWorkspace', { workspaceId })
+    const sessions = sessionManager.getSessions(workspaceId)
     end()
     return sessions
   })

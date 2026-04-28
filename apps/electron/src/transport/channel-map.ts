@@ -19,6 +19,7 @@ function listener(channel: string) {
 export const CHANNEL_MAP = {
   // Session management
   getSessions: invoke(RPC_CHANNELS.sessions.GET),
+  getSessionsForWorkspace: invoke(RPC_CHANNELS.sessions.GET_FOR_WORKSPACE),
   getUnreadSummary: invoke(RPC_CHANNELS.sessions.GET_UNREAD_SUMMARY),
   markAllSessionsRead: invoke(RPC_CHANNELS.sessions.MARK_ALL_READ),
   getSessionMessages: invoke(RPC_CHANNELS.sessions.GET_MESSAGES),

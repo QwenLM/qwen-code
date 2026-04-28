@@ -18,6 +18,10 @@ export const LOCAL_ONLY_CHANNELS = new Set<string>([
   // remote — local connectivity management (reaches out to remote server from local app)
   RPC_CHANNELS.remote.TEST_CONNECTION,
 
+  // sessions — local workspace overview for project sidebar.
+  // The embedded server already has lightweight metadata for local workspaces.
+  RPC_CHANNELS.sessions.GET_FOR_WORKSPACE,
+
   // workspaces — local workspace CRUD (workspace list is local config)
   RPC_CHANNELS.workspaces.GET,
   RPC_CHANNELS.workspaces.CREATE,
