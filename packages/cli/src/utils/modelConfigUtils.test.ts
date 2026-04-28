@@ -719,9 +719,12 @@ describe('modelConfigUtils', () => {
       expect(result.warnings).toEqual(['Warning 1', 'Warning 2']);
     });
 
-    it('should use custom env when provided', () => {
+    it('should use custom env when provided (no model set, no filtering)', () => {
       const argv = {};
-      const settings = makeMockSettings();
+      // Intentionally omit model so the filteredEnv stripping is not triggered
+      const settings = makeMockSettings({
+        model: undefined as unknown as Settings['model'],
+      });
       const selectedAuthType = AuthType.USE_OPENAI;
       const customEnv = {
         OPENAI_API_KEY: 'custom-key',
@@ -978,6 +981,111 @@ describe('modelConfigUtils', () => {
       });
       expect(result4.model).toBe('settings-model');
     });
+    it('should strip OPENAI_MODEL and QWEN_MODEL from env when argv.model is set (regression)', () => {
+      // Regression: when a model is explicitly provided via argv, env vars like
+      // OPENAI_MODEL and QWEN_MODEL must not override it. The filteredEnv passed
+      // to resolveModelConfig should have these keys removed.
+      const argv = { model: 'cli-model' };
+      const settings = makeMockSettings();
+      const selectedAuthType = AuthType.USE_OPENAI;
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: 'cli-model', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+
+      resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType,
+        env: {
+          OPENAI_MODEL: 'env-model',
+          QWEN_MODEL: 'qwen-env-model',
+          OPENAI_API_KEY: 'key',
+        },
+      });
+
+      const calledWith = vi.mocked(resolveModelConfig).mock.calls[0][0];
+      expect(calledWith.env).toBeDefined();
+      expect(
+        (calledWith.env as Record<string, string>)['OPENAI_MODEL'],
+      ).toBeUndefined();
+      expect(
+        (calledWith.env as Record<string, string>)['QWEN_MODEL'],
+      ).toBeUndefined();
+      // Other env vars should remain intact
+      expect((calledWith.env as Record<string, string>)['OPENAI_API_KEY']).toBe(
+        'key',
+      );
+    });
+
+    it('should strip OPENAI_MODEL and QWEN_MODEL from env when settings.model.name is set (regression)', () => {
+      // Regression: when a model is explicitly set via settings.model.name,
+      // env vars must not override it through the core resolver.
+      const argv = {};
+      const settings = makeMockSettings({ model: { name: 'settings-model' } });
+      const selectedAuthType = AuthType.USE_OPENAI;
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: 'settings-model', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+
+      resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType,
+        env: {
+          OPENAI_MODEL: 'env-model',
+          QWEN_MODEL: 'qwen-env-model',
+        },
+      });
+
+      const calledWith = vi.mocked(resolveModelConfig).mock.calls[0][0];
+      expect(
+        (calledWith.env as Record<string, string>)['OPENAI_MODEL'],
+      ).toBeUndefined();
+      expect(
+        (calledWith.env as Record<string, string>)['QWEN_MODEL'],
+      ).toBeUndefined();
+    });
+
+    it('should NOT strip OPENAI_MODEL/QWEN_MODEL when no explicit model is set', () => {
+      // When neither argv.model nor settings.model.name is set, the env vars
+      // should be passed through so the core resolver can use them.
+      const argv = {};
+      const settings = makeMockSettings({
+        model: undefined as unknown as Settings['model'],
+      });
+      const selectedAuthType = AuthType.USE_OPENAI;
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: 'env-model', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+
+      resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType,
+        env: {
+          OPENAI_MODEL: 'env-model',
+          QWEN_MODEL: 'qwen-env-model',
+        },
+      });
+
+      const calledWith = vi.mocked(resolveModelConfig).mock.calls[0][0];
+      expect((calledWith.env as Record<string, string>)['OPENAI_MODEL']).toBe(
+        'env-model',
+      );
+      expect((calledWith.env as Record<string, string>)['QWEN_MODEL']).toBe(
+        'qwen-env-model',
+      );
+    });
+
     it('should not use env-matched provider when settings.model.name is set but unmatched', () => {
       // Regression: when settings.model.name is set but doesn't match any
       // provider, the code should NOT fall through to OPENAI_MODEL/QWEN_MODEL.
