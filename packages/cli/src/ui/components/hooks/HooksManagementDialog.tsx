@@ -55,6 +55,9 @@ function isValidHookConfig(config: unknown): config is HookConfig {
   if (obj['type'] === 'function') {
     return 'callback' in obj && typeof obj['callback'] === 'function';
   }
+  if (obj['type'] === 'prompt') {
+    return 'prompt' in obj && typeof obj['prompt'] === 'string';
+  }
   return false;
 }
 

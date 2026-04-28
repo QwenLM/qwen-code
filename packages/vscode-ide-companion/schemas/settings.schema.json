@@ -796,7 +796,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -805,6 +806,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to fastModel.",
                       "type": "string"
                     },
                     "headers": {
@@ -899,7 +908,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -908,6 +918,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to fastModel.",
                       "type": "string"
                     },
                     "headers": {
@@ -1002,7 +1020,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1011,6 +1030,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to fastModel.",
                       "type": "string"
                     },
                     "headers": {
@@ -1105,7 +1132,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1114,6 +1142,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to fastModel.",
                       "type": "string"
                     },
                     "headers": {
@@ -1208,7 +1244,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1217,6 +1254,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to fastModel.",
                       "type": "string"
                     },
                     "headers": {
@@ -1311,7 +1356,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1320,6 +1366,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to fastModel.",
                       "type": "string"
                     },
                     "headers": {
@@ -1414,7 +1468,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1423,6 +1478,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to fastModel.",
                       "type": "string"
                     },
                     "headers": {
@@ -1517,7 +1580,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1526,6 +1590,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to fastModel.",
                       "type": "string"
                     },
                     "headers": {
@@ -1620,7 +1692,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1629,6 +1702,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to fastModel.",
                       "type": "string"
                     },
                     "headers": {
@@ -1723,7 +1804,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1732,6 +1814,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to fastModel.",
                       "type": "string"
                     },
                     "headers": {
@@ -1826,7 +1916,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1835,6 +1926,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to fastModel.",
                       "type": "string"
                     },
                     "headers": {
@@ -1929,7 +2028,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1938,6 +2038,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to fastModel.",
                       "type": "string"
                     },
                     "headers": {

@@ -654,6 +654,64 @@ describe('HookRegistry', () => {
 
       expect(registry.getAllHooks()).toHaveLength(2);
     });
+
+    it('should distinguish unnamed prompt hooks with same prefix but different content', async () => {
+      // Two prompt hooks without name that share the same first 30 chars
+      const hooksConfig = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Prompt,
+                prompt:
+                  'This is a very long prompt that exceeds thirty characters and has ending A',
+              },
+              {
+                type: HookType.Prompt,
+                prompt:
+                  'This is a very long prompt that exceeds thirty characters and has ending B',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+
+      // Both hooks should be registered (not treated as duplicates)
+      const hooks = registry.getAllHooks();
+      expect(hooks).toHaveLength(2);
+      expect(hooks[0].config.type).toBe(HookType.Prompt);
+      expect(hooks[1].config.type).toBe(HookType.Prompt);
+    });
+
+    it('should skip truly duplicate unnamed prompt hooks with identical prompt', async () => {
+      const hooksConfig = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Prompt,
+                prompt: 'This is a test prompt',
+              },
+              {
+                type: HookType.Prompt,
+                prompt: 'This is a test prompt',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+
+      // Only one hook should be registered (true duplicate)
+      expect(registry.getAllHooks()).toHaveLength(1);
+    });
   });
 
   describe('extension hooks', () => {

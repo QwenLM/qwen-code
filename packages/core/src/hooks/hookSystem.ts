@@ -60,7 +60,7 @@ export class HookSystem {
 
     // Initialize components
     this.hookRegistry = new HookRegistry(config);
-    this.hookRunner = new HookRunner(allowedHttpUrls);
+    this.hookRunner = new HookRunner(allowedHttpUrls, config); // Pass config for prompt hooks
     this.hookAggregator = new HookAggregator();
     this.hookPlanner = new HookPlanner(this.hookRegistry);
     this.sessionHooksManager = new SessionHooksManager();

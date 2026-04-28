@@ -831,7 +831,7 @@ export class AuthEvent implements BaseTelemetryEvent {
 }
 
 /** Hook type for telemetry */
-export type HookTelemetryType = 'command' | 'http' | 'function';
+export type HookTelemetryType = 'command' | 'http' | 'function' | 'prompt';
 
 /**
  * Hook call telemetry event

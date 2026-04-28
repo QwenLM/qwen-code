@@ -101,6 +101,15 @@ export function HookDetailStep({
               // For function hook, show name or id
               hookDisplay =
                 config.config.name || config.config.id || 'function-hook';
+            } else if (hookType === HookType.Prompt) {
+              // For prompt hook, show name or prompt content (truncated)
+              const promptText = config.config.prompt || '';
+              const maxLength = 50;
+              hookDisplay =
+                config.config.name ||
+                (promptText.length > maxLength
+                  ? promptText.slice(0, maxLength) + '...'
+                  : promptText);
             }
 
             // Check if this is an async hook (only command hooks support async)
