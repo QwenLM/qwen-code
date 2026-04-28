@@ -6,17 +6,19 @@
 
 import React from 'react';
 
-export type MermaidRenderMode = 'visual' | 'source';
+export type MarkdownRenderMode = 'visual' | 'source';
 
 interface MarkdownRenderingContextValue {
-  mermaidRenderMode: MermaidRenderMode;
-  setMermaidRenderMode: React.Dispatch<React.SetStateAction<MermaidRenderMode>>;
+  markdownRenderMode: MarkdownRenderMode;
+  setMarkdownRenderMode: React.Dispatch<
+    React.SetStateAction<MarkdownRenderMode>
+  >;
 }
 
 const MarkdownRenderingContext =
   React.createContext<MarkdownRenderingContextValue>({
-    mermaidRenderMode: 'visual',
-    setMermaidRenderMode: () => undefined,
+    markdownRenderMode: 'visual',
+    setMarkdownRenderMode: () => undefined,
   });
 
 export const MarkdownRenderingProvider = MarkdownRenderingContext.Provider;

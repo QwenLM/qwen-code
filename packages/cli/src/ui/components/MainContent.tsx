@@ -34,7 +34,7 @@ export const MainContent = () => {
   const uiState = useUIState();
   const uiActions = useUIActions();
   const { compactMode } = useCompactMode();
-  const { mermaidRenderMode } = useMarkdownRendering();
+  const { markdownRenderMode } = useMarkdownRendering();
   const {
     pendingHistoryItems,
     terminalWidth,
@@ -181,7 +181,7 @@ export const MainContent = () => {
   return (
     <>
       <Static
-        key={`${uiState.historyRemountKey}-${uiState.currentModel}-${mermaidRenderMode}`}
+        key={`${uiState.historyRemountKey}-${uiState.currentModel}-${markdownRenderMode}`}
         items={[
           <AppHeader key="app-header" version={version} />,
           <DebugModeNotification key="debug-notification" />,

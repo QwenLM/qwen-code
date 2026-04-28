@@ -128,7 +128,7 @@ import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import {
   MarkdownRenderingProvider,
-  type MermaidRenderMode,
+  type MarkdownRenderMode,
 } from './contexts/MarkdownRenderingContext.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
 import {
@@ -1536,17 +1536,17 @@ export const AppContainer = (props: AppContainerProps) => {
   const [compactMode, setCompactMode] = useState<boolean>(
     settings.merged.ui?.compactMode ?? false,
   );
-  const [mermaidRenderMode, setMermaidRenderMode] =
-    useState<MermaidRenderMode>('visual');
-  const mermaidRenderModeMountedRef = useRef(false);
+  const [markdownRenderMode, setMarkdownRenderMode] =
+    useState<MarkdownRenderMode>('visual');
+  const markdownRenderModeMountedRef = useRef(false);
   useEffect(() => {
-    if (!mermaidRenderModeMountedRef.current) {
-      mermaidRenderModeMountedRef.current = true;
+    if (!markdownRenderModeMountedRef.current) {
+      markdownRenderModeMountedRef.current = true;
       return;
     }
 
     refreshStatic();
-  }, [mermaidRenderMode, refreshStatic]);
+  }, [markdownRenderMode, refreshStatic]);
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
@@ -2167,8 +2167,8 @@ export const AppContainer = (props: AppContainerProps) => {
         void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
         refreshStatic();
       } else if (keyMatchers[Command.TOGGLE_MARKDOWN_RENDER_MODE](key)) {
-        setMermaidRenderMode(
-          mermaidRenderMode === 'visual' ? 'source' : 'visual',
+        setMarkdownRenderMode(
+          markdownRenderMode === 'visual' ? 'source' : 'visual',
         );
       }
     },
@@ -2205,8 +2205,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isAuthenticating,
       compactMode,
       setCompactMode,
-      mermaidRenderMode,
-      setMermaidRenderMode,
+      markdownRenderMode,
+      setMarkdownRenderMode,
       refreshStatic,
       handleDoubleEscRewind,
     ],
@@ -2687,8 +2687,8 @@ export const AppContainer = (props: AppContainerProps) => {
     [compactMode, setCompactMode],
   );
   const markdownRenderingValue = useMemo(
-    () => ({ mermaidRenderMode, setMermaidRenderMode }),
-    [mermaidRenderMode, setMermaidRenderMode],
+    () => ({ markdownRenderMode, setMarkdownRenderMode }),
+    [markdownRenderMode, setMarkdownRenderMode],
   );
 
   return (

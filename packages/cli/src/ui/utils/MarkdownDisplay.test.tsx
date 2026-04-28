@@ -477,8 +477,8 @@ flowchart LR
       const { lastFrame } = renderWithProviders(
         <MarkdownRenderingProvider
           value={{
-            mermaidRenderMode: 'source',
-            setMermaidRenderMode: () => undefined,
+            markdownRenderMode: 'source',
+            setMarkdownRenderMode: () => undefined,
           }}
         >
           <MarkdownDisplay {...baseProps} text={text} />
@@ -488,6 +488,38 @@ flowchart LR
       expect(output).toContain('flowchart LR');
       expect(output).toContain('A[Client] --> B[API]');
       expect(output).not.toContain('Mermaid flowchart');
+    });
+
+    it('keeps enhanced markdown blocks as markdown source in source mode', () => {
+      const text = `
+| Name | Value |
+|------|-------|
+| Alpha | $x^2$ |
+
+$$
+\\alpha + \\beta
+$$
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownRenderingProvider
+          value={{
+            markdownRenderMode: 'source',
+            setMarkdownRenderMode: () => undefined,
+          }}
+        >
+          <MarkdownDisplay {...baseProps} text={text} />
+        </MarkdownRenderingProvider>,
+      );
+
+      const output = lastFrame();
+      expect(output).toContain('| Name | Value |');
+      expect(output).toContain('|------|-------|');
+      expect(output).toContain('$x^2$');
+      expect(output).toContain('$$');
+      expect(output).toContain('\\alpha + \\beta');
+      expect(output).not.toContain('┌');
+      expect(output).not.toContain('x²');
+      expect(output).not.toContain('α + β');
     });
 
     it('reuses mermaid node labels when later edges reference node ids', () => {

@@ -39,8 +39,10 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   contentWidth,
   textColor = theme.text.primary,
 }) => {
+  const { markdownRenderMode } = useMarkdownRendering();
   if (!text) return <></>;
 
+  const renderVisualBlocks = markdownRenderMode === 'visual';
   const lines = text.split(/\r?\n/);
   const headerRegex = /^ *(#{1,4}) +(.*)/;
   const codeFenceRegex = /^ *(`{3,}|~{3,}) *([^`]*)$/;
@@ -167,10 +169,10 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       } else {
         currentCodeBlockLangIndex = 0;
       }
-    } else if (mathFenceMatch) {
+    } else if (mathFenceMatch && renderVisualBlocks) {
       inMathBlock = true;
       mathBlockContent = [];
-    } else if (tableRowMatch && !inTable) {
+    } else if (tableRowMatch && !inTable && renderVisualBlocks) {
       // Potential table start - check if next line is separator with matching column count
       const potentialHeaders = tableRowMatch[1]
         .split(/(?<!\\)\|/)
@@ -196,7 +198,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
               <RenderInline
                 text={line}
                 textColor={textColor}
-                enableInlineMath
+                enableInlineMath={renderVisualBlocks}
               />
             </Text>
           </Box>,
@@ -244,7 +246,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
               <RenderInline
                 text={line}
                 textColor={textColor}
-                enableInlineMath
+                enableInlineMath={renderVisualBlocks}
               />
             </Text>
           </Box>,
@@ -262,6 +264,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           key={key}
           quoteText={blockquoteMatch[1]}
           textColor={textColor}
+          enableInlineMath={renderVisualBlocks}
         />,
       );
     } else if (headerMatch) {
@@ -275,7 +278,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
               <RenderInline
                 text={headerText}
                 textColor={textColor}
-                enableInlineMath
+                enableInlineMath={renderVisualBlocks}
               />
             </Text>
           );
@@ -286,7 +289,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
               <RenderInline
                 text={headerText}
                 textColor={textColor}
-                enableInlineMath
+                enableInlineMath={renderVisualBlocks}
               />
             </Text>
           );
@@ -297,7 +300,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
               <RenderInline
                 text={headerText}
                 textColor={textColor}
-                enableInlineMath
+                enableInlineMath={renderVisualBlocks}
               />
             </Text>
           );
@@ -308,7 +311,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
               <RenderInline
                 text={headerText}
                 textColor={textColor}
-                enableInlineMath
+                enableInlineMath={renderVisualBlocks}
               />
             </Text>
           );
@@ -319,7 +322,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
               <RenderInline
                 text={headerText}
                 textColor={textColor}
-                enableInlineMath
+                enableInlineMath={renderVisualBlocks}
               />
             </Text>
           );
@@ -338,6 +341,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           marker={marker}
           leadingWhitespace={leadingWhitespace}
           textColor={textColor}
+          enableInlineMath={renderVisualBlocks}
         />,
       );
     } else if (olMatch) {
@@ -352,6 +356,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           marker={marker}
           leadingWhitespace={leadingWhitespace}
           textColor={textColor}
+          enableInlineMath={renderVisualBlocks}
         />,
       );
     } else {
@@ -369,7 +374,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
               <RenderInline
                 text={line}
                 textColor={textColor}
-                enableInlineMath
+                enableInlineMath={renderVisualBlocks}
               />
             </Text>
           </Box>,
@@ -441,11 +446,11 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
   contentWidth,
 }) => {
   const settings = useSettings();
-  const { mermaidRenderMode } = useMarkdownRendering();
+  const { markdownRenderMode } = useMarkdownRendering();
   const MIN_LINES_FOR_MESSAGE = 1; // Minimum lines to show before the "generating more" message
   const RESERVED_LINES = 2; // Lines reserved for the message itself and potential padding
 
-  if (lang?.toLowerCase() === 'mermaid' && mermaidRenderMode === 'visual') {
+  if (lang?.toLowerCase() === 'mermaid' && markdownRenderMode === 'visual') {
     if (isPending) {
       return (
         <RenderPendingMermaidBlock
@@ -592,17 +597,23 @@ const RenderMathBlock = React.memo(RenderMathBlockInternal);
 interface RenderBlockquoteProps {
   quoteText: string;
   textColor?: string;
+  enableInlineMath?: boolean;
 }
 
 const RenderBlockquoteInternal: React.FC<RenderBlockquoteProps> = ({
   quoteText,
   textColor = theme.text.primary,
+  enableInlineMath = true,
 }) => (
   <Box paddingLeft={BLOCKQUOTE_PREFIX_PADDING} flexDirection="row">
     <Text color={theme.text.secondary}>│ </Text>
     <Box flexGrow={LIST_ITEM_TEXT_FLEX_GROW}>
       <Text wrap="wrap" color={textColor} italic>
-        <RenderInline text={quoteText} textColor={textColor} enableInlineMath />
+        <RenderInline
+          text={quoteText}
+          textColor={textColor}
+          enableInlineMath={enableInlineMath}
+        />
       </Text>
     </Box>
   </Box>
@@ -616,6 +627,7 @@ interface RenderListItemProps {
   marker: string;
   leadingWhitespace?: string;
   textColor?: string;
+  enableInlineMath?: boolean;
 }
 
 const RenderListItemInternal: React.FC<RenderListItemProps> = ({
@@ -624,6 +636,7 @@ const RenderListItemInternal: React.FC<RenderListItemProps> = ({
   marker,
   leadingWhitespace = '',
   textColor = theme.text.primary,
+  enableInlineMath = true,
 }) => {
   const taskMatch = itemText.match(/^\[([ xX])\]\s+(.*)$/);
   const isTaskItem = taskMatch !== null;
@@ -650,7 +663,7 @@ const RenderListItemInternal: React.FC<RenderListItemProps> = ({
           <RenderInline
             text={effectiveItemText}
             textColor={textColor}
-            enableInlineMath
+            enableInlineMath={enableInlineMath}
           />
         </Text>
       </Box>
