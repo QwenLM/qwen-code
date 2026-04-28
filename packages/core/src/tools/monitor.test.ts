@@ -71,15 +71,20 @@ describe('MonitorTool', () => {
   let mockConfig: Config;
   let monitorRegistry: MonitorRegistry;
   let mockChild: ReturnType<typeof createMockChild>;
+  let mockIsPathWithinWorkspace: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
 
     monitorRegistry = new MonitorRegistry();
+    mockIsPathWithinWorkspace = vi.fn().mockReturnValue(true);
 
     mockConfig = {
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
       getMonitorRegistry: vi.fn().mockReturnValue(monitorRegistry),
+      getWorkspaceContext: vi.fn().mockReturnValue({
+        isPathWithinWorkspace: mockIsPathWithinWorkspace,
+      }),
     } as unknown as Config;
 
     monitorTool = new MonitorTool(mockConfig);
@@ -153,6 +158,52 @@ describe('MonitorTool', () => {
           command: 'tail -f log',
           max_events: 500,
           idle_timeout_ms: 60000,
+        }),
+      ).toBeNull();
+    });
+
+    it('rejects non-string command without throwing', () => {
+      // Schema normally blocks this, but SDK/direct callers can bypass it.
+      // The validator must return a structured error instead of throwing.
+      expect(() => validate({ command: undefined })).not.toThrow();
+      expect(validate({ command: undefined })).toBe('Command cannot be empty.');
+      expect(validate({ command: 123 })).toBe('Command cannot be empty.');
+      expect(validate({ command: null })).toBe('Command cannot be empty.');
+    });
+
+    it('rejects non-absolute directory', () => {
+      expect(
+        validate({ command: 'tail -f log', directory: 'relative/path' }),
+      ).toBe('Directory must be an absolute path.');
+    });
+
+    it('rejects directory outside workspace (delegates to WorkspaceContext)', () => {
+      mockIsPathWithinWorkspace.mockReturnValueOnce(false);
+      const result = validate({
+        command: 'tail -f log',
+        directory: '/tmp/project-a-evil/x',
+      });
+      expect(result).toContain('not within any of the registered workspace');
+      expect(mockIsPathWithinWorkspace).toHaveBeenCalledWith(
+        '/tmp/project-a-evil/x',
+      );
+    });
+
+    it('rejects directory with parent-reference traversal', () => {
+      mockIsPathWithinWorkspace.mockReturnValueOnce(false);
+      const result = validate({
+        command: 'tail -f log',
+        directory: '/tmp/project-a/../etc',
+      });
+      expect(result).toContain('not within any of the registered workspace');
+    });
+
+    it('accepts directory within workspace', () => {
+      mockIsPathWithinWorkspace.mockReturnValueOnce(true);
+      expect(
+        validate({
+          command: 'tail -f log',
+          directory: '/test/dir/sub',
         }),
       ).toBeNull();
     });
@@ -364,6 +415,45 @@ describe('MonitorTool', () => {
 
       const result = await invocation.execute(new AbortController().signal);
       expect(result.llmContent).toContain('failed to start');
+    });
+
+    it('caps unbounded partial-line accumulation (no newlines)', async () => {
+      const callback = vi.fn();
+      monitorRegistry.setNotificationCallback(callback);
+
+      const invocation = createInvocation({
+        command: 'tight-loop --no-newlines',
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      // MAX_LINE_LENGTH is 4096; send five 1000-byte chunks with no newline.
+      // Total accumulated bytes = 5000, which exceeds 4096 — the guard must
+      // force-emit a single truncated event and reset the buffer instead of
+      // growing without bound.
+      const chunk = 'A'.repeat(1000);
+      for (let i = 0; i < 5; i++) {
+        mockChild.stdout.emit('data', Buffer.from(chunk));
+      }
+
+      // Exactly one forced emit should have happened (first chunk that
+      // pushes the buffer past MAX_LINE_LENGTH).
+      expect(callback).toHaveBeenCalledTimes(1);
+      // Callback signature: (displayText, modelText, meta). The modelText is
+      // an XML envelope; we assert on bounded total length and the presence
+      // of our 'A' payload rather than exact string contents.
+      const [, modelText] = callback.mock.calls[0] as [string, string];
+      // Bounded: should be well under the 5000 bytes we streamed. Accepts the
+      // XML envelope plus MAX_LINE_LENGTH (4096) plus truncation markers.
+      expect(modelText.length).toBeLessThan(5000);
+      expect(modelText).toContain('A'.repeat(100));
+
+      // Buffer must have been reset: continuing to stream still produces
+      // further forced emits (i.e. no runaway growth).
+      for (let i = 0; i < 5; i++) {
+        mockChild.stdout.emit('data', Buffer.from(chunk));
+      }
+      expect(callback).toHaveBeenCalledTimes(2);
     });
   });
 });

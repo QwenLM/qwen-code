@@ -201,6 +201,25 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
       const text = stripAnsi(data.toString('utf-8'));
       buffer.value += text;
+
+      // Guard against unbounded partial-line accumulation. If a command emits
+      // a long stream without newlines, buffer.value would otherwise grow
+      // without bound and each chunk would re-split the entire string.
+      // When no newline has arrived yet and the buffer has already exceeded
+      // MAX_LINE_LENGTH, force-emit a single truncated event through the
+      // throttled path and reset the buffer so it cannot keep growing.
+      if (
+        !buffer.value.includes('\n') &&
+        buffer.value.length > MAX_LINE_LENGTH
+      ) {
+        const trimmed = buffer.value.trim();
+        if (trimmed.length > 0) {
+          throttledEmit(trimmed.slice(0, MAX_LINE_LENGTH) + '...');
+        }
+        buffer.value = '';
+        return;
+      }
+
       const lines = buffer.value.split('\n');
       buffer.value = lines.pop() ?? '';
 
@@ -366,7 +385,7 @@ export class MonitorTool extends BaseDeclarativeTool<
   protected override validateToolParamValues(
     params: MonitorToolParams,
   ): string | null {
-    if (!params.command.trim()) {
+    if (typeof params.command !== 'string' || !params.command.trim()) {
       return 'Command cannot be empty.';
     }
     if (params.max_events !== undefined) {
@@ -397,11 +416,12 @@ export class MonitorTool extends BaseDeclarativeTool<
       if (!path.isAbsolute(params.directory)) {
         return 'Directory must be an absolute path.';
       }
-      const workspaceDirs = this.config.getWorkspaceContext().getDirectories();
-      const isWithinWorkspace = workspaceDirs.some((wsDir) =>
-        params.directory!.startsWith(wsDir),
-      );
-      if (!isWithinWorkspace) {
+      // Use WorkspaceContext.isPathWithinWorkspace so the check canonicalises
+      // the path, resolves symlinks, and matches on path segments rather than
+      // raw string prefix (prevents e.g. '/tmp/project-evil' from slipping
+      // past a '/tmp/project' workspace).
+      const ws = this.config.getWorkspaceContext();
+      if (!ws.isPathWithinWorkspace(params.directory)) {
         return `Directory '${params.directory}' is not within any of the registered workspace directories.`;
       }
     }
