@@ -1428,6 +1428,7 @@ export default {
   'Command Format Migration': '命令格式遷移',
   'Found {{count}} TOML command file:': '發現 {{count}} 個 TOML 命令文件：',
   'Found {{count}} TOML command files:': '發現 {{count}} 個 TOML 命令文件：',
+  'Current tasks': '目前任務',
   '... and {{count}} more': '... 以及其他 {{count}} 個',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'TOML 格式已棄用。是否將它們遷移到 Markdown 格式？',

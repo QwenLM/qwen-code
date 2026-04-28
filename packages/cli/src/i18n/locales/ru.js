@@ -1538,6 +1538,7 @@ export default {
   'Found {{count}} TOML command file:': 'Найден {{count}} файл команд TOML:',
   'Found {{count}} TOML command files:':
     'Найдено {{count}} файлов команд TOML:',
+  'Current tasks': 'Текущие задачи',
   '... and {{count}} more': '... и ещё {{count}}',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'Формат TOML устарел. Хотите перенести их в формат Markdown?',

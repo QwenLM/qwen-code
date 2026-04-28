@@ -1689,6 +1689,7 @@ export default {
   'Command Format Migration': 'Command Format Migration',
   'Found {{count}} TOML command file:': 'Found {{count}} TOML command file:',
   'Found {{count}} TOML command files:': 'Found {{count}} TOML command files:',
+  'Current tasks': 'Current tasks',
   '... and {{count}} more': '... and {{count}} more',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'The TOML format is deprecated. Would you like to migrate them to Markdown format?',

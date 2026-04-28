@@ -282,6 +282,58 @@ describe('sticky todo layout helpers', () => {
     );
   });
 
+  it('keeps the layout key stable when only hidden todos change', () => {
+    const todos = Array.from({ length: 6 }, (_, index) => ({
+      id: `todo-${index + 1}`,
+      content: `Task ${index + 1}`,
+      status: 'pending' as const,
+    }));
+    const changedHiddenTodo = todos.map((todo, index) =>
+      index === 5 ? { ...todo, content: 'Changed hidden task' } : todo,
+    );
+
+    expect(getStickyTodosLayoutKey(todos, 64, 5)).toBe(
+      getStickyTodosLayoutKey(changedHiddenTodo, 64, 5),
+    );
+    expect(getStickyTodosLayoutKey(todos, 64, 5)).toBe(
+      getStickyTodosLayoutKey(
+        [
+          ...todos,
+          {
+            id: 'todo-7',
+            content: 'Additional hidden task',
+            status: 'pending' as const,
+          },
+        ],
+        64,
+        5,
+      ),
+    );
+  });
+
+  it('changes the layout key when the hidden item summary first appears', () => {
+    const visibleTodos = Array.from({ length: 5 }, (_, index) => ({
+      id: `todo-${index + 1}`,
+      content: `Task ${index + 1}`,
+      status: 'pending' as const,
+    }));
+
+    expect(getStickyTodosLayoutKey(visibleTodos, 64, 5)).not.toBe(
+      getStickyTodosLayoutKey(
+        [
+          ...visibleTodos,
+          {
+            id: 'todo-6',
+            content: 'First hidden task',
+            status: 'pending' as const,
+          },
+        ],
+        64,
+        5,
+      ),
+    );
+  });
+
   it('derives a bounded sticky todo item count from terminal height', () => {
     expect(getStickyTodoMaxVisibleItems(8)).toBe(1);
     expect(getStickyTodoMaxVisibleItems(15)).toBe(3);

@@ -23,6 +23,8 @@ type SnapshotSearchResult = TodoSnapshotSearchResult | undefined;
 // response can fill the viewport while still counting as one item, so the
 // sticky panel may stay hidden longer than strictly necessary. That is
 // preferable to duplicating a recently committed inline TodoWrite result.
+// On tall terminals, TodoWrite -> short text -> small tool call can still
+// leave the inline result visible when the sticky panel appears.
 const MIN_HISTORY_ITEMS_AFTER_TODO_BEFORE_STICKY = 2;
 export const STICKY_TODO_MAX_VISIBLE_ITEMS = 5;
 const STICKY_TODO_ROWS_PER_VISIBLE_ITEM = 5;
@@ -32,6 +34,17 @@ const STICKY_TODO_STATUS_PRIORITY: Record<TodoItem['status'], number> = {
   pending: 1,
   completed: 2,
 };
+
+function clampStickyTodoVisibleItems(value: number): number {
+  if (!Number.isFinite(value)) {
+    return STICKY_TODO_MAX_VISIBLE_ITEMS;
+  }
+
+  return Math.max(
+    1,
+    Math.min(STICKY_TODO_MAX_VISIBLE_ITEMS, Math.floor(value)),
+  );
+}
 
 function extractTodosFromResultDisplay(
   resultDisplay: unknown,
@@ -167,10 +180,15 @@ export function getStickyTodosLayoutKey(
     return 'null';
   }
 
+  const visibleTodoCount = clampStickyTodoVisibleItems(maxVisibleItems);
+  const visibleTodos = todos.slice(0, visibleTodoCount);
+  const hasHiddenTodos = todos.length > visibleTodos.length;
+
   return JSON.stringify({
     width,
-    maxVisibleItems,
-    todos: todos.map((todo) => [todo.id, todo.content]),
+    maxVisibleItems: visibleTodoCount,
+    hasHiddenTodos,
+    todos: visibleTodos.map((todo) => [todo.id, todo.content]),
   });
 }
 
@@ -179,11 +197,7 @@ export function getStickyTodoMaxVisibleItems(terminalHeight: number): number {
     return STICKY_TODO_MAX_VISIBLE_ITEMS;
   }
 
-  return Math.max(
-    1,
-    Math.min(
-      STICKY_TODO_MAX_VISIBLE_ITEMS,
-      Math.floor(terminalHeight / STICKY_TODO_ROWS_PER_VISIBLE_ITEM),
-    ),
+  return clampStickyTodoVisibleItems(
+    terminalHeight / STICKY_TODO_ROWS_PER_VISIBLE_ITEM,
   );
 }
