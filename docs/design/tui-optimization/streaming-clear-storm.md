@@ -7,8 +7,9 @@ targets the remaining classes that were still reproducible with local evidence:
 
 - long pending assistant/thought streaming output can grow taller than the
   terminal and make Ink clear the whole screen;
-- terminal resize can force a static-history remount and emit a full-screen
-  clear even when the user has not requested `/clear`;
+- terminal resize, view switches, compact-history replacement, rewind, auth
+  refresh, resume, and editor-close refresh can force a static-history remount
+  and emit a full-screen clear even when the user has not requested `/clear`;
 - narrow shell output can reflow without new visible bytes and be re-emitted as
   fresh live output;
 - expanded subagent detail can exceed its assigned tool-message budget.
@@ -37,13 +38,15 @@ That sequence clears the screen, resets scrollback, moves the cursor home, and
 then replays static output. The user-visible result is a banner/history replay
 while the model is still streaming.
 
-### 2. Resize-Triggered Static Refresh
+### 2. Static Refresh Full-Screen Clear
 
-`AppContainer` previously watched `terminalWidth` and called `refreshStatic()`
-after a short debounce. `refreshStatic()` intentionally writes
-`ansiEscapes.clearTerminal` before bumping the static history key. That was safe
-for explicit history replacement, but resize is not an explicit replacement
-operation. A simple narrow/wide resize produced full-screen clear sequences.
+`AppContainer` exposed a single `refreshStatic()` action that intentionally
+wrote `ansiEscapes.clearTerminal` before bumping the static history key. That
+action was used by resize, view switch, compact merge, compact-mode setting
+changes, rewind, auth refresh, resume, and editor-close refresh. Those are
+static-history replacement paths, but they are not user-requested terminal
+resets. They could therefore clear the whole screen and scrollback while the
+user was simply resizing, switching views, or expanding another TUI state.
 
 ### 3. Narrow Shell Reflow
 
@@ -58,6 +61,14 @@ output chunk.
 expanded modes previously had fixed item limits but did not derive their budget
 from the `availableHeight` assigned by `ToolGroupMessage`. In a small terminal,
 expanded detail could still occupy too much dynamic space.
+
+### 5. Exactly-Fit Tool Output
+
+`ToolMessage` pre-slices string results before they reach `MaxSizedBox`. The
+first implementation always reserved one row for the hidden-line banner. That
+was correct once content overflowed, but it treated exactly-fit output as
+overflow too. A six-line result in a six-line budget lost the first visible line
+and rendered a misleading hidden-line banner.
 
 ## Implementation
 
@@ -96,29 +107,36 @@ Completed assistant messages still render through the existing full
 long single-line outputs are sliced before Ink wraps them. `MaxSizedBox` still
 owns the final visible-window rendering and hidden-line marker.
 
+String output is checked for real overflow before reserving the hidden-line
+banner row. Exactly-fit results render all lines without a synthetic
+`... lines hidden ...` marker; overflowing results still reserve one banner row
+before reaching `MaxSizedBox`.
+
 `AgentExecutionDisplay` now derives prompt and tool-call limits from
 `availableHeight`. Default and verbose modes remain expandable, but verbose is
 bounded to the assigned dynamic budget instead of rendering an unbounded list.
 Tool descriptions and subagent result snippets are truncated by visual width,
 not raw UTF-16 length.
 
-### Resize Viewport Repaint
+### Static Refresh Viewport Repaint
 
-`AppContainer` no longer uses the scrollback-clearing `refreshStatic()` path
-solely because `terminalWidth` changed. A pure removal was not correct: it left
-old `<Static>` header output in the terminal, and narrow/wide reflow could turn
-the previous ASCII art into visible garbled blocks.
-
-The resize path now performs a targeted viewport repaint:
+`AppContainer` no longer makes `refreshStatic()` a scrollback-clearing reset.
+The action now performs a targeted viewport repaint:
 
 ```text
 cursorTo(0, 0) + eraseDown
 ```
 
-Then it remounts static history at the new width. Active PTYs are still resized
-so shell dimensions stay correct. Explicit replacement flows such as `/clear`,
-compact-mode replacement, rewind, and view switches still own their
-clear/remount behavior.
+Then it remounts static history at the current width. This applies to resize,
+view switches, compact-history replacement, compact-mode setting changes,
+rewind, auth refresh, resume, and editor-close refresh. Active PTYs are still
+resized so shell dimensions stay correct. Explicit `/clear` keeps its own
+terminal reset path through `clearScreen()` and passes only a remount callback
+to slash commands, so `/clear` does not emit a second `clearTerminal` write.
+
+This does not copy or fork Ink. It keeps the existing `<Static>` architecture,
+but prevents non-explicit refresh operations from clearing the entire terminal
+and scrollback.
 
 ### Shell Live Reflow Gate
 
@@ -301,21 +319,37 @@ resize-only soft-wrap change.
 | Shell live reflow | `origin/main` | failure-first reproduction |           2 |                  1 | reproduced |
 | Shell live reflow | fixed branch  | strict pass                |           1 |                  0 | passed     |
 
+Revalidated on April 28, 2026 after the exact-fit tool-output fix and the
+`refreshStatic()` semantic change from full-screen clear to viewport repaint.
+
+| Scenario                  | Branch       | Expected    | `clearTerminalPairCount` | `clearScreenCodeCount` | Frames | Result |
+| ------------------------- | ------------ | ----------- | -----------------------: | ---------------------: | -----: | ------ |
+| Streaming                 | fixed branch | strict pass |                        0 |                      0 |     93 | passed |
+| Narrow streaming + resize | fixed branch | strict pass |                        0 |                      0 |     93 | passed |
+| Resize/static refresh     | fixed branch | strict pass |                        0 |                      0 |     50 | passed |
+
+| Scenario          | Branch       | Expected    | Data events | Resize-only events | Result |
+| ----------------- | ------------ | ----------- | ----------: | -----------------: | ------ |
+| Shell live reflow | fixed branch | strict pass |           1 |                  0 | passed |
+
 ## Review Notes
 
 - The streaming fix is complete for the reproduced assistant/thought
   clear-storm class because pending dynamic height is bounded below the
   terminal viewport before Ink layout.
-- The resize fix replaces the automatic resize-only `clearTerminal` path with a
-  viewport repaint. This is necessary because removing resize remount entirely
-  leaves stale static ASCII art to be soft-wrapped by the terminal.
+- The static refresh fix replaces non-explicit `clearTerminal` refresh paths
+  with a viewport repaint. This covers resize, view switch, compact replacement,
+  rewind, auth/resume, and editor-close refresh while keeping `/clear` explicit.
+  A pure remount removal was not correct because stale `<Static>` output could
+  remain visible after width changes or view replacement.
 - The shell reflow fix must be validated with shell live-output events, not the
   assistant streaming clear-storm GIF. The latter proves dynamic-height
   bounding and raw clear suppression; the former proves narrow shell duplicate
   output is no longer emitted.
 - Tool and subagent detail paths are bounded by visual height/width, including
-  single long lines, so they do not depend on explicit newline count.
+  single long lines, so they do not depend on explicit newline count. Exactly-fit
+  string output is not pre-sliced into a false hidden-line state.
 - Copying a heavily modified Ink fork is not the preferred fix for these
   reproductions. The verified root causes are unbounded dynamic children and a
-  resize-only static refresh; local bounding plus targeted viewport repaint is
+  full-screen static refresh; local bounding plus targeted viewport repaint is
   smaller, testable, and easier to keep aligned with upstream Ink.

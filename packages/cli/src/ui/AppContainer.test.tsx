@@ -431,7 +431,7 @@ describe('AppContainer State Management', () => {
       }).not.toThrow();
     });
 
-    it('refreshStatic clears the terminal before remounting history', () => {
+    it('refreshStatic repaints the viewport without clearing scrollback', () => {
       render(
         <AppContainer
           config={mockConfig}
@@ -443,7 +443,12 @@ describe('AppContainer State Management', () => {
 
       capturedUIActions.refreshStatic();
 
-      expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
+      expect(mockStdout.write).toHaveBeenCalledWith(
+        `${ansiEscapes.cursorTo(0, 0)}${ansiEscapes.eraseDown}`,
+      );
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearTerminal,
+      );
     });
 
     it('does not clear scrollback just because width changed', () => {

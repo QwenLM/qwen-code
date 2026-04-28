@@ -489,11 +489,6 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   const refreshStatic = useCallback(() => {
-    stdout.write(ansiEscapes.clearTerminal);
-    remountStaticHistory();
-  }, [remountStaticHistory, stdout]);
-
-  const repaintStaticViewport = useCallback(() => {
     stdout.write(`${ansiEscapes.cursorTo(0, 0)}${ansiEscapes.eraseDown}`);
     remountStaticHistory();
   }, [remountStaticHistory, stdout]);
@@ -1633,8 +1628,8 @@ export const AppContainer = (props: AppContainerProps) => {
     }
 
     previousTerminalWidthRef.current = terminalWidth;
-    repaintStaticViewport();
-  }, [terminalWidth, repaintStaticViewport]);
+    refreshStatic();
+  }, [terminalWidth, refreshStatic]);
 
   useEffect(() => {
     if (ideNeedsRestart) {

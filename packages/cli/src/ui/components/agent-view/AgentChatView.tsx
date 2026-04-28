@@ -218,9 +218,9 @@ export const AgentChatView = ({ agentId }: AgentChatViewProps) => {
   return (
     <Box flexDirection="column">
       {/* Committed message history.
-          key includes historyRemountKey: when refreshStatic() clears the
-          terminal it bumps the key, forcing Static to remount and re-emit
-          all items on the cleared screen. */}
+          key includes historyRemountKey: when refreshStatic() repaints the
+          viewport it bumps the key, forcing Static to remount and re-emit
+          all items on the refreshed screen. */}
       <Static
         key={`agent-${agentId}-${historyRemountKey}`}
         items={[

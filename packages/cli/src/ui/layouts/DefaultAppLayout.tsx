@@ -36,10 +36,10 @@ export const DefaultAppLayout: React.FC = () => {
     !uiState.isFeedbackDialogOpen &&
     uiState.streamingState !== StreamingState.WaitingForConfirmation;
 
-  // Clear terminal on view switch so previous view's <Static> output
-  // is removed. refreshStatic clears the terminal and bumps the
-  // historyRemountKey so MainContent's <Static> re-renders all items
-  // when switching back.
+  // Repaint the visible viewport on view switch so previous view's <Static>
+  // output is removed without clearing scrollback. refreshStatic bumps the
+  // historyRemountKey so MainContent's <Static> re-renders all items when
+  // switching back.
   const prevViewRef = useRef(activeView);
   useEffect(() => {
     if (prevViewRef.current !== activeView) {

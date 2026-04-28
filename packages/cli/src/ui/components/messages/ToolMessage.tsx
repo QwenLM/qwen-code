@@ -54,6 +54,21 @@ function sliceTextForMaxHeight(
   maxHeight: number | undefined,
   maxWidth: number,
 ): { text: string; hiddenLinesCount: number } {
+  const uncappedOverflowCheck = sliceTextByVisualHeight(
+    text,
+    maxHeight,
+    maxWidth,
+    {
+      minHeight: MINIMUM_MAX_HEIGHT,
+      reservedRows: 0,
+      overflowDirection: 'top',
+    },
+  );
+
+  if (uncappedOverflowCheck.hiddenLinesCount === 0) {
+    return uncappedOverflowCheck;
+  }
+
   return sliceTextByVisualHeight(text, maxHeight, maxWidth, {
     minHeight: MINIMUM_MAX_HEIGHT,
     reservedRows: 1,

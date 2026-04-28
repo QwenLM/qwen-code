@@ -59,8 +59,8 @@ export const MainContent = () => {
   // buffer, it cannot be replaced. In compact mode, when a new tool_group is
   // merged into a previous one, the merged result has FEWER items than the
   // raw history. Static would not re-render the older items even though their
-  // content changed, so we explicitly call refreshStatic() to clear the
-  // terminal and re-render the merged view.
+  // content changed, so we explicitly call refreshStatic() to repaint the
+  // visible viewport and re-render the merged view.
   //
   // Detection: if history length grew but mergedHistory length did NOT grow
   // proportionally (i.e., a merge consolidated items), trigger a refresh.
