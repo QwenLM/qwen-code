@@ -12,6 +12,7 @@ import type { ToolResult, ToolResultDisplay } from './tools.js';
 import type { Config } from '../config/config.js';
 import {
   assertProjectSkillPath,
+  assertRealProjectSkillPath,
   getProjectSkillsRoot,
   sanitizeSkillName,
   SKILL_FILE_NAME,
@@ -147,6 +148,10 @@ class SkillManageToolInvocation extends BaseToolInvocation<
     try {
       const targetPath = this.resolveTargetPath();
       assertProjectSkillPath(targetPath, this.config.getProjectRoot());
+      await assertRealProjectSkillPath(
+        targetPath,
+        this.config.getProjectRoot(),
+      );
 
       switch (this.params.action) {
         case 'create':
