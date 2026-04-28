@@ -55,17 +55,18 @@ const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
  * not sleep inside pipelines, subshells, or scripts (those are fine).
  */
 export function detectBlockedSleepPattern(command: string): string | null {
-  const parts = splitCommands(command);
-  if (parts.length === 0) return null;
-  const first = (parts[0] ?? '').trim();
-  // Bare `sleep N` as the first subcommand.
-  // Float durations (sleep 0.5) are allowed — those are legit pacing.
-  const m = /^sleep\s+(\d+)\s*$/.exec(first);
+  const trimmed = command.trim();
+  // Match `sleep N` at the very start. Only integer durations >= 2.
+  // After the number: end of string, or a sequential separator (&&, ||, ;, &, newline).
+  // Pipes (|) are NOT matched — those are legitimate pipelines.
+  const m = /^sleep\s+(\d+)(?:\s*$|\s*(&&|\|\||[;&\n])\s*([\s\S]*))$/.exec(
+    trimmed,
+  );
   if (!m) return null;
   const secs = parseInt(m[1]!, 10);
   if (secs < 2) return null;
 
-  const rest = parts.slice(1).join(' ').trim();
+  const rest = (m[3] ?? '').trim();
   return rest
     ? `sleep ${secs} followed by: ${rest}`
     : `standalone sleep ${secs}`;

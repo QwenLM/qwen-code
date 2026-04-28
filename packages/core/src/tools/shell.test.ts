@@ -1333,6 +1333,15 @@ describe('detectBlockedSleepPattern', () => {
     expect(detectBlockedSleepPattern('npm run dev')).toBeNull();
   });
 
+  it('allows sleep in pipelines', () => {
+    expect(detectBlockedSleepPattern('sleep 5 | cat')).toBeNull();
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 10 | while read line; do echo $line; done',
+      ),
+    ).toBeNull();
+  });
+
   it('returns null for empty command', () => {
     expect(detectBlockedSleepPattern('')).toBeNull();
   });

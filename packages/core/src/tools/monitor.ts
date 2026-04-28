@@ -248,23 +248,27 @@ class MonitorToolInvocation extends BaseToolInvocation<
       }
     });
 
-    // Wire abort → kill process group
+    // Wire abort → kill process (tree)
     const abortHandler = (): void => {
       if (!exited && child.pid) {
-        try {
-          process.kill(-child.pid, 'SIGTERM');
-        } catch {
-          // process may already be dead
-        }
-        setTimeout(() => {
-          if (!exited && child.pid) {
-            try {
-              process.kill(-child.pid, 'SIGKILL');
-            } catch {
-              // ignore
-            }
+        if (process.platform === 'win32') {
+          spawn('taskkill', ['/pid', child.pid.toString(), '/f', '/t']);
+        } else {
+          try {
+            process.kill(-child.pid, 'SIGTERM');
+          } catch {
+            // process may already be dead
           }
-        }, 200);
+          setTimeout(() => {
+            if (!exited && child.pid) {
+              try {
+                process.kill(-child.pid, 'SIGKILL');
+              } catch {
+                // ignore
+              }
+            }
+          }, 200);
+        }
       }
     };
     entryAc.signal.addEventListener('abort', abortHandler, { once: true });
