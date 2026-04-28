@@ -98,6 +98,17 @@ export function resolveCliGenerationConfig(
   // Find modelProvider from settings.modelProviders based on authType and model
   let modelProvider: ProviderModelConfig | undefined;
   let filteredEnv = env;
+
+  // Prevent env vars from overriding a higher-priority model selection.
+  // When the model was resolved from argv or settings, strip OPENAI_MODEL
+  // and QWEN_MODEL so the core resolver cannot use them to override
+  // the user's explicit choice.
+  if (authType === AuthType.USE_OPENAI && (argv.model || settings.model?.name)) {
+    filteredEnv = { ...env };
+    delete filteredEnv['OPENAI_MODEL'];
+    delete filteredEnv['QWEN_MODEL'];
+  }
+
   if (authType && settings.modelProviders) {
     const providers = settings.modelProviders[authType];
     if (providers && Array.isArray(providers)) {
@@ -120,16 +131,6 @@ export function resolveCliGenerationConfig(
         modelProvider = providers.find((p) => p.id === requestedModel) as
           | ProviderModelConfig
           | undefined;
-
-        // Prevent env vars from overriding a higher-priority model selection.
-        // When the model was resolved from argv or settings, strip OPENAI_MODEL
-        // and QWEN_MODEL so the core resolver cannot use them to override
-        // the user's explicit choice.
-        if (argv.model || settings.model?.name) {
-          filteredEnv = { ...env };
-          delete filteredEnv['OPENAI_MODEL'];
-          delete filteredEnv['QWEN_MODEL'];
-        }
       }
     }
   }

@@ -913,7 +913,7 @@ describe('modelConfigUtils', () => {
       );
     });
 
-    it('should respect precedence: argv.model > OPENAI_MODEL > QWEN_MODEL > settings.model.name', () => {
+    it('should respect precedence: argv.model > settings.model.name > OPENAI_MODEL > QWEN_MODEL', () => {
       const mockSettings = makeMockSettings({
         model: { name: 'settings-model' },
         modelProviders: {

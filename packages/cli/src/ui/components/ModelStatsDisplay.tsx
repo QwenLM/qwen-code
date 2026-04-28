@@ -104,7 +104,7 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
         inputTokens: metrics.tokens.prompt,
         outputTokens: metrics.tokens.candidates + metrics.tokens.thoughts,
         pricing: modelPricing?.[getModelName(key)],
-      }) != null,
+      }) != null || metrics.tokens.thoughts > 0,
   );
 
   return (
