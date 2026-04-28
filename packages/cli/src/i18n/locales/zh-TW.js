@@ -1141,6 +1141,8 @@ export default {
   'Alibaba Cloud Coding Plan': '阿里雲百鍊 Coding Plan',
   'Bring your own API key': '使用自己的 API 密鑰',
   'API-KEY': 'API-KEY',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    '基於瀏覽器的第三方提供商認證（例如 OpenRouter、ModelScope）',
   'Use coding plan credentials or your own api-keys/providers.':
     '使用 Coding Plan 憑證或您自己的 API 密鑰/提供商。',
   OpenAI: 'OpenAI',

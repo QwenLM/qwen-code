@@ -16,11 +16,13 @@ import { PluginChoicePrompt } from './PluginChoicePrompt.js';
 import { ThemeDialog } from './ThemeDialog.js';
 import { SettingsDialog } from './SettingsDialog.js';
 import { QwenOAuthProgress } from './QwenOAuthProgress.js';
+import { ExternalAuthProgress } from './ExternalAuthProgress.js';
 import { AuthDialog } from '../auth/AuthDialog.js';
 import { EditorSettingsDialog } from './EditorSettingsDialog.js';
 import { TrustDialog } from './TrustDialog.js';
 import { PermissionsDialog } from './PermissionsDialog.js';
 import { ModelDialog } from './ModelDialog.js';
+import { ManageModelsDialog } from './ManageModelsDialog.js';
 import { ArenaStartDialog } from './arena/ArenaStartDialog.js';
 import { ArenaSelectDialog } from './arena/ArenaSelectDialog.js';
 import { ArenaStopDialog } from './arena/ArenaStopDialog.js';
@@ -45,6 +47,8 @@ import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
 import { SessionPicker } from './SessionPicker.js';
 import { RewindSelector } from './RewindSelector.js';
 import { MemoryDialog } from './MemoryDialog.js';
+import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.js';
+import { useBackgroundTaskViewState } from '../contexts/BackgroundTaskViewContext.js';
 import { t } from '../../i18n/index.js';
 
 interface DialogManagerProps {
@@ -62,6 +66,7 @@ export const DialogManager = ({
 
   const uiState = useUIState();
   const uiActions = useUIActions();
+  const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
   const { constrainHeight, terminalHeight, staticExtraHeight, mainAreaWidth } =
     uiState;
 
@@ -213,6 +218,14 @@ export const DialogManager = ({
       />
     );
   }
+  if (uiState.isManageModelsDialogOpen) {
+    return (
+      <ManageModelsDialog
+        config={config}
+        onClose={uiActions.closeManageModelsDialog}
+      />
+    );
+  }
   if (uiState.isSettingsDialogOpen) {
     return (
       <Box flexDirection="column">
@@ -310,6 +323,23 @@ export const DialogManager = ({
   }
 
   if (uiState.isAuthenticating) {
+    if (
+      uiState.pendingAuthType === AuthType.USE_OPENAI &&
+      uiState.externalAuthState
+    ) {
+      return (
+        <ExternalAuthProgress
+          title={uiState.externalAuthState.title}
+          message={uiState.externalAuthState.message}
+          detail={uiState.externalAuthState.detail}
+          onCancel={() => {
+            uiActions.cancelAuthentication();
+            uiActions.setAuthState(AuthState.Updating);
+          }}
+        />
+      );
+    }
+
     // OpenAI authentication now handled through AuthDialog with coding-plan/custom sub-modes
     // Qwen OAuth remains as a separate flow
     if (uiState.pendingAuthType === AuthType.QWEN_OAUTH) {
@@ -405,6 +435,20 @@ export const DialogManager = ({
         history={uiState.history}
         onRewind={uiActions.handleRewindConfirm}
         onCancel={uiActions.closeRewindSelector}
+      />
+    );
+  }
+
+  // Background tasks dialog — lowest priority so other dialogs
+  // (permissions, trust prompts, auth, etc.) always take precedence. The
+  // dialog is part of the shared dialogsVisible machinery (see
+  // AppContainer) so its visibility mutes the composer and the global
+  // Ctrl+C / Esc handlers route through `closeAnyOpenDialog`.
+  if (bgTasksDialogOpen) {
+    return (
+      <BackgroundTasksDialog
+        availableTerminalHeight={terminalHeight - staticExtraHeight}
+        terminalWidth={mainAreaWidth}
       />
     );
   }
