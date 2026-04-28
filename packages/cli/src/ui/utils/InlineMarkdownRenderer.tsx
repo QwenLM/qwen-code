@@ -9,6 +9,11 @@ import { Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import stringWidth from 'string-width';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  renderInlineMathInText,
+  renderTerminalMathInline,
+  splitInlineMathSegments,
+} from './TerminalMathRenderer.js';
 
 // Constants for Markdown parsing
 const BOLD_MARKER_LENGTH = 2; // For "**"
@@ -29,9 +34,44 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
   text,
   textColor = theme.text.primary,
 }) => {
+  const mathSegments = splitInlineMathSegments(text);
+  if (mathSegments.some((segment) => segment.type === 'math')) {
+    return (
+      <>
+        {mathSegments.map((segment, index) =>
+          segment.type === 'math' ? (
+            <Text key={`math-${index}`} color={theme.text.code}>
+              {renderTerminalMathInline(segment.text)}
+            </Text>
+          ) : (
+            <React.Fragment key={`text-${index}`}>
+              {renderInlineMarkdownNodes(
+                segment.text,
+                textColor,
+                `seg-${index}`,
+              )}
+            </React.Fragment>
+          ),
+        )}
+      </>
+    );
+  }
+
+  return <>{renderInlineMarkdownNodes(text, textColor, 'root')}</>;
+};
+
+function renderInlineMarkdownNodes(
+  text: string,
+  textColor: string,
+  keyPrefix: string,
+): React.ReactNode[] {
   // Early return for plain text without markdown or URLs
   if (!/[*_~`<[https?:]/.test(text)) {
-    return <Text color={textColor}>{text}</Text>;
+    return [
+      <Text key={`${keyPrefix}-plain`} color={textColor}>
+        {text}
+      </Text>,
+    ];
   }
 
   const nodes: React.ReactNode[] = [];
@@ -43,7 +83,7 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
   while ((match = inlineRegex.exec(text)) !== null) {
     if (match.index > lastIndex) {
       nodes.push(
-        <Text key={`t-${lastIndex}`}>
+        <Text key={`${keyPrefix}-t-${lastIndex}`}>
           {text.slice(lastIndex, match.index)}
         </Text>,
       );
@@ -51,7 +91,7 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
 
     const fullMatch = match[0];
     let renderedNode: React.ReactNode = null;
-    const key = `m-${match.index}`;
+    const key = `${keyPrefix}-m-${match.index}`;
 
     try {
       if (
@@ -155,11 +195,13 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
   }
 
   if (lastIndex < text.length) {
-    nodes.push(<Text key={`t-${lastIndex}`}>{text.slice(lastIndex)}</Text>);
+    nodes.push(
+      <Text key={`${keyPrefix}-t-${lastIndex}`}>{text.slice(lastIndex)}</Text>,
+    );
   }
 
-  return <>{nodes.filter((node) => node !== null)}</>;
-};
+  return nodes.filter((node) => node !== null);
+}
 
 export const RenderInline = React.memo(RenderInlineInternal);
 
@@ -168,7 +210,7 @@ export const RenderInline = React.memo(RenderInlineInternal);
  * This is useful for calculating column widths in tables
  */
 export const getPlainTextLength = (text: string): number => {
-  const cleanText = text
+  const cleanText = renderInlineMathInText(text)
     .replace(/\*\*(.*?)\*\*/g, '$1')
     .replace(/\*(.*?)\*/g, '$1')
     .replace(/_(.*?)_/g, '$1')

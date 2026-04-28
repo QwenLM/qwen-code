@@ -10,6 +10,10 @@ import wrapAnsi from 'wrap-ansi';
 import stripAnsi from 'strip-ansi';
 import { getCachedStringWidth } from './textUtils.js';
 import { theme } from '../semantic-colors.js';
+import {
+  renderTerminalMathInline,
+  splitInlineMathSegments,
+} from './TerminalMathRenderer.js';
 
 /** Minimum column width to prevent degenerate layouts */
 const MIN_COLUMN_WIDTH = 3;
@@ -107,6 +111,17 @@ const ansiFmt = {
  * Mirrors RenderInline's behavior but outputs strings instead of React nodes.
  */
 function renderMarkdownToAnsi(text: string): string {
+  const mathSegments = splitInlineMathSegments(text);
+  if (mathSegments.some((segment) => segment.type === 'math')) {
+    return mathSegments
+      .map((segment) =>
+        segment.type === 'math'
+          ? applyColor(renderTerminalMathInline(segment.text), theme.text.code)
+          : renderMarkdownToAnsi(segment.text),
+      )
+      .join('');
+  }
+
   const inlineRegex =
     /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|<u>.*?<\/u>|https?:\/\/\S+)/g;
 

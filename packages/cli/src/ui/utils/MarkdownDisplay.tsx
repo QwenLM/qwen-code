@@ -11,6 +11,7 @@ import { colorizeCode } from './CodeColorizer.js';
 import { TableRenderer, type ColumnAlign } from './TableRenderer.js';
 import { RenderInline } from './InlineMarkdownRenderer.js';
 import { useSettings } from '../contexts/SettingsContext.js';
+import { renderTerminalMathBlock } from './TerminalMathRenderer.js';
 
 interface MarkdownDisplayProps {
   text: string;
@@ -45,6 +46,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   const tableRowRegex = /^\s*\|(.+)\|\s*$/;
   const tableSeparatorRegex =
     /^(?=.*\|)\s*\|?\s*(:?-+:?)\s*(\|\s*(:?-+:?)\s*)*\|?\s*$/;
+  const mathBlockStartRegex = /^ *(\$\$|\\\[)(.*)$/;
 
   /** Parse column alignments from a markdown table separator like `|:---|:---:|---:|` */
   const parseTableAligns = (line: string): ColumnAlign[] =>
@@ -70,6 +72,9 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   let tableRows: string[][] = [];
   let tableHeaders: string[] = [];
   let tableAligns: ColumnAlign[] = [];
+  let inMathBlock = false;
+  let mathBlockContent: string[] = [];
+  let mathBlockClose = '$$';
 
   function addContentBlock(block: React.ReactNode) {
     if (block) {
@@ -77,6 +82,36 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       lastLineEmpty = false;
     }
   }
+
+  const getMathBlockStart = (
+    line: string,
+  ): { content: string; close: string; isClosed: boolean } | null => {
+    const match = line.match(mathBlockStartRegex);
+    if (!match) return null;
+
+    const delimiter = match[1];
+    const close = delimiter === '$$' ? '$$' : '\\]';
+    const rest = match[2] ?? '';
+    const closeIndex = rest.lastIndexOf(close);
+    const isClosed =
+      closeIndex >= 0 && rest.slice(closeIndex + close.length).trim() === '';
+
+    return {
+      content: isClosed ? rest.slice(0, closeIndex).trim() : rest.trimStart(),
+      close,
+      isClosed,
+    };
+  };
+
+  const addTextLine = (line: string, key: string) => {
+    addContentBlock(
+      <Box key={key}>
+        <Text wrap="wrap">
+          <RenderInline text={line} textColor={textColor} />
+        </Text>
+      </Box>,
+    );
+  };
 
   lines.forEach((line, index) => {
     const key = `line-${index}`;
@@ -108,6 +143,34 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       return;
     }
 
+    if (inMathBlock) {
+      const closeIndex = line.indexOf(mathBlockClose);
+      if (closeIndex >= 0) {
+        const beforeClose = line.slice(0, closeIndex);
+        if (beforeClose.trim().length > 0) {
+          mathBlockContent.push(beforeClose);
+        }
+        addContentBlock(
+          <RenderMathBlock
+            key={key}
+            content={mathBlockContent}
+            contentWidth={contentWidth}
+            textColor={textColor}
+          />,
+        );
+        inMathBlock = false;
+        mathBlockContent = [];
+
+        const trailing = line.slice(closeIndex + mathBlockClose.length).trim();
+        if (trailing.length > 0) {
+          addTextLine(trailing, `${key}-trailing`);
+        }
+      } else {
+        mathBlockContent.push(line);
+      }
+      return;
+    }
+
     const codeFenceMatch = line.match(codeFenceRegex);
     const headerMatch = line.match(headerRegex);
     const ulMatch = line.match(ulItemRegex);
@@ -120,33 +183,140 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       inCodeBlock = true;
       codeBlockFence = codeFenceMatch[1];
       codeBlockLang = codeFenceMatch[2] || null;
-    } else if (tableRowMatch && !inTable) {
-      // Potential table start - check if next line is separator with matching column count
-      const potentialHeaders = tableRowMatch[1]
-        .split(/(?<!\\)\|/)
-        .map((cell) => cell.trim().replaceAll('\\|', '|'));
-      const nextLine = index + 1 < lines.length ? lines[index + 1]! : '';
-      const sepMatch = nextLine.match(tableSeparatorRegex);
-      const sepColCount = sepMatch
-        ? nextLine
-            .split(/(?<!\\)\|/)
-            .map((c) => c.trim())
-            .filter((c) => c.length > 0).length
-        : 0;
+    } else if (!inTable) {
+      const mathBlockStart = getMathBlockStart(line);
+      if (mathBlockStart) {
+        if (mathBlockStart.isClosed) {
+          addContentBlock(
+            <RenderMathBlock
+              key={key}
+              content={[mathBlockStart.content]}
+              contentWidth={contentWidth}
+              textColor={textColor}
+            />,
+          );
+        } else {
+          inMathBlock = true;
+          mathBlockClose = mathBlockStart.close;
+          mathBlockContent = mathBlockStart.content
+            ? [mathBlockStart.content]
+            : [];
+        }
+      } else if (tableRowMatch && !inTable) {
+        // Potential table start - check if next line is separator with matching column count
+        const potentialHeaders = tableRowMatch[1]
+          .split(/(?<!\\)\|/)
+          .map((cell) => cell.trim().replaceAll('\\|', '|'));
+        const nextLine = index + 1 < lines.length ? lines[index + 1]! : '';
+        const sepMatch = nextLine.match(tableSeparatorRegex);
+        const sepColCount = sepMatch
+          ? nextLine
+              .split(/(?<!\\)\|/)
+              .map((c) => c.trim())
+              .filter((c) => c.length > 0).length
+          : 0;
 
-      if (sepMatch && sepColCount === potentialHeaders.length) {
-        inTable = true;
-        tableHeaders = potentialHeaders;
-        tableRows = [];
-      } else {
-        // Not a table, treat as regular text
+        if (sepMatch && sepColCount === potentialHeaders.length) {
+          inTable = true;
+          tableHeaders = potentialHeaders;
+          tableRows = [];
+        } else {
+          // Not a table, treat as regular text
+          addTextLine(line, key);
+        }
+      } else if (hrMatch) {
         addContentBlock(
           <Box key={key}>
-            <Text wrap="wrap">
-              <RenderInline text={line} textColor={textColor} />
-            </Text>
+            <Text dimColor>---</Text>
           </Box>,
         );
+      } else if (headerMatch) {
+        const level = headerMatch[1].length;
+        const headerText = headerMatch[2];
+        let headerNode: React.ReactNode = null;
+        switch (level) {
+          case 1:
+            headerNode = (
+              <Text bold color={textColor}>
+                <RenderInline text={headerText} textColor={textColor} />
+              </Text>
+            );
+            break;
+          case 2:
+            headerNode = (
+              <Text bold color={textColor}>
+                <RenderInline text={headerText} textColor={textColor} />
+              </Text>
+            );
+            break;
+          case 3:
+            headerNode = (
+              <Text bold color={textColor}>
+                <RenderInline text={headerText} textColor={textColor} />
+              </Text>
+            );
+            break;
+          case 4:
+            headerNode = (
+              <Text italic color={textColor}>
+                <RenderInline text={headerText} textColor={textColor} />
+              </Text>
+            );
+            break;
+          default:
+            headerNode = (
+              <Text color={textColor}>
+                <RenderInline text={headerText} textColor={textColor} />
+              </Text>
+            );
+            break;
+        }
+        if (headerNode) addContentBlock(<Box key={key}>{headerNode}</Box>);
+      } else if (ulMatch) {
+        const leadingWhitespace = ulMatch[1];
+        const marker = ulMatch[2];
+        const itemText = ulMatch[3];
+        addContentBlock(
+          <RenderListItem
+            key={key}
+            itemText={itemText}
+            type="ul"
+            marker={marker}
+            leadingWhitespace={leadingWhitespace}
+            textColor={textColor}
+          />,
+        );
+      } else if (olMatch) {
+        const leadingWhitespace = olMatch[1];
+        const marker = olMatch[2];
+        const itemText = olMatch[3];
+        addContentBlock(
+          <RenderListItem
+            key={key}
+            itemText={itemText}
+            type="ol"
+            marker={marker}
+            leadingWhitespace={leadingWhitespace}
+            textColor={textColor}
+          />,
+        );
+      } else {
+        if (line.trim().length === 0 && !inCodeBlock) {
+          if (!lastLineEmpty) {
+            contentBlocks.push(
+              <Box key={`spacer-${index}`} height={EMPTY_LINE_HEIGHT} />,
+            );
+            lastLineEmpty = true;
+          }
+        } else {
+          addContentBlock(
+            <Box key={key}>
+              <Text wrap="wrap" color={textColor}>
+                <RenderInline text={line} textColor={textColor} />
+              </Text>
+            </Box>,
+          );
+        }
       }
     } else if (inTable && tableSeparatorMatch) {
       // Parse alignment from separator line
@@ -184,106 +354,27 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
 
       // Process current line as normal
       if (line.trim().length > 0) {
-        addContentBlock(
-          <Box key={key}>
-            <Text wrap="wrap">
-              <RenderInline text={line} textColor={textColor} />
-            </Text>
-          </Box>,
-        );
-      }
-    } else if (hrMatch) {
-      addContentBlock(
-        <Box key={key}>
-          <Text dimColor>---</Text>
-        </Box>,
-      );
-    } else if (headerMatch) {
-      const level = headerMatch[1].length;
-      const headerText = headerMatch[2];
-      let headerNode: React.ReactNode = null;
-      switch (level) {
-        case 1:
-          headerNode = (
-            <Text bold color={textColor}>
-              <RenderInline text={headerText} textColor={textColor} />
-            </Text>
-          );
-          break;
-        case 2:
-          headerNode = (
-            <Text bold color={textColor}>
-              <RenderInline text={headerText} textColor={textColor} />
-            </Text>
-          );
-          break;
-        case 3:
-          headerNode = (
-            <Text bold color={textColor}>
-              <RenderInline text={headerText} textColor={textColor} />
-            </Text>
-          );
-          break;
-        case 4:
-          headerNode = (
-            <Text italic color={textColor}>
-              <RenderInline text={headerText} textColor={textColor} />
-            </Text>
-          );
-          break;
-        default:
-          headerNode = (
-            <Text color={textColor}>
-              <RenderInline text={headerText} textColor={textColor} />
-            </Text>
-          );
-          break;
-      }
-      if (headerNode) addContentBlock(<Box key={key}>{headerNode}</Box>);
-    } else if (ulMatch) {
-      const leadingWhitespace = ulMatch[1];
-      const marker = ulMatch[2];
-      const itemText = ulMatch[3];
-      addContentBlock(
-        <RenderListItem
-          key={key}
-          itemText={itemText}
-          type="ul"
-          marker={marker}
-          leadingWhitespace={leadingWhitespace}
-          textColor={textColor}
-        />,
-      );
-    } else if (olMatch) {
-      const leadingWhitespace = olMatch[1];
-      const marker = olMatch[2];
-      const itemText = olMatch[3];
-      addContentBlock(
-        <RenderListItem
-          key={key}
-          itemText={itemText}
-          type="ol"
-          marker={marker}
-          leadingWhitespace={leadingWhitespace}
-          textColor={textColor}
-        />,
-      );
-    } else {
-      if (line.trim().length === 0 && !inCodeBlock) {
-        if (!lastLineEmpty) {
-          contentBlocks.push(
-            <Box key={`spacer-${index}`} height={EMPTY_LINE_HEIGHT} />,
-          );
-          lastLineEmpty = true;
+        const mathBlockStart = getMathBlockStart(line);
+        if (mathBlockStart) {
+          if (mathBlockStart.isClosed) {
+            addContentBlock(
+              <RenderMathBlock
+                key={key}
+                content={[mathBlockStart.content]}
+                contentWidth={contentWidth}
+                textColor={textColor}
+              />,
+            );
+          } else {
+            inMathBlock = true;
+            mathBlockClose = mathBlockStart.close;
+            mathBlockContent = mathBlockStart.content
+              ? [mathBlockStart.content]
+              : [];
+          }
+        } else {
+          addTextLine(line, key);
         }
-      } else {
-        addContentBlock(
-          <Box key={key}>
-            <Text wrap="wrap" color={textColor}>
-              <RenderInline text={line} textColor={textColor} />
-            </Text>
-          </Box>,
-        );
       }
     }
   });
@@ -297,6 +388,17 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth}
+      />,
+    );
+  }
+
+  if (inMathBlock) {
+    addContentBlock(
+      <RenderMathBlock
+        key="math-eof"
+        content={mathBlockContent}
+        contentWidth={contentWidth}
+        textColor={textColor}
       />,
     );
   }
@@ -396,6 +498,37 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
 };
 
 const RenderCodeBlock = React.memo(RenderCodeBlockInternal);
+
+interface RenderMathBlockProps {
+  content: string[];
+  contentWidth: number;
+  textColor?: string;
+}
+
+const RenderMathBlockInternal: React.FC<RenderMathBlockProps> = ({
+  content,
+  contentWidth,
+  textColor = theme.text.primary,
+}) => {
+  const renderedLines = renderTerminalMathBlock(content.join('\n'));
+
+  return (
+    <Box
+      paddingLeft={CODE_BLOCK_PREFIX_PADDING}
+      flexDirection="column"
+      width={contentWidth}
+      flexShrink={0}
+    >
+      {renderedLines.map((line, index) => (
+        <Text key={`math-${index}`} color={textColor}>
+          {line}
+        </Text>
+      ))}
+    </Box>
+  );
+};
+
+const RenderMathBlock = React.memo(RenderMathBlockInternal);
 
 interface RenderListItemProps {
   itemText: string;
