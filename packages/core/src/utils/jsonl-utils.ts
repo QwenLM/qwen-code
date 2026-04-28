@@ -109,9 +109,10 @@ export function _recoverObjectsFromLine<T = unknown>(line: string): T[] {
  * Parses a single physical JSONL line tolerantly. Returns the parsed objects:
  * one if the line is well-formed, multiple if it is `}{`-glued from an
  * interrupted append (the #3606 corruption shape), zero if nothing can be
- * recovered. Mirrors the silent skip in `countSessionMessages`.
+ * recovered. Use this from any streaming reader that walks JSONL line-by-line
+ * and wants the same recovery semantics as `read()` / `readLines()`.
  */
-function parseLineTolerant<T>(line: string, filePath: string): T[] {
+export function parseLineTolerant<T>(line: string, filePath: string): T[] {
   try {
     return [JSON.parse(line) as T];
   } catch {

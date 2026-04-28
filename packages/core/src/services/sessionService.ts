@@ -310,6 +310,10 @@ export class SessionService {
   /**
    * Counts unique message UUIDs in a session file.
    * This gives the number of logical messages in the session.
+   *
+   * Streams the file and routes each physical line through
+   * `jsonl.parseLineTolerant` so a `}{`-glued line (#3606 corruption shape)
+   * still contributes both records, instead of being silently dropped.
    */
   private async countSessionMessages(filePath: string): Promise<number> {
     const uniqueUuids = new Set<string>();
@@ -323,14 +327,13 @@ export class SessionService {
       for await (const line of rl) {
         const trimmed = line.trim();
         if (!trimmed) continue;
-        try {
-          const record = JSON.parse(trimmed) as ChatRecord;
+        for (const record of jsonl.parseLineTolerant<ChatRecord>(
+          trimmed,
+          filePath,
+        )) {
           if (record.type === 'user' || record.type === 'assistant') {
             uniqueUuids.add(record.uuid);
           }
-        } catch {
-          // Ignore malformed lines
-          continue;
         }
       }
 
