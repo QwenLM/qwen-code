@@ -152,6 +152,26 @@ describe('BundledSkillLoader', () => {
     expect(commands.map((c) => c.name)).toEqual(['review', 'deploy']);
   });
 
+  it('should load simplify bundled skill like other slash commands', async () => {
+    const skills = [
+      makeSkill({
+        name: 'simplify',
+        description: 'Simplify recent changes',
+        filePath: '/bundled/simplify/SKILL.md',
+        body: 'Simplify body',
+      }),
+    ];
+    mockSkillManager.listSkills.mockResolvedValue(skills);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0].name).toBe('simplify');
+    expect(commands[0].description).toBe('Simplify recent changes');
+    expect(commands[0].kind).toBe(CommandKind.SKILL);
+  });
+
   it('should resolve {{model}} template variable in skill body', async () => {
     const skill = makeSkill({
       body: 'Review by {{model}} via Qwen Code',

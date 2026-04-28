@@ -693,21 +693,33 @@ Skill 3 content`);
       isSymbolicLink: () => false,
     };
 
+    const simplifyDirEntry = {
+      name: 'simplify',
+      isDirectory: () => true,
+      isFile: () => false,
+      isSymbolicLink: () => false,
+    };
+
     const emptyDir = [] as unknown as Awaited<ReturnType<typeof fs.readdir>>;
 
     function mockReaddirForLevels(levels: Set<string>) {
       vi.mocked(fs.readdir).mockImplementation((dirPath) => {
         const pathStr = String(dirPath);
-        const isBundled =
-          pathStr.endsWith(bundledDirSegment) && !pathStr.includes('.qwen');
+        const isBundled = pathStr.endsWith(bundledDirSegment);
         const isProject =
           pathStr.includes(projectDirSegment) &&
           pathStr.startsWith(projectPrefix);
         const isUser =
           pathStr.includes(userDirSegment) && pathStr.startsWith(userPrefix);
 
+        if (levels.has('bundled') && isBundled) {
+          return Promise.resolve([
+            reviewDirEntry,
+            simplifyDirEntry,
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+
         if (
-          (levels.has('bundled') && isBundled) ||
           (levels.has('project') && isProject) ||
           (levels.has('user') && isUser)
         ) {
@@ -715,21 +727,42 @@ Skill 3 content`);
             ReturnType<typeof fs.readdir>
           >);
         }
+
         return Promise.resolve(emptyDir);
       });
     }
 
     function setupReviewSkillMocks() {
       vi.mocked(fs.access).mockResolvedValue(undefined);
-      vi.mocked(fs.readFile).mockResolvedValue(`---
+      vi.mocked(fs.readFile).mockImplementation(async (filePath) => {
+        const pathStr = String(filePath);
+        if (pathStr.includes(`${path.sep}simplify${path.sep}`)) {
+          return `---
+name: simplify
+description: Simplify recent changes
+---
+Simplify content`;
+        }
+
+        return `---
 name: review
 description: Review code changes
 ---
-Review content`);
+Review content`;
+      });
 
-      mockParseYaml.mockReturnValue({
-        name: 'review',
-        description: 'Review code changes',
+      mockParseYaml.mockImplementation((yamlString: string) => {
+        if (yamlString.includes('name: simplify')) {
+          return {
+            name: 'simplify',
+            description: 'Simplify recent changes',
+          };
+        }
+
+        return {
+          name: 'review',
+          description: 'Review code changes',
+        };
       });
     }
 
@@ -740,8 +773,11 @@ Review content`);
       const skills = await manager.listSkills({ force: true });
 
       expect(skills.some((s) => s.name === 'review')).toBe(true);
+      expect(skills.some((s) => s.name === 'simplify')).toBe(true);
       const reviewSkill = skills.find((s) => s.name === 'review');
+      const simplifySkill = skills.find((s) => s.name === 'simplify');
       expect(reviewSkill!.level).toBe('bundled');
+      expect(simplifySkill!.level).toBe('bundled');
     });
 
     it('should prioritize project-level over bundled skills with same name', async () => {
