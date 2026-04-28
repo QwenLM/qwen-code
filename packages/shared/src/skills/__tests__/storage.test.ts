@@ -2,13 +2,13 @@
  * Tests for Skills Storage
  *
  * Verifies the three-tier skill loading system:
- * 1. Global skills: ~/.agents/skills/ (lowest priority)
+ * 1. Global skills: ~/.qwen/skills/ and ~/.agents/skills/ (lowest priority)
  * 2. Workspace skills: {workspaceRoot}/skills/ (medium priority)
- * 3. Project skills: {projectRoot}/.agents/skills/ (highest priority)
+ * 3. Project skills: {projectRoot}/.qwen/skills/ and .agents/skills/ (highest priority)
  *
  * Uses real temp directories to test actual filesystem operations.
  *
- * Note: The global skills directory (~/.agents/skills/) is a module-level constant
+ * Note: The global skills directories (~/.qwen/skills/ and ~/.agents/skills/) are module-level constants
  * that cannot be mocked reliably when tests run in parallel with other test files.
  * The loadAllSkills tests account for any pre-existing global skills by capturing a
  * baseline count and validating relative to it.
@@ -321,6 +321,7 @@ describe('loadWorkspaceSkills', () => {
 describe('loadAllSkills', () => {
   const getWorkspaceSkillsDir = () => join(workspaceRoot, 'skills');
   const getProjectSkillsDir = () => join(projectRoot, '.agents', 'skills');
+  const getProjectQwenSkillsDir = () => join(projectRoot, '.qwen', 'skills');
 
   // Use unique slugs that won't collide with real global skills
   const TEST_PREFIX = '_test_storage_';
@@ -354,6 +355,50 @@ describe('loadAllSkills', () => {
       expect(skill).toBeDefined();
       expect(skill!.source).toBe('global');
     }
+  });
+
+  it('should load Qwen project skills without requiring a Craft workspace skills directory', () => {
+    const baselineGlobal = getExistingGlobalSlugs();
+    const qwenProjDir = getProjectQwenSkillsDir();
+    mkdirSync(qwenProjDir, { recursive: true });
+
+    createSkill(qwenProjDir, `${TEST_PREFIX}qwen_proj`, {
+      name: 'Qwen Project Skill',
+      description: 'From .qwen skills',
+    });
+
+    const skills = loadAllSkills(workspaceRoot, projectRoot);
+    const skill = skills.find(s => s.slug === `${TEST_PREFIX}qwen_proj`);
+
+    expect(skills.length).toBe(baselineGlobal.size + 1);
+    expect(skill).toBeDefined();
+    expect(skill!.source).toBe('project');
+    expect(skill!.path).toBe(join(qwenProjDir, `${TEST_PREFIX}qwen_proj`));
+  });
+
+  it('should prefer .qwen project skills over .agents project skills with the same slug', () => {
+    const baselineGlobal = getExistingGlobalSlugs();
+    const qwenProjDir = getProjectQwenSkillsDir();
+    const agentsProjDir = getProjectSkillsDir();
+    mkdirSync(qwenProjDir, { recursive: true });
+    mkdirSync(agentsProjDir, { recursive: true });
+
+    createSkill(qwenProjDir, `${TEST_PREFIX}provider_dup`, {
+      name: 'Qwen Provider Skill',
+      description: 'From .qwen',
+    });
+    createSkill(agentsProjDir, `${TEST_PREFIX}provider_dup`, {
+      name: 'Agents Provider Skill',
+      description: 'From .agents',
+    });
+
+    const skills = loadAllSkills(workspaceRoot, projectRoot);
+    const skill = skills.find(s => s.slug === `${TEST_PREFIX}provider_dup`);
+
+    expect(skills.length).toBe(baselineGlobal.size + 1);
+    expect(skill).toBeDefined();
+    expect(skill!.metadata.name).toBe('Qwen Provider Skill');
+    expect(skill!.path).toBe(join(qwenProjDir, `${TEST_PREFIX}provider_dup`));
   });
 
   it('should override global skills with workspace skills when slug matches', () => {

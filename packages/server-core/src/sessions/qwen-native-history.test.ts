@@ -3,7 +3,9 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { AgentBackend } from '@craft-agent/shared/agent/backend'
+import type { Workspace } from '@craft-agent/shared/config'
 import { loadSession, saveSession } from '@craft-agent/shared/sessions'
+import { saveWorkspaceConfig } from '@craft-agent/shared/workspaces'
 import type { Message } from '@craft-agent/core/types'
 import { createManagedSession, SessionManager, setSessionPlatform } from './SessionManager.ts'
 
@@ -34,6 +36,66 @@ describe('Qwen native history loading', () => {
     for (const root of tempRoots.splice(0)) {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+
+  it('lists provider-native sessions from the workspace default working directory', async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), 'craft-managed-workspace-'))
+    const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'))
+    tempRoots.push(workspaceRoot, projectRoot)
+
+    const sessionId = 'fd2803fd-1070-41da-b7c0-10d978f7128c'
+    const timestamp = Date.parse('2026-04-26T10:12:13.000Z')
+    saveWorkspaceConfig(workspaceRoot, {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      defaults: {
+        defaultLlmConnection: 'qwen-code',
+        workingDirectory: projectRoot,
+      },
+      localMcpServers: { enabled: true },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    })
+
+    let listCalls = 0
+    const manager = new SessionManager({
+      createExternalSessionAgent: () => ({
+        listSessions: async (options?: { cwd?: string }) => {
+          listCalls += 1
+          expect(options?.cwd).toBe(projectRoot)
+          return {
+            sessions: [{
+              sessionId,
+              cwd: projectRoot,
+              title: 'qwen native conversation',
+              updatedAt: new Date(timestamp).toISOString(),
+            }],
+          }
+        },
+        destroy: () => {},
+        dispose: () => {},
+      } as unknown as AgentBackend),
+    })
+
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    }
+
+    await (manager as unknown as {
+      doRefreshExternalSessionsForWorkspace: (workspace: Workspace) => Promise<void>
+    }).doRefreshExternalSessionsForWorkspace(workspace)
+
+    const imported = loadSession(workspaceRoot, sessionId)
+    expect(listCalls).toBe(1)
+    expect(imported?.workspaceRootPath).toBe(workspaceRoot)
+    expect(imported?.sdkCwd).toBe(projectRoot)
+    expect(imported?.workingDirectory).toBe(projectRoot)
+    expect(imported?.llmConnection).toBe('qwen-code')
   })
 
   it('backfills an already-loaded empty local session from provider-native history', async () => {

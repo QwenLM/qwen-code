@@ -32,8 +32,14 @@ import {
 /** Global agent skills directory: ~/.agents/skills/ */
 export const GLOBAL_AGENT_SKILLS_DIR = join(homedir(), '.agents', 'skills');
 
+/** Global Qwen Code skills directory: ~/.qwen/skills/ */
+export const GLOBAL_QWEN_SKILLS_DIR = join(homedir(), '.qwen', 'skills');
+
 /** Project-level agent skills relative directory name */
 export const PROJECT_AGENT_SKILLS_DIR = '.agents/skills';
+
+/** Project-level Qwen Code skills relative directory name */
+export const PROJECT_QWEN_SKILLS_DIR = '.qwen/skills';
 
 /**
  * Normalize requiredSources frontmatter to a clean string array.
@@ -170,6 +176,20 @@ function loadSkillsFromDir(skillsDir: string, source: SkillSource): LoadedSkill[
   return skills;
 }
 
+function loadSkillsFromDirs(skillsDirs: string[], source: SkillSource): LoadedSkill[] {
+  const skillsBySlug = new Map<string, LoadedSkill>();
+
+  for (const dir of skillsDirs) {
+    for (const skill of loadSkillsFromDir(dir, source)) {
+      if (!skillsBySlug.has(skill.slug)) {
+        skillsBySlug.set(skill.slug, skill);
+      }
+    }
+  }
+
+  return [...skillsBySlug.values()];
+}
+
 /**
  * Load a single skill from a workspace
  * @param workspaceRoot - Absolute path to workspace root
@@ -223,8 +243,8 @@ export function loadAllSkills(workspaceRoot: string, projectRoot?: string): Load
 
   const skillsBySlug = new Map<string, LoadedSkill>();
 
-  // 1. Global skills (lowest priority): ~/.agents/skills/
-  for (const skill of loadSkillsFromDir(GLOBAL_AGENT_SKILLS_DIR, 'global')) {
+  // 1. Global skills (lowest priority): ~/.qwen/skills/ then ~/.agents/skills/
+  for (const skill of loadSkillsFromDirs([GLOBAL_QWEN_SKILLS_DIR, GLOBAL_AGENT_SKILLS_DIR], 'global')) {
     skillsBySlug.set(skill.slug, skill);
   }
 
@@ -233,10 +253,13 @@ export function loadAllSkills(workspaceRoot: string, projectRoot?: string): Load
     skillsBySlug.set(skill.slug, skill);
   }
 
-  // 3. Project skills (highest priority): {projectRoot}/.agents/skills/
+  // 3. Project skills (highest priority): {projectRoot}/.qwen/skills/ then .agents/skills/
   if (projectRoot) {
-    const projectSkillsDir = join(projectRoot, PROJECT_AGENT_SKILLS_DIR);
-    for (const skill of loadSkillsFromDir(projectSkillsDir, 'project')) {
+    const projectSkillsDirs = [
+      join(projectRoot, PROJECT_QWEN_SKILLS_DIR),
+      join(projectRoot, PROJECT_AGENT_SKILLS_DIR),
+    ];
+    for (const skill of loadSkillsFromDirs(projectSkillsDirs, 'project')) {
       skillsBySlug.set(skill.slug, skill);
     }
   }
@@ -257,9 +280,10 @@ export function loadAllSkills(workspaceRoot: string, projectRoot?: string): Load
 export function loadSkillBySlug(workspaceRoot: string, slug: string, projectRoot?: string): LoadedSkill | null {
   // Highest priority: project-level
   if (projectRoot) {
-    const projectSkillsDir = join(projectRoot, PROJECT_AGENT_SKILLS_DIR);
-    const skill = loadSkillFromDir(projectSkillsDir, slug, 'project');
-    if (skill) return skill;
+    for (const projectSkillsDir of [PROJECT_QWEN_SKILLS_DIR, PROJECT_AGENT_SKILLS_DIR]) {
+      const skill = loadSkillFromDir(join(projectRoot, projectSkillsDir), slug, 'project');
+      if (skill) return skill;
+    }
   }
 
   // Medium priority: workspace
@@ -267,7 +291,8 @@ export function loadSkillBySlug(workspaceRoot: string, slug: string, projectRoot
   if (workspaceSkill) return workspaceSkill;
 
   // Lowest priority: global
-  return loadSkillFromDir(GLOBAL_AGENT_SKILLS_DIR, slug, 'global');
+  return loadSkillFromDir(GLOBAL_QWEN_SKILLS_DIR, slug, 'global')
+    ?? loadSkillFromDir(GLOBAL_AGENT_SKILLS_DIR, slug, 'global');
 }
 
 /**

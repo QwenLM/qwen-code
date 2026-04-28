@@ -502,9 +502,9 @@ Skills are reusable instruction sets that teach you specialized behaviors. Each 
 2. Follow the instructions in the file to complete the user's request
 
 Skills are stored at three levels (checked in order):
-- Global: \`~/.agents/skills/{slug}/SKILL.md\`
+- Global: \`~/.qwen/skills/{slug}/SKILL.md\` or \`~/.agents/skills/{slug}/SKILL.md\`
 - Workspace: \`${workspacePath}/skills/{slug}/SKILL.md\`
-- Project: \`{projectRoot}/.agents/skills/{slug}/SKILL.md\`
+- Project: \`{projectRoot}/.qwen/skills/{slug}/SKILL.md\` or \`{projectRoot}/.agents/skills/{slug}/SKILL.md\`
 
 ## Project Context
 

@@ -15,14 +15,14 @@ import {
   rmSync,
   statSync,
 } from 'fs';
-import { join } from 'path';
-import { homedir } from 'os';
+import { join, relative, resolve, isAbsolute } from 'path';
 import { randomUUID } from 'crypto';
 import { expandPath, toPortablePath } from '../utils/paths.ts';
 import { atomicWriteFileSync, readJsonFileSync } from '../utils/files.ts';
 import { getDefaultStatusConfig, saveStatusConfig, ensureDefaultIconFiles } from '../statuses/storage.ts';
 import { getDefaultLabelConfig, saveLabelConfig } from '../labels/storage.ts';
 import { loadConfigDefaults } from '../config/storage.ts';
+import { CONFIG_DIR } from '../config/paths.ts';
 import { parsePermissionMode, PERMISSION_MODE_ORDER } from '../agent/mode-types.ts';
 import { normalizeThinkingLevel } from '../agent/thinking-levels.ts';
 import type {
@@ -32,8 +32,16 @@ import type {
   WorkspaceSummary,
 } from './types.ts';
 
-const CONFIG_DIR = join(homedir(), '.craft-agent');
 const DEFAULT_WORKSPACES_DIR = join(CONFIG_DIR, 'workspaces');
+
+function isPathWithin(parentPath: string, childPath: string): boolean {
+  const rel = relative(resolve(parentPath), resolve(childPath));
+  return rel === '' || (!!rel && !rel.startsWith('..') && !isAbsolute(rel));
+}
+
+function isManagedWorkspacePath(rootPath: string): boolean {
+  return isPathWithin(DEFAULT_WORKSPACES_DIR, rootPath);
+}
 
 // ============================================================
 // Path Utilities
@@ -201,13 +209,15 @@ export function loadWorkspace(rootPath: string): LoadedWorkspace | null {
   const config = loadWorkspaceConfig(rootPath);
   if (!config) return null;
 
-  // Ensure plugin manifest exists (migration for existing workspaces)
-  ensurePluginManifest(rootPath, config.name);
+  if (isManagedWorkspacePath(rootPath)) {
+    // Ensure plugin manifest exists (migration for existing managed workspaces)
+    ensurePluginManifest(rootPath, config.name);
 
-  // Ensure skills directory exists (migration for existing workspaces)
-  const skillsPath = getWorkspaceSkillsPath(rootPath);
-  if (!existsSync(skillsPath)) {
-    mkdirSync(skillsPath, { recursive: true });
+    // Ensure skills directory exists (migration for existing managed workspaces)
+    const skillsPath = getWorkspaceSkillsPath(rootPath);
+    if (!existsSync(skillsPath)) {
+      mkdirSync(skillsPath, { recursive: true });
+    }
   }
 
   return {

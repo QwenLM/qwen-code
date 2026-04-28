@@ -1733,6 +1733,7 @@ export class SessionManager implements ISessionManager {
 
   private async doRefreshExternalSessionsForWorkspace(workspace: Workspace): Promise<void> {
     const workspaceConfig = loadWorkspaceConfig(workspace.rootPath)
+    const sessionListCwd = workspaceConfig?.defaults?.workingDirectory || workspace.rootPath
     const backendContext = resolveBackendContext({
       workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
     })
@@ -1751,7 +1752,7 @@ export class SessionManager implements ISessionManager {
 
       for (let page = 0; page < EXTERNAL_SESSION_LIST_MAX_PAGES; page++) {
         const result = await agent.listSessions({
-          cwd: workspace.rootPath,
+          cwd: sessionListCwd,
           cursor,
           size: EXTERNAL_SESSION_LIST_PAGE_SIZE,
         })

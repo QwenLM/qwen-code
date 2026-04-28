@@ -1,9 +1,13 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync } from 'fs';
-import { join, dirname, basename } from 'path';
+import { join, dirname, basename, resolve, relative, isAbsolute } from 'path';
 import { getCredentialManager } from '../credentials/index.ts';
 import { getOrCreateLatestSession, type SessionConfig } from '../sessions/index.ts';
 import {
   discoverWorkspacesInDefaultLocation,
+  ensureDefaultWorkspacesDir,
+  generateSlug,
+  generateUniqueWorkspacePath,
+  getDefaultWorkspacesDir,
   loadWorkspaceConfig,
   saveWorkspaceConfig,
   createWorkspaceAtPath,
@@ -93,6 +97,7 @@ export interface StoredConfig {
 
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
 const CONFIG_DEFAULTS_FILE = join(CONFIG_DIR, 'config-defaults.json');
+const WORKSPACES_DIR = join(CONFIG_DIR, 'workspaces');
 
 // Track if config-defaults have been synced this session (prevents re-sync on hot reload)
 let configDefaultsSynced = false;
@@ -221,6 +226,108 @@ export function ensureConfigDir(): void {
   configDirInitialized = true;
 }
 
+function isPathWithin(parentPath: string, childPath: string): boolean {
+  const rel = relative(resolve(parentPath), resolve(childPath));
+  return rel === '' || (!!rel && !rel.startsWith('..') && !isAbsolute(rel));
+}
+
+function isManagedWorkspacePath(rootPath: string): boolean {
+  return isPathWithin(getDefaultWorkspacesDir(), rootPath);
+}
+
+function isExistingDirectory(path: string): boolean {
+  try {
+    return existsSync(path) && statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+const PROJECT_DIRECTORY_MARKERS = [
+  '.git',
+  '.hg',
+  '.svn',
+  'package.json',
+  'pyproject.toml',
+  'Cargo.toml',
+  'go.mod',
+  'pom.xml',
+  'build.gradle',
+  'build.gradle.kts',
+  '.qwen',
+  '.vscode',
+];
+
+function looksLikeUserProjectDirectory(rootPath: string): boolean {
+  if (!isExistingDirectory(rootPath)) return false;
+  return PROJECT_DIRECTORY_MARKERS.some(marker => existsSync(join(rootPath, marker)));
+}
+
+function allocateManagedWorkspacePath(workspace: Workspace, reservedPaths: Set<string>): string {
+  ensureDefaultWorkspacesDir();
+
+  const baseDir = getDefaultWorkspacesDir();
+  const preferredSlug = workspace.slug || generateSlug(workspace.name || basename(workspace.rootPath));
+  const preferredPath = join(baseDir, preferredSlug || workspace.id || 'workspace');
+  const resolvedPreferred = resolve(preferredPath);
+
+  if (!reservedPaths.has(resolvedPreferred) && !existsSync(preferredPath)) {
+    return preferredPath;
+  }
+
+  let candidate = generateUniqueWorkspacePath(workspace.name || preferredSlug || 'Workspace', baseDir);
+  let counter = 2;
+  while (reservedPaths.has(resolve(candidate))) {
+    candidate = join(baseDir, `${preferredSlug || 'workspace'}-${counter++}`);
+  }
+  return candidate;
+}
+
+function migrateExternalProjectWorkspace(
+  workspace: Workspace,
+  reservedPaths: Set<string>,
+  forceProjectWorkingDirectory: boolean,
+): boolean {
+  if (isManagedWorkspacePath(workspace.rootPath)) {
+    if (!isValidWorkspace(workspace.rootPath)) {
+      createWorkspaceAtPath(workspace.rootPath, workspace.name);
+    }
+    return false;
+  }
+
+  const shouldMoveToManagedStorage =
+    !isValidWorkspace(workspace.rootPath) ||
+    looksLikeUserProjectDirectory(workspace.rootPath) ||
+    forceProjectWorkingDirectory;
+
+  if (!shouldMoveToManagedStorage) return false;
+
+  const projectRoot = isExistingDirectory(workspace.rootPath) ? workspace.rootPath : undefined;
+  const existingWorkspaceConfig = loadWorkspaceConfig(workspace.rootPath);
+  const managedRootPath = allocateManagedWorkspacePath(workspace, reservedPaths);
+  const defaults = {
+    ...existingWorkspaceConfig?.defaults,
+    ...(projectRoot ? { workingDirectory: projectRoot } : {}),
+  };
+
+  createWorkspaceAtPath(managedRootPath, workspace.name, defaults);
+
+  if (existingWorkspaceConfig) {
+    saveWorkspaceConfig(managedRootPath, {
+      ...existingWorkspaceConfig,
+      name: workspace.name || existingWorkspaceConfig.name,
+      slug: generateSlug(workspace.name || existingWorkspaceConfig.name || basename(managedRootPath)),
+      defaults,
+    });
+  }
+
+  reservedPaths.delete(resolve(workspace.rootPath));
+  workspace.rootPath = managedRootPath;
+  workspace.slug = extractWorkspaceSlugFromPath(managedRootPath, workspace.id);
+  reservedPaths.add(resolve(managedRootPath));
+  return true;
+}
+
 export function loadStoredConfig(): StoredConfig | null {
   try {
     if (!existsSync(CONFIG_FILE)) {
@@ -245,16 +352,21 @@ export function loadStoredConfig(): StoredConfig | null {
       config.activeWorkspaceId = config.workspaces[0]?.id || null;
     }
 
-    // Ensure workspace folder structure exists for all workspaces.
-    // Failures here are non-fatal — the workspace will be re-created on next access.
+    // Keep Craft's own workspace state in managed storage. Existing project
+    // directories are treated as a session default working directory, not as
+    // the place where Craft should scaffold config/status/label files.
+    const reservedPaths = new Set(config.workspaces.map(w => resolve(w.rootPath)));
+    let migratedWorkspacePaths = false;
     for (const workspace of config.workspaces) {
-      if (!isValidWorkspace(workspace.rootPath)) {
-        try {
-          createWorkspaceAtPath(workspace.rootPath, workspace.name);
-        } catch (wsError) {
-          debug('[config] Failed to create workspace at', workspace.rootPath, ':', wsError instanceof Error ? wsError.message : wsError);
-        }
+      try {
+        migratedWorkspacePaths = migrateExternalProjectWorkspace(workspace, reservedPaths, false) || migratedWorkspacePaths;
+      } catch (wsError) {
+        debug('[config] Failed to prepare workspace', workspace.rootPath, ':', wsError instanceof Error ? wsError.message : wsError);
       }
+    }
+
+    if (migratedWorkspacePaths) {
+      saveConfig(config);
     }
 
     return config;
@@ -700,15 +812,48 @@ export function addWorkspace(workspace: Omit<Workspace, 'id' | 'createdAt' | 'sl
     throw new Error('No config found');
   }
 
-  const slug = extractWorkspaceSlugFromPath(workspace.rootPath, '');
+  const inputRootPath = expandPath(workspace.rootPath);
+  const existingByProjectPath = config.workspaces.find(w => {
+    const wsConfig = loadWorkspaceConfig(w.rootPath);
+    return wsConfig?.defaults?.workingDirectory === inputRootPath;
+  });
+
+  if (existingByProjectPath) {
+    const existingConfig = loadWorkspaceConfig(existingByProjectPath.rootPath);
+    const defaults = {
+      ...existingConfig?.defaults,
+      workingDirectory: inputRootPath,
+    };
+    if (existingConfig) {
+      saveWorkspaceConfig(existingByProjectPath.rootPath, {
+        ...existingConfig,
+        name: workspace.name,
+        slug: generateSlug(workspace.name),
+        defaults,
+      });
+    }
+
+    const updated: Workspace = {
+      ...existingByProjectPath,
+      name: workspace.name,
+      ...(workspace.remoteServer && { remoteServer: workspace.remoteServer }),
+    };
+    const existingIndex = config.workspaces.indexOf(existingByProjectPath);
+    config.workspaces[existingIndex] = updated;
+    saveConfig(config);
+    return updated;
+  }
+
+  const slug = extractWorkspaceSlugFromPath(inputRootPath, '');
 
   // Check if workspace with same rootPath already exists
-  const existing = config.workspaces.find(w => w.rootPath === workspace.rootPath);
+  const existing = config.workspaces.find(w => w.rootPath === inputRootPath);
   if (existing) {
     // Update existing workspace with new settings
     const updated: Workspace = {
       ...existing,
       ...workspace,
+      rootPath: inputRootPath,
       slug,
       id: existing.id,
       createdAt: existing.createdAt,
@@ -721,13 +866,17 @@ export function addWorkspace(workspace: Omit<Workspace, 'id' | 'createdAt' | 'sl
 
   const newWorkspace: Workspace = {
     ...workspace,
+    rootPath: inputRootPath,
     slug,
     id: generateWorkspaceId(),
     createdAt: Date.now(),
   };
 
-  // Create workspace folder structure if it doesn't exist
-  if (!isValidWorkspace(newWorkspace.rootPath)) {
+  const reservedPaths = new Set(config.workspaces.map(w => resolve(w.rootPath)));
+
+  if (looksLikeUserProjectDirectory(newWorkspace.rootPath)) {
+    migrateExternalProjectWorkspace(newWorkspace, reservedPaths, true);
+  } else if (!isValidWorkspace(newWorkspace.rootPath)) {
     createWorkspaceAtPath(newWorkspace.rootPath, newWorkspace.name);
   }
 
@@ -822,8 +971,6 @@ export async function removeWorkspace(workspaceId: string): Promise<boolean> {
 // ============================================
 // Workspace Conversation Persistence
 // ============================================
-
-const WORKSPACES_DIR = join(CONFIG_DIR, 'workspaces');
 
 function ensureWorkspaceDir(workspaceId: string): string {
   const dir = join(WORKSPACES_DIR, workspaceId);

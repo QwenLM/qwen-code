@@ -7,7 +7,9 @@
 export * from './types.ts';
 export {
   GLOBAL_AGENT_SKILLS_DIR,
+  GLOBAL_QWEN_SKILLS_DIR,
   PROJECT_AGENT_SKILLS_DIR,
+  PROJECT_QWEN_SKILLS_DIR,
   loadSkill,
   loadAllSkills,
   invalidateSkillsCache,
