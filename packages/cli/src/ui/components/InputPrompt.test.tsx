@@ -8,7 +8,7 @@ import { renderWithProviders } from '../../test-utils/render.js';
 import { waitFor, act } from '@testing-library/react';
 import type { InputPromptProps } from './InputPrompt.js';
 import { InputPrompt } from './InputPrompt.js';
-import type { TextBuffer } from './shared/text-buffer.js';
+import { useTextBuffer, type TextBuffer } from './shared/text-buffer.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import * as path from 'node:path';
@@ -739,6 +739,171 @@ describe('InputPrompt', () => {
     await wait();
 
     expect(props.onSubmit).toHaveBeenCalledWith('/clear');
+    unmount();
+  });
+
+  it('should submit a perfect match on Enter when suggestions were not navigated', async () => {
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        { label: 'jsonl', value: 'jsonl' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+    });
+    props.buffer.setText('/export');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\r');
+    await wait();
+
+    expect(props.onSubmit).toHaveBeenCalledWith('/export');
+    expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should fill and submit an export format selected with arrow navigation', async () => {
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        { label: 'jsonl', value: 'jsonl' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+    });
+    props.buffer.setText('/export');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\u001B[B');
+    await wait();
+
+    expect(props.buffer.setText).toHaveBeenLastCalledWith('/export md ');
+    expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
+    expect(props.onSubmit).not.toHaveBeenCalled();
+
+    stdin.write('\r');
+    await wait();
+
+    expect(props.onSubmit).toHaveBeenCalledWith('/export md ');
+    unmount();
+  });
+
+  it('should keep cycling export formats after arrow navigation fills input', async () => {
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        { label: 'jsonl', value: 'jsonl' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+    });
+    props.buffer.setText('/export');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\u001B[B');
+    await wait();
+    stdin.write('\u001B[B');
+    await wait();
+
+    expect(props.buffer.setText).toHaveBeenNthCalledWith(2, '/export md ');
+    expect(props.buffer.setText).toHaveBeenNthCalledWith(3, '/export json ');
+    expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should keep export format suggestions visible after arrow navigation fills input', async () => {
+    const exportSuggestions = [
+      { label: 'html', value: 'html' },
+      { label: 'md', value: 'md' },
+      { label: 'json', value: 'json' },
+      { label: 'jsonl', value: 'jsonl' },
+    ];
+    mockedUseCommandCompletion.mockImplementation((buffer) => {
+      const isExportRoot = buffer.text.trim() === '/export';
+      return {
+        ...mockCommandCompletion,
+        showSuggestions: isExportRoot,
+        suggestions: isExportRoot ? exportSuggestions : [],
+        activeSuggestionIndex: 0,
+        isPerfectMatch: isExportRoot,
+      };
+    });
+    props.slashCommands = [
+      ...mockSlashCommands,
+      {
+        name: 'export',
+        kind: CommandKind.BUILT_IN,
+        description: 'Export session',
+        action: vi.fn(),
+        subCommands: [
+          {
+            name: 'html',
+            kind: CommandKind.BUILT_IN,
+            description: 'Export HTML',
+            action: vi.fn(),
+          },
+          {
+            name: 'md',
+            kind: CommandKind.BUILT_IN,
+            description: 'Export Markdown',
+            action: vi.fn(),
+          },
+          {
+            name: 'json',
+            kind: CommandKind.BUILT_IN,
+            description: 'Export JSON',
+            action: vi.fn(),
+          },
+          {
+            name: 'jsonl',
+            kind: CommandKind.BUILT_IN,
+            description: 'Export JSONL',
+            action: vi.fn(),
+          },
+        ],
+      },
+    ];
+    const TestHarness = () => {
+      const buffer = useTextBuffer({
+        initialText: '/export',
+        viewport: { width: 80, height: 20 },
+        isValidPath: () => false,
+        onChange: () => {},
+      });
+      return <InputPrompt {...props} buffer={buffer} />;
+    };
+
+    const { stdin, lastFrame, unmount } = renderWithProviders(<TestHarness />);
+    await wait();
+
+    stdin.write('\u001B[B');
+    await wait();
+
+    const output = stripAnsi(lastFrame() ?? '');
+    expect(output).toContain('/export md');
+    expect(output).toContain('html');
+    expect(output).toContain('md');
+    expect(output).toContain('json');
+    expect(output).toContain('jsonl');
+    expect(output).toContain('Export Markdown');
     unmount();
   });
 

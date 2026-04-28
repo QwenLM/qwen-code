@@ -7,7 +7,11 @@
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { Box, Text } from 'ink';
-import { SuggestionsDisplay, MAX_WIDTH } from './SuggestionsDisplay.js';
+import {
+  SuggestionsDisplay,
+  MAX_WIDTH,
+  type Suggestion,
+} from './SuggestionsDisplay.js';
 import { theme } from '../semantic-colors.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
 import type { TextBuffer } from './shared/text-buffer.js';
@@ -65,6 +69,20 @@ export interface Attachment {
 }
 
 const debugLogger = createDebugLogger('INPUT_PROMPT');
+const EXPORT_COMMAND_INPUT = '/export';
+const EXPORT_FORMAT_COMPLETIONS = ['html', 'md', 'json', 'jsonl'] as const;
+type ExportFormatCompletion = (typeof EXPORT_FORMAT_COMPLETIONS)[number];
+
+const getExportFormatFromInput = (
+  input: string,
+): ExportFormatCompletion | null => {
+  const match = input.trim().match(/^\/export\s+(html|md|json|jsonl)$/);
+  const format = match?.[1];
+  return EXPORT_FORMAT_COMPLETIONS.includes(format as ExportFormatCompletion)
+    ? (format as ExportFormatCompletion)
+    : null;
+};
+
 export interface InputPromptProps {
   buffer: TextBuffer;
   onSubmit: (value: string) => void;
@@ -189,6 +207,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   ]);
   const [expandedSuggestionIndex, setExpandedSuggestionIndex] =
     useState<number>(-1);
+  const completionSelectionWasNavigatedRef = useRef(false);
+  const exportCompletionSelectionIndexRef = useRef<number | null>(null);
   const shellHistory = useShellHistory(config.getProjectRoot());
   const shellHistoryData = shellHistory.history;
 
@@ -211,6 +231,26 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     showCursorBeforeText?: boolean;
   } | null>(null);
   midInputGhostTextRef.current = completion.midInputGhostText;
+
+  const exportFormatSuggestions = useMemo<Suggestion[]>(() => {
+    const exportCommand = slashCommands.find(
+      (command) => command.name === EXPORT_COMMAND_INPUT.slice(1),
+    );
+    const subCommandsByName = new Map(
+      exportCommand?.subCommands?.map((command) => [command.name, command]) ??
+        [],
+    );
+
+    return EXPORT_FORMAT_COMPLETIONS.map((format) => {
+      const command = subCommandsByName.get(format);
+      return {
+        label: command?.name ?? format,
+        value: command?.name ?? format,
+        description: command?.description,
+        commandKind: command?.kind,
+      };
+    });
+  }, [slashCommands]);
 
   const reverseSearchCompletion = useReverseSearchCompletion(
     buffer,
@@ -243,6 +283,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     reverseSearchCompletion.resetCompletionState;
   const resetCommandSearchCompletionState =
     commandSearchCompletion.resetCompletionState;
+
+  useEffect(() => {
+    if (!completion.showSuggestions) {
+      completionSelectionWasNavigatedRef.current = false;
+    }
+  }, [completion.showSuggestions]);
+
+  useEffect(() => {
+    completionSelectionWasNavigatedRef.current = false;
+  }, [completion.suggestions]);
 
   const showCursor =
     focus && isShellFocused && !isEmbeddedShellFocused && !agentTabBarFocused;
@@ -302,6 +352,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const handleSubmitAndClear = useCallback(
     (submittedValue: string) => {
+      exportCompletionSelectionIndexRef.current = null;
       // Expand any large paste placeholders to their full content before submitting
       let finalValue = submittedValue;
       if (pendingPastes.size > 0) {
@@ -615,6 +666,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       if (keyMatchers[Command.ESCAPE](key)) {
+        exportCompletionSelectionIndexRef.current = null;
         const cancelSearch = (
           setActive: (active: boolean) => void,
           resetCompletion: () => void,
@@ -653,6 +705,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
 
         if (completion.showSuggestions) {
+          completionSelectionWasNavigatedRef.current = false;
           completion.resetCompletionState();
           setExpandedSuggestionIndex(-1);
           resetEscapeState();
@@ -780,8 +833,84 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
       }
 
+      const isCompletionUpKey = keyMatchers[Command.COMPLETION_UP](key);
+      const isCompletionDownKey = keyMatchers[Command.COMPLETION_DOWN](key);
+
+      const setExportCompletionInput = (index: number): boolean => {
+        const format = EXPORT_FORMAT_COMPLETIONS[index];
+        if (!format) {
+          return false;
+        }
+
+        buffer.setText(`${EXPORT_COMMAND_INPUT} ${format} `);
+        exportCompletionSelectionIndexRef.current = index;
+        completionSelectionWasNavigatedRef.current = false;
+        setExpandedSuggestionIndex(-1);
+        return true;
+      };
+
+      const getNextExportCompletionIndex = (
+        currentIndex: number,
+        direction: 'up' | 'down',
+      ) => {
+        const lastIndex = EXPORT_FORMAT_COMPLETIONS.length - 1;
+        if (direction === 'up') {
+          return currentIndex <= 0 ? lastIndex : currentIndex - 1;
+        }
+        return currentIndex >= lastIndex ? 0 : currentIndex + 1;
+      };
+
+      const hasExportFormatSuggestions =
+        buffer.text.trim() === EXPORT_COMMAND_INPUT &&
+        completion.suggestions.length === EXPORT_FORMAT_COMPLETIONS.length &&
+        EXPORT_FORMAT_COMPLETIONS.every(
+          (format, index) => completion.suggestions[index]?.value === format,
+        );
+
+      if (
+        exportCompletionSelectionIndexRef.current !== null &&
+        !key.ctrl &&
+        !key.meta &&
+        !key.paste &&
+        (isCompletionUpKey || isCompletionDownKey)
+      ) {
+        const nextIndex = getNextExportCompletionIndex(
+          exportCompletionSelectionIndexRef.current,
+          isCompletionUpKey ? 'up' : 'down',
+        );
+        setExportCompletionInput(nextIndex);
+        return true;
+      }
+
+      const acceptActiveCompletionSuggestion = () => {
+        if (completion.suggestions.length === 0) {
+          return false;
+        }
+
+        const targetIndex =
+          completion.activeSuggestionIndex === -1
+            ? 0
+            : completion.activeSuggestionIndex;
+        if (targetIndex >= completion.suggestions.length) {
+          return false;
+        }
+
+        completion.handleAutocomplete(targetIndex);
+        completionSelectionWasNavigatedRef.current = false;
+        setExpandedSuggestionIndex(-1);
+        return true;
+      };
+
       // If the command is a perfect match, pressing enter should execute it.
       if (completion.isPerfectMatch && keyMatchers[Command.RETURN](key)) {
+        if (
+          completion.showSuggestions &&
+          completionSelectionWasNavigatedRef.current &&
+          acceptActiveCompletionSuggestion()
+        ) {
+          return true;
+        }
+
         handleSubmitAndClear(buffer.text);
         return true;
       }
@@ -819,29 +948,45 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       if (completion.showSuggestions) {
         if (completion.suggestions.length > 1) {
-          if (keyMatchers[Command.COMPLETION_UP](key)) {
+          if (isCompletionUpKey) {
+            if (hasExportFormatSuggestions) {
+              const activeIndex =
+                completion.activeSuggestionIndex === -1
+                  ? 0
+                  : completion.activeSuggestionIndex;
+              const nextIndex = getNextExportCompletionIndex(activeIndex, 'up');
+              setExportCompletionInput(nextIndex);
+              return true;
+            }
+
             completion.navigateUp();
+            completionSelectionWasNavigatedRef.current = true;
             setExpandedSuggestionIndex(-1); // Reset expansion when navigating
             return true;
           }
-          if (keyMatchers[Command.COMPLETION_DOWN](key)) {
+          if (isCompletionDownKey) {
+            if (hasExportFormatSuggestions) {
+              const activeIndex =
+                completion.activeSuggestionIndex === -1
+                  ? 0
+                  : completion.activeSuggestionIndex;
+              const nextIndex = getNextExportCompletionIndex(
+                activeIndex,
+                'down',
+              );
+              setExportCompletionInput(nextIndex);
+              return true;
+            }
+
             completion.navigateDown();
+            completionSelectionWasNavigatedRef.current = true;
             setExpandedSuggestionIndex(-1); // Reset expansion when navigating
             return true;
           }
         }
 
         if (keyMatchers[Command.ACCEPT_SUGGESTION](key) && !key.paste) {
-          if (completion.suggestions.length > 0) {
-            const targetIndex =
-              completion.activeSuggestionIndex === -1
-                ? 0 // Default to the first if none is active
-                : completion.activeSuggestionIndex;
-            if (targetIndex < completion.suggestions.length) {
-              completion.handleAutocomplete(targetIndex);
-              setExpandedSuggestionIndex(-1); // Reset expansion after selection
-            }
-          }
+          acceptActiveCompletionSuggestion();
           return true;
         }
       }
@@ -1070,6 +1215,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       // Ctrl+C with completion active — also reset completion state
       if (keyMatchers[Command.CLEAR_INPUT](key)) {
+        exportCompletionSelectionIndexRef.current = null;
         if (buffer.text.length > 0) {
           resetCompletionState();
         }
@@ -1090,6 +1236,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         followup.dismiss();
         onPromptSuggestionDismiss?.();
       }
+      exportCompletionSelectionIndexRef.current = null;
       return false;
     },
     [
@@ -1255,7 +1402,30 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   };
 
   const activeCompletion = getActiveCompletion();
-  const shouldShowSuggestions = activeCompletion.showSuggestions;
+  const selectedExportFormat = getExportFormatFromInput(buffer.text);
+  const selectedExportFormatIndex =
+    selectedExportFormat === null
+      ? -1
+      : EXPORT_FORMAT_COMPLETIONS.indexOf(selectedExportFormat);
+  const shouldKeepExportFormatSuggestions =
+    !reverseSearchActive &&
+    !commandSearchActive &&
+    exportCompletionSelectionIndexRef.current !== null &&
+    selectedExportFormatIndex !== -1;
+  const displayedSuggestions = shouldKeepExportFormatSuggestions
+    ? exportFormatSuggestions
+    : activeCompletion.suggestions;
+  const displayedActiveSuggestionIndex = shouldKeepExportFormatSuggestions
+    ? selectedExportFormatIndex
+    : activeCompletion.activeSuggestionIndex;
+  const displayedSuggestionsScrollOffset = shouldKeepExportFormatSuggestions
+    ? 0
+    : activeCompletion.visibleStartIndex;
+  const displayedSuggestionsLoading = shouldKeepExportFormatSuggestions
+    ? false
+    : activeCompletion.isLoadingSuggestions;
+  const shouldShowSuggestions =
+    shouldKeepExportFormatSuggestions || activeCompletion.showSuggestions;
 
   // Notify parent about suggestions visibility changes
   useEffect(() => {
@@ -1354,11 +1524,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       {shouldShowSuggestions && (
         <Box marginLeft={2} marginRight={2}>
           <SuggestionsDisplay
-            suggestions={activeCompletion.suggestions}
-            activeIndex={activeCompletion.activeSuggestionIndex}
-            isLoading={activeCompletion.isLoadingSuggestions}
+            suggestions={displayedSuggestions}
+            activeIndex={displayedActiveSuggestionIndex}
+            isLoading={displayedSuggestionsLoading}
             width={suggestionsWidth}
-            scrollOffset={activeCompletion.visibleStartIndex}
+            scrollOffset={displayedSuggestionsScrollOffset}
             userInput={buffer.text}
             mode={
               buffer.text.startsWith('/') &&
