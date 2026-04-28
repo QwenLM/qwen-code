@@ -440,6 +440,29 @@ export async function start_sandbox(
     );
   }
 
+  // Pass QWEN_HOME so the sandboxed CLI resolves the global qwen dir to the
+  // same path the host did, instead of relying on the /home/node/.qwen mount
+  // being the default fallback.
+  args.push('--env', `QWEN_HOME=${getContainerPath(userSettingsDirOnHost)}`);
+
+  // Mount the runtime base dir and pass QWEN_RUNTIME_DIR when it diverges
+  // from the global qwen dir; otherwise the existing user-settings mount
+  // already covers it.
+  const runtimeBaseDirOnHost = Storage.getRuntimeBaseDir();
+  if (runtimeBaseDirOnHost !== userSettingsDirOnHost) {
+    if (!fs.existsSync(runtimeBaseDirOnHost)) {
+      fs.mkdirSync(runtimeBaseDirOnHost, { recursive: true });
+    }
+    args.push(
+      '--volume',
+      `${runtimeBaseDirOnHost}:${getContainerPath(runtimeBaseDirOnHost)}`,
+    );
+    args.push(
+      '--env',
+      `QWEN_RUNTIME_DIR=${getContainerPath(runtimeBaseDirOnHost)}`,
+    );
+  }
+
   // mount os.tmpdir() as os.tmpdir() inside container
   args.push('--volume', `${os.tmpdir()}:${getContainerPath(os.tmpdir())}`);
 
