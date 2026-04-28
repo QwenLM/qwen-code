@@ -1,13 +1,23 @@
 /**
- * Qwen Code Backend (ACP JSON-RPC Client)
+ * Qwen Code Backend (ACP SDK Client)
  *
  * Spawns Qwen Code in ACP mode and adapts ACP session updates into Craft's
  * provider-agnostic AgentEvent stream.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
+import { Readable, Writable } from 'node:stream';
 
+import {
+  ClientSideConnection,
+  PROTOCOL_VERSION,
+  ndJsonStream,
+  type Client,
+  type ContentBlock,
+  type McpServer,
+  type RequestPermissionRequest,
+  type RequestPermissionResponse,
+} from '@agentclientprotocol/sdk';
 import type { AgentEvent } from '@craft-agent/core/types';
 import type { FileAttachment } from '../utils/files.ts';
 import { getProxyEnvVars } from '../config/proxy-env.ts';
@@ -28,15 +38,7 @@ import { EventQueue } from './backend/event-queue.ts';
 import type { PermissionMode } from './mode-manager.ts';
 import { LLM_QUERY_TIMEOUT_MS, type LLMQueryRequest, type LLMQueryResult } from './llm-tool.ts';
 
-type JsonRpcId = string | number;
 type JsonRecord = Record<string, unknown>;
-
-type PendingJsonRpcRequest = {
-  method: string;
-  resolve: (value: unknown) => void;
-  reject: (error: Error) => void;
-  timeout?: ReturnType<typeof setTimeout>;
-};
 
 type AcpPermissionOption = {
   optionId?: string;
@@ -45,7 +47,7 @@ type AcpPermissionOption = {
 };
 
 type PendingPermission = {
-  rpcId: JsonRpcId;
+  resolve: (response: RequestPermissionResponse) => void;
   options: AcpPermissionOption[];
 };
 
@@ -54,24 +56,6 @@ type MiniCollector = {
   inputTokens?: number;
   outputTokens?: number;
 };
-
-type AcpMcpServer =
-  | {
-      name: string;
-      command: string;
-      args: string[];
-      env: Array<{ name: string; value: string }>;
-    }
-  | {
-      type: 'http' | 'sse';
-      name: string;
-      url: string;
-      headers: Array<{ name: string; value: string }>;
-    };
-
-type AcpContentBlock =
-  | { type: 'text'; text: string }
-  | { type: 'image' | 'audio'; data: string; mimeType: string };
 
 const QWEN_CONTEXT_WINDOW = 1_000_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -221,7 +205,7 @@ export class QwenAgent extends BaseAgent {
   protected backendName = 'Qwen Code';
 
   private subprocess: ChildProcess | null = null;
-  private readline: ReadlineInterface | null = null;
+  private connection: ClientSideConnection | null = null;
   private startPromise: Promise<void> | null = null;
   private initialized = false;
 
@@ -232,11 +216,10 @@ export class QwenAgent extends BaseAgent {
   private persistedQwenSessionId: string | null = null;
   private activePromptRunId: number | null = null;
   private promptRunCounter = 0;
-  private jsonRpcIdCounter = 0;
+  private permissionRequestCounter = 0;
   private toolIdCounter = 0;
   private planUpdateCounter = 0;
 
-  private pendingRequests = new Map<string, PendingJsonRpcRequest>();
   private pendingPermissions = new Map<string, PendingPermission>();
   private miniCollectors = new Map<string, MiniCollector>();
   private suppressedSessionUpdates = new Set<string>();
@@ -338,7 +321,11 @@ export class QwenAgent extends BaseAgent {
       if (!sessionId) throw new Error('Qwen ACP session was not created');
 
       const prompt = this.buildPromptBlocks(message, attachments);
-      const promptPromise = this.sendRequest('session/prompt', { sessionId, prompt }, 0);
+      const promptPromise = this.callAcp(
+        'session/prompt',
+        (connection) => connection.prompt({ sessionId, prompt }),
+        0,
+      );
 
       promptPromise
         .then((result) => {
@@ -402,8 +389,13 @@ export class QwenAgent extends BaseAgent {
     this.activePromptRunId = null;
     this.cancelPendingPermissions();
 
-    if (this.qwenSessionId && this.subprocess) {
-      await this.sendRequest('session/cancel', { sessionId: this.qwenSessionId }, 5_000).catch((error) => {
+    const sessionId = this.qwenSessionId;
+    if (sessionId && this.connection) {
+      await this.callAcp(
+        'session/cancel',
+        (connection) => connection.cancel({ sessionId }),
+        5_000,
+      ).catch((error) => {
         this.debug(`Qwen cancel failed: ${error instanceof Error ? error.message : String(error)}`);
       });
     }
@@ -419,8 +411,13 @@ export class QwenAgent extends BaseAgent {
     this.cancelPendingPermissions();
     this.eventQueue.complete();
 
-    if (this.qwenSessionId && this.subprocess) {
-      void this.sendRequest('session/cancel', { sessionId: this.qwenSessionId }, 5_000).catch((error) => {
+    const sessionId = this.qwenSessionId;
+    if (sessionId && this.connection) {
+      void this.callAcp(
+        'session/cancel',
+        (connection) => connection.cancel({ sessionId }),
+        5_000,
+      ).catch((error) => {
         this.debug(`Qwen force cancel failed: ${error instanceof Error ? error.message : String(error)}`);
       });
     }
@@ -431,15 +428,7 @@ export class QwenAgent extends BaseAgent {
     if (!pending) return;
 
     this.pendingPermissions.delete(requestId);
-    if (!allowed) {
-      this.sendResponse(pending.rpcId, { outcome: { outcome: 'cancelled' } });
-      return;
-    }
-
-    const optionId = this.selectPermissionOption(pending.options, !!alwaysAllow);
-    this.sendResponse(pending.rpcId, {
-      outcome: { outcome: 'selected', optionId },
-    });
+    pending.resolve(this.createPermissionResponse(pending.options, allowed, !!alwaysAllow));
   }
 
   override setPermissionMode(mode: PermissionMode): void {
@@ -455,12 +444,13 @@ export class QwenAgent extends BaseAgent {
 
   override setModel(model: string): void {
     super.setModel(model);
-    if (!model || !this.qwenSessionId) return;
-    void this.sendRequest('session/set_config_option', {
-      sessionId: this.qwenSessionId,
+    const sessionId = this.qwenSessionId;
+    if (!model || !sessionId) return;
+    void this.callAcp('session/set_config_option', (connection) => connection.setSessionConfigOption({
+      sessionId,
       configId: 'model',
       value: model,
-    }, 10_000).catch((error) => {
+    }), 10_000).catch((error) => {
       this.debug(`Qwen model switch failed: ${error instanceof Error ? error.message : String(error)}`);
     });
   }
@@ -486,20 +476,21 @@ export class QwenAgent extends BaseAgent {
     this.miniCollectors.set(sessionId, collector);
 
     try {
-      if (request.model) {
-        await this.sendRequest('session/set_config_option', {
+      const model = request.model;
+      if (model) {
+        await this.callAcp('session/set_config_option', (connection) => connection.setSessionConfigOption({
           sessionId,
           configId: 'model',
-          value: request.model,
-        }, 10_000).catch((error) => {
+          value: model,
+        }), 10_000).catch((error) => {
           this.debug(`Qwen mini model switch failed: ${error instanceof Error ? error.message : String(error)}`);
         });
       }
 
       const prompt = this.buildQueryPrompt(request);
-      await this.sendRequest(
+      await this.callAcp(
         'session/prompt',
-        { sessionId, prompt: [{ type: 'text', text: prompt }] },
+        (connection) => connection.prompt({ sessionId, prompt: [{ type: 'text', text: prompt }] }),
         LLM_QUERY_TIMEOUT_MS,
       );
 
@@ -517,17 +508,22 @@ export class QwenAgent extends BaseAgent {
   override destroy(): void {
     super.destroy();
     this.killSubprocess();
-    this.pendingRequests.clear();
     this.pendingPermissions.clear();
     this.miniCollectors.clear();
   }
 
   // ============================================================
-  // ACP process and JSON-RPC
+  // ACP process and SDK connection
   // ============================================================
 
   private async ensureProcess(): Promise<void> {
-    if (this.subprocess && !this.subprocess.killed && this.initialized) return;
+    if (
+      this.subprocess
+      && !this.subprocess.killed
+      && this.connection
+      && !this.connection.signal.aborted
+      && this.initialized
+    ) return;
     if (this.startPromise) {
       await this.startPromise;
       return;
@@ -570,12 +566,15 @@ export class QwenAgent extends BaseAgent {
     this.subprocess = child;
     this.initialized = false;
 
-    this.readline = createInterface({
-      input: child.stdout!,
-      crlfDelay: Infinity,
-    });
+    const connection = new ClientSideConnection(
+      () => this.createAcpClient(),
+      ndJsonStream(
+        Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>,
+        Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>,
+      ),
+    );
+    this.connection = connection;
 
-    this.readline.on('line', (line) => this.handleLine(line));
     child.stderr?.on('data', (data: Buffer) => {
       const text = data.toString();
       this.recordStderr(text);
@@ -584,17 +583,29 @@ export class QwenAgent extends BaseAgent {
     });
     child.on('exit', (code, signal) => this.handleProcessExit(code, signal));
     child.on('error', (error) => {
-      this.rejectAllPending(error);
       this.eventQueue.enqueue({ type: 'error', message: `Qwen ACP process error: ${error.message}` });
       this.eventQueue.complete();
     });
 
-    await this.sendRequest('initialize', {
-      protocolVersion: 1,
-      clientCapabilities: {},
-    }, 30_000);
+    void connection.closed.then(() => {
+      if (this.connection !== connection) return;
+      if (this.subprocess === child && !child.killed && child.exitCode === null) {
+        child.kill();
+      }
+    });
 
-    this.initialized = true;
+    try {
+      await this.withTimeout(connection.initialize({
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {},
+      }), 'initialize', 30_000);
+      this.initialized = true;
+    } catch (error) {
+      if (this.subprocess === child) {
+        this.killSubprocess();
+      }
+      throw error;
+    }
   }
 
   private buildSpawnCommand(qwenCliPath: string, nodePath: string): { command: string; args: string[] } {
@@ -610,102 +621,47 @@ export class QwenAgent extends BaseAgent {
     return { command: qwenCliPath, args };
   }
 
-  private sendRequest(method: string, params?: unknown, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promise<unknown> {
-    if (!this.subprocess?.stdin || this.subprocess.killed) {
-      return Promise.reject(new Error('Qwen ACP process is not running'));
-    }
-
-    const id = ++this.jsonRpcIdCounter;
-    const payload = {
-      jsonrpc: '2.0',
-      id,
-      method,
-      ...(params !== undefined ? { params } : {}),
+  private createAcpClient(): Client {
+    return {
+      requestPermission: (params) => this.handlePermissionRequest(params),
+      sessionUpdate: async (params) => {
+        this.handleSessionUpdate(params);
+      },
     };
+  }
 
-    return new Promise((resolve, reject) => {
-      const pending: PendingJsonRpcRequest = { method, resolve, reject };
-      if (timeoutMs > 0) {
-        pending.timeout = setTimeout(() => {
-          this.pendingRequests.delete(String(id));
-          reject(new Error(`Qwen ACP request timed out: ${method}`));
-        }, timeoutMs);
-      }
-      this.pendingRequests.set(String(id), pending);
-      this.subprocess!.stdin!.write(`${JSON.stringify(payload)}\n`, (error) => {
-        if (!error) return;
-        const existing = this.pendingRequests.get(String(id));
-        if (existing?.timeout) clearTimeout(existing.timeout);
-        this.pendingRequests.delete(String(id));
-        reject(error);
-      });
+  private getAcpConnection(): ClientSideConnection {
+    if (!this.connection || this.connection.signal.aborted || !this.subprocess || this.subprocess.killed) {
+      throw new Error('Qwen ACP process is not running');
+    }
+    return this.connection;
+  }
+
+  private callAcp<T>(
+    method: string,
+    execute: (connection: ClientSideConnection) => Promise<T>,
+    timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  ): Promise<T> {
+    return this.withTimeout(execute(this.getAcpConnection()), method, timeoutMs);
+  }
+
+  private withTimeout<T>(
+    promise: Promise<T>,
+    method: string,
+    timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  ): Promise<T> {
+    if (timeoutMs <= 0) return promise;
+
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => {
+        reject(new Error(`Qwen ACP request timed out: ${method}`));
+      }, timeoutMs);
     });
-  }
 
-  private sendResponse(id: JsonRpcId, result: unknown): void {
-    this.writeJson({ jsonrpc: '2.0', id, result });
-  }
-
-  private sendError(id: JsonRpcId, code: number, message: string): void {
-    this.writeJson({ jsonrpc: '2.0', id, error: { code, message } });
-  }
-
-  private writeJson(value: unknown): void {
-    if (!this.subprocess?.stdin || this.subprocess.killed) return;
-    this.subprocess.stdin.write(`${JSON.stringify(value)}\n`);
-  }
-
-  private handleLine(line: string): void {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-
-    let message: JsonRecord;
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (!isRecord(parsed)) return;
-      message = parsed;
-    } catch {
-      this.debug(`[qwen stdout] ${trimmed}`);
-      return;
-    }
-
-    const id = message.id as JsonRpcId | undefined;
-    const method = asString(message.method);
-
-    if (id !== undefined && ('result' in message || 'error' in message)) {
-      this.handleResponse(id, message);
-      return;
-    }
-
-    if (method === 'session/update') {
-      this.handleSessionUpdate(message.params);
-      return;
-    }
-
-    if (method === 'session/request_permission' && id !== undefined) {
-      this.handlePermissionRequest(id, message.params);
-      return;
-    }
-
-    if (id !== undefined) {
-      this.sendError(id, -32601, `Unsupported ACP client method: ${method || 'unknown'}`);
-    }
-  }
-
-  private handleResponse(id: JsonRpcId, message: JsonRecord): void {
-    const pending = this.pendingRequests.get(String(id));
-    if (!pending) return;
-
-    if (pending.timeout) clearTimeout(pending.timeout);
-    this.pendingRequests.delete(String(id));
-
-    if (isRecord(message.error)) {
-      const errMsg = asString(message.error.message) || `${pending.method} failed`;
-      pending.reject(new Error(errMsg));
-      return;
-    }
-
-    pending.resolve(message.result);
+    return Promise.race([promise, timeoutPromise]).finally(() => {
+      if (timeout) clearTimeout(timeout);
+    });
   }
 
   private handleProcessExit(code: number | null, signal: NodeJS.Signals | null): void {
@@ -713,11 +669,9 @@ export class QwenAgent extends BaseAgent {
     this.debug(message);
     this.initialized = false;
     this.subprocess = null;
-    this.readline?.close();
-    this.readline = null;
+    this.connection = null;
 
-    this.rejectAllPending(new Error(message));
-    this.pendingPermissions.clear();
+    this.cancelPendingPermissions();
 
     if (this._isProcessing && !this.abortReason) {
       this.eventQueue.enqueue({ type: 'error', message });
@@ -726,17 +680,8 @@ export class QwenAgent extends BaseAgent {
     }
   }
 
-  private rejectAllPending(error: Error): void {
-    for (const [, pending] of this.pendingRequests) {
-      if (pending.timeout) clearTimeout(pending.timeout);
-      pending.reject(error);
-    }
-    this.pendingRequests.clear();
-  }
-
   private killSubprocess(): void {
-    this.readline?.close();
-    this.readline = null;
+    this.connection = null;
     if (this.subprocess && !this.subprocess.killed) {
       this.subprocess.kill();
     }
@@ -774,11 +719,11 @@ export class QwenAgent extends BaseAgent {
     if (existingSessionId) {
       this.suppressedSessionUpdates.add(existingSessionId);
       try {
-        await this.sendRequest('session/load', {
+        await this.callAcp('session/load', (connection) => connection.loadSession({
           sessionId: existingSessionId,
           cwd,
           mcpServers,
-        }, 60_000);
+        }), 60_000);
         this.qwenSessionId = existingSessionId;
         this.persistedQwenSessionId = existingSessionId;
         this.config.onSdkSessionIdUpdate?.(existingSessionId);
@@ -789,10 +734,10 @@ export class QwenAgent extends BaseAgent {
       }
     }
 
-    const result = toRecord(await this.sendRequest('session/new', {
+    const result = toRecord(await this.callAcp('session/new', (connection) => connection.newSession({
       cwd,
       mcpServers,
-    }, 60_000));
+    }), 60_000));
 
     const sessionId = asString(result.sessionId);
     if (!sessionId) {
@@ -806,10 +751,10 @@ export class QwenAgent extends BaseAgent {
   }
 
   private async createEphemeralSession(): Promise<string> {
-    const result = toRecord(await this.sendRequest('session/new', {
+    const result = toRecord(await this.callAcp('session/new', (connection) => connection.newSession({
       cwd: this.resolvedCwd(),
       mcpServers: [],
-    }, 60_000));
+    }), 60_000));
     const sessionId = asString(result.sessionId);
     if (!sessionId) {
       throw new Error('Qwen ACP did not return a sessionId for mini completion');
@@ -821,22 +766,22 @@ export class QwenAgent extends BaseAgent {
     await this.forwardPermissionMode(this.getPermissionMode(), sessionId);
 
     if (this._model) {
-      await this.sendRequest('session/set_config_option', {
+      await this.callAcp('session/set_config_option', (connection) => connection.setSessionConfigOption({
         sessionId,
         configId: 'model',
         value: this._model,
-      }, 10_000).catch((error) => {
+      }), 10_000).catch((error) => {
         this.debug(`Qwen initial model switch failed: ${error instanceof Error ? error.message : String(error)}`);
       });
     }
   }
 
   private async forwardPermissionMode(mode: PermissionMode, sessionId = this.qwenSessionId): Promise<void> {
-    if (!sessionId || !this.subprocess) return;
-    await this.sendRequest('session/set_mode', {
+    if (!sessionId || !this.connection || this.connection.signal.aborted) return;
+    await this.callAcp('session/set_mode', (connection) => connection.setSessionMode({
       sessionId,
       modeId: mapPermissionModeToQwen(mode),
-    }, 10_000).catch((error) => {
+    }), 10_000).catch((error) => {
       this.debug(`Qwen mode switch failed: ${error instanceof Error ? error.message : String(error)}`);
     });
   }
@@ -848,7 +793,7 @@ export class QwenAgent extends BaseAgent {
       || process.cwd();
   }
 
-  private buildAcpMcpServers(): AcpMcpServer[] {
+  private buildAcpMcpServers(): McpServer[] {
     if (this.config.poolServerUrl) {
       return [{
         type: 'http',
@@ -897,7 +842,7 @@ export class QwenAgent extends BaseAgent {
   // Prompt construction
   // ============================================================
 
-  private buildPromptBlocks(message: string, attachments?: FileAttachment[]): AcpContentBlock[] {
+  private buildPromptBlocks(message: string, attachments?: FileAttachment[]): ContentBlock[] {
     const textParts: string[] = [];
     const context = this.buildCraftContext();
     if (context) {
@@ -917,7 +862,7 @@ export class QwenAgent extends BaseAgent {
     }
 
     textParts.push(message);
-    const blocks: AcpContentBlock[] = [{ type: 'text', text: textParts.filter(Boolean).join('\n\n') }];
+    const blocks: ContentBlock[] = [{ type: 'text', text: textParts.filter(Boolean).join('\n\n') }];
 
     for (const attachment of attachments ?? []) {
       if (attachment.mimeType?.startsWith('image/') && attachment.base64) {
@@ -1190,15 +1135,12 @@ export class QwenAgent extends BaseAgent {
   // Permissions
   // ============================================================
 
-  private handlePermissionRequest(rpcId: JsonRpcId, params: unknown): void {
+  private handlePermissionRequest(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
     const record = toRecord(params);
     const toolCall = toRecord(record.toolCall);
     const options = Array.isArray(record.options)
       ? record.options.filter(isRecord) as AcpPermissionOption[]
       : [];
-
-    const requestId = `qwen-permission-${String(rpcId)}`;
-    this.pendingPermissions.set(requestId, { rpcId, options });
 
     const kind = asString(toolCall.kind);
     const rawInput = toRecord(toolCall.rawInput);
@@ -1208,24 +1150,29 @@ export class QwenAgent extends BaseAgent {
 
     if (!this.onPermissionRequest) {
       const autoAllow = this.getPermissionMode() === 'allow-all';
-      this.respondToPermission(requestId, autoAllow, autoAllow);
-      return;
+      return Promise.resolve(this.createPermissionResponse(options, autoAllow, autoAllow));
     }
 
-    try {
-      this.onPermissionRequest({
-        requestId,
-        toolName,
-        command,
-        description: title,
-        type: permissionTypeForKind(kind),
-        reason: asString(rawInput.reason),
-        impact: this.permissionImpact(toolCall),
-      });
-    } catch (error) {
-      this.debug(`Qwen permission callback failed: ${error instanceof Error ? error.message : String(error)}`);
-      this.respondToPermission(requestId, false, false);
-    }
+    return new Promise<RequestPermissionResponse>((resolve) => {
+      const requestId = `qwen-permission-${++this.permissionRequestCounter}`;
+      this.pendingPermissions.set(requestId, { resolve, options });
+
+      try {
+        this.onPermissionRequest?.({
+          requestId,
+          toolName,
+          command,
+          description: title,
+          type: permissionTypeForKind(kind),
+          reason: asString(rawInput.reason),
+          impact: this.permissionImpact(toolCall),
+        });
+      } catch (error) {
+        this.debug(`Qwen permission callback failed: ${error instanceof Error ? error.message : String(error)}`);
+        this.pendingPermissions.delete(requestId);
+        resolve(this.createPermissionResponse(options, false, false));
+      }
+    });
   }
 
   private permissionImpact(toolCall: JsonRecord): string | undefined {
@@ -1263,9 +1210,26 @@ export class QwenAgent extends BaseAgent {
     return firstAllow?.optionId || 'proceed_once';
   }
 
+  private createPermissionResponse(
+    options: AcpPermissionOption[],
+    allowed: boolean,
+    alwaysAllow: boolean,
+  ): RequestPermissionResponse {
+    if (!allowed) {
+      return { outcome: { outcome: 'cancelled' } };
+    }
+
+    return {
+      outcome: {
+        outcome: 'selected',
+        optionId: this.selectPermissionOption(options, alwaysAllow),
+      },
+    };
+  }
+
   private cancelPendingPermissions(): void {
     for (const [, pending] of this.pendingPermissions) {
-      this.sendResponse(pending.rpcId, { outcome: { outcome: 'cancelled' } });
+      pending.resolve(this.createPermissionResponse(pending.options, false, false));
     }
     this.pendingPermissions.clear();
   }
