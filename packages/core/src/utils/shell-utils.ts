@@ -10,7 +10,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { parse, quote } from 'shell-quote';
 import { doesToolInvocationMatch } from './tool-utils.js';
-import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
+import {
+  splitCommandsAST,
+  getCommandRootAST,
+  getCommandRootsAST,
+  detectCommandSubstitutionAST,
+} from './shellAstParser.js';
 import {
   execFile,
   execFileSync,
@@ -198,12 +203,23 @@ export function escapeShellArg(arg: string, shell: ShellType): string {
 }
 
 /**
- * Splits a shell command into a list of individual commands, respecting quotes.
- * This is used to separate chained commands (e.g., using &&, ||, ;).
- * @param command The shell command string to parse
- * @returns An array of individual command strings
+ * Split a compound shell command string into individual simple commands.
+ *
+ * Uses tree-sitter-bash AST when the parser is initialised (accurate parsing
+ * of quoting, heredocs, and nested constructs).  Falls back to the legacy
+ * character-level state machine when the parser is not yet ready.
  */
 export function splitCommands(command: string): string[] {
+  // Prefer AST-based splitting when the parser is ready
+  const astResult = splitCommandsAST(command);
+  if (astResult !== null) return astResult;
+
+  // Legacy fallback (parser not yet initialised)
+  return splitCommandsLegacy(command);
+}
+
+/** @internal Legacy string-based command splitter (fallback). */
+function splitCommandsLegacy(command: string): string[] {
   const commands: string[] = [];
   let currentCommand = '';
   let inSingleQuotes = false;
@@ -295,10 +311,26 @@ export function splitCommands(command: string): string[] {
 
 /**
  * Extracts the root command from a given shell command string.
+ *
+ * Uses tree-sitter-bash AST when the parser is initialised, falling back
+ * to regex-based extraction otherwise.
+ *
+ * @example getCommandRoot("ls -la /tmp") returns "ls"
+ * @example getCommandRoot("git status && npm test") returns "git"
  * Skips leading env var assignments (VAR=value) so that
  * `PYTHONPATH=/tmp python3 -c "..."` returns `python3`.
  */
 export function getCommandRoot(command: string): string | undefined {
+  // Prefer AST-based extraction
+  const astResult = getCommandRootAST(command);
+  if (astResult !== null) return astResult;
+
+  // Legacy fallback
+  return getCommandRootLegacy(command);
+}
+
+/** @internal Legacy regex-based command root extraction. */
+function getCommandRootLegacy(command: string): string | undefined {
   const trimmedCommand = command.trim();
   if (!trimmedCommand) {
     return undefined;
@@ -329,10 +361,21 @@ export function getCommandRoot(command: string): string | undefined {
   }
 }
 
+/**
+ * Extract root command names from ALL sub-commands in a compound command.
+ *
+ * Uses tree-sitter-bash AST when the parser is initialised, falling back
+ * to the legacy string-based approach otherwise.
+ */
 export function getCommandRoots(command: string): string[] {
   if (!command) {
     return [];
   }
+  // Prefer AST-based extraction
+  const astResult = getCommandRootsAST(command);
+  if (astResult !== null) return astResult;
+
+  // Legacy fallback
   return splitCommands(command)
     .map((c) => getCommandRoot(c))
     .filter((c): c is string => !!c);
@@ -355,20 +398,23 @@ export function stripShellWrapper(command: string): string {
 }
 
 /**
- * Detects command substitution patterns in a shell command, following bash quoting rules:
- * - Single quotes ('): Everything literal, no substitution possible
- * - Double quotes ("): Command substitution with $() and backticks unless escaped with \
- * - No quotes: Command substitution with $(), <(), and backticks
+ * Detect command substitution patterns ($(), ``, <(), >()) in a shell command.
  *
- * This function also understands heredocs:
- * - If a heredoc delimiter is quoted (e.g. `<<'EOF'`), bash will not perform
- *   expansions in the heredoc body, so substitution-like text is allowed.
- * - If a heredoc delimiter is unquoted (e.g. `<<EOF`), bash will perform
- *   expansions in the heredoc body, so command substitution is blocked there too.
- * @param command The shell command string to check
- * @returns true if command substitution would be executed by bash
+ * Uses tree-sitter-bash AST when the parser is initialised (more accurate,
+ * correctly handles all quoting contexts and heredocs).  Falls back to the
+ * legacy character-level parser otherwise.
  */
 export function detectCommandSubstitution(command: string): boolean {
+  // Prefer AST-based detection
+  const astResult = detectCommandSubstitutionAST(command);
+  if (astResult !== null) return astResult;
+
+  // Legacy fallback
+  return detectCommandSubstitutionLegacy(command);
+}
+
+/** @internal Legacy string-based command substitution detection. */
+function detectCommandSubstitutionLegacy(command: string): boolean {
   type PendingHeredoc = {
     delimiter: string;
     isQuotedDelimiter: boolean;
@@ -1082,22 +1128,6 @@ export async function isCommandAllowed(
     return { allowed: true };
   }
   return { allowed: false, reason: blockReason };
-}
-
-export function isCommandNeedsPermission(command: string): {
-  requiresPermission: boolean;
-  reason?: string;
-} {
-  const isAllowed = isShellCommandReadOnly(command);
-
-  if (isAllowed) {
-    return { requiresPermission: false };
-  }
-
-  return {
-    requiresPermission: true,
-    reason: 'Command requires permission to execute.',
-  };
 }
 
 /**

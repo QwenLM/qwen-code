@@ -33,6 +33,7 @@
 
 import nodePath from 'node:path';
 import os from 'node:os';
+import { isParserReady, tokenizeCommandAST } from '../utils/shellAstParser.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -1585,6 +1586,96 @@ const PREFIX_COMMANDS = new Set([
  * @param cwd           - Working directory for resolving relative paths.
  */
 export function extractShellOperations(
+  simpleCommand: string,
+  cwd: string,
+): ShellOperation[] {
+  if (!simpleCommand.trim()) return [];
+
+  // ── Prefer AST-based tokenization when the parser is ready ─────────────
+  if (isParserReady()) {
+    const astResult = tokenizeCommandAST(simpleCommand);
+    if (astResult !== null) {
+      const {
+        commandName: cmdName,
+        args,
+        redirectReads: astRedirectReads,
+        redirectWrites: astRedirectWrites,
+      } = astResult;
+
+      // Resolve redirect paths
+      const redirectReads = astRedirectReads
+        .filter(looksLikePath)
+        .map((p) => resolvePath(p, cwd));
+      const redirectWrites = astRedirectWrites
+        .filter((t) => t !== '/dev/null' && looksLikePath(t))
+        .map((p) => resolvePath(p, cwd));
+
+      // Skip pure environment variable assignments
+      if (cmdName.includes('=')) return [];
+
+      const ops: ShellOperation[] = [];
+
+      // ── Transparent prefix commands ─────────────────────────────────────
+      if (PREFIX_COMMANDS.has(cmdName)) {
+        const flagsWithVal = PREFIX_COMMAND_FLAGS_WITH_VALUE.get(cmdName);
+        let startIdx = 0;
+        while (startIdx < args.length) {
+          const t = args[startIdx]!;
+          if (t.startsWith('-')) {
+            startIdx++;
+            if (
+              flagsWithVal?.has(t) &&
+              startIdx < args.length &&
+              !args[startIdx]!.startsWith('-')
+            ) {
+              startIdx++;
+            }
+          } else if (t.includes('=')) {
+            startIdx++;
+          } else {
+            break;
+          }
+        }
+        if (
+          cmdName === 'timeout' &&
+          startIdx < args.length &&
+          /^\d/.test(args[startIdx]!)
+        ) {
+          startIdx++;
+        }
+        if (startIdx < args.length) {
+          const innerCommand = args.slice(startIdx).join(' ');
+          ops.push(...extractShellOperations(innerCommand, cwd));
+        }
+      } else {
+        const handler = COMMANDS[cmdName];
+        if (handler) {
+          ops.push(...handler(args, cwd));
+        }
+      }
+
+      // Append redirect-derived operations
+      ops.push(
+        ...redirectReads.map((p) => ({
+          virtualTool: 'read_file' as const,
+          filePath: p,
+        })),
+        ...redirectWrites.map((p) => ({
+          virtualTool: 'write_file' as const,
+          filePath: p,
+        })),
+      );
+
+      return ops;
+    }
+  }
+
+  // ── Legacy fallback (parser not yet initialised) ───────────────────────
+  return extractShellOperationsLegacy(simpleCommand, cwd);
+}
+
+/** @internal Legacy string-based shell operation extraction. */
+function extractShellOperationsLegacy(
   simpleCommand: string,
   cwd: string,
 ): ShellOperation[] {
