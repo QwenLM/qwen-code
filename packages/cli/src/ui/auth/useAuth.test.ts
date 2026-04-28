@@ -225,6 +225,111 @@ describe('useAuthCommand', () => {
       expect.any(Number),
     );
   });
+
+  it('configures DeepSeek via the shared API key provider flow', async () => {
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+
+    await act(async () => {
+      await result.current.handleApiKeyProviderSubmit(
+        'deepseek',
+        ' sk-deepseek ',
+        'deepseek-v4-flash, deepseek-v4-pro, deepseek-v4-flash',
+      );
+    });
+
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'env.DEEPSEEK_API_KEY',
+      'sk-deepseek',
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'modelProviders.openai',
+      [
+        {
+          id: 'deepseek-v4-flash',
+          name: '[DeepSeek] deepseek-v4-flash',
+          baseUrl: 'https://api.deepseek.com/v1',
+          envKey: 'DEEPSEEK_API_KEY',
+        },
+        {
+          id: 'deepseek-v4-pro',
+          name: '[DeepSeek] deepseek-v4-pro',
+          baseUrl: 'https://api.deepseek.com/v1',
+          envKey: 'DEEPSEEK_API_KEY',
+        },
+      ],
+    );
+    expect(config.reloadModelProvidersConfig).toHaveBeenCalledWith({
+      [AuthType.USE_OPENAI]: expect.any(Array),
+    });
+    expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+  });
+
+  it('configures Alibaba standard regional endpoints via the shared API key provider flow', async () => {
+    const settings = createSettings();
+    settings.merged.modelProviders = {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'deepseek-v4-flash',
+          name: '[DeepSeek] deepseek-v4-flash',
+          baseUrl: 'https://api.deepseek.com/v1',
+          envKey: 'DEEPSEEK_API_KEY',
+        },
+        {
+          id: 'old-qwen',
+          name: '[ModelStudio Standard] old-qwen',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          envKey: 'DASHSCOPE_API_KEY',
+        },
+      ],
+    };
+    const config = createConfig();
+    const addItem = vi.fn();
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+
+    await act(async () => {
+      await result.current.handleApiKeyProviderSubmit(
+        'alibabaStandard',
+        'sk-dashscope',
+        'qwen3.5-plus',
+        'sg-singapore',
+      );
+    });
+
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'env.DASHSCOPE_API_KEY',
+      'sk-dashscope',
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'modelProviders.openai',
+      [
+        {
+          id: 'qwen3.5-plus',
+          name: '[ModelStudio Standard] qwen3.5-plus',
+          baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+          envKey: 'DASHSCOPE_API_KEY',
+        },
+        {
+          id: 'deepseek-v4-flash',
+          name: '[DeepSeek] deepseek-v4-flash',
+          baseUrl: 'https://api.deepseek.com/v1',
+          envKey: 'DEEPSEEK_API_KEY',
+        },
+      ],
+    );
+  });
 });
 
 describe('generateCustomApiKeyEnvKey', () => {

@@ -23,9 +23,13 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { t } from '../../i18n/index.js';
 import {
-  ALIBABA_STANDARD_API_KEY_ENDPOINTS,
-  type AlibabaStandardRegion,
-} from '../../constants/alibabaStandardApiKey.js';
+  API_KEY_PROVIDER_OPTIONS,
+  API_KEY_PROVIDERS,
+  type ApiKeyProviderConfig,
+  type ApiKeyProviderId,
+  type ApiKeyProviderRegion,
+  type ApiKeyProviderRegionConfig,
+} from '../../constants/apiKeyProviders.js';
 import {
   generateCustomApiKeyEnvKey,
   normalizeCustomModelIds,
@@ -49,10 +53,8 @@ function parseDefaultAuthType(
 
 // Main menu option type
 type MainOption = 'OAUTH' | 'CODING_PLAN' | 'API_KEY';
-type ApiKeyOption =
-  | 'OPENROUTER_OAUTH'
-  | 'ALIBABA_STANDARD_API_KEY'
-  | 'CUSTOM_API_KEY';
+type PresetApiKeyOption = (typeof API_KEY_PROVIDER_OPTIONS)[number]['option'];
+type ApiKeyOption = 'OPENROUTER_OAUTH' | PresetApiKeyOption | 'CUSTOM_API_KEY';
 type OAuthOption =
   | 'OPENROUTER_OAUTH'
   | 'MODELSCOPE_OAUTH'
@@ -64,9 +66,9 @@ type ViewLevel =
   | 'region-select'
   | 'api-key-input'
   | 'api-key-type-select'
-  | 'alibaba-standard-region-select'
-  | 'alibaba-standard-api-key-input'
-  | 'alibaba-standard-model-id-input'
+  | 'preset-api-key-region-select'
+  | 'preset-api-key-input'
+  | 'preset-model-id-input'
   | 'custom-protocol-select'
   | 'custom-base-url-input'
   | 'custom-api-key-input'
@@ -75,26 +77,46 @@ type ViewLevel =
   | 'custom-review-json'
   | 'oauth-provider-select';
 
-const ALIBABA_STANDARD_MODEL_IDS_PLACEHOLDER = 'qwen3.5-plus,glm-5,kimi-k2.5';
-const ALIBABA_STANDARD_API_DOCUMENTATION_URLS: Record<
-  AlibabaStandardRegion,
-  string
-> = {
-  'cn-beijing': 'https://bailian.console.aliyun.com/cn-beijing?tab=api#/api',
-  'sg-singapore':
-    'https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=api#/api/?type=model&url=2712195',
-  'us-virginia':
-    'https://modelstudio.console.alibabacloud.com/us-east-1?tab=api#/api/?type=model&url=2712195',
-  'cn-hongkong':
-    'https://modelstudio.console.alibabacloud.com/cn-hongkong?tab=api#/api/?type=model&url=2712195',
-};
+function getDefaultRegion(
+  provider: ApiKeyProviderConfig,
+): ApiKeyProviderRegion | undefined {
+  return provider.regions?.[0]?.id;
+}
+
+function getSelectedRegionConfig(
+  provider: ApiKeyProviderConfig,
+  region: ApiKeyProviderRegion | undefined,
+): ApiKeyProviderRegionConfig | undefined {
+  return provider.regions?.find((candidate) => candidate.id === region);
+}
+
+function getProviderEndpoint(
+  provider: ApiKeyProviderConfig,
+  region: ApiKeyProviderRegion | undefined,
+): string {
+  return (
+    getSelectedRegionConfig(provider, region)?.endpoint ||
+    provider.endpoint ||
+    ''
+  );
+}
+
+function getProviderDocumentationUrl(
+  provider: ApiKeyProviderConfig,
+  region: ApiKeyProviderRegion | undefined,
+): string | undefined {
+  return (
+    getSelectedRegionConfig(provider, region)?.documentationUrl ||
+    provider.documentationUrl
+  );
+}
 
 export function AuthDialog(): React.JSX.Element {
   const { pendingAuthType, authError } = useUIState();
   const {
     handleAuthSelect: onAuthSelect,
     handleCodingPlanSubmit,
-    handleAlibabaStandardSubmit,
+    handleApiKeyProviderSubmit,
     handleOpenRouterSubmit,
     handleCustomApiKeySubmit,
     onAuthError,
@@ -107,19 +129,23 @@ export function AuthDialog(): React.JSX.Element {
   const [region, setRegion] = useState<CodingPlanRegion>(
     CodingPlanRegion.CHINA,
   );
-  const [alibabaStandardRegionIndex, setAlibabaStandardRegionIndex] =
+  const [presetApiKeyRegionIndex, setPresetApiKeyRegionIndex] =
     useState<number>(0);
   const [apiKeyTypeIndex, setApiKeyTypeIndex] = useState<number>(0);
   const [oauthProviderIndex, setOAuthProviderIndex] = useState<number>(0);
-  const [alibabaStandardRegion, setAlibabaStandardRegion] =
-    useState<AlibabaStandardRegion>('cn-beijing');
-  const [alibabaStandardApiKey, setAlibabaStandardApiKey] = useState('');
-  const [alibabaStandardApiKeyError, setAlibabaStandardApiKeyError] = useState<
-    string | null
-  >(null);
-  const [alibabaStandardModelId, setAlibabaStandardModelId] = useState('');
-  const [alibabaStandardModelIdError, setAlibabaStandardModelIdError] =
-    useState<string | null>(null);
+  const [presetApiKeyProvider, setPresetApiKeyProvider] =
+    useState<ApiKeyProviderConfig>(API_KEY_PROVIDERS.alibabaStandard);
+  const [presetApiKeyRegion, setPresetApiKeyRegion] = useState<
+    ApiKeyProviderRegion | undefined
+  >(getDefaultRegion(API_KEY_PROVIDERS.alibabaStandard));
+  const [presetApiKey, setPresetApiKey] = useState('');
+  const [presetApiKeyError, setPresetApiKeyError] = useState<string | null>(
+    null,
+  );
+  const [presetModelId, setPresetModelId] = useState('');
+  const [presetModelIdError, setPresetModelIdError] = useState<string | null>(
+    null,
+  );
 
   // Custom API Key wizard state
   const [customProtocolIndex, setCustomProtocolIndex] = useState<number>(0);
@@ -210,52 +236,18 @@ export function AuthDialog(): React.JSX.Element {
     },
   ];
 
-  const alibabaStandardRegionItems = [
-    {
-      key: 'cn-beijing',
-      title: t('China (Beijing)'),
-      label: t('China (Beijing)'),
+  const presetApiKeyRegionItems =
+    presetApiKeyProvider.regions?.map((regionConfig) => ({
+      key: regionConfig.id,
+      title: t(regionConfig.title),
+      label: t(regionConfig.title),
       description: (
         <Text color={theme.text.secondary}>
-          Endpoint: {ALIBABA_STANDARD_API_KEY_ENDPOINTS['cn-beijing']}
+          Endpoint: {regionConfig.endpoint}
         </Text>
       ),
-      value: 'cn-beijing' as AlibabaStandardRegion,
-    },
-    {
-      key: 'sg-singapore',
-      title: t('Singapore'),
-      label: t('Singapore'),
-      description: (
-        <Text color={theme.text.secondary}>
-          Endpoint: {ALIBABA_STANDARD_API_KEY_ENDPOINTS['sg-singapore']}
-        </Text>
-      ),
-      value: 'sg-singapore' as AlibabaStandardRegion,
-    },
-    {
-      key: 'us-virginia',
-      title: t('US (Virginia)'),
-      label: t('US (Virginia)'),
-      description: (
-        <Text color={theme.text.secondary}>
-          Endpoint: {ALIBABA_STANDARD_API_KEY_ENDPOINTS['us-virginia']}
-        </Text>
-      ),
-      value: 'us-virginia' as AlibabaStandardRegion,
-    },
-    {
-      key: 'cn-hongkong',
-      title: t('China (Hong Kong)'),
-      label: t('China (Hong Kong)'),
-      description: (
-        <Text color={theme.text.secondary}>
-          Endpoint: {ALIBABA_STANDARD_API_KEY_ENDPOINTS['cn-hongkong']}
-        </Text>
-      ),
-      value: 'cn-hongkong' as AlibabaStandardRegion,
-    },
-  ];
+      value: regionConfig.id,
+    })) || [];
 
   const protocolItems = [
     {
@@ -290,13 +282,13 @@ export function AuthDialog(): React.JSX.Element {
   };
 
   const apiKeyTypeItems = [
-    {
-      key: 'ALIBABA_STANDARD_API_KEY',
-      title: t('Alibaba Cloud ModelStudio Standard API Key'),
-      label: t('Alibaba Cloud ModelStudio Standard API Key'),
-      description: t('Quick setup for Model Studio (China/International)'),
-      value: 'ALIBABA_STANDARD_API_KEY' as ApiKeyOption,
-    },
+    ...API_KEY_PROVIDER_OPTIONS.map((provider) => ({
+      key: provider.option,
+      title: t(provider.title),
+      label: t(provider.title),
+      description: t(provider.description),
+      value: provider.option as ApiKeyOption,
+    })),
     {
       key: 'CUSTOM_API_KEY',
       title: t('Custom API Key'),
@@ -408,10 +400,22 @@ export function AuthDialog(): React.JSX.Element {
     setErrorMessage(null);
     onAuthError(null);
 
-    if (value === 'ALIBABA_STANDARD_API_KEY') {
-      setAlibabaStandardModelIdError(null);
-      setAlibabaStandardApiKeyError(null);
-      setViewLevel('alibaba-standard-region-select');
+    const selectedProvider = API_KEY_PROVIDER_OPTIONS.find(
+      (provider) => provider.option === value,
+    ) as ApiKeyProviderConfig | undefined;
+    if (selectedProvider) {
+      setPresetApiKeyProvider(selectedProvider);
+      setPresetApiKeyRegion(getDefaultRegion(selectedProvider));
+      setPresetApiKeyRegionIndex(0);
+      setPresetApiKey('');
+      setPresetApiKeyError(null);
+      setPresetModelId(selectedProvider.defaultModelIds);
+      setPresetModelIdError(null);
+      setViewLevel(
+        selectedProvider.regions
+          ? 'preset-api-key-region-select'
+          : 'preset-api-key-input',
+      );
       return;
     }
 
@@ -471,15 +475,15 @@ export function AuthDialog(): React.JSX.Element {
     setViewLevel('api-key-input');
   };
 
-  const handleAlibabaStandardRegionSelect = async (
-    selectedRegion: AlibabaStandardRegion,
+  const handlePresetApiKeyRegionSelect = async (
+    selectedRegion: ApiKeyProviderRegion,
   ) => {
     setErrorMessage(null);
     onAuthError(null);
-    setAlibabaStandardApiKeyError(null);
-    setAlibabaStandardModelIdError(null);
-    setAlibabaStandardRegion(selectedRegion);
-    setViewLevel('alibaba-standard-api-key-input');
+    setPresetApiKeyError(null);
+    setPresetModelIdError(null);
+    setPresetApiKeyRegion(selectedRegion);
+    setViewLevel('preset-api-key-input');
   };
 
   const handleApiKeyInputSubmit = async (apiKey: string) => {
@@ -494,38 +498,39 @@ export function AuthDialog(): React.JSX.Element {
     await handleCodingPlanSubmit(apiKey, region);
   };
 
-  const handleAlibabaStandardApiKeySubmit = () => {
-    const trimmedKey = alibabaStandardApiKey.trim();
+  const handlePresetApiKeySubmit = () => {
+    const trimmedKey = presetApiKey.trim();
     if (!trimmedKey) {
-      setAlibabaStandardApiKeyError(t('API key cannot be empty.'));
+      setPresetApiKeyError(t('API key cannot be empty.'));
       return;
     }
 
-    setAlibabaStandardApiKeyError(null);
-    if (!alibabaStandardModelId.trim()) {
-      setAlibabaStandardModelId(ALIBABA_STANDARD_MODEL_IDS_PLACEHOLDER);
+    setPresetApiKeyError(null);
+    if (!presetModelId.trim()) {
+      setPresetModelId(presetApiKeyProvider.defaultModelIds);
     }
-    setViewLevel('alibaba-standard-model-id-input');
+    setViewLevel('preset-model-id-input');
   };
 
-  const handleAlibabaStandardModelSubmit = () => {
-    const trimmedApiKey = alibabaStandardApiKey.trim();
-    const trimmedModelIds = alibabaStandardModelId.trim();
+  const handlePresetModelSubmit = () => {
+    const trimmedApiKey = presetApiKey.trim();
+    const trimmedModelIds = presetModelId.trim();
     if (!trimmedApiKey) {
-      setAlibabaStandardApiKeyError(t('API key cannot be empty.'));
-      setViewLevel('alibaba-standard-api-key-input');
+      setPresetApiKeyError(t('API key cannot be empty.'));
+      setViewLevel('preset-api-key-input');
       return;
     }
     if (!trimmedModelIds) {
-      setAlibabaStandardModelIdError(t('Model IDs cannot be empty.'));
+      setPresetModelIdError(t('Model IDs cannot be empty.'));
       return;
     }
 
-    setAlibabaStandardModelIdError(null);
-    void handleAlibabaStandardSubmit(
+    setPresetModelIdError(null);
+    void handleApiKeyProviderSubmit(
+      presetApiKeyProvider.id as ApiKeyProviderId,
       trimmedApiKey,
-      alibabaStandardRegion,
       trimmedModelIds,
+      presetApiKeyRegion || getDefaultRegion(presetApiKeyProvider),
     );
   };
 
@@ -634,12 +639,16 @@ export function AuthDialog(): React.JSX.Element {
       setViewLevel('custom-model-id-input');
     } else if (viewLevel === 'custom-review-json') {
       setViewLevel('custom-advanced-config');
-    } else if (viewLevel === 'alibaba-standard-region-select') {
+    } else if (viewLevel === 'preset-api-key-region-select') {
       setViewLevel('api-key-type-select');
-    } else if (viewLevel === 'alibaba-standard-api-key-input') {
-      setViewLevel('alibaba-standard-region-select');
-    } else if (viewLevel === 'alibaba-standard-model-id-input') {
-      setViewLevel('alibaba-standard-api-key-input');
+    } else if (viewLevel === 'preset-api-key-input') {
+      setViewLevel(
+        presetApiKeyProvider.regions
+          ? 'preset-api-key-region-select'
+          : 'api-key-type-select',
+      );
+    } else if (viewLevel === 'preset-model-id-input') {
+      setViewLevel('preset-api-key-input');
     } else if (viewLevel === 'oauth-provider-select') {
       setViewLevel('main');
     }
@@ -671,9 +680,9 @@ export function AuthDialog(): React.JSX.Element {
         }
         if (
           viewLevel === 'api-key-type-select' ||
-          viewLevel === 'alibaba-standard-region-select' ||
-          viewLevel === 'alibaba-standard-api-key-input' ||
-          viewLevel === 'alibaba-standard-model-id-input' ||
+          viewLevel === 'preset-api-key-region-select' ||
+          viewLevel === 'preset-api-key-input' ||
+          viewLevel === 'preset-model-id-input' ||
           viewLevel === 'oauth-provider-select'
         ) {
           handleGoBack();
@@ -819,18 +828,18 @@ export function AuthDialog(): React.JSX.Element {
     </>
   );
 
-  const renderAlibabaStandardRegionSelectView = () => (
+  const renderPresetApiKeyRegionSelectView = () => (
     <>
       <Box marginTop={1}>
         <DescriptiveRadioButtonSelect
-          items={alibabaStandardRegionItems}
-          initialIndex={alibabaStandardRegionIndex}
-          onSelect={handleAlibabaStandardRegionSelect}
+          items={presetApiKeyRegionItems}
+          initialIndex={presetApiKeyRegionIndex}
+          onSelect={handlePresetApiKeyRegionSelect}
           onHighlight={(value) => {
-            const index = alibabaStandardRegionItems.findIndex(
+            const index = presetApiKeyRegionItems.findIndex(
               (item) => item.value === value,
             );
-            setAlibabaStandardRegionIndex(index);
+            setPresetApiKeyRegionIndex(index);
           }}
           itemGap={1}
         />
@@ -843,77 +852,85 @@ export function AuthDialog(): React.JSX.Element {
     </>
   );
 
-  const renderAlibabaStandardApiKeyInputView = () => (
-    <Box marginTop={1} flexDirection="column">
-      <Box marginTop={1}>
-        <Text color={theme.text.secondary}>
-          Endpoint: {ALIBABA_STANDARD_API_KEY_ENDPOINTS[alibabaStandardRegion]}
-        </Text>
-      </Box>
-      <Box marginTop={1}>
-        <Text color={theme.text.secondary}>{t('Documentation')}:</Text>
-      </Box>
-      <Box marginTop={0}>
-        <Link
-          url={ALIBABA_STANDARD_API_DOCUMENTATION_URLS[alibabaStandardRegion]}
-          fallback={false}
-        >
-          <Text color={theme.text.link}>
-            {ALIBABA_STANDARD_API_DOCUMENTATION_URLS[alibabaStandardRegion]}
-          </Text>
-        </Link>
-      </Box>
-      <Box marginTop={1}>
-        <TextInput
-          value={alibabaStandardApiKey}
-          onChange={(value) => {
-            setAlibabaStandardApiKey(value);
-            if (alibabaStandardApiKeyError) {
-              setAlibabaStandardApiKeyError(null);
-            }
-          }}
-          onSubmit={handleAlibabaStandardApiKeySubmit}
-          placeholder="sk-..."
-        />
-      </Box>
-      {alibabaStandardApiKeyError && (
-        <Box marginTop={1}>
-          <Text color={theme.status.error}>{alibabaStandardApiKeyError}</Text>
-        </Box>
-      )}
-      <Box marginTop={1}>
-        <Text color={theme.text.secondary}>
-          {t('Enter to submit, Esc to go back')}
-        </Text>
-      </Box>
-    </Box>
-  );
+  const renderPresetApiKeyInputView = () => {
+    const documentationUrl = getProviderDocumentationUrl(
+      presetApiKeyProvider,
+      presetApiKeyRegion,
+    );
 
-  const renderAlibabaStandardModelIdInputView = () => (
+    return (
+      <Box marginTop={1} flexDirection="column">
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary}>
+            Endpoint:{' '}
+            {getProviderEndpoint(presetApiKeyProvider, presetApiKeyRegion)}
+          </Text>
+        </Box>
+        {documentationUrl && (
+          <>
+            <Box marginTop={1}>
+              <Text color={theme.text.secondary}>{t('Documentation')}:</Text>
+            </Box>
+            <Box marginTop={0}>
+              <Link url={documentationUrl} fallback={false}>
+                <Text color={theme.text.link}>{documentationUrl}</Text>
+              </Link>
+            </Box>
+          </>
+        )}
+        <Box marginTop={1}>
+          <TextInput
+            value={presetApiKey}
+            onChange={(value) => {
+              setPresetApiKey(value);
+              if (presetApiKeyError) {
+                setPresetApiKeyError(null);
+              }
+            }}
+            onSubmit={handlePresetApiKeySubmit}
+            placeholder="sk-..."
+          />
+        </Box>
+        {presetApiKeyError && (
+          <Box marginTop={1}>
+            <Text color={theme.status.error}>{presetApiKeyError}</Text>
+          </Box>
+        )}
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary}>
+            {t('Enter to submit, Esc to go back')}
+          </Text>
+        </Box>
+      </Box>
+    );
+  };
+
+  const renderPresetModelIdInputView = () => (
     <Box marginTop={1} flexDirection="column">
       <Box marginTop={1}>
         <Text color={theme.text.secondary}>
           {t(
-            'You can enter multiple model IDs, separated by commas. Examples: qwen3.5-plus,glm-5,kimi-k2.5',
+            'You can enter multiple model IDs, separated by commas. Examples: {{modelIds}}',
+            { modelIds: presetApiKeyProvider.defaultModelIds },
           )}
         </Text>
       </Box>
       <Box marginTop={1}>
         <TextInput
-          value={alibabaStandardModelId}
+          value={presetModelId}
           onChange={(value) => {
-            setAlibabaStandardModelId(value);
-            if (alibabaStandardModelIdError) {
-              setAlibabaStandardModelIdError(null);
+            setPresetModelId(value);
+            if (presetModelIdError) {
+              setPresetModelIdError(null);
             }
           }}
-          onSubmit={handleAlibabaStandardModelSubmit}
-          placeholder={ALIBABA_STANDARD_MODEL_IDS_PLACEHOLDER}
+          onSubmit={handlePresetModelSubmit}
+          placeholder={presetApiKeyProvider.defaultModelIds}
         />
       </Box>
-      {alibabaStandardModelIdError && (
+      {presetModelIdError && (
         <Box marginTop={1}>
-          <Text color={theme.status.error}>{alibabaStandardModelIdError}</Text>
+          <Text color={theme.status.error}>{presetModelIdError}</Text>
         </Box>
       )}
       <Box marginTop={1}>
@@ -1226,6 +1243,16 @@ export function AuthDialog(): React.JSX.Element {
         return t('Enter Coding Plan API Key');
       case 'api-key-type-select':
         return t('Select API Key Type');
+      case 'preset-api-key-region-select':
+        return t('Select Region for {{providerName}}', {
+          providerName: presetApiKeyProvider.title,
+        });
+      case 'preset-api-key-input':
+        return t('Enter {{providerName}}', {
+          providerName: presetApiKeyProvider.title,
+        });
+      case 'preset-model-id-input':
+        return t('Enter Model IDs');
       case 'custom-protocol-select':
         return t('Step 1/6 \u00B7 Protocol');
       case 'custom-base-url-input':
@@ -1238,14 +1265,6 @@ export function AuthDialog(): React.JSX.Element {
         return t('Step 5/6 \u00B7 Advanced Config');
       case 'custom-review-json':
         return t('Step 6/6 \u00B7 Review');
-      case 'alibaba-standard-region-select':
-        return t(
-          'Select Region for Alibaba Cloud ModelStudio Standard API Key',
-        );
-      case 'alibaba-standard-api-key-input':
-        return t('Enter Alibaba Cloud ModelStudio Standard API Key');
-      case 'alibaba-standard-model-id-input':
-        return t('Enter Model IDs');
       case 'oauth-provider-select':
         return t('Select OAuth Provider');
       default:
@@ -1267,12 +1286,10 @@ export function AuthDialog(): React.JSX.Element {
       {viewLevel === 'region-select' && renderRegionSelectView()}
       {viewLevel === 'api-key-input' && renderApiKeyInputView()}
       {viewLevel === 'api-key-type-select' && renderApiKeyTypeSelectView()}
-      {viewLevel === 'alibaba-standard-region-select' &&
-        renderAlibabaStandardRegionSelectView()}
-      {viewLevel === 'alibaba-standard-api-key-input' &&
-        renderAlibabaStandardApiKeyInputView()}
-      {viewLevel === 'alibaba-standard-model-id-input' &&
-        renderAlibabaStandardModelIdInputView()}
+      {viewLevel === 'preset-api-key-region-select' &&
+        renderPresetApiKeyRegionSelectView()}
+      {viewLevel === 'preset-api-key-input' && renderPresetApiKeyInputView()}
+      {viewLevel === 'preset-model-id-input' && renderPresetModelIdInputView()}
       {viewLevel === 'custom-protocol-select' &&
         renderCustomProtocolSelectView()}
       {viewLevel === 'custom-base-url-input' && renderCustomBaseUrlInputView()}

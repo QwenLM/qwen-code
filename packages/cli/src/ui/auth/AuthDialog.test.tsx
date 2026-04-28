@@ -33,7 +33,7 @@ const createMockUIActions = (overrides: Partial<UIActions> = {}): UIActions => {
   const baseActions = {
     handleAuthSelect: vi.fn(),
     handleCodingPlanSubmit: vi.fn(),
-    handleAlibabaStandardSubmit: vi.fn(),
+    handleApiKeyProviderSubmit: vi.fn(),
     handleOpenRouterSubmit: vi.fn(),
     onAuthError: vi.fn(),
     handleRetryLastPrompt: vi.fn(),
@@ -141,6 +141,7 @@ const navigateToCustomProtocolSelect = async (
     lastFrame,
     'Alibaba Cloud ModelStudio Standard API Key',
   );
+  await moveDownAndWaitForSelection(stdin, lastFrame, 'DeepSeek API Key');
   await moveDownAndWaitForSelection(stdin, lastFrame, 'Custom API Key');
   await pressEnterAndWaitFor(stdin, lastFrame, 'Step 1/6 · Protocol');
 };
@@ -835,7 +836,7 @@ describe('AuthDialog Custom API Key Wizard', () => {
       const mockUIActions = {
         handleAuthSelect: vi.fn(),
         handleCodingPlanSubmit: vi.fn(),
-        handleAlibabaStandardSubmit: vi.fn(),
+        handleApiKeyProviderSubmit: vi.fn(),
         handleOpenRouterSubmit: vi.fn(),
         handleCustomApiKeySubmit,
         onAuthError: vi.fn(),
@@ -884,7 +885,7 @@ describe('AuthDialog Custom API Key Wizard', () => {
       const mockUIActions = {
         handleAuthSelect: vi.fn(),
         handleCodingPlanSubmit: vi.fn(),
-        handleAlibabaStandardSubmit: vi.fn(),
+        handleApiKeyProviderSubmit: vi.fn(),
         handleOpenRouterSubmit: vi.fn(),
         handleCustomApiKeySubmit,
         onAuthError: vi.fn(),
@@ -931,7 +932,7 @@ describe('AuthDialog Custom API Key Wizard', () => {
       const mockUIActions = {
         handleAuthSelect: vi.fn(),
         handleCodingPlanSubmit: vi.fn(),
-        handleAlibabaStandardSubmit: vi.fn(),
+        handleApiKeyProviderSubmit: vi.fn(),
         handleOpenRouterSubmit: vi.fn(),
         handleCustomApiKeySubmit,
         onAuthError: vi.fn(),
@@ -988,7 +989,7 @@ describe('AuthDialog Custom API Key Wizard', () => {
       const mockUIActions = {
         handleAuthSelect: vi.fn(),
         handleCodingPlanSubmit: vi.fn(),
-        handleAlibabaStandardSubmit: vi.fn(),
+        handleApiKeyProviderSubmit: vi.fn(),
         handleOpenRouterSubmit: vi.fn(),
         handleCustomApiKeySubmit,
         onAuthError: vi.fn(),
@@ -1053,7 +1054,7 @@ describe('AuthDialog Custom API Key Wizard', () => {
       const mockUIActions = {
         handleAuthSelect: vi.fn(),
         handleCodingPlanSubmit: vi.fn(),
-        handleAlibabaStandardSubmit: vi.fn(),
+        handleApiKeyProviderSubmit: vi.fn(),
         handleOpenRouterSubmit: vi.fn(),
         handleCustomApiKeySubmit,
         onAuthError: vi.fn(),
@@ -1110,7 +1111,7 @@ describe('AuthDialog Custom API Key Wizard', () => {
       const mockUIActions = {
         handleAuthSelect: vi.fn(),
         handleCodingPlanSubmit: vi.fn(),
-        handleAlibabaStandardSubmit: vi.fn(),
+        handleApiKeyProviderSubmit: vi.fn(),
         handleOpenRouterSubmit: vi.fn(),
         handleCustomApiKeySubmit,
         onAuthError: vi.fn(),

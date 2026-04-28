@@ -16,7 +16,10 @@ import {
   type CodingPlanRegion,
 } from '@qwen-code/qwen-code-core';
 import { type SettingScope } from '../../config/settings.js';
-import { type AlibabaStandardRegion } from '../../constants/alibabaStandardApiKey.js';
+import {
+  type ApiKeyProviderId,
+  type ApiKeyProviderRegion,
+} from '../../constants/apiKeyProviders.js';
 import type { AuthState, HistoryItem } from '../types.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
 // OpenAICredentials type (previously imported from OpenAIKeyPrompt)
@@ -47,10 +50,11 @@ export interface UIActions {
     apiKey: string,
     region?: CodingPlanRegion,
   ) => Promise<void>;
-  handleAlibabaStandardSubmit: (
+  handleApiKeyProviderSubmit: (
+    providerId: ApiKeyProviderId,
     apiKey: string,
-    region: AlibabaStandardRegion,
     modelIdsInput: string,
+    region?: ApiKeyProviderRegion,
   ) => Promise<void>;
   handleOpenRouterSubmit: () => Promise<void>;
   handleCustomApiKeySubmit: (

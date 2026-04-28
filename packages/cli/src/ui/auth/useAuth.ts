@@ -35,10 +35,13 @@ import type { HistoryItem } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { backupSettingsFile } from '../../utils/settingsUtils.js';
 import {
-  ALIBABA_STANDARD_API_KEY_ENDPOINTS,
-  DASHSCOPE_STANDARD_API_KEY_ENV_KEY,
-  type AlibabaStandardRegion,
-} from '../../constants/alibabaStandardApiKey.js';
+  API_KEY_PROVIDERS,
+  getApiKeyProviderEndpoint,
+  isApiKeyProviderConfig,
+  type ApiKeyProviderId,
+  type ApiKeyProviderConfig,
+  type ApiKeyProviderRegion,
+} from '../../constants/apiKeyProviders.js';
 import {
   applyOpenRouterModelsConfiguration,
   createOpenRouterOAuthSession,
@@ -85,6 +88,19 @@ export function maskApiKey(apiKey: string): string {
   const head = trimmed.slice(0, 3);
   const tail = trimmed.slice(-4);
   return `${head}...${tail}`;
+}
+
+function buildApiKeyProviderModelConfigs(
+  provider: ApiKeyProviderConfig,
+  modelIds: string[],
+  baseUrl: string,
+): ProviderModelConfig[] {
+  return modelIds.map((modelId) => ({
+    id: modelId,
+    name: `[${provider.modelNamePrefix}] ${modelId}`,
+    baseUrl,
+    envKey: provider.envKey,
+  }));
 }
 
 export type { QwenAuthState } from '../hooks/useQwenAuth.js';
@@ -491,27 +507,19 @@ export const useAuthCommand = (
     [settings, config, handleAuthFailure, addItem, onAuthChange],
   );
 
-  /**
-   * Handle Alibaba Cloud standard API key flow.
-   * Persists key to env.DASHSCOPE_API_KEY and creates a modelProviders.openai entry.
-   */
-  const handleAlibabaStandardSubmit = useCallback(
+  const submitApiKeyProvider = useCallback(
     async (
+      provider: ApiKeyProviderConfig,
       apiKey: string,
-      region: AlibabaStandardRegion,
       modelIdsInput: string,
+      region?: ApiKeyProviderRegion,
     ) => {
       try {
         setIsAuthenticating(true);
         setAuthError(null);
 
         const trimmedApiKey = apiKey.trim();
-        const modelIds = modelIdsInput
-          .split(',')
-          .map((id) => id.trim())
-          .filter(
-            (id, index, array) => id.length > 0 && array.indexOf(id) === index,
-          );
+        const modelIds = normalizeCustomModelIds(modelIdsInput);
         if (!trimmedApiKey) {
           throw new Error(t('API key cannot be empty.'));
         }
@@ -519,43 +527,36 @@ export const useAuthCommand = (
           throw new Error(t('Model IDs cannot be empty.'));
         }
 
-        const baseUrl = ALIBABA_STANDARD_API_KEY_ENDPOINTS[region];
+        const baseUrl = getApiKeyProviderEndpoint(provider, region);
         const persistScope = getPersistScopeForModelSelection(settings);
-
         const settingsFile = settings.forScope(persistScope);
         backupSettingsFile(settingsFile.path);
 
         settings.setValue(
           persistScope,
-          `env.${DASHSCOPE_STANDARD_API_KEY_ENV_KEY}`,
+          `env.${provider.envKey}`,
           trimmedApiKey,
         );
-        process.env[DASHSCOPE_STANDARD_API_KEY_ENV_KEY] = trimmedApiKey;
+        process.env[provider.envKey] = trimmedApiKey;
 
-        const newConfigs: ProviderModelConfig[] = modelIds.map((modelId) => ({
-          id: modelId,
-          name: `[ModelStudio Standard] ${modelId}`,
+        const newConfigs = buildApiKeyProviderModelConfigs(
+          provider,
+          modelIds,
           baseUrl,
-          envKey: DASHSCOPE_STANDARD_API_KEY_ENV_KEY,
-        }));
-
+        );
         const existingConfigs =
           (
             settings.merged.modelProviders as ModelProvidersConfig | undefined
           )?.[AuthType.USE_OPENAI] || [];
-
-        const nonAlibabaStandardConfigs = existingConfigs.filter(
+        const otherProviderConfigs = existingConfigs.filter(
           (existing) =>
-            !(
-              existing.envKey === DASHSCOPE_STANDARD_API_KEY_ENV_KEY &&
-              typeof existing.baseUrl === 'string' &&
-              Object.values(ALIBABA_STANDARD_API_KEY_ENDPOINTS).includes(
-                existing.baseUrl,
-              )
+            !isApiKeyProviderConfig(
+              provider,
+              existing.baseUrl,
+              existing.envKey,
             ),
         );
-
-        const updatedConfigs = [...newConfigs, ...nonAlibabaStandardConfigs];
+        const updatedConfigs = [...newConfigs, ...otherProviderConfigs];
 
         settings.setValue(
           persistScope,
@@ -589,8 +590,12 @@ export const useAuthCommand = (
           {
             type: MessageType.INFO,
             text: t(
-              'Alibaba Cloud ModelStudio Standard API Key successfully entered. Settings updated with env.DASHSCOPE_API_KEY and {{modelCount}} model(s).',
-              { modelCount: String(modelIds.length) },
+              '{{providerName}} successfully entered. Settings updated with env.{{envKey}} and {{modelCount}} model(s).',
+              {
+                providerName: provider.title,
+                envKey: provider.envKey,
+                modelCount: String(modelIds.length),
+              },
             ),
           },
           Date.now(),
@@ -600,7 +605,8 @@ export const useAuthCommand = (
           {
             type: MessageType.INFO,
             text: t(
-              'You can use /model to see new ModelStudio Standard models and switch between them.',
+              'You can use /model to see new {{providerName}} models and switch between them.',
+              { providerName: provider.modelNamePrefix },
             ),
           },
           Date.now(),
@@ -617,6 +623,22 @@ export const useAuthCommand = (
       }
     },
     [settings, config, handleAuthFailure, addItem, onAuthChange],
+  );
+
+  const handleApiKeyProviderSubmit = useCallback(
+    async (
+      providerId: ApiKeyProviderId,
+      apiKey: string,
+      modelIdsInput: string,
+      region?: ApiKeyProviderRegion,
+    ) =>
+      submitApiKeyProvider(
+        API_KEY_PROVIDERS[providerId],
+        apiKey,
+        modelIdsInput,
+        region,
+      ),
+    [submitApiKeyProvider],
   );
 
   const handleOpenRouterSubmit = useCallback(async () => {
@@ -949,7 +971,7 @@ export const useAuthCommand = (
     qwenAuthState,
     handleAuthSelect,
     handleCodingPlanSubmit,
-    handleAlibabaStandardSubmit,
+    handleApiKeyProviderSubmit,
     handleOpenRouterSubmit,
     handleCustomApiKeySubmit,
     openAuthDialog,
