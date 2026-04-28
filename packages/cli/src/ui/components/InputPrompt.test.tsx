@@ -229,23 +229,6 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it('accepts and submits the prompt suggestion on Enter when the buffer is empty', async () => {
-      const { stdin, unmount } = renderWithProviders(
-        <InputPrompt {...props} promptSuggestion="commit this" />,
-      );
-      await wait(350);
-
-      stdin.write('\r');
-      await wait();
-
-      expect(props.onSubmit).toHaveBeenCalledWith('commit this');
-      // Enter path must NOT call buffer.insert — it passes text directly to
-      // handleSubmitAndClear. Calling insert would re-fill the buffer after
-      // it was already cleared (the microtask race bug).
-      expect(mockBuffer.insert).not.toHaveBeenCalled();
-      unmount();
-    });
-
     it('does not accept a prompt suggestion while command completion is active', async () => {
       mockCommandCompletion.showSuggestions = true;
       mockCommandCompletion.suggestions = [

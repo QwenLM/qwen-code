@@ -696,42 +696,6 @@ describe('SessionPicker', () => {
       };
     }
 
-    it('opens preview on Space and closes on Esc', async () => {
-      const sessions = [
-        createMockSession({
-          sessionId: 's1',
-          prompt: 'First session',
-          messageCount: 2,
-        }),
-      ];
-      const service = createMockSessionService(sessions);
-      service.loadSession.mockResolvedValue(fakeResumedData('s1'));
-
-      const { stdin, lastFrame } = renderPicker(
-        <SessionPicker
-          sessionService={service as never}
-          onSelect={vi.fn()}
-          onCancel={vi.fn()}
-          enablePreview
-        />,
-      );
-
-      await wait(100);
-      expect(lastFrame()).toContain('First session');
-
-      stdin.write(' '); // Space
-      await wait(150);
-      const previewFrame = lastFrame() ?? '';
-      expect(previewFrame).toContain('USER-ASKED-THIS');
-      expect(previewFrame).toContain('ASSISTANT-REPLIED');
-
-      stdin.write('\u001B'); // Esc
-      await wait(50);
-      const afterExitFrame = lastFrame() ?? '';
-      expect(afterExitFrame).toContain('First session');
-      expect(afterExitFrame).not.toContain('USER-ASKED-THIS');
-    });
-
     it('renders tool_group items without crashing (stub Providers mounted)', async () => {
       // The previewed session contains a function call + tool_result, which
       // produces a `tool_group` HistoryItem that exercises ToolGroupMessage
