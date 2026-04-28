@@ -212,6 +212,9 @@ describe('useGeminiStream', () => {
       getBackgroundTaskRegistry: vi.fn(() => ({
         setNotificationCallback: vi.fn(),
       })),
+      getMonitorRegistry: vi.fn(() => ({
+        setNotificationCallback: vi.fn(),
+      })),
     } as unknown as Config;
     mockOnDebugMessage = vi.fn();
     mockHandleSlashCommand = vi.fn().mockResolvedValue(false);

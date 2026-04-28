@@ -65,6 +65,29 @@ function stripTrailingBackgroundAmp(command: string): string {
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
 
+/**
+ * Detect standalone or leading `sleep N` patterns that should use Monitor
+ * instead. Catches `sleep 5`, `sleep 5 && check`, `sleep 5; check` — but
+ * not sleep inside pipelines, subshells, or scripts (those are fine).
+ */
+export function detectBlockedSleepPattern(command: string): string | null {
+  const trimmed = command.trim();
+  // Match `sleep N` at the very start. Only integer durations >= 2.
+  // After the number: end of string, or a sequential separator (&&, ||, ;, &, newline).
+  // Pipes (|) are NOT matched — those are legitimate pipelines.
+  const m = /^sleep\s+(\d+)(?:\s*$|\s*(&&|\|\||[;&\n])\s*([\s\S]*))$/.exec(
+    trimmed,
+  );
+  if (!m) return null;
+  const secs = parseInt(m[1]!, 10);
+  if (secs < 2) return null;
+
+  const rest = (m[3] ?? '').trim();
+  return rest
+    ? `sleep ${secs} followed by: ${rest}`
+    : `standalone sleep ${secs}`;
+}
+
 export interface ShellToolParams {
   command: string;
   is_background: boolean;
@@ -799,6 +822,18 @@ export class ShellTool extends BaseDeclarativeTool<
 
       if (!isWithinWorkspace) {
         return `Directory '${params.directory}' is not within any of the registered workspace directories.`;
+      }
+    }
+    // Sleep interception: block sleep >= 2s in foreground, suggest Monitor
+    if (!params.is_background) {
+      const sleepPattern = detectBlockedSleepPattern(params.command);
+      if (sleepPattern !== null) {
+        return (
+          `Blocked: ${sleepPattern}. ` +
+          'Run blocking commands in the background with is_background: true. ' +
+          'For streaming events (watching logs, polling APIs), use the Monitor tool. ' +
+          'If you genuinely need a delay (rate limiting, deliberate pacing), keep it under 2 seconds.'
+        );
       }
     }
     return null;

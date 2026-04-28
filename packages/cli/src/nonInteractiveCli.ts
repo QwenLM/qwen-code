@@ -341,6 +341,31 @@ export async function runNonInteractive(
         });
       });
 
+      // Register monitor notification callback onto the shared queue.
+      const monitorRegistry = config.getMonitorRegistry();
+      monitorRegistry.setNotificationCallback(
+        (displayText, modelText, meta) => {
+          localQueue.push({
+            displayText,
+            modelText,
+            sendMessageType: SendMessageType.Notification,
+            sdkNotification: {
+              task_id: meta.monitorId,
+              tool_use_id: meta.toolUseId,
+              status: meta.status,
+            },
+          });
+        },
+      );
+
+      monitorRegistry.setRegisterCallback((entry) => {
+        adapter.emitSystemMessage('task_started', {
+          task_id: entry.monitorId,
+          tool_use_id: entry.toolUseId,
+          description: entry.description,
+        });
+      });
+
       let isFirstTurn = true;
       let modelOverride: string | undefined;
       while (true) {
@@ -705,6 +730,7 @@ export async function runNonInteractive(
           while (true) {
             if (abortController.signal.aborted) {
               registry.abortAll();
+              monitorRegistry.abortAll();
               // Flush queued terminal notifications before handleCancellationError
               // exits so stream-json consumers always see a task_notification paired
               // with every task_started.
@@ -718,7 +744,12 @@ export async function runNonInteractive(
             // running ones: cancel() marks status 'cancelled' synchronously
             // but the notification is emitted later by the natural handler,
             // and SDK consumers need every task_started paired with one.
-            if (!registry.hasUnfinalizedTasks() && localQueue.length === 0)
+            // Also wait for running monitors to finish streaming events.
+            if (
+              !registry.hasUnfinalizedTasks() &&
+              monitorRegistry.getRunning().length === 0 &&
+              localQueue.length === 0
+            )
               break;
             await new Promise((r) => setTimeout(r, 100));
           }
@@ -775,6 +806,9 @@ export async function runNonInteractive(
       const reg = config.getBackgroundTaskRegistry();
       reg.setNotificationCallback(undefined);
       reg.setRegisterCallback(undefined);
+      const monReg = config.getMonitorRegistry();
+      monReg.setNotificationCallback(undefined);
+      monReg.setRegisterCallback(undefined);
 
       process.stdout.removeListener('error', stdoutErrorHandler);
       // Cleanup signal handlers

@@ -170,6 +170,12 @@ describe('runNonInteractive', () => {
         hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
         abortAll: vi.fn(),
       }),
+      getMonitorRegistry: vi.fn().mockReturnValue({
+        setNotificationCallback: vi.fn(),
+        setRegisterCallback: vi.fn(),
+        getRunning: vi.fn().mockReturnValue([]),
+        abortAll: vi.fn(),
+      }),
     } as unknown as Config;
 
     mockSettings = {
