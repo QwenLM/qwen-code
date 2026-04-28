@@ -966,6 +966,25 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  modelPricing: {
+    type: 'object',
+    label: 'Model Pricing',
+    category: 'Model',
+    requiresRestart: false,
+    default: undefined as
+      | Record<
+          string,
+          {
+            inputPerMillionTokens?: number;
+            outputPerMillionTokens?: number;
+          }
+        >
+      | undefined,
+    description:
+      'Optional per-model pricing for cost estimation in /stats model. Example: {"qwen3-coder": {"inputPerMillionTokens": 0.30, "outputPerMillionTokens": 1.20}}',
+    showInDialog: false,
+  },
+
   context: {
     type: 'object',
     label: 'Context',
@@ -1914,4 +1933,11 @@ type InferSettings<T extends SettingsSchema> = {
         : T[K]['default'];
 };
 
-export type Settings = InferSettings<SettingsSchemaType>;
+export interface ModelPricing {
+  inputPerMillionTokens?: number;
+  outputPerMillionTokens?: number;
+}
+
+export type Settings = InferSettings<SettingsSchemaType> & {
+  modelPricing?: Record<string, ModelPricing>;
+};

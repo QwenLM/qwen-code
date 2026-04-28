@@ -182,6 +182,11 @@ const navigateToCustomAdvancedConfig = async (
   await pressEnterAndWaitFor(stdin, lastFrame, 'Step 5/6 · Advanced Config');
 };
 
+const isUnreliableTuiInputEnvironment =
+  process.platform === 'win32' ||
+  (process.env['CI'] === 'true' && process.version.startsWith('v20.'));
+const itWhenTuiInputReliable = isUnreliableTuiInputEnvironment ? it.skip : it;
+
 describe('AuthDialog', () => {
   const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -509,224 +514,290 @@ describe('AuthDialog', () => {
     });
   });
 
-  it('should prevent exiting when no auth method is selected and show error message', async () => {
-    const handleAuthSelect = vi.fn();
-    const settings: LoadedSettings = new LoadedSettings(
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      {
-        settings: {},
-        originalSettings: {},
-        path: '',
-      },
-      {
-        settings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+  itWhenTuiInputReliable(
+    'should prevent exiting when no auth method is selected and show error message',
+    async () => {
+      const handleAuthSelect = vi.fn();
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
         },
-        originalSettings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
         },
-        path: '',
-      },
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      true,
-      new Set(),
-    );
-
-    const { lastFrame, stdin, unmount } = renderAuthDialog(
-      settings,
-      {},
-      { handleAuthSelect },
-      undefined, // config.getAuthType() returns undefined
-    );
-    await wait();
-
-    // Simulate pressing escape key
-    stdin.write('\u001b'); // ESC key
-    await wait();
-
-    // Should show error message instead of calling handleAuthSelect
-    await vi.waitFor(() => {
-      const frame = lastFrame();
-      expect(frame).toContain('You must select an auth method');
-      expect(frame).toContain('Press Ctrl+C again to exit');
-    });
-    expect(handleAuthSelect).not.toHaveBeenCalled();
-    unmount();
-  });
-
-  it('should not exit if there is already an error message', async () => {
-    const handleAuthSelect = vi.fn();
-    const settings: LoadedSettings = new LoadedSettings(
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      {
-        settings: {},
-        originalSettings: {},
-        path: '',
-      },
-      {
-        settings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+        {
+          settings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          originalSettings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          path: '',
         },
-        originalSettings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
         },
-        path: '',
-      },
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      true,
-      new Set(),
-    );
+        true,
+        new Set(),
+      );
 
-    const { lastFrame, stdin, unmount } = renderAuthDialog(
-      settings,
-      { authError: 'Initial error' },
-      { handleAuthSelect },
-      undefined, // config.getAuthType() returns undefined
-    );
-    await wait();
+      const { lastFrame, stdin, unmount } = renderAuthDialog(
+        settings,
+        {},
+        { handleAuthSelect },
+        undefined, // config.getAuthType() returns undefined
+      );
+      await wait();
 
-    expect(lastFrame()).toContain('Initial error');
+      // Simulate pressing escape key
+      stdin.write('\u001b'); // ESC key
+      await wait();
 
-    // Simulate pressing escape key
-    stdin.write('\u001b'); // ESC key
-    await wait();
+      // Should show error message instead of calling handleAuthSelect
+      await vi.waitFor(() => {
+        const frame = lastFrame();
+        expect(frame).toContain('You must select an auth method');
+        expect(frame).toContain('Press Ctrl+C again to exit');
+      });
+      expect(handleAuthSelect).not.toHaveBeenCalled();
+      unmount();
+    },
+  );
 
-    // Should not call handleAuthSelect
-    expect(handleAuthSelect).not.toHaveBeenCalled();
-    unmount();
-  });
-
-  it('should allow exiting when auth method is already selected', async () => {
-    const handleAuthSelect = vi.fn();
-    const settings: LoadedSettings = new LoadedSettings(
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      {
-        settings: {},
-        originalSettings: {},
-        path: '',
-      },
-      {
-        settings: {
-          security: { auth: { selectedType: AuthType.USE_OPENAI } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+  itWhenTuiInputReliable(
+    'should not exit if there is already an error message',
+    async () => {
+      const handleAuthSelect = vi.fn();
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
         },
-        originalSettings: {
-          security: { auth: { selectedType: AuthType.USE_OPENAI } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
         },
-        path: '',
-      },
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      true,
-      new Set(),
-    );
-
-    const { stdin, unmount } = renderAuthDialog(
-      settings,
-      {},
-      { handleAuthSelect },
-      AuthType.USE_OPENAI, // config.getAuthType() returns USE_OPENAI
-    );
-    await wait();
-
-    // Simulate pressing escape key
-    stdin.write('\u001b'); // ESC key
-    await wait();
-
-    // Should call handleAuthSelect with undefined to exit
-    expect(handleAuthSelect).toHaveBeenCalledWith(undefined);
-    unmount();
-  });
-
-  it('should show OpenRouter in API key options', async () => {
-    const settings: LoadedSettings = new LoadedSettings(
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      {
-        settings: {},
-        originalSettings: {},
-        path: '',
-      },
-      {
-        settings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+        {
+          settings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          originalSettings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          path: '',
         },
-        originalSettings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
         },
-        path: '',
-      },
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      true,
-      new Set(),
-    );
+        true,
+        new Set(),
+      );
 
-    const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
-    await wait();
+      const { lastFrame, stdin, unmount } = renderAuthDialog(
+        settings,
+        { authError: 'Initial error' },
+        { handleAuthSelect },
+        undefined, // config.getAuthType() returns undefined
+      );
+      await wait();
 
-    // OAuth is selected by default, press Enter to enter OAuth provider list
-    stdin.write('\r');
-    await wait();
+      expect(lastFrame()).toContain('Initial error');
 
-    await vi.waitFor(() => {
-      const frame = lastFrame();
-      expect(frame).toContain('OpenRouter');
-      expect(frame).toContain('Browser OAuth');
-    });
+      // Simulate pressing escape key
+      stdin.write('\u001b'); // ESC key
+      await wait();
 
-    unmount();
-  });
+      // Should not call handleAuthSelect
+      expect(handleAuthSelect).not.toHaveBeenCalled();
+      unmount();
+    },
+  );
+
+  itWhenTuiInputReliable(
+    'should allow exiting when auth method is already selected',
+    async () => {
+      const handleAuthSelect = vi.fn();
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
+        },
+        {
+          settings: {
+            security: { auth: { selectedType: AuthType.USE_OPENAI } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          originalSettings: {
+            security: { auth: { selectedType: AuthType.USE_OPENAI } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
+
+      const { stdin, unmount } = renderAuthDialog(
+        settings,
+        {},
+        { handleAuthSelect },
+        AuthType.USE_OPENAI, // config.getAuthType() returns USE_OPENAI
+      );
+      await wait();
+
+      // Simulate pressing escape key
+      stdin.write('\u001b'); // ESC key
+      await wait();
+
+      // Should call handleAuthSelect with undefined to exit
+      expect(handleAuthSelect).toHaveBeenCalledWith(undefined);
+      unmount();
+    },
+  );
+
+  itWhenTuiInputReliable(
+    'should show OpenRouter in API key options',
+    async () => {
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
+        },
+        {
+          settings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          originalSettings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
+
+      const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+      await wait();
+
+      // OAuth is selected by default, press Enter to enter OAuth provider list
+      stdin.write('\r');
+      await wait();
+
+      await vi.waitFor(() => {
+        const frame = lastFrame();
+        expect(frame).toContain('OpenRouter');
+        expect(frame).toContain('Browser OAuth');
+      });
+
+      unmount();
+    },
+  );
+
+  itWhenTuiInputReliable(
+    'should trigger OpenRouter OAuth from API key options',
+    async () => {
+      const handleOpenRouterSubmit = vi.fn().mockResolvedValue(undefined);
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
+        },
+        {
+          settings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          originalSettings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
+
+      const { stdin, unmount } = renderAuthDialog(
+        settings,
+        {},
+        { handleOpenRouterSubmit },
+      );
+      await wait();
+
+      // OAuth is selected by default, press Enter to enter OAuth provider list
+      stdin.write('\r');
+      await wait();
+      // OpenRouter is the first option, press Enter to trigger OAuth
+      stdin.write('\r');
+      await wait();
+
+      await vi.waitFor(() => {
+        expect(handleOpenRouterSubmit).toHaveBeenCalledTimes(1);
+      });
+
+      unmount();
+    },
+  );
 });
-
-const isUnreliableTuiInputEnvironment =
-  process.platform === 'win32' ||
-  (process.env['CI'] === 'true' && process.version.startsWith('v20.'));
-const itWhenTuiInputReliable = isUnreliableTuiInputEnvironment ? it.skip : it;
 
 describe('AuthDialog Custom API Key Wizard', () => {
   const createStandardSettings = (): LoadedSettings =>

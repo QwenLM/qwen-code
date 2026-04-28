@@ -53,10 +53,7 @@ export const tasksCommand: SlashCommand = {
     }
 
     const now = Date.now();
-    const lines: string[] = [
-      `Background shells (${entries.length} total)`,
-      '',
-    ];
+    const lines: string[] = [`Background shells (${entries.length} total)`, ''];
     for (const entry of entries) {
       const endTime = entry.endTime ?? now;
       const runtime = formatDuration(endTime - entry.startTime, {

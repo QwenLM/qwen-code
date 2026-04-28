@@ -14,6 +14,7 @@ import {
   CommandKind,
 } from './types.js';
 import { t } from '../../i18n/index.js';
+import { calculateCost } from '../../utils/costCalculator.js';
 
 export const statsCommand: SlashCommand = {
   name: 'stats',
@@ -89,6 +90,7 @@ export const statsCommand: SlashCommand = {
       action: (context: CommandContext): MessageActionReturn | void => {
         if (context.executionMode !== 'interactive') {
           const { metrics } = context.session.stats;
+          const pricing = context.services.settings.merged.modelPricing;
           const lines: string[] = [];
           for (const [modelName, modelMetrics] of Object.entries(
             metrics.models,
@@ -96,6 +98,15 @@ export const statsCommand: SlashCommand = {
             lines.push(
               `${modelName}: prompt=${modelMetrics.tokens.prompt}, output=${modelMetrics.tokens.candidates}, cached=${modelMetrics.tokens.cached}`,
             );
+            const cost = calculateCost({
+              inputTokens: modelMetrics.tokens.prompt,
+              outputTokens:
+                modelMetrics.tokens.candidates + modelMetrics.tokens.thoughts,
+              pricing: pricing?.[modelName],
+            });
+            if (cost != null) {
+              lines.push(`  Estimated cost: $${cost.toFixed(4)}`);
+            }
           }
           if (lines.length === 0) {
             lines.push('No model usage data yet.');
