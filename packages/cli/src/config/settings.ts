@@ -609,9 +609,7 @@ export function loadEnvironment(settings: Settings): void {
         settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
       const userLevelPaths = getUserLevelEnvPaths();
       const normalizedEnvFilePath = path.normalize(envFilePath);
-      const isUserLevelEnvFile =
-        userLevelPaths.has(normalizedEnvFilePath) ||
-        normalizedEnvFilePath.includes(`${path.sep}${QWEN_DIR}${path.sep}`);
+      const isUserLevelEnvFile = userLevelPaths.has(normalizedEnvFilePath);
       const isProjectEnvFile = !isUserLevelEnvFile;
 
       for (const key in parsedEnv) {
