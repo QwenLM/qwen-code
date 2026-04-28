@@ -31,6 +31,19 @@ interface SelectedLatexBlock {
   label: string;
 }
 
+interface InlineLatexExpression {
+  content: string;
+  index: number;
+}
+
+interface SelectedInlineLatexExpression {
+  expression: InlineLatexExpression;
+  label: string;
+}
+
+const INLINE_MATH_REGEX =
+  /(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,240}\S\$)([^$\n]{1,240})\$(?![\w$])/g;
+
 function parseFencedCodeBlocks(markdown: string): FencedCodeBlock[] {
   const blocks: FencedCodeBlock[] = [];
   const lines = markdown.split(/\r?\n/);
@@ -83,6 +96,87 @@ function parseFencedCodeBlocks(markdown: string): FencedCodeBlock[] {
   return blocks;
 }
 
+function parseInlineLatexExpressions(
+  markdown: string,
+): InlineLatexExpression[] {
+  const expressions: InlineLatexExpression[] = [];
+  const lines = markdown.split(/\r?\n/);
+  const codeFenceRegex = /^ *(`{3,}|~{3,}) *([^`]*)$/;
+  const mathFenceRegex = /^ *\$\$ *$/;
+  let activeCodeFence: string | null = null;
+  let inLatexBlock = false;
+
+  for (const line of lines) {
+    const codeFenceMatch = line.match(codeFenceRegex);
+    if (activeCodeFence) {
+      if (
+        codeFenceMatch &&
+        codeFenceMatch[1].startsWith(activeCodeFence[0]) &&
+        codeFenceMatch[1].length >= activeCodeFence.length
+      ) {
+        activeCodeFence = null;
+      }
+      continue;
+    }
+
+    if (inLatexBlock) {
+      if (mathFenceRegex.test(line)) {
+        inLatexBlock = false;
+      }
+      continue;
+    }
+
+    if (codeFenceMatch) {
+      activeCodeFence = codeFenceMatch[1];
+      continue;
+    }
+
+    if (mathFenceRegex.test(line)) {
+      inLatexBlock = true;
+      continue;
+    }
+
+    for (const match of line.matchAll(INLINE_MATH_REGEX)) {
+      const content = match[1];
+      if (content) {
+        expressions.push({
+          content,
+          index: expressions.length + 1,
+        });
+      }
+    }
+  }
+
+  return expressions;
+}
+
+function selectInlineLatexExpression(
+  markdown: string,
+  tokens: string[],
+): SelectedInlineLatexExpression | null {
+  const expressions = parseInlineLatexExpressions(markdown);
+  if (expressions.length === 0) return null;
+
+  let requestedIndex: number | null = null;
+  for (const token of tokens) {
+    if (/^\d+$/.test(token)) {
+      requestedIndex = Number(token);
+    }
+  }
+
+  const selected =
+    requestedIndex !== null
+      ? expressions.find((expression) => expression.index === requestedIndex)
+      : expressions[expressions.length - 1];
+
+  return selected
+    ? {
+        expression: selected,
+        label: `Inline LaTeX expression ${selected.index}`,
+      }
+    : null;
+}
+
 function parseLatexBlocks(markdown: string): LatexBlock[] {
   const blocks: LatexBlock[] = [];
   const lines = markdown.split(/\r?\n/);
@@ -118,16 +212,37 @@ function parseLatexBlocks(markdown: string): LatexBlock[] {
 function selectLatexBlock(
   markdown: string,
   args: string,
-): SelectedLatexBlock | null | undefined {
+): SelectedLatexBlock | SelectedInlineLatexExpression | null | undefined {
   const tokens = args.trim().split(/\s+/).filter(Boolean);
   const firstToken = tokens[0]?.toLowerCase();
-  if (firstToken !== 'latex' && firstToken !== 'math') return undefined;
+  if (
+    firstToken !== 'latex' &&
+    firstToken !== 'math' &&
+    firstToken !== 'inline-latex'
+  ) {
+    return undefined;
+  }
+
+  if (firstToken === 'inline-latex') {
+    return selectInlineLatexExpression(markdown, tokens.slice(1));
+  }
+
+  const selectorTokens = tokens.slice(1);
+  const inlineSelectorIndex = selectorTokens.findIndex(
+    (token) => token.toLowerCase() === 'inline',
+  );
+  if (inlineSelectorIndex !== -1) {
+    return selectInlineLatexExpression(
+      markdown,
+      selectorTokens.filter((_, index) => index !== inlineSelectorIndex),
+    );
+  }
 
   const blocks = parseLatexBlocks(markdown);
   if (blocks.length === 0) return null;
 
   let requestedIndex: number | null = null;
-  for (const token of tokens.slice(1)) {
+  for (const token of selectorTokens) {
     if (/^\d+$/.test(token)) {
       requestedIndex = Number(token);
     }
@@ -236,11 +351,22 @@ export const copyCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'info',
-            content: 'No matching LaTeX block found in the last AI output.',
+            content:
+              _args
+                .trim()
+                .split(/\s+/)
+                .some((token) => token === 'inline') ||
+              _args.trim().toLowerCase().startsWith('inline-latex')
+                ? 'No matching inline LaTeX expression found in the last AI output.'
+                : 'No matching LaTeX block found in the last AI output.',
           };
         }
         if (selectedLatexBlock !== undefined) {
-          await copyToClipboard(selectedLatexBlock.block.content);
+          const copiedLatex =
+            'expression' in selectedLatexBlock
+              ? selectedLatexBlock.expression.content
+              : selectedLatexBlock.block.content;
+          await copyToClipboard(copiedLatex);
 
           return {
             type: 'message',
