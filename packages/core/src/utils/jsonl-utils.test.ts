@@ -11,6 +11,7 @@ import path from 'node:path';
 import {
   _recoverObjectsFromLine,
   _resetEnsuredDirsCacheForTest,
+  parseLineTolerant,
   read,
   readLines,
 } from './jsonl-utils.js';
@@ -78,6 +79,27 @@ describe('_recoverObjectsFromLine', () => {
   it('returns empty array when nothing balanced can be parsed', () => {
     expect(_recoverObjectsFromLine('not json at all')).toEqual([]);
     expect(_recoverObjectsFromLine('{"unterminated":')).toEqual([]);
+  });
+});
+
+describe('parseLineTolerant', () => {
+  it('returns the parsed object for a well-formed line', () => {
+    expect(parseLineTolerant<{ a: number }>('{"a":1}', '/tmp/x.jsonl')).toEqual(
+      [{ a: 1 }],
+    );
+  });
+
+  it('recovers both records from a `}{`-glued line', () => {
+    expect(
+      parseLineTolerant<{ uuid: string }>(
+        '{"uuid":"a"}{"uuid":"b"}',
+        '/tmp/x.jsonl',
+      ),
+    ).toEqual([{ uuid: 'a' }, { uuid: 'b' }]);
+  });
+
+  it('returns [] when nothing balanced can be recovered', () => {
+    expect(parseLineTolerant('not-json', '/tmp/x.jsonl')).toEqual([]);
   });
 });
 
