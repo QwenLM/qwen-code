@@ -116,16 +116,29 @@ function slicePendingTextForHeight(
   });
 }
 
+// Streaming pending output is always rendered as plain text (not through
+// MarkdownDisplay) so that the visual height we use for slicing matches the
+// height that actually reaches Ink/Yoga. MarkdownDisplay's code blocks,
+// tables, and list items can each render taller than their source text
+// (line-number prefixes, table borders, paddingLeft narrowing the wrap
+// width), and that gap was letting pending output exceed the viewport on
+// narrow terminals — which made Ink leak the topmost row into scrollback
+// every frame, producing the duplicate output in #3279. Once a stable
+// prefix is promoted into <Static>, the committed message is rendered
+// through MarkdownDisplay with full formatting; only the still-streaming
+// tail stays plain.
 const PendingTextPreview: React.FC<{
   text: string;
   hiddenLinesCount: number;
   textColor: string;
 }> = ({ text, hiddenLinesCount, textColor }) => (
   <Box flexDirection="column">
-    <Text color={theme.text.secondary} wrap="truncate">
-      ... first {hiddenLinesCount} streaming line
-      {hiddenLinesCount === 1 ? '' : 's'} hidden ...
-    </Text>
+    {hiddenLinesCount > 0 && (
+      <Text color={theme.text.secondary} wrap="truncate">
+        ... first {hiddenLinesCount} streaming line
+        {hiddenLinesCount === 1 ? '' : 's'} hidden ...
+      </Text>
+    )}
     <Text wrap="wrap" color={textColor}>
       {text}
     </Text>
@@ -189,7 +202,7 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
         </Text>
       </Box>
       <Box flexGrow={1} flexDirection="column">
-        {pendingSlice.hiddenLinesCount > 0 ? (
+        {isPending ? (
           <PendingTextPreview
             text={pendingSlice.text}
             hiddenLinesCount={pendingSlice.hiddenLinesCount}
@@ -228,7 +241,7 @@ const ContinuationMarkdownMessage: React.FC<
 
   return (
     <Box flexDirection="column" paddingLeft={prefixWidth}>
-      {pendingSlice.hiddenLinesCount > 0 ? (
+      {isPending ? (
         <PendingTextPreview
           text={pendingSlice.text}
           hiddenLinesCount={pendingSlice.hiddenLinesCount}
