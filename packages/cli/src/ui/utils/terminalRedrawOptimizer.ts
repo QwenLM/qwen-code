@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import ansiEscapes from 'ansi-escapes';
+
 const ESC = '\u001B[';
 const ERASE_LINE = `${ESC}2K`;
 const CURSOR_UP_ONE = `${ESC}1A`;
@@ -33,6 +35,79 @@ function countOccurrences(value: string, search: string): number {
   return count;
 }
 
+export interface TerminalRedrawStatsSnapshot {
+  stdoutWriteCount: number;
+  stdoutBytes: number;
+  clearTerminalCount: number;
+  eraseLinesOptimizedCount: number;
+}
+
+const terminalRedrawStats: TerminalRedrawStatsSnapshot = {
+  stdoutWriteCount: 0,
+  stdoutBytes: 0,
+  clearTerminalCount: 0,
+  eraseLinesOptimizedCount: 0,
+};
+
+export function getTerminalRedrawStatsSnapshot(): TerminalRedrawStatsSnapshot {
+  return { ...terminalRedrawStats };
+}
+
+export function resetTerminalRedrawStats(): void {
+  terminalRedrawStats.stdoutWriteCount = 0;
+  terminalRedrawStats.stdoutBytes = 0;
+  terminalRedrawStats.clearTerminalCount = 0;
+  terminalRedrawStats.eraseLinesOptimizedCount = 0;
+}
+
+function getChunkByteLength(
+  chunk: string | Uint8Array,
+  encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
+): number {
+  if (typeof chunk === 'string') {
+    const encoding =
+      typeof encodingOrCallback === 'string' ? encodingOrCallback : undefined;
+    return Buffer.byteLength(chunk, encoding);
+  }
+
+  return chunk.byteLength;
+}
+
+function optimizeMultilineEraseLinesWithCount(output: string): {
+  output: string;
+  optimizedSequenceCount: number;
+} {
+  let optimizedSequenceCount = 0;
+
+  const optimizedOutput = output.replace(
+    MULTILINE_ERASE_LINES_PATTERN,
+    (sequence) => {
+      const lineCount = countOccurrences(sequence, ERASE_LINE);
+      const cursorUpCount = lineCount - 1;
+
+      if (cursorUpCount <= 1) {
+        return sequence;
+      }
+
+      optimizedSequenceCount += 1;
+
+      let boundedErase = `${ESC}${cursorUpCount}A`;
+
+      for (let line = 0; line < lineCount; line++) {
+        boundedErase += ERASE_LINE;
+
+        if (line < lineCount - 1) {
+          boundedErase += CURSOR_DOWN_ONE;
+        }
+      }
+
+      return `${boundedErase}${ESC}${cursorUpCount}A${CURSOR_LEFT}`;
+    },
+  );
+
+  return { output: optimizedOutput, optimizedSequenceCount };
+}
+
 /**
  * Ink clears dynamic output via ansi-escapes.eraseLines(), which emits a
  * clear-line + cursor-up pair for every previous line. That can make terminal
@@ -40,26 +115,7 @@ function countOccurrences(value: string, search: string): number {
  * upward cursor movement while still clearing only the same old frame lines.
  */
 export function optimizeMultilineEraseLines(output: string): string {
-  return output.replace(MULTILINE_ERASE_LINES_PATTERN, (sequence) => {
-    const lineCount = countOccurrences(sequence, ERASE_LINE);
-    const cursorUpCount = lineCount - 1;
-
-    if (cursorUpCount <= 1) {
-      return sequence;
-    }
-
-    let boundedErase = `${ESC}${cursorUpCount}A`;
-
-    for (let line = 0; line < lineCount; line++) {
-      boundedErase += ERASE_LINE;
-
-      if (line < lineCount - 1) {
-        boundedErase += CURSOR_DOWN_ONE;
-      }
-    }
-
-    return `${boundedErase}${ESC}${cursorUpCount}A${CURSOR_LEFT}`;
-  });
+  return optimizeMultilineEraseLinesWithCount(output).output;
 }
 
 export function installTerminalRedrawOptimizer(
@@ -77,8 +133,35 @@ export function installTerminalRedrawOptimizer(
     encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
     callback?: (error?: Error | null) => void,
   ) {
-    const optimizedChunk =
-      typeof chunk === 'string' ? optimizeMultilineEraseLines(chunk) : chunk;
+    const optimizedResult =
+      typeof chunk === 'string'
+        ? optimizeMultilineEraseLinesWithCount(chunk)
+        : undefined;
+    const optimizedChunk = optimizedResult?.output ?? chunk;
+
+    if (
+      typeof optimizedChunk === 'string' ||
+      optimizedChunk instanceof Uint8Array ||
+      Buffer.isBuffer(optimizedChunk)
+    ) {
+      terminalRedrawStats.stdoutWriteCount += 1;
+      terminalRedrawStats.stdoutBytes += getChunkByteLength(
+        optimizedChunk,
+        encodingOrCallback,
+      );
+
+      if (typeof optimizedChunk === 'string') {
+        terminalRedrawStats.clearTerminalCount += countOccurrences(
+          optimizedChunk,
+          ansiEscapes.clearTerminal,
+        );
+      }
+    }
+
+    if (optimizedResult) {
+      terminalRedrawStats.eraseLinesOptimizedCount +=
+        optimizedResult.optimizedSequenceCount;
+    }
 
     return originalWrite.call(
       this,

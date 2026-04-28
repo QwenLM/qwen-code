@@ -12,6 +12,7 @@ import { ContextUsageDisplay } from './ContextUsageDisplay.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { AutoAcceptIndicator } from './AutoAcceptIndicator.js';
 import { ShellModeIndicator } from './ShellModeIndicator.js';
+import { BackgroundTasksPill } from './background-view/BackgroundTasksPill.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 
 import { useStatusLine } from '../hooks/useStatusLine.js';
@@ -100,6 +101,10 @@ export const Footer: React.FC = () => {
     <Text color={theme.status.warning}>{t('Press Ctrl+D again to exit.')}</Text>
   ) : uiState.showEscapePrompt ? (
     <Text color={theme.text.secondary}>{t('Press Esc again to clear.')}</Text>
+  ) : uiState.rewindEscPending ? (
+    <Text color={theme.text.secondary}>
+      {t('Press Esc again to rewind conversation.')}
+    </Text>
   ) : vimEnabled && vimMode === 'INSERT' ? (
     <Text color={theme.text.secondary}>-- INSERT --</Text>
   ) : uiState.shellModeActive ? (
@@ -169,7 +174,10 @@ export const Footer: React.FC = () => {
               {line}
             </Text>
           ))}
-        <Text wrap="truncate">{leftBottomContent}</Text>
+        <Box flexDirection="row" flexShrink={1}>
+          <Text wrap="truncate">{leftBottomContent}</Text>
+          <BackgroundTasksPill />
+        </Box>
       </Box>
 
       {/* Right Section — never compressed, aligns to top so multi-line

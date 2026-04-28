@@ -5,7 +5,7 @@
  */
 
 import type {
-  BackgroundAgentStatus,
+  BackgroundTaskStatus,
   Config,
   ToolCallRequestInfo,
 } from '@qwen-code/qwen-code-core';
@@ -302,7 +302,7 @@ export async function runNonInteractive(
         sdkNotification?: {
           task_id: string;
           tool_use_id?: string;
-          status: BackgroundAgentStatus;
+          status: BackgroundTaskStatus;
           usage?: {
             total_tokens: number;
             tool_uses: number;
@@ -349,7 +349,7 @@ export async function runNonInteractive(
           config.getMaxSessionTurns() >= 0 &&
           turnCount > config.getMaxSessionTurns()
         ) {
-          handleMaxTurnsExceededError(config);
+          await handleMaxTurnsExceededError(config);
         }
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
@@ -372,7 +372,7 @@ export async function runNonInteractive(
 
         for await (const event of responseStream) {
           if (abortController.signal.aborted) {
-            handleCancellationError(config);
+            await handleCancellationError(config);
           }
           // Use adapter for all event processing
           adapter.processEvent(event);
@@ -498,7 +498,7 @@ export async function runNonInteractive(
               config.getMaxSessionTurns() >= 0 &&
               turnCount > config.getMaxSessionTurns()
             ) {
-              handleMaxTurnsExceededError(config);
+              await handleMaxTurnsExceededError(config);
             }
 
             const inputFormat =
@@ -711,11 +711,15 @@ export async function runNonInteractive(
               while (localQueue.length > 0) {
                 emitNotificationToSdk(localQueue.shift()!);
               }
-              handleCancellationError(config);
+              await handleCancellationError(config);
             }
             await drainLocalQueue();
-            const running = registry.getRunning();
-            if (running.length === 0 && localQueue.length === 0) break;
+            // Wait for every task's terminal notification, not just the
+            // running ones: cancel() marks status 'cancelled' synchronously
+            // but the notification is emitted later by the natural handler,
+            // and SDK consumers need every task_started paired with one.
+            if (!registry.hasUnfinalizedTasks() && localQueue.length === 0)
+              break;
             await new Promise((r) => setTimeout(r, 100));
           }
 
@@ -766,7 +770,7 @@ export async function runNonInteractive(
         usage,
         stats,
       });
-      handleError(error, config);
+      await handleError(error, config);
     } finally {
       const reg = config.getBackgroundTaskRegistry();
       reg.setNotificationCallback(undefined);

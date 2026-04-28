@@ -235,6 +235,18 @@
           ],
           "default": "china",
           "markdownDescription": "Region for Coding Plan. _(Only used when Provider is `coding-plan`)_"
+        },
+        "qwen-code.dotIndicator": {
+          "order": 3,
+          "type": "boolean",
+          "default": true,
+          "description": "Show a colored dot on the tab icon when a task completes (orange) or needs your attention (blue) while the tab is hidden."
+        },
+        "qwen-code.notifications": {
+          "order": 4,
+          "type": "boolean",
+          "default": true,
+          "description": "Show notifications with sound when a task completes (at least 20 seconds) or needs your attention, while you are not actively viewing the Qwen Code panel."
         }
       }
     },

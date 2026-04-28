@@ -115,6 +115,10 @@ export function parseSkillContent(
 
   // Extract optional model field
   const model = parseModelField(frontmatter);
+  const argumentHint =
+    typeof frontmatter['argument-hint'] === 'string'
+      ? frontmatter['argument-hint']
+      : undefined;
 
   // Optional `paths` frontmatter: glob patterns that gate when this skill
   // is offered to the model (conditional skill).
@@ -124,6 +128,7 @@ export function parseSkillContent(
     name,
     description,
     allowedTools,
+    argumentHint,
     model,
     filePath,
     body: body.trim(),

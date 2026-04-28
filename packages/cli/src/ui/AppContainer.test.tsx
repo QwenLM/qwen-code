@@ -15,6 +15,7 @@ import {
 } from 'vitest';
 import { render, cleanup } from 'ink-testing-library';
 import { AppContainer, dedupeNewestFirst } from './AppContainer.js';
+import ansiEscapes from 'ansi-escapes';
 import {
   type Config,
   makeFakeConfig,
@@ -30,6 +31,7 @@ import {
 } from './contexts/UIActionsContext.js';
 import { ToolCallStatus } from './types.js';
 import { useContext } from 'react';
+import { Box, measureElement } from 'ink';
 
 // Mock useStdout to capture terminal title writes
 let mockStdout: { write: ReturnType<typeof vi.fn> };
@@ -49,7 +51,7 @@ let capturedUIActions: UIActions;
 function TestContextConsumer() {
   capturedUIState = useContext(UIStateContext)!;
   capturedUIActions = useContext(UIActionsContext)!;
-  return null;
+  return <Box ref={capturedUIState.mainControlsRef} />;
 }
 
 vi.mock('./App.js', () => ({
@@ -121,7 +123,6 @@ import { useSessionStats } from './contexts/SessionContext.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
-import { measureElement } from 'ink';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core';
 
@@ -190,9 +191,17 @@ describe('AppContainer State Management', () => {
       onAuthError: vi.fn(),
       isAuthDialogOpen: false,
       isAuthenticating: false,
+      pendingAuthType: undefined,
+      externalAuthState: null,
+      qwenAuthState: {
+        deviceAuth: null,
+        authStatus: 'idle',
+        authMessage: null,
+      },
       handleAuthSelect: vi.fn(),
       handleCodingPlanSubmit: vi.fn(),
       handleAlibabaStandardSubmit: vi.fn(),
+      handleOpenRouterSubmit: vi.fn(),
       openAuthDialog: vi.fn(),
       cancelAuthentication: vi.fn(),
     });
@@ -426,6 +435,83 @@ describe('AppContainer State Management', () => {
           />,
         );
       }).not.toThrow();
+    });
+
+    it('refreshStatic clears the terminal before remounting history', () => {
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.refreshStatic();
+
+      expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
+    });
+
+    it('handleClearScreen avoids a second clearTerminal write', () => {
+      const clearSpy = vi.spyOn(console, 'clear').mockImplementation(() => {});
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleClearScreen();
+
+      expect(clearSpy).toHaveBeenCalledTimes(1);
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearTerminal,
+      );
+
+      clearSpy.mockRestore();
+    });
+
+    it('passes a remount-only refresh callback to slash commands', () => {
+      let slashRefreshStatic: (() => void) | undefined;
+      mockedUseSlashCommandProcessor.mockImplementation(
+        (
+          _config,
+          _settings,
+          _addItem,
+          _clearItems,
+          _loadHistory,
+          refreshStatic,
+        ) => {
+          slashRefreshStatic = refreshStatic;
+          return {
+            handleSlashCommand: vi.fn(),
+            slashCommands: [],
+            pendingHistoryItems: [],
+            commandContext: {},
+            shellConfirmationRequest: null,
+            confirmationRequest: null,
+          };
+        },
+      );
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      slashRefreshStatic?.();
+
+      expect(slashRefreshStatic).toBeDefined();
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearTerminal,
+      );
     });
 
     it('provides ConfigContext with config object', () => {
@@ -1319,7 +1405,17 @@ describe('AppContainer State Management', () => {
         onAuthError: vi.fn(),
         isAuthDialogOpen: false,
         isAuthenticating: true,
+        pendingAuthType: undefined,
+        externalAuthState: null,
+        qwenAuthState: {
+          deviceAuth: null,
+          authStatus: 'idle',
+          authMessage: null,
+        },
         handleAuthSelect: vi.fn(),
+        handleCodingPlanSubmit: vi.fn(),
+        handleAlibabaStandardSubmit: vi.fn(),
+        handleOpenRouterSubmit: vi.fn(),
         openAuthDialog: vi.fn(),
         cancelAuthentication: vi.fn(),
       });

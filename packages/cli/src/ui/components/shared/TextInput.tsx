@@ -22,7 +22,7 @@ export interface TextInputProps {
   onChange: (text: string) => void;
   onSubmit?: () => void;
   /** Called when Tab is pressed; if provided, prevents the default tab-insertion behaviour. */
-  onTab?: () => void;
+  onTab?: (key: Key) => void;
   /** Called when ↑ is pressed; if provided, prevents cursor-up in the buffer. */
   onUp?: () => void;
   /** Called when ↓ is pressed; if provided, prevents cursor-down in the buffer. */
@@ -80,7 +80,7 @@ export function TextInput({
       // Tab completion: delegate to caller instead of inserting a tab character
       // During paste, let tab through as literal content (e.g. Excel tab-separated data)
       if (key.name === 'tab' && !key.paste) {
-        onTab?.();
+        onTab?.(key);
         return;
       }
 

@@ -147,6 +147,8 @@ export * from './services/sessionService.js';
 export * from './services/sessionTitle.js';
 export { stripTerminalControlSequences } from './utils/terminalSafe.js';
 export * from './services/shellExecutionService.js';
+export * from './services/backgroundShellRegistry.js';
+export * from './services/toolUseSummary.js';
 export * from './utils/bareMode.js';
 
 // ============================================================================
@@ -298,6 +300,10 @@ export * from './utils/request-tokenizer/supportedImageFormats.js';
 export { TextTokenizer } from './utils/request-tokenizer/textTokenizer.js';
 export * from './utils/retry.js';
 export * from './utils/ripgrepUtils.js';
+export {
+  detectRuntime,
+  getOrCreateSharedDispatcher,
+} from './utils/runtimeFetchOptions.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/shell-utils.js';
 export * from './utils/subagentGenerator.js';

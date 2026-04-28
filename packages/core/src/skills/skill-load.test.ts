@@ -43,6 +43,13 @@ describe('skill-load', () => {
           allowedTools: ['read_file', 'write_file'],
         };
       }
+      if (yamlString.includes('argument-hint:')) {
+        return {
+          name: 'test-skill',
+          description: 'A test skill',
+          'argument-hint': '[topic]',
+        };
+      }
       // Default case
       return {
         name: 'test-skill',
@@ -172,6 +179,21 @@ You are a helpful assistant with this skill.
       const config = parseSkillContent(markdownWithTools, testFilePath);
 
       expect(config.allowedTools).toEqual(['read_file', 'write_file']);
+    });
+
+    it('should parse argument-hint from frontmatter', () => {
+      const markdownWithArgumentHint = `---
+name: test-skill
+description: A test skill
+argument-hint: "[topic]"
+---
+
+Skill body.
+`;
+
+      const config = parseSkillContent(markdownWithArgumentHint, testFilePath);
+
+      expect(config.argumentHint).toBe('[topic]');
     });
 
     it('should throw error for invalid format without frontmatter', () => {

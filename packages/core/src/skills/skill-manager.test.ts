@@ -82,6 +82,13 @@ describe('SkillManager', () => {
           allowedTools: ['read_file', 'write_file'],
         };
       }
+      if (yamlString.includes('argument-hint:')) {
+        return {
+          name: 'test-skill',
+          description: 'A test skill',
+          'argument-hint': '[topic]',
+        };
+      }
       // Match a frontmatter-level `paths:` field, not any incidental
       // occurrence of "paths:" in the body. Multiline + start-anchor matches
       // a top-level YAML key.
@@ -275,6 +282,25 @@ You are a helpful assistant with this skill.
       );
 
       expect(config.allowedTools).toEqual(['read_file', 'write_file']);
+    });
+
+    it('should parse argument-hint from frontmatter', () => {
+      const markdownWithArgumentHint = `---
+name: test-skill
+description: A test skill
+argument-hint: "[topic]"
+---
+
+Skill body.
+`;
+
+      const config = manager.parseSkillContent(
+        markdownWithArgumentHint,
+        validSkillConfig.filePath,
+        'project',
+      );
+
+      expect(config.argumentHint).toBe('[topic]');
     });
 
     it('should parse content with paths (conditional skill)', () => {
