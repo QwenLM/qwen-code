@@ -81,7 +81,7 @@ export function getAuthTypeFromEnv(): AuthType | undefined {
  * Unified resolver for CLI generation config.
  *
  * Precedence (for OpenAI auth):
- * - model: argv.model > OPENAI_MODEL > QWEN_MODEL > settings.model.name
+ * - model: argv.model > settings.model.name > OPENAI_MODEL > QWEN_MODEL
  * - apiKey: argv.openaiApiKey > OPENAI_API_KEY > settings.security.auth.apiKey
  * - baseUrl: argv.openaiBaseUrl > OPENAI_BASE_URL > settings.security.auth.baseUrl
  *
@@ -95,19 +95,39 @@ export function resolveCliGenerationConfig(
 
   const authType = selectedAuthType;
 
-  // Find modelProvider from settings.modelProviders based on authType and model
+  // Resolve the target model based on strict precedence:
+  // argv.model > settings.model.name > OPENAI_MODEL > QWEN_MODEL
+  // Env vars are ONLY considered when neither argv.model nor settings.model.name is set.
+  let resolvedModel: string | undefined;
+  if (argv.model) {
+    resolvedModel = argv.model;
+  } else if (settings.model?.name) {
+    resolvedModel = settings.model.name;
+  } else if (authType === AuthType.USE_OPENAI) {
+    resolvedModel = env['OPENAI_MODEL'] || env['QWEN_MODEL'];
+  }
+
+  // Find a matching provider for the resolved model (for metadata: generationConfig, envKey, etc.)
+  // When resolvedModel is from settings and matches a provider, modelProvider.id == settings.model.name,
+  // so the resolver correctly uses the settings-selected model (no override occurs).
+  // The old candidate-loop code that fell through to OPENAI_MODEL is gone.
   let modelProvider: ProviderModelConfig | undefined;
-  if (authType && settings.modelProviders) {
+  if (resolvedModel && authType && settings.modelProviders) {
     const providers = settings.modelProviders[authType];
     if (providers && Array.isArray(providers)) {
-      // Try to find by requested model (from CLI or settings)
-      const requestedModel = argv.model || settings.model?.name;
-      if (requestedModel) {
-        modelProvider = providers.find((p) => p.id === requestedModel) as
-          | ProviderModelConfig
-          | undefined;
-      }
+      modelProvider = providers.find((p) => p.id === resolvedModel);
     }
+  }
+
+  // Filter env to prevent OPENAI_MODEL/QWEN_MODEL from overriding higher-priority sources.
+  // Only pass these env vars when we actually resolved the model from them.
+  const filteredEnv = { ...env };
+  if (
+    resolvedModel !== env['OPENAI_MODEL'] &&
+    resolvedModel !== env['QWEN_MODEL']
+  ) {
+    delete filteredEnv['OPENAI_MODEL'];
+    delete filteredEnv['QWEN_MODEL'];
   }
 
   const configSources: ModelConfigSourcesInput = {
@@ -126,7 +146,7 @@ export function resolveCliGenerationConfig(
         | undefined,
     },
     modelProvider,
-    env,
+    env: filteredEnv,
   };
 
   const resolved = resolveModelConfig(configSources);
