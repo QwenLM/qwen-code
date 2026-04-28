@@ -13,6 +13,7 @@ import { RenderInline } from './InlineMarkdownRenderer.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
+import { useMarkdownRendering } from '../contexts/MarkdownRenderingContext.js';
 
 interface MarkdownDisplayProps {
   text: string;
@@ -68,6 +69,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
 
   const contentBlocks: React.ReactNode[] = [];
   let inCodeBlock = false;
+  let codeBlockIndex = 0;
+  let currentCodeBlockIndex = 0;
   let lastLineEmpty = true;
   let codeBlockContent: string[] = [];
   let codeBlockLang: string | null = null;
@@ -101,12 +104,14 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             key={key}
             content={codeBlockContent}
             lang={codeBlockLang}
+            codeBlockIndex={currentCodeBlockIndex}
             isPending={isPending}
             availableTerminalHeight={availableTerminalHeight}
             contentWidth={contentWidth}
           />,
         );
         inCodeBlock = false;
+        currentCodeBlockIndex = 0;
         codeBlockContent = [];
         codeBlockLang = null;
         codeBlockFence = '';
@@ -145,6 +150,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
 
     if (codeFenceMatch) {
       inCodeBlock = true;
+      codeBlockIndex += 1;
+      currentCodeBlockIndex = codeBlockIndex;
       codeBlockFence = codeFenceMatch[1];
       codeBlockLang = codeFenceMatch[2]?.trim().split(/\s+/)[0] || null;
     } else if (mathFenceMatch) {
@@ -364,6 +371,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         key="line-eof"
         content={codeBlockContent}
         lang={codeBlockLang}
+        codeBlockIndex={currentCodeBlockIndex}
         isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth}
@@ -402,6 +410,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
 interface RenderCodeBlockProps {
   content: string[];
   lang: string | null;
+  codeBlockIndex: number;
   isPending: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
@@ -410,15 +419,17 @@ interface RenderCodeBlockProps {
 const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
   content,
   lang,
+  codeBlockIndex,
   isPending,
   availableTerminalHeight,
   contentWidth,
 }) => {
   const settings = useSettings();
+  const { mermaidRenderMode } = useMarkdownRendering();
   const MIN_LINES_FOR_MESSAGE = 1; // Minimum lines to show before the "generating more" message
   const RESERVED_LINES = 2; // Lines reserved for the message itself and potential padding
 
-  if (lang?.toLowerCase() === 'mermaid') {
+  if (lang?.toLowerCase() === 'mermaid' && mermaidRenderMode === 'visual') {
     if (isPending) {
       return (
         <RenderPendingMermaidBlock
@@ -432,6 +443,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
     return (
       <MermaidDiagram
         source={content.join('\n')}
+        sourceCodeIndex={codeBlockIndex}
         isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth}

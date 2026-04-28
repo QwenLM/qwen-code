@@ -9,6 +9,7 @@ import { MarkdownDisplay } from './MarkdownDisplay.js';
 import { LoadedSettings } from '../../config/settings.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { renderMermaidVisual } from './mermaidVisualRenderer.js';
+import { MarkdownRenderingProvider } from '../contexts/MarkdownRenderingContext.js';
 
 describe('<MarkdownDisplay />', () => {
   const baseProps = {
@@ -422,6 +423,7 @@ flowchart LR
       );
       const output = lastFrame();
       expect(output).toContain('Mermaid flowchart (LR)');
+      expect(output).toContain('source: /copy code 1');
       expect(output).toContain('Client');
       expect(output).toContain('API');
       expect(output).toContain('▶');
@@ -440,9 +442,33 @@ flowchart LR
       );
       const output = lastFrame();
       expect(output).toContain('Mermaid flowchart (LR)');
+      expect(output).toContain('source: /copy code 1');
       expect(output).toContain('Client');
       expect(output).toContain('API');
       expect(output).not.toContain('flowchart LR');
+    });
+
+    it('can render mermaid fences as source when source mode is active', () => {
+      const text = `
+\`\`\`mermaid
+flowchart LR
+  A[Client] --> B[API]
+\`\`\`
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownRenderingProvider
+          value={{
+            mermaidRenderMode: 'source',
+            setMermaidRenderMode: () => undefined,
+          }}
+        >
+          <MarkdownDisplay {...baseProps} text={text} />
+        </MarkdownRenderingProvider>,
+      );
+      const output = lastFrame();
+      expect(output).toContain('flowchart LR');
+      expect(output).toContain('A[Client] --> B[API]');
+      expect(output).not.toContain('Mermaid flowchart');
     });
 
     it('reuses mermaid node labels when later edges reference node ids', () => {

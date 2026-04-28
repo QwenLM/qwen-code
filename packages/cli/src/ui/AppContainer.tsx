@@ -126,6 +126,10 @@ import {
 } from './hooks/useExtensionUpdates.js';
 import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
+import {
+  MarkdownRenderingProvider,
+  type MermaidRenderMode,
+} from './contexts/MarkdownRenderingContext.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
 import {
   useBackgroundTaskViewState,
@@ -1532,6 +1536,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const [compactMode, setCompactMode] = useState<boolean>(
     settings.merged.ui?.compactMode ?? false,
   );
+  const [mermaidRenderMode, setMermaidRenderMode] =
+    useState<MermaidRenderMode>('visual');
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
@@ -2151,6 +2157,11 @@ export const AppContainer = (props: AppContainerProps) => {
         setCompactMode(newValue);
         void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
         refreshStatic();
+      } else if (keyMatchers[Command.TOGGLE_MARKDOWN_RENDER_MODE](key)) {
+        setMermaidRenderMode((current) =>
+          current === 'visual' ? 'source' : 'visual',
+        );
+        refreshStatic();
       }
     },
     [
@@ -2186,6 +2197,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isAuthenticating,
       compactMode,
       setCompactMode,
+      setMermaidRenderMode,
       refreshStatic,
       handleDoubleEscRewind,
     ],
@@ -2665,6 +2677,10 @@ export const AppContainer = (props: AppContainerProps) => {
     () => ({ compactMode, setCompactMode }),
     [compactMode, setCompactMode],
   );
+  const markdownRenderingValue = useMemo(
+    () => ({ mermaidRenderMode, setMermaidRenderMode }),
+    [mermaidRenderMode, setMermaidRenderMode],
+  );
 
   return (
     <UIStateContext.Provider value={uiState}>
@@ -2677,9 +2693,11 @@ export const AppContainer = (props: AppContainerProps) => {
             }}
           >
             <CompactModeProvider value={compactModeValue}>
-              <ShellFocusContext.Provider value={isFocused}>
-                <App />
-              </ShellFocusContext.Provider>
+              <MarkdownRenderingProvider value={markdownRenderingValue}>
+                <ShellFocusContext.Provider value={isFocused}>
+                  <App />
+                </ShellFocusContext.Provider>
+              </MarkdownRenderingProvider>
             </CompactModeProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>

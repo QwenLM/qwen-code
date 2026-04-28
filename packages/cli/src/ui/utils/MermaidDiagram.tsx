@@ -13,6 +13,7 @@ import { renderMermaidImageSync } from './mermaidImageRenderer.js';
 
 interface MermaidDiagramProps {
   source: string;
+  sourceCodeIndex: number;
   contentWidth: number;
   isPending: boolean;
   availableTerminalHeight?: number;
@@ -22,6 +23,7 @@ const MERMAID_PADDING = 1;
 
 const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
   source,
+  sourceCodeIndex,
   contentWidth,
   isPending,
   availableTerminalHeight,
@@ -60,6 +62,9 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
     write(kittySequence);
   }, [kittySequence, write]);
 
+  const titleWithSourceHint = (title: string) =>
+    `${title} · source: /copy code ${sourceCodeIndex}`;
+
   if (
     image?.kind === 'terminal-image' &&
     image.protocol === 'kitty' &&
@@ -73,7 +78,7 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
         flexShrink={0}
       >
         <Text bold color={theme.text.accent}>
-          {image.title}
+          {titleWithSourceHint(visual.title)}
         </Text>
         <MaxSizedBox
           maxHeight={availableTerminalHeight}
@@ -101,7 +106,7 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
         flexShrink={0}
       >
         <Text bold color={theme.text.accent}>
-          {image.title}
+          {titleWithSourceHint(visual.title)}
         </Text>
         <Box flexDirection="column" height={image.rows}>
           <Text>{image.sequence}</Text>
@@ -119,7 +124,7 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
         flexShrink={0}
       >
         <Text bold color={theme.text.accent}>
-          {image.title}
+          {titleWithSourceHint(visual.title)}
         </Text>
         <MaxSizedBox
           maxHeight={availableTerminalHeight}
@@ -144,7 +149,7 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
       flexShrink={0}
     >
       <Text bold color={theme.text.accent}>
-        {visual.title}
+        {titleWithSourceHint(visual.title)}
       </Text>
       <MaxSizedBox
         maxHeight={availableTerminalHeight}

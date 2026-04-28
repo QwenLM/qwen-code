@@ -215,6 +215,162 @@ describe('copyCommand', () => {
     });
   });
 
+  it('should copy the last fenced code block with /copy code', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistory.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: [
+              'Example:',
+              '```js',
+              'const first = true;',
+              '```',
+              '```mermaid',
+              'flowchart TD',
+              '  A --> B',
+              '```',
+            ].join('\n'),
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, 'code');
+
+    expect(mockCopyToClipboard).toHaveBeenCalledWith('flowchart TD\n  A --> B');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Code block 2 copied to the clipboard',
+    });
+  });
+
+  it('should copy a numbered fenced code block with /copy code 2', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistory.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: [
+              '```ts',
+              'const first = 1;',
+              '```',
+              '```json',
+              '{"second": true}',
+              '```',
+            ].join('\n'),
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, 'code 2');
+
+    expect(mockCopyToClipboard).toHaveBeenCalledWith('{"second": true}');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Code block 2 copied to the clipboard',
+    });
+  });
+
+  it('should copy the last matching language code block with /copy code mermaid', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistory.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: [
+              '```mermaid title="First"',
+              'flowchart LR',
+              '  A --> B',
+              '```',
+              '```mermaid',
+              'sequenceDiagram',
+              '  A->>B: hello',
+              '```',
+            ].join('\n'),
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, 'code mermaid');
+
+    expect(mockCopyToClipboard).toHaveBeenCalledWith(
+      'sequenceDiagram\n  A->>B: hello',
+    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Code block 2 copied to the clipboard',
+    });
+  });
+
+  it('should copy a numbered matching language block with /copy code mermaid 1', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistory.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: [
+              '```mermaid',
+              'flowchart LR',
+              '  A --> B',
+              '```',
+              '```mermaid',
+              'flowchart TD',
+              '  C --> D',
+              '```',
+            ].join('\n'),
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, 'code mermaid 1');
+
+    expect(mockCopyToClipboard).toHaveBeenCalledWith('flowchart LR\n  A --> B');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Code block 1 copied to the clipboard',
+    });
+  });
+
+  it('should report when /copy code has no matching code block', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistory.mockReturnValue([
+      {
+        role: 'model',
+        parts: [{ text: 'No code here.' }],
+      },
+    ]);
+
+    const result = await copyCommand.action(mockContext, 'code');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'No matching code block found in the last AI output.',
+    });
+    expect(mockCopyToClipboard).not.toHaveBeenCalled();
+  });
+
   it('should handle clipboard copy error', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
