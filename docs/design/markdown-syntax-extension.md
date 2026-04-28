@@ -189,17 +189,37 @@ Targeted unit verification:
 
 ```bash
 cd packages/cli
-npx vitest run src/ui/utils/MarkdownDisplay.test.tsx
-npx vitest run src/ui/utils/mermaidImageRenderer.test.ts
+npx vitest run \
+  src/config/settingsSchema.test.ts \
+  src/ui/AppContainer.test.tsx \
+  src/ui/utils/MarkdownDisplay.test.tsx \
+  src/ui/utils/mermaidImageRenderer.test.ts \
+  src/ui/commands/copyCommand.test.ts \
+  src/ui/components/BaseTextInput.test.tsx \
+  src/ui/keyMatchers.test.ts \
+  src/ui/contexts/KeypressContext.test.tsx
 ```
 
 Broader verification before PR submission:
 
 ```bash
+npm run build --workspace=packages/cli
 npm run typecheck --workspace=packages/cli
 npm run lint --workspace=packages/cli
 git diff --check
 ```
+
+Terminal-capture integration scenario:
+
+```bash
+npm run build && npm run bundle
+cd integration-tests/terminal-capture
+npm run capture:markdown-rendering
+```
+
+This scenario captures a Markdown-heavy model response, toggles raw/source mode
+with `Alt/Option+M`, and verifies the visible source copy flows with
+`/copy mermaid 1` and `/copy latex 1`.
 
 Manual scenarios:
 
@@ -209,3 +229,8 @@ Manual scenarios:
 - Fenced JavaScript code block still showing code formatting.
 - Narrow terminal width.
 - Constrained tool/detail surface.
+- `ui.renderMode: "raw"` starts a session in source-oriented mode.
+- `Alt/Option+M` toggles the same response between rendered and raw/source
+  mode.
+- Mermaid and LaTeX visual blocks expose copy hints that map to the actual
+  `/copy mermaid N` and `/copy latex N` source order.

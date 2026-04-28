@@ -29,6 +29,10 @@ import {
   UIActionsContext,
   type UIActions,
 } from './contexts/UIActionsContext.js';
+import {
+  useRenderMode,
+  type RenderMode,
+} from './contexts/RenderModeContext.js';
 import { ToolCallStatus } from './types.js';
 import { useContext } from 'react';
 import { Box, measureElement } from 'ink';
@@ -48,9 +52,11 @@ vi.mock('ink', async (importOriginal) => {
 // so we can assert against them in our tests.
 let capturedUIState: UIState;
 let capturedUIActions: UIActions;
+let capturedRenderMode: RenderMode;
 function TestContextConsumer() {
   capturedUIState = useContext(UIStateContext)!;
   capturedUIActions = useContext(UIActionsContext)!;
+  capturedRenderMode = useRenderMode().renderMode;
   return <Box ref={capturedUIState.mainControlsRef} />;
 }
 
@@ -169,6 +175,7 @@ describe('AppContainer State Management', () => {
 
     capturedUIState = null!;
     capturedUIActions = null!;
+    capturedRenderMode = 'render';
 
     // **Provide a default return value for EVERY mocked hook.**
     mockedUseHistory.mockReturnValue({
@@ -923,6 +930,54 @@ describe('AppContainer State Management', () => {
           />,
         );
       }).not.toThrow();
+    });
+
+    it('initializes Markdown render mode from ui.renderMode', () => {
+      const rawSettings = {
+        ...mockSettings,
+        merged: {
+          ...mockSettings.merged,
+          ui: {
+            ...mockSettings.merged.ui,
+            renderMode: 'raw',
+          },
+        },
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={rawSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(capturedRenderMode).toBe('raw');
+    });
+
+    it('falls back to rendered Markdown mode for missing or invalid ui.renderMode', () => {
+      const invalidSettings = {
+        ...mockSettings,
+        merged: {
+          ...mockSettings.merged,
+          ui: {
+            ...mockSettings.merged.ui,
+            renderMode: 'unsupported',
+          },
+        },
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={invalidSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(capturedRenderMode).toBe('render');
     });
   });
 
