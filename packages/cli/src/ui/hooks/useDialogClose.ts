@@ -61,6 +61,10 @@ export interface DialogCloseOptions {
   // Help dialog
   isHelpDialogOpen?: boolean;
   closeHelpDialog?: () => void;
+
+  // Background tasks dialog
+  isBackgroundTasksDialogOpen: boolean;
+  closeBackgroundTasksDialog: () => void;
 }
 
 /**
@@ -120,6 +124,14 @@ export function useDialogClose(options: DialogCloseOptions) {
     if (options.showWelcomeBackDialog) {
       // WelcomeBack has its own close handler
       options.handleWelcomeBackClose();
+      return true;
+    }
+
+    if (options.isBackgroundTasksDialogOpen) {
+      // Background tasks dialog — routed through closeAnyOpenDialog so
+      // Ctrl+C and the global escape path dismiss it without escalating
+      // to exit prompts.
+      options.closeBackgroundTasksDialog();
       return true;
     }
 

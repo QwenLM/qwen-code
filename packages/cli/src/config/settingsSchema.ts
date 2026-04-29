@@ -924,6 +924,17 @@ const SETTINGS_SCHEMA = {
             parentKey: 'generationConfig',
             showInDialog: false,
           },
+          splitToolMedia: {
+            type: 'boolean',
+            label: 'Split Tool Result Media',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: false,
+            description:
+              'When true, media (images / audio / video / files) returned by MCP tool calls is split into a follow-up user message instead of being embedded in the tool message. Required for strict OpenAI-compatible servers (e.g., LM Studio) that reject non-text content on `role: "tool"` messages with HTTP 400 "Invalid \'messages\' in payload". Default false preserves the prior behavior for permissive providers. See QwenLM/qwen-code#3616.',
+            parentKey: 'generationConfig',
+            showInDialog: false,
+          },
           schemaCompliance: {
             type: 'enum',
             label: 'Tool Schema Compliance',

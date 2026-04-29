@@ -1285,9 +1285,12 @@ export const useGeminiStream = (
           dualOutput?.processEvent(event);
           switch (event.type) {
             case ServerGeminiEventType.Thought:
-              // If the thought has a subject, it's a discrete status update rather than
-              // a streamed textual thought, so we update the thought state directly.
-              if (event.value.subject) {
+              // Subject-only chunks are discrete status updates for the
+              // loading indicator and render immediately. Anything carrying
+              // streamed text (with or without a subject) goes through the
+              // throttled buffer so it batches with adjacent reasoning
+              // chunks; the flush merger preserves the subject.
+              if (event.value.subject && !event.value.description) {
                 flushBufferedStreamEvents();
                 setThought(event.value);
               } else {

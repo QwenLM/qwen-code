@@ -29,6 +29,7 @@ import {
 import type {
   ToolConfirmationOutcome,
   ToolCallConfirmationDetails,
+  ToolResultDisplay,
 } from '../../tools/tools.js';
 import { getInitialChatHistory } from '../../utils/environmentContext.js';
 import { FinishReason } from '@google/genai';
@@ -46,6 +47,7 @@ import type {
   ModelConfig,
   RunConfig,
   ToolConfig,
+  AgentMessage,
 } from './agent-types.js';
 import { AgentTerminateMode } from './agent-types.js';
 import type {
@@ -56,8 +58,9 @@ import type {
   AgentToolOutputUpdateEvent,
   AgentUsageEvent,
   AgentHooks,
+  AgentExternalMessageEvent,
 } from './agent-events.js';
-import { type AgentEventEmitter, AgentEventType } from './agent-events.js';
+import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
 import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import { ToolNames } from '../../tools/tool-names.js';
@@ -71,13 +74,26 @@ import { type ContextState, templateString } from './agent-headless.js';
  * Tools that must never be available to subagents (including forked agents).
  * - AgentTool prevents recursive subagent spawning.
  * - Cron tools are session-scoped and should only run from the main session.
+ * - TaskStop and SendMessage are parent-side control-plane tools for managing
+ *   background subagents; subagents have no agent IDs to manage natively, so
+ *   exposing them only widens the surface for cross-agent interference if an
+ *   ID leaks via prompt or transcript.
  */
 export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
+  ToolNames.TASK_STOP,
+  ToolNames.SEND_MESSAGE,
 ]);
+
+/**
+ * Prefix applied to each external message injected into a background agent's
+ * reasoning loop via getExternalMessages. Kept here so tests and any future
+ * parsers can import the same literal.
+ */
+export const EXTERNAL_MESSAGE_PREFIX = '[Message from parent agent]:';
 
 export interface ReasoningLoopResult {
   /** The final model text response (empty if terminated by abort/limits). */
@@ -98,6 +114,12 @@ export interface ReasoningLoopOptions {
   maxTimeMinutes?: number;
   /** Start time in ms (for timeout calculation). Defaults to Date.now(). */
   startTimeMs?: number;
+  /**
+   * Optional callback to drain external messages between tool rounds.
+   * Called after processFunctionCalls completes. Returned strings are
+   * appended to the next model request as user-role content.
+   */
+  getExternalMessages?: () => string[];
 }
 
 /**
@@ -153,9 +175,25 @@ export class AgentCore {
   readonly modelConfig: ModelConfig;
   readonly runConfig: RunConfig;
   readonly toolConfig?: ToolConfig;
-  readonly eventEmitter?: AgentEventEmitter;
+  /**
+   * Event emitter for this agent. Always present — if the caller doesn't
+   * pass one, AgentCore allocates its own so the observable state below
+   * is populated regardless of who constructs the agent.
+   */
+  readonly eventEmitter: AgentEventEmitter;
   readonly hooks?: AgentHooks;
   readonly stats = new AgentStatistics();
+
+  // Observable state lives on Core (not a wrapper) so headless and
+  // background agents can be observed with the same accessors as
+  // interactive ones. Populated by listeners set up in the constructor.
+  private readonly messages: AgentMessage[] = [];
+  private readonly pendingApprovals = new Map<
+    string,
+    ToolCallConfirmationDetails
+  >();
+  private readonly liveOutputs = new Map<string, ToolResultDisplay>();
+  private readonly shellPids = new Map<string, number>();
 
   /**
    * Legacy execution stats maintained for aggregate tracking.
@@ -207,8 +245,9 @@ export class AgentCore {
     this.modelConfig = modelConfig;
     this.runConfig = runConfig;
     this.toolConfig = toolConfig;
-    this.eventEmitter = eventEmitter;
+    this.eventEmitter = eventEmitter ?? new AgentEventEmitter();
     this.hooks = hooks;
+    this.setupStateListeners();
   }
 
   // ─── Chat Creation ────────────────────────────────────────
@@ -567,6 +606,30 @@ export class AgentCore {
           currentResponseId,
           wasOutputTruncated,
         );
+
+        const externalMsgs = options?.getExternalMessages?.() ?? [];
+        if (externalMsgs.length > 0) {
+          // Append to the tool-response user message so external input rides
+          // alongside the tool results the model is about to see.
+          // processFunctionCalls always returns exactly one user-role entry.
+          const last = currentMessages[currentMessages.length - 1];
+          last.parts!.push(
+            ...externalMsgs.map((text) => ({
+              text: `\n${EXTERNAL_MESSAGE_PREFIX} ${text}`,
+            })),
+          );
+          // Emit one event per injection so observers (e.g. the JSONL
+          // transcript writer) can persist each external message as a
+          // user-role record. The framing prefix is stripped — the prefix
+          // is a model-facing detail, not part of the original message.
+          for (const text of externalMsgs) {
+            this.eventEmitter?.emit(AgentEventType.EXTERNAL_MESSAGE, {
+              subagentId: this.subagentId,
+              text,
+              timestamp: Date.now(),
+            });
+          }
+        }
       } else {
         // No tool calls — treat this as the model's final answer.
         if (roundText && roundText.trim().length > 0) {
@@ -957,9 +1020,67 @@ export class AgentCore {
     return [{ role: 'user', parts: toolResponseParts }];
   }
 
+  // ─── Observable state accessors ────────────────────────────
+
+  getMessages(): readonly AgentMessage[] {
+    return this.messages;
+  }
+
+  /**
+   * Tool calls currently awaiting user approval. Mutated by
+   * AgentInteractive's TOOL_WAITING_APPROVAL handler; headless agents
+   * never populate this because they run with
+   * `getShouldAvoidPermissionPrompts === true`.
+   */
+  getPendingApprovals(): ReadonlyMap<string, ToolCallConfirmationDetails> {
+    return this.pendingApprovals;
+  }
+
+  getLiveOutputs(): ReadonlyMap<string, ToolResultDisplay> {
+    return this.liveOutputs;
+  }
+
+  getShellPids(): ReadonlyMap<string, number> {
+    return this.shellPids;
+  }
+
+  pushMessage(
+    role: AgentMessage['role'],
+    content: string,
+    options?: { thought?: boolean; metadata?: Record<string, unknown> },
+  ): void {
+    const message: AgentMessage = {
+      role,
+      content,
+      timestamp: Date.now(),
+    };
+    if (options?.thought) {
+      message.thought = true;
+    }
+    if (options?.metadata) {
+      message.metadata = options.metadata;
+    }
+    this.messages.push(message);
+  }
+
+  setPendingApproval(
+    callId: string,
+    details: ToolCallConfirmationDetails,
+  ): void {
+    this.pendingApprovals.set(callId, details);
+  }
+
+  deletePendingApproval(callId: string): void {
+    this.pendingApprovals.delete(callId);
+  }
+
+  clearPendingApprovals(): void {
+    this.pendingApprovals.clear();
+  }
+
   // ─── Stats & Events ───────────────────────────────────────
 
-  getEventEmitter(): AgentEventEmitter | undefined {
+  getEventEmitter(): AgentEventEmitter {
     return this.eventEmitter;
   }
 
@@ -1071,6 +1192,81 @@ export class AgentCore {
   }
 
   // ─── Private Helpers ──────────────────────────────────────
+
+  /**
+   * TOOL_WAITING_APPROVAL is deliberately NOT listened to here because
+   * the correct response depends on whether the consumer is interactive
+   * (needs to wrap onConfirm with cancel-round behavior) or headless
+   * (approvals never fire). AgentInteractive owns that listener and
+   * writes into `pendingApprovals` via the public mutator API.
+   */
+  private setupStateListeners(): void {
+    const emitter = this.eventEmitter;
+
+    emitter.on(AgentEventType.ROUND_TEXT, (event: AgentRoundTextEvent) => {
+      if (event.thoughtText) {
+        this.pushMessage('assistant', event.thoughtText, { thought: true });
+      }
+      if (event.text) {
+        this.pushMessage('assistant', event.text);
+      }
+    });
+
+    emitter.on(AgentEventType.TOOL_CALL, (event: AgentToolCallEvent) => {
+      this.pushMessage('tool_call', `Tool call: ${event.name}`, {
+        metadata: {
+          callId: event.callId,
+          toolName: event.name,
+          args: event.args,
+          description: event.description,
+          renderOutputAsMarkdown: event.isOutputMarkdown,
+          round: event.round,
+        },
+      });
+    });
+
+    emitter.on(
+      AgentEventType.TOOL_OUTPUT_UPDATE,
+      (event: AgentToolOutputUpdateEvent) => {
+        this.liveOutputs.set(event.callId, event.outputChunk);
+        if (event.pid !== undefined) {
+          this.shellPids.set(event.callId, event.pid);
+        }
+      },
+    );
+
+    emitter.on(AgentEventType.TOOL_RESULT, (event: AgentToolResultEvent) => {
+      this.liveOutputs.delete(event.callId);
+      this.shellPids.delete(event.callId);
+      this.pendingApprovals.delete(event.callId);
+
+      const statusText = event.success ? 'succeeded' : 'failed';
+      const summary = event.error
+        ? `Tool ${event.name} ${statusText}: ${event.error}`
+        : `Tool ${event.name} ${statusText}`;
+      this.pushMessage('tool_result', summary, {
+        metadata: {
+          callId: event.callId,
+          toolName: event.name,
+          success: event.success,
+          resultDisplay: event.resultDisplay,
+          outputFile: event.outputFile,
+          round: event.round,
+        },
+      });
+    });
+
+    // Mirror send_message injections into the observable message stream so
+    // the TUI detail dialog shows parent→child messages alongside what the
+    // JSONL transcript records. The framing prefix is stripped — that's a
+    // model-facing detail, not what the user wants to see in the dialog.
+    emitter.on(
+      AgentEventType.EXTERNAL_MESSAGE,
+      (event: AgentExternalMessageEvent) => {
+        this.pushMessage('user', event.text);
+      },
+    );
+  }
 
   /**
    * Builds the system prompt with template substitution and optional

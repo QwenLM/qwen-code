@@ -45,6 +45,89 @@ function getFileLock(filePath: string): Mutex {
 }
 
 /**
+ * Recovers parsed objects from a single physical line that may contain one
+ * or more concatenated top-level JSON objects (i.e. a missing newline
+ * separator left two records glued together as `}{`). Walks the line with a
+ * brace-depth counter that respects string boundaries and `\` escapes, then
+ * tries `JSON.parse` on each balanced top-level fragment. Fragments that
+ * still fail to parse are skipped silently — the caller decides whether to
+ * warn.
+ *
+ * **Limitation**: only top-level `{...}` records are recovered. A glued line
+ * whose records are top-level arrays (`[...][...]`) will not split. All
+ * existing JSONL writers in this codebase produce object records, so this
+ * matches the actual corruption shape — extend if that ever changes.
+ *
+ * Exported for unit tests; not part of the module's stable surface.
+ */
+export function _recoverObjectsFromLine<T = unknown>(line: string): T[] {
+  const out: T[] = [];
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let start = -1;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (inString) {
+      if (c === '\\') escape = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') {
+      inString = true;
+      continue;
+    }
+    if (c === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (c === '}') {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        const fragment = line.slice(start, i + 1);
+        try {
+          out.push(JSON.parse(fragment) as T);
+        } catch {
+          // Skip un-parseable fragment; caller may still recover others.
+        }
+        start = -1;
+      } else if (depth < 0) {
+        // Unbalanced close brace — reset and keep scanning for the next
+        // well-formed object rather than giving up on the whole line.
+        depth = 0;
+        start = -1;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Parses a single physical JSONL line tolerantly. Returns the parsed objects:
+ * one if the line is well-formed, multiple if it is `}{`-glued from an
+ * interrupted append (the #3606 corruption shape), zero if nothing can be
+ * recovered. Mirrors the silent skip in `countSessionMessages`.
+ */
+function parseLineTolerant<T>(line: string, filePath: string): T[] {
+  try {
+    return [JSON.parse(line) as T];
+  } catch {
+    const fragments = _recoverObjectsFromLine<T>(line);
+    if (fragments.length === 0) {
+      debugLogger.warn(`Failed to parse line in ${filePath}`);
+    } else {
+      debugLogger.warn(
+        `Recovered ${fragments.length} record(s) from malformed line in ${filePath}`,
+      );
+    }
+    return fragments;
+  }
+}
+
+/**
  * Reads the first N lines from a JSONL file efficiently.
  * Returns an array of parsed objects.
  */
@@ -63,8 +146,10 @@ export async function readLines<T = unknown>(
     for await (const line of rl) {
       if (results.length >= count) break;
       const trimmed = line.trim();
-      if (trimmed.length > 0) {
-        results.push(JSON.parse(trimmed) as T);
+      if (trimmed.length === 0) continue;
+      for (const obj of parseLineTolerant<T>(trimmed, filePath)) {
+        if (results.length >= count) break;
+        results.push(obj);
       }
     }
 
@@ -95,8 +180,9 @@ export async function read<T = unknown>(filePath: string): Promise<T[]> {
     const results: T[] = [];
     for await (const line of rl) {
       const trimmed = line.trim();
-      if (trimmed.length > 0) {
-        results.push(JSON.parse(trimmed) as T);
+      if (trimmed.length === 0) continue;
+      for (const obj of parseLineTolerant<T>(trimmed, filePath)) {
+        results.push(obj);
       }
     }
 

@@ -127,6 +127,10 @@ import {
 import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
+import {
+  useBackgroundTaskViewState,
+  useBackgroundTaskViewActions,
+} from './contexts/BackgroundTaskViewContext.js';
 import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
@@ -138,6 +142,7 @@ import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useMemoryDialog } from './hooks/useMemoryDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
+import { buildTerminalNotification } from './hooks/useTerminalNotification.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
@@ -301,10 +306,7 @@ export const AppContainer = (props: AppContainerProps) => {
     [],
   );
 
-  // Helper to determine the current model (polled, since Config has no model-change event).
-  const getCurrentModel = useCallback(() => config.getModel(), [config]);
-
-  const [currentModel, setCurrentModel] = useState(getCurrentModel());
+  const [currentModel, setCurrentModel] = useState(() => config.getModel());
 
   const [isConfigInitialized, setConfigInitialized] = useState(false);
 
@@ -314,6 +316,20 @@ export const AppContainer = (props: AppContainerProps) => {
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
   const { stdin, setRawMode } = useStdin();
   const { stdout } = useStdout();
+
+  // Raw write function for terminal escape sequences.
+  // Uses process.stdout directly instead of Ink's useStdout() because
+  // standard Ink v6.2.3 proxies stdout writes through its rendering
+  // pipeline, which can corrupt binary escape sequences (OSC, DCS).
+  const writeRaw = useCallback((data: string) => {
+    process.stdout.write(data);
+  }, []);
+
+  // Terminal notification helpers (constructed directly, not via context)
+  const terminal = useMemo(
+    () => buildTerminalNotification(writeRaw),
+    [writeRaw],
+  );
 
   // Additional hooks moved from App.tsx
   const { stats: sessionStats, startNewSession } = useSessionStats();
@@ -418,21 +434,6 @@ export const AppContainer = (props: AppContainerProps) => {
     return () => handler?.cleanup();
   }, [historyManager.addItem]);
 
-  // Watch for model changes (e.g., user switches model via /model)
-  useEffect(() => {
-    const checkModelChange = () => {
-      const model = getCurrentModel();
-      if (model !== currentModel) {
-        setCurrentModel(model);
-      }
-    };
-
-    checkModelChange();
-    const interval = setInterval(checkModelChange, 1000); // Check every second
-
-    return () => clearInterval(interval);
-  }, [config, currentModel, getCurrentModel]);
-
   // Derive widths for InputPrompt using shared helper
   const { inputWidth, suggestionsWidth } = useMemo(() => {
     const { inputWidth, suggestionsWidth } =
@@ -493,6 +494,23 @@ export const AppContainer = (props: AppContainerProps) => {
     stdout.write(ansiEscapes.clearTerminal);
     remountStaticHistory();
   }, [remountStaticHistory, stdout]);
+
+  // Keep the static header in sync with model changes without polling.
+  // Ink's <Static> output is append-only, so model changes must explicitly
+  // clear and remount the static region to redraw the banner at the top.
+  useEffect(() => {
+    const unsubscribe = config.onModelChange((model) => {
+      setCurrentModel((prev) => {
+        if (prev === model) {
+          return prev;
+        }
+        refreshStatic();
+        return model;
+      });
+    });
+
+    return unsubscribe;
+  }, [config, refreshStatic]);
 
   const {
     isThemeDialogOpen,
@@ -895,6 +913,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const [hasSuggestionsVisible, setHasSuggestionsVisible] = useState(false);
 
   const agentViewState = useAgentViewState();
+  const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
+  const { closeDialog: closeBgTasksDialog } = useBackgroundTaskViewActions();
 
   // Prompt suggestion state
   const [promptSuggestion, setPromptSuggestion] = useState<string | null>(null);
@@ -1589,7 +1609,8 @@ export const AppContainer = (props: AppContainerProps) => {
     isDeleteDialogOpen ||
     isHelpDialogOpen ||
     isExtensionsManagerDialogOpen ||
-    isRewindSelectorOpen;
+    isRewindSelectorOpen ||
+    bgTasksDialogOpen;
   dialogsVisibleRef.current = dialogsVisible;
   const shouldShowStickyTodos =
     stickyTodos !== null &&
@@ -1890,6 +1911,8 @@ export const AppContainer = (props: AppContainerProps) => {
     elapsedTime,
     settings,
     config,
+    terminal,
+    pendingToolCalls,
   });
 
   // Dialog close functionality
@@ -1914,6 +1937,8 @@ export const AppContainer = (props: AppContainerProps) => {
     handleWelcomeBackClose,
     isHelpDialogOpen,
     closeHelpDialog,
+    isBackgroundTasksDialogOpen: bgTasksDialogOpen,
+    closeBackgroundTasksDialog: closeBgTasksDialog,
   });
 
   const handleExit = useCallback(

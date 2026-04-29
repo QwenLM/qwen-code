@@ -18,6 +18,10 @@ export interface RequestContext {
   modalities: InputModalities;
   startTime: number;
   toolCallParser?: StreamingToolCallParser;
+  // When true, media parts in tool-result messages are split into a follow-up
+  // user message for strict OpenAI-compat servers. See ContentGeneratorConfig
+  // for details.
+  splitToolMedia?: boolean;
 }
 
 export interface ErrorHandler {

@@ -359,6 +359,11 @@
               "type": "boolean",
               "default": true
             },
+            "splitToolMedia": {
+              "description": "When true, media (images / audio / video / files) returned by MCP tool calls is split into a follow-up user message instead of being embedded in the tool message. Required for strict OpenAI-compatible servers (e.g., LM Studio) that reject non-text content on `role: \"tool\"` messages with HTTP 400 \"Invalid 'messages' in payload\". Default false preserves the prior behavior for permissive providers. See QwenLM/qwen-code#3616.",
+              "type": "boolean",
+              "default": false
+            },
             "schemaCompliance": {
               "description": "The compliance mode for tool schemas sent to the model. Use \"openapi_30\" for strict OpenAPI 3.0 compatibility (e.g., for Gemini). Options: auto, openapi_30",
               "enum": [
