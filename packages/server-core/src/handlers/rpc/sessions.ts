@@ -140,6 +140,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
       log.error('GET_SESSIONS_FOR_WORKSPACE continuing after initialization failure:', error)
     }
     const end = perf.start('rpc.getSessionsForWorkspace', { workspaceId })
+    await sessionManager.refreshExternalSessions?.(workspaceId)
     const sessions = sessionManager.getSessions(workspaceId)
     end()
     return sessions

@@ -236,6 +236,14 @@ export default function App() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   // Window's workspace ID — shared atom so Root/ThemeProvider stays in sync on switch
   const [windowWorkspaceId, setWindowWorkspaceId] = useAtom(windowWorkspaceIdAtom)
+  const windowWorkspaceIdRef = useRef<string | null>(windowWorkspaceId)
+  const sessionListRequestSeqRef = useRef(0)
+  const workspaceSwitchSeqRef = useRef(0)
+  const workspaceSwitchChainRef = useRef<Promise<void>>(Promise.resolve())
+
+  useEffect(() => {
+    windowWorkspaceIdRef.current = windowWorkspaceId
+  }, [windowWorkspaceId])
 
   // Derive workspace slug for SDK skill qualification
   const windowWorkspaceSlug = useMemo(() => {
@@ -461,13 +469,31 @@ export default function App() {
   }, [reconcilePermissionModeState])
 
   const loadSessionsFromServer = useCallback(async () => {
+    const requestWorkspaceId = windowWorkspaceIdRef.current
+    const requestSeq = ++sessionListRequestSeqRef.current
     setSessionLoadError(null)
 
     try {
       const loadedSessions = await window.electronAPI.getSessions()
 
+      if (requestSeq !== sessionListRequestSeqRef.current || requestWorkspaceId !== windowWorkspaceIdRef.current) {
+        console.info('[App] Ignoring stale session list response', {
+          requestWorkspaceId,
+          currentWorkspaceId: windowWorkspaceIdRef.current,
+        })
+        return
+      }
+
       applyLoadedSessions(loadedSessions)
       await reconcileLoadedSessionPermissionModes(loadedSessions)
+
+      if (requestSeq !== sessionListRequestSeqRef.current || requestWorkspaceId !== windowWorkspaceIdRef.current) {
+        console.info('[App] Ignoring stale session list post-reconcile', {
+          requestWorkspaceId,
+          currentWorkspaceId: windowWorkspaceIdRef.current,
+        })
+        return
+      }
 
       setSessionsLoaded(true)
 
@@ -478,6 +504,14 @@ export default function App() {
         }
       }
     } catch (err) {
+      if (requestSeq !== sessionListRequestSeqRef.current || requestWorkspaceId !== windowWorkspaceIdRef.current) {
+        console.info('[App] Ignoring stale session list error', {
+          requestWorkspaceId,
+          currentWorkspaceId: windowWorkspaceIdRef.current,
+        })
+        return
+      }
+
       console.error('[App] Failed to load sessions:', err)
       const transportState = await window.electronAPI.getTransportConnectionState().catch(() => null)
 
@@ -494,8 +528,16 @@ export default function App() {
   }, [applyLoadedSessions, initialSessionId, reconcileLoadedSessionPermissionModes, windowWorkspaceId])
 
   const refreshSessionListMetadataFromServer = useCallback(async (): Promise<Map<string, SessionMeta> | null> => {
+    const requestWorkspaceId = windowWorkspaceIdRef.current
     try {
       const sessions = await window.electronAPI.getSessions()
+      if (requestWorkspaceId !== windowWorkspaceIdRef.current) {
+        console.info('[App] Ignoring stale reconnect session metadata response', {
+          requestWorkspaceId,
+          currentWorkspaceId: windowWorkspaceIdRef.current,
+        })
+        return null
+      }
       console.info(`[App] getSessions returned ${sessions.length} session(s) for reconnect refresh`)
       const loadedSessionIds = store.get(loadedSessionsAtom)
 
@@ -512,6 +554,13 @@ export default function App() {
 
       return nextMetaMap
     } catch (err) {
+      if (requestWorkspaceId !== windowWorkspaceIdRef.current) {
+        console.info('[App] Ignoring stale reconnect session metadata error', {
+          requestWorkspaceId,
+          currentWorkspaceId: windowWorkspaceIdRef.current,
+        })
+        return null
+      }
       console.error('[App] Failed to refresh session list metadata after reconnect:', err)
       return null
     }
@@ -573,6 +622,7 @@ export default function App() {
       if (ws.length > 0) {
         // Switch to workspace in-place (no window close/reopen)
         await window.electronAPI.switchWorkspace(ws[0].id)
+        windowWorkspaceIdRef.current = ws[0].id
         setWindowWorkspaceId(ws[0].id)
         setWorkspaces(ws)
       } else {
@@ -616,6 +666,7 @@ export default function App() {
       try {
         // Get this window's workspace ID (passed via URL query param from main process)
         const wsId = await window.electronAPI.getWindowWorkspace()
+        windowWorkspaceIdRef.current = wsId
         setWindowWorkspaceId(wsId)
 
         const needs = await window.electronAPI.getSetupNeeds()
@@ -868,7 +919,12 @@ export default function App() {
               syncSessionOptionsFromSession(createdSession)
               return
             }
-            return window.electronAPI.getSessions().then(initializeSessions)
+
+            const requestWorkspaceId = windowWorkspaceIdRef.current
+            return window.electronAPI.getSessions().then((sessions) => {
+              if (requestWorkspaceId !== windowWorkspaceIdRef.current) return
+              initializeSessions(sessions)
+            })
           })
           .catch((error: unknown) => console.error('Failed to handle session_created event:', error))
         return
@@ -1612,6 +1668,7 @@ export default function App() {
       // Clear session atoms - initialize with empty array clears all per-session atoms
       initializeSessions([])
       setWorkspaces([])
+      windowWorkspaceIdRef.current = null
       setWindowWorkspaceId(null)
       // Reset setupNeeds to force fresh onboarding start
       setSetupNeeds({
@@ -1634,12 +1691,20 @@ export default function App() {
   // - With openInNewWindow=true: open in new window (or focus existing)
   const handleSelectWorkspace = useCallback(async (workspaceId: string, openInNewWindow = false) => {
     // If selecting current workspace, do nothing
-    if (workspaceId === windowWorkspaceId) return
+    if (workspaceId === windowWorkspaceIdRef.current) return
 
     if (openInNewWindow) {
       // Open (or focus) the window for the selected workspace
       window.electronAPI.openWorkspace(workspaceId)
-    } else {
+      return
+    }
+
+    const switchSeq = ++workspaceSwitchSeqRef.current
+    const requestSeq = ++sessionListRequestSeqRef.current
+
+    const runSwitch = async () => {
+      if (switchSeq !== workspaceSwitchSeqRef.current) return
+
       setSessionLoadError(null)
 
       const targetWorkspace = workspaces.find(w => w.id === workspaceId)
@@ -1655,20 +1720,36 @@ export default function App() {
         }
       }
 
+      if (switchSeq !== workspaceSwitchSeqRef.current || requestSeq !== sessionListRequestSeqRef.current) {
+        return
+      }
+
       // Switch workspace in current window.
       await window.electronAPI.switchWorkspace(workspaceId)
+
+      if (switchSeq !== workspaceSwitchSeqRef.current || requestSeq !== sessionListRequestSeqRef.current) {
+        return
+      }
 
       if (!loadedSessions) {
         try {
           loadedSessions = await window.electronAPI.getSessions()
         } catch (error) {
+          if (switchSeq !== workspaceSwitchSeqRef.current || requestSeq !== sessionListRequestSeqRef.current) {
+            return
+          }
           console.error(`[App] Failed to load sessions while switching to workspace ${workspaceId}:`, error)
           setSessionLoadError(formatSessionLoadFailure(error))
           loadedSessions = []
         }
       }
 
+      if (switchSeq !== workspaceSwitchSeqRef.current || requestSeq !== sessionListRequestSeqRef.current) {
+        return
+      }
+
       sessionDraftsRef.current.clear()
+      windowWorkspaceIdRef.current = workspaceId
 
       // Keep the switch visually atomic: the active workspace and its session
       // metadata land in the same paint, instead of briefly rendering empty UI.
@@ -1687,7 +1768,14 @@ export default function App() {
       // Sessions and theme still refresh via windowWorkspaceId-dependent effects,
       // but the first frame already has the target workspace's session metadata.
     }
-  }, [windowWorkspaceId, workspaces, setWindowWorkspaceId, setSession, applyLoadedSessions, reconcileLoadedSessionPermissionModes])
+
+    const nextSwitch = workspaceSwitchChainRef.current
+      .catch(() => {})
+      .then(runSwitch)
+
+    workspaceSwitchChainRef.current = nextSwitch.catch(() => {})
+    return nextSwitch
+  }, [workspaces, setWindowWorkspaceId, setSession, applyLoadedSessions, reconcileLoadedSessionPermissionModes])
 
   // Handle workspace switch by slug (called by NavigationContext on popstate when ?ws= changes)
   const handleSwitchWorkspaceBySlug = useCallback((slug: string) => {
@@ -1895,6 +1983,7 @@ export default function App() {
           <WorkspacePicker
             onSelectWorkspace={async (id) => {
               await window.electronAPI.switchWorkspace(id)
+              windowWorkspaceIdRef.current = id
               setWindowWorkspaceId(id)
               setAppState('ready')
             }}
