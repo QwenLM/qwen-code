@@ -9,9 +9,13 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import { Storage } from '../config/storage.js';
 import type { ForkedAgentResult } from '../utils/forkedAgent.js';
 import { runForkedAgent } from '../utils/forkedAgent.js';
-import { planManagedAutoMemoryDreamByAgent } from './dreamAgentPlanner.js';
+import {
+  getTranscriptDir,
+  planManagedAutoMemoryDreamByAgent,
+} from './dreamAgentPlanner.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 
 vi.mock('../utils/forkedAgent.js', () => ({
@@ -38,12 +42,28 @@ describe('dreamAgentPlanner', () => {
   });
 
   afterEach(async () => {
+    Storage.setRuntimeBaseDir(null);
     await fs.rm(tempDir, {
       recursive: true,
       force: true,
       maxRetries: 3,
       retryDelay: 10,
     });
+  });
+
+  it('returns project-scoped session transcript directory', () => {
+    const runtimeDir = path.join(tempDir, 'runtime');
+    Storage.setRuntimeBaseDir(runtimeDir);
+
+    expect(getTranscriptDir(projectRoot)).toBe(
+      path.join(new Storage(projectRoot).getProjectDir(), 'chats'),
+    );
+    expect(getTranscriptDir(projectRoot)).toContain(
+      path.join(runtimeDir, 'projects'),
+    );
+    expect(getTranscriptDir(projectRoot)).not.toContain(
+      `${path.sep}.qwen${path.sep}tmp${path.sep}`,
+    );
   });
 
   it('returns the forked agent result', async () => {

@@ -9,7 +9,8 @@ import {
   runForkedAgent,
   type ForkedAgentResult,
 } from '../utils/forkedAgent.js';
-import { getProjectHash, QWEN_DIR } from '../utils/paths.js';
+import * as path from 'node:path';
+import { Storage } from '../config/storage.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
   getAutoMemoryRoot,
@@ -160,9 +161,8 @@ Rules:
 - Keep the MEMORY.md index concise: one line per file in the format \`- [Title](relative/path.md) — one-line hook\`.
 - If nothing needs consolidation, do nothing and say so.`;
 
-function getTranscriptDir(projectRoot: string): string {
-  const projectHash = getProjectHash(projectRoot);
-  return `${QWEN_DIR}/tmp/${projectHash}/chats`;
+export function getTranscriptDir(projectRoot: string): string {
+  return path.join(new Storage(projectRoot).getProjectDir(), 'chats');
 }
 
 export function buildConsolidationTaskPrompt(
