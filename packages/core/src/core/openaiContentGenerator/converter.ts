@@ -21,7 +21,7 @@ import { GenerateContentResponse, FinishReason } from '@google/genai';
 import type OpenAI from 'openai';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
-import type { RequestContext } from './types.js';
+import type { RequestContext, StreamingTextDeltaState } from './types.js';
 import {
   convertSchema,
   type SchemaComplianceMode,
@@ -56,6 +56,60 @@ export interface ExtendedCompletionChunkDelta
   extends OpenAI.Chat.ChatCompletionChunk.Choice.Delta {
   reasoning_content?: string | null;
   reasoning?: string | null;
+}
+
+const CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH = 20;
+
+// Some OpenAI-compatible providers send accumulated content in each
+// delta.content field. Normalize that shape to incremental suffixes before the
+// Gemini stream layer appends it to the live transcript.
+function normalizeStreamingTextDelta(
+  rawDelta: string,
+  state: StreamingTextDeltaState,
+): string {
+  if (rawDelta.length === 0) {
+    return '';
+  }
+
+  if (state.emittedText.length === 0) {
+    state.emittedText = rawDelta;
+    return rawDelta;
+  }
+
+  if (state.cumulativeMode) {
+    if (rawDelta.startsWith(state.emittedText)) {
+      const suffix = rawDelta.slice(state.emittedText.length);
+      state.emittedText = rawDelta;
+      return suffix;
+    }
+
+    if (state.emittedText.startsWith(rawDelta)) {
+      return '';
+    }
+
+    state.cumulativeMode = false;
+  }
+
+  if (
+    rawDelta.startsWith(state.emittedText) &&
+    rawDelta.length > state.emittedText.length
+  ) {
+    const suffix = rawDelta.slice(state.emittedText.length);
+    state.emittedText = rawDelta;
+    state.cumulativeMode = true;
+    return suffix;
+  }
+
+  if (
+    rawDelta === state.emittedText &&
+    rawDelta.length >= CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH
+  ) {
+    state.cumulativeMode = true;
+    return '';
+  }
+
+  state.emittedText += rawDelta;
+  return rawDelta;
 }
 
 /**
@@ -939,13 +993,31 @@ export function convertOpenAIChunkToGemini(
       (choice.delta as ExtendedCompletionChunkDelta)?.reasoning_content ??
       (choice.delta as ExtendedCompletionChunkDelta)?.reasoning;
     if (reasoningText) {
-      parts.push({ text: reasoningText, thought: true });
+      const normalizedReasoningText = normalizeStreamingTextDelta(
+        reasoningText,
+        (requestContext.reasoningDeltaState ??= {
+          emittedText: '',
+          cumulativeMode: false,
+        }),
+      );
+      if (normalizedReasoningText) {
+        parts.push({ text: normalizedReasoningText, thought: true });
+      }
     }
 
     // Handle text content
     if (choice.delta?.content) {
       if (typeof choice.delta.content === 'string') {
-        parts.push({ text: choice.delta.content });
+        const normalizedContent = normalizeStreamingTextDelta(
+          choice.delta.content,
+          (requestContext.textDeltaState ??= {
+            emittedText: '',
+            cumulativeMode: false,
+          }),
+        );
+        if (normalizedContent) {
+          parts.push({ text: normalizedContent });
+        }
       }
     }
 

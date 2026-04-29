@@ -13,11 +13,18 @@ import type {
 import type { OpenAICompatibleProvider } from './provider/index.js';
 import type { StreamingToolCallParser } from './streamingToolCallParser.js';
 
+export interface StreamingTextDeltaState {
+  emittedText: string;
+  cumulativeMode: boolean;
+}
+
 export interface RequestContext {
   model: string;
   modalities: InputModalities;
   startTime: number;
   toolCallParser?: StreamingToolCallParser;
+  textDeltaState?: StreamingTextDeltaState;
+  reasoningDeltaState?: StreamingTextDeltaState;
 }
 
 export interface ErrorHandler {

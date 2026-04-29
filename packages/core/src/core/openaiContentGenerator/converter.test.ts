@@ -1475,6 +1475,101 @@ describe('OpenAIContentConverter', () => {
       const parts = chunk.candidates?.[0]?.content?.parts;
       expect(parts).toEqual([]);
     });
+
+    it('should normalize cumulative streaming content deltas to suffixes', () => {
+      const ctx = withStreamParser();
+      const chunks = [
+        'Here',
+        'Here is a Flowchart Syntax Reference:',
+        'Here is a Flowchart Syntax Reference:\n| `flowchart TD` | Direction |',
+        'Here is a Flowchart Syntax Reference:\n| `flowchart TD` | Direction |\n| `A[Text]` | Node |',
+      ];
+
+      const emitted = chunks.map((content, index) => {
+        const chunk = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: `chunk-cumulative-${index}`,
+            created: 456 + index,
+            choices: [
+              {
+                index: 0,
+                delta: { content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        );
+
+        return chunk.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+      });
+
+      expect(emitted).toEqual([
+        'Here',
+        ' is a Flowchart Syntax Reference:',
+        '\n| `flowchart TD` | Direction |',
+        '\n| `A[Text]` | Node |',
+      ]);
+      expect(emitted.join('')).toBe(chunks[chunks.length - 1]);
+    });
+
+    it('should ignore repeated cumulative chunks with no new suffix', () => {
+      const ctx = withStreamParser();
+      const content = 'The following section starts with enough text.';
+      const emitted = [content, content].map((chunkContent, index) => {
+        const chunk = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: `chunk-cumulative-repeat-${index}`,
+            created: 456 + index,
+            choices: [
+              {
+                index: 0,
+                delta: { content: chunkContent },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        );
+
+        return chunk.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+      });
+
+      expect(emitted).toEqual([content, '']);
+    });
+
+    it('should preserve repeated short incremental content chunks', () => {
+      const ctx = withStreamParser();
+      const emitted = ['ha', 'ha'].map((content, index) => {
+        const chunk = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: `chunk-repeat-${index}`,
+            created: 456 + index,
+            choices: [
+              {
+                index: 0,
+                delta: { content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        );
+
+        return chunk.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+      });
+
+      expect(emitted).toEqual(['ha', 'ha']);
+    });
   });
 
   describe('convertGeminiToolsToOpenAI', () => {

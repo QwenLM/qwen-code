@@ -80,6 +80,9 @@ type Summary = Counts & {
   stallSentinelOccurrenceCount: number;
   maxFrameStallSentinelOccurrenceCount: number;
   minPostDoneViewportStallSentinelOccurrenceCount: number | null;
+  tableSentinelExpectedCount: number;
+  tableSentinelOccurrenceCount: number;
+  maxFrameTableSentinelOccurrenceCount: number;
   terminal: {
     cols: number;
     rows: number;
@@ -198,6 +201,17 @@ const STALL_SENTINELS = [
   'QWEN_F1',
 ];
 
+const TABLE_SENTINELS = [
+  'QWEN_TABLE_01',
+  'QWEN_TABLE_02',
+  'QWEN_TABLE_03',
+  'QWEN_TABLE_04',
+  'QWEN_TABLE_05',
+  'QWEN_TABLE_06',
+  'QWEN_TABLE_07',
+  'QWEN_TABLE_08',
+];
+
 function markdownStallChunks(): string[] {
   const lines = [
     'Here is a deterministic Mermaid flowchart used by the TUI stall regression:',
@@ -221,6 +235,31 @@ function markdownBlankTailChunks(): string[] {
   return [...markdownStallChunks(), ...Array.from({ length: 80 }, () => '\n')];
 }
 
+function markdownTableChunks(): string[] {
+  const lines = [
+    'The following section is a deterministic Flowchart Syntax Reference:',
+    '',
+    '```mermaid',
+    'flowchart TD',
+    '    A[Start] --> B{Decision}',
+    '    B --> C[Process]',
+    '```',
+    '',
+    '## Flowchart Syntax Reference',
+    '',
+    '| Syntax | Direction | Sentinel |',
+    '| --- | --- | --- |',
+    ...TABLE_SENTINELS.map(
+      (sentinel, index) =>
+        `| \`${sentinel}\` | Flowchart syntax reference row ${index + 1} |`,
+    ),
+    '',
+    'This paragraph closes the table after the normal streaming output.',
+  ];
+
+  return lines.flatMap((line) => [line, '\n']);
+}
+
 function defaultChunks(): string[] {
   return Array.from({ length: STREAM_CHUNK_COUNT }, (_, index) => {
     const marker = String(index).padStart(3, '0');
@@ -229,16 +268,24 @@ function defaultChunks(): string[] {
 }
 
 function getChunksForPayload(payload: string): string[] {
-  if (payload === 'markdown') {
+  const normalizedPayload = payload.endsWith('-cumulative')
+    ? payload.slice(0, -'-cumulative'.length)
+    : payload;
+
+  if (normalizedPayload === 'markdown') {
     return markdownChunks();
   }
 
-  if (payload === 'markdown-stall') {
+  if (normalizedPayload === 'markdown-stall') {
     return markdownStallChunks();
   }
 
-  if (payload === 'markdown-blank-tail') {
+  if (normalizedPayload === 'markdown-blank-tail') {
     return markdownBlankTailChunks();
+  }
+
+  if (normalizedPayload === 'markdown-table') {
+    return markdownTableChunks();
   }
 
   return defaultChunks();
@@ -248,6 +295,19 @@ function countStallSentinels(text: string): number {
   return STALL_SENTINELS.reduce(
     (total, sentinel) => total + countOccurrences(text, sentinel),
     0,
+  );
+}
+
+function countTableSentinels(text: string): number {
+  return TABLE_SENTINELS.reduce(
+    (total, sentinel) => total + countOccurrences(text, sentinel),
+    0,
+  );
+}
+
+function isMarkdownTablePayload(payload: string): boolean {
+  return (
+    payload === 'markdown-table' || payload === 'markdown-table-cumulative'
   );
 }
 
@@ -275,6 +335,7 @@ function streamOpenAIResponse(res: ServerResponse, payload: string): void {
 
   const chunks = getChunksForPayload(payload);
   chunks.push(STREAM_DONE);
+  const useCumulativeTextDelta = payload.endsWith('-cumulative');
   const streamIntervalMs = envNumber(
     'QWEN_TUI_E2E_STREAM_INTERVAL_MS',
     STREAM_INTERVAL_MS,
@@ -285,6 +346,7 @@ function streamOpenAIResponse(res: ServerResponse, payload: string): void {
       : 0;
 
   let index = 0;
+  let cumulativeContent = '';
   const finish = () => {
     send({
       ...base,
@@ -297,12 +359,17 @@ function streamOpenAIResponse(res: ServerResponse, payload: string): void {
 
   const timer = setInterval(() => {
     if (index < chunks.length) {
+      cumulativeContent += chunks[index];
       send({
         ...base,
         choices: [
           {
             index: 0,
-            delta: { content: chunks[index] },
+            delta: {
+              content: useCumulativeTextDelta
+                ? cumulativeContent
+                : chunks[index],
+            },
             finish_reason: null,
           },
         ],
@@ -548,12 +615,14 @@ async function main(): Promise<void> {
   const frameRawMermaidFenceCounts: number[] = [];
   const frameStallSentinelOccurrenceCounts: number[] = [];
   const postDoneViewportStallSentinelOccurrenceCounts: number[] = [];
+  const frameTableSentinelOccurrenceCounts: number[] = [];
 
   const recordMarkdownFrameMetrics = async () => {
     if (
       streamPayload !== 'markdown' &&
       streamPayload !== 'markdown-stall' &&
-      streamPayload !== 'markdown-blank-tail'
+      streamPayload !== 'markdown-blank-tail' &&
+      !isMarkdownTablePayload(streamPayload)
     ) {
       return;
     }
@@ -574,6 +643,9 @@ async function main(): Promise<void> {
           countStallSentinels(viewport),
         );
       }
+    }
+    if (isMarkdownTablePayload(streamPayload)) {
+      frameTableSentinelOccurrenceCounts.push(countTableSentinels(screen));
     }
   };
 
@@ -642,6 +714,16 @@ async function main(): Promise<void> {
       postDoneViewportStallSentinelOccurrenceCounts.length > 0
         ? Math.min(...postDoneViewportStallSentinelOccurrenceCounts)
         : null;
+    const tableSentinelExpectedCount = isMarkdownTablePayload(streamPayload)
+      ? TABLE_SENTINELS.length
+      : 0;
+    const tableSentinelOccurrenceCount = isMarkdownTablePayload(streamPayload)
+      ? countTableSentinels(finalScreen)
+      : 0;
+    const maxFrameTableSentinelOccurrenceCount = Math.max(
+      0,
+      ...frameTableSentinelOccurrenceCounts,
+    );
     const gifPath = generateGif(frames, outputDir);
     const markdownPass =
       (streamPayload !== 'markdown' && streamPayload !== 'markdown-stall') ||
@@ -658,6 +740,10 @@ async function main(): Promise<void> {
       streamPayload !== 'markdown-blank-tail' ||
       (minPostDoneViewportStallSentinelOccurrenceCount !== null &&
         minPostDoneViewportStallSentinelOccurrenceCount > 0);
+    const markdownTablePass =
+      !isMarkdownTablePayload(streamPayload) ||
+      (tableSentinelOccurrenceCount <= tableSentinelExpectedCount &&
+        maxFrameTableSentinelOccurrenceCount <= tableSentinelExpectedCount);
     const pass =
       counts.clearTerminalPairCount >= minClearTerminalPairs &&
       counts.clearTerminalPairCount <= maxClearTerminalPairs &&
@@ -665,7 +751,8 @@ async function main(): Promise<void> {
       countOccurrences(finalScreen, STREAM_DONE) === 1 &&
       markdownPass &&
       markdownStallPass &&
-      markdownBlankTailPass;
+      markdownBlankTailPass &&
+      markdownTablePass;
 
     const summary: Summary = {
       repoRoot,
@@ -687,6 +774,9 @@ async function main(): Promise<void> {
       stallSentinelOccurrenceCount,
       maxFrameStallSentinelOccurrenceCount,
       minPostDoneViewportStallSentinelOccurrenceCount,
+      tableSentinelExpectedCount,
+      tableSentinelOccurrenceCount,
+      maxFrameTableSentinelOccurrenceCount,
       terminal: {
         cols: terminalCols,
         rows: terminalRows,

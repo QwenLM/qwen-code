@@ -563,6 +563,57 @@ QWEN_TUI_E2E_OUT=<artifact-dir>/narrow-markdown-blank-tail-after \
   npm run capture:narrow-markdown-blank-tail-regression
 ```
 
+### Cumulative OpenAI-Compatible Delta Reproduction
+
+The latest manual screenshots showed a different shape: output was not waiting
+on a long blank tail, but repeated whole Markdown/table sections during normal
+streaming. A controlled incremental table stream did not reproduce that class:
+eight unique table sentinel rows remained eight rows in every captured frame.
+That ruled out the bounded TUI renderer as the source of this specific
+duplication.
+
+The reproducible trigger is an OpenAI-compatible upstream that sends
+`delta.content` as the accumulated full assistant text so far instead of the
+next incremental suffix. Qwen previously appended every `delta.content` value
+as if it were an incremental delta. In a narrow Markdown/table response, that
+turns a source stream with eight unique rows into many repeated visible rows,
+matching the user-visible screenshots where repeated `flowchart TD`,
+`A[Text]`, or `Direction` table rows suddenly appear during otherwise normal
+output.
+
+`OpenAIContentConverter` now tracks text-delta state per request context and
+normalizes cumulative text deltas to suffixes before they reach the Gemini
+stream pipeline. Text and reasoning streams use separate state, and short exact
+repeated chunks such as `ha`, `ha` are still preserved so ordinary model
+repetition is not blindly removed.
+
+Validation metric: eight unique table sentinel labels
+(`QWEN_TABLE_01` through `QWEN_TABLE_08`) are present in the fake model payload.
+The final screen and every captured frame must not show more than eight sentinel
+occurrences.
+
+| Scenario                               | Branch                | Expected                         | Final sentinel occurrences | Max frame sentinel occurrences | Result |
+| -------------------------------------- | --------------------- | -------------------------------- | -------------------------: | -----------------------------: | ------ |
+| Narrow Markdown table incremental      | fixed branch          | normal incremental stream stable |                          8 |                              8 | passed |
+| Narrow Markdown table cumulative delta | before cumulative fix | failure-first reproduction       |                        112 |                            112 | failed |
+| Narrow Markdown table cumulative delta | fixed branch          | strict pass, no duplicate append |                          8 |                              8 | passed |
+
+Commands:
+
+```bash
+cd integration-tests/terminal-capture
+
+QWEN_TUI_E2E_OUT=<artifact-dir>/narrow-markdown-table \
+  npm run capture:narrow-markdown-table-regression
+
+QWEN_TUI_E2E_REPO=/path/to/before-cumulative-fix-checkout \
+QWEN_TUI_E2E_OUT=<artifact-dir>/narrow-markdown-table-cumulative-before \
+  npm run capture:narrow-markdown-table-cumulative-regression
+
+QWEN_TUI_E2E_OUT=<artifact-dir>/narrow-markdown-table-cumulative-after \
+  npm run capture:narrow-markdown-table-cumulative-regression
+```
+
 ## Claude Code Cross-Check
 
 Claude Code does not avoid this class by relying on a larger per-message
