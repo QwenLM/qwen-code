@@ -19,19 +19,23 @@ import {
   useMemo,
   useState,
 } from 'react';
+import { type Config } from '@qwen-code/qwen-code-core';
 import {
-  type BackgroundTaskEntry,
-  type Config,
-} from '@qwen-code/qwen-code-core';
-import { useBackgroundTaskView } from '../hooks/useBackgroundTaskView.js';
+  type DialogEntry,
+  useBackgroundTaskView,
+} from '../hooks/useBackgroundTaskView.js';
 
 // ─── Types ──────────────────────────────────────────────────
 
 export type BackgroundDialogMode = 'closed' | 'list' | 'detail';
 
 export interface BackgroundTaskViewState {
-  /** Live snapshot of every background agent entry, ordered by startTime. */
-  entries: readonly BackgroundTaskEntry[];
+  /**
+   * Live snapshot of every background entry across both registries
+   * (subagents + managed shells), ordered by `startTime`. Each entry carries
+   * a `kind` discriminator so renderers can dispatch on agent vs shell.
+   */
+  entries: readonly DialogEntry[];
   /** Index into `entries` for the currently focused row (0-based). */
   selectedIndex: number;
   /** `'closed'` when the overlay isn't mounted; otherwise the active mode. */
@@ -166,8 +170,16 @@ export function BackgroundTaskViewProvider({
     if (!config) return;
     const target = entries[selectedIndex];
     if (!target) return;
-    // cancel() is a no-op for non-running entries, so no pre-check here.
-    config.getBackgroundTaskRegistry().cancel(target.agentId);
+    // Both registries' cancel paths are no-ops on non-running entries, so
+    // no pre-check here. Shell cancel goes through requestCancel — it
+    // triggers the AbortController only and lets the spawn's settle path
+    // record the real terminal moment + outcome (mirrors the task_stop
+    // tool path in #3687).
+    if (target.kind === 'agent') {
+      config.getBackgroundTaskRegistry().cancel(target.agentId);
+    } else {
+      config.getBackgroundShellRegistry().requestCancel(target.shellId);
+    }
   }, [config, entries, selectedIndex]);
 
   const state: BackgroundTaskViewState = useMemo(

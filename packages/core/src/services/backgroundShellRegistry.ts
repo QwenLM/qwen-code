@@ -17,6 +17,10 @@
  * status.
  */
 
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('BACKGROUND_SHELLS');
+
 export type BackgroundShellStatus =
   | 'running'
   | 'completed'
@@ -47,6 +51,20 @@ export interface BackgroundShellEntry {
   abortController: AbortController;
 }
 
+/** Fires when a new entry is registered. */
+export type BackgroundShellRegisterCallback = (
+  entry: BackgroundShellEntry,
+) => void;
+
+/**
+ * Fires on every status transition (running → terminal). Symmetric with
+ * `BackgroundTaskRegistry.setStatusChangeCallback` so the same UI hook can
+ * subscribe to both registries.
+ */
+export type BackgroundShellStatusChangeCallback = (
+  entry: BackgroundShellEntry,
+) => void;
+
 export class BackgroundShellRegistry {
   // Entries persist for the session lifetime — no automatic eviction of
   // terminal entries. For typical interactive sessions (tens of background
@@ -56,8 +74,39 @@ export class BackgroundShellRegistry {
   // is left as a follow-up alongside output-file rotation.
   private readonly entries = new Map<string, BackgroundShellEntry>();
 
+  private registerCallback: BackgroundShellRegisterCallback | undefined;
+  private statusChangeCallback: BackgroundShellStatusChangeCallback | undefined;
+
+  /**
+   * Subscribe to new-entry events. Called synchronously inside `register()`.
+   * Setting `undefined` clears the existing subscriber. Single-subscriber on
+   * purpose — the UI hook is the only consumer in the codebase, and a list
+   * would invite drift in error-handling.
+   */
+  setRegisterCallback(cb: BackgroundShellRegisterCallback | undefined): void {
+    this.registerCallback = cb;
+  }
+
+  /**
+   * Subscribe to status transitions (running → terminal). Called
+   * synchronously inside `complete()` / `fail()` / `cancel()` after the
+   * entry has been mutated. Same single-subscriber rationale as
+   * `setRegisterCallback`.
+   */
+  setStatusChangeCallback(
+    cb: BackgroundShellStatusChangeCallback | undefined,
+  ): void {
+    this.statusChangeCallback = cb;
+  }
+
   register(entry: BackgroundShellEntry): void {
     this.entries.set(entry.shellId, entry);
+    this.fireRegister(entry);
+    // Mirror BackgroundTaskRegistry: registration is a status transition
+    // (nothing → running) so subscribers that only care about
+    // "what's in the registry now" can subscribe to a single callback
+    // and see new entries the same way they see status changes.
+    this.fireStatusChange(entry);
   }
 
   get(shellId: string): BackgroundShellEntry | undefined {
@@ -74,6 +123,7 @@ export class BackgroundShellRegistry {
     entry.status = 'completed';
     entry.exitCode = exitCode;
     entry.endTime = endTime;
+    this.fireStatusChange(entry);
   }
 
   fail(shellId: string, error: string, endTime: number): void {
@@ -82,6 +132,7 @@ export class BackgroundShellRegistry {
     entry.status = 'failed';
     entry.error = error;
     entry.endTime = endTime;
+    this.fireStatusChange(entry);
   }
 
   cancel(shellId: string, endTime: number): void {
@@ -90,6 +141,28 @@ export class BackgroundShellRegistry {
     entry.status = 'cancelled';
     entry.endTime = endTime;
     entry.abortController.abort();
+    this.fireStatusChange(entry);
+  }
+
+  private fireRegister(entry: BackgroundShellEntry): void {
+    if (!this.registerCallback) return;
+    try {
+      this.registerCallback(entry);
+    } catch (error) {
+      // Subscriber failure must not poison the registry — the spawn path
+      // has already happened. Swallow + continue so the entry remains
+      // observable via `getAll()` / `get()`.
+      debugLogger.error('register callback failed:', error);
+    }
+  }
+
+  private fireStatusChange(entry: BackgroundShellEntry): void {
+    if (!this.statusChangeCallback) return;
+    try {
+      this.statusChangeCallback(entry);
+    } catch (error) {
+      debugLogger.error('statusChange callback failed:', error);
+    }
   }
 
   /**

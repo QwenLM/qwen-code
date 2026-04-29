@@ -101,6 +101,85 @@ describe('BackgroundShellRegistry', () => {
     });
   });
 
+  describe('callbacks', () => {
+    it('fires register callback synchronously when an entry is added', () => {
+      const reg = new BackgroundShellRegistry();
+      const seen: string[] = [];
+      reg.setRegisterCallback((entry) => seen.push(entry.shellId));
+
+      reg.register(makeEntry({ shellId: 'a' }));
+      reg.register(makeEntry({ shellId: 'b' }));
+
+      expect(seen).toEqual(['a', 'b']);
+    });
+
+    it('fires statusChange callback on register too (mirrors BackgroundTaskRegistry)', () => {
+      const reg = new BackgroundShellRegistry();
+      const seen: string[] = [];
+      reg.setStatusChangeCallback((e) => seen.push(e.shellId));
+      reg.register(makeEntry({ shellId: 'a' }));
+      reg.register(makeEntry({ shellId: 'b' }));
+      expect(seen).toEqual(['a', 'b']);
+    });
+
+    it('fires statusChange callback on complete / fail / cancel', () => {
+      const reg = new BackgroundShellRegistry();
+      reg.register(makeEntry({ shellId: 'a' }));
+      reg.register(makeEntry({ shellId: 'b' }));
+      reg.register(makeEntry({ shellId: 'c' }));
+      const transitions: Array<{ id: string; status: string }> = [];
+      reg.setStatusChangeCallback((entry) =>
+        transitions.push({ id: entry.shellId, status: entry.status }),
+      );
+
+      reg.complete('a', 0, 1000);
+      reg.fail('b', 'boom', 1100);
+      reg.cancel('c', 1200);
+
+      expect(transitions).toEqual([
+        { id: 'a', status: 'completed' },
+        { id: 'b', status: 'failed' },
+        { id: 'c', status: 'cancelled' },
+      ]);
+    });
+
+    it('does not fire statusChange when a transition is a no-op', () => {
+      const reg = new BackgroundShellRegistry();
+      const transitions: string[] = [];
+      reg.setStatusChangeCallback((e) => transitions.push(e.shellId));
+      reg.register(makeEntry({ shellId: 'a' }));
+      reg.complete('a', 0, 1000);
+      transitions.length = 0;
+
+      reg.complete('a', 0, 2000); // already terminal
+      reg.fail('a', 'late', 2000); // already terminal
+      reg.cancel('a', 2000); // already terminal
+      reg.requestCancel('a'); // already terminal — also no fire
+
+      expect(transitions).toEqual([]);
+    });
+
+    it('keeps the registry usable when a callback throws', () => {
+      const reg = new BackgroundShellRegistry();
+      reg.setRegisterCallback(() => {
+        throw new Error('subscriber blew up');
+      });
+
+      expect(() => reg.register(makeEntry({ shellId: 'a' }))).not.toThrow();
+      expect(reg.get('a')!.status).toBe('running');
+    });
+
+    it('clears subscriber when set to undefined', () => {
+      const reg = new BackgroundShellRegistry();
+      const seen: string[] = [];
+      reg.setRegisterCallback((e) => seen.push(e.shellId));
+      reg.register(makeEntry({ shellId: 'a' }));
+      reg.setRegisterCallback(undefined);
+      reg.register(makeEntry({ shellId: 'b' }));
+      expect(seen).toEqual(['a']);
+    });
+  });
+
   describe('requestCancel', () => {
     it('aborts the signal but leaves status running and endTime undefined', () => {
       const reg = new BackgroundShellRegistry();

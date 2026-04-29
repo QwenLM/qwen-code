@@ -16,11 +16,19 @@ import {
   useBackgroundTaskViewState,
 } from '../../contexts/BackgroundTaskViewContext.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
-import { useBackgroundTaskView } from '../../hooks/useBackgroundTaskView.js';
+import {
+  useBackgroundTaskView,
+  type DialogEntry,
+} from '../../hooks/useBackgroundTaskView.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 
 vi.mock('../../hooks/useBackgroundTaskView.js', () => ({
   useBackgroundTaskView: vi.fn(),
+  // Re-export the helper so Dialog renderers can still resolve it under the
+  // mocked module. Inline impl keeps the test independent of the hook
+  // module while preserving the discriminator-based id contract.
+  entryId: (entry: DialogEntry): string =>
+    entry.kind === 'agent' ? entry.agentId : entry.shellId,
 }));
 
 vi.mock('../../hooks/useKeypress.js', () => ({
@@ -30,33 +38,34 @@ vi.mock('../../hooks/useKeypress.js', () => ({
 const mockedUseBackgroundTaskView = vi.mocked(useBackgroundTaskView);
 const mockedUseKeypress = vi.mocked(useKeypress);
 
-function entry(overrides: Partial<BackgroundTaskEntry>): BackgroundTaskEntry {
+function entry(overrides: Partial<BackgroundTaskEntry> = {}): DialogEntry {
   return {
+    kind: 'agent',
     agentId: 'a',
     description: 'desc',
     status: 'running',
     startTime: 0,
     abortController: new AbortController(),
     ...overrides,
-  };
+  } as DialogEntry;
 }
 
 interface ProbeHandle {
   actions: ReturnType<typeof useBackgroundTaskViewActions>;
   state: ReturnType<typeof useBackgroundTaskViewState>;
-  setEntries: (next: readonly BackgroundTaskEntry[]) => void;
+  setEntries: (next: readonly DialogEntry[]) => void;
 }
 
 interface Harness {
   cancel: ReturnType<typeof vi.fn>;
-  setEntries: (next: readonly BackgroundTaskEntry[]) => void;
+  setEntries: (next: readonly DialogEntry[]) => void;
   pressKey: (key: { name?: string; sequence?: string }) => void;
   call: (fn: () => void) => void;
   lastFrame: () => string | undefined;
   probe: { current: ProbeHandle | null };
 }
 
-function setup(initial: readonly BackgroundTaskEntry[]): Harness {
+function setup(initial: readonly DialogEntry[]): Harness {
   const handlers: Array<(key: { name?: string; sequence?: string }) => void> =
     [];
   mockedUseKeypress.mockImplementation((cb, opts) => {
@@ -94,7 +103,7 @@ function setup(initial: readonly BackgroundTaskEntry[]): Harness {
   function Probe({
     entriesSetter,
   }: {
-    entriesSetter: (e: readonly BackgroundTaskEntry[]) => void;
+    entriesSetter: (e: readonly DialogEntry[]) => void;
   }) {
     handle.current = {
       actions: useBackgroundTaskViewActions(),

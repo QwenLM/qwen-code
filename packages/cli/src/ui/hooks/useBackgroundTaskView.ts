@@ -5,11 +5,14 @@
  */
 
 /**
- * useBackgroundTaskView — subscribes to the background task registry's
- * status-change callback and maintains a reactive snapshot of every
- * `BackgroundTaskEntry`, including terminal ones. Surfaces that only
- * care about live work (the footer pill, the composer's Down-arrow
- * route) filter for `running` themselves.
+ * useBackgroundTaskView — subscribes to both registries (background
+ * subagents and background shells) and merges them into a single ordered
+ * snapshot of `DialogEntry`s. Both registries fire `statusChange` on
+ * register too, so a single subscription per registry is enough to keep
+ * the snapshot fresh for new + transitioning entries.
+ *
+ * Surfaces that only care about live work (the footer pill, the
+ * composer's Down-arrow route) filter for `running` themselves.
  *
  * Intentionally ignores activity updates (appendActivity). Tool-call
  * traffic from a running background agent would otherwise churn the
@@ -21,33 +24,63 @@
 import { useState, useEffect } from 'react';
 import {
   type BackgroundTaskEntry,
+  type BackgroundShellEntry,
   type Config,
 } from '@qwen-code/qwen-code-core';
 
+/**
+ * A unified view-model entry the dialog/pill/context render against.
+ * Discriminated by `kind`; agent-shaped fields and shell-shaped fields
+ * are inlined verbatim to keep the renderer code unchanged on the agent
+ * branch (just guarded by `kind === 'agent'`).
+ */
+export type DialogEntry =
+  | (BackgroundTaskEntry & { kind: 'agent' })
+  | (BackgroundShellEntry & { kind: 'shell' });
+
 export interface UseBackgroundTaskViewResult {
-  entries: readonly BackgroundTaskEntry[];
+  entries: readonly DialogEntry[];
+}
+
+/** Stable id of an entry regardless of kind — used as React key + lookup. */
+export function entryId(entry: DialogEntry): string {
+  return entry.kind === 'agent' ? entry.agentId : entry.shellId;
 }
 
 export function useBackgroundTaskView(
   config: Config | null,
 ): UseBackgroundTaskViewResult {
-  const [entries, setEntries] = useState<BackgroundTaskEntry[]>([]);
+  const [entries, setEntries] = useState<DialogEntry[]>([]);
 
   useEffect(() => {
     if (!config) return;
-    const registry = config.getBackgroundTaskRegistry();
+    const agentRegistry = config.getBackgroundTaskRegistry();
+    const shellRegistry = config.getBackgroundShellRegistry();
 
-    // getAll() returns a fresh array in registration (= startTime) order.
-    setEntries(registry.getAll());
-
-    const onStatusChange = () => {
-      setEntries(registry.getAll());
+    const refresh = () => {
+      const agentEntries: DialogEntry[] = agentRegistry
+        .getAll()
+        .map((e) => ({ ...e, kind: 'agent' as const }));
+      const shellEntries: DialogEntry[] = shellRegistry
+        .getAll()
+        .map((e) => ({ ...e, kind: 'shell' as const }));
+      // Merge by startTime so the order matches launch order across both
+      // registries (matters when an agent and a shell are launched
+      // alternately).
+      const merged = [...agentEntries, ...shellEntries].sort(
+        (a, b) => a.startTime - b.startTime,
+      );
+      setEntries(merged);
     };
 
-    registry.setStatusChangeCallback(onStatusChange);
+    refresh();
+
+    agentRegistry.setStatusChangeCallback(refresh);
+    shellRegistry.setStatusChangeCallback(refresh);
 
     return () => {
-      registry.setStatusChangeCallback(undefined);
+      agentRegistry.setStatusChangeCallback(undefined);
+      shellRegistry.setStatusChangeCallback(undefined);
     };
   }, [config]);
 
