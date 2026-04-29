@@ -842,6 +842,19 @@ describe('useSlashCommandProcessor', () => {
       expect(action).toHaveBeenCalledWith(expect.anything(), 'with-args');
     });
 
+    it('should execute extension-qualified commands with dots', async () => {
+      const action = vi.fn();
+      const command = createTestCommand({ name: 'gcp.deploy', action });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/gcp.deploy with-args');
+      });
+
+      expect(action).toHaveBeenCalledWith(expect.anything(), 'with-args');
+    });
+
     it('should return false for file-path-like input (issue #1804)', async () => {
       const result = setupProcessorHook();
       await waitFor(() => expect(result.current.slashCommands).toBeDefined());
@@ -849,12 +862,16 @@ describe('useSlashCommandProcessor', () => {
       // File paths should not enter the slash command flow at all because
       // isSlashCommand() rejects them. handleSlashCommand returns false when
       // the input doesn't start with '/' or '?'.
-      const pathResult = await act(async () => result.current.handleSlashCommand('/api/apiFunction/接口的实现'));
+      const pathResult = await act(async () =>
+        result.current.handleSlashCommand('/api/apiFunction/接口的实现'),
+      );
       expect(pathResult).toBe(false);
 
-      const absPathResult = await act(async () => result.current.handleSlashCommand(
+      const absPathResult = await act(async () =>
+        result.current.handleSlashCommand(
           '/Users/zhoushuo/Desktop/dw-operator-skill 帮我安装',
-        ));
+        ),
+      );
       expect(absPathResult).toBe(false);
     });
 

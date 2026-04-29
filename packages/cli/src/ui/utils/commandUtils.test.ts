@@ -111,6 +111,11 @@ describe('commandUtils', () => {
       expect(looksLikeCommandName('123')).toBe(true);
     });
 
+    it('should return true for extension-qualified command names with dots', () => {
+      expect(looksLikeCommandName('gcp.deploy')).toBe(true);
+      expect(looksLikeCommandName('gcp.deploy1')).toBe(true);
+    });
+
     it('should return false for empty string', () => {
       expect(looksLikeCommandName('')).toBe(false);
     });
@@ -119,11 +124,6 @@ describe('commandUtils', () => {
       expect(looksLikeCommandName('api/endpoint')).toBe(false);
       expect(looksLikeCommandName('Users/name/path')).toBe(false);
       expect(looksLikeCommandName('var/log/syslog')).toBe(false);
-    });
-
-    it('should return false for strings containing dots', () => {
-      expect(looksLikeCommandName('file.txt')).toBe(false);
-      expect(looksLikeCommandName('config.json')).toBe(false);
     });
 
     it('should return false for strings containing non-ASCII characters', () => {
@@ -151,6 +151,11 @@ describe('commandUtils', () => {
 
     it('should return true for MCP-style slash commands with colons', () => {
       expect(isSlashCommand('/mcp:server__tool args')).toBe(true);
+    });
+
+    it('should return true for extension-qualified slash commands with dots', () => {
+      expect(isSlashCommand('/gcp.deploy args')).toBe(true);
+      expect(isSlashCommand('/gcp.deploy1')).toBe(true);
     });
 
     it('should return true for bare slash (triggers autocomplete)', () => {
@@ -191,12 +196,6 @@ describe('commandUtils', () => {
       expect(isSlashCommand('/tmp/test.txt')).toBe(false);
       expect(isSlashCommand('/home/user/.config/settings.json')).toBe(false);
       expect(isSlashCommand('/etc/nginx/nginx.conf')).toBe(false);
-    });
-
-    it('should return false for paths with dots in the first token', () => {
-      expect(isSlashCommand('/file.txt content')).toBe(false);
-      expect(isSlashCommand('/config.json')).toBe(false);
-      expect(isSlashCommand('/some.path.with.dots')).toBe(false);
     });
 
     it('should return false for paths with non-ASCII in the first token', () => {

@@ -451,8 +451,8 @@ export const useSlashCommandProcessor = (
 
       // For '/' prefix, check if the first token looks like a valid command
       // name. File paths like '/api/endpoint' or '/Users/name/path' contain
-      // characters (e.g. '/', '.') that are not valid in command names, so
-      // they should fall through to be sent to the model as regular input.
+      // path separators that are not valid in command names, so they should
+      // fall through to be sent to the model as regular input.
       if (trimmed.startsWith('/')) {
         const firstToken = trimmed.slice(1).split(/\s+/)[0] ?? '';
         if (!looksLikeCommandName(firstToken)) {
