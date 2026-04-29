@@ -130,7 +130,11 @@ export interface ScheduleSkillReviewParams {
 export interface SkillReviewScheduleResult {
   status: 'scheduled' | 'skipped';
   taskId?: string;
-  skippedReason?: 'below_threshold' | 'skills_modified_in_session' | 'disabled';
+  skippedReason?:
+    | 'below_threshold'
+    | 'skills_modified_in_session'
+    | 'disabled'
+    | 'already_running';
   promise?: Promise<MemoryTaskRecord>;
 }
 
@@ -381,6 +385,9 @@ export class MemoryManager {
     string,
     { taskId: string; params: ScheduleExtractParams }
   >();
+
+  // ── Skill-review in-flight dedup ─────────────────────────────────────────────
+  private readonly skillReviewInFlightByProject = new Map<string, string>();
 
   // ── Dream scheduling state ───────────────────────────────────────────────────
   private readonly dreamInFlightByKey = new Map<string, string>();
@@ -692,6 +699,17 @@ export class MemoryManager {
       return { status: 'skipped', skippedReason: 'disabled' };
     }
 
+    const existingTaskId = this.skillReviewInFlightByProject.get(
+      params.projectRoot,
+    );
+    if (existingTaskId) {
+      return {
+        status: 'skipped',
+        skippedReason: 'already_running',
+        taskId: existingTaskId,
+      };
+    }
+
     const record = makeTaskRecord(
       'skill-review',
       params.projectRoot,
@@ -715,6 +733,7 @@ export class MemoryManager {
     record: MemoryTaskRecord,
     params: ScheduleSkillReviewParams,
   ): Promise<MemoryTaskRecord> {
+    this.skillReviewInFlightByProject.set(params.projectRoot, record.id);
     try {
       const result = await runSkillReviewByAgent({
         config: params.config!,
@@ -735,6 +754,8 @@ export class MemoryManager {
         status: 'failed',
         error: error instanceof Error ? error.message : String(error),
       });
+    } finally {
+      this.skillReviewInFlightByProject.delete(params.projectRoot);
     }
     return record;
   }

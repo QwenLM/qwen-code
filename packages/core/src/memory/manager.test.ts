@@ -275,6 +275,50 @@ describe('MemoryManager', () => {
       expect(runSkillReviewByAgent).not.toHaveBeenCalled();
     });
 
+    it('skips second call while first is still in-flight (already_running)', async () => {
+      let resolveReview!: (v: { touchedSkillFiles: string[] }) => void;
+      vi.mocked(runSkillReviewByAgent).mockReturnValueOnce(
+        new Promise<{ touchedSkillFiles: string[] }>((resolve) => {
+          resolveReview = resolve;
+        }),
+      );
+
+      const mgr = new MemoryManager();
+      const baseParams = {
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: [{ role: 'user' as const, parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+      };
+
+      const first = mgr.scheduleSkillReview(baseParams);
+      expect(first.status).toBe('scheduled');
+
+      // Second call while first is still running
+      const second = mgr.scheduleSkillReview({
+        ...baseParams,
+        sessionId: 'sess-2',
+      });
+      expect(second.status).toBe('skipped');
+      expect(second.skippedReason).toBe('already_running');
+      // Returns the existing task id so callers can observe it
+      expect(second.taskId).toBe(first.taskId);
+
+      // After first completes, a new call is allowed
+      resolveReview({ touchedSkillFiles: [] });
+      await first.promise;
+
+      vi.mocked(runSkillReviewByAgent).mockResolvedValueOnce({
+        touchedSkillFiles: [],
+      });
+      const third = mgr.scheduleSkillReview(baseParams);
+      expect(third.status).toBe('scheduled');
+      expect(third.taskId).not.toBe(first.taskId);
+    });
+
     it('schedules skill review at threshold', async () => {
       const mgr = new MemoryManager();
       const result = mgr.scheduleSkillReview({
