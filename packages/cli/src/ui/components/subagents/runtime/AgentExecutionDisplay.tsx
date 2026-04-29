@@ -235,10 +235,13 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
   ]);
 
   // Handle keyboard shortcuts to control display mode. Scope the listener to
-  // running subagents only — every completed/historical AgentExecutionDisplay
-  // mounted in the chat history would otherwise toggle in lock-step on a
-  // single Ctrl+E / Ctrl+F press, reflowing the entire scrollback and
-  // re-introducing the flicker this component is meant to prevent.
+  // the running subagent that currently holds focus — `data.status` rules
+  // out completed/historical instances mounted in scrollback, and
+  // `isFocused` rules out *parallel* running subagents that share the live
+  // viewport. Without the focus gate, two SubAgents running side by side
+  // would both toggle on a single Ctrl+E / Ctrl+F press and the resulting
+  // dual-reflow brings back the flicker this component is meant to
+  // prevent.
   useKeypress(
     (key) => {
       if (key.ctrl && key.name === 'e') {
@@ -253,7 +256,7 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
         );
       }
     },
-    { isActive: data.status === 'running' },
+    { isActive: data.status === 'running' && isFocused },
   );
 
   if (displayMode === 'compact') {

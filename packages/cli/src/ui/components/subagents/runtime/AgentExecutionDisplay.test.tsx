@@ -118,6 +118,27 @@ describe('<AgentExecutionDisplay />', () => {
     );
   });
 
+  it('does not respond to ctrl+e when another running subagent has focus', () => {
+    // Two SubAgents running side-by-side share the live viewport. Only the
+    // focused one should react to Ctrl+E / Ctrl+F — otherwise both reflow
+    // together and the dual height-change reintroduces flicker.
+    const { lastFrame } = render(
+      <AgentExecutionDisplay
+        data={makeRunningData(2)}
+        availableHeight={20}
+        childWidth={80}
+        config={makeFakeConfig()}
+        isFocused={false}
+      />,
+    );
+
+    const before = lastFrame() ?? '';
+    act(() => {
+      keypressHandler?.({ ctrl: true, name: 'e' });
+    });
+    expect(lastFrame() ?? '').toBe(before);
+  });
+
   it('survives the running → completed transition while expanded', () => {
     // Real path: subagent is running, the user expands it (ctrl+e) so
     // displayMode becomes 'default', then the same instance rerenders with
