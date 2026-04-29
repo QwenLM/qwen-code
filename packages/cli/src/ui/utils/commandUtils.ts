@@ -39,8 +39,29 @@ export const isAtCommand = (query: string): boolean =>
   query.startsWith('@') || /\s@/.test(query);
 
 /**
+ * Checks if a string looks like a valid slash command name.
+ * Command names only contain alphanumeric characters, colons, hyphens, and
+ * underscores (e.g. "help", "config", "mcp:server__tool").
+ * Strings containing other characters (like path separators '/' or dots '.')
+ * are not valid command names and likely represent file paths or other input.
+ *
+ * @param name The potential command name to check (without the leading '/').
+ * @returns True if the name matches the command name pattern, false otherwise.
+ */
+export const looksLikeCommandName = (name: string): boolean => {
+  if (!name) {
+    return false;
+  }
+  // Command names should only contain [a-zA-Z0-9:_-]
+  return !/[^a-zA-Z0-9:\-_]/.test(name);
+};
+
+/**
  * Checks if a query string potentially represents an '/' command.
- * It triggers if the query starts with '/' but excludes code comments like '//' and '/*'.
+ * It triggers if the query starts with '/' but excludes:
+ * - Code comments starting with '//' or '/*'
+ * - File paths where the first token contains non-command characters
+ *   (e.g. '/api/endpoint', '/Users/name/path')
  *
  * @param query The input query string.
  * @returns True if the query looks like an '/' command, false otherwise.
@@ -57,6 +78,17 @@ export const isSlashCommand = (query: string): boolean => {
 
   // Exclude block comments that start with '/*'
   if (query.startsWith('/*')) {
+    return false;
+  }
+
+  // Extract the first token after '/' (split by whitespace).
+  // If it contains characters not valid in command names (like '/' for file
+  // paths, '.' for filenames, or non-ASCII characters), treat the input as
+  // regular text rather than a slash command.
+  // A bare '/' with no token is allowed — it signals the start of command
+  // input and triggers the autocomplete dropdown.
+  const firstToken = query.slice(1).split(/\s+/)[0] ?? '';
+  if (firstToken && !looksLikeCommandName(firstToken)) {
     return false;
   }
 

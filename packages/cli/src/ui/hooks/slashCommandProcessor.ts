@@ -46,7 +46,7 @@ import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
 import { parseSlashCommand } from '../../utils/commands.js';
-import { isBtwCommand } from '../utils/commandUtils.js';
+import { isBtwCommand, looksLikeCommandName } from '../utils/commandUtils.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
 import { useKeypress } from './useKeypress.js';
 import {
@@ -447,6 +447,17 @@ export const useSlashCommandProcessor = (
       const trimmed = rawQuery.trim();
       if (!trimmed.startsWith('/') && !trimmed.startsWith('?')) {
         return false;
+      }
+
+      // For '/' prefix, check if the first token looks like a valid command
+      // name. File paths like '/api/endpoint' or '/Users/name/path' contain
+      // characters (e.g. '/', '.') that are not valid in command names, so
+      // they should fall through to be sent to the model as regular input.
+      if (trimmed.startsWith('/')) {
+        const firstToken = trimmed.slice(1).split(/\s+/)[0] ?? '';
+        if (!looksLikeCommandName(firstToken)) {
+          return false;
+        }
       }
 
       const recordedItems: Array<Omit<HistoryItem, 'id'>> = [];

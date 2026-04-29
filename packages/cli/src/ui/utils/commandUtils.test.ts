@@ -11,6 +11,7 @@ import { EventEmitter } from 'node:events';
 import {
   isAtCommand,
   isSlashCommand,
+  looksLikeCommandName,
   copyToClipboard,
   getUrlOpenCommand,
   CodePage,
@@ -89,11 +90,70 @@ describe('commandUtils', () => {
     });
   });
 
+  describe('looksLikeCommandName', () => {
+    it('should return true for valid command names', () => {
+      expect(looksLikeCommandName('help')).toBe(true);
+      expect(looksLikeCommandName('config')).toBe(true);
+      expect(looksLikeCommandName('clear')).toBe(true);
+      expect(looksLikeCommandName('pr-review')).toBe(true);
+      expect(looksLikeCommandName('issue_triage')).toBe(true);
+      expect(looksLikeCommandName('commit')).toBe(true);
+    });
+
+    it('should return true for MCP-style command names with colons', () => {
+      expect(looksLikeCommandName('mcp:server__tool')).toBe(true);
+      expect(looksLikeCommandName('code:review')).toBe(true);
+    });
+
+    it('should return true for names with hyphens, underscores, and digits', () => {
+      expect(looksLikeCommandName('my-command-2')).toBe(true);
+      expect(looksLikeCommandName('tool_v3')).toBe(true);
+      expect(looksLikeCommandName('123')).toBe(true);
+    });
+
+    it('should return false for empty string', () => {
+      expect(looksLikeCommandName('')).toBe(false);
+    });
+
+    it('should return false for strings containing path separators', () => {
+      expect(looksLikeCommandName('api/endpoint')).toBe(false);
+      expect(looksLikeCommandName('Users/name/path')).toBe(false);
+      expect(looksLikeCommandName('var/log/syslog')).toBe(false);
+    });
+
+    it('should return false for strings containing dots', () => {
+      expect(looksLikeCommandName('file.txt')).toBe(false);
+      expect(looksLikeCommandName('config.json')).toBe(false);
+    });
+
+    it('should return false for strings containing non-ASCII characters', () => {
+      expect(looksLikeCommandName('接口')).toBe(false);
+      expect(looksLikeCommandName('api接口')).toBe(false);
+      expect(looksLikeCommandName('命令')).toBe(false);
+    });
+
+    it('should return false for strings containing spaces or special characters', () => {
+      expect(looksLikeCommandName('my command')).toBe(false);
+      expect(looksLikeCommandName('test@file')).toBe(false);
+      expect(looksLikeCommandName('path\\to')).toBe(false);
+      expect(looksLikeCommandName('cmd#1')).toBe(false);
+    });
+  });
+
   describe('isSlashCommand', () => {
-    it('should return true when query starts with /', () => {
+    it('should return true for valid slash commands', () => {
       expect(isSlashCommand('/help')).toBe(true);
       expect(isSlashCommand('/config set')).toBe(true);
       expect(isSlashCommand('/clear')).toBe(true);
+      expect(isSlashCommand('/pr-review')).toBe(true);
+      expect(isSlashCommand('/commit')).toBe(true);
+    });
+
+    it('should return true for MCP-style slash commands with colons', () => {
+      expect(isSlashCommand('/mcp:server__tool args')).toBe(true);
+    });
+
+    it('should return true for bare slash (triggers autocomplete)', () => {
       expect(isSlashCommand('/')).toBe(true);
     });
 
@@ -117,6 +177,31 @@ describe('commandUtils', () => {
       expect(isSlashCommand('/* This is a block comment */')).toBe(false);
       expect(isSlashCommand('/*\n * Multi-line comment\n */')).toBe(false);
       expect(isSlashCommand('/*comment without space*/')).toBe(false);
+    });
+
+    it('should return false for file paths (issue #1804)', () => {
+      // Unix absolute paths
+      expect(isSlashCommand('/api/apiFunction/接口的实现')).toBe(false);
+      expect(
+        isSlashCommand(
+          '/Users/zhoushuo/Desktop/AI_operator/dw-operator-skill 帮我安装',
+        ),
+      ).toBe(false);
+      expect(isSlashCommand('/var/log/syslog check this')).toBe(false);
+      expect(isSlashCommand('/tmp/test.txt')).toBe(false);
+      expect(isSlashCommand('/home/user/.config/settings.json')).toBe(false);
+      expect(isSlashCommand('/etc/nginx/nginx.conf')).toBe(false);
+    });
+
+    it('should return false for paths with dots in the first token', () => {
+      expect(isSlashCommand('/file.txt content')).toBe(false);
+      expect(isSlashCommand('/config.json')).toBe(false);
+      expect(isSlashCommand('/some.path.with.dots')).toBe(false);
+    });
+
+    it('should return false for paths with non-ASCII in the first token', () => {
+      expect(isSlashCommand('/接口实现')).toBe(false);
+      expect(isSlashCommand('/文档 查看内容')).toBe(false);
     });
   });
 
