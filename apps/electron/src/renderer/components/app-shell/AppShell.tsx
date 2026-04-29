@@ -624,6 +624,7 @@ function AppShellContent({
   const effectiveNavigatorWidth = isAutoCompact
     ? sessionListWidth
     : (effectiveSidebarAndNavigatorHidden || isSessionNavigatorCollapsed ? 0 : sessionListWidth)
+  const isNavigatorResizeAvailable = !effectiveSidebarAndNavigatorHidden && effectiveNavigatorWidth > 0
 
   // Derive source filter from navigation state (only when in sources navigator)
   const sourceFilter: SourceFilter | null = isSourcesNavigation(navState) ? navState.filter ?? null : null
@@ -3182,8 +3183,8 @@ function AppShellContent({
           isResizing={!!isResizing}
         />
 
-        {/* Sidebar Resize Handle (absolute, hidden in focused mode) */}
-        {!effectiveSidebarAndNavigatorHidden && !isSessionNavigatorCollapsed && (
+        {/* Sidebar Resize Handle (absolute, hidden when the navigator is not visible) */}
+        {isNavigatorResizeAvailable && (
         <div
           ref={resizeHandleRef}
           onMouseDown={(e) => { e.preventDefault(); setIsResizing('sidebar') }}
@@ -3215,8 +3216,8 @@ function AppShellContent({
         </div>
         )}
 
-        {/* Session List Resize Handle (absolute, hidden in focused mode) */}
-        {!effectiveSidebarAndNavigatorHidden && (
+        {/* Session List Resize Handle (absolute, hidden when the navigator is not visible) */}
+        {isNavigatorResizeAvailable && (
         <div
           ref={sessionListHandleRef}
           onMouseDown={(e) => { e.preventDefault(); setIsResizing('session-list') }}
