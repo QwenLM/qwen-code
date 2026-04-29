@@ -64,6 +64,13 @@ export const USER_SETTINGS_PATH = Storage.getGlobalSettingsPath();
 export const USER_SETTINGS_DIR = path.dirname(USER_SETTINGS_PATH);
 export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
 
+// QWEN_HOME and QWEN_RUNTIME_DIR control where global state (settings, OAuth
+// credentials, installation IDs, etc.) is written. A project `.env` must never
+// redirect these — that would split global state between the real home and a
+// project-controlled directory. Always excluded from project .env files,
+// regardless of user-configurable `advanced.excludedEnvVars`.
+const PROJECT_ENV_HARDCODED_EXCLUSIONS = ['QWEN_HOME', 'QWEN_RUNTIME_DIR'];
+
 // Settings version to track migration state
 export const SETTINGS_VERSION = 3;
 export const SETTINGS_VERSION_KEY = '$version';
@@ -630,8 +637,13 @@ export function loadEnvironment(settings: Settings): void {
       for (const key in parsedEnv) {
         if (Object.hasOwn(parsedEnv, key)) {
           // If it's a project .env file, skip loading excluded variables.
-          if (isProjectEnvFile && excludedVars.includes(key)) {
-            continue;
+          if (isProjectEnvFile) {
+            if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) {
+              continue;
+            }
+            if (excludedVars.includes(key)) {
+              continue;
+            }
           }
 
           // Only set if not already present in process.env (no-override)
