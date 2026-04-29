@@ -63,6 +63,7 @@ assert(chatMd.includes('chat-delete.md'), 'Routes to chat-delete.md');
 assert(chatMd.includes('__proto__'), 'Blocks __proto__');
 assert(chatMd.includes('constructor'), 'Blocks constructor');
 assert(chatMd.includes('prototype'), 'Blocks prototype');
+assert(chatMd.includes('.') && chatMd.includes('..'), 'Blocks . and ..');
 assert(chatMd.includes('chat-index.json'), 'References index file');
 assert(chatMd.includes(REGEX), 'Has validation regex');
 assert(chatMd.includes('128'), 'Has max length rule');
@@ -73,8 +74,8 @@ let totalProd = 0;
 for (const f of FILES) totalProd += fs.readFileSync(path.join(PROD_DIR, f), 'utf-8').length;
 const tokens = Math.round(totalProd * 0.35);
 console.log(`  Production: ${totalProd} chars ≈ ${tokens} tokens`);
-console.log(`  Note: Budget increased from 4000 to 9000 to accommodate security rules and error handling specs`);
-assert(totalProd < 9000, 'Total < 9000 chars');
+console.log(`  Note: Budget increased to 9300 to accommodate security rules and error handling specs`);
+assert(totalProd < 9300, 'Total < 9300 chars');
 
 // ── [5] Source logic completeness ──────────────────────────────────
 console.log('\n[5] Source file logic completeness');
@@ -82,7 +83,7 @@ const [s0, s1, s2, s3, s4] = FILES.map(f => fs.readFileSync(path.join(SRC_DIR, f
 assert(s0.includes('Lang') || s0.includes('lang') || s0.includes('language'), 'chat.md src: language detection');
 assert(s0.includes('OS') || s0.includes('os'), 'chat.md src: OS detection');
 assert(s0.includes('Route') || s0.includes('route'), 'chat.md src: routing section');
-assert(s0.includes('Hash') || s0.includes('hash'), 'chat.md src: hash calculation');
+assert(s0.includes('sanitizeCwd') || s0.includes('sanitize'), 'chat.md src: sanitizeCwd calculation');
 assert(s1.includes('Validat') || s1.includes('valid') || s1.includes('Regex'), 'chat-save src: validation');
 assert(s1.includes('Read') || s1.includes('read'), 'chat-save src: read index');
 assert(s1.includes('Overwrite') || s1.includes('overwrite'), 'chat-save src: overwrite check');
@@ -125,6 +126,7 @@ assert(p1.includes('Validat') || p1.includes('valid') || p1.includes('Regex'), '
 assert(p1.includes('index') || p1.includes('json'), 'chat-save prod: index reference');
 assert(p1.includes('Overwrite') || p1.includes('overwrite') || p1.includes('yes/no'), 'chat-save prod: overwrite check');
 assert(p1.includes('.jsonl') || p1.includes('Session ID') || p1.includes('newest'), 'chat-save prod: session ID source');
+assert(p1.includes('sanitizeCwd'), 'chat-save prod: uses sanitizeCwd path');
 assert(p1.includes('Write') || p1.includes('write') || p1.includes('indent') || p1.includes('Add') || p1.includes('add'), 'chat-save prod: write to index');
 assert(p1.includes('Saved') || p1.includes('Overwritten'), 'chat-save prod: confirmation output');
 assert(p2.includes('read') || p2.includes('Read') || p2.includes('index'), 'chat-list prod: read index');
@@ -156,8 +158,8 @@ assert(srcAll.includes('.jsonl'), 'Source references jsonl');
 assert(prodAll.includes('.jsonl'), 'Production references jsonl');
 assert(srcAll.includes('128'), 'Source has max length');
 assert(prodAll.includes('128'), 'Production has max length');
-assert(srcAll.includes('hash') || srcAll.includes('Hash'), 'Source has hash calc');
-assert(prodAll.includes('hash') || prodAll.includes('Hash'), 'Production has hash calc');
+assert(srcAll.includes('sanitizeCwd') || srcAll.includes('sanitize'), 'Source has sanitizeCwd');
+assert(prodAll.includes('sanitizeCwd') || prodAll.includes('sanitize'), 'Production has sanitizeCwd');
 
 // ── [8] Edge case data ──────────────────────────────────────────────
 console.log('\n[8] Edge case data');
@@ -232,6 +234,10 @@ assert(/```[\s\S]*Usage:.*\/chat/.test(chatProd), 'chat.md prod has help text bl
 assert(chatSrc.includes('Valid name regex') || chatSrc.includes(REGEX), 'chat.md src has common rules');
 assert(chatProd.includes('Valid name regex') || chatProd.includes(REGEX), 'chat.md prod has common rules');
 
+// Cross-file: -y/--force flag support
+assert(chatSrc.includes('-y') || chatSrc.includes('--force'), 'chat.md src supports -y/--force');
+assert(chatProd.includes('-y') || chatProd.includes('--force'), 'chat.md prod supports -y/--force');
+
 // ── [11] Behavioral specification tests ──────────────────────────────
 console.log('\n[11] Behavioral specification (does the spec define correct behavior?)');
 
@@ -248,8 +254,8 @@ const saveSrc = fs.readFileSync(path.join(SRC_DIR, 'chat-save.md'), 'utf-8');
 const saveProd = fs.readFileSync(path.join(PROD_DIR, 'chat-save.md'), 'utf-8');
 assert(saveSrc.includes('most recently modified') || saveSrc.includes('newest') || saveSrc.includes('latest') || saveSrc.includes('most recent'), 'chat-save src specifies finding most recent session');
 assert(saveProd.includes('most recently modified') || saveProd.includes('newest') || saveProd.includes('latest') || saveProd.includes('most recent'), 'chat-save prod specifies finding most recent session');
-assert(saveSrc.includes('No active session') || saveSrc.includes('no .jsonl') || saveSrc.includes('session not found'), 'chat-save src specifies behavior when no session exists');
-assert(saveProd.includes('No active session') || saveProd.includes('no .jsonl') || saveProd.includes('session not found'), 'chat-save prod specifies behavior when no session exists');
+assert(saveSrc.includes('No session found') || saveSrc.includes('no .jsonl') || saveSrc.includes('session not found'), 'chat-save src specifies behavior when no session exists');
+assert(saveProd.includes('No session found') || saveProd.includes('no .jsonl') || saveProd.includes('session not found'), 'chat-save prod specifies behavior when no session exists');
 assert(saveSrc.includes('2-space') || saveSrc.includes('2 space') || saveSrc.includes('indent'), 'chat-save src specifies 2-space indent for JSON output');
 assert(saveProd.includes('2-space') || saveProd.includes('2 space') || saveProd.includes('indent'), 'chat-save prod specifies 2-space indent for JSON output');
 assert(saveSrc.includes('.jsonl') && (saveSrc.includes('extension') || saveSrc.includes('filename') || saveSrc.includes('without')), 'chat-save src explains UUID comes from filename');
@@ -342,11 +348,9 @@ for (const [f, content] of [
   assert(content.includes('project root') || content.includes('project\'s root') || content.includes('NOT') || content.includes('NOT'), `${f} prod clarifies project root vs home`);
 }
 
-// [12e] Hash calculation specification
-assert(chatMdSrc.includes('hash') || chatMdSrc.includes('Hash') || chatMdSrc.includes('cwd'), 'chat.md src specifies hash calculation');
-assert(chatMdProd.includes('hash') || chatMdProd.includes('Hash') || chatMdProd.includes('cwd'), 'chat.md prod specifies hash calculation');
-assert(chatMdSrc.includes('SHA-256') || (chatMdSrc.includes('sha256') && chatMdSrc.includes('lowercase')), 'chat.md src explains SHA-256 hash with Windows normalization');
-assert(chatMdProd.includes('SHA-256') || (chatMdProd.includes('sha256') && chatMdProd.includes('lowercase')), 'chat.md prod explains SHA-256 hash with Windows normalization');
+// [12e] Hash calculation specification (sanitizeCwd instead of SHA-256)
+assert(chatMdSrc.includes('sanitizeCwd') || chatMdSrc.includes('sanitize') || chatMdSrc.includes('cwd'), 'chat.md src specifies sanitizeCwd calculation');
+assert(chatMdProd.includes('sanitizeCwd') || chatMdProd.includes('sanitize') || chatMdProd.includes('cwd'), 'chat.md prod specifies sanitizeCwd calculation');
 
 // ── Summary ──────────────────────────────────────────────────────────
 console.log(`\n${'='.repeat(50)}`);

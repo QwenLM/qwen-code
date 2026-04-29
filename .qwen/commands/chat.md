@@ -1,5 +1,5 @@
 ---
-description: Chat session manager. /chat [-s|-l|-r|-d|-h] [name]
+description: Chat session manager. /chat [-s|-l|-r|-d|-h] [name] [-y|--force]
 ---
 
 # CRITICAL: First check {{args}}, then route
@@ -39,22 +39,32 @@ Run `node -e "console.log(process.platform)"`. Works across all shells.
 
 ## Step 2: Parse and Route
 
-Split `{{args}}` by whitespace. First token = flag. Remaining = name.
+Split `{{args}}` by whitespace. First token = flag. Remaining = raw_args.
 
 | Flag              | Action                                    | Sub-Command File |
 | ----------------- | ----------------------------------------- | ---------------- |
 | `-s` / `--save`   | Go to Step 3                              | `chat-save.md`   |
 | `-l` / `--list`   | Read `chat-list.md` and execute its logic | `chat-list.md`   |
 | `-r` / `--resume` | Go to Step 3                              | `chat-resume.md` |
-| `-d` / `--delete` | Check for `-y`/`--force`, then route      | `chat-delete.md` |
+| `-d` / `--delete` | Go to Step 3                              | `chat-delete.md` |
 | `-h` / `--help`   | **Show Help immediately, STOP**           | —                |
 
 ### Step 3: Validate name (for `-s`, `-r`, `-d`)
 
-Extract the name (everything after the flag). Also check for `-y` or `--force` after the name.
+**For delete (`-d`):**
 
-- Is name missing, empty, or whitespace only? → **Show Help immediately, STOP**
-- Is `-y` or `--force` present? → Set `forceDelete = true` for delete command
+1. Parse raw_args to extract name: Filter out `-y` and `--force` flags first, the first remaining token is the name.
+2. If name is missing, empty, or whitespace only → **Show Help immediately, STOP**
+3. If extra non-flag tokens remain after the first name → **Show Help immediately, STOP**
+4. If `-y` or `--force` was found → Set `forceDelete = true`
+
+**For save/resume (`-s`, `-r`):**
+
+1. Name = first token in raw_args
+2. If name is missing, empty, or whitespace only → **Show Help immediately, STOP**
+
+**Common validation:**
+
 - Does name match `^[a-zA-Z0-9_.-]+$` and length ≤ 128?
   - **NO** → Output error: `Invalid name. Must match: ^[a-zA-Z0-9_.-]+$ (max 128 chars)` and STOP
   - **YES** → Check if name is reserved (`.`, `..`, `__proto__`, `constructor`, `prototype`)
@@ -65,15 +75,15 @@ Extract the name (everything after the flag). Also check for `-y` or `--force` a
 
 ## Common Rules
 
-| Rule                  | Value                                                                                                                                                                |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Valid name regex**  | `^[a-zA-Z0-9_.-]+$`                                                                                                                                                  |
-| **Max length**        | 128 characters                                                                                                                                                       |
-| **Reserved names**    | `.`, `..`, `__proto__`, `constructor`, `prototype`                                                                                                                   |
-| **Index path**        | `.qwen/chat-index.json` (project root)                                                                                                                               |
-| **Index format**      | `{"name": "sessionId", ...}`                                                                                                                                         |
-| **Session ID source** | Filename (no extension) of `.jsonl` in `~/.qwen/projects/<hash>/chats/`                                                                                              |
-| **Hash calculation**  | SHA-256 of the full project root path. On Windows only, normalize the path to lowercase before hashing. Session files live under `~/.qwen/projects/<sha256>/chats/`. |
+| Rule                  | Value                                                                                                                                                     |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Valid name regex**  | `^[a-zA-Z0-9_.-]+$`                                                                                                                                       |
+| **Max length**        | 128 characters                                                                                                                                            |
+| **Reserved names**    | `.`, `..`, `__proto__`, `constructor`, `prototype`                                                                                                        |
+| **Index path**        | `.qwen/chat-index.json` (project root)                                                                                                                    |
+| **Index format**      | `{"name": "sessionId", ...}`                                                                                                                              |
+| **Session ID source** | Filename (no extension) of `.jsonl` in `~/.qwen/projects/<sanitizeCwd>/chats/`                                                                            |
+| **Project dir**       | `sanitizeCwd(projectRoot)` replaces all non-alphanumeric characters with `-`. On Windows, also lowercase. E.g., `D:\code\qwen-code` → `d--code-qwen-code` |
 
 ---
 
@@ -91,14 +101,17 @@ Extract the name (everything after the flag). Also check for `-y` or `--force` a
 ```
 Chat Session Manager
 
-Usage: /chat <flag> [name]
+Usage: /chat <flag> [name] [-y|--force]
 
 Flags:
   -s, --save <name>   Save current session with a name
   -l, --list          List all saved sessions
   -r, --resume <name> Resume a saved session
-  -d, --delete <name> Delete a saved session from index (-y/--force to skip confirmation)
+  -d, --delete <name> Delete a saved session from index
   -h, --help          Show this help
+
+Options:
+  -y, --force         Skip confirmation prompt (for -d)
 
 Examples:
   /chat -s my-session
@@ -108,4 +121,4 @@ Examples:
   /chat -d my-session -y  # Delete without confirmation
 ```
 
-(End of file - 107 lines)
+(End of file - 109 lines)
