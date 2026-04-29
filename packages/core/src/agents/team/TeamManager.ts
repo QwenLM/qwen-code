@@ -466,8 +466,9 @@ export class TeamManager {
   /**
    * Register the callback that delivers teammate messages
    * to the leader's conversation. Called by the CLI layer.
+   * Pass `null` to detach a previously-installed callback.
    */
-  setLeaderMessageCallback(cb: (message: string) => void): void {
+  setLeaderMessageCallback(cb: ((message: string) => void) | null): void {
     this.leaderMessageCallback = cb;
   }
 

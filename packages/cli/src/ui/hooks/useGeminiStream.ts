@@ -2279,11 +2279,21 @@ export const useGeminiStream = (
   const teammateQueueRef = useRef<string[]>([]);
   const [teammateTrigger, setTeammateTrigger] = useState(0);
 
-  // Subscribe to TeamManager's leader message callback
+  // Subscribe to TeamManager's leader message callback.
+  // Track the bound manager so we can detach the callback
+  // before a new manager replaces it (and on unmount) —
+  // otherwise a stale TeamManager could keep pushing into
+  // the active queue ref after team recreation/remount.
   useEffect(() => {
+    let boundManager: import('@qwen-code/qwen-code-core').TeamManager | null =
+      null;
     const handleManagerChange = (
       manager: import('@qwen-code/qwen-code-core').TeamManager | null,
     ) => {
+      if (boundManager && boundManager !== manager) {
+        boundManager.setLeaderMessageCallback(null);
+      }
+      boundManager = manager;
       if (manager) {
         manager.setLeaderMessageCallback((formatted: string) => {
           teammateQueueRef.current.push(formatted);
@@ -2302,6 +2312,10 @@ export const useGeminiStream = (
 
     return () => {
       config.onTeamManagerChange(null, handleManagerChange);
+      if (boundManager) {
+        boundManager.setLeaderMessageCallback(null);
+        boundManager = null;
+      }
     };
   }, [config]);
 

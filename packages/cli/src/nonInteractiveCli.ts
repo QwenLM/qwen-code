@@ -203,20 +203,38 @@ export async function runNonInteractive(
     // accumulate here and are drained into the LLM
     // conversation between turns.
     const pendingTeammateMessages: string[] = [];
-    // Track the approval listener so we can remove it in
-    // finally — prevents duplicate handlers across turns in
-    // multi-turn stream-json sessions.
+    // Track the manager we're currently bound to so we can
+    // detach the leader callback and approval listener before
+    // a new manager is installed (or in `finally`). Without
+    // this, a reused stream-json session could leave callbacks
+    // attached to a stale TeamManager.
+    let boundManager: import('@qwen-code/qwen-code-core').TeamManager | null =
+      null;
     let approvalListener:
       | ((
           event: import('@qwen-code/qwen-code-core').TeammateApprovalRequestEvent,
         ) => void)
       | null = null;
-    let approvalListenerManager:
-      | import('@qwen-code/qwen-code-core').TeamManager
-      | null = null;
+    const detachFromManager = (
+      m: import('@qwen-code/qwen-code-core').TeamManager,
+    ) => {
+      m.setLeaderMessageCallback(null);
+      if (approvalListener) {
+        m.getEventEmitter().off(
+          TeamEventType.TEAMMATE_APPROVAL_REQUEST,
+          approvalListener,
+        );
+        approvalListener = null;
+      }
+    };
     const onTeamManagerChangeHandler = (
       manager: import('@qwen-code/qwen-code-core').TeamManager | null,
     ) => {
+      // Detach from the previous manager before rebinding.
+      if (boundManager && boundManager !== manager) {
+        detachFromManager(boundManager);
+      }
+      boundManager = manager;
       if (manager) {
         manager.setLeaderMessageCallback((formatted) => {
           pendingTeammateMessages.push(formatted);
@@ -230,7 +248,6 @@ export async function runNonInteractive(
               event,
             );
           };
-          approvalListenerManager = manager;
           manager
             .getEventEmitter()
             .on(TeamEventType.TEAMMATE_APPROVAL_REQUEST, approvalListener);
@@ -907,21 +924,16 @@ export async function runNonInteractive(
       });
       await handleError(error, config);
     } finally {
-      // Unsubscribe the leader message callback, but do NOT tear
-      // down the team itself — in stream-json sessions the same
-      // Config is reused across turns, so the team must survive.
-      // Full team cleanup happens via Config.shutdown() /
-      // cleanupTeamRuntime() when the session ends.
+      // Unsubscribe the leader message callback and approval
+      // listener, but do NOT tear down the team itself — in
+      // stream-json sessions the same Config is reused across
+      // turns, so the team must survive. Full team cleanup
+      // happens via Config.shutdown() / cleanupTeamRuntime()
+      // when the session ends.
       config.onTeamManagerChange(null, onTeamManagerChangeHandler);
-
-      // Remove the per-turn approval listener from the
-      // persistent TeamManager to avoid duplicates.
-      if (approvalListener && approvalListenerManager) {
-        approvalListenerManager
-          .getEventEmitter()
-          .off(TeamEventType.TEAMMATE_APPROVAL_REQUEST, approvalListener);
-        approvalListener = null;
-        approvalListenerManager = null;
+      if (boundManager) {
+        detachFromManager(boundManager);
+        boundManager = null;
       }
 
       const reg = config.getBackgroundTaskRegistry();
