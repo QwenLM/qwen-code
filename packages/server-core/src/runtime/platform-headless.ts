@@ -9,23 +9,55 @@
 import { join } from 'path'
 import type { PlatformServices, Logger } from './platform'
 
+const ANSI_RESET = '\x1b[0m'
+const ANSI_DIM = '\x1b[2m'
+const ANSI_GREEN = '\x1b[32m'
+const ANSI_YELLOW = '\x1b[33m'
+const ANSI_RED = '\x1b[31m'
+const ANSI_MAGENTA = '\x1b[35m'
+
+function shouldColor(stream: NodeJS.WriteStream): boolean {
+  if (process.env.NO_COLOR) return false
+  if (process.env.FORCE_COLOR && process.env.FORCE_COLOR !== '0') return true
+  return stream.isTTY === true
+}
+
+function colorize(value: string, color: string, stream: NodeJS.WriteStream): string {
+  return shouldColor(stream) ? `${color}${value}${ANSI_RESET}` : value
+}
+
+function colorizeLevel(level: string, stream: NodeJS.WriteStream): string {
+  switch (level.trim().toLowerCase()) {
+    case 'error':
+      return colorize(level, ANSI_RED, stream)
+    case 'warn':
+      return colorize(level, ANSI_YELLOW, stream)
+    case 'debug':
+      return colorize(level, ANSI_MAGENTA, stream)
+    case 'info':
+    default:
+      return colorize(level, ANSI_GREEN, stream)
+  }
+}
+
 /**
  * Simple console-based logger matching the Logger interface.
  * Prefixes each line with ISO timestamp and level for structured grepping.
  */
 function createConsoleLogger(): Logger {
-  const fmt = (level: string, args: unknown[]) => {
-    const ts = new Date().toISOString()
+  const fmt = (level: string, args: unknown[], stream: NodeJS.WriteStream) => {
+    const ts = colorize(new Date().toISOString(), ANSI_DIM, stream)
+    const levelText = colorizeLevel(level.toUpperCase().padEnd(5), stream)
     const parts = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ')
-    return `${ts} ${level.toUpperCase().padEnd(5)} ${parts}`
+    return `${ts} ${levelText} ${parts}`
   }
   return {
-    info: (...args) => console.log(fmt('info', args)),
-    warn: (...args) => console.warn(fmt('warn', args)),
-    error: (...args) => console.error(fmt('error', args)),
+    info: (...args) => console.log(fmt('info', args, process.stdout)),
+    warn: (...args) => console.warn(fmt('warn', args, process.stderr)),
+    error: (...args) => console.error(fmt('error', args, process.stderr)),
     debug: (...args) => {
       if (process.env.CRAFT_DEBUG === 'true' || process.env.CRAFT_IS_PACKAGED !== 'true') {
-        console.debug(fmt('debug', args))
+        console.debug(fmt('debug', args, process.stderr))
       }
     },
   }

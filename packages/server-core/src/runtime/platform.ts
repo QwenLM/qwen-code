@@ -66,12 +66,55 @@ export interface PlatformServices {
 
 // ── Logger helpers ──────────────────────────────────────────────────────────
 
+const ANSI_RESET = '\x1b[0m'
+const ANSI_GREEN = '\x1b[32m'
+const ANSI_YELLOW = '\x1b[33m'
+const ANSI_RED = '\x1b[31m'
+const ANSI_MAGENTA = '\x1b[35m'
+
+type TtyLikeStream = { isTTY?: boolean }
+
+function shouldColor(stream?: TtyLikeStream): boolean {
+  if (typeof process === 'undefined') return false
+  if (process.env.NO_COLOR) return false
+  if (process.env.FORCE_COLOR && process.env.FORCE_COLOR !== '0') return true
+  return stream?.isTTY === true
+}
+
+function levelColor(level: keyof Logger): string {
+  switch (level) {
+    case 'error':
+      return ANSI_RED
+    case 'warn':
+      return ANSI_YELLOW
+    case 'debug':
+      return ANSI_MAGENTA
+    case 'info':
+    default:
+      return ANSI_GREEN
+  }
+}
+
+function colorizeArgs(level: keyof Logger, args: unknown[], stream?: TtyLikeStream): unknown[] {
+  if (!shouldColor(stream)) return args
+  const color = levelColor(level)
+  return args.map((arg) => typeof arg === 'string' ? `${color}${arg}${ANSI_RESET}` : arg)
+}
+
+function stdout(): TtyLikeStream | undefined {
+  return typeof process === 'undefined' ? undefined : process.stdout
+}
+
+function stderr(): TtyLikeStream | undefined {
+  return typeof process === 'undefined' ? undefined : process.stderr
+}
+
 /** Console-based Logger for use before platform initialization. */
 export const CONSOLE_LOGGER: Logger = {
-  info: (...args: unknown[]) => console.log(...args),
-  warn: (...args: unknown[]) => console.warn(...args),
-  error: (...args: unknown[]) => console.error(...args),
-  debug: (...args: unknown[]) => console.debug(...args),
+  info: (...args: unknown[]) => console.log(...colorizeArgs('info', args, stdout())),
+  warn: (...args: unknown[]) => console.warn(...colorizeArgs('warn', args, stderr())),
+  error: (...args: unknown[]) => console.error(...colorizeArgs('error', args, stderr())),
+  debug: (...args: unknown[]) => console.debug(...colorizeArgs('debug', args, stderr())),
 }
 
 /** Create a Logger that prefixes every message with [scope]. */

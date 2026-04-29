@@ -8,6 +8,41 @@ import type {
   MessagingLogger,
 } from '@craft-agent/messaging-gateway'
 
+const ANSI_RESET = '\x1b[0m'
+const ANSI_DIM = '\x1b[2m'
+const ANSI_CYAN = '\x1b[36m'
+const ANSI_GREEN = '\x1b[32m'
+const ANSI_YELLOW = '\x1b[33m'
+const ANSI_RED = '\x1b[31m'
+const ANSI_MAGENTA = '\x1b[35m'
+
+function shouldColorConsole(): boolean {
+  if (process.env.NO_COLOR) return false
+  if (process.env.FORCE_COLOR && process.env.FORCE_COLOR !== '0') return true
+  return process.stdout.isTTY === true || process.stderr.isTTY === true
+}
+
+const colorConsole = shouldColorConsole()
+
+function colorize(value: string, color: string): string {
+  return colorConsole ? `${color}${value}${ANSI_RESET}` : value
+}
+
+function colorizeLevel(level: string): string {
+  switch (level.trim().toLowerCase()) {
+    case 'error':
+      return colorize(level, ANSI_RED)
+    case 'warn':
+      return colorize(level, ANSI_YELLOW)
+    case 'debug':
+      return colorize(level, ANSI_MAGENTA)
+    case 'info':
+      return colorize(level, ANSI_GREEN)
+    default:
+      return colorize(level, ANSI_CYAN)
+  }
+}
+
 /**
  * Resolve debug mode deterministically across runtimes.
  *
@@ -53,12 +88,13 @@ if (isDebugMode) {
   // Console output in debug mode with readable format
   // Note: format must return an array - electron-log's transformStyles calls .reduce() on it
   log.transports.console.format = ({ message }) => {
-    const scope = message.scope ? `[${message.scope}]` : ''
-    const level = message.level.toUpperCase().padEnd(5)
+    const timestamp = colorize(message.date.toISOString(), ANSI_DIM)
+    const scope = message.scope ? colorize(`[${message.scope}]`, ANSI_CYAN) : ''
+    const level = colorizeLevel(message.level.toUpperCase().padEnd(5))
     const data = message.data
       .map((d: unknown) => (typeof d === 'object' ? JSON.stringify(d) : String(d)))
       .join(' ')
-    return [`${message.date.toISOString()} ${level} ${scope} ${data}`]
+    return [`${timestamp} ${level} ${scope} ${data}`]
   }
   log.transports.console.level = 'debug'
 } else {

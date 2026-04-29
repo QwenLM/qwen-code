@@ -10,6 +10,15 @@ function isCliJsonOnlyMode(): boolean {
  * Runtime environment detection
  */
 type Environment = 'electron-main' | 'electron-renderer' | 'cli';
+type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+const ANSI_RESET = '\x1b[0m';
+const ANSI_DIM = '\x1b[2m';
+const ANSI_CYAN = '\x1b[36m';
+const ANSI_GREEN = '\x1b[32m';
+const ANSI_YELLOW = '\x1b[33m';
+const ANSI_RED = '\x1b[31m';
+const ANSI_MAGENTA = '\x1b[35m';
 
 function detectEnvironment(): Environment {
   // No process object means we're in a browser/renderer context
@@ -83,16 +92,51 @@ function safeStringify(obj: unknown): string {
   }
 }
 
+function shouldColorDebugOutput(): boolean {
+  if (typeof process === 'undefined') return false;
+  if (detectEnvironment() === 'electron-renderer') return false;
+  if (process.env.NO_COLOR) return false;
+  if (process.env.FORCE_COLOR && process.env.FORCE_COLOR !== '0') return true;
+  return process.stderr?.isTTY === true;
+}
+
+function colorize(value: string, color: string, enabled: boolean): string {
+  return enabled ? `${color}${value}${ANSI_RESET}` : value;
+}
+
+function colorizeLevel(level: LogLevel, levelStr: string, enabled: boolean): string {
+  switch (level) {
+    case 'error':
+      return colorize(levelStr, ANSI_RED, enabled);
+    case 'warn':
+      return colorize(levelStr, ANSI_YELLOW, enabled);
+    case 'debug':
+      return colorize(levelStr, ANSI_MAGENTA, enabled);
+    case 'info':
+    default:
+      return colorize(levelStr, ANSI_GREEN, enabled);
+  }
+}
+
 /**
  * Format a log message with timestamp and optional scope.
  */
-function formatMessage(scope: string | undefined, message: string, args: unknown[]): string {
-  const timestamp = new Date().toISOString();
-  const scopeStr = scope ? `[${scope}] ` : '';
+function formatMessage(
+  scope: string | undefined,
+  message: string,
+  args: unknown[],
+  options?: { color?: boolean; level?: LogLevel; date?: Date },
+): string {
+  const useColor = options?.color === true && shouldColorDebugOutput();
+  const timestamp = colorize((options?.date ?? new Date()).toISOString(), ANSI_DIM, useColor);
+  const scopeStr = scope ? `${colorize(`[${scope}]`, ANSI_CYAN, useColor)} ` : '';
+  const messageStr = options?.level
+    ? `${colorizeLevel(options.level, options.level.toUpperCase().padEnd(5), useColor)} ${message}`
+    : colorize(message, ANSI_MAGENTA, useColor);
   const argsStr = args.length > 0
     ? ' ' + args.map(a => typeof a === 'object' ? safeStringify(a) : String(a)).join(' ')
     : '';
-  return `${timestamp} ${scopeStr}${message}${argsStr}\n`;
+  return `${timestamp} ${scopeStr}${messageStr}${argsStr}\n`;
 }
 
 /**
@@ -101,7 +145,7 @@ function formatMessage(scope: string | undefined, message: string, args: unknown
  * All environments output to console.error (or console.log for renderer).
  * In Electron main process, logs also go to electron-log via the main process logger.
  */
-function output(formatted: string): void {
+function output(formatted: string, consoleFormatted = formatted): void {
   const env = detectEnvironment();
 
   // Mirror debug logs into electron-log when available so they appear in main.log.
@@ -112,13 +156,13 @@ function output(formatted: string): void {
 
   if (env === 'electron-renderer') {
     // Use console.log in renderer for DevTools
-    console.log(formatted.trim());
+    console.log(consoleFormatted.trim());
   } else if (typeof process !== 'undefined' && process.stderr) {
     // Use stderr in main/cli to avoid stdout interference
-    process.stderr.write(formatted);
+    process.stderr.write(consoleFormatted);
   } else {
     // Fallback to console for unexpected environments
-    console.log(formatted.trim());
+    console.log(consoleFormatted.trim());
   }
 }
 
@@ -137,7 +181,11 @@ function output(formatted: string): void {
  */
 export function debug(message: string, ...args: unknown[]): void {
   if (!isDebugEnabled()) return;
-  output(formatMessage(undefined, message, args));
+  const date = new Date();
+  output(
+    formatMessage(undefined, message, args, { date }),
+    formatMessage(undefined, message, args, { color: true, date }),
+  );
 }
 
 /**
@@ -151,10 +199,13 @@ export function debug(message: string, ...args: unknown[]): void {
  * log.error('Failed to connect', error);
  */
 export function createLogger(scope: string) {
-  const logWithLevel = (level: string, message: string, args: unknown[]) => {
+  const logWithLevel = (level: LogLevel, message: string, args: unknown[]) => {
     if (!isDebugEnabled()) return;
-    const levelStr = level.toUpperCase().padEnd(5);
-    output(formatMessage(scope, `${levelStr} ${message}`, args));
+    const date = new Date();
+    output(
+      formatMessage(scope, message, args, { date, level }),
+      formatMessage(scope, message, args, { color: true, date, level }),
+    );
   };
 
   return {
