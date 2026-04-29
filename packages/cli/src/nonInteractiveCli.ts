@@ -142,6 +142,7 @@ export interface RunNonInteractiveOptions {
   sendMessageType?: SendMessageType;
   notificationDisplayText?: string;
   captureMonitorNotifications?: boolean;
+  captureMonitorRegistrations?: boolean;
 }
 
 /**
@@ -367,13 +368,15 @@ export async function runNonInteractive(
         );
       }
 
-      monitorRegistry.setRegisterCallback((entry) => {
-        adapter.emitSystemMessage('task_started', {
-          task_id: entry.monitorId,
-          tool_use_id: entry.toolUseId,
-          description: entry.description,
+      if (options.captureMonitorRegistrations !== false) {
+        monitorRegistry.setRegisterCallback((entry) => {
+          adapter.emitSystemMessage('task_started', {
+            task_id: entry.monitorId,
+            tool_use_id: entry.toolUseId,
+            description: entry.description,
+          });
         });
-      });
+      }
 
       let isFirstTurn = true;
       let modelOverride: string | undefined;
@@ -821,7 +824,9 @@ export async function runNonInteractive(
       if (options.captureMonitorNotifications !== false) {
         monReg.setNotificationCallback(undefined);
       }
-      monReg.setRegisterCallback(undefined);
+      if (options.captureMonitorRegistrations !== false) {
+        monReg.setRegisterCallback(undefined);
+      }
 
       process.stdout.removeListener('error', stdoutErrorHandler);
       // Cleanup signal handlers

@@ -1358,6 +1358,7 @@ describe('runNonInteractive', () => {
             thoughts: 0,
             tool: 0,
           },
+          bySource: {},
         },
       },
     });

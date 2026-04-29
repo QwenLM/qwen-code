@@ -58,6 +58,7 @@ interface ConfigOverrides {
 
 let mockMonitorRegistry: {
   setNotificationCallback: ReturnType<typeof vi.fn>;
+  setRegisterCallback: ReturnType<typeof vi.fn>;
 };
 
 function createConfig(overrides: ConfigOverrides = {}): Config {
@@ -165,6 +166,7 @@ describe('runNonInteractiveStreamJson', () => {
   beforeEach(() => {
     mockMonitorRegistry = {
       setNotificationCallback: vi.fn(),
+      setRegisterCallback: vi.fn(),
     };
     config = createConfig();
     runNonInteractiveMock.mockReset();
@@ -276,7 +278,15 @@ describe('runNonInteractiveStreamJson', () => {
   it('routes monitor notifications through the session queue', async () => {
     const initRequest = createControlRequest('initialize');
     const userMessage = createUserMessage('Start a monitor');
+    let closeInput: (() => void) | undefined;
 
+    let registerCallback:
+      | ((entry: {
+          monitorId: string;
+          toolUseId?: string;
+          description: string;
+        }) => void)
+      | undefined;
     let monitorCallback:
       | ((
           displayText: string,
@@ -288,6 +298,9 @@ describe('runNonInteractiveStreamJson', () => {
           },
         ) => void)
       | undefined;
+    mockMonitorRegistry.setRegisterCallback.mockImplementation((cb) => {
+      registerCallback = cb;
+    });
     mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
       monitorCallback = cb;
     });
@@ -303,6 +316,11 @@ describe('runNonInteractiveStreamJson', () => {
 
     runNonInteractiveMock
       .mockImplementationOnce(async () => {
+        registerCallback?.({
+          monitorId: 'mon_1',
+          toolUseId: 'tool_mon_1',
+          description: 'logs',
+        });
         monitorCallback?.('Monitor "logs" event #1: ready', notificationXml, {
           monitorId: 'mon_1',
           toolUseId: 'tool_mon_1',
@@ -314,11 +332,27 @@ describe('runNonInteractiveStreamJson', () => {
     mockInputReader.read = async function* () {
       yield initRequest;
       yield userMessage;
+      await new Promise<void>((resolve) => {
+        closeInput = resolve;
+      });
     };
 
-    await runNonInteractiveStreamJson(config, '');
+    const sessionPromise = runNonInteractiveStreamJson(config, '');
+    await vi.waitFor(() => {
+      expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
+    });
+    closeInput?.();
+    await sessionPromise;
 
     expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
+    expect(mockOutputAdapter.emitSystemMessage).toHaveBeenCalledWith(
+      'task_started',
+      {
+        task_id: 'mon_1',
+        tool_use_id: 'tool_mon_1',
+        description: 'logs',
+      },
+    );
     expect(mockOutputAdapter.emitUserMessage).toHaveBeenCalledWith([
       { text: 'Monitor "logs" event #1: ready' },
     ]);
@@ -341,7 +375,137 @@ describe('runNonInteractiveStreamJson', () => {
         sendMessageType: SendMessageType.Notification,
         notificationDisplayText: 'Monitor "logs" event #1: ready',
         captureMonitorNotifications: false,
+        captureMonitorRegistrations: false,
       }),
+    );
+  });
+
+  it('stops accepting new monitor events before EOF drain', async () => {
+    const initRequest = createControlRequest('initialize');
+    const userMessage = createUserMessage('Start a monitor');
+    let closeInput: (() => void) | undefined;
+
+    let registerCallback:
+      | ((entry: {
+          monitorId: string;
+          toolUseId?: string;
+          description: string;
+        }) => void)
+      | undefined;
+    let notificationCallback:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: {
+            monitorId: string;
+            toolUseId?: string;
+            status: string;
+          },
+        ) => void)
+      | undefined;
+
+    mockMonitorRegistry.setRegisterCallback.mockImplementation((cb) => {
+      registerCallback = cb;
+    });
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      notificationCallback = cb;
+    });
+
+    let releaseFirstTurn: (() => void) | undefined;
+    runNonInteractiveMock.mockImplementationOnce(async () => {
+      registerCallback?.({
+        monitorId: 'mon_before_eof',
+        toolUseId: 'tool_mon_before_eof',
+        description: 'before eof',
+      });
+      notificationCallback?.(
+        'Monitor "before eof" event #1: ready',
+        '<task-notification>before-eof</task-notification>',
+        {
+          monitorId: 'mon_before_eof',
+          toolUseId: 'tool_mon_before_eof',
+          status: 'running',
+        },
+      );
+      await new Promise<void>((resolve) => {
+        releaseFirstTurn = () => {
+          registerCallback?.({
+            monitorId: 'mon_late',
+            toolUseId: 'tool_mon_late',
+            description: 'late monitor',
+          });
+          notificationCallback?.(
+            'Monitor "late monitor" event #1: ignored',
+            '<task-notification>late</task-notification>',
+            {
+              monitorId: 'mon_late',
+              toolUseId: 'tool_mon_late',
+              status: 'running',
+            },
+          );
+          resolve();
+        };
+      });
+    });
+
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      yield userMessage;
+      await new Promise<void>((resolve) => {
+        closeInput = resolve;
+      });
+    };
+
+    const sessionPromise = runNonInteractiveStreamJson(config, '');
+    await vi.waitFor(() => {
+      expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
+    });
+
+    closeInput?.();
+    await vi.waitFor(() => {
+      expect(
+        mockMonitorRegistry.setNotificationCallback,
+      ).toHaveBeenLastCalledWith(undefined);
+      expect(mockMonitorRegistry.setRegisterCallback).toHaveBeenLastCalledWith(
+        undefined,
+      );
+    });
+
+    releaseFirstTurn?.();
+    await sessionPromise;
+
+    expect(mockOutputAdapter.emitSystemMessage).toHaveBeenCalledWith(
+      'task_started',
+      {
+        task_id: 'mon_before_eof',
+        tool_use_id: 'tool_mon_before_eof',
+        description: 'before eof',
+      },
+    );
+    expect(mockOutputAdapter.emitSystemMessage).not.toHaveBeenCalledWith(
+      'task_started',
+      expect.objectContaining({ task_id: 'mon_late' }),
+    );
+    expect(mockOutputAdapter.emitSystemMessage).toHaveBeenCalledWith(
+      'task_notification',
+      {
+        task_id: 'mon_before_eof',
+        tool_use_id: 'tool_mon_before_eof',
+        status: 'running',
+      },
+    );
+    expect(mockOutputAdapter.emitSystemMessage).not.toHaveBeenCalledWith(
+      'task_notification',
+      expect.objectContaining({ task_id: 'mon_late' }),
+    );
+    expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
+
+    const clearCalls = mockMonitorRegistry.setNotificationCallback.mock.calls
+      .map(([cb]) => cb)
+      .filter((cb) => cb === undefined);
+    expect(clearCalls).toHaveLength(1);
+    expect(mockMonitorRegistry.setRegisterCallback).toHaveBeenLastCalledWith(
+      undefined,
     );
   });
 

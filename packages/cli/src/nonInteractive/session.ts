@@ -36,6 +36,12 @@ import { runNonInteractive } from '../nonInteractiveCli.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 
+interface MonitorStartedQueueItem {
+  task_id: string;
+  tool_use_id?: string;
+  description: string;
+}
+
 interface MonitorQueueItem {
   displayText: string;
   modelText: string;
@@ -48,6 +54,7 @@ interface MonitorQueueItem {
 
 class Session {
   private userMessageQueue: CLIUserMessage[] = [];
+  private monitorStartedQueue: MonitorStartedQueueItem[] = [];
   private monitorQueue: MonitorQueueItem[] = [];
   private abortController: AbortController;
   private config: Config;
@@ -65,6 +72,7 @@ class Session {
   private isShuttingDown: boolean = false;
   private configInitialized: boolean = false;
   private monitorNotificationsRegistered: boolean = false;
+  private monitorRegistrationsRegistered: boolean = false;
 
   // Single initialization promise that resolves when session is ready for user messages.
   // Created lazily once initialization actually starts.
@@ -122,6 +130,7 @@ class Session {
     try {
       await this.config.initialize(options);
       this.configInitialized = true;
+      this.registerMonitorRegistrations();
       this.registerMonitorNotifications();
     } catch (error) {
       debugLogger.error('[Session] Failed to initialize config:', error);
@@ -136,6 +145,9 @@ class Session {
 
     const registry = this.config.getMonitorRegistry();
     registry.setNotificationCallback((displayText, modelText, meta) => {
+      if (this.isShuttingDown || this.abortController.signal.aborted) {
+        return;
+      }
       this.enqueueMonitorNotification({
         displayText,
         modelText,
@@ -147,6 +159,25 @@ class Session {
       });
     });
     this.monitorNotificationsRegistered = true;
+  }
+
+  private registerMonitorRegistrations(): void {
+    if (this.monitorRegistrationsRegistered) {
+      return;
+    }
+
+    const registry = this.config.getMonitorRegistry();
+    registry.setRegisterCallback((entry) => {
+      if (this.isShuttingDown || this.abortController.signal.aborted) {
+        return;
+      }
+      this.enqueueMonitorStarted({
+        task_id: entry.monitorId,
+        tool_use_id: entry.toolUseId,
+        description: entry.description,
+      });
+    });
+    this.monitorRegistrationsRegistered = true;
   }
 
   /**
@@ -373,6 +404,7 @@ class Session {
           adapter: this.outputAdapter,
           controlService: this.controlService ?? undefined,
           captureMonitorNotifications: false,
+          captureMonitorRegistrations: false,
         },
       );
     } catch (error) {
@@ -404,6 +436,7 @@ class Session {
         sendMessageType: SendMessageType.Notification,
         notificationDisplayText: notification.displayText,
         captureMonitorNotifications: false,
+        captureMonitorRegistrations: false,
       },
     );
   }
@@ -414,7 +447,9 @@ class Session {
     }
 
     while (
-      (this.userMessageQueue.length > 0 || this.monitorQueue.length > 0) &&
+      (this.userMessageQueue.length > 0 ||
+        this.monitorStartedQueue.length > 0 ||
+        this.monitorQueue.length > 0) &&
       !this.isShuttingDown &&
       !this.abortController.signal.aborted
     ) {
@@ -426,6 +461,12 @@ class Session {
           debugLogger.error('[Session] Error processing user message:', error);
           this.emitErrorResult(error);
         }
+        continue;
+      }
+
+      const started = this.monitorStartedQueue.shift();
+      if (started) {
+        this.outputAdapter.emitSystemMessage('task_started', started);
         continue;
       }
 
@@ -450,6 +491,11 @@ class Session {
     this.ensureProcessingStarted();
   }
 
+  private enqueueMonitorStarted(started: MonitorStartedQueueItem): void {
+    this.monitorStartedQueue.push(started);
+    this.ensureProcessingStarted();
+  }
+
   private enqueueMonitorNotification(notification: MonitorQueueItem): void {
     this.monitorQueue.push(notification);
     this.ensureProcessingStarted();
@@ -463,7 +509,9 @@ class Session {
     this.processingPromise = this.processPendingWork().finally(() => {
       this.processingPromise = null;
       if (
-        (this.userMessageQueue.length > 0 || this.monitorQueue.length > 0) &&
+        (this.userMessageQueue.length > 0 ||
+          this.monitorStartedQueue.length > 0 ||
+          this.monitorQueue.length > 0) &&
         !this.isShuttingDown &&
         !this.abortController.signal.aborted
       ) {
@@ -547,17 +595,47 @@ class Session {
     debugLogger.debug('[Session] Shutting down');
 
     this.isShuttingDown = true;
+    this.stopMonitorCallbacks();
 
     // Wait for all pending work
     await this.waitForAllPendingWork();
 
-    if (this.monitorNotificationsRegistered) {
-      this.config.getMonitorRegistry().setNotificationCallback(undefined);
-      this.monitorNotificationsRegistered = false;
-    }
+    this.finishShutdown();
+  }
 
+  private async drainAndShutdown(): Promise<void> {
+    debugLogger.debug('[Session] Draining pending work before shutdown');
+
+    // Stop accepting new monitor events first, then drain anything already
+    // queued so EOF does not remain coupled to monitor process lifetime.
+    this.stopMonitorCallbacks();
+    await this.waitForAllPendingWork();
+
+    this.finishShutdown();
+  }
+
+  private finishShutdown(): void {
     this.dispatcher?.shutdown();
     this.cleanupSignalHandlers();
+  }
+
+  private stopMonitorCallbacks(): void {
+    if (
+      !this.monitorNotificationsRegistered &&
+      !this.monitorRegistrationsRegistered
+    ) {
+      return;
+    }
+
+    const registry = this.config.getMonitorRegistry();
+    if (this.monitorNotificationsRegistered) {
+      registry.setNotificationCallback(undefined);
+      this.monitorNotificationsRegistered = false;
+    }
+    if (this.monitorRegistrationsRegistered) {
+      registry.setRegisterCallback(undefined);
+      this.monitorRegistrationsRegistered = false;
+    }
   }
 
   private cleanupSignalHandlers(): void {
@@ -654,9 +732,7 @@ class Session {
         this.dispatcher.markInputClosed();
       }
 
-      // Wait for all pending work before shutdown
-      await this.waitForAllPendingWork();
-      await this.shutdown();
+      await this.drainAndShutdown();
     } catch (error) {
       debugLogger.error('[Session] Error:', error);
       await this.shutdown();
