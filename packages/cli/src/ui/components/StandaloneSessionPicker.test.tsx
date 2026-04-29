@@ -903,4 +903,142 @@ describe('SessionPicker', () => {
       expect(service.loadSession).not.toHaveBeenCalled();
     });
   });
+
+  describe('Multi-select', () => {
+    it('should toggle a checkbox with Space and commit checked ids on Enter', async () => {
+      const sessions = [
+        createMockSession({ sessionId: 's1', prompt: 'one' }),
+        createMockSession({ sessionId: 's2', prompt: 'two' }),
+        createMockSession({ sessionId: 's3', prompt: 'three' }),
+      ];
+      const service = createMockSessionService(sessions);
+      const onSelect = vi.fn();
+      const onConfirmMulti = vi.fn();
+      const onCancel = vi.fn();
+
+      const { stdin } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SessionPicker
+            sessionService={service as never}
+            onSelect={onSelect}
+            onCancel={onCancel}
+            enableMultiSelect
+            onConfirmMulti={onConfirmMulti}
+          />
+        </KeypressProvider>,
+      );
+
+      await wait(100);
+
+      // Space on s1, then arrow down + Space on s2.
+      stdin.write(' ');
+      await wait(20);
+      stdin.write('\u001B[B'); // Down
+      await wait(20);
+      stdin.write(' ');
+      await wait(20);
+      stdin.write('\r');
+      await wait(50);
+
+      expect(onConfirmMulti).toHaveBeenCalledTimes(1);
+      expect(onConfirmMulti).toHaveBeenCalledWith(['s1', 's2']);
+      expect(onSelect).not.toHaveBeenCalled();
+    });
+
+    it('should fall back to single-select on Enter when nothing is checked', async () => {
+      const sessions = [createMockSession({ sessionId: 's1', prompt: 'only' })];
+      const service = createMockSessionService(sessions);
+      const onSelect = vi.fn();
+      const onConfirmMulti = vi.fn();
+
+      const { stdin } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SessionPicker
+            sessionService={service as never}
+            onSelect={onSelect}
+            onCancel={() => {}}
+            enableMultiSelect
+            onConfirmMulti={onConfirmMulti}
+          />
+        </KeypressProvider>,
+      );
+
+      await wait(100);
+      stdin.write('\r');
+      await wait(50);
+
+      expect(onSelect).toHaveBeenCalledWith('s1');
+      expect(onConfirmMulti).not.toHaveBeenCalled();
+    });
+
+    it('should not check disabled ids and exclude them from the commit set', async () => {
+      const sessions = [
+        createMockSession({ sessionId: 'current', prompt: 'current' }),
+        createMockSession({ sessionId: 's2', prompt: 'two' }),
+      ];
+      const service = createMockSessionService(sessions);
+      const onConfirmMulti = vi.fn();
+
+      const { stdin, lastFrame } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SessionPicker
+            sessionService={service as never}
+            onSelect={() => {}}
+            onCancel={() => {}}
+            enableMultiSelect
+            onConfirmMulti={onConfirmMulti}
+            disabledIds={['current']}
+          />
+        </KeypressProvider>,
+      );
+
+      await wait(100);
+      // Cursor starts on the first row (the disabled one) — Space is a no-op.
+      stdin.write(' ');
+      await wait(20);
+      // Move down, then Space to check s2.
+      stdin.write('\u001B[B');
+      await wait(20);
+      stdin.write(' ');
+      await wait(20);
+      stdin.write('\r');
+      await wait(50);
+
+      // The hint for the disabled row should be visible, signaling that
+      // it can't be deleted.
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('cannot delete');
+      expect(onConfirmMulti).toHaveBeenCalledWith(['s2']);
+    });
+
+    it('should render the multi-select footer hint with selected count', async () => {
+      const sessions = [
+        createMockSession({ sessionId: 's1', prompt: 'one' }),
+        createMockSession({ sessionId: 's2', prompt: 'two' }),
+      ];
+      const service = createMockSessionService(sessions);
+
+      const { stdin, lastFrame } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SessionPicker
+            sessionService={service as never}
+            onSelect={() => {}}
+            onCancel={() => {}}
+            enableMultiSelect
+            onConfirmMulti={() => {}}
+          />
+        </KeypressProvider>,
+      );
+
+      await wait(100);
+
+      const before = lastFrame() ?? '';
+      expect(before).toContain('Space to select multiple');
+
+      stdin.write(' ');
+      await wait(20);
+      const after = lastFrame() ?? '';
+      expect(after).toContain('1 selected');
+    });
+  });
 });

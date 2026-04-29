@@ -644,6 +644,7 @@ export const AppContainer = (props: AppContainerProps) => {
     openDeleteDialog,
     closeDeleteDialog,
     handleDelete,
+    handleDeleteMany,
   } = useDeleteCommand({
     config,
     addItem: historyManager.addItem,
@@ -2577,6 +2578,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openDeleteDialog,
       closeDeleteDialog,
       handleDelete,
+      handleDeleteMany,
       // Feedback dialog
       openFeedbackDialog,
       closeFeedbackDialog,
@@ -2649,6 +2651,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openDeleteDialog,
       closeDeleteDialog,
       handleDelete,
+      handleDeleteMany,
       // Feedback dialog
       openFeedbackDialog,
       closeFeedbackDialog,

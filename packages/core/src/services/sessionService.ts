@@ -654,6 +654,48 @@ export class SessionService {
   }
 
   /**
+   * Removes multiple sessions in one call.
+   *
+   * Each session is processed independently — a failure on one does not
+   * abort the rest. Sessions that don't exist (or belong to a different
+   * project) are reported in {@link removed}=false; thrown filesystem
+   * errors are surfaced per-id in {@link errors} so callers can decide
+   * whether to retry.
+   *
+   * @param sessionIds IDs to remove. Duplicates are de-duplicated.
+   * @returns Per-id outcomes: which were removed, which were not found,
+   *   and which threw an error.
+   */
+  async removeSessions(sessionIds: string[]): Promise<{
+    removed: string[];
+    notFound: string[];
+    errors: Array<{ sessionId: string; error: Error }>;
+  }> {
+    const removed: string[] = [];
+    const notFound: string[] = [];
+    const errors: Array<{ sessionId: string; error: Error }> = [];
+
+    const seen = new Set<string>();
+    for (const sessionId of sessionIds) {
+      if (seen.has(sessionId)) continue;
+      seen.add(sessionId);
+
+      try {
+        const ok = await this.removeSession(sessionId);
+        if (ok) {
+          removed.push(sessionId);
+        } else {
+          notFound.push(sessionId);
+        }
+      } catch (error) {
+        errors.push({ sessionId, error: error as Error });
+      }
+    }
+
+    return { removed, notFound, errors };
+  }
+
+  /**
    * Renames a session by appending a custom_title system record to its JSONL file.
    *
    * @param sessionId The session ID to rename

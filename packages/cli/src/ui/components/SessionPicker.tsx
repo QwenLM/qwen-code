@@ -50,6 +50,26 @@ export interface SessionPickerProps {
    * for non-destructive selection flows.
    */
   enablePreview?: boolean;
+
+  /**
+   * Enable multi-select mode. Tab toggles a checkbox on the cursor item;
+   * Enter commits the checked set via {@link onConfirmMulti}. With nothing
+   * checked, Enter falls back to single-select via {@link onSelect}.
+   */
+  enableMultiSelect?: boolean;
+
+  /**
+   * Receives the list of session IDs the user committed when in
+   * multi-select mode. Required when {@link enableMultiSelect} is true.
+   */
+  onConfirmMulti?: (sessionIds: string[]) => void;
+
+  /**
+   * Session IDs the user is not allowed to check (e.g. the current
+   * active session can't be batch-deleted). They render with a hint and
+   * Tab is a no-op while the cursor is on them.
+   */
+  disabledIds?: readonly string[];
 }
 
 const PREFIX_CHARS = {
@@ -74,6 +94,12 @@ interface SessionListItemViewProps {
     normal: string;
   };
   boldSelectedPrefix?: boolean;
+  /** When defined, render a leading `[x]`/`[ ]` checkbox. */
+  isChecked?: boolean;
+  /** Item cannot be checked — render dim and append a hint. */
+  isDisabled?: boolean;
+  /** Reason text shown beside disabled rows (e.g. "current"). */
+  disabledHint?: string;
 }
 
 function SessionListItemView({
@@ -86,6 +112,9 @@ function SessionListItemView({
   maxPromptWidth,
   prefixChars = PREFIX_CHARS,
   boldSelectedPrefix = true,
+  isChecked,
+  isDisabled = false,
+  disabledHint,
 }: SessionListItemViewProps): React.JSX.Element {
   const timeAgo = formatRelativeTime(session.mtime);
   const messageText = formatMessageCount(session.messageCount);
@@ -102,7 +131,13 @@ function SessionListItemView({
         : prefixChars.normal;
 
   const promptText = session.customTitle || session.prompt || '(empty prompt)';
-  const truncatedPrompt = truncateText(promptText, maxPromptWidth);
+  // Reserve space for the checkbox when multi-select is active so the
+  // prompt column doesn't shift between modes.
+  const checkboxWidth = isChecked === undefined ? 0 : 4; // "[x] "
+  const truncatedPrompt = truncateText(
+    promptText,
+    Math.max(1, maxPromptWidth - checkboxWidth),
+  );
   // Dim auto-generated titles so users can distinguish a model guess from
   // a title they chose themselves with `/rename`. Selected row keeps the
   // accent color — legibility of the focused row wins over source hinting.
@@ -124,15 +159,33 @@ function SessionListItemView({
         >
           {prefix}
         </Text>
+        {isChecked !== undefined && (
+          <Text
+            color={
+              isDisabled
+                ? theme.text.secondary
+                : isChecked
+                  ? theme.text.accent
+                  : isSelected
+                    ? theme.text.accent
+                    : theme.text.secondary
+            }
+            bold={isChecked}
+          >
+            {isChecked ? '[x] ' : '[ ] '}
+          </Text>
+        )}
         <Text
           color={
-            isSelected
-              ? theme.text.accent
-              : isAutoTitle
-                ? theme.text.secondary
-                : theme.text.primary
+            isDisabled
+              ? theme.text.secondary
+              : isSelected
+                ? theme.text.accent
+                : isAutoTitle
+                  ? theme.text.secondary
+                  : theme.text.primary
           }
-          bold={isSelected}
+          bold={isSelected && !isDisabled}
         >
           {truncatedPrompt}
         </Text>
@@ -141,6 +194,7 @@ function SessionListItemView({
         <Text color={theme.text.secondary}>
           {timeAgo} · {messageText}
           {session.gitBranch && ` · ${session.gitBranch}`}
+          {isDisabled && disabledHint ? ` · ${disabledHint}` : ''}
         </Text>
       </Box>
     </Box>
@@ -157,6 +211,9 @@ export function SessionPicker(props: SessionPickerProps) {
     centerSelection = true,
     initialSessions,
     enablePreview = false,
+    enableMultiSelect = false,
+    onConfirmMulti,
+    disabledIds,
   } = props;
 
   const { columns: width, rows: height } = useTerminalSize();
@@ -183,6 +240,9 @@ export function SessionPicker(props: SessionPickerProps) {
     initialSessions,
     isActive: true,
     enablePreview,
+    enableMultiSelect,
+    onConfirmMulti,
+    disabledIds,
   });
 
   if (
@@ -262,6 +322,7 @@ export function SessionPicker(props: SessionPickerProps) {
           ) : (
             picker.visibleSessions.map((session, visibleIndex) => {
               const actualIndex = picker.scrollOffset + visibleIndex;
+              const isDisabled = picker.disabledIdSet.has(session.sessionId);
               return (
                 <SessionListItemView
                   key={session.sessionId}
@@ -274,6 +335,17 @@ export function SessionPicker(props: SessionPickerProps) {
                   maxPromptWidth={boxWidth - 6}
                   prefixChars={PREFIX_CHARS}
                   boldSelectedPrefix={false}
+                  isChecked={
+                    enableMultiSelect
+                      ? picker.checkedIds.has(session.sessionId)
+                      : undefined
+                  }
+                  isDisabled={enableMultiSelect && isDisabled}
+                  disabledHint={
+                    enableMultiSelect && isDisabled
+                      ? t('current — cannot delete')
+                      : undefined
+                  }
                 />
               );
             })
@@ -302,6 +374,15 @@ export function SessionPicker(props: SessionPickerProps) {
             {enablePreview && (
               <Text color={theme.text.secondary}>
                 {t('Space to preview · ')}
+              </Text>
+            )}
+            {enableMultiSelect && (
+              <Text color={theme.text.secondary}>
+                {picker.checkedIds.size > 0
+                  ? t('Space to toggle · {{count}} selected · ', {
+                      count: String(picker.checkedIds.size),
+                    })
+                  : t('Space to select multiple · ')}
               </Text>
             )}
             <Text color={theme.text.secondary}>
