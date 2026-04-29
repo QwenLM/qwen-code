@@ -173,6 +173,10 @@ const EXTERNAL_SESSION_LIST_PAGE_SIZE = 100
 const EXTERNAL_SESSION_LIST_MAX_PAGES = 20
 const EXTERNAL_SESSION_PLACEHOLDER_TITLE = '(session)'
 
+function isSlashCommandMessage(message: string): boolean {
+  return /^\/[A-Za-z][\w-]*(?:\s|$)/.test(message.trim())
+}
+
 /**
  * Text sent to the session when a plan is approved from outside the desktop
  * UI (e.g. Telegram button). Mirrors the English `plan.approved` i18n key
@@ -5733,7 +5737,9 @@ export class SessionManager implements ISessionManager {
       // in session JSONL (line ~3952); this only affects the SDK's in-process context.
       let effectiveMessage = message
       if (managed.wasInterrupted) {
-        effectiveMessage = `${message}\n\n<system-reminder>The previous assistant response was interrupted by the user and may be incomplete. Do not repeat or continue the interrupted response unless asked. Focus on the new message above.</system-reminder>`
+        if (!isSlashCommandMessage(message)) {
+          effectiveMessage = `${message}\n\n<system-reminder>The previous assistant response was interrupted by the user and may be incomplete. Do not repeat or continue the interrupted response unless asked. Focus on the new message above.</system-reminder>`
+        }
         managed.wasInterrupted = false
       }
 

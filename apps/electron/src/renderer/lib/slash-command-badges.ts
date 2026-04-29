@@ -17,6 +17,10 @@ function isSupportedSlashCommandName(name: string): boolean {
   return !!name && !UNSUPPORTED_SLASH_BADGE_NAMES.has(name)
 }
 
+function getSlashCommandBadgeLabel(fullMatch: string): string {
+  return fullMatch.replace(/^\/+/, '')
+}
+
 /**
  * Find slash commands that should render as command badges.
  *
@@ -64,7 +68,7 @@ export function findSlashCommandMatches(
 export function extractCommandBadges(text: string, commandNames?: string[]): ContentBadge[] {
   return findSlashCommandMatches(text, commandNames).map((match) => ({
     type: 'command',
-    label: match.fullMatch,
+    label: getSlashCommandBadgeLabel(match.fullMatch),
     rawText: match.fullMatch,
     start: match.startIndex,
     end: match.startIndex + match.fullMatch.length,

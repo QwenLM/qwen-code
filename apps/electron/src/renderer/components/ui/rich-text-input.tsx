@@ -410,7 +410,7 @@ function textToHTML(
     let tooltip: string | undefined
 
     if (match.type === 'command') {
-      label = match.fullMatch
+      label = match.fullMatch.replace(/^\/+/, '')
       tooltip = 'Slash command'
     } else if (match.type === 'skill') {
       skill = skills.find(s => s.slug === match.id)

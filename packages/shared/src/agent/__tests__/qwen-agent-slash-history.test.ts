@@ -73,6 +73,20 @@ describe('QwenAgent slash command history', () => {
     }
   });
 
+  it('sends slash commands as raw ACP prompts', () => {
+    const blocks = (QwenAgent.prototype as unknown as QwenPromptInternals)
+      .buildPromptBlocks('  /context  ');
+
+    expect(blocks).toEqual([{ type: 'text', text: '/context' }]);
+  });
+
+  it('does not prepend Craft context to Qwen prompts while disabled', () => {
+    const blocks = (QwenAgent.prototype as unknown as QwenPromptInternals)
+      .buildPromptBlocks('hello');
+
+    expect(blocks).toEqual([{ type: 'text', text: 'hello' }]);
+  });
+
   it('adds slash command invocations when their result produced output', () => {
     const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
@@ -143,7 +157,7 @@ describe('QwenAgent slash command history', () => {
     ]);
   });
 
-  it('sends Craft context as embedded ACP context instead of user-visible prompt text', () => {
+  it('does not send Craft context while Qwen prompt context is disabled', () => {
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
     tempRoots.push(cwd);
 
@@ -156,9 +170,6 @@ describe('QwenAgent slash command history', () => {
     expect(textBlock?.text).not.toContain('<craft_agent_context>');
 
     const resourceBlock = blocks.find(block => block.type === 'resource');
-    expect(resourceBlock?.resource?.uri).toBe('craft://agent-context/session-qwen');
-    expect(resourceBlock?.resource?.mimeType).toBe('text/plain');
-    expect(resourceBlock?.resource?.text).toContain('<craft_agent_context>');
-    expect(resourceBlock?._meta?.hiddenFromPromptDisplay).toBe(true);
+    expect(resourceBlock).toBeUndefined();
   });
 });

@@ -23,11 +23,11 @@ describe('findSlashCommandMatches', () => {
 })
 
 describe('extractCommandBadges', () => {
-  it('creates command badges without changing command text', () => {
+  it('creates command badges with raw slash text preserved', () => {
     expect(extractCommandBadges('/status show details')).toEqual([
       {
         type: 'command',
-        label: '/status',
+        label: 'status',
         rawText: '/status',
         start: 0,
         end: 7,

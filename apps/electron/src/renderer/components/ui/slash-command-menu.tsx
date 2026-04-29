@@ -293,9 +293,11 @@ function CommandItemContent({
     <>
       <div className="shrink-0 text-muted-foreground">{command.icon}</div>
       <div className="flex min-w-0 flex-1 items-center gap-3">
-        <div className="min-w-0 truncate">{label}</div>
+        <div className={cn('truncate', showDescription ? 'w-[132px] shrink-0' : 'min-w-0')}>
+          {label}
+        </div>
         {showDescription && command.description && (
-          <div className="ml-auto min-w-0 truncate text-muted-foreground/70">
+          <div className="min-w-0 flex-1 truncate text-right text-muted-foreground/70">
             {command.description}
           </div>
         )}

@@ -76,6 +76,7 @@ type SlashCommandInvocation = {
 const QWEN_CONTEXT_WINDOW = 1_000_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_INITIALIZE_TIMEOUT_MS = 60_000;
+const INCLUDE_CRAFT_CONTEXT_IN_QWEN_PROMPTS = false;
 
 function isRecord(value: unknown): value is JsonRecord {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -189,6 +190,11 @@ function jsonStringify(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function isSlashCommandPrompt(message: string, attachments?: FileAttachment[]): boolean {
+  if (attachments && attachments.length > 0) return false;
+  return /^\/[A-Za-z][\w-]*(?:\s|$)/.test(message.trim());
 }
 
 function qwenInitializeTimeoutMs(): number {
@@ -431,7 +437,7 @@ export class QwenAgent extends BaseAgent {
           this.persistedQwenSessionId = null;
           this.config.onSdkSessionIdCleared?.();
           const recoveryContext = this.buildRecoveryContext();
-          if (recoveryContext) {
+          if (recoveryContext && !isSlashCommandPrompt(message, attachments)) {
             message = recoveryContext + message;
           }
           await this.ensureQwenSession();
@@ -812,7 +818,7 @@ export class QwenAgent extends BaseAgent {
   }
 
   private buildSpawnCommand(qwenCliPath: string, nodePath: string): { command: string; args: string[] } {
-    const args = ['--acp'];
+    const args = ['--acp', '--channel=ACP'];
     if (this._model) {
       args.push('--model', this._model);
     }
@@ -1103,8 +1109,12 @@ export class QwenAgent extends BaseAgent {
   // ============================================================
 
   private buildPromptBlocks(message: string, attachments?: FileAttachment[]): ContentBlock[] {
+    if (isSlashCommandPrompt(message, attachments)) {
+      return [{ type: 'text', text: message.trim() }];
+    }
+
     const textParts: string[] = [];
-    const context = this.buildCraftContext();
+    const context = INCLUDE_CRAFT_CONTEXT_IN_QWEN_PROMPTS ? this.buildCraftContext() : '';
 
     for (const attachment of attachments ?? []) {
       if (attachment.mimeType?.startsWith('image/') && attachment.base64) {
