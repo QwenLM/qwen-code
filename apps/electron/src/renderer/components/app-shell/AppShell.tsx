@@ -2268,29 +2268,7 @@ function AppShellContent({
                     <TooltipContent side="right">{newChatHotkey}</TooltipContent>
                   </Tooltip>
                 </div>
-                <WorkspaceProjectTree
-                  workspaces={workspaces}
-                  activeWorkspaceId={activeWorkspaceId}
-                  selectedSessionId={effectiveSessionId}
-                  workspaceSessions={projectTreeWorkspaceSessions}
-                  workspaceUnreadMap={workspaceUnreadMap}
-                  onSelectWorkspace={onSelectWorkspace}
-                  onSelectSession={handleSelectProjectSession}
-                  onNewSession={handleNewProjectSession}
-                  onWorkspaceCreated={() => onRefreshWorkspaces?.()}
-                  sessionStatuses={effectiveSessionStatuses}
-                  labels={displayLabelConfigs}
-                  onDeleteSession={handleDeleteSession}
-                  onFlagSession={onFlagSession}
-                  onUnflagSession={onUnflagSession}
-                  onArchiveSession={onArchiveSession}
-                  onUnarchiveSession={onUnarchiveSession}
-                  onMarkSessionUnread={onMarkSessionUnread}
-                  onSessionStatusChange={onSessionStatusChange}
-                  onRenameSession={onRenameSession}
-                  onSessionLabelsChange={handleSessionLabelsChange}
-                />
-                <div className="shrink-0 border-t border-foreground/5 py-2">
+                <div className="shrink-0 border-b border-foreground/5 py-2">
                   <LeftSidebar
                     isCollapsed={false}
                     getItemProps={getSidebarItemProps}
@@ -2432,6 +2410,28 @@ function AppShellContent({
                     ]}
                   />
                 </div>
+                <WorkspaceProjectTree
+                  workspaces={workspaces}
+                  activeWorkspaceId={activeWorkspaceId}
+                  selectedSessionId={effectiveSessionId}
+                  workspaceSessions={projectTreeWorkspaceSessions}
+                  workspaceUnreadMap={workspaceUnreadMap}
+                  onSelectWorkspace={onSelectWorkspace}
+                  onSelectSession={handleSelectProjectSession}
+                  onNewSession={handleNewProjectSession}
+                  onWorkspaceCreated={() => onRefreshWorkspaces?.()}
+                  sessionStatuses={effectiveSessionStatuses}
+                  labels={displayLabelConfigs}
+                  onDeleteSession={handleDeleteSession}
+                  onFlagSession={onFlagSession}
+                  onUnflagSession={onUnflagSession}
+                  onArchiveSession={onArchiveSession}
+                  onUnarchiveSession={onUnarchiveSession}
+                  onMarkSessionUnread={onMarkSessionUnread}
+                  onSessionStatusChange={onSessionStatusChange}
+                  onRenameSession={onRenameSession}
+                  onSessionLabelsChange={handleSessionLabelsChange}
+                />
               </div>
 
             </div>
