@@ -985,6 +985,66 @@ describe('fetchGitDiffHunks ignores external diff drivers', () => {
       await fs.rm(sentinel, { force: true });
     }
   });
+
+  it('does not invoke textconv drivers when reading hunks', async () => {
+    // Reproduces wenshao Critical (PR #3491 line 282). `--no-ext-diff`
+    // blocks GIT_EXTERNAL_DIFF / diff.<name>.command but is INDEPENDENT
+    // of textconv filters configured via .gitattributes +
+    // `diff.<name>.textconv`. Without `--no-textconv`, a malicious
+    // worktree can still execute commands when this utility runs.
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdiff-tc-'));
+    const sentinel = path.join(os.tmpdir(), `qwen-tc-fired-${Date.now()}`);
+    const driverScript = path.join(repo, 'evil-textconv.sh');
+    try {
+      await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+      await execFileAsync('git', ['config', 'user.email', 't@e.com'], {
+        cwd: repo,
+      });
+      await execFileAsync('git', ['config', 'user.name', 'T'], { cwd: repo });
+      await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+        cwd: repo,
+      });
+
+      // Driver writes the sentinel as a side effect when invoked.
+      await fs.writeFile(
+        driverScript,
+        `#!/bin/sh\necho fired > "${sentinel}"\ncat "$1" 2>/dev/null\n`,
+        { mode: 0o755 },
+      );
+
+      // Wire the driver up: register textconv command + attribute.
+      await execFileAsync(
+        'git',
+        ['config', 'diff.evil.textconv', driverScript],
+        {
+          cwd: repo,
+        },
+      );
+      await fs.writeFile(
+        path.join(repo, '.gitattributes'),
+        '*.pdf diff=evil\n',
+      );
+      await fs.writeFile(path.join(repo, 'doc.pdf'), 'a\n');
+      await execFileAsync('git', ['add', '.'], { cwd: repo });
+      await execFileAsync('git', ['commit', '-q', '-m', 'init'], { cwd: repo });
+      await fs.writeFile(path.join(repo, 'doc.pdf'), 'b\n');
+
+      const hunks = await fetchGitDiffHunks(repo);
+      expect(hunks.get('doc.pdf')).toBeDefined();
+
+      let driverFired = false;
+      try {
+        await fs.stat(sentinel);
+        driverFired = true;
+      } catch {
+        // ENOENT — driver never ran. Expected.
+      }
+      expect(driverFired).toBe(false);
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true });
+      await fs.rm(sentinel, { force: true });
+    }
+  });
 });
 
 describe('fetchGitDiff deletion detection', () => {

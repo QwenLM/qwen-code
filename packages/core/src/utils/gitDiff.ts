@@ -125,16 +125,27 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
   // numstat cost. For untracked we hold the raw stdout rather than the parsed
   // list so the fast path only has to count NUL bytes instead of allocating
   // a full path array.
-  // Every `git diff` invocation passes `--no-ext-diff` so a malicious
-  // repo-local or user-global config that registers an external diff driver
-  // (`GIT_EXTERNAL_DIFF` or `diff.<name>.command`) can never run when /diff
-  // touches the worktree. In practice the stats variants (`--shortstat`,
-  // `--numstat`, `--name-status`) do not invoke external drivers, but
-  // pinning the flag everywhere is defense-in-depth — git's behavior
-  // around external drivers has shifted between versions before.
+  // Every `git diff` invocation passes both `--no-ext-diff` AND
+  // `--no-textconv` so the worktree's config can never run user-supplied
+  // commands while /diff is only inspecting changes. The two flags cover
+  // independent attack surfaces: `--no-ext-diff` blocks `GIT_EXTERNAL_DIFF`
+  // and `diff.<name>.command`, while `--no-textconv` blocks the textconv
+  // filter that .gitattributes + `diff.<name>.textconv` register (e.g.
+  // `pdftotext` to render PDFs). In practice the stats variants
+  // (`--shortstat`, `--numstat`, `--name-status`) do not invoke either
+  // mechanism, but pinning both flags everywhere is defense-in-depth —
+  // git's behavior around these drivers has shifted between versions
+  // before.
   const [shortstatOut, untrackedOut] = await Promise.all([
     runGit(
-      ['--no-optional-locks', 'diff', '--no-ext-diff', 'HEAD', '--shortstat'],
+      [
+        '--no-optional-locks',
+        'diff',
+        '--no-ext-diff',
+        '--no-textconv',
+        'HEAD',
+        '--shortstat',
+      ],
       gitRoot,
     ),
     runGit(
@@ -180,6 +191,7 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
         '--no-optional-locks',
         'diff',
         '--no-ext-diff',
+        '--no-textconv',
         'HEAD',
         '--numstat',
         '-z',
@@ -191,6 +203,7 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
         '--no-optional-locks',
         'diff',
         '--no-ext-diff',
+        '--no-textconv',
         'HEAD',
         '--name-status',
         '-z',
@@ -273,13 +286,14 @@ export async function fetchGitDiffHunks(
   if (!gitRoot) return new Map();
   if (await isInTransientGitState(gitRoot)) return new Map();
 
-  // `--no-ext-diff` is critical here: without it, a repo-local or user-
-  // global config that sets `GIT_EXTERNAL_DIFF` or `diff.<name>.command`
-  // would let `git diff` execute arbitrary commands when this read-only
-  // utility is invoked. The stats variants in `fetchGitDiff` already
-  // bypass external drivers, but plain `git diff` honors them.
+  // Plain `git diff` honors both `GIT_EXTERNAL_DIFF` / `diff.<name>.command`
+  // (blocked by `--no-ext-diff`) AND .gitattributes-driven textconv filters
+  // like `diff.<name>.textconv` (blocked by `--no-textconv`) — independent
+  // command-execution surfaces, both of which we have to disable on this
+  // read-only utility. The stats variants in `fetchGitDiff` already bypass
+  // both, but plain diff fires both unless told not to.
   const diffOut = await runGit(
-    ['--no-optional-locks', 'diff', '--no-ext-diff', 'HEAD'],
+    ['--no-optional-locks', 'diff', '--no-ext-diff', '--no-textconv', 'HEAD'],
     gitRoot,
   );
   if (diffOut == null) return new Map();
