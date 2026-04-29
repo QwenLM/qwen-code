@@ -22,6 +22,7 @@ import { useAppShellContext, usePendingPermission, usePendingCredential, useSess
 import { rendererPerf } from '@/lib/perf'
 import { routes } from '@/lib/navigate'
 import { coerceInputText } from '@/lib/input-text'
+import { shouldShowForegroundMessageLoading } from '@/lib/session-load'
 import { ensureSessionMessagesLoadedAtom, loadedSessionsAtom, sessionMetaMapAtom } from '@/atoms/sessions'
 import { getSessionTitle } from '@/utils/session'
 // Model resolution: connection.defaultModel (no hardcoded defaults)
@@ -339,7 +340,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   const isArchived = session?.isArchived || sessionMeta?.isArchived || false
   const sharedUrl = session?.sharedUrl || sessionMeta?.sharedUrl || null
   const currentSessionStatus = session?.sessionStatus || sessionMeta?.sessionStatus || 'todo'
-  const hasMessages = !!(session?.messages?.length || sessionMeta?.lastFinalMessageId)
+  const messagesLoading = shouldShowForegroundMessageLoading(messagesLoaded, session?.messages?.length)
   const hasUnreadMessages = sessionMeta
     ? !!(sessionMeta.lastFinalMessageId && sessionMeta.lastFinalMessageId !== sessionMeta.lastReadMessageId)
     : false
@@ -693,7 +694,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
             workingDirectory={workingDirectory}
             onWorkingDirectoryChange={handleWorkingDirectoryChange}
             sessionFolderPath={session?.sessionFolderPath}
-            messagesLoading={!messagesLoaded}
+            messagesLoading={messagesLoading}
             searchQuery={sessionListSearchQuery}
             isSearchModeActive={isSearchModeActive}
             onMatchInfoChange={onChatMatchInfoChange}

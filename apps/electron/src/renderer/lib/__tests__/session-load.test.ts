@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'bun:test'
 import type { TransportConnectionState } from '../../../shared/types'
-import { formatSessionLoadFailure, shouldTreatSessionLoadFailureAsTransportFallback } from '../session-load'
+import {
+  formatSessionLoadFailure,
+  shouldShowForegroundMessageLoading,
+  shouldTreatSessionLoadFailureAsTransportFallback,
+} from '../session-load'
 
 function createState(overrides?: Partial<TransportConnectionState>): TransportConnectionState {
   return {
@@ -49,5 +53,19 @@ describe('formatSessionLoadFailure', () => {
 
   it('falls back to a generic message', () => {
     expect(formatSessionLoadFailure(null)).toBe('Unknown error')
+  })
+})
+
+describe('shouldShowForegroundMessageLoading', () => {
+  it('shows loading while an unloaded session has no visible messages', () => {
+    expect(shouldShowForegroundMessageLoading(false, 0)).toBe(true)
+  })
+
+  it('keeps already-rendered messages visible during a background reload', () => {
+    expect(shouldShowForegroundMessageLoading(false, 2)).toBe(false)
+  })
+
+  it('hides loading once the session is marked loaded', () => {
+    expect(shouldShowForegroundMessageLoading(true, 0)).toBe(false)
   })
 })

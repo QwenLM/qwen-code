@@ -1,5 +1,12 @@
 import type { TransportConnectionState } from '../../shared/types'
 
+export function shouldShowForegroundMessageLoading(
+  messagesLoaded: boolean,
+  visibleMessageCount: number | null | undefined,
+): boolean {
+  return !messagesLoaded && (visibleMessageCount ?? 0) === 0
+}
+
 export function shouldTreatSessionLoadFailureAsTransportFallback(
   state: TransportConnectionState | null | undefined,
 ): boolean {
