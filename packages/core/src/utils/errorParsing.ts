@@ -26,6 +26,29 @@ function getRateLimitMessage(authType?: AuthType): string {
   }
 }
 
+// Prefix this function emits when wrapping any error message. Exported so
+// callers (and the function itself) can detect already-formatted strings and
+// skip re-wrapping. See ALREADY_FORMATTED below.
+export const API_ERROR_PREFIX = '[API Error: ';
+
+/**
+ * Returns true when `value` already looks like the output of
+ * parseAndFormatApiError (i.e. starts with "[API Error: " and ends with "]").
+ *
+ * Used as an idempotency guard: when an upstream caller has already passed an
+ * Error through parseAndFormatApiError, stuffed the formatted string into
+ * Error.message, and the message reaches us a second time, we should return it
+ * unchanged rather than producing "[API Error: [API Error: ...]]". The
+ * non-interactive runner is the main offender: the stream-error handler
+ * formats and prints, then throws an Error whose .message is the formatted
+ * string, which the top-level handleError catches and tries to format again.
+ */
+function isAlreadyFormatted(value: string): boolean {
+  // Trailing ']' check guards against false positives where a raw upstream
+  // message just happens to start with the prefix mid-string.
+  return value.startsWith(API_ERROR_PREFIX) && value.trimEnd().endsWith(']');
+}
+
 export function parseAndFormatApiError(
   error: unknown,
   authType?: AuthType,
@@ -39,6 +62,14 @@ export function parseAndFormatApiError(
       return error.message;
     }
 
+    // If a previous pass through this function already wrapped this message
+    // and stuffed it into Error.message, return it unchanged. Avoids the
+    // "[API Error: [API Error: ...]]" double-wrap reported in non-interactive
+    // mode when a 4xx flows through both the stream handler and handleError.
+    if (isAlreadyFormatted(error.message)) {
+      return error.message;
+    }
+
     let text = `[API Error: ${error.message}]`;
     if (error.status === 429) {
       text += getRateLimitMessage(authType);
@@ -48,6 +79,11 @@ export function parseAndFormatApiError(
 
   // The error message might be a string containing a JSON object.
   if (typeof error === 'string') {
+    // Same idempotency guard for the plain-string path.
+    if (isAlreadyFormatted(error)) {
+      return error;
+    }
+
     const jsonStart = error.indexOf('{');
     if (jsonStart === -1) {
       return `[API Error: ${error}]`; // Not a JSON error, return as is.

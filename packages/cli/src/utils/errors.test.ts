@@ -12,6 +12,7 @@ import {
   ToolErrorType,
 } from '@qwen-code/qwen-code-core';
 import {
+  AlreadyReportedError,
   _resetExitLatchForTest,
   getErrorMessage,
   handleError,
@@ -202,6 +203,22 @@ describe('errors', () => {
         expect(mockWriteStderrLine).toHaveBeenCalledWith(
           'API Error: String error',
         );
+      });
+
+      it('does not reformat or reprint AlreadyReportedError', async () => {
+        // The non-interactive runner formats and prints the API error
+        // itself, then throws AlreadyReportedError as a marker. handleError
+        // must propagate that throw without producing a second stderr line
+        // (the bug this fix targets) or running parseAndFormatApiError on
+        // the already-formatted message (which would yield
+        // "[API Error: [API Error: ...]]").
+        const reported = new AlreadyReportedError(
+          '[API Error: 402 Model X is not available for billing.]',
+        );
+
+        await expect(handleError(reported, mockConfig)).rejects.toBe(reported);
+
+        expect(mockWriteStderrLine).not.toHaveBeenCalled();
       });
     });
 

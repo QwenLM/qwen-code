@@ -19,6 +19,37 @@ import { writeStderrLine } from './stdioHelpers.js';
 
 const debugLogger = createDebugLogger('CLI_ERRORS');
 
+/**
+ * Marker thrown when a producer has already formatted the error message and
+ * written it to stderr — the downstream `handleError` should propagate the
+ * exit code without printing or reformatting again.
+ *
+ * The non-interactive runner uses this when an upstream API error event
+ * arrives mid-stream: it formats with parseAndFormatApiError, writes once,
+ * and then throws. Without this marker, handleError would call
+ * parseAndFormatApiError a second time on the (now formatted) Error.message,
+ * yielding "[API Error: [API Error: ...]]" plus a duplicate stderr line.
+ */
+export class AlreadyReportedError extends Error {
+  /** Discriminator so tests and other consumers don't need `instanceof`. */
+  readonly isAlreadyReported = true as const;
+  /** Exit code to surface — defaults to 1 for generic upstream failures. */
+  exitCode: number;
+
+  constructor(message: string, exitCode = 1) {
+    super(message);
+    this.name = 'AlreadyReportedError';
+    this.exitCode = exitCode;
+  }
+}
+
+function isAlreadyReported(error: unknown): error is AlreadyReportedError {
+  return (
+    error instanceof Error &&
+    (error as Partial<AlreadyReportedError>).isAlreadyReported === true
+  );
+}
+
 export function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
@@ -121,6 +152,23 @@ export async function handleError(
   config: Config,
   customErrorCode?: string | number,
 ): Promise<never> {
+  // Producers that already wrote a formatted message to stderr (see
+  // AlreadyReportedError above) should not be reprinted or reformatted here.
+  // In TEXT mode this short-circuits straight to a clean re-throw; in JSON
+  // mode we still emit the structured payload exactly once so machine
+  // consumers don't lose the error.
+  if (isAlreadyReported(error)) {
+    if (config.getOutputFormat() === OutputFormat.JSON) {
+      const formatter = new JsonFormatter();
+      const errorCode = customErrorCode ?? error.exitCode;
+      const formattedError = formatter.formatError(error, errorCode);
+      writeStderrLine(formattedError);
+      return exitAfterCleanup(getNumericExitCode(errorCode));
+    }
+    await runExitCleanup();
+    throw error;
+  }
+
   const errorMessage = parseAndFormatApiError(
     error,
     config.getContentGeneratorConfig()?.authType,
