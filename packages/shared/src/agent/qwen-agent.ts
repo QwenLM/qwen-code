@@ -1026,9 +1026,6 @@ export class QwenAgent extends BaseAgent {
   private buildPromptBlocks(message: string, attachments?: FileAttachment[]): ContentBlock[] {
     const textParts: string[] = [];
     const context = this.buildCraftContext();
-    if (context) {
-      textParts.push(`<craft_agent_context>\n${context}\n</craft_agent_context>`);
-    }
 
     for (const attachment of attachments ?? []) {
       if (attachment.mimeType?.startsWith('image/') && attachment.base64) {
@@ -1043,7 +1040,26 @@ export class QwenAgent extends BaseAgent {
     }
 
     textParts.push(message);
-    const blocks: ContentBlock[] = [{ type: 'text', text: textParts.filter(Boolean).join('\n\n') }];
+    const text = textParts.filter(Boolean).join('\n\n');
+    const blocks: ContentBlock[] = [{
+      type: 'text',
+      text: context ? `${text}\n\n` : text,
+    }];
+
+    if (context) {
+      blocks.push({
+        type: 'resource',
+        resource: {
+          uri: `craft://agent-context/${encodeURIComponent(this._sessionId)}`,
+          mimeType: 'text/plain',
+          text: `<craft_agent_context>\n${context}\n</craft_agent_context>`,
+        },
+        _meta: {
+          source: 'craft-agent',
+          hiddenFromPromptDisplay: true,
+        },
+      });
+    }
 
     for (const attachment of attachments ?? []) {
       if (attachment.mimeType?.startsWith('image/') && attachment.base64) {

@@ -98,6 +98,64 @@ describe('Qwen native history loading', () => {
     expect(imported?.llmConnection).toBe('qwen-code')
   })
 
+  it('syncs Craft session titles to Qwen custom titles through the provider rename hook', async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), 'craft-managed-workspace-'))
+    const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'))
+    tempRoots.push(workspaceRoot, projectRoot)
+
+    const timestamp = Date.parse('2026-04-26T10:12:13.000Z')
+    saveWorkspaceConfig(workspaceRoot, {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      defaults: {
+        defaultLlmConnection: 'qwen-code',
+        workingDirectory: projectRoot,
+      },
+      localMcpServers: { enabled: true },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    })
+
+    const renameCalls: Array<{ sessionId: string; title: string; cwd?: string }> = []
+    const manager = new SessionManager({
+      createExternalSessionAgent: () => ({
+        renameBackendSession: async (sessionId: string, title: string, options?: { cwd?: string }) => {
+          renameCalls.push({ sessionId, title, cwd: options?.cwd })
+          return true
+        },
+        destroy: () => {},
+        dispose: () => {},
+      } as unknown as AgentBackend),
+    })
+
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    }
+    const managed = createManagedSession({
+      id: '260429-fix-session-names',
+      name: 'Fix session names',
+      sdkSessionId: 'fd2803fd-1070-41da-b7c0-10d978f7128c',
+      sdkCwd: projectRoot,
+      workingDirectory: projectRoot,
+      llmConnection: 'qwen-code',
+    }, workspace)
+
+    await (manager as unknown as {
+      syncExternalBackendTitleIfSupported: (managedSession: unknown, title: string) => Promise<void>
+    }).syncExternalBackendTitleIfSupported(managed, managed.name!)
+
+    expect(renameCalls).toEqual([{
+      sessionId: 'fd2803fd-1070-41da-b7c0-10d978f7128c',
+      title: 'Fix session names',
+      cwd: projectRoot,
+    }])
+  })
+
   it('skips placeholder provider-native sessions with no renderable history', async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), 'craft-managed-workspace-'))
     const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'))

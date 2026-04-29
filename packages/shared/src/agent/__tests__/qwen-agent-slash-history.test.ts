@@ -10,6 +10,21 @@ type QwenHistoryInternals = {
   mergeSlashCommandInvocationMessages: (sessionId: string, messages: Message[], cwd: string) => Message[];
 };
 
+type QwenPromptBlock = {
+  type: string;
+  text?: string;
+  resource?: {
+    uri?: string;
+    mimeType?: string | null;
+    text?: string;
+  };
+  _meta?: Record<string, unknown> | null;
+};
+
+type QwenPromptInternals = {
+  buildPromptBlocks: (message: string) => QwenPromptBlock[];
+};
+
 const originalRuntimeDir = process.env.QWEN_RUNTIME_DIR;
 
 function createAgent(cwd: string): QwenAgent {
@@ -126,5 +141,24 @@ describe('QwenAgent slash command history', () => {
       ['user', '/insight', Date.parse(insightInvocation)],
       ['assistant', 'This may take a couple minutes. Sit tight!', Date.parse(insightResult)],
     ]);
+  });
+
+  it('sends Craft context as embedded ACP context instead of user-visible prompt text', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const agent = createAgent(cwd);
+    const blocks = (agent as unknown as QwenPromptInternals).buildPromptBlocks('Fix session names');
+    agent.destroy();
+
+    const textBlock = blocks.find(block => block.type === 'text');
+    expect(textBlock?.text?.trim()).toBe('Fix session names');
+    expect(textBlock?.text).not.toContain('<craft_agent_context>');
+
+    const resourceBlock = blocks.find(block => block.type === 'resource');
+    expect(resourceBlock?.resource?.uri).toBe('craft://agent-context/session-qwen');
+    expect(resourceBlock?.resource?.mimeType).toBe('text/plain');
+    expect(resourceBlock?.resource?.text).toContain('<craft_agent_context>');
+    expect(resourceBlock?._meta?.hiddenFromPromptDisplay).toBe(true);
   });
 });

@@ -1,12 +1,13 @@
 /**
  * Human-Readable Session ID Generator
  *
- * Generates session IDs in the format: YYMMDD-adjective-noun
- * Example: 260111-swift-river
+ * Generates session IDs in the format: YYMMDD-readable-slug
+ * Example: 260111-fix-session-names
  *
  * - Time-sortable by date prefix
  * - Human-readable and memorable
- * - ~20,000 unique combinations per day
+ * - Prompt/title-derived when a useful hint is available
+ * - Random adjective-noun fallback for callers that cannot provide a hint
  * - Collision handling with numeric suffix
  */
 
@@ -40,18 +41,56 @@ export function generateHumanSlug(): string {
 }
 
 /**
+ * Convert a user-facing title or prompt into a filesystem-safe slug.
+ */
+export function generateSlugFromHint(hint?: string): string | null {
+  const normalized = (hint ?? '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/<[^>]+>/gu, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-{2,}/g, '-');
+
+  if (!normalized) return null;
+
+  const maxLength = 48;
+  if (normalized.length <= maxLength) return normalized;
+
+  const truncated = normalized.slice(0, maxLength).replace(/-+$/g, '');
+  return truncated || null;
+}
+
+/**
  * Generate a unique session ID, handling collisions
  *
  * @param existingIds - Set or array of existing session IDs in the workspace
  * @param date - Optional date for the prefix (defaults to now)
- * @returns A unique session ID like "260111-swift-river" or "260111-swift-river-2"
+ * @param slugHint - Optional prompt/title text to derive the slug from
+ * @returns A unique session ID like "260111-fix-session-names" or "260111-fix-session-names-2"
  */
 export function generateUniqueSessionId(
   existingIds: Set<string> | string[],
-  date: Date = new Date()
+  date: Date = new Date(),
+  slugHint?: string,
 ): string {
   const existingSet = existingIds instanceof Set ? existingIds : new Set(existingIds);
   const datePrefix = generateDatePrefix(date);
+  const hintedSlug = generateSlugFromHint(slugHint);
+
+  if (hintedSlug) {
+    const baseId = `${datePrefix}-${hintedSlug}`;
+    if (!existingSet.has(baseId)) {
+      return baseId;
+    }
+
+    for (let suffix = 2; suffix <= 999; suffix++) {
+      const suffixedId = `${baseId}-${suffix}`;
+      if (!existingSet.has(suffixedId)) {
+        return suffixedId;
+      }
+    }
+  }
 
   // Try up to 100 times to find a unique slug
   for (let attempt = 0; attempt < 100; attempt++) {
@@ -89,8 +128,8 @@ export function parseSessionId(sessionId: string): {
   slug: string;
   suffix?: number;
 } | null {
-  // Match YYMMDD-word-word or YYMMDD-word-word-N pattern
-  const match = sessionId.match(/^(\d{6})-([a-z]+-[a-z]+)(?:-(\d+))?$/);
+  // Match YYMMDD-readable-slug or YYMMDD-readable-slug-N pattern
+  const match = sessionId.match(/^(\d{6})-([\p{L}\p{N}_]+(?:-[\p{L}\p{N}_]+)*?)(?:-(\d+))?$/u);
   if (!match) {
     return null;
   }

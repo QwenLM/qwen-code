@@ -84,6 +84,7 @@ import {
   updateFocusedPanelRouteAtom,
   parseSessionIdFromRoute,
 } from '@/atoms/panel-stack'
+import { newSessionDraftAtom } from '@/atoms/new-session-draft'
 
 // Re-export routes for convenience
 export { routes }
@@ -154,7 +155,6 @@ export function NavigationProvider({
   workspaceSlug,
   onSwitchWorkspaceBySlug,
   onCreateSession,
-  onInputChange,
   getDraft,
   onAutoDeleteEmptySession,
   isReady = true,
@@ -168,6 +168,7 @@ export function NavigationProvider({
   const sessionMetaMap = useAtomValue(sessionMetaMapAtom)
   const sessionMetas = useMemo(() => Array.from(sessionMetaMap.values()), [sessionMetaMap])
   const updateSessionMeta = useSetAtom(updateSessionMetaAtom)
+  const setNewSessionDraft = useSetAtom(newSessionDraftAtom)
 
   const pushPanel = useSetAtom(pushPanelAtom)
 
@@ -693,24 +694,17 @@ export function NavigationProvider({
           if (parsed.params.systemPrompt) {
             createOptions.systemPromptPreset = parsed.params.systemPrompt as 'default' | 'mini' | string
           }
-          const session = await onCreateSession(workspaceId, createOptions)
-
           if (parsed.params.name) {
-            await window.electronAPI.sessionCommand(session.id, { type: 'rename', name: parsed.params.name })
+            createOptions.name = parsed.params.name
           }
-
+          if (parsed.params.name || parsed.params.input) {
+            createOptions.slugHint = parsed.params.name ?? parsed.params.input
+          }
           if (parsed.params.status) {
-            updateSessionMeta(session.id, { sessionStatus: parsed.params.status })
+            createOptions.sessionStatus = parsed.params.status
           }
           if (parsed.params.label) {
-            updateSessionMeta(session.id, { labels: [parsed.params.label] })
-          }
-
-          if (parsed.params.status) {
-            await window.electronAPI.sessionCommand(session.id, { type: 'setSessionStatus', state: parsed.params.status })
-          }
-          if (parsed.params.label) {
-            await window.electronAPI.sessionCommand(session.id, { type: 'setLabels', labels: [parsed.params.label] })
+            createOptions.labels = [parsed.params.label]
           }
 
           // Determine navigation filter
@@ -718,25 +712,6 @@ export function NavigationProvider({
             parsed.params.status ? { kind: 'state', stateId: parsed.params.status } :
             parsed.params.label ? { kind: 'label', labelId: parsed.params.label } :
             { kind: 'allSessions' }
-
-          if (options?.newPanel) {
-            // Open the new session in a new panel using lane-aware routing (pushPanel auto-focuses it)
-            pushPanel({
-              route: routes.view.allSessions(session.id) as ViewRoute,
-              targetLaneId: options.targetLaneId,
-              intent: 'explicit',
-            })
-          } else {
-            // Navigate the focused panel to the new session
-            const newState: NavigationState = {
-              navigator: 'sessions',
-              filter,
-              details: { type: 'session', sessionId: session.id },
-            }
-            const route = buildRouteFromNavigationState(newState) as ViewRoute
-            store.set(updateFocusedPanelRouteAtom, route)
-            // Session selection sync handled by effect
-          }
 
           // Parse badges from params
           let badges: ContentBadge[] | undefined
@@ -748,24 +723,73 @@ export function NavigationProvider({
             }
           }
 
-          // Handle input: either auto-send or pre-fill
-          if (parsed.params.input) {
-            const shouldSend = parsed.params.send === 'true'
-            if (shouldSend) {
-              setTimeout(() => {
-                window.electronAPI.sendMessage(
-                  session.id,
-                  parsed.params.input!,
-                  undefined,
-                  undefined,
-                  badges ? { badges } : undefined
-                )
-              }, 100)
-            } else if (onInputChange) {
-              setTimeout(() => {
-                onInputChange(session.id, parsed.params.input!)
-              }, 100)
+          const shouldSend = parsed.params.input && parsed.params.send === 'true'
+          if (shouldSend) {
+            const session = await onCreateSession(workspaceId, createOptions)
+
+            if (parsed.params.name) {
+              await window.electronAPI.sessionCommand(session.id, { type: 'rename', name: parsed.params.name })
             }
+
+            if (parsed.params.status) {
+              updateSessionMeta(session.id, { sessionStatus: parsed.params.status })
+              await window.electronAPI.sessionCommand(session.id, { type: 'setSessionStatus', state: parsed.params.status })
+            }
+            if (parsed.params.label) {
+              updateSessionMeta(session.id, { labels: [parsed.params.label] })
+              await window.electronAPI.sessionCommand(session.id, { type: 'setLabels', labels: [parsed.params.label] })
+            }
+
+            if (options?.newPanel) {
+              pushPanel({
+                route: routes.view.allSessions(session.id) as ViewRoute,
+                targetLaneId: options.targetLaneId,
+                intent: 'explicit',
+              })
+            } else {
+              const newState: NavigationState = {
+                navigator: 'sessions',
+                filter,
+                details: { type: 'session', sessionId: session.id },
+              }
+              const route = buildRouteFromNavigationState(newState) as ViewRoute
+              store.set(updateFocusedPanelRouteAtom, route)
+            }
+
+            setTimeout(() => {
+              window.electronAPI.sendMessage(
+                session.id,
+                parsed.params.input!,
+                undefined,
+                undefined,
+                badges ? { badges } : undefined
+              )
+            }, 100)
+            break
+          }
+
+          suppressAutoSelectRef.current = true
+          setNewSessionDraft((previous) => ({
+            nonce: previous.nonce + 1,
+            input: parsed.params.input ?? '',
+            createOptions,
+            badges,
+          }))
+
+          const draftState: NavigationState = {
+            navigator: 'sessions',
+            filter,
+            details: null,
+          }
+          const draftRoute = buildRouteFromNavigationState(draftState) as ViewRoute
+          if (options?.newPanel) {
+            pushPanel({
+              route: draftRoute,
+              targetLaneId: options.targetLaneId,
+              intent: 'explicit',
+            })
+          } else {
+            store.set(updateFocusedPanelRouteAtom, draftRoute)
           }
           break
         }
@@ -830,7 +854,7 @@ export function NavigationProvider({
           console.warn('[Navigation] Unknown action:', parsed.name)
       }
     },
-    [workspaceId, onCreateSession, onInputChange, pushPanel, store, updateSessionMeta]
+    [workspaceId, onCreateSession, pushPanel, setNewSessionDraft, store, updateSessionMeta]
   )
 
   // =========================================================================

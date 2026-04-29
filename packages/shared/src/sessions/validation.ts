@@ -2,17 +2,17 @@
  * Session ID Validation
  *
  * Security utilities for validating session IDs to prevent path traversal attacks.
- * Session IDs should only contain alphanumeric characters, hyphens, and underscores.
+ * Session IDs should only contain letters, numbers, hyphens, and underscores.
  */
 
 import { basename } from 'path';
 
 /**
  * Valid session ID pattern.
- * Matches: alphanumeric, hyphens, underscores
- * Examples: "260202-swift-river", "my_session_1", "abc123"
+ * Matches: Unicode letters/numbers, hyphens, underscores
+ * Examples: "260202-fix-session-names", "260202-你好", "my_session_1"
  */
-const SESSION_ID_PATTERN = /^[\w-]+$/;
+const SESSION_ID_PATTERN = /^[\p{L}\p{N}_-]+$/u;
 
 /**
  * Validate that a session ID is safe for use in file paths.

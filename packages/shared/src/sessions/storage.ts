@@ -159,12 +159,13 @@ function getExistingSessionIds(workspaceRootPath: string): Set<string> {
 }
 
 /**
- * Generate a human-readable session ID
- * Format: YYMMDD-adjective-noun (e.g., 260111-swift-river)
+ * Generate a human-readable session ID.
+ * Uses a prompt/title hint when available, otherwise falls back to a random
+ * adjective-noun slug.
  */
-export function generateSessionId(workspaceRootPath: string): string {
+export function generateSessionId(workspaceRootPath: string, slugHint?: string): string {
   const existingIds = getExistingSessionIds(workspaceRootPath);
-  return generateUniqueSessionId(existingIds);
+  return generateUniqueSessionId(existingIds, new Date(), slugHint);
 }
 
 // ============================================================
@@ -187,12 +188,13 @@ export async function createSession(
     sessionStatus?: SessionConfig['sessionStatus'];
     labels?: string[];
     isFlagged?: boolean;
+    slugHint?: string;
   }
 ): Promise<SessionConfig> {
   ensureSessionsDir(workspaceRootPath);
 
   const now = Date.now();
-  const sessionId = generateSessionId(workspaceRootPath);
+  const sessionId = generateSessionId(workspaceRootPath, options?.slugHint ?? options?.name);
 
   // Create session directory with all subdirectories (plans, attachments)
   ensureSessionDir(workspaceRootPath, sessionId);

@@ -1,8 +1,7 @@
 /**
  * Word Lists for Human-Readable Session IDs
  *
- * Curated lists of adjectives and nouns for generating memorable,
- * URL-safe session identifiers in the format: YYMMDD-adjective-noun
+ * Curated fallback lists for sessions created without a prompt/title hint.
  */
 
 /**

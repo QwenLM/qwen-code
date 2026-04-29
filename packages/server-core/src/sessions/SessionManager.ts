@@ -733,6 +733,9 @@ interface ManagedSession {
   // See: packages/shared/src/agent/tool-matching.ts
   // Session name (user-defined or AI-generated)
   name?: string
+  // Runtime-only guard for provider-native title synchronization.
+  externalBackendSyncedTitle?: string
+  externalBackendTitleSyncChain?: Promise<void>
   isFlagged: boolean
   /** Whether this session is archived */
   isArchived?: boolean
@@ -1852,18 +1855,45 @@ export class SessionManager implements ISessionManager {
     return undefined
   }
 
-  private async renameExternalBackendSessionIfSupported(managed: ManagedSession, title: string): Promise<void> {
-    if (!managed.sdkSessionId) return
+  private async renameExternalBackendSessionIfSupported(managed: ManagedSession, title: string): Promise<boolean> {
+    if (!managed.sdkSessionId) return false
     try {
-      await this.withExternalSessionAgent(managed, async (agent) => {
+      const renamed = await this.withExternalSessionAgent(managed, async (agent) => {
         if (!agent.renameBackendSession) return false
         return agent.renameBackendSession(managed.sdkSessionId!, title, {
           cwd: managed.workingDirectory || managed.sdkCwd || managed.workspace.rootPath,
         })
       })
+      return renamed === true
     } catch (error) {
       sessionLog.warn(`Failed to rename provider session ${managed.sdkSessionId}:`, error)
+      return false
     }
+  }
+
+  private syncExternalBackendTitleIfSupported(managed: ManagedSession, title: string): Promise<void> {
+    const normalizedTitle = title.trim()
+    if (!normalizedTitle || !managed.sdkSessionId || managed.externalBackendSyncedTitle === normalizedTitle) {
+      return Promise.resolve()
+    }
+
+    const previous = managed.externalBackendTitleSyncChain ?? Promise.resolve()
+    const next = previous.catch(() => undefined).then(async () => {
+      if (!managed.sdkSessionId || managed.externalBackendSyncedTitle === normalizedTitle) return
+      const synced = await this.renameExternalBackendSessionIfSupported(managed, normalizedTitle)
+      if (synced) {
+        managed.externalBackendSyncedTitle = normalizedTitle
+      }
+    })
+
+    const guarded = next.finally(() => {
+      if (managed.externalBackendTitleSyncChain === guarded) {
+        managed.externalBackendTitleSyncChain = undefined
+      }
+    })
+    managed.externalBackendTitleSyncChain = guarded
+
+    return guarded
   }
 
   private async deleteExternalBackendSessionIfSupported(managed: ManagedSession): Promise<void> {
@@ -2919,6 +2949,7 @@ export class SessionManager implements ISessionManager {
     // Use storage layer to create and persist the session
     const storedSession = await createStoredSession(workspaceRootPath, {
       name: options?.name,
+      slugHint: options?.slugHint,
       permissionMode: defaultPermissionMode,
       workingDirectory: resolvedWorkingDir,
       hidden: options?.hidden,
@@ -3189,6 +3220,11 @@ export class SessionManager implements ISessionManager {
         }
         this.persistSession(managed)
         sessionPersistenceQueue.flush(managed.id)
+        // Provider-native mirrors already get their title from Qwen; only push
+        // Craft-owned session names back into Qwen when a child SDK id appears.
+        if (managed.name && managed.id !== sdkSessionId) {
+          void this.syncExternalBackendTitleIfSupported(managed, managed.name)
+        }
       }
 
       const onSdkSessionIdCleared = () => {
@@ -3919,6 +3955,7 @@ export class SessionManager implements ISessionManager {
 
         const session = await this.createSession(managed.workspace.id, {
           name: request.name,
+          slugHint: request.name ?? request.prompt,
           llmConnection: request.llmConnection ?? managed.llmConnection,
           model: request.model ?? managed.model,
           enabledSourceSlugs: request.enabledSourceSlugs ?? managed.enabledSourceSlugs,
@@ -4815,7 +4852,7 @@ export class SessionManager implements ISessionManager {
     const managed = this.sessions.get(sessionId)
     if (managed) {
       const truncatedName = truncateTitle(name)
-      await this.renameExternalBackendSessionIfSupported(managed, truncatedName)
+      await this.syncExternalBackendTitleIfSupported(managed, truncatedName)
       managed.name = truncatedName
       this.persistSession(managed)
       // Notify renderer of the name change
@@ -4917,7 +4954,7 @@ export class SessionManager implements ISessionManager {
       const title = await agent.regenerateTitle(userMessages, assistantResponse, titleOptions)
       sessionLog.info(`refreshTitle: regenerateTitle returned: ${title ? `"${title}"` : 'null'}`)
       if (title) {
-        await this.renameExternalBackendSessionIfSupported(managed, title)
+        await this.syncExternalBackendTitleIfSupported(managed, title)
         managed.name = title
         this.persistSession(managed)
         // title_generated will also clear isRegeneratingTitle via the event handler
@@ -5433,6 +5470,7 @@ export class SessionManager implements ISessionManager {
           sessionId,
           title: initialTitle,
         }, managed.workspace.id)
+        void this.syncExternalBackendTitleIfSupported(managed, initialTitle)
 
         // Generate AI title asynchronously using agent's SDK
         // (waits briefly for agent creation if needed)
@@ -5679,6 +5717,9 @@ export class SessionManager implements ISessionManager {
             // Also flush here since we're in fallback mode
             this.persistSession(managed)
             sessionPersistenceQueue.flush(managed.id)
+            if (managed.name && managed.id !== sdkId) {
+              void this.syncExternalBackendTitleIfSupported(managed, managed.name)
+            }
           }
         }
 
@@ -6026,6 +6067,10 @@ export class SessionManager implements ISessionManager {
     // 1. Cleanup state
     this.setProcessing(managed, false)
     managed.stopRequested = false  // Reset for next turn
+
+    if (managed.name && managed.sdkSessionId && managed.id !== managed.sdkSessionId) {
+      void this.syncExternalBackendTitleIfSupported(managed, managed.name)
+    }
 
     const turnStartFinalMessageId = managed.turnStartFinalMessageId
     managed.turnStartFinalMessageId = undefined
@@ -6558,7 +6603,7 @@ export class SessionManager implements ISessionManager {
       const genLangEntry = LOCALE_REGISTRY[genLangCode]
       const title = await agent.generateTitle(userMessage, { language: genLangEntry?.nativeName })
       if (title) {
-        await this.renameExternalBackendSessionIfSupported(managed, title)
+        await this.syncExternalBackendTitleIfSupported(managed, title)
         managed.name = title
         this.persistSession(managed)
         // Flush immediately to ensure disk is up-to-date before notifying renderer.
@@ -7294,6 +7339,7 @@ export class SessionManager implements ISessionManager {
     // Create a new session for this automation
     const session = await this.createSession(workspaceId, {
       name: sessionName,
+      slugHint: automationName || prompt,
       labels: resolvedLabels,
       permissionMode: permissionMode || 'safe',
       enabledSourceSlugs: resolved?.sourceSlugs,

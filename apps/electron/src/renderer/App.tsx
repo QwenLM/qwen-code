@@ -1449,7 +1449,7 @@ export default function App() {
     schedulePersistDraft(sessionId)
   }, [schedulePersistDraft])
 
-  // Open new chat - creates session and selects it
+  // Open new chat as a draft. The backing session is created on first send.
   // Used by components via AppShellContext and for programmatic navigation
   const openNewChat = useCallback(async (params: NewChatActionParams = {}) => {
     if (!windowWorkspaceId) {
@@ -1457,20 +1457,15 @@ export default function App() {
       return
     }
 
-    const session = await handleCreateSession(windowWorkspaceId)
-
-    if (params.name) {
-      await window.electronAPI.sessionCommand(session.id, { type: 'rename', name: params.name })
-    }
-
-    // Navigate to the chat view - this sets both selectedSession and activeView
-    navigate(routes.view.allSessions(session.id))
-
-    // Pre-fill input if provided (after a small delay to ensure component is mounted)
-    if (params.input) {
-      setTimeout(() => handleInputChange(session.id, params.input!), 100)
-    }
-  }, [windowWorkspaceId, handleCreateSession, handleInputChange])
+    navigate(routes.action.newSession(
+      params.input || params.name
+        ? {
+            ...(params.input ? { input: params.input } : {}),
+            ...(params.name ? { name: params.name } : {}),
+          }
+        : undefined
+    ))
+  }, [windowWorkspaceId])
 
   const handleRespondToPermission = useCallback(async (
     sessionId: string,

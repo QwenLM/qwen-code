@@ -36,7 +36,7 @@ import { useSessionSelection, useIsMultiSelectActive, useSelectedIds, useSelecti
 import { sourceSelection, skillSelection, automationSelection } from '@/hooks/useEntitySelection'
 import { extractLabelId } from '@craft-agent/shared/labels'
 import type { SessionStatusId } from '@/config/session-status-config'
-import { SourceInfoPage, ChatPage } from '@/pages'
+import { SourceInfoPage, ChatPage, DraftChatPage } from '@/pages'
 import SkillInfoPage from '@/pages/SkillInfoPage'
 import { getSettingsPageComponent } from '@/pages/settings/settings-pages'
 import { AutomationInfoPage } from '../automations/AutomationInfoPage'
@@ -379,12 +379,10 @@ export function MainContentPanel({
         </Panel>
       )
     }
-    // No session selected - empty state
+    // New-chat draft: no session is created until the first message is sent.
     return wrapWithStoplight(
       <Panel variant="grow" className={className}>
-        <div className="flex items-center justify-center h-full text-muted-foreground">
-          <p className="text-sm">{t("session.noSessionSelected")}</p>
-        </div>
+        <DraftChatPage />
       </Panel>
     )
   }

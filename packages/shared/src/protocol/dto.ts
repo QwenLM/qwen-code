@@ -105,6 +105,8 @@ export interface Session {
 
 export interface CreateSessionOptions {
   name?: string
+  /** Optional prompt/title text used only to generate a readable session folder id. */
+  slugHint?: string
   permissionMode?: PermissionMode
   /**
    * Reasoning/thinking level override. When set, takes precedence over workspace
