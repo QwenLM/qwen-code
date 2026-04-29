@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
   mockConfigChangeHandlers,
@@ -24,6 +24,12 @@ const {
   mockWriteModelProvidersConfig,
   mockClearPersistedAuth,
   slashCommandNotificationCallbackRef,
+  endTurnCallbackRef,
+  streamChunkCallbackRef,
+  permissionRequestCallbackRef,
+  askUserQuestionCallbackRef,
+  mockShowInformationMessage,
+  mockWindowState,
   mockQwenAgentManagerInstances,
 } = vi.hoisted(() => ({
   mockConfigChangeHandlers: [] as Array<
@@ -80,6 +86,24 @@ const {
         }) => void)
       | undefined,
   },
+  endTurnCallbackRef: {
+    current: undefined as ((reason?: string) => void) | undefined,
+  },
+  streamChunkCallbackRef: {
+    current: undefined as ((chunk: string) => void) | undefined,
+  },
+  permissionRequestCallbackRef: {
+    current: undefined as ((request: unknown) => Promise<string>) | undefined,
+  },
+  askUserQuestionCallbackRef: {
+    current: undefined as
+      | ((request: unknown) => Promise<{ optionId: string }>)
+      | undefined,
+  },
+  mockShowInformationMessage: vi.fn<
+    (message: string, ...items: string[]) => Thenable<string | undefined>
+  >(() => Promise.resolve(undefined)),
+  mockWindowState: { focused: true },
   mockQwenAgentManagerInstances: [] as Array<{
     permissionRequestCallback?: (request: unknown) => Promise<string>;
     cancelCurrentPrompt: ReturnType<typeof vi.fn>;
@@ -116,6 +140,8 @@ vi.mock('vscode', () => ({
     onDidChangeActiveTextEditor: mockOnDidChangeActiveTextEditor,
     onDidChangeTextEditorSelection: mockOnDidChangeTextEditorSelection,
     activeTextEditor: undefined,
+    showInformationMessage: mockShowInformationMessage,
+    state: mockWindowState,
   },
   workspace: {
     workspaceFolders: [{ uri: { fsPath: '/workspace-root' } }],
@@ -145,7 +171,9 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
     createNewSession = vi.fn();
     setModelFromUi = vi.fn();
     onMessage = vi.fn();
-    onStreamChunk = vi.fn();
+    onStreamChunk = vi.fn((cb: (chunk: string) => void) => {
+      streamChunkCallbackRef.current = cb;
+    });
     onThoughtChunk = vi.fn();
     onModeInfo = vi.fn();
     onModeChanged = vi.fn();
@@ -161,6 +189,7 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
         availableCommandsCallbackRef.current = callback;
       },
     );
+    onAvailableSkills = vi.fn();
     onAvailableModels = vi.fn();
     onSlashCommandNotification = vi.fn(
       (
@@ -174,15 +203,22 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
         slashCommandNotificationCallbackRef.current = callback;
       },
     );
-    onEndTurn = vi.fn();
+    onEndTurn = vi.fn((cb: (reason?: string) => void) => {
+      endTurnCallbackRef.current = cb;
+    });
     onToolCall = vi.fn();
     onPlan = vi.fn();
     onPermissionRequest = vi.fn(
       (callback: (request: unknown) => Promise<string>) => {
         this.permissionRequestCallback = callback;
+        permissionRequestCallbackRef.current = callback;
       },
     );
-    onAskUserQuestion = vi.fn();
+    onAskUserQuestion = vi.fn(
+      (callback: (request: unknown) => Promise<{ optionId: string }>) => {
+        askUserQuestionCallbackRef.current = callback;
+      },
+    );
     onDisconnected = vi.fn();
     permissionRequestCallback?: (request: unknown) => Promise<string>;
     cancelCurrentPrompt = vi.fn();
@@ -262,6 +298,25 @@ vi.mock('../utils/imageHandler.js', () => ({
   createImagePathResolver: mockCreateImagePathResolver,
 }));
 
+vi.mock('child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('child_process')>();
+  return {
+    ...actual,
+    exec: vi.fn((_cmd: string, cb?: (err: Error | null) => void) => {
+      cb?.(null);
+    }),
+    execFile: vi.fn(
+      (_file: string, _args?: string[], cb?: (err: Error | null) => void) => {
+        if (typeof _args === 'function') {
+          (_args as unknown as (err: Error | null) => void)(null);
+        } else {
+          cb?.(null);
+        }
+      },
+    ),
+  };
+});
+
 vi.mock('../../utils/authErrors.js', () => ({
   isAuthenticationRequiredError: vi.fn(() => false),
 }));
@@ -333,6 +388,13 @@ async function setupAttachedProvider(options?: {
 
 beforeEach(() => {
   mockConfigChangeHandlers.length = 0;
+  endTurnCallbackRef.current = undefined;
+  streamChunkCallbackRef.current = undefined;
+  permissionRequestCallbackRef.current = undefined;
+  askUserQuestionCallbackRef.current = undefined;
+  mockWindowState.focused = true;
+  mockShowInformationMessage.mockReset();
+  mockShowInformationMessage.mockReturnValue(Promise.resolve(undefined));
 });
 
 describe('WebViewProvider.attachToView', () => {
@@ -724,6 +786,143 @@ describe('WebViewProvider.attachToView', () => {
       }),
     });
   });
+
+  it('replays available skills to the webview after webviewReady', async () => {
+    let messageHandler:
+      | ((message: { type: string; data?: unknown }) => Promise<void>)
+      | undefined;
+
+    const postMessage = vi.fn();
+    const webview = {
+      options: undefined as unknown,
+      html: '',
+      postMessage,
+      asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
+        toString: () => `webview:${uri.fsPath}`,
+      })),
+      onDidReceiveMessage: vi.fn(
+        (
+          handler: (message: { type: string; data?: unknown }) => Promise<void>,
+        ) => {
+          messageHandler = handler;
+          return { dispose: vi.fn() };
+        },
+      ),
+    };
+
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+
+    await provider.attachToView(
+      {
+        webview,
+        visible: true,
+        onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
+        onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
+      } as never,
+      'qwen-code.chatView.sidebar',
+    );
+
+    const agentManager = (
+      provider as unknown as {
+        agentManager: {
+          onAvailableSkills: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).agentManager;
+    const onAvailableSkills = agentManager.onAvailableSkills.mock
+      .calls[0]?.[0] as ((skills: string[]) => void) | undefined;
+
+    expect(onAvailableSkills).toBeTypeOf('function');
+
+    const skills = ['code-review-expert'];
+    onAvailableSkills?.(skills);
+
+    postMessage.mockClear();
+
+    await messageHandler?.({
+      type: 'webviewReady',
+      data: {},
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'availableSkills',
+      data: { skills },
+    });
+  });
+
+  it('replays available commands to the webview after webviewReady', async () => {
+    let messageHandler:
+      | ((message: { type: string; data?: unknown }) => Promise<void>)
+      | undefined;
+
+    const postMessage = vi.fn();
+    const webview = {
+      options: undefined as unknown,
+      html: '',
+      postMessage,
+      asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
+        toString: () => `webview:${uri.fsPath}`,
+      })),
+      onDidReceiveMessage: vi.fn(
+        (
+          handler: (message: { type: string; data?: unknown }) => Promise<void>,
+        ) => {
+          messageHandler = handler;
+          return { dispose: vi.fn() };
+        },
+      ),
+    };
+
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+
+    await provider.attachToView(
+      {
+        webview,
+        visible: true,
+        onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
+        onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
+      } as never,
+      'qwen-code.chatView.sidebar',
+    );
+
+    const agentManager = (
+      provider as unknown as {
+        agentManager: {
+          onAvailableCommands: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).agentManager;
+    const onAvailableCommands = agentManager.onAvailableCommands.mock
+      .calls[0]?.[0] as
+      | ((commands: Array<{ name: string; description: string }>) => void)
+      | undefined;
+
+    expect(onAvailableCommands).toBeTypeOf('function');
+
+    const commands = [
+      { name: 'skills', description: 'List available skills' },
+      { name: 'compress', description: 'Compress the context' },
+    ];
+    onAvailableCommands?.(commands);
+
+    postMessage.mockClear();
+
+    await messageHandler?.({
+      type: 'webviewReady',
+      data: {},
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'availableCommands',
+      data: { commands },
+    });
+  });
 });
 
 describe('WebViewProvider settings sync', () => {
@@ -1063,5 +1262,382 @@ describe('WebViewProvider initial model inheritance', () => {
       { autoAuthenticate: true },
     );
     expect(agentManager.setModelFromUi).toHaveBeenCalledWith('glm-5');
+  });
+});
+
+describe('Notification & dot indicator', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    mockConfigGet.mockImplementation((key: string, defaultValue?: unknown) => {
+      if (key === 'dotIndicator') {
+        return true;
+      }
+      if (key === 'notifications') {
+        return true;
+      }
+      return defaultValue;
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('shows orange dot and notification when a long task completes while panel is not active', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    // Simulate stream chunk to set agentStartTime
+    streamChunkCallbackRef.current?.('chunk');
+
+    // Advance time past 20s threshold
+    vi.advanceTimersByTime(25_000);
+
+    // Trigger endTurn
+    endTurnCallbackRef.current?.('end_turn');
+
+    // Orange dot should be set
+    expect(mockPanel.iconPath).toEqual(
+      expect.objectContaining({
+        fsPath: expect.stringContaining('icon-orange.png'),
+      }),
+    );
+
+    // Notification should be shown
+    expect(mockShowInformationMessage).toHaveBeenCalledWith(
+      'Qwen Code: Waiting for your input.',
+      'Show',
+    );
+  });
+
+  it('does not show notification for short tasks (< 20s)', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(5_000); // only 5s
+    endTurnCallbackRef.current?.('end_turn');
+
+    // Orange dot should still appear (no duration requirement for dot)
+    expect(mockPanel.iconPath).toEqual(
+      expect.objectContaining({
+        fsPath: expect.stringContaining('icon-orange.png'),
+      }),
+    );
+
+    // But NO notification for short task
+    expect(mockShowInformationMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not show notification when user is watching the panel', async () => {
+    const mockPanel = {
+      active: true,
+      visible: true,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = true;
+
+    await setupAttachedProvider();
+
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(25_000);
+    endTurnCallbackRef.current?.('end_turn');
+
+    // No dot (panel is active)
+    expect(mockPanel.iconPath).toBeUndefined();
+    // No notification (user is watching)
+    expect(mockShowInformationMessage).not.toHaveBeenCalled();
+  });
+
+  it('shows blue dot and notification for permission requests when panel is not active', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    // Trigger permission request — don't await, it blocks on user response
+    void permissionRequestCallbackRef.current?.({
+      toolCall: { title: 'Bash' },
+      options: [],
+    });
+
+    // Blue dot
+    expect(mockPanel.iconPath).toEqual(
+      expect.objectContaining({
+        fsPath: expect.stringContaining('icon-blue.png'),
+      }),
+    );
+
+    // Notification with tool name
+    expect(mockShowInformationMessage).toHaveBeenCalledWith(
+      'Qwen Code: Needs your permission to use Bash.',
+      'Show',
+    );
+  });
+
+  it('blue dot takes priority over orange dot', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    // First: task completes, orange dot
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(25_000);
+    endTurnCallbackRef.current?.('end_turn');
+    expect(mockPanel.iconPath).toEqual(
+      expect.objectContaining({
+        fsPath: expect.stringContaining('icon-orange.png'),
+      }),
+    );
+
+    // Then: permission request, should upgrade to blue
+    void permissionRequestCallbackRef.current?.({
+      toolCall: { title: 'Read' },
+      options: [],
+    });
+    expect(mockPanel.iconPath).toEqual(
+      expect.objectContaining({
+        fsPath: expect.stringContaining('icon-blue.png'),
+      }),
+    );
+
+    // Another endTurn should NOT downgrade back to orange
+    endTurnCallbackRef.current?.('end_turn');
+    expect(mockPanel.iconPath).toEqual(
+      expect.objectContaining({
+        fsPath: expect.stringContaining('icon-blue.png'),
+      }),
+    );
+  });
+
+  it('does not send duplicate idle notifications for multi-turn tasks', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(25_000);
+
+    // First endTurn (intermediate)
+    endTurnCallbackRef.current?.('end_turn');
+    expect(mockShowInformationMessage).toHaveBeenCalledTimes(1);
+
+    // Second endTurn (final) — should NOT fire another notification
+    endTurnCallbackRef.current?.('end_turn');
+    expect(mockShowInformationMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not notify when notifications setting is disabled', async () => {
+    mockConfigGet.mockImplementation((key: string, defaultValue?: unknown) => {
+      if (key === 'notifications') {
+        return false;
+      }
+      if (key === 'dotIndicator') {
+        return true;
+      }
+      return defaultValue;
+    });
+
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(25_000);
+    endTurnCallbackRef.current?.('end_turn');
+
+    // Dot should still appear
+    expect(mockPanel.iconPath).toEqual(
+      expect.objectContaining({
+        fsPath: expect.stringContaining('icon-orange.png'),
+      }),
+    );
+    // But no notification
+    expect(mockShowInformationMessage).not.toHaveBeenCalled();
+  });
+
+  it('cancellation resets agentStartTime so the next short task does not trigger phantom notification', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    const { messageHandler } = await setupAttachedProvider({
+      captureMessageHandler: true,
+    });
+
+    // Start a task
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(30_000);
+
+    // User sends a new message (resets timer)
+    await messageHandler?.({ type: 'sendMessage', data: { text: 'hello' } });
+
+    // Short task starts and completes quickly
+    streamChunkCallbackRef.current?.('chunk2');
+    vi.advanceTimersByTime(2_000);
+    endTurnCallbackRef.current?.('end_turn');
+
+    // Should NOT send notification (only 2s)
+    expect(mockShowInformationMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not show dot when dotIndicator setting is disabled', async () => {
+    mockConfigGet.mockImplementation((key: string, defaultValue?: unknown) => {
+      if (key === 'dotIndicator') {
+        return false;
+      }
+      if (key === 'notifications') {
+        return true;
+      }
+      return defaultValue;
+    });
+
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(25_000);
+    endTurnCallbackRef.current?.('end_turn');
+
+    // Dot should NOT appear (setting disabled)
+    expect(mockPanel.iconPath).toBeUndefined();
+    // But notification should still fire
+    expect(mockShowInformationMessage).toHaveBeenCalled();
+  });
+
+  it('notifies when VS Code is focused but panel is not visible', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = true; // VS Code focused
+
+    await setupAttachedProvider();
+
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(25_000);
+    endTurnCallbackRef.current?.('end_turn');
+
+    // User is in VS Code but not looking at the panel — should notify
+    expect(mockShowInformationMessage).toHaveBeenCalledWith(
+      'Qwen Code: Waiting for your input.',
+      'Show',
+    );
+  });
+
+  it('notifies when VS Code is not focused but panel is visible', async () => {
+    const mockPanel = {
+      active: false,
+      visible: true,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false; // VS Code not focused
+
+    await setupAttachedProvider();
+
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(25_000);
+    endTurnCallbackRef.current?.('end_turn');
+
+    // User left VS Code — should notify even though panel is visible
+    expect(mockShowInformationMessage).toHaveBeenCalledWith(
+      'Qwen Code: Waiting for your input.',
+      'Show',
+    );
+  });
+
+  it('shows blue dot and notification for askUserQuestion when panel is not active', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    // Trigger askUserQuestion — don't await, it blocks on user response
+    void askUserQuestionCallbackRef.current?.({
+      questions: [{ question: 'Which option?' }],
+    });
+
+    // Blue dot
+    expect(mockPanel.iconPath).toEqual(
+      expect.objectContaining({
+        fsPath: expect.stringContaining('icon-blue.png'),
+      }),
+    );
+
+    // Notification without tool name (generic message)
+    expect(mockShowInformationMessage).toHaveBeenCalledWith(
+      'Qwen Code: Waiting for your input.',
+      'Show',
+    );
   });
 });

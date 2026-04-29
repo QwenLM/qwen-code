@@ -246,6 +246,35 @@ describe('useSlashCompletion', () => {
       });
     });
 
+    it('should keep argumentHint out of command suggestion labels', async () => {
+      const slashCommands = [
+        createTestCommand({
+          name: 'fix-issue',
+          description: 'Fix GitHub issue',
+          argumentHint: '[issue-number]',
+        }),
+      ];
+      const { result } = renderHook(() =>
+        useTestHarnessForSlashCompletion(
+          true,
+          '/fix',
+          slashCommands,
+          mockCommandContext,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions).toEqual([
+          {
+            label: 'fix-issue',
+            value: 'fix-issue',
+            description: 'Fix GitHub issue',
+            commandKind: CommandKind.BUILT_IN,
+          },
+        ]);
+      });
+    });
+
     it('should prefer higher completionPriority when match quality ties', async () => {
       const slashCommands = [
         createTestCommand({

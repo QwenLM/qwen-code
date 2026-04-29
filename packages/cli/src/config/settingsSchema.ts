@@ -924,6 +924,17 @@ const SETTINGS_SCHEMA = {
             parentKey: 'generationConfig',
             showInDialog: false,
           },
+          splitToolMedia: {
+            type: 'boolean',
+            label: 'Split Tool Result Media',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: false,
+            description:
+              'When true, media (images / audio / video / files) returned by MCP tool calls is split into a follow-up user message instead of being embedded in the tool message. Required for strict OpenAI-compatible servers (e.g., LM Studio) that reject non-text content on `role: "tool"` messages with HTTP 400 "Invalid \'messages\' in payload". Default false preserves the prior behavior for permissive providers. See QwenLM/qwen-code#3616.',
+            parentKey: 'generationConfig',
+            showInDialog: false,
+          },
           schemaCompliance: {
             type: 'enum',
             label: 'Tool Schema Compliance',
@@ -1012,16 +1023,6 @@ const SETTINGS_SCHEMA = {
           'Settings for clearing stale context after idle periods. Use -1 to disable a threshold.',
         showInDialog: false,
         properties: {
-          thinkingThresholdMinutes: {
-            type: 'number',
-            label: 'Thinking Idle Threshold (minutes)',
-            category: 'Context',
-            requiresRestart: false,
-            default: 5 as number,
-            description:
-              'Minutes of inactivity before clearing old thinking blocks. Use -1 to disable.',
-            showInDialog: false,
-          },
           toolResultsThresholdMinutes: {
             type: 'number',
             label: 'Tool Results Idle Threshold (minutes)',
@@ -1600,37 +1601,9 @@ const SETTINGS_SCHEMA = {
           'Config files remain at ~/.qwen. Env var QWEN_RUNTIME_DIR takes priority.',
         showInDialog: false,
       },
-      tavilyApiKey: {
-        type: 'string',
-        label: 'Tavily API Key (Deprecated)',
-        category: 'Advanced',
-        requiresRestart: false,
-        default: undefined as string | undefined,
-        description:
-          '⚠️ DEPRECATED: Please use webSearch.provider configuration instead. Legacy API key for the Tavily API.',
-        showInDialog: false,
-      },
     },
   },
 
-  webSearch: {
-    type: 'object',
-    label: 'Web Search',
-    category: 'Advanced',
-    requiresRestart: true,
-    default: undefined as
-      | {
-          provider: Array<{
-            type: 'tavily' | 'google' | 'dashscope';
-            apiKey?: string;
-            searchEngineId?: string;
-          }>;
-          default: string;
-        }
-      | undefined,
-    description: 'Configuration for web search providers.',
-    showInDialog: false,
-  },
   agents: {
     type: 'object',
     label: 'Agents',
@@ -1908,6 +1881,16 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'Enable in-session cron/loop tools (experimental). When enabled, the model can create recurring prompts using cron_create, cron_list, and cron_delete tools. Can also be enabled via QWEN_CODE_ENABLE_CRON=1 environment variable.',
+        showInDialog: true,
+      },
+      emitToolUseSummaries: {
+        type: 'boolean',
+        label: 'Tool Use Summaries',
+        category: 'Experimental',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Generate a short LLM-based label after each tool batch completes. In compact mode the label replaces the generic `Tool × N` header; in full mode it appears as a dim `● <label>` line below the tool group. Requires a fast model to be configured; runs in parallel with the next API call so latency is hidden. Currently affects interactive CLI rendering only — SDK / non-interactive emission of the `tool_use_summary` message is not yet wired (the message factory is exported for a follow-up PR). Can be overridden with QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0 or =1.',
         showInDialog: true,
       },
     },

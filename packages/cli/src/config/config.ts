@@ -31,6 +31,7 @@ import {
   isBareMode,
   isToolEnabled,
   type ConfigParameters,
+  type MCPServerConfig,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -46,6 +47,7 @@ import { hideBin } from 'yargs/helpers';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
+import stripJsonComments from 'strip-json-comments';
 
 import { resolvePath } from '../utils/resolvePath.js';
 import { getCliVersion } from '../utils/version.js';
@@ -68,7 +70,6 @@ export function isValidSessionId(value: string): boolean {
 }
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
-import { buildWebSearchConfig } from './webSearch.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 const debugLogger = createDebugLogger('CONFIG');
@@ -127,6 +128,7 @@ export interface CliArgs {
   telemetryLogPrompts: boolean | undefined;
   telemetryOutfile: string | undefined;
   allowedMcpServerNames: string[] | undefined;
+  mcpConfig: string | undefined;
   allowedTools: string[] | undefined;
   acp: boolean | undefined;
   experimentalAcp: boolean | undefined;
@@ -139,10 +141,6 @@ export interface CliArgs {
   openaiLoggingDir: string | undefined;
   proxy: string | undefined;
   includeDirectories: string[] | undefined;
-  tavilyApiKey: string | undefined;
-  googleApiKey: string | undefined;
-  googleSearchEngineId: string | undefined;
-  webSearchDefault: string | undefined;
   screenReader: boolean | undefined;
   inputFormat?: string | undefined;
   outputFormat: string | undefined;
@@ -379,6 +377,11 @@ export async function parseArguments(): Promise<CliArgs> {
               mcpServerName.split(',').map((m) => m.trim()),
             ),
         })
+        .option('mcp-config', {
+          type: 'string',
+          description:
+            'MCP server configuration as JSON string or file path. Can be a path to a JSON file or inline JSON with {"mcpServers": {...}} format.',
+        })
         .option('allowed-tools', {
           type: 'array',
           string: true,
@@ -431,23 +434,6 @@ export async function parseArguments(): Promise<CliArgs> {
         .option('openai-base-url', {
           type: 'string',
           description: 'OpenAI base URL (for custom endpoints)',
-        })
-        .option('tavily-api-key', {
-          type: 'string',
-          description: 'Tavily API key for web search',
-        })
-        .option('google-api-key', {
-          type: 'string',
-          description: 'Google Custom Search API key',
-        })
-        .option('google-search-engine-id', {
-          type: 'string',
-          description: 'Google Custom Search Engine ID',
-        })
-        .option('web-search-default', {
-          type: 'string',
-          description:
-            'Default web search provider (dashscope, tavily, google)',
         })
         .option('screen-reader', {
           type: 'boolean',
@@ -739,6 +725,84 @@ export function isDebugMode(argv: CliArgs): boolean {
       (v) => v === 'true' || v === '1',
     )
   );
+}
+
+/**
+ * Validates that the provided config is a valid MCP server configuration object.
+ */
+function validateMcpServerConfig(
+  config: unknown,
+): config is Record<string, MCPServerConfig> {
+  if (typeof config !== 'object' || config === null || Array.isArray(config)) {
+    return false;
+  }
+
+  // Basic validation - each entry should be an object
+  return Object.values(config).every(
+    (server) => typeof server === 'object' && server !== null,
+  );
+}
+
+/**
+ * Parses MCP configuration from command-line argument.
+ * Supports both file paths and inline JSON strings.
+ * Handles both {"mcpServers": {...}} and direct {...} formats.
+ *
+ * @param mcpConfigArg - The --mcp-config value (file path or JSON string)
+ * @returns Record of MCP server configurations, or null if no config provided
+ * @throws FatalConfigError if the configuration is invalid
+ */
+function parseMcpConfig(
+  mcpConfigArg: string | undefined,
+): Record<string, MCPServerConfig> | null {
+  if (!mcpConfigArg) {
+    return null;
+  }
+
+  try {
+    let parsed: unknown;
+
+    // Check if it's a file path
+    if (fs.existsSync(mcpConfigArg)) {
+      debugLogger.debug(`Reading MCP config from file: ${mcpConfigArg}`);
+      const content = fs.readFileSync(mcpConfigArg, 'utf-8');
+      parsed = JSON.parse(stripJsonComments(content));
+    } else {
+      // Try parsing as JSON string
+      debugLogger.debug('Parsing MCP config as JSON string');
+      parsed = JSON.parse(mcpConfigArg);
+    }
+
+    // Handle both {"mcpServers": {...}} and direct {...} formats
+    let servers: unknown;
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      'mcpServers' in parsed &&
+      typeof (parsed as { mcpServers: unknown }).mcpServers === 'object'
+    ) {
+      servers = (parsed as { mcpServers: unknown }).mcpServers;
+    } else {
+      servers = parsed;
+    }
+
+    // Validate the structure
+    if (!validateMcpServerConfig(servers)) {
+      throw new Error(
+        'Invalid MCP server configuration format. Expected an object with server names as keys.',
+      );
+    }
+
+    debugLogger.debug(
+      `Loaded ${Object.keys(servers).length} MCP server(s) from --mcp-config`,
+    );
+    return servers as Record<string, MCPServerConfig>;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    throw new FatalConfigError(
+      `Invalid MCP configuration provided via --mcp-config: ${errorMessage}`,
+    );
+  }
 }
 
 export async function loadCliConfig(
@@ -1157,7 +1221,13 @@ export async function loadCliConfig(
       : settings.tools?.discoveryCommand,
     toolCallCommand: bareMode ? undefined : settings.tools?.callCommand,
     mcpServerCommand: bareMode ? undefined : settings.mcp?.serverCommand,
-    mcpServers: bareMode ? {} : settings.mcpServers || {},
+    mcpServers: bareMode
+      ? {}
+      : (() => {
+          const base = settings.mcpServers || {};
+          const cliMcpServers = parseMcpConfig(argv.mcpConfig);
+          return cliMcpServers ? { ...base, ...cliMcpServers } : base;
+        })(),
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
       : undefined,
@@ -1191,6 +1261,7 @@ export async function loadCliConfig(
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     cronEnabled: settings.experimental?.cron ?? false,
+    emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
     overrideExtensions: overrideExtensions || argv.extensions,
     noBrowser: !!process.env['NO_BROWSER'],
@@ -1207,9 +1278,6 @@ export async function loadCliConfig(
       ? []
       : (settings.security?.allowedHttpHookUrls ?? []),
     cliVersion: await getCliVersion(),
-    webSearch: bareMode
-      ? undefined
-      : buildWebSearchConfig(argv, settings, selectedAuthType),
     ideMode,
     chatCompression: settings.model?.chatCompression,
     folderTrust,

@@ -18,6 +18,7 @@ import { ToolErrorType } from '../tools/tool-error.js';
 import { BINARY_EXTENSIONS } from './ignorePatterns.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
+import { isNodeError } from './errors.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
 import { extractPDFText, parsePDFPageRange } from './pdf.js';
@@ -581,17 +582,24 @@ export async function processSingleFileContent(
 ): Promise<ProcessedFileReadResult> {
   const rootDirectory = config.getTargetDir();
   try {
-    if (!fs.existsSync(filePath)) {
-      // Sync check is acceptable before async read
-      return {
-        llmContent:
-          'Could not read file because no file was found at the specified path.',
-        returnDisplay: 'File not found.',
-        error: `File not found: ${filePath}`,
-        errorType: ToolErrorType.FILE_NOT_FOUND,
-      };
+    let stats: import('node:fs').Stats;
+    try {
+      // Async stat doubles as the existence check — ENOENT is handled below
+      // and surfaces the same FILE_NOT_FOUND error type as the old explicit
+      // existsSync gate, with one fewer sync syscall on the hot path.
+      stats = await fs.promises.stat(filePath);
+    } catch (error: unknown) {
+      if (isNodeError(error) && error.code === 'ENOENT') {
+        return {
+          llmContent:
+            'Could not read file because no file was found at the specified path.',
+          returnDisplay: 'File not found.',
+          error: `File not found: ${filePath}`,
+          errorType: ToolErrorType.FILE_NOT_FOUND,
+        };
+      }
+      throw error;
     }
-    const stats = await fs.promises.stat(filePath);
     if (stats.isDirectory()) {
       return {
         llmContent:

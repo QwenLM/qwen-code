@@ -26,6 +26,16 @@ package-lock.json
 .qoder
 .claude
 CLAUDE.md
+.codex
+
+# Qwen Code Configs
+.qwen/*
+!.qwen/commands/
+!.qwen/commands/**
+!.qwen/skills/
+!.qwen/skills/**
+!.qwen/agents/
+!.qwen/agents/**
 
 # OS metadata
 .DS_Store
@@ -53,15 +63,6 @@ packages/web-templates/src/generated/
 .integration-tests/
 packages/vscode-ide-companion/*.vsix
 
-# Qwen Code Configs
-
-.qwen/*
-!.qwen/commands/
-!.qwen/commands/**
-!.qwen/skills/
-!.qwen/skills/**
-!.qwen/agents/
-!.qwen/agents/**
 logs/
 # GHA credentials
 gha-creds-*.json
@@ -88,3 +89,4 @@ storybook-static
 
 # Dev symlink: qc-helper bundled skill docs (created by scripts/dev.js)
 packages/core/src/skills/bundled/qc-helper/docs
+tmp/

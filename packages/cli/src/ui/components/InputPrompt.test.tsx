@@ -169,6 +169,7 @@ describe('InputPrompt', () => {
       navigateUp: vi.fn(),
       navigateDown: vi.fn(),
       handleSubmit: vi.fn(),
+      resetHistoryNav: vi.fn(),
     };
     mockedUseInputHistory.mockReturnValue(mockInputHistory);
 
@@ -224,23 +225,6 @@ describe('InputPrompt', () => {
       stdin.write('\x1b[Z'); // shift+tab
       await wait();
 
-      expect(mockBuffer.insert).not.toHaveBeenCalled();
-      unmount();
-    });
-
-    it('accepts and submits the prompt suggestion on Enter when the buffer is empty', async () => {
-      const { stdin, unmount } = renderWithProviders(
-        <InputPrompt {...props} promptSuggestion="commit this" />,
-      );
-      await wait(350);
-
-      stdin.write('\r');
-      await wait();
-
-      expect(props.onSubmit).toHaveBeenCalledWith('commit this');
-      // Enter path must NOT call buffer.insert — it passes text directly to
-      // handleSubmitAndClear. Calling insert would re-fill the buffer after
-      // it was already cleared (the microtask race bug).
       expect(mockBuffer.insert).not.toHaveBeenCalled();
       unmount();
     });
@@ -738,6 +722,25 @@ describe('InputPrompt', () => {
     await wait();
 
     expect(props.onSubmit).toHaveBeenCalledWith('/clear');
+    unmount();
+  });
+
+  it('should reset history navigation after submitting on Enter', async () => {
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: false,
+      isPerfectMatch: false,
+    });
+    props.buffer.setText('a prompt from history');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\r');
+    await wait();
+
+    expect(props.onSubmit).toHaveBeenCalledWith('a prompt from history');
+    expect(mockInputHistory.resetHistoryNav).toHaveBeenCalled();
     unmount();
   });
 

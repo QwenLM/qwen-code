@@ -36,7 +36,22 @@ function shellTool(
   };
 }
 
-describe('<CompactToolGroupDisplay />', () => {
+function toolCall(
+  overrides: Partial<IndividualToolCallDisplay> = {},
+): IndividualToolCallDisplay {
+  return {
+    callId: 'call-1',
+    name: 'read_file',
+    description: 'Read a.ts',
+    resultDisplay: 'file contents',
+    status: ToolCallStatus.Success,
+    confirmationDetails: undefined,
+    renderOutputAsMarkdown: false,
+    ...overrides,
+  };
+}
+
+describe('<CompactToolGroupDisplay /> — shell timeout plumbing', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
@@ -89,5 +104,78 @@ describe('<CompactToolGroupDisplay />', () => {
     // No timeout in display → legacy 3s-threshold elapsed.
     expect(lastFrame()).toContain('5s');
     expect(lastFrame()).not.toContain('timeout');
+  });
+});
+
+describe('<CompactToolGroupDisplay /> — summary label', () => {
+  it('renders default header (active tool name + count) when no compactLabel is provided', () => {
+    const tools = [
+      toolCall({ callId: 'c1', name: 'read_file' }),
+      toolCall({ callId: 'c2', name: 'read_file' }),
+      toolCall({ callId: 'c3', name: 'grep' }),
+    ];
+    const { lastFrame } = render(
+      <CompactToolGroupDisplay toolCalls={tools} contentWidth={80} />,
+    );
+    const frame = lastFrame()!;
+    // Active tool = last in array when none are executing/confirming.
+    expect(frame).toContain('grep');
+    expect(frame).toContain('× 3');
+  });
+
+  it('replaces header with compactLabel when provided', () => {
+    const tools = [
+      toolCall({ callId: 'c1', name: 'read_file' }),
+      toolCall({ callId: 'c2', name: 'grep' }),
+    ];
+    const { lastFrame } = render(
+      <CompactToolGroupDisplay
+        toolCalls={tools}
+        contentWidth={80}
+        compactLabel="Searched in auth/"
+      />,
+    );
+    const frame = lastFrame()!;
+    expect(frame).toContain('Searched in auth/');
+    expect(frame).toContain('2 tools');
+    // The raw tool name should not appear as the primary header when a
+    // summary is shown.
+    expect(frame).not.toContain('read_file × 2');
+  });
+
+  it('shows tool count suffix only when multiple tools are present', () => {
+    const tools = [toolCall({ callId: 'c1', name: 'read_file' })];
+    const { lastFrame } = render(
+      <CompactToolGroupDisplay
+        toolCalls={tools}
+        contentWidth={80}
+        compactLabel="Read config.json"
+      />,
+    );
+    const frame = lastFrame()!;
+    expect(frame).toContain('Read config.json');
+    expect(frame).not.toContain('tools');
+  });
+
+  it('renders nothing for empty tool calls', () => {
+    const { lastFrame } = render(
+      <CompactToolGroupDisplay toolCalls={[]} contentWidth={80} />,
+    );
+    expect(lastFrame()).toBe('');
+  });
+
+  it('preserves default rendering for shell commands without label', () => {
+    const tools = [
+      toolCall({
+        callId: 'c1',
+        name: 'Bash',
+        description: 'ls -la',
+      }),
+    ];
+    const { lastFrame } = render(
+      <CompactToolGroupDisplay toolCalls={tools} contentWidth={80} />,
+    );
+    expect(lastFrame()).toContain('Bash');
+    expect(lastFrame()).toContain('ls -la');
   });
 });

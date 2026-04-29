@@ -20,7 +20,8 @@ import {
 } from './provider/index.js';
 
 export { OpenAIContentGenerator } from './openaiContentGenerator.js';
-export { ContentGenerationPipeline, type PipelineConfig } from './pipeline.js';
+export { ContentGenerationPipeline } from './pipeline.js';
+export type { ErrorHandler, PipelineConfig, RequestContext } from './types.js';
 
 export {
   type OpenAICompatibleProvider,
@@ -91,4 +92,4 @@ export function determineProvider(
   return new DefaultOpenAICompatibleProvider(contentGeneratorConfig, cliConfig);
 }
 
-export { type ErrorHandler, EnhancedErrorHandler } from './errorHandler.js';
+export { EnhancedErrorHandler } from './errorHandler.js';

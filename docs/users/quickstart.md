@@ -223,6 +223,7 @@ Here are the most important commands for daily use:
 | `qwen`                | start Qwen Code                                  | `qwen`                        |
 | `/auth`               | Change authentication method (in session)        | `/auth`                       |
 | `qwen auth`           | Configure authentication from the terminal       | `qwen auth`                   |
+| `qwen auth api-key`   | Configure API key authentication                 | `qwen auth api-key`           |
 | `qwen auth status`    | Check current authentication status              | `qwen auth status`            |
 | `/help`               | Display help information for available commands  | `/help` or `/?`               |
 | `/compress`           | Replace chat history with summary to save Tokens | `/compress`                   |

@@ -39,6 +39,53 @@ import {
   DASHSCOPE_STANDARD_API_KEY_ENV_KEY,
   type AlibabaStandardRegion,
 } from '../../constants/alibabaStandardApiKey.js';
+import {
+  applyOpenRouterModelsConfiguration,
+  createOpenRouterOAuthSession,
+  OPENROUTER_OAUTH_CALLBACK_URL,
+  runOpenRouterOAuthLogin,
+} from '../../commands/auth/openrouterOAuth.js';
+
+/**
+ * Generate a Qwen-managed env key from protocol and base URL.
+ * Format: QWEN_CUSTOM_API_KEY_${PROTOCOL}_${NORMALIZED_BASE_URL}
+ */
+export function generateCustomApiKeyEnvKey(
+  protocol: string,
+  baseUrl: string,
+): string {
+  const normalize = (value: string) =>
+    value
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_+|_+$/g, '');
+
+  return `QWEN_CUSTOM_API_KEY_${normalize(protocol)}_${normalize(baseUrl)}`;
+}
+
+/**
+ * Normalize model IDs: split by comma, trim, deduplicate, remove empty.
+ */
+export function normalizeCustomModelIds(modelIdsInput: string): string[] {
+  return modelIdsInput
+    .split(',')
+    .map((id) => id.trim())
+    .filter((id, index, array) => id.length > 0 && array.indexOf(id) === index);
+}
+
+/**
+ * Mask an API key for display: show first 3 and last 4 chars.
+ */
+export function maskApiKey(apiKey: string): string {
+  const trimmed = apiKey.trim();
+  if (trimmed.length === 0) return '(not set)';
+  if (trimmed.length <= 6) return '***';
+  const head = trimmed.slice(0, 3);
+  const tail = trimmed.slice(-4);
+  return `${head}...${tail}`;
+}
 
 export type { QwenAuthState } from '../hooks/useQwenAuth.js';
 
@@ -61,6 +108,13 @@ export const useAuthCommand = (
   const [pendingAuthType, setPendingAuthType] = useState<AuthType | undefined>(
     undefined,
   );
+  const [externalAuthState, setExternalAuthState] = useState<{
+    title: string;
+    message: string;
+    detail?: string;
+  } | null>(null);
+  const [openRouterAuthAbortController, setOpenRouterAuthAbortController] =
+    useState<AbortController | null>(null);
 
   const { qwenAuthState, cancelQwenAuth } = useQwenAuth(
     pendingAuthType,
@@ -81,6 +135,7 @@ export const useAuthCommand = (
   const handleAuthFailure = useCallback(
     (error: unknown) => {
       setIsAuthenticating(false);
+      setExternalAuthState(null);
       const errorMessage = t('Failed to authenticate. Message: {{message}}', {
         message: getErrorMessage(error),
       });
@@ -276,6 +331,11 @@ export const useAuthCommand = (
       cancelQwenAuth();
     }
 
+    if (isAuthenticating && pendingAuthType === AuthType.USE_OPENAI) {
+      openRouterAuthAbortController?.abort();
+      setOpenRouterAuthAbortController(null);
+    }
+
     // Log authentication cancellation
     if (isAuthenticating && pendingAuthType) {
       const authEvent = new AuthEvent(pendingAuthType, 'manual', 'cancelled');
@@ -284,9 +344,16 @@ export const useAuthCommand = (
 
     // Do not reset pendingAuthType here, persist the previously selected type.
     setIsAuthenticating(false);
+    setExternalAuthState(null);
     setIsAuthDialogOpen(true);
     setAuthError(null);
-  }, [isAuthenticating, pendingAuthType, cancelQwenAuth, config]);
+  }, [
+    isAuthenticating,
+    pendingAuthType,
+    cancelQwenAuth,
+    config,
+    openRouterAuthAbortController,
+  ]);
 
   /**
    * Handle coding plan submission - generates configs from template and stores api-key
@@ -552,6 +619,284 @@ export const useAuthCommand = (
     [settings, config, handleAuthFailure, addItem, onAuthChange],
   );
 
+  const handleOpenRouterSubmit = useCallback(async () => {
+    try {
+      setPendingAuthType(AuthType.USE_OPENAI);
+      setIsAuthenticating(true);
+      setAuthError(null);
+      setIsAuthDialogOpen(false);
+
+      const oauthSession = createOpenRouterOAuthSession(
+        OPENROUTER_OAUTH_CALLBACK_URL,
+      );
+      setExternalAuthState({
+        title: t('OpenRouter Authentication'),
+        message: t(
+          'Open the authorization page if your browser does not launch automatically.',
+        ),
+        detail: oauthSession.authorizationUrl,
+      });
+
+      const abortController = new AbortController();
+      setOpenRouterAuthAbortController(abortController);
+      const oauthResult = await runOpenRouterOAuthLogin(
+        OPENROUTER_OAUTH_CALLBACK_URL,
+        {
+          abortSignal: abortController.signal,
+          session: oauthSession,
+        },
+      );
+      setOpenRouterAuthAbortController(null);
+      setExternalAuthState({
+        title: t('OpenRouter Authentication'),
+        message: t('Finalizing OpenRouter setup...'),
+        detail: t(
+          'Syncing OpenRouter models and updating your local configuration.',
+        ),
+      });
+      const selectedKey = oauthResult.apiKey;
+      if (!selectedKey) {
+        throw new Error(
+          t('OpenRouter authentication completed without an API key.'),
+        );
+      }
+
+      const persistScope = getPersistScopeForModelSelection(settings);
+      const settingsFile = settings.forScope(persistScope);
+      backupSettingsFile(settingsFile.path);
+
+      await applyOpenRouterModelsConfiguration({
+        settings,
+        config,
+        apiKey: selectedKey,
+        reloadConfig: true,
+      });
+      await config.refreshAuth(AuthType.USE_OPENAI);
+
+      setAuthError(null);
+      setExternalAuthState(null);
+      setAuthState(AuthState.Authenticated);
+      setPendingAuthType(undefined);
+      setIsAuthDialogOpen(false);
+      setIsAuthenticating(false);
+      onAuthChange?.();
+
+      addItem(
+        {
+          type: MessageType.INFO,
+          text: t('Successfully configured OpenRouter.'),
+        },
+        Date.now(),
+      );
+
+      addItem(
+        {
+          type: MessageType.INFO,
+          text: t('Use /model to switch models.'),
+        },
+        Date.now(),
+      );
+
+      addItem(
+        {
+          type: MessageType.INFO,
+          text: t(
+            'Want more OpenRouter models? Use /manage-models to browse and enable them.',
+          ),
+        },
+        Date.now(),
+      );
+
+      const authEvent = new AuthEvent(AuthType.USE_OPENAI, 'manual', 'success');
+      logAuth(config, authEvent);
+    } catch (error) {
+      setOpenRouterAuthAbortController(null);
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        setExternalAuthState(null);
+        setPendingAuthType(undefined);
+        setIsAuthenticating(false);
+        setIsAuthDialogOpen(true);
+        return;
+      }
+      handleAuthFailure(error);
+    }
+  }, [
+    settings,
+    config,
+    handleAuthFailure,
+    addItem,
+    onAuthChange,
+    setOpenRouterAuthAbortController,
+  ]);
+
+  /**
+   * Handle custom API key setup wizard submission.
+   * Persists key to env[generatedEnvKey] and creates modelProviders entries.
+   */
+  const handleCustomApiKeySubmit = useCallback(
+    async (
+      protocol:
+        | AuthType.USE_OPENAI
+        | AuthType.USE_ANTHROPIC
+        | AuthType.USE_GEMINI,
+      baseUrl: string,
+      apiKey: string,
+      modelIdsInput: string,
+      generationConfig?: {
+        enableThinking?: boolean;
+        multimodal?: {
+          image?: boolean;
+          video?: boolean;
+          audio?: boolean;
+        };
+        maxTokens?: number;
+      },
+    ) => {
+      try {
+        setIsAuthenticating(true);
+        setAuthError(null);
+
+        const trimmedApiKey = apiKey.trim();
+        const trimmedBaseUrl = baseUrl.trim();
+        const modelIds = normalizeCustomModelIds(modelIdsInput);
+
+        if (!trimmedApiKey) {
+          throw new Error(t('API key cannot be empty.'));
+        }
+        if (!trimmedBaseUrl) {
+          throw new Error(t('Base URL cannot be empty.'));
+        }
+        if (!/^https?:\/\//i.test(trimmedBaseUrl)) {
+          throw new Error(t('Base URL must start with http:// or https://.'));
+        }
+        if (modelIds.length === 0) {
+          throw new Error(t('Model IDs cannot be empty.'));
+        }
+
+        const generatedEnvKey = generateCustomApiKeyEnvKey(
+          protocol,
+          trimmedBaseUrl,
+        );
+        const persistScope = getPersistScopeForModelSelection(settings);
+
+        const settingsFile = settings.forScope(persistScope);
+        backupSettingsFile(settingsFile.path);
+
+        // Persist API key to env
+        settings.setValue(
+          persistScope,
+          `env.${generatedEnvKey}`,
+          trimmedApiKey,
+        );
+        process.env[generatedEnvKey] = trimmedApiKey;
+
+        // Build generationConfig if any option is set
+        let genConfig: ProviderModelConfig['generationConfig'] | undefined;
+        if (generationConfig) {
+          const hasThinking = generationConfig.enableThinking === true;
+          const hasMultimodal =
+            generationConfig.multimodal &&
+            (generationConfig.multimodal.image === true ||
+              generationConfig.multimodal.video === true ||
+              generationConfig.multimodal.audio === true);
+          const hasMaxTokens =
+            generationConfig.maxTokens !== undefined &&
+            generationConfig.maxTokens > 0;
+
+          if (hasThinking || hasMultimodal || hasMaxTokens) {
+            genConfig = {};
+            if (hasMultimodal) {
+              genConfig.modalities = {
+                image: generationConfig.multimodal!.image ?? false,
+                video: generationConfig.multimodal!.video ?? false,
+                audio: generationConfig.multimodal!.audio ?? false,
+              };
+            }
+            if (hasThinking) {
+              genConfig.extra_body = { enable_thinking: true };
+            }
+            if (hasMaxTokens) {
+              genConfig.samplingParams = {
+                max_tokens: generationConfig.maxTokens,
+              };
+            }
+          }
+        }
+
+        // Build new model configs
+        const newConfigs: ProviderModelConfig[] = modelIds.map((modelId) => ({
+          id: modelId,
+          name: modelId,
+          baseUrl: trimmedBaseUrl,
+          envKey: generatedEnvKey,
+          ...(genConfig ? { generationConfig: genConfig } : {}),
+        }));
+
+        // Merge with existing configs: replace same generatedEnvKey, preserve rest
+        const existingConfigs =
+          (
+            settings.merged.modelProviders as ModelProvidersConfig | undefined
+          )?.[protocol] || [];
+
+        const preservedConfigs = existingConfigs.filter(
+          (existing) => existing.envKey !== generatedEnvKey,
+        );
+
+        const updatedConfigs = [...newConfigs, ...preservedConfigs];
+
+        // Persist modelProviders, security, model
+        settings.setValue(
+          persistScope,
+          `modelProviders.${protocol}`,
+          updatedConfigs,
+        );
+        settings.setValue(persistScope, 'security.auth.selectedType', protocol);
+        settings.setValue(persistScope, 'model.name', modelIds[0]);
+
+        // Hot-reload before refreshAuth
+        const updatedModelProviders: ModelProvidersConfig = {
+          ...(settings.merged.modelProviders as
+            | ModelProvidersConfig
+            | undefined),
+          [protocol]: updatedConfigs,
+        };
+        config.reloadModelProvidersConfig(updatedModelProviders);
+        await config.refreshAuth(protocol);
+
+        setAuthError(null);
+        setAuthState(AuthState.Authenticated);
+        setPendingAuthType(undefined);
+        setIsAuthDialogOpen(false);
+        setIsAuthenticating(false);
+        onAuthChange?.();
+
+        addItem(
+          {
+            type: MessageType.INFO,
+            text: t(
+              'Custom API Key authenticated successfully. Settings updated with generated env key and model provider config.',
+            ),
+          },
+          Date.now(),
+        );
+
+        addItem(
+          {
+            type: MessageType.INFO,
+            text: t('Tip: Use /model to switch between configured models.'),
+          },
+          Date.now(),
+        );
+
+        const authEvent = new AuthEvent(protocol, 'manual', 'success');
+        logAuth(config, authEvent);
+      } catch (error) {
+        handleAuthFailure(error);
+      }
+    },
+    [settings, config, handleAuthFailure, addItem, onAuthChange],
+  );
+
   /**
    /**
     * We previously used a useEffect to trigger authentication automatically when
@@ -600,10 +945,13 @@ export const useAuthCommand = (
     isAuthDialogOpen,
     isAuthenticating,
     pendingAuthType,
+    externalAuthState,
     qwenAuthState,
     handleAuthSelect,
     handleCodingPlanSubmit,
     handleAlibabaStandardSubmit,
+    handleOpenRouterSubmit,
+    handleCustomApiKeySubmit,
     openAuthDialog,
     cancelAuthentication,
   };

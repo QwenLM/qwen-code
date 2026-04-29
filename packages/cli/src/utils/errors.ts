@@ -14,6 +14,7 @@ import {
   ToolErrorType,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
+import { runExitCleanup } from './cleanup.js';
 import { writeStderrLine } from './stdioHelpers.js';
 
 const debugLogger = createDebugLogger('CLI_ERRORS');
@@ -82,15 +83,44 @@ function getNumericExitCode(errorCode: string | number): number {
 }
 
 /**
+ * Drains pending cleanup before terminating. Routing every "we're about
+ * to die" path through here keeps async exit-side I/O (chat-recording
+ * flush, telemetry shutdown, MCP disconnect) from being skipped — the
+ * earlier sync writes were inherently bounded so a bare `process.exit`
+ * was safe; with the async-jsonl change it is not.
+ */
+// Guards against double-entry when two terminating paths race (e.g. SIGINT
+// fires `handleCancellationError` while a stream rejection routes through
+// `handleError`): only the first caller drains cleanup + exits; the second
+// suspends forever in the unresolved promise and gets killed when the first
+// caller's process.exit fires.
+let exiting = false;
+
+async function exitAfterCleanup(code: number): Promise<never> {
+  if (exiting) return new Promise<never>(() => {});
+  exiting = true;
+  await runExitCleanup();
+  // `return` so process.exit's `never` narrows the function's terminating
+  // statement — without it TS reports "function returning 'never' cannot
+  // have a reachable end point" because await doesn't propagate `never`.
+  return process.exit(code);
+}
+
+/** Test-only — reset the exit-once latch between cases. */
+export function _resetExitLatchForTest(): void {
+  exiting = false;
+}
+
+/**
  * Handles errors consistently for both JSON and text output formats.
  * In JSON mode, outputs formatted JSON error and exits.
  * In text mode, outputs error message and re-throws.
  */
-export function handleError(
+export async function handleError(
   error: unknown,
   config: Config,
   customErrorCode?: string | number,
-): never {
+): Promise<never> {
   const errorMessage = parseAndFormatApiError(
     error,
     config.getContentGeneratorConfig()?.authType,
@@ -106,9 +136,12 @@ export function handleError(
     );
 
     writeStderrLine(formattedError);
-    process.exit(getNumericExitCode(errorCode));
+    return exitAfterCleanup(getNumericExitCode(errorCode));
   } else {
     writeStderrLine(errorMessage);
+    // Drain queued writes before re-throwing so the unhandled rejection
+    // path doesn't lose chat-recording records that are still in the queue.
+    await runExitCleanup();
     throw error;
   }
 }
@@ -155,7 +188,7 @@ export function handleToolError(
 /**
  * Handles cancellation/abort signals consistently.
  */
-export function handleCancellationError(config: Config): never {
+export async function handleCancellationError(config: Config): Promise<never> {
   const cancellationError = new FatalCancellationError('Operation cancelled.');
 
   if (config.getOutputFormat() === OutputFormat.JSON) {
@@ -166,17 +199,18 @@ export function handleCancellationError(config: Config): never {
     );
 
     writeStderrLine(formattedError);
-    process.exit(cancellationError.exitCode);
   } else {
     writeStderrLine(cancellationError.message);
-    process.exit(cancellationError.exitCode);
   }
+  return exitAfterCleanup(cancellationError.exitCode);
 }
 
 /**
  * Handles max session turns exceeded consistently.
  */
-export function handleMaxTurnsExceededError(config: Config): never {
+export async function handleMaxTurnsExceededError(
+  config: Config,
+): Promise<never> {
   const maxTurnsError = new FatalTurnLimitedError(
     'Reached max session turns for this session. Increase the number of turns by specifying maxSessionTurns in settings.json.',
   );
@@ -189,9 +223,8 @@ export function handleMaxTurnsExceededError(config: Config): never {
     );
 
     writeStderrLine(formattedError);
-    process.exit(maxTurnsError.exitCode);
   } else {
     writeStderrLine(maxTurnsError.message);
-    process.exit(maxTurnsError.exitCode);
   }
+  return exitAfterCleanup(maxTurnsError.exitCode);
 }

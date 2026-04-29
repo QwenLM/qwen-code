@@ -12,6 +12,7 @@ import { theme } from '../semantic-colors.js';
 import { shortAsciiLogo } from './AsciiArt.js';
 import { getAsciiArtWidth, getCachedStringWidth } from '../utils/textUtils.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { getRenderableGradientColors } from '../utils/gradientUtils.js';
 
 /**
  * Auth display type for the Header component.
@@ -98,12 +99,11 @@ export const Header: React.FC<HeaderProps> = ({
         ? shortenedPath.slice(0, maxPathLength)
         : shortenedPath;
 
-  // Use theme gradient colors if available, otherwise use text colors (excluding primary)
-  const gradientColors = theme.ui.gradient || [
+  const gradientColors = getRenderableGradientColors(theme.ui.gradient, [
     theme.text.secondary,
     theme.text.link,
     theme.text.accent,
-  ];
+  ]);
 
   return (
     <Box
@@ -116,9 +116,13 @@ export const Header: React.FC<HeaderProps> = ({
       {showLogo && (
         <>
           <Box flexShrink={0}>
-            <Gradient colors={gradientColors}>
+            {gradientColors ? (
+              <Gradient colors={gradientColors}>
+                <Text>{displayLogo}</Text>
+              </Gradient>
+            ) : (
               <Text>{displayLogo}</Text>
-            </Gradient>
+            )}
           </Box>
           {/* Fixed gap between logo and info panel */}
           <Box width={logoGap} />

@@ -352,6 +352,46 @@ describe('QwenSessionUpdateHandler', () => {
     });
   });
 
+  describe('available skills handling', () => {
+    it('reads available skills from available_commands_update metadata', () => {
+      mockCallbacks.onAvailableSkills = vi.fn();
+
+      const commandsUpdate = {
+        sessionId: 'test-session',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+          _meta: {
+            availableSkills: ['code-review-expert', 'verification-pack'],
+          },
+        },
+      } as unknown as SessionNotification;
+
+      handler.handleSessionUpdate(commandsUpdate);
+
+      expect(mockCallbacks.onAvailableSkills).toHaveBeenCalledWith([
+        'code-review-expert',
+        'verification-pack',
+      ]);
+    });
+
+    it('clears available skills when metadata is absent', () => {
+      mockCallbacks.onAvailableSkills = vi.fn();
+
+      const commandsUpdate = {
+        sessionId: 'test-session',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+        },
+      } as unknown as SessionNotification;
+
+      handler.handleSessionUpdate(commandsUpdate);
+
+      expect(mockCallbacks.onAvailableSkills).toHaveBeenCalledWith([]);
+    });
+  });
+
   describe('updateCallbacks', () => {
     it('updates mode callback and uses new one', () => {
       const newOnModeChanged = vi.fn();

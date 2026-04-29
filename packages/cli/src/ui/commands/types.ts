@@ -173,6 +173,7 @@ export interface OpenDialogActionReturn {
     | 'memory'
     | 'model'
     | 'fast-model'
+    | 'manage-models'
     | 'subagent_create'
     | 'subagent_list'
     | 'trust'
@@ -182,7 +183,8 @@ export interface OpenDialogActionReturn {
     | 'delete'
     | 'extensions_manage'
     | 'hooks'
-    | 'mcp';
+    | 'mcp'
+    | 'rewind';
 }
 
 /**

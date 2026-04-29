@@ -39,6 +39,7 @@ import type {
   InputModalities,
 } from '../contentGenerator.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
+import type { RequestContext } from '../openaiContentGenerator/types.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
 import {
   getErrorMessage,
@@ -295,14 +296,14 @@ export class LoggingContentGenerator implements ContentGenerator {
       return undefined;
     }
 
-    const converter = new OpenAIContentConverter(
-      request.model,
-      this.schemaCompliance,
+    const requestContext = this.createLoggingRequestContext(request.model);
+    const messages = OpenAIContentConverter.convertGeminiRequestToOpenAI(
+      request,
+      requestContext,
+      {
+        cleanOrphanToolCalls: false,
+      },
     );
-    converter.setModalities(this.modalities ?? {});
-    const messages = converter.convertGeminiRequestToOpenAI(request, {
-      cleanOrphanToolCalls: false,
-    });
 
     const openaiRequest: OpenAI.Chat.ChatCompletionCreateParams = {
       model: request.model,
@@ -310,9 +311,11 @@ export class LoggingContentGenerator implements ContentGenerator {
     };
 
     if (request.config?.tools) {
-      openaiRequest.tools = await converter.convertGeminiToolsToOpenAI(
-        request.config.tools,
-      );
+      openaiRequest.tools =
+        await OpenAIContentConverter.convertGeminiToolsToOpenAI(
+          request.config.tools,
+          this.schemaCompliance ?? 'auto',
+        );
     }
 
     if (request.config?.temperature !== undefined) {
@@ -332,6 +335,14 @@ export class LoggingContentGenerator implements ContentGenerator {
     }
 
     return openaiRequest;
+  }
+
+  private createLoggingRequestContext(model: string): RequestContext {
+    return {
+      model,
+      modalities: this.modalities ?? {},
+      startTime: 0,
+    };
   }
 
   private async logOpenAIInteraction(
@@ -362,12 +373,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     response: GenerateContentResponse,
     openaiRequest: OpenAI.Chat.ChatCompletionCreateParams,
   ): OpenAI.Chat.ChatCompletion {
-    const converter = new OpenAIContentConverter(
-      openaiRequest.model,
-      this.schemaCompliance,
+    return OpenAIContentConverter.convertGeminiResponseToOpenAI(
+      response,
+      this.createLoggingRequestContext(openaiRequest.model),
     );
-
-    return converter.convertGeminiResponseToOpenAI(response);
   }
 
   private consolidateGeminiResponsesForLogging(

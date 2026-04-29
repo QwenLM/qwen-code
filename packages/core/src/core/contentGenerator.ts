@@ -116,6 +116,15 @@ export type ContentGeneratorConfig = {
   // Supported input modalities. Unsupported media types are replaced with text
   // placeholders. Leave undefined to use automatic detection from model name.
   modalities?: InputModalities;
+  // When true, media parts in MCP tool responses are split into a follow-up
+  // `role: "user"` message instead of being embedded inside the `role: "tool"`
+  // message. The OpenAI Chat Completions spec only permits string / text-part
+  // content on tool messages; strict OpenAI-compatible servers (notably
+  // LM Studio) reject anything else with HTTP 400 "Invalid 'messages' in
+  // payload". Enable this for any provider that strictly validates tool
+  // message content. Default: false (preserves prior behavior for permissive
+  // providers). See QwenLM/qwen-code#3616.
+  splitToolMedia?: boolean;
 };
 
 // Keep the public ContentGeneratorConfigSources API, but reuse the generic

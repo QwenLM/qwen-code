@@ -5,7 +5,7 @@
  */
 
 import { render } from 'ink-testing-library';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { StatsDisplay } from './StatsDisplay.js';
 import * as SessionContext from '../contexts/SessionContext.js';
 import type {
@@ -14,6 +14,7 @@ import type {
   SessionMetrics,
 } from '../contexts/SessionContext.js';
 import { MAIN_SOURCE } from '@qwen-code/qwen-code-core';
+import { DEFAULT_THEME, themeManager } from '../themes/theme-manager.js';
 
 // Wraps a core metrics object as a ModelMetrics with a single `main` source
 // bucket, matching the shape produced by processing an API call with no
@@ -33,6 +34,21 @@ vi.mock('../contexts/SessionContext.js', async (importOriginal) => {
 });
 
 const useSessionStatsMock = vi.mocked(SessionContext.useSessionStats);
+const originalNoColor = process.env['NO_COLOR'];
+
+beforeEach(() => {
+  delete process.env['NO_COLOR'];
+});
+
+afterEach(() => {
+  if (originalNoColor === undefined) {
+    delete process.env['NO_COLOR'];
+  } else {
+    process.env['NO_COLOR'] = originalNoColor;
+  }
+  themeManager.loadCustomThemes({});
+  themeManager.setActiveTheme(DEFAULT_THEME.name);
+});
 
 const renderWithMockedStats = (metrics: SessionMetrics) => {
   useSessionStatsMock.mockReturnValue({
@@ -557,6 +573,36 @@ describe('<StatsDisplay />', () => {
       expect(output).toContain('Agent powering down. Goodbye!');
       expect(output).not.toContain('Session Stats');
       expect(output).toMatchSnapshot();
+    });
+
+    it('renders a custom title as plain text when the theme has too few gradient colors', () => {
+      themeManager.loadCustomThemes({
+        OneColorGradient: {
+          name: 'OneColorGradient',
+          type: 'custom',
+          ui: { gradient: ['red'] },
+        },
+      });
+      themeManager.setActiveTheme('OneColorGradient');
+      useSessionStatsMock.mockReturnValue({
+        stats: {
+          sessionId: 'test-session-id',
+          sessionStartTime: new Date(),
+          metrics: zeroMetrics,
+          lastPromptTokenCount: 0,
+          promptCount: 5,
+        },
+
+        getPromptCount: () => 5,
+        startNewPrompt: vi.fn(),
+      });
+
+      const { lastFrame } = render(
+        <StatsDisplay duration="1s" title="Agent powering down. Goodbye!" />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('Agent powering down. Goodbye!');
+      expect(output).not.toContain('Invalid number of stops');
     });
   });
 });

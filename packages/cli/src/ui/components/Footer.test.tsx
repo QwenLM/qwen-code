@@ -13,6 +13,7 @@ import { type UIState, UIStateContext } from '../contexts/UIStateContext.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { VimModeProvider } from '../contexts/VimModeContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
+import { KeypressProvider } from '../contexts/KeypressContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
 vi.mock('../hooks/useTerminalSize.js');
@@ -78,6 +79,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     contextFileNames: [],
     showToolDescriptions: false,
     ideContextState: undefined,
+    isConfigInitialized: true,
     ...overrides,
   }) as UIState;
 
@@ -96,11 +98,13 @@ const renderWithWidth = (width: number, uiState: UIState) => {
   return render(
     <SettingsContext.Provider value={mockSettings}>
       <ConfigContext.Provider value={createMockConfig() as never}>
-        <VimModeProvider settings={mockSettings}>
-          <UIStateContext.Provider value={uiState}>
-            <Footer />
-          </UIStateContext.Provider>
-        </VimModeProvider>
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <VimModeProvider settings={mockSettings}>
+            <UIStateContext.Provider value={uiState}>
+              <Footer />
+            </UIStateContext.Provider>
+          </VimModeProvider>
+        </KeypressProvider>
       </ConfigContext.Provider>
     </SettingsContext.Provider>,
   );
@@ -146,6 +150,43 @@ describe('<Footer />', () => {
       useStatusLineMock.mockReturnValue({ lines: ['status info'] });
       const { lastFrame } = renderWithWidth(120, createMockUIState());
       expect(lastFrame()).not.toContain('? for shortcuts');
+    });
+  });
+
+  describe('config init message', () => {
+    it('shows init status in place of the hint while config is initializing', () => {
+      const { lastFrame } = renderWithWidth(
+        120,
+        createMockUIState({ isConfigInitialized: false }),
+      );
+      const frame = lastFrame()!;
+      expect(frame).toContain('Initializing...');
+      expect(frame).not.toContain('? for shortcuts');
+    });
+
+    it('falls back to the hint once config is initialized', () => {
+      const { lastFrame } = renderWithWidth(
+        120,
+        createMockUIState({ isConfigInitialized: true }),
+      );
+      const frame = lastFrame()!;
+      expect(frame).not.toContain('Initializing...');
+      expect(frame).toContain('? for shortcuts');
+    });
+
+    // Init progress is more useful than zero layout shift: we show it even
+    // when a custom status line is active, accepting that the row shrinks
+    // by one line once init completes. Still strictly better than the
+    // original bug (a 2-row residual above the input in the default case).
+    it('shows init status even when a custom status line is active', () => {
+      useStatusLineMock.mockReturnValue({ lines: ['model-name ctx:34%'] });
+      const { lastFrame } = renderWithWidth(
+        120,
+        createMockUIState({ isConfigInitialized: false }),
+      );
+      const frame = lastFrame()!;
+      expect(frame).toContain('model-name ctx:34%');
+      expect(frame).toContain('Initializing...');
     });
   });
 
