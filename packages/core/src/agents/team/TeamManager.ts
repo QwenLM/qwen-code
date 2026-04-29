@@ -206,7 +206,7 @@ export class TeamManager {
         throw new Error(`Subagent type "${config.agentType}" not found.`);
       }
       const runtimeCfg =
-        this.subagentManager.convertToRuntimeConfig(subagentConfig);
+        await this.subagentManager.convertToRuntimeConfig(subagentConfig);
       subagentPrompt = runtimeCfg.promptConfig.systemPrompt;
       subagentModel = runtimeCfg.modelConfig.model;
       subagentRunConfig = runtimeCfg.runConfig as Record<string, unknown>;
