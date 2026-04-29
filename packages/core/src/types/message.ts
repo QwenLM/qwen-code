@@ -535,6 +535,15 @@ export interface AgentEventUsage {
 }
 
 /**
+ * Slash command advertised by a provider runtime.
+ */
+export interface AvailableSlashCommand {
+  name: string;
+  description?: string;
+  input?: Record<string, unknown> | null;
+}
+
+/**
  * Events emitted by CraftAgent during chat
  * turnId: Correlation ID from the API's message.id, groups all events in an assistant turn
  */
@@ -571,6 +580,7 @@ export type AgentEvent =
   | { type: 'shell_killed'; shellId: string; turnId?: string }
   | { type: 'source_activated'; sourceSlug: string; originalMessage: string }
   | { type: 'usage_update'; usage: Pick<AgentEventUsage, 'inputTokens' | 'contextWindow'> }
+  | { type: 'available_commands_update'; availableCommands: AvailableSlashCommand[]; availableSkills?: string[] }
   | { type: 'steer_undelivered'; message: string };
 
 /**

@@ -22,7 +22,7 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import type { AgentEvent, Message } from '@craft-agent/core/types';
+import type { AgentEvent, AvailableSlashCommand, Message } from '@craft-agent/core/types';
 import type { FileAttachment } from '../utils/files.ts';
 import type { ModelDefinition } from '../config/models.ts';
 import { getProxyEnvVars } from '../config/proxy-env.ts';
@@ -106,6 +106,48 @@ function toQwenModelDefinition(value: unknown): ModelDefinition | null {
 
 function toRecord(value: unknown): JsonRecord {
   return isRecord(value) ? value : {};
+}
+
+function toAvailableSlashCommands(value: unknown): AvailableSlashCommand[] {
+  if (!Array.isArray(value)) return [];
+
+  const seen = new Set<string>();
+  const commands: AvailableSlashCommand[] = [];
+
+  for (const item of value) {
+    const record = toRecord(item);
+    const rawName = asString(record.name)?.trim().replace(/^\/+/, '');
+    if (!rawName || seen.has(rawName)) continue;
+
+    seen.add(rawName);
+    const input = record.input === null || isRecord(record.input)
+      ? record.input
+      : undefined;
+
+    commands.push({
+      name: rawName,
+      description: asString(record.description),
+      ...(input !== undefined && { input }),
+    });
+  }
+
+  return commands;
+}
+
+function toAvailableSkills(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+
+  const seen = new Set<string>();
+  const skills: string[] = [];
+
+  for (const item of value) {
+    const name = asString(item)?.trim().replace(/^\/+/, '');
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    skills.push(name);
+  }
+
+  return skills.length > 0 ? skills : undefined;
 }
 
 function parseQwenTimestamp(value: unknown): number | undefined {
@@ -1188,6 +1230,9 @@ export class QwenAgent extends BaseAgent {
       case 'current_mode_update':
         this.handleModeUpdate(update);
         break;
+      case 'available_commands_update':
+        this.handleAvailableCommandsUpdate(update);
+        break;
       default:
         break;
     }
@@ -1554,6 +1599,22 @@ export class QwenAgent extends BaseAgent {
     if (mode === this.getPermissionMode()) return;
     this.permissionManager.setPermissionMode(mode);
     this.onPermissionModeChange?.(mode);
+  }
+
+  private handleAvailableCommandsUpdate(update: JsonRecord): void {
+    const availableCommands = toAvailableSlashCommands(update.availableCommands);
+    const meta = toRecord(update._meta);
+    const availableSkills = toAvailableSkills(meta.availableSkills);
+
+    if (availableCommands.length === 0 && (!availableSkills || availableSkills.length === 0)) {
+      return;
+    }
+
+    this.eventQueue.enqueue({
+      type: 'available_commands_update',
+      availableCommands,
+      availableSkills,
+    });
   }
 
   private formatToolResult(update: JsonRecord): string {

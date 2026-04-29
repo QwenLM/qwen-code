@@ -5,7 +5,7 @@
  * All agent events flow through a single pure function for consistent state transitions.
  */
 
-import type { Session, Message, PermissionRequest, CredentialRequest, TypedError, PermissionMode, SessionStatus, AuthRequest, ToolDisplayMeta } from '../../shared/types'
+import type { Session, Message, PermissionRequest, CredentialRequest, TypedError, PermissionMode, SessionStatus, AuthRequest, ToolDisplayMeta, AvailableSlashCommand } from '../../shared/types'
 
 /**
  * Streaming state for a session - replaces streamingTextRef
@@ -470,6 +470,16 @@ export interface UsageUpdateEvent {
 }
 
 /**
+ * Available commands update event - provider-advertised slash commands and skills.
+ */
+export interface AvailableCommandsUpdateEvent {
+  type: 'available_commands_update'
+  sessionId: string
+  availableCommands: AvailableSlashCommand[]
+  availableSkills?: string[]
+}
+
+/**
  * Union of all agent events
  */
 export type AgentEvent =
@@ -514,6 +524,7 @@ export type AgentEvent =
   | AuthCompletedEvent
   | SourceActivatedEvent
   | UsageUpdateEvent
+  | AvailableCommandsUpdateEvent
 
 /**
  * Side effects that need to be handled outside the pure processor

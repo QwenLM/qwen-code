@@ -42,6 +42,7 @@ export type {
   StoredMessage,
   TokenUsage,
   AgentEventUsage,
+  AvailableSlashCommand,
   RecoveryAction,
   TypedError,
   PermissionRequest,
@@ -63,4 +64,3 @@ export type {
   SessionProcessingStatus,
   ActiveSessionInfo,
 } from './server.ts';
-

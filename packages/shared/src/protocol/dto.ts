@@ -13,6 +13,7 @@ import type {
   ToolDisplayMeta,
   AnnotationV1,
   PermissionRequest as BasePermissionRequest,
+  AvailableSlashCommand as BaseAvailableSlashCommand,
 } from '@craft-agent/core/types'
 import type { PermissionMode } from '../agent/mode-types'
 import type { ThinkingLevel } from '../agent/thinking-levels'
@@ -25,6 +26,7 @@ import type {
 
 // Re-export generateMessageId for handler convenience
 export { generateMessageId } from '@craft-agent/core/types'
+export type AvailableSlashCommand = BaseAvailableSlashCommand
 
 // ---------------------------------------------------------------------------
 // Session types
@@ -101,6 +103,10 @@ export interface Session {
   isArchived?: boolean
   archivedAt?: number
   supportsBranching?: boolean
+  /** Provider-advertised slash commands for the current session. Runtime-only. */
+  availableCommands?: AvailableSlashCommand[]
+  /** Provider-advertised skill command names for the current session. Runtime-only. */
+  availableSkills?: string[]
 }
 
 export interface CreateSessionOptions {
@@ -209,6 +215,7 @@ export type SessionEvent =
   | { type: 'auth_completed'; sessionId: string; requestId: string; success: boolean; cancelled?: boolean; error?: string }
   | { type: 'source_activated'; sessionId: string; sourceSlug: string; originalMessage: string }
   | { type: 'usage_update'; sessionId: string; tokenUsage: { inputTokens: number; contextWindow?: number } }
+  | { type: 'available_commands_update'; sessionId: string; availableCommands: AvailableSlashCommand[]; availableSkills?: string[] }
   | { type: 'message_annotations_updated'; sessionId: string; messageId: string; annotations: AnnotationV1[] }
   | { type: 'working_directory_error'; sessionId: string; error: string }
 

@@ -1,16 +1,19 @@
 import * as React from 'react'
 import { useTranslation } from "react-i18next"
 import { Command as CommandPrimitive } from 'cmdk'
-import { Check, Minimize2 } from 'lucide-react'
+import { Check, Minimize2, Sparkles, Terminal } from 'lucide-react'
 import { Icon_Folder } from '@craft-agent/ui'
 import { cn } from '@/lib/utils'
 import { PERMISSION_MODE_CONFIG, PERMISSION_MODE_ORDER, type PermissionMode } from '@craft-agent/shared/agent/modes'
+import type { AvailableSlashCommand } from '../../../shared/types'
 
 // ============================================================================
 // Types
 // ============================================================================
 
-export type SlashCommandId = PermissionMode | 'compact'
+export type QwenSlashCommandId = `qwen:${string}`
+export type QwenSkillCommandId = `qwen-skill:${string}`
+export type SlashCommandId = PermissionMode | 'compact' | QwenSlashCommandId | QwenSkillCommandId
 
 /** Union type for all item types in the slash menu */
 export type SlashItemType = 'command' | 'folder'
@@ -23,6 +26,9 @@ export interface SlashCommand {
   shortcut?: string
   /** Optional color for the command (hex color string) */
   color?: string
+  /** Text inserted into the input when selected. Commands without this are handled as UI actions. */
+  insertText?: string
+  source?: 'mode' | 'app' | 'qwen' | 'qwen-skill'
 }
 
 /** Folder item for the slash menu */
@@ -97,6 +103,24 @@ const compactCommand: SlashCommand = {
   icon: <Minimize2 className={MENU_ICON_SIZE} />,
 }
 
+const QWEN_COMMAND_ID_PREFIX = 'qwen:'
+const QWEN_SKILL_ID_PREFIX = 'qwen-skill:'
+const HIDDEN_QWEN_SLASH_NAMES = new Set(['model', 'skills'])
+
+const FALLBACK_QWEN_COMMANDS: AvailableSlashCommand[] = [
+  { name: 'status', description: 'Show version info' },
+  { name: 'tasks', description: 'List background tasks' },
+  { name: 'bug', description: 'Submit a bug report' },
+  { name: 'clear', description: 'Clear conversation history' },
+  { name: 'compress', description: 'Compress conversation context' },
+  { name: 'context', description: 'Show context window usage' },
+  { name: 'docs', description: 'Open Qwen Code documentation' },
+  { name: 'doctor', description: 'Run installation and environment diagnostics' },
+  { name: 'export', description: 'Export current session history' },
+  { name: 'stats', description: 'Show current session information' },
+  { name: 'help', description: 'Display available commands' },
+]
+
 export const DEFAULT_SLASH_COMMANDS: SlashCommand[] = [
   ...permissionModeCommands,
   compactCommand,
@@ -105,6 +129,86 @@ export const DEFAULT_SLASH_COMMANDS: SlashCommand[] = [
 export const DEFAULT_SLASH_COMMAND_GROUPS: CommandGroup[] = [
   { id: 'modes', commands: permissionModeCommands },
 ]
+
+export function isQwenSlashCommandId(commandId: SlashCommandId): commandId is QwenSlashCommandId | QwenSkillCommandId {
+  return commandId.startsWith(QWEN_COMMAND_ID_PREFIX) || commandId.startsWith(QWEN_SKILL_ID_PREFIX)
+}
+
+function normalizeQwenSlashName(value: string): string {
+  return value.trim().replace(/^\/+/, '')
+}
+
+function getCommandInputHint(command: AvailableSlashCommand): string | undefined {
+  const input = command.input
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const hint = input.hint
+  return typeof hint === 'string' && hint.trim() ? hint.trim() : undefined
+}
+
+export function createQwenSlashSections({
+  availableCommands = [],
+  availableSkills = [],
+  enabled = true,
+}: {
+  availableCommands?: AvailableSlashCommand[]
+  availableSkills?: string[]
+  enabled?: boolean
+}): SlashSection[] {
+  if (!enabled) return []
+
+  const sourceCommands = availableCommands.length > 0 ? availableCommands : FALLBACK_QWEN_COMMANDS
+  const seenNames = new Set<string>()
+  const commandItems: SlashCommand[] = []
+
+  for (const command of sourceCommands) {
+    const name = normalizeQwenSlashName(command.name)
+    if (!name || HIDDEN_QWEN_SLASH_NAMES.has(name) || seenNames.has(name)) continue
+    seenNames.add(name)
+
+    const inputHint = getCommandInputHint(command)
+    commandItems.push({
+      id: `${QWEN_COMMAND_ID_PREFIX}${name}` as QwenSlashCommandId,
+      label: `/${name}`,
+      description: command.description?.trim() || inputHint || 'Qwen Code command',
+      icon: <Terminal className={MENU_ICON_SIZE} />,
+      insertText: `/${name} `,
+      source: 'qwen',
+    })
+  }
+
+  const skillItems: SlashCommand[] = []
+  for (const skill of availableSkills) {
+    const name = normalizeQwenSlashName(skill)
+    if (!name || HIDDEN_QWEN_SLASH_NAMES.has(name) || seenNames.has(name)) continue
+    seenNames.add(name)
+    skillItems.push({
+      id: `${QWEN_SKILL_ID_PREFIX}${name}` as QwenSkillCommandId,
+      label: `/${name}`,
+      description: 'Qwen Code skill',
+      icon: <Sparkles className={MENU_ICON_SIZE} />,
+      insertText: `/${name} `,
+      source: 'qwen-skill',
+    })
+  }
+
+  const sections: SlashSection[] = []
+  if (commandItems.length > 0) {
+    sections.push({
+      id: 'qwen-commands',
+      label: 'Qwen Code',
+      items: commandItems,
+    })
+  }
+  if (skillItems.length > 0) {
+    sections.push({
+      id: 'qwen-skills',
+      label: 'Skills',
+      items: skillItems,
+    })
+  }
+
+  return sections
+}
 
 // ============================================================================
 // Shared Styles
@@ -126,7 +230,8 @@ function filterCommands(commands: SlashCommand[], filter: string): SlashCommand[
   return commands.filter(
     cmd =>
       cmd.label.toLowerCase().includes(lowerFilter) ||
-      cmd.id.toLowerCase().includes(lowerFilter)
+      cmd.id.toLowerCase().includes(lowerFilter) ||
+      cmd.description.toLowerCase().includes(lowerFilter)
   )
 }
 
@@ -158,19 +263,43 @@ function flattenSections(sections: SlashSection[]): (SlashCommand | SlashFolderI
   return sections.flatMap(section => section.items)
 }
 
+function findCommandById(sections: SlashSection[], commandId: SlashCommandId): SlashCommand | undefined {
+  for (const section of sections) {
+    for (const item of section.items) {
+      if (!isFolder(item) && item.id === commandId) return item
+    }
+  }
+  return undefined
+}
+
 // ============================================================================
 // Shared: Command Item Content
 // ============================================================================
 
 const MODE_COMMAND_IDS = new Set<string>(PERMISSION_MODE_ORDER)
 
-function CommandItemContent({ command, isActive }: { command: SlashCommand; isActive: boolean }) {
+function CommandItemContent({
+  command,
+  isActive,
+  showDescription = false,
+}: {
+  command: SlashCommand
+  isActive: boolean
+  showDescription?: boolean
+}) {
   const { t } = useTranslation()
   const label = MODE_COMMAND_IDS.has(command.id) ? t(`mode.${command.id}`, command.label) : command.label
   return (
     <>
       <div className="shrink-0 text-muted-foreground">{command.icon}</div>
-      <div className="flex-1 min-w-0">{label}</div>
+      <div className="flex min-w-0 flex-1 items-center gap-3">
+        <div className="min-w-0 truncate">{label}</div>
+        {showDescription && command.description && (
+          <div className="ml-auto min-w-0 truncate text-muted-foreground/70">
+            {command.description}
+          </div>
+        )}
+      </div>
       {isActive && (
         <div className="shrink-0 h-4 w-4 rounded-full bg-current flex items-center justify-center">
           <Check className="h-2.5 w-2.5 text-white dark:text-black" strokeWidth={3} />
@@ -419,6 +548,15 @@ export function InlineSlashCommand({
   const bottomPosition = typeof window !== 'undefined'
     ? window.innerHeight - Math.round(position.y) + 8
     : 0
+  const menuWidth = typeof window !== 'undefined'
+    ? Math.min(520, Math.max(260, window.innerWidth - 24))
+    : 520
+  const leftPosition = typeof window !== 'undefined'
+    ? Math.min(
+        Math.max(12, Math.round(position.x) - 10),
+        Math.max(12, window.innerWidth - menuWidth - 12)
+      )
+    : Math.round(position.x) - 10
 
   // Track current item index across all sections
   let currentItemIndex = 0
@@ -428,7 +566,7 @@ export function InlineSlashCommand({
       ref={menuRef}
       data-inline-menu
       className={cn('fixed z-dropdown', MENU_CONTAINER_STYLE, className)}
-      style={{ left: Math.round(position.x) - 10, bottom: bottomPosition, minWidth: 220, maxWidth: 260 }}
+      style={{ left: leftPosition, bottom: bottomPosition, width: menuWidth }}
     >
       <div ref={listRef} className={MENU_LIST_STYLE}>
         {filteredSections.map((section, sectionIndex) => (
@@ -479,7 +617,7 @@ export function InlineSlashCommand({
                       isSelected && MENU_ITEM_SELECTED
                     )}
                   >
-                    <CommandItemContent command={item} isActive={isActive} />
+                    <CommandItemContent command={item} isActive={isActive} showDescription />
                   </div>
                 )
               }
@@ -534,6 +672,9 @@ export interface UseInlineSlashCommandOptions {
   activeCommands?: SlashCommandId[]
   recentFolders?: string[]
   homeDir?: string
+  availableCommands?: AvailableSlashCommand[]
+  availableSkills?: string[]
+  enableQwenCommands?: boolean
 }
 
 export interface UseInlineSlashCommandReturn {
@@ -544,7 +685,7 @@ export interface UseInlineSlashCommandReturn {
   handleInputChange: (value: string, cursorPosition: number) => void
   close: () => void
   activeCommands: SlashCommandId[]
-  handleSelectCommand: (commandId: SlashCommandId) => string
+  handleSelectCommand: (commandId: SlashCommandId) => { value: string; cursorPosition?: number }
   handleSelectFolder: (path: string) => string
 }
 
@@ -555,6 +696,9 @@ export function useInlineSlashCommand({
   activeCommands = [],
   recentFolders = [],
   homeDir,
+  availableCommands = [],
+  availableSkills = [],
+  enableQwenCommands = false,
 }: UseInlineSlashCommandOptions): UseInlineSlashCommandReturn {
   const [isOpen, setIsOpen] = React.useState(false)
   const [filter, setFilter] = React.useState('')
@@ -566,6 +710,12 @@ export function useInlineSlashCommand({
   // Build sections from commands and folders
   const sections = React.useMemo((): SlashSection[] => {
     const result: SlashSection[] = []
+
+    result.push(...createQwenSlashSections({
+      availableCommands,
+      availableSkills,
+      enabled: enableQwenCommands,
+    }))
 
     // Modes section
     result.push({
@@ -604,14 +754,14 @@ export function useInlineSlashCommand({
     }
 
     return result
-  }, [recentFolders, homeDir])
+  }, [availableCommands, availableSkills, enableQwenCommands, recentFolders, homeDir])
 
   const handleInputChange = React.useCallback((value: string, cursorPosition: number) => {
     // Store current state for handleSelect
     currentInputRef.current = { value, cursorPosition }
 
     const textBeforeCursor = value.slice(0, cursorPosition)
-    const slashMatch = textBeforeCursor.match(/(?:^|\s)\/(\w*)$/)
+    const slashMatch = textBeforeCursor.match(/(?:^|\s)\/([^\n]*)$/)
 
     // Only show menu if we have sections with items
     const hasItems = sections.some(s => s.items.length > 0)
@@ -665,22 +815,29 @@ export function useInlineSlashCommand({
     }
   }, [inputRef, sections])
 
-  const handleSelectCommand = React.useCallback((commandId: SlashCommandId): string => {
+  const handleSelectCommand = React.useCallback((commandId: SlashCommandId): { value: string; cursorPosition?: number } => {
     // Capture values BEFORE any state changes to avoid race conditions
-    let result = ''
+    const selectedCommand = findCommandById(sections, commandId)
+    let result = currentInputRef.current.value
+    let nextCursorPosition: number | undefined
     if (slashStart >= 0) {
       const { value: currentValue, cursorPosition } = currentInputRef.current
       const before = currentValue.slice(0, slashStart)
       const after = currentValue.slice(cursorPosition)
-      result = (before + after).trim()
+      if (selectedCommand?.insertText) {
+        result = before + selectedCommand.insertText + after
+        nextCursorPosition = before.length + selectedCommand.insertText.length
+      } else {
+        result = (before + after).trim()
+      }
     }
 
     // Now safe to trigger state changes
     onSelectCommand(commandId)
     setIsOpen(false)
 
-    return result
-  }, [onSelectCommand, slashStart])
+    return { value: result, cursorPosition: nextCursorPosition }
+  }, [onSelectCommand, sections, slashStart])
 
   const handleSelectFolder = React.useCallback((path: string): string => {
     // Capture values BEFORE any state changes to avoid race conditions
