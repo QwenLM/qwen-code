@@ -6,9 +6,9 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir, platform, tmpdir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 
 import {
@@ -22,7 +22,7 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import type { AgentEvent, AvailableSlashCommand, Message } from '@craft-agent/core/types';
+import type { AgentEvent, AvailableSlashCommand, ContentBadge, Message } from '@craft-agent/core/types';
 import type { FileAttachment } from '../utils/files.ts';
 import type { ModelDefinition } from '../config/models.ts';
 import { getProxyEnvVars } from '../config/proxy-env.ts';
@@ -77,6 +77,24 @@ const QWEN_CONTEXT_WINDOW = 1_000_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_INITIALIZE_TIMEOUT_MS = 60_000;
 const INCLUDE_CRAFT_CONTEXT_IN_QWEN_PROMPTS = false;
+const UNSUPPORTED_SLASH_BADGE_NAMES = new Set(['model', 'skills']);
+const QWEN_FILE_EXTENSIONS = [
+  'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs',
+  'py', 'rs', 'go', 'java', 'rb', 'swift', 'kt',
+  'c', 'cc', 'cpp', 'cxx', 'h', 'hh', 'hpp', 'cs',
+  'css', 'scss', 'less', 'html', 'vue', 'svelte',
+  'json', 'jsonl', 'yaml', 'yml', 'toml', 'xml',
+  'sh', 'bash', 'zsh', 'fish',
+  'md', 'mdx', 'txt', 'log',
+  'sql', 'graphql', 'proto',
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg',
+  'pdf', 'csv', 'tsv',
+].join('|');
+const QWEN_FILE_EXTENSION_REGEX = new RegExp(`\\.(${QWEN_FILE_EXTENSIONS})(?::\\d+(?::\\d+)?)?$`, 'i');
+const QWEN_FILE_PATH_REGEX = new RegExp(
+  `(?:^|[\\s([\\{<])(@?(?:/|~/|\\./|\\.\\./|[A-Za-z0-9_][\\w\\-./@]*)[\\w\\-./@]*\\.(?:${QWEN_FILE_EXTENSIONS})(?::\\d+(?::\\d+)?)?)(?=[\\s)\\]}\\.,:;!?>]|$)`,
+  'gi',
+);
 
 function isRecord(value: unknown): value is JsonRecord {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -191,6 +209,160 @@ function getQwenTranscriptPath(sessionId: string, cwd: string): string {
   return join(getQwenRuntimeDir(), 'projects', projectId, 'chats', `${sessionId}.jsonl`);
 }
 
+function normalizeSlashCommandBadgeName(value: string): string {
+  return value.trim().replace(/^\/+/, '').toLowerCase();
+}
+
+function extractQwenCommandBadges(text: string): ContentBadge[] {
+  const match = /^(\s*)(\/([A-Za-z][\w-]*))(?=\s|$)/.exec(text);
+  if (!match) return [];
+
+  const commandText = match[2];
+  const commandName = match[3];
+  if (!commandText || !commandName) return [];
+
+  const normalizedName = normalizeSlashCommandBadgeName(commandName);
+  if (!normalizedName || UNSUPPORTED_SLASH_BADGE_NAMES.has(normalizedName)) return [];
+
+  const start = match[1]?.length ?? 0;
+  return [{
+    type: 'command',
+    label: commandText.replace(/^\/+/, ''),
+    rawText: commandText,
+    start,
+    end: start + commandText.length,
+  }];
+}
+
+function stripFileLineSuffix(value: string): string {
+  if (!QWEN_FILE_EXTENSION_REGEX.test(value)) return value;
+  return value.replace(/:\d+(?::\d+)?$/, '');
+}
+
+function stripTrailingPathPunctuation(value: string): string {
+  return value.replace(/[.,;!?]+$/, '');
+}
+
+function resolveFileUrlPath(value: string): string | undefined {
+  if (!/^file:/i.test(value)) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'file:') return undefined;
+    const pathname = decodeURIComponent(url.pathname || '');
+    if (!pathname && !url.hostname) return undefined;
+    return url.hostname ? `//${decodeURIComponent(url.hostname)}${pathname}` : pathname;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveQwenDisplayFilePath(rawPath: string, cwd: string): string | undefined {
+  const cleaned = stripFileLineSuffix(stripTrailingPathPunctuation(rawPath.trim()));
+  if (!cleaned || /^https?:\/\//i.test(cleaned)) return undefined;
+
+  const withoutMentionPrefix = cleaned.startsWith('@') ? cleaned.slice(1) : cleaned;
+  const fileUrlPath = resolveFileUrlPath(withoutMentionPrefix);
+  const candidate = fileUrlPath ?? withoutMentionPrefix;
+  if (!QWEN_FILE_EXTENSION_REGEX.test(candidate)) return undefined;
+
+  if (candidate.startsWith('~/')) {
+    return join(homedir(), candidate.slice(2));
+  }
+
+  if (isAbsolute(candidate)) return candidate;
+  if (candidate.startsWith('./') || candidate.startsWith('../') || candidate.includes('/')) {
+    return resolve(cwd, candidate);
+  }
+
+  return undefined;
+}
+
+function getQwenDisplayFileBadgeType(filePath: string): 'file' | 'folder' {
+  try {
+    return statSync(filePath).isDirectory() ? 'folder' : 'file';
+  } catch {
+    return 'file';
+  }
+}
+
+function rangesOverlap(a: { start: number; end: number }, b: { start: number; end: number }): boolean {
+  return a.start < b.end && b.start < a.end;
+}
+
+function addFileBadgeIfValid(
+  badges: ContentBadge[],
+  args: {
+    content: string;
+    cwd: string;
+    rawText: string;
+    start: number;
+    end: number;
+    label?: string;
+  },
+): void {
+  const { cwd, rawText, start, end, label } = args;
+  if (badges.some((badge) => rangesOverlap(badge, { start, end }))) return;
+
+  const filePath = resolveQwenDisplayFilePath(rawText, cwd);
+  if (!filePath) return;
+
+  badges.push({
+    type: getQwenDisplayFileBadgeType(filePath),
+    label: label?.trim() || basename(filePath) || rawText,
+    rawText: args.content.slice(start, end),
+    start,
+    end,
+    filePath,
+  });
+}
+
+function extractQwenFileBadges(text: string, cwd: string, existingBadges: ContentBadge[] = []): ContentBadge[] {
+  const badges: ContentBadge[] = [...existingBadges];
+
+  const markdownLinkRegex = /\[([^\]]+)\]\(([^)\s]+)\)/g;
+  let markdownMatch: RegExpExecArray | null;
+  while ((markdownMatch = markdownLinkRegex.exec(text)) !== null) {
+    const linkText = markdownMatch[1];
+    const target = markdownMatch[2];
+    if (!target) continue;
+    addFileBadgeIfValid(badges, {
+      content: text,
+      cwd,
+      rawText: target,
+      start: markdownMatch.index,
+      end: markdownMatch.index + markdownMatch[0].length,
+      label: linkText,
+    });
+  }
+
+  QWEN_FILE_PATH_REGEX.lastIndex = 0;
+  let pathMatch: RegExpExecArray | null;
+  while ((pathMatch = QWEN_FILE_PATH_REGEX.exec(text)) !== null) {
+    const rawPath = pathMatch[1];
+    if (!rawPath) continue;
+
+    const pathOffset = pathMatch[0].indexOf(rawPath);
+    const start = pathMatch.index + pathOffset;
+    const rawText = stripTrailingPathPunctuation(rawPath);
+    addFileBadgeIfValid(badges, {
+      content: text,
+      cwd,
+      rawText,
+      start,
+      end: start + rawText.length,
+    });
+  }
+
+  return badges.slice(existingBadges.length);
+}
+
+function deriveQwenUserBadges(content: string, cwd: string): ContentBadge[] | undefined {
+  const commandBadges = extractQwenCommandBadges(content);
+  const fileBadges = extractQwenFileBadges(content, cwd, commandBadges);
+  const badges = [...commandBadges, ...fileBadges].sort((a, b) => a.start - b.start);
+  return badges.length > 0 ? badges : undefined;
+}
+
 function jsonStringify(value: unknown): string {
   try {
     return JSON.stringify(value, null, 2);
@@ -235,6 +407,12 @@ function normalizeQwenAssistantText(
   if (!options.forceJsonFence && !isDoctorOutput(parsed)) return text;
 
   return formatJsonMarkdown(parsed);
+}
+
+function normalizeQwenUserHistoryText(text: string): string {
+  return text
+    .replace(/^<craft_agent_context>[\s\S]*?<\/craft_agent_context>\s*/, '')
+    .trimStart();
 }
 
 function formatQwenSlashOutputHistoryItem(item: JsonRecord): string | undefined {
@@ -709,6 +887,7 @@ export class QwenAgent extends BaseAgent {
   }
 
   async loadSessionMessages(sessionId: string, options: { cwd?: string } = {}): Promise<Message[]> {
+    const cwd = options.cwd || this.resolvedCwd();
     await this.ensureProcess();
 
     const collector: HistoryCollector = { updates: [] };
@@ -721,8 +900,8 @@ export class QwenAgent extends BaseAgent {
         mcpServers: this.buildAcpMcpServers(),
       }), 60_000);
 
-      const messages = this.buildHistoryMessages(sessionId, collector.updates);
-      return this.mergeSlashCommandInvocationMessages(sessionId, messages, options.cwd || this.resolvedCwd());
+      const messages = this.buildHistoryMessages(sessionId, collector.updates, cwd);
+      return this.mergeSlashCommandInvocationMessages(sessionId, messages, cwd);
     } finally {
       this.historyCollectors.delete(sessionId);
     }
@@ -1321,7 +1500,7 @@ export class QwenAgent extends BaseAgent {
     if (text) collector.chunks.push(text);
   }
 
-  private buildHistoryMessages(sessionId: string, updates: JsonRecord[]): Message[] {
+  private buildHistoryMessages(sessionId: string, updates: JsonRecord[], cwd: string): Message[] {
     const messages: Message[] = [];
     const toolMessages = new Map<string, Message>();
     let idCounter = 0;
@@ -1356,15 +1535,20 @@ export class QwenAgent extends BaseAgent {
         previous.content = role === 'assistant'
           ? normalizeQwenAssistantText(nextContent)
           : nextContent;
+        if (role === 'user') {
+          previous.badges = deriveQwenUserBadges(previous.content, cwd);
+        }
         return;
       }
 
+      const content = messageText;
       messages.push({
         id: nextId(),
         role,
-        content: messageText,
+        content,
         timestamp,
         isIntermediate,
+        ...(role === 'user' ? { badges: deriveQwenUserBadges(content, cwd) } : {}),
       });
     };
 
@@ -1555,11 +1739,13 @@ export class QwenAgent extends BaseAgent {
         seenResults.add(resultKey);
 
         const invocation = parentUuid ? invocations.get(parentUuid) : undefined;
+        const userContent = invocation?.rawCommand || rawCommand;
         messages.push({
           id: `qwen-${sessionId}-slash-${++idCounter}`,
           role: 'user',
-          content: invocation?.rawCommand || rawCommand,
+          content: userContent,
           timestamp: invocation?.timestamp ?? timestamp,
+          badges: deriveQwenUserBadges(userContent, cwd),
         });
         messages.push({
           id: `qwen-${sessionId}-slash-${++idCounter}`,

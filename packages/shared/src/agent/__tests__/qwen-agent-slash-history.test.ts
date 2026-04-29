@@ -8,6 +8,7 @@ import type { BackendConfig } from '../backend/types.ts';
 
 type QwenHistoryInternals = {
   mergeSlashCommandInvocationMessages: (sessionId: string, messages: Message[], cwd: string) => Message[];
+  buildHistoryMessages: (sessionId: string, updates: Record<string, unknown>[], cwd: string) => Message[];
 };
 
 type QwenPromptBlock = {
@@ -155,6 +156,42 @@ describe('QwenAgent slash command history', () => {
       ['user', '/insight', Date.parse(insightInvocation)],
       ['assistant', 'This may take a couple minutes. Sit tight!', Date.parse(insightResult)],
     ]);
+    expect(messages[0]?.badges).toEqual([{
+      type: 'command',
+      label: 'insight',
+      rawText: '/insight',
+      start: 0,
+      end: 8,
+    }]);
+  });
+
+  it('derives file badges from Qwen user history without a Craft metadata sidecar', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const agent = createAgent(cwd);
+    const messages = (agent as unknown as QwenHistoryInternals).buildHistoryMessages(
+      'session-with-files',
+      [{
+        sessionUpdate: 'user_message_chunk',
+        content: {
+          type: 'text',
+          text: 'please inspect @packages/shared/src/agent/qwen-agent.ts:42',
+        },
+        _meta: { timestamp: 1234 },
+      }],
+      cwd,
+    );
+    agent.destroy();
+
+    expect(messages[0]?.badges).toEqual([{
+      type: 'file',
+      label: 'qwen-agent.ts',
+      rawText: '@packages/shared/src/agent/qwen-agent.ts:42',
+      start: 15,
+      end: 58,
+      filePath: join(cwd, 'packages/shared/src/agent/qwen-agent.ts'),
+    }]);
   });
 
   it('formats slash command JSON output as a markdown json block', () => {

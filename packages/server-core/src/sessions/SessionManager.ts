@@ -19,7 +19,7 @@ import {
   type BackendHostRuntimeContext,
   type PostInitResult,
 } from '@craft-agent/shared/agent/backend'
-import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars, updateLlmConnection, type ModelDefinition } from '@craft-agent/shared/config'
+import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars, updateLlmConnection, QWEN_CODE_CONNECTION_SLUG, type ModelDefinition } from '@craft-agent/shared/config'
 import { PrivilegedExecutionBroker } from '@craft-agent/server-core/services'
 import { isValidWorkingDirectory } from '../utils/path-validation'
 import { InitGate } from '@craft-agent/server-core/domain'
@@ -844,6 +844,10 @@ interface ManagedSession {
   // Runtime guard: for provider-native sessions with empty local JSONL, try one
   // native-history backfill even if a previous render path marked messages loaded.
   externalMessagesLoadAttempted?: boolean
+  // Provider-native history cache watermark. For Qwen canonical sessions, messages
+  // are rendered from ACP but not persisted into Craft JSONL, so re-load only
+  // when provider listing metadata reports a newer external update.
+  externalMessagesLoadedThroughAt?: number
   // Pending auth request tracking (for unified auth flow)
   pendingAuthRequestId?: string
   pendingAuthRequest?: AuthRequest
@@ -1051,6 +1055,8 @@ export class SessionManager implements ISessionManager {
   // Per-workspace provider-native history sync (currently Qwen ACP session/list).
   private externalSessionListSyncAt: Map<string, number> = new Map()
   private externalSessionListSyncPromises: Map<string, Promise<void>> = new Map()
+  private pendingExternalSessionDeletes: Set<string> = new Set()
+  private externalSessionAgents: Map<string, AgentBackend> = new Map()
   /**
    * Track which session the user is actively viewing (per workspace).
    * Map of workspaceId -> sessionId. Used to determine if a session should be
@@ -1754,54 +1760,48 @@ export class SessionManager implements ISessionManager {
 
     if (!backendContext.capabilities.listsSessions || !backendContext.connection) return
 
-    const agent = this.createExternalSessionListAgent(workspace, backendContext)
-    agent.onDebug = (msg: string) => sessionLog.debug(msg)
+    const agent = this.getExternalSessionAgent(workspace, backendContext)
+    if (!agent.listSessions) return
 
-    try {
-      if (!agent.listSessions) return
+    const listedSessions: BackendSessionInfo[] = []
+    let cursor: string | null | undefined
+    let reachedEnd = false
 
-      const listedSessions: BackendSessionInfo[] = []
-      let cursor: string | null | undefined
-      let reachedEnd = false
-
-      for (let page = 0; page < EXTERNAL_SESSION_LIST_MAX_PAGES; page++) {
-        const result = await agent.listSessions({
-          cwd: sessionListCwd,
-          cursor,
-          size: EXTERNAL_SESSION_LIST_PAGE_SIZE,
-        })
-        listedSessions.push(...result.sessions)
-        cursor = result.nextCursor
-        if (!cursor) {
-          reachedEnd = true
-          break
-        }
+    for (let page = 0; page < EXTERNAL_SESSION_LIST_MAX_PAGES; page++) {
+      const result = await agent.listSessions({
+        cwd: sessionListCwd,
+        cursor,
+        size: EXTERNAL_SESSION_LIST_PAGE_SIZE,
+      })
+      listedSessions.push(...result.sessions)
+      cursor = result.nextCursor
+      if (!cursor) {
+        reachedEnd = true
+        break
       }
+    }
 
-      const seenSdkSessionIds = new Set<string>()
-      for (const info of listedSessions) {
-        const didUpsert = await this.upsertExternalListedSession({
-          workspace,
-          info,
-          connectionSlug: backendContext.connection.slug,
-          model: backendContext.resolvedModel,
-          defaultThinkingLevel: normalizeThinkingLevel(workspaceConfig?.defaults?.thinkingLevel) ?? getDefaultThinkingLevel(),
-          loadMessages: agent.loadSessionMessages
-            ? (sessionInfo) => agent.loadSessionMessages!(sessionInfo.sessionId, { cwd: sessionInfo.cwd })
-            : undefined,
-        })
-        if (didUpsert) seenSdkSessionIds.add(info.sessionId)
-      }
+    const seenSdkSessionIds = new Set<string>()
+    for (const info of listedSessions) {
+      const didUpsert = await this.upsertExternalListedSession({
+        workspace,
+        info,
+        connectionSlug: backendContext.connection.slug,
+        model: backendContext.resolvedModel,
+        defaultThinkingLevel: normalizeThinkingLevel(workspaceConfig?.defaults?.thinkingLevel) ?? getDefaultThinkingLevel(),
+        loadMessages: agent.loadSessionMessages
+          ? (sessionInfo) => agent.loadSessionMessages!(sessionInfo.sessionId, { cwd: sessionInfo.cwd })
+          : undefined,
+      })
+      if (didUpsert) seenSdkSessionIds.add(info.sessionId)
+    }
 
-      if (reachedEnd) {
-        await this.removeMissingExternalListedSessions(workspace, backendContext.connection.slug, seenSdkSessionIds)
-      }
+    if (reachedEnd) {
+      await this.removeMissingExternalListedSessions(workspace, backendContext.connection.slug, seenSdkSessionIds)
+    }
 
-      if (listedSessions.length > 0) {
-        sessionLog.info(`Synced ${seenSdkSessionIds.size} provider session(s) for workspace ${workspace.id}`)
-      }
-    } finally {
-      agent.dispose()
+    if (listedSessions.length > 0) {
+      sessionLog.info(`Synced ${seenSdkSessionIds.size} provider session(s) for workspace ${workspace.id}`)
     }
   }
 
@@ -1827,6 +1827,28 @@ export class SessionManager implements ISessionManager {
     })
   }
 
+  private externalSessionAgentCacheKey(
+    workspace: Workspace,
+    backendContext: ReturnType<typeof resolveBackendContext>,
+  ): string {
+    const connectionSlug = backendContext.connection?.slug ?? 'unknown'
+    return `${workspace.id}:${connectionSlug}:${backendContext.resolvedModel}`
+  }
+
+  private getExternalSessionAgent(
+    workspace: Workspace,
+    backendContext: ReturnType<typeof resolveBackendContext>,
+  ): AgentBackend {
+    const key = this.externalSessionAgentCacheKey(workspace, backendContext)
+    const cached = this.externalSessionAgents.get(key)
+    if (cached) return cached
+
+    const agent = this.createExternalSessionListAgent(workspace, backendContext)
+    agent.onDebug = (msg: string) => sessionLog.debug(msg)
+    this.externalSessionAgents.set(key, agent)
+    return agent
+  }
+
   private async withExternalSessionAgent<T>(
     managed: ManagedSession,
     callback: (agent: AgentBackend) => Promise<T>,
@@ -1843,13 +1865,8 @@ export class SessionManager implements ISessionManager {
 
     if (!backendContext.capabilities.listsSessions || !backendContext.connection) return undefined
 
-    const agent = this.createExternalSessionListAgent(managed.workspace, backendContext)
-    agent.onDebug = (msg: string) => sessionLog.debug(msg)
-    try {
-      return await callback(agent)
-    } finally {
-      agent.dispose()
-    }
+    const agent = this.getExternalSessionAgent(managed.workspace, backendContext)
+    return await callback(agent)
   }
 
   private resolveExternalSessionConnectionSlug(managed: ManagedSession): string | undefined {
@@ -1859,10 +1876,29 @@ export class SessionManager implements ISessionManager {
     // Older/partially migrated local headers may be missing llmConnection, so keep
     // those sessions loadable through the built-in Qwen Code connection.
     if (managed.sdkSessionId && managed.id === managed.sdkSessionId) {
-      return 'qwen-code'
+      return QWEN_CODE_CONNECTION_SLUG
     }
 
     return undefined
+  }
+
+  private isQwenCanonicalMessageSession(managed: ManagedSession): boolean {
+    return !!managed.sdkSessionId
+      && this.resolveExternalSessionConnectionSlug(managed) === QWEN_CODE_CONNECTION_SLUG
+  }
+
+  private externalSessionDeleteKey(workspaceId: string, sdkSessionId: string): string {
+    return `${workspaceId}:${sdkSessionId}`
+  }
+
+  private externalSessionDeleteKeyForManaged(managed: ManagedSession): string | undefined {
+    return managed.sdkSessionId
+      ? this.externalSessionDeleteKey(managed.workspace.id, managed.sdkSessionId)
+      : undefined
+  }
+
+  private isExternalSessionDeletePending(workspaceId: string, sdkSessionId: string): boolean {
+    return this.pendingExternalSessionDeletes.has(this.externalSessionDeleteKey(workspaceId, sdkSessionId))
   }
 
   private async renameExternalBackendSessionIfSupported(managed: ManagedSession, title: string): Promise<boolean> {
@@ -2063,6 +2099,7 @@ export class SessionManager implements ISessionManager {
   }): Promise<boolean> {
     const { workspace, info, connectionSlug, model, defaultThinkingLevel, loadMessages } = args
     if (!info.sessionId || !info.cwd) return false
+    if (this.isExternalSessionDeletePending(workspace.id, info.sessionId)) return false
 
     const timestamp = this.parseExternalSessionTimestamp(info.updatedAt)
     const title = info.title?.trim() || EXTERNAL_SESSION_PLACEHOLDER_TITLE
@@ -2095,6 +2132,7 @@ export class SessionManager implements ISessionManager {
       if (!managed.thinkingLevel) managed.thinkingLevel = defaultThinkingLevel
       if (inspectedMessages?.length) {
         this.applyLoadedExternalMessages(managed, inspectedMessages)
+        this.markExternalMessagesLoadedThrough(managed)
         managed.messagesLoaded = true
         this.persistSession(managed)
       }
@@ -2102,6 +2140,7 @@ export class SessionManager implements ISessionManager {
     }
 
     const lastInspectedMessage = inspectedMessages?.[inspectedMessages.length - 1]
+    const shouldPersistInspectedMessages = connectionSlug !== QWEN_CODE_CONNECTION_SLUG
     const storedSession: StoredSession = {
       id: info.sessionId,
       workspaceRootPath: workspace.rootPath,
@@ -2117,7 +2156,7 @@ export class SessionManager implements ISessionManager {
       connectionLocked: true,
       model,
       thinkingLevel: defaultThinkingLevel,
-      messages: inspectedMessages?.map(messageToStored) ?? [],
+      messages: shouldPersistInspectedMessages ? inspectedMessages?.map(messageToStored) ?? [] : [],
       tokenUsage: { ...DEFAULT_TOKEN_USAGE },
     }
 
@@ -2131,6 +2170,7 @@ export class SessionManager implements ISessionManager {
     })
     if (inspectedMessages?.length) {
       this.applyLoadedExternalMessages(imported, inspectedMessages)
+      this.markExternalMessagesLoadedThrough(imported)
     }
     this.sessions.set(imported.id, imported)
     setPermissionMode(imported.id, imported.permissionMode ?? 'ask', { changedBy: 'restore' })
@@ -2173,15 +2213,18 @@ export class SessionManager implements ISessionManager {
   // Persist a session to disk (async with debouncing)
   private persistSession(managed: ManagedSession): void {
     try {
+      const usesQwenCanonicalMessages = this.isQwenCanonicalMessageSession(managed)
       // Filter out transient status messages (progress indicators like "Compacting...")
       // Error messages are now persisted with rich fields for diagnostics
-      const persistableMessages = managed.messages.filter(m =>
-        m.role !== 'status'
-      )
+      const persistableMessages = usesQwenCanonicalMessages
+        ? []
+        : managed.messages.filter(m =>
+            m.role !== 'status'
+          )
 
       // If messages haven't been loaded yet (e.g., branched session not yet opened),
       // skip persistence to avoid overwriting JSONL messages with empty array
-      if (!managed.messagesLoaded) {
+      if (!managed.messagesLoaded && !usesQwenCanonicalMessages) {
         return
       }
 
@@ -2609,7 +2652,7 @@ export class SessionManager implements ISessionManager {
     let loadedExternalMessages = false
     const storedSession = loadStoredSession(managed.workspace.rootPath, managed.id)
     if (storedSession) {
-      managed.messages = (storedSession.messages || []).map(storedToMessage)
+      const storedMessages = (storedSession.messages || []).map(storedToMessage)
       managed.tokenUsage = storedSession.tokenUsage
       managed.lastReadMessageId = storedSession.lastReadMessageId
       managed.hasUnread = storedSession.hasUnread  // Explicit unread flag for NEW badge state machine
@@ -2643,12 +2686,16 @@ export class SessionManager implements ISessionManager {
       // Sync transferred session summary state from disk
       managed.transferredSessionSummary = storedSession.transferredSessionSummary
       managed.transferredSessionSummaryApplied = storedSession.transferredSessionSummaryApplied
+      const usesQwenCanonicalMessages = this.isQwenCanonicalMessageSession(managed)
+      managed.messages = usesQwenCanonicalMessages ? [] : storedMessages
       sessionLog.debug(`Lazy-loaded ${managed.messages.length} messages for session ${managed.id}`)
 
       // Queue recovery: find orphaned queued messages from crash/restart and re-queue them
-      const orphanedQueued = managed.messages.filter(m =>
-        m.role === 'user' && m.isQueued === true
-      )
+      const orphanedQueued = usesQwenCanonicalMessages
+        ? []
+        : managed.messages.filter(m =>
+            m.role === 'user' && m.isQueued === true
+          )
       if (orphanedQueued.length > 0) {
         sessionLog.info(`Recovering ${orphanedQueued.length} queued message(s) for session ${managed.id}`)
         for (const msg of orphanedQueued) {
@@ -2673,15 +2720,27 @@ export class SessionManager implements ISessionManager {
       const externalLoadResult = await this.loadExternalSessionMessages(managed)
       loadedExternalMessages = externalLoadResult === 'loaded'
       managed.externalMessagesLoadAttempted = externalLoadResult !== 'unavailable'
+      if (externalLoadResult === 'loaded' || externalLoadResult === 'empty') {
+        this.markExternalMessagesLoadedThrough(managed)
+      }
     }
     managed.messagesLoaded = true
-    if (loadedExternalMessages) {
+    if (loadedExternalMessages && !this.isQwenCanonicalMessageSession(managed)) {
       this.persistSession(managed)
       await this.flushSession(managed.id)
     }
   }
 
   private shouldAttemptExternalMessageLoad(managed: ManagedSession): boolean {
+    if (this.isQwenCanonicalMessageSession(managed)) {
+      if (managed.isProcessing) return false
+      if (managed.messages.length === 0) return true
+
+      const externalUpdatedAt = managed.lastMessageAt ?? managed.lastUsedAt ?? 0
+      const loadedThroughAt = managed.externalMessagesLoadedThroughAt ?? 0
+      return externalUpdatedAt > loadedThroughAt
+    }
+
     return !!managed.sdkSessionId
       && managed.messages.length === 0
       && !managed.externalMessagesLoadAttempted
@@ -2692,10 +2751,21 @@ export class SessionManager implements ISessionManager {
 
     const externalLoadResult = await this.loadExternalSessionMessages(managed)
     managed.externalMessagesLoadAttempted = externalLoadResult !== 'unavailable'
-    if (externalLoadResult === 'loaded') {
+    if (externalLoadResult === 'loaded' || externalLoadResult === 'empty') {
+      this.markExternalMessagesLoadedThrough(managed)
+    }
+    if (externalLoadResult === 'loaded' && !this.isQwenCanonicalMessageSession(managed)) {
       this.persistSession(managed)
       await this.flushSession(managed.id)
     }
+  }
+
+  private markExternalMessagesLoadedThrough(managed: ManagedSession): void {
+    managed.externalMessagesLoadedThroughAt = Math.max(
+      managed.externalMessagesLoadedThroughAt ?? 0,
+      managed.lastMessageAt ?? 0,
+      managed.lastUsedAt ?? 0,
+    )
   }
 
   private async loadExternalSessionMessages(managed: ManagedSession): Promise<ExternalMessageLoadResult> {
@@ -5355,7 +5425,14 @@ export class SessionManager implements ISessionManager {
       await new Promise(resolve => setTimeout(resolve, 100))
     }
 
-    await this.deleteExternalBackendSessionIfSupported(managed)
+    const externalDeleteKey = this.externalSessionDeleteKeyForManaged(managed)
+    if (externalDeleteKey) {
+      this.pendingExternalSessionDeletes.add(externalDeleteKey)
+      void this.deleteExternalBackendSessionIfSupported(managed)
+        .finally(() => {
+          this.pendingExternalSessionDeletes.delete(externalDeleteKey)
+        })
+    }
 
     // Revoke share if session was shared (prevent orphaned viewer copies)
     if (managed.sharedId) {
@@ -7892,6 +7969,16 @@ export class SessionManager implements ISessionManager {
     for (const sessionId of this.sessions.keys()) {
       unregisterSessionScopedToolCallbacks(sessionId)
     }
+
+    for (const [key, agent] of this.externalSessionAgents) {
+      try {
+        agent.dispose()
+        sessionLog.info(`Disposed external session agent ${key}`)
+      } catch (error) {
+        sessionLog.warn(`Failed to dispose external session agent ${key}:`, error)
+      }
+    }
+    this.externalSessionAgents.clear()
 
     sessionLog.info('Cleanup complete')
   }

@@ -539,10 +539,7 @@ describe('Qwen native history loading', () => {
       ['user', '/insight'],
       ['assistant', output],
     ])
-    expect(loadSession(workspaceRoot, sessionId)?.messages.map(message => [message.type, message.content])).toEqual([
-      ['user', '/insight'],
-      ['assistant', output],
-    ])
+    expect(loadSession(workspaceRoot, sessionId)?.messages).toHaveLength(0)
   })
 
   it('backfills an already-loaded empty local session from provider-native history', async () => {
@@ -630,7 +627,7 @@ describe('Qwen native history loading', () => {
       ['assistant', 'The user is just saying hi and asking me to reply with "pong". Simple greeting-like interaction.', true],
       ['assistant', 'pong', false],
     ])
-    expect(loadSession(workspaceRoot, sessionId)?.messages).toHaveLength(3)
+    expect(loadSession(workspaceRoot, sessionId)?.messages).toHaveLength(0)
   })
 
   it('backfills a lazy-loaded empty local session from provider-native history', async () => {
@@ -721,7 +718,7 @@ describe('Qwen native history loading', () => {
       ['tool', 'Running Bash...', 'Bash'],
       ['assistant', 'PR 已创建：https://github.com/QwenLM/qwen-code/pull/3593', ''],
     ])
-    expect(loadSession(workspaceRoot, sessionId)?.messages).toHaveLength(4)
+    expect(loadSession(workspaceRoot, sessionId)?.messages).toHaveLength(0)
   })
 
   it('uses the built-in Qwen Code connection for provider-native sessions missing llmConnection', async () => {
@@ -790,6 +787,6 @@ describe('Qwen native history loading', () => {
 
     expect(resolvedConnectionSlug).toBe('qwen-code')
     expect(session?.messages).toHaveLength(2)
-    expect(loadSession(workspaceRoot, sessionId)?.messages).toHaveLength(2)
+    expect(loadSession(workspaceRoot, sessionId)?.messages).toHaveLength(0)
   })
 })
