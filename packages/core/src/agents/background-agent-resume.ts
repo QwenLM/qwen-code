@@ -110,6 +110,24 @@ function normalizeApprovalMode(
   }
 }
 
+function reconcileResumedApprovalMode(
+  persistedMode: ApprovalModeValue,
+  parentMode: ApprovalModeValue,
+  isTrustedFolder: boolean,
+): ApprovalModeValue {
+  if (
+    isTrustedFolder ||
+    (persistedMode !== 'auto-edit' && persistedMode !== 'yolo')
+  ) {
+    return persistedMode;
+  }
+
+  if (parentMode === 'plan' || parentMode === 'default') {
+    return parentMode;
+  }
+  return 'default';
+}
+
 function createApprovalModeOverride(
   base: Config,
   mode: ApprovalModeValue,
@@ -487,9 +505,14 @@ export class BackgroundAgentResumeService {
         return undefined;
       }
 
-      const resolvedApprovalMode = normalizeApprovalMode(
-        meta.resolvedApprovalMode,
+      const parentApprovalMode = normalizeApprovalMode(
         this.config.getApprovalMode() as ApprovalModeValue,
+        'default',
+      );
+      const resolvedApprovalMode = reconcileResumedApprovalMode(
+        normalizeApprovalMode(meta.resolvedApprovalMode, parentApprovalMode),
+        parentApprovalMode,
+        this.config.isTrustedFolder(),
       );
       const agentConfig =
         resolvedApprovalMode !== this.config.getApprovalMode()

@@ -61,6 +61,7 @@ describe('BackgroundAgentResumeService', () => {
       getSubagentManager: () => subagentManager,
       getHookSystem: () => hookSystem,
       getApprovalMode: () => 'default',
+      isTrustedFolder: () => true,
       getProjectRoot: () => tempDir,
       getCliVersion: () => 'test-version',
       getGeminiClient: () => undefined,
@@ -453,6 +454,78 @@ describe('BackgroundAgentResumeService', () => {
         expect.any(AbortSignal),
       );
     });
+  });
+
+  it('downgrades persisted privileged approval modes when folder trust is revoked', async () => {
+    const sessionId = 'session-untrusted';
+    const agentId = 'agent-untrusted';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume after trust revoked',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'yolo',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: 'Resume after trust revoked' }],
+        },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume after trust revoked',
+      subagentType: 'researcher',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume after trust revoked',
+      outputFile,
+      metaPath,
+    });
+
+    const createAgentHeadless = vi.fn().mockResolvedValue({
+      execute: vi.fn(async () => undefined),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    });
+
+    const { service, subagentManager } = createService();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (service as any).config.isTrustedFolder = () => false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (service as any).config.getApprovalMode = () => 'default';
+    subagentManager.createAgentHeadless = createAgentHeadless;
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    expect(createAgentHeadless).toHaveBeenCalledTimes(1);
+    const [, overriddenConfig] = createAgentHeadless.mock.calls[0]!;
+    expect(overriddenConfig.getApprovalMode()).toBe('default');
   });
 
   it('coalesces concurrent resume calls into a single running agent', async () => {
