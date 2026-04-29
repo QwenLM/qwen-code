@@ -52,6 +52,7 @@ describe('ReadFileTool', () => {
         modalities: { image: true, pdf: true, audio: true, video: true },
       }),
       getFileReadCache: () => fileReadCache,
+      getFileReadCacheDisabled: () => false,
     } as unknown as Config;
     tool = new ReadFileTool(mockConfigInstance);
   });
@@ -578,8 +579,11 @@ describe('ReadFileTool', () => {
 
     describe('with FileReadCache', () => {
       // Helper to build + execute a Read in one shot.
-      async function read(params: ReadFileToolParams): Promise<ToolResult> {
-        const invocation = tool.build(params) as ToolInvocation<
+      async function read(
+        params: ReadFileToolParams,
+        toolOverride: ReadFileTool = tool,
+      ): Promise<ToolResult> {
+        const invocation = toolOverride.build(params) as ToolInvocation<
           ReadFileToolParams,
           ToolResult
         >;
@@ -651,6 +655,33 @@ describe('ReadFileTool', () => {
         expect(ranged.llmContent).toContain('b');
       });
 
+      it('does not arm the placeholder if the first Read was truncated', async () => {
+        // Truncation means the model has not seen the full file even
+        // though no offset/limit was passed. A follow-up no-args Read
+        // must therefore re-emit the truncated window rather than
+        // claiming "you've already seen this file".
+        const filePath = path.join(tempRootDir, 'long.txt');
+        // Write more lines than the mock Config's truncate-lines limit
+        // (500) so the read pipeline reports isTruncated = true.
+        const bigContent = Array.from(
+          { length: 700 },
+          (_, i) => `line ${i + 1}`,
+        ).join('\n');
+        await fsp.writeFile(filePath, bigContent, 'utf-8');
+
+        const first = await read({ file_path: filePath });
+        expect(typeof first.llmContent).toBe('string');
+        // Truncation kicks in (either by line or character cap depending
+        // on Config); we only need the read to actually be truncated,
+        // not match a specific line count.
+        expect(first.returnDisplay).toMatch(/Read lines .* of 700/);
+
+        const second = await read({ file_path: filePath });
+        expect(typeof second.llmContent).toBe('string');
+        expect(second.llmContent).not.toMatch(/unchanged since/);
+        expect(second.returnDisplay).toMatch(/Read lines .* of 700/);
+      });
+
       it('does not arm the placeholder if the first Read was ranged', async () => {
         // First Read covers only a slice — lastReadWasFull = false. A
         // follow-up no-args Read must therefore go through the full
@@ -692,6 +723,47 @@ describe('ReadFileTool', () => {
         const second = await read({ file_path: imagePath });
         // Must remain a Part — never collapsed to a string placeholder.
         expect(typeof second.llmContent).not.toBe('string');
+      });
+
+      it('completely bypasses the cache when getFileReadCacheDisabled() is true', async () => {
+        // Build a fresh ReadFileTool with a Config whose cache is
+        // disabled. Two consecutive full Reads must both return the
+        // file content — never the placeholder, and the cache itself
+        // must remain empty so prior-read enforcement (added in a
+        // follow-up) cannot accidentally trip on a recorded entry.
+        const isolatedCache = new FileReadCache();
+        const disabledConfig = {
+          getFileService: () => new FileDiscoveryService(tempRootDir),
+          getFileSystemService: () => new StandardFileSystemService(),
+          getTargetDir: () => tempRootDir,
+          getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
+          storage: {
+            getProjectTempDir: () => path.join(tempRootDir, '.temp'),
+            getProjectDir: () => path.join(tempRootDir, '.project'),
+            getUserSkillsDirs: () => [
+              path.join(os.homedir(), '.qwen', 'skills'),
+            ],
+          },
+          getTruncateToolOutputThreshold: () => 2500,
+          getTruncateToolOutputLines: () => 500,
+          getContentGeneratorConfig: () => ({
+            modalities: { image: true, pdf: true, audio: true, video: true },
+          }),
+          getFileReadCache: () => isolatedCache,
+          getFileReadCacheDisabled: () => true,
+        } as unknown as Config;
+        const disabledTool = new ReadFileTool(disabledConfig);
+
+        const filePath = path.join(tempRootDir, 'bypass.txt');
+        await fsp.writeFile(filePath, 'plain text', 'utf-8');
+
+        const first = await read({ file_path: filePath }, disabledTool);
+        const second = await read({ file_path: filePath }, disabledTool);
+
+        expect(first.llmContent).toBe('plain text');
+        expect(second.llmContent).toBe('plain text');
+        expect(second.llmContent).not.toMatch(/unchanged since/);
+        expect(isolatedCache.size()).toBe(0);
       });
     });
 

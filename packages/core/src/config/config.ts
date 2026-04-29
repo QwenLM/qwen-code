@@ -366,6 +366,14 @@ export interface ConfigParameters {
   telemetry?: TelemetrySettings;
   gitCoAuthor?: boolean;
   usageStatisticsEnabled?: boolean;
+  /**
+   * If true, disables the per-session FileReadCache short-circuit
+   * (file_unchanged placeholder). Useful for sessions that may undergo
+   * context compaction or transcript transformation, where the model
+   * cannot reliably retrieve a previously-emitted full file content
+   * from prior tool results. Defaults to false (cache active).
+   */
+  fileReadCacheDisabled?: boolean;
   fileFiltering?: {
     respectGitIgnore?: boolean;
     respectQwenIgnore?: boolean;
@@ -603,6 +611,7 @@ export class Config {
   private readonly telemetrySettings: TelemetrySettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
+  private readonly fileReadCacheDisabled: boolean;
   private geminiClient!: GeminiClient;
   private baseLlmClient!: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
@@ -754,6 +763,7 @@ export class Config {
       email: 'qwen-coder@alibabacloud.com',
     };
     this.usageStatisticsEnabled = params.usageStatisticsEnabled ?? true;
+    this.fileReadCacheDisabled = params.fileReadCacheDisabled ?? false;
     this.outputLanguageFilePath = params.outputLanguageFilePath;
 
     this.fileFiltering = {
@@ -2505,6 +2515,19 @@ export class Config {
    */
   getFileReadCache(): FileReadCache {
     return this.fileReadCache;
+  }
+
+  /**
+   * When true, ReadFile / Edit / WriteFile must bypass the session
+   * FileReadCache entirely and behave as if it did not exist (no
+   * `file_unchanged` placeholder, no future prior-read enforcement).
+   * Intended as an escape hatch for sessions where the cache's "model
+   * has already seen this content earlier in the conversation"
+   * assumption is unreliable — e.g. after context compaction or
+   * transcript transformation.
+   */
+  getFileReadCacheDisabled(): boolean {
+    return this.fileReadCacheDisabled;
   }
 
   /**

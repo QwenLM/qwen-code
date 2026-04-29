@@ -29,6 +29,9 @@ import { isSubpaths } from '../utils/paths.js';
 import { Storage } from '../config/storage.js';
 import { isAutoMemPath } from '../memory/paths.js';
 import { memoryFreshnessNote } from '../memory/memoryAge.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('READ_FILE_CACHE');
 
 /**
  * Parameters for the ReadFile tool
@@ -129,6 +132,13 @@ class ReadFileToolInvocation extends BaseToolInvocation<
 
   async execute(): Promise<ToolResult> {
     const absPath = path.resolve(this.params.file_path);
+    // The cache can be disabled at the Config level (escape hatch for
+    // sessions where the "model has already seen the prior tool result"
+    // assumption breaks down — e.g. after context compaction or
+    // transcript transformation). When disabled we bypass both the
+    // fast-path lookup and the post-read record so behaviour matches
+    // the pre-cache implementation byte-for-byte.
+    const cacheEnabled = !this.config.getFileReadCacheDisabled();
     const cache = this.config.getFileReadCache();
     // A "full" Read consumes the whole file: no offset, no limit, no PDF
     // page range. Only full Reads are eligible for the file_unchanged
@@ -150,7 +160,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       // Surface the error via processSingleFileContent below.
     }
 
-    if (stats && isFullRead) {
+    if (cacheEnabled && stats && isFullRead) {
       const status = cache.check(stats);
       if (
         status.state === 'fresh' &&
@@ -160,8 +170,10 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         (status.entry.lastWriteAt === undefined ||
           status.entry.lastReadAt > status.entry.lastWriteAt)
       ) {
+        debugLogger.debug('hit', { path: absPath });
         return this.unchangedResult(absPath);
       }
+      debugLogger.debug('miss', { path: absPath, state: status.state });
     }
 
     const result = await processSingleFileContent(
@@ -184,14 +196,19 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     }
 
     // Record a cache entry so that subsequent identical Reads can hit
-    // the file_unchanged fast-path. We only mark the entry "cacheable"
-    // when the produced content is plain text — for binary, image,
-    // audio, video, PDF, and notebook reads the model wants the full
-    // structured payload re-emitted, not a placeholder.
-    if (stats) {
+    // the file_unchanged fast-path. An entry is "cacheable" only when
+    //   - the content is plain text (not binary / image / audio / video
+    //     / PDF / notebook — those need their structured payload), and
+    //   - the read was not truncated. A truncated full Read means the
+    //     model only saw the head of the file; returning a placeholder
+    //     on the next call would falsely imply "you've already seen
+    //     everything", so we force the next call back through the full
+    //     pipeline.
+    if (cacheEnabled && stats) {
       const cacheable =
         typeof result.llmContent === 'string' &&
-        result.originalLineCount !== undefined;
+        result.originalLineCount !== undefined &&
+        !result.isTruncated;
       cache.recordRead(absPath, stats, { full: isFullRead, cacheable });
     }
 
@@ -251,10 +268,18 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   /**
    * Build the placeholder ToolResult returned when the cache indicates
    * the file has not changed since the model last fully read it. The
-   * placeholder explicitly references the prior conversation and warns
-   * about external mutations the cache cannot observe (shell writes,
-   * MCP tools, other processes), so the model can decide to re-read
-   * with explicit offset/limit if it suspects drift.
+   * placeholder is intentionally explicit about its assumptions so the
+   * model can decide whether to trust it:
+   *
+   *  1. The full content was emitted *earlier in this conversation*.
+   *     If the conversation has been compacted, summarised, or the
+   *     model is a subagent receiving a transformed transcript, the
+   *     prior content may no longer be retrievable — the model should
+   *     re-read with explicit offset/limit in that case.
+   *  2. External mutations the cache cannot observe (shell writes via
+   *     run_shell_command, MCP tool writes, other processes touching
+   *     the file) will not appear here as `stale`. If the model
+   *     suspects drift, it should re-read with explicit offset/limit.
    *
    * No `logFileOperation` is emitted on this path: the file_unchanged
    * fast-path bypasses the read pipeline entirely, and the existing
@@ -268,8 +293,10 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     );
     const llmContent =
       `[File ${relativePath} unchanged since last read in this session — ` +
-      `content was provided earlier in this conversation. ` +
-      `If you modified this file via shell or external tools, re-read with ` +
+      `the full content was provided earlier in this conversation. ` +
+      `If you cannot retrieve that prior content (e.g. after context ` +
+      `compaction) or you suspect the file was modified outside the read/edit ` +
+      `tools (shell command, MCP tool, another process), re-read with ` +
       `explicit offset/limit to fetch current content.]`;
     return {
       llmContent,
