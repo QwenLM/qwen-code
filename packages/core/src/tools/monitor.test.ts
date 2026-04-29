@@ -103,6 +103,11 @@ describe('MonitorTool', () => {
       getWorkspaceContext: vi.fn().mockReturnValue({
         isPathWithinWorkspace: mockIsPathWithinWorkspace,
       }),
+      storage: {
+        getUserSkillsDirs: vi
+          .fn()
+          .mockReturnValue(['/home/user/.claude/skills']),
+      },
     } as unknown as Config;
 
     monitorTool = new MonitorTool(mockConfig);
@@ -263,6 +268,14 @@ describe('MonitorTool', () => {
       expect(
         validate({ command: 'tail -f log', directory: 'relative/path' }),
       ).toBe('Directory must be an absolute path.');
+    });
+
+    it('rejects directory within user skills directory', () => {
+      const result = validate({
+        command: 'tail -f log',
+        directory: '/home/user/.claude/skills/my-skill',
+      });
+      expect(result).toContain('user skills directory is not allowed');
     });
 
     it('rejects directory outside workspace (delegates to WorkspaceContext)', () => {

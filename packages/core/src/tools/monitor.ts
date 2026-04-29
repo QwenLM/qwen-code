@@ -40,6 +40,7 @@ import {
   stripShellWrapper,
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isSubpaths } from '../utils/paths.js';
 import type { MonitorEntry } from '../services/monitorRegistry.js';
 import {
   extractCommandRules,
@@ -477,6 +478,11 @@ export class MonitorTool extends BaseDeclarativeTool<
     if (params.directory) {
       if (!path.isAbsolute(params.directory)) {
         return 'Directory must be an absolute path.';
+      }
+      const resolvedDirectoryPath = path.resolve(params.directory);
+      const userSkillsDirs = this.config.storage.getUserSkillsDirs();
+      if (isSubpaths(userSkillsDirs, resolvedDirectoryPath)) {
+        return 'Explicitly running monitor commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.';
       }
       // Use WorkspaceContext.isPathWithinWorkspace so the check canonicalises
       // the path, resolves symlinks, and matches on path segments rather than
