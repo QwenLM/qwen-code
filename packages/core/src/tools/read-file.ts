@@ -132,13 +132,22 @@ class ReadFileToolInvocation extends BaseToolInvocation<
 
   async execute(): Promise<ToolResult> {
     const absPath = path.resolve(this.params.file_path);
+    const projectRoot = this.config.getTargetDir();
+    // Auto-memory files (AGENTS.md and friends under the auto-memory
+    // root) get a per-read freshness `<system-reminder>` prepended in
+    // the slow path — the signal that tells the model to treat the
+    // contents as a point-in-time snapshot. Returning the
+    // file_unchanged placeholder would skip that prepend, silently
+    // dropping the staleness warning for the rest of the session.
+    // These files are small; re-emit them on every read.
+    const isAutoMem = isAutoMemPath(absPath, projectRoot);
     // The cache can be disabled at the Config level (escape hatch for
     // sessions where the "model has already seen the prior tool result"
     // assumption breaks down — e.g. after context compaction or
     // transcript transformation). When disabled we bypass both the
     // fast-path lookup and the post-read record so behaviour matches
     // the pre-cache implementation byte-for-byte.
-    const cacheEnabled = !this.config.getFileReadCacheDisabled();
+    const cacheEnabled = !this.config.getFileReadCacheDisabled() && !isAutoMem;
     const cache = this.config.getFileReadCache();
     // A "full" Read consumes the whole file: no offset, no limit, no PDF
     // page range. Only full Reads are eligible for the file_unchanged
@@ -156,8 +165,11 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     let stats: Stats | undefined;
     try {
       stats = await fs.stat(absPath);
-    } catch {
-      // Surface the error via processSingleFileContent below.
+    } catch (err) {
+      debugLogger.debug('stat-failed', {
+        path: absPath,
+        code: (err as NodeJS.ErrnoException).code,
+      });
     }
 
     if (cacheEnabled && stats && isFullRead) {
@@ -204,12 +216,32 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     //     on the next call would falsely imply "you've already seen
     //     everything", so we force the next call back through the full
     //     pipeline.
+    //
+    // The stat we record is the one taken **after** the read pipeline,
+    // not `stats` from L158. processSingleFileContent does its own stat
+    // internally; if the file mutated between L158 and that internal
+    // stat, the bytes that landed in `result.llmContent` correspond to
+    // the post-read fingerprint, not the pre-read one. Recording
+    // `stats` would store a fingerprint that does not match the bytes
+    // we just emitted, so a later `check()` could report `fresh` and
+    // serve a placeholder pointing at content the model never saw.
     if (cacheEnabled && stats) {
       const cacheable =
         typeof result.llmContent === 'string' &&
         result.originalLineCount !== undefined &&
         !result.isTruncated;
-      cache.recordRead(absPath, stats, { full: isFullRead, cacheable });
+      let recordStats: Stats = stats;
+      try {
+        recordStats = await fs.stat(absPath);
+      } catch {
+        // Stat after read failed — fall back to the pre-read stat.
+        // The fingerprint may not exactly match the bytes emitted,
+        // but it is the best we have without a second strategy.
+      }
+      cache.recordRead(absPath, recordStats, {
+        full: isFullRead,
+        cacheable,
+      });
     }
 
     let llmContent: PartUnion;
@@ -223,8 +255,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
 
     // For memory files, prepend a per-file staleness caveat so the model knows
     // the content is a point-in-time snapshot and may be stale.
-    const projectRoot = this.config.getTargetDir();
-    if (typeof llmContent === 'string' && isAutoMemPath(absPath, projectRoot)) {
+    if (typeof llmContent === 'string' && isAutoMem) {
       // Reuse the stat from above when we have it; only re-stat as a
       // fallback so memory-file behavior survives a stat failure earlier
       // (which would leave `stats` undefined).

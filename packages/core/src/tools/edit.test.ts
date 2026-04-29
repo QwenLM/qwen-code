@@ -20,7 +20,7 @@ import type { Mock } from 'vitest';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { EditToolParams } from './edit.js';
 import { applyReplacement, EditTool } from './edit.js';
-import type { FileDiff } from './tools.js';
+import type { FileDiff, ToolInvocation, ToolResult } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -28,6 +28,7 @@ import os from 'node:os';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 
 describe('EditTool', () => {
@@ -37,12 +38,14 @@ describe('EditTool', () => {
   let mockConfig: Config;
   let geminiClient: any;
   let baseLlmClient: any;
+  let fileReadCache: FileReadCache;
 
   beforeEach(() => {
     vi.restoreAllMocks();
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'edit-tool-test-'));
     rootDir = path.join(tempDir, 'root');
     fs.mkdirSync(rootDir);
+    fileReadCache = new FileReadCache();
 
     geminiClient = {
       generateJson: mockGenerateJson, // mockGenerateJson is already defined and hoisted
@@ -78,6 +81,7 @@ describe('EditTool', () => {
       setGeminiMdFileCount: vi.fn(),
       getToolRegistry: () => ({}) as any, // Minimal mock for ToolRegistry
       getDefaultFileEncoding: vi.fn().mockReturnValue('utf-8'),
+      getFileReadCache: () => fileReadCache,
     } as unknown as Config;
 
     // Reset mocks before each test
@@ -847,6 +851,57 @@ describe('EditTool', () => {
       expect(invocation.getDescription()).toBe(
         `${testFileName}: this is a very long old string... => this is a very long new string...`,
       );
+    });
+  });
+
+  describe('FileReadCache integration', () => {
+    it('records a write into the cache so a follow-up Read sees lastWriteAt', async () => {
+      // Without this hook, ReadFile's `(lastWriteAt === undefined ||
+      // lastReadAt > lastWriteAt)` guard would let a post-edit Read
+      // return the pre-edit placeholder when the filesystem's mtime
+      // resolution is too coarse to detect the edit.
+      const filePath = path.join(rootDir, 'cached.txt');
+      fs.writeFileSync(filePath, 'old content');
+
+      // Simulate the model having Read the file before Edit fires.
+      const preEditStats = fs.statSync(filePath);
+      fileReadCache.recordRead(filePath, preEditStats, {
+        full: true,
+        cacheable: true,
+      });
+      const beforeRead = fileReadCache.check(preEditStats);
+      expect(beforeRead.state).toBe('fresh');
+      if (beforeRead.state === 'fresh') {
+        expect(beforeRead.entry.lastWriteAt).toBeUndefined();
+      }
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old content',
+        new_string: 'new content',
+      };
+      const invocation = tool.build(params) as ToolInvocation<
+        EditToolParams,
+        ToolResult
+      >;
+      const abortSignal = new AbortController().signal;
+      const result = await invocation.execute(abortSignal);
+      expect(result.error).toBeUndefined();
+
+      const postEditStats = fs.statSync(filePath);
+      const after = fileReadCache.check(postEditStats);
+      // After the edit, the cache entry's mtime+size match the new
+      // file state and lastWriteAt has been stamped.
+      expect(after.state).toBe('fresh');
+      if (after.state === 'fresh') {
+        expect(after.entry.lastWriteAt).toBeDefined();
+        // lastReadAt was set by the simulated pre-edit Read; the
+        // post-write timestamp must dominate it so subsequent Reads
+        // do not return the placeholder.
+        expect(after.entry.lastWriteAt!).toBeGreaterThanOrEqual(
+          after.entry.lastReadAt!,
+        );
+      }
     });
   });
 
