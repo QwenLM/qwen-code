@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Config } from '@qwen-code/qwen-code-core';
+import { SendMessageType, type Config } from '@qwen-code/qwen-code-core';
 import { runNonInteractiveStreamJson } from './session.js';
 import type {
   CLIUserMessage,
@@ -56,6 +56,10 @@ interface ConfigOverrides {
   [key: string]: unknown;
 }
 
+let mockMonitorRegistry: {
+  setNotificationCallback: ReturnType<typeof vi.fn>;
+};
+
 function createConfig(overrides: ConfigOverrides = {}): Config {
   const base = {
     getSessionId: () => 'test-session',
@@ -65,6 +69,7 @@ function createConfig(overrides: ConfigOverrides = {}): Config {
     getApprovalMode: () => 'auto',
     getOutputFormat: () => 'stream-json',
     initialize: vi.fn(),
+    getMonitorRegistry: () => mockMonitorRegistry,
   };
   return { ...base, ...overrides } as unknown as Config;
 }
@@ -142,6 +147,8 @@ describe('runNonInteractiveStreamJson', () => {
   };
   let mockOutputAdapter: {
     emitResult: ReturnType<typeof vi.fn>;
+    emitUserMessage: ReturnType<typeof vi.fn>;
+    emitSystemMessage: ReturnType<typeof vi.fn>;
   };
   let mockDispatcher: {
     dispatch: ReturnType<typeof vi.fn>;
@@ -156,14 +163,21 @@ describe('runNonInteractiveStreamJson', () => {
     };
   };
   beforeEach(() => {
+    mockMonitorRegistry = {
+      setNotificationCallback: vi.fn(),
+    };
     config = createConfig();
     runNonInteractiveMock.mockReset();
 
     // Setup mocks
     mockOutputAdapter = {
       emitResult: vi.fn(),
+      emitUserMessage: vi.fn(),
+      emitSystemMessage: vi.fn(),
     } as {
       emitResult: ReturnType<typeof vi.fn>;
+      emitUserMessage: ReturnType<typeof vi.fn>;
+      emitSystemMessage: ReturnType<typeof vi.fn>;
       [key: string]: unknown;
     };
     (
@@ -257,6 +271,78 @@ describe('runNonInteractiveStreamJson', () => {
     await runNonInteractiveStreamJson(config, '');
 
     expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('routes monitor notifications through the session queue', async () => {
+    const initRequest = createControlRequest('initialize');
+    const userMessage = createUserMessage('Start a monitor');
+
+    let monitorCallback:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: {
+            monitorId: string;
+            toolUseId?: string;
+            status: string;
+          },
+        ) => void)
+      | undefined;
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      monitorCallback = cb;
+    });
+
+    const notificationXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>running</status>\n' +
+      '<summary>Monitor emitted event #1.</summary>\n' +
+      '<result>ready</result>\n' +
+      '</task-notification>';
+
+    runNonInteractiveMock
+      .mockImplementationOnce(async () => {
+        monitorCallback?.('Monitor "logs" event #1: ready', notificationXml, {
+          monitorId: 'mon_1',
+          toolUseId: 'tool_mon_1',
+          status: 'running',
+        });
+      })
+      .mockResolvedValueOnce(undefined);
+
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      yield userMessage;
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
+    expect(mockOutputAdapter.emitUserMessage).toHaveBeenCalledWith([
+      { text: 'Monitor "logs" event #1: ready' },
+    ]);
+    expect(mockOutputAdapter.emitSystemMessage).toHaveBeenCalledWith(
+      'task_notification',
+      {
+        task_id: 'mon_1',
+        tool_use_id: 'tool_mon_1',
+        status: 'running',
+      },
+    );
+    expect(runNonInteractiveMock).toHaveBeenNthCalledWith(
+      2,
+      config,
+      expect.objectContaining({ merged: expect.any(Object) }),
+      notificationXml,
+      expect.stringContaining('test-session'),
+      expect.objectContaining({
+        adapter: mockOutputAdapter,
+        sendMessageType: SendMessageType.Notification,
+        notificationDisplayText: 'Monitor "logs" event #1: ready',
+        captureMonitorNotifications: false,
+      }),
+    );
   });
 
   it('enqueues user messages received during processing', async () => {

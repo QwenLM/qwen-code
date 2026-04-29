@@ -139,6 +139,9 @@ export interface RunNonInteractiveOptions {
   adapter?: JsonOutputAdapterInterface;
   userMessage?: CLIUserMessage;
   controlService?: ControlService;
+  sendMessageType?: SendMessageType;
+  notificationDisplayText?: string;
+  captureMonitorNotifications?: boolean;
 }
 
 /**
@@ -341,22 +344,28 @@ export async function runNonInteractive(
         });
       });
 
-      // Register monitor notification callback onto the shared queue.
       const monitorRegistry = config.getMonitorRegistry();
-      monitorRegistry.setNotificationCallback(
-        (displayText, modelText, meta) => {
-          localQueue.push({
-            displayText,
-            modelText,
-            sendMessageType: SendMessageType.Notification,
-            sdkNotification: {
-              task_id: meta.monitorId,
-              tool_use_id: meta.toolUseId,
-              status: meta.status,
-            },
-          });
-        },
-      );
+      if (options.captureMonitorNotifications !== false) {
+        // One-shot headless runs capture monitor notifications locally so any
+        // events already emitted before exit can be surfaced to the SDK/model.
+        // Persistent stream-json sessions own this callback at the Session
+        // layer instead, so future monitor events can continue after the
+        // originating turn has already completed.
+        monitorRegistry.setNotificationCallback(
+          (displayText, modelText, meta) => {
+            localQueue.push({
+              displayText,
+              modelText,
+              sendMessageType: SendMessageType.Notification,
+              sdkNotification: {
+                task_id: meta.monitorId,
+                tool_use_id: meta.toolUseId,
+                status: meta.status,
+              },
+            });
+          },
+        );
+      }
 
       monitorRegistry.setRegisterCallback((entry) => {
         adapter.emitSystemMessage('task_started', {
@@ -385,9 +394,13 @@ export async function runNonInteractive(
           prompt_id,
           {
             type: isFirstTurn
-              ? SendMessageType.UserQuery
+              ? (options.sendMessageType ?? SendMessageType.UserQuery)
               : SendMessageType.ToolResult,
             modelOverride,
+            ...(isFirstTurn &&
+              options.notificationDisplayText && {
+                notificationDisplayText: options.notificationDisplayText,
+              }),
           },
         );
         isFirstTurn = false;
@@ -740,16 +753,14 @@ export async function runNonInteractive(
               await handleCancellationError(config);
             }
             await drainLocalQueue();
-            // Wait for every task's terminal notification, not just the
-            // running ones: cancel() marks status 'cancelled' synchronously
-            // but the notification is emitted later by the natural handler,
-            // and SDK consumers need every task_started paired with one.
-            // Also wait for running monitors to finish streaming events.
-            if (
-              !registry.hasUnfinalizedTasks() &&
-              monitorRegistry.getRunning().length === 0 &&
-              localQueue.length === 0
-            )
+            // Wait for every background task's terminal notification, not
+            // just the running ones: cancel() marks status 'cancelled'
+            // synchronously but the notification is emitted later by the
+            // natural handler, and SDK consumers need every task_started
+            // paired with one. Monitors are different: they intentionally
+            // continue in the background, so final result emission is not
+            // gated on monitor lifetime.
+            if (!registry.hasUnfinalizedTasks() && localQueue.length === 0)
               break;
             await new Promise((r) => setTimeout(r, 100));
           }
@@ -807,7 +818,9 @@ export async function runNonInteractive(
       reg.setNotificationCallback(undefined);
       reg.setRegisterCallback(undefined);
       const monReg = config.getMonitorRegistry();
-      monReg.setNotificationCallback(undefined);
+      if (options.captureMonitorNotifications !== false) {
+        monReg.setNotificationCallback(undefined);
+      }
       monReg.setRegisterCallback(undefined);
 
       process.stdout.removeListener('error', stdoutErrorHandler);

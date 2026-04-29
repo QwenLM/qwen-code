@@ -8,7 +8,7 @@ import type {
   Config,
   ConfigInitializeOptions,
 } from '@qwen-code/qwen-code-core';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger, SendMessageType } from '@qwen-code/qwen-code-core';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
 import { ControlContext } from './control/ControlContext.js';
@@ -36,8 +36,19 @@ import { runNonInteractive } from '../nonInteractiveCli.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 
+interface MonitorQueueItem {
+  displayText: string;
+  modelText: string;
+  sdkNotification: {
+    task_id: string;
+    tool_use_id?: string;
+    status: string;
+  };
+}
+
 class Session {
   private userMessageQueue: CLIUserMessage[] = [];
+  private monitorQueue: MonitorQueueItem[] = [];
   private abortController: AbortController;
   private config: Config;
   private sessionId: string;
@@ -53,6 +64,7 @@ class Session {
   private processingPromise: Promise<void> | null = null;
   private isShuttingDown: boolean = false;
   private configInitialized: boolean = false;
+  private monitorNotificationsRegistered: boolean = false;
 
   // Single initialization promise that resolves when session is ready for user messages.
   // Created lazily once initialization actually starts.
@@ -110,10 +122,31 @@ class Session {
     try {
       await this.config.initialize(options);
       this.configInitialized = true;
+      this.registerMonitorNotifications();
     } catch (error) {
       debugLogger.error('[Session] Failed to initialize config:', error);
       throw error;
     }
+  }
+
+  private registerMonitorNotifications(): void {
+    if (this.monitorNotificationsRegistered) {
+      return;
+    }
+
+    const registry = this.config.getMonitorRegistry();
+    registry.setNotificationCallback((displayText, modelText, meta) => {
+      this.enqueueMonitorNotification({
+        displayText,
+        modelText,
+        sdkNotification: {
+          task_id: meta.monitorId,
+          tool_use_id: meta.toolUseId,
+          status: meta.status,
+        },
+      });
+    });
+    this.monitorNotificationsRegistered = true;
   }
 
   /**
@@ -339,6 +372,7 @@ class Session {
           abortController: this.abortController,
           adapter: this.outputAdapter,
           controlService: this.controlService ?? undefined,
+          captureMonitorNotifications: false,
         },
       );
     } catch (error) {
@@ -346,21 +380,66 @@ class Session {
     }
   }
 
-  private async processUserMessageQueue(): Promise<void> {
+  private async processMonitorNotification(
+    notification: MonitorQueueItem,
+  ): Promise<void> {
+    await this.waitForInitialization();
+
+    this.outputAdapter.emitUserMessage([{ text: notification.displayText }]);
+    this.outputAdapter.emitSystemMessage(
+      'task_notification',
+      notification.sdkNotification,
+    );
+
+    const promptId = this.getNextPromptId();
+    await runNonInteractive(
+      this.config,
+      createMinimalSettings(),
+      notification.modelText,
+      promptId,
+      {
+        abortController: this.abortController,
+        adapter: this.outputAdapter,
+        controlService: this.controlService ?? undefined,
+        sendMessageType: SendMessageType.Notification,
+        notificationDisplayText: notification.displayText,
+        captureMonitorNotifications: false,
+      },
+    );
+  }
+
+  private async processPendingWork(): Promise<void> {
     if (this.isShuttingDown || this.abortController.signal.aborted) {
       return;
     }
 
     while (
-      this.userMessageQueue.length > 0 &&
+      (this.userMessageQueue.length > 0 || this.monitorQueue.length > 0) &&
       !this.isShuttingDown &&
       !this.abortController.signal.aborted
     ) {
-      const userMessage = this.userMessageQueue.shift()!;
+      if (this.userMessageQueue.length > 0) {
+        const userMessage = this.userMessageQueue.shift()!;
+        try {
+          await this.processUserMessage(userMessage);
+        } catch (error) {
+          debugLogger.error('[Session] Error processing user message:', error);
+          this.emitErrorResult(error);
+        }
+        continue;
+      }
+
+      const notification = this.monitorQueue.shift();
+      if (!notification) {
+        continue;
+      }
       try {
-        await this.processUserMessage(userMessage);
+        await this.processMonitorNotification(notification);
       } catch (error) {
-        debugLogger.error('[Session] Error processing user message:', error);
+        debugLogger.error(
+          '[Session] Error processing monitor notification:',
+          error,
+        );
         this.emitErrorResult(error);
       }
     }
@@ -371,15 +450,20 @@ class Session {
     this.ensureProcessingStarted();
   }
 
+  private enqueueMonitorNotification(notification: MonitorQueueItem): void {
+    this.monitorQueue.push(notification);
+    this.ensureProcessingStarted();
+  }
+
   private ensureProcessingStarted(): void {
     if (this.processingPromise) {
       return;
     }
 
-    this.processingPromise = this.processUserMessageQueue().finally(() => {
+    this.processingPromise = this.processPendingWork().finally(() => {
       this.processingPromise = null;
       if (
-        this.userMessageQueue.length > 0 &&
+        (this.userMessageQueue.length > 0 || this.monitorQueue.length > 0) &&
         !this.isShuttingDown &&
         !this.abortController.signal.aborted
       ) {
@@ -466,6 +550,11 @@ class Session {
 
     // Wait for all pending work
     await this.waitForAllPendingWork();
+
+    if (this.monitorNotificationsRegistered) {
+      this.config.getMonitorRegistry().setNotificationCallback(undefined);
+      this.monitorNotificationsRegistered = false;
+    }
 
     this.dispatcher?.shutdown();
     this.cleanupSignalHandlers();

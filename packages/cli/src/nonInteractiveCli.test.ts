@@ -69,6 +69,19 @@ describe('runNonInteractive', () => {
   let mockConfig: Config;
   let mockSettings: LoadedSettings;
   let mockToolRegistry: ToolRegistry;
+  let mockBackgroundTaskRegistry: {
+    setNotificationCallback: ReturnType<typeof vi.fn>;
+    setRegisterCallback: ReturnType<typeof vi.fn>;
+    getAll: ReturnType<typeof vi.fn>;
+    hasUnfinalizedTasks: ReturnType<typeof vi.fn>;
+    abortAll: ReturnType<typeof vi.fn>;
+  };
+  let mockMonitorRegistry: {
+    setNotificationCallback: ReturnType<typeof vi.fn>;
+    setRegisterCallback: ReturnType<typeof vi.fn>;
+    getRunning: ReturnType<typeof vi.fn>;
+    abortAll: ReturnType<typeof vi.fn>;
+  };
   let mockCoreExecuteToolCall: Mock;
   let mockShutdownTelemetry: Mock;
   let processStdoutSpy: MockInstance;
@@ -112,6 +125,21 @@ describe('runNonInteractive', () => {
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
       getAllToolNames: vi.fn().mockReturnValue([]),
     } as unknown as ToolRegistry;
+
+    mockBackgroundTaskRegistry = {
+      setNotificationCallback: vi.fn(),
+      setRegisterCallback: vi.fn(),
+      getAll: vi.fn().mockReturnValue([]),
+      hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+      abortAll: vi.fn(),
+    };
+
+    mockMonitorRegistry = {
+      setNotificationCallback: vi.fn(),
+      setRegisterCallback: vi.fn(),
+      getRunning: vi.fn().mockReturnValue([]),
+      abortAll: vi.fn(),
+    };
 
     mockGetDebugResponses = vi.fn(() => []);
 
@@ -163,19 +191,10 @@ describe('runNonInteractive', () => {
       setModelInvocableCommandsProvider: vi.fn(),
       setModelInvocableCommandsExecutor: vi.fn(),
       getDisabledSlashCommands: vi.fn().mockReturnValue([]),
-      getBackgroundTaskRegistry: vi.fn().mockReturnValue({
-        setNotificationCallback: vi.fn(),
-        setRegisterCallback: vi.fn(),
-        getAll: vi.fn().mockReturnValue([]),
-        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
-        abortAll: vi.fn(),
-      }),
-      getMonitorRegistry: vi.fn().mockReturnValue({
-        setNotificationCallback: vi.fn(),
-        setRegisterCallback: vi.fn(),
-        getRunning: vi.fn().mockReturnValue([]),
-        abortAll: vi.fn(),
-      }),
+      getBackgroundTaskRegistry: vi
+        .fn()
+        .mockReturnValue(mockBackgroundTaskRegistry),
+      getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
     } as unknown as Config;
 
     mockSettings = {
@@ -1154,6 +1173,112 @@ describe('runNonInteractive', () => {
       type: 'result',
       is_error: false,
       num_turns: 1,
+    });
+  });
+
+  it('does not wait for running monitors before emitting the final headless result', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock();
+
+    const writes: string[] = [];
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      if (typeof chunk === 'string') {
+        writes.push(chunk);
+      } else {
+        writes.push(Buffer.from(chunk).toString('utf8'));
+      }
+      return true;
+    });
+
+    const notificationXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>running</status>\n' +
+      '<summary>Monitor emitted event #1.</summary>\n' +
+      '<result>ready</result>\n' +
+      '</task-notification>';
+
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      if (!cb) {
+        return;
+      }
+      cb('Monitor "logs" event #1: ready', notificationXml, {
+        monitorId: 'mon_1',
+        toolUseId: 'tool_mon_1',
+        status: 'running',
+        eventCount: 1,
+      });
+    });
+    mockMonitorRegistry.getRunning.mockReturnValue([
+      { monitorId: 'mon_1', status: 'running' },
+    ]);
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Monitor launched.' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 2 },
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Observed.' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Watch the logs',
+      'prompt-monitor',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: notificationXml }],
+      expect.any(AbortSignal),
+      'prompt-monitor',
+      {
+        type: SendMessageType.Notification,
+        modelOverride: undefined,
+        notificationDisplayText: 'Monitor "logs" event #1: ready',
+      },
+    );
+
+    const envelopes = writes
+      .join('')
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line));
+    expect(
+      envelopes.some(
+        (env) =>
+          env.type === 'system' &&
+          env.subtype === 'task_notification' &&
+          env.data?.task_id === 'mon_1',
+      ),
+    ).toBe(true);
+    expect(envelopes.at(-1)).toMatchObject({
+      type: 'result',
+      is_error: false,
     });
   });
 
