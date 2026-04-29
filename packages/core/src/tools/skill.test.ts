@@ -557,6 +557,36 @@ describe('SkillTool', () => {
       // All commands overlapped with file skills, so no extra entries added
       expect(tool.description).toContain('<available_skills>');
     });
+
+    it('does not let a disable-model-invocation skill block an unrelated command of the same name', async () => {
+      // Regression for /review finding: the model-invocable-commands dedup
+      // set was built from every file-based skill name, including hidden
+      // ones. A skill marked `disable-model-invocation: true` is
+      // intentionally invisible to the model — it must not also suppress
+      // an unrelated MCP prompt or command that happens to share its name.
+      const hiddenSkill: SkillConfig = {
+        name: 'mcp-prompt-a',
+        description: 'A hidden file-based skill',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/mcp-prompt-a/SKILL.md',
+        body: 'Body.',
+        disableModelInvocation: true,
+      };
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue([hiddenSkill]);
+      vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
+        () => [
+          { name: 'mcp-prompt-a', description: 'An unrelated MCP prompt' },
+        ],
+      );
+
+      const tool = new SkillTool(config);
+      await vi.runAllTimersAsync();
+
+      // The unrelated MCP prompt should still appear; the disabled file
+      // skill must not have suppressed it.
+      expect(tool.description).toContain('mcp-prompt-a');
+      expect(tool.description).toContain('An unrelated MCP prompt');
+    });
   });
 
   describe('validateToolParams with modelInvocableCommands', () => {

@@ -130,4 +130,24 @@ describe('SkillActivationRegistry', () => {
     expect(reg.matchAndConsume('/project/test/foo.ts')).toEqual(['multi']);
     expect(reg.matchAndConsume('/project/src/Bar.tsx')).toEqual([]);
   });
+
+  it('rejects an absolute relative path (Windows cross-drive case)', () => {
+    // Regression: on Windows, `path.relative('C:\\project', 'D:\\other')`
+    // returns an absolute path like `D:\\other`. After normalizing
+    // backslashes to forward slashes, broad globs like `**/*.ts` would
+    // false-match. The guard must reject absolute relative paths before
+    // normalization.
+    const reg = new SkillActivationRegistry(
+      [makeSkill({ name: 'broad', paths: ['**/*.ts'] })],
+      projectRoot,
+    );
+    // Simulate the Node.js Windows cross-drive return value by constructing
+    // a candidate that, when path.relative is computed against projectRoot,
+    // yields an absolute path. On POSIX runners this same scenario manifests
+    // as the existing `..` guard; on Windows the new isAbsolute branch
+    // catches it. Either way the registry must return [] for paths outside
+    // the project root regardless of platform.
+    expect(reg.matchAndConsume('/totally/other/place/file.ts')).toEqual([]);
+    expect(reg.activatedCount).toBe(0);
+  });
 });

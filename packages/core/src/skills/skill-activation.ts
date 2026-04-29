@@ -79,15 +79,24 @@ export class SkillActivationRegistry {
     const absolutePath = path.isAbsolute(filePath)
       ? filePath
       : path.resolve(this.projectRoot, filePath);
-    const relativePath = path
-      .relative(this.projectRoot, absolutePath)
-      .replace(/\\/g, '/');
+    const rawRelativePath = path.relative(this.projectRoot, absolutePath);
 
     // Skip files outside the project root — conditional skills are scoped to
     // the project, matching ConditionalRulesRegistry's behavior.
-    if (relativePath === '..' || relativePath.startsWith('../')) {
+    //
+    // On Windows, `path.relative` between paths on different drives returns
+    // an absolute path (e.g. `D:\\other`), which would otherwise normalize
+    // to forward slashes and false-match a glob like `**/*.ts`. Reject
+    // absolute results before normalizing.
+    if (
+      rawRelativePath === '..' ||
+      rawRelativePath.startsWith(`..${path.sep}`) ||
+      rawRelativePath.startsWith('../') ||
+      path.isAbsolute(rawRelativePath)
+    ) {
       return [];
     }
+    const relativePath = rawRelativePath.replace(/\\/g, '/');
 
     const newlyActivated: string[] = [];
     for (const { skill, matchers } of this.compiled) {

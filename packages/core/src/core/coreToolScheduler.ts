@@ -179,6 +179,34 @@ export type CompletedToolCall =
   | CancelledToolCall
   | ErroredToolCall;
 
+/**
+ * Pull the filesystem path-bearing fields out of a tool's input. Different
+ * core tools name these differently:
+ *  - `file_path` — read-file, edit, write-file
+ *  - `path`      — ls, ripGrep
+ *  - `filePath`  — grep, lsp
+ *  - `paths`     — ripGrep array form
+ * Used by ConditionalRulesRegistry / SkillActivationRegistry hooks to
+ * route every path the tool just touched through the same activation
+ * pipeline. Returns input order, with empty / non-string entries dropped.
+ */
+export function extractToolFilePaths(toolInput: unknown): string[] {
+  if (!toolInput || typeof toolInput !== 'object') return [];
+  const out: string[] = [];
+  const push = (v: unknown): void => {
+    if (typeof v === 'string' && v.length > 0) out.push(v);
+  };
+  const obj = toolInput as Record<string, unknown>;
+  push(obj['file_path']);
+  push(obj['filePath']);
+  push(obj['path']);
+  const pathsField = obj['paths'];
+  if (Array.isArray(pathsField)) {
+    for (const p of pathsField) push(p);
+  }
+  return out;
+}
+
 export type ConfirmHandler = (
   toolCall: WaitingToolCall,
 ) => Promise<ToolConfirmationOutcome>;
@@ -1700,29 +1728,45 @@ export class CoreToolScheduler {
           }
         }
 
-        // Inject conditional rules when the model accesses a matching file.
-        // Rules are injected at most once per session per rule file.
-        const filePath = toolInput?.['file_path'];
-        if (typeof filePath === 'string') {
-          const rulesCtx = this.config
-            .getConditionalRulesRegistry()
-            ?.matchAndConsume(filePath);
-          if (rulesCtx) {
-            content = appendAdditionalContext(
-              content,
-              `<system-reminder>\n${rulesCtx}\n</system-reminder>`,
-            );
+        // Collect filesystem paths the tool just touched. Different tools
+        // use different parameter names: `file_path` (read/edit/write),
+        // `path` (ls, ripGrep), `filePath` (grep, lsp), and `paths`
+        // (ripGrep array form). Conditional rules and skill activation
+        // both key off the same path set, so inspect the union.
+        const candidatePaths = extractToolFilePaths(toolInput);
+
+        if (candidatePaths.length > 0) {
+          const rulesRegistry = this.config.getConditionalRulesRegistry();
+          const skillManager = this.config.getSkillManager();
+          const seenSkillActivations = new Set<string>();
+
+          for (const candidatePath of candidatePaths) {
+            // Inject conditional rules at most once per session per rule
+            // file. The registry tracks dedup internally.
+            const rulesCtx = rulesRegistry?.matchAndConsume(candidatePath);
+            if (rulesCtx) {
+              content = appendAdditionalContext(
+                content,
+                `<system-reminder>\n${rulesCtx}\n</system-reminder>`,
+              );
+            }
+
+            // Activate any conditional skills (skills with `paths:`
+            // frontmatter) whose globs match this file. Newly activated
+            // skills appear in the SkillTool listing on the next turn.
+            const activatedSkills =
+              skillManager?.matchAndActivateByPath(candidatePath);
+            if (activatedSkills) {
+              for (const name of activatedSkills)
+                seenSkillActivations.add(name);
+            }
           }
 
-          // Activate any conditional skills (skills with `paths:` frontmatter)
-          // whose globs match this file. Newly activated skills appear in the
-          // SkillTool listing on the next turn; announce them to the model via
-          // a system-reminder so it knows they became available.
-          const activatedSkills = this.config
-            .getSkillManager()
-            ?.matchAndActivateByPath(filePath);
-          if (activatedSkills && activatedSkills.length > 0) {
-            const names = activatedSkills.join(', ');
+          // Coalesce all activations from this tool call into one
+          // system-reminder so the model gets a single, deduplicated
+          // announcement even when multiple paths matched the same skill.
+          if (seenSkillActivations.size > 0) {
+            const names = Array.from(seenSkillActivations).join(', ');
             content = appendAdditionalContext(
               content,
               `<system-reminder>\nThe following skill(s) are now available via the Skill tool based on the file you just accessed: ${names}. Use them if relevant to the task.\n</system-reminder>`,

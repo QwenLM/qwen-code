@@ -31,6 +31,7 @@ import type { ToolCall, WaitingToolCall } from './coreToolScheduler.js';
 import {
   CoreToolScheduler,
   convertToFunctionResponse,
+  extractToolFilePaths,
 } from './coreToolScheduler.js';
 import type { Part, PartListUnion } from '@google/genai';
 import {
@@ -4310,5 +4311,67 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     const msg = getLastErrorMessage(onToolCallsUpdate);
     expect(msg).toBeDefined();
     expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+});
+
+describe('extractToolFilePaths', () => {
+  it('returns empty for non-object inputs', () => {
+    expect(extractToolFilePaths(undefined)).toEqual([]);
+    expect(extractToolFilePaths(null)).toEqual([]);
+    expect(extractToolFilePaths('string')).toEqual([]);
+    expect(extractToolFilePaths(42)).toEqual([]);
+  });
+
+  it('extracts file_path (read-file / edit / write-file convention)', () => {
+    expect(extractToolFilePaths({ file_path: '/proj/a.ts' })).toEqual([
+      '/proj/a.ts',
+    ]);
+  });
+
+  it('extracts filePath (grep / lsp camelCase convention)', () => {
+    expect(extractToolFilePaths({ filePath: '/proj/b.ts' })).toEqual([
+      '/proj/b.ts',
+    ]);
+  });
+
+  it('extracts path (ls / ripGrep convention)', () => {
+    expect(extractToolFilePaths({ path: '/proj/dir' })).toEqual(['/proj/dir']);
+  });
+
+  it('extracts paths array (ripGrep multi-path convention)', () => {
+    expect(
+      extractToolFilePaths({ paths: ['/proj/a.ts', '/proj/b.ts'] }),
+    ).toEqual(['/proj/a.ts', '/proj/b.ts']);
+  });
+
+  it('combines all field variants in input order', () => {
+    expect(
+      extractToolFilePaths({
+        file_path: '/a',
+        filePath: '/b',
+        path: '/c',
+        paths: ['/d', '/e'],
+      }),
+    ).toEqual(['/a', '/b', '/c', '/d', '/e']);
+  });
+
+  it('drops empty strings and non-string entries', () => {
+    expect(
+      extractToolFilePaths({
+        file_path: '',
+        filePath: undefined,
+        path: 42,
+        paths: ['/ok', '', null, '/also-ok'],
+      }),
+    ).toEqual(['/ok', '/also-ok']);
+  });
+
+  it('ignores fields with the right name but the wrong shape', () => {
+    expect(
+      extractToolFilePaths({
+        file_path: { not: 'a string' },
+        paths: 'not-an-array',
+      }),
+    ).toEqual([]);
   });
 });

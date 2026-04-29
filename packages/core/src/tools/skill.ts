@@ -114,14 +114,20 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
           .map((s) => s.name),
       );
       // Merge in model-invocable commands from CommandService (injected via
-      // Config), but exclude any whose names appear as ANY file-based skill —
-      // including pending conditional skills. Using `availableSkills` (active
-      // only) here would let a path-gated skill leak through the
-      // <available_commands> listing and bypass validateToolParams's
-      // pendingConditionalSkillNames check, breaking the activation contract.
+      // Config), but exclude any whose names appear as a model-invocable
+      // file-based skill — including pending conditional skills. Using
+      // `availableSkills` (active only) here would let a path-gated skill
+      // leak through the <available_commands> listing and bypass
+      // validateToolParams's pendingConditionalSkillNames check, breaking
+      // the activation contract. Conversely, a skill marked
+      // `disable-model-invocation: true` is intentionally hidden from the
+      // model and must not block an unrelated command/MCP prompt that
+      // happens to share its name; exclude those from the dedup set too.
       const provider = this.config.getModelInvocableCommandsProvider();
       const allCommands = provider ? provider() : [];
-      const fileBasedSkillNames = new Set(allSkills.map((s) => s.name));
+      const fileBasedSkillNames = new Set(
+        allSkills.filter((s) => !s.disableModelInvocation).map((s) => s.name),
+      );
       this.modelInvocableCommands = allCommands.filter(
         (cmd) => !fileBasedSkillNames.has(cmd.name),
       );
