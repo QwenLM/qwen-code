@@ -29,8 +29,12 @@ import {
   type AgentRoundTextEvent,
   type AgentExternalMessageEvent,
 } from './runtime/agent-events.js';
-import { type ChatRecord } from '../services/chatRecordingService.js';
+import type {
+  AgentBootstrapRecordPayload,
+  ChatRecord,
+} from '../services/chatRecordingService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { _recoverObjectsFromLine } from '../utils/jsonl-utils.js';
 
 const debugLogger = createDebugLogger('AGENT_TRANSCRIPT');
 
@@ -94,6 +98,23 @@ export interface AgentMeta {
   parentAgentId: string | null;
   /** ISO 8601 creation time. */
   createdAt: string;
+  /**
+   * Persisted lifecycle status. Background-resume discovery treats
+   * `running` as resumable work that was interrupted by process exit.
+   */
+  status?: 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+  /** ISO 8601 timestamp of the latest lifecycle transition. */
+  lastUpdatedAt?: string;
+  /** Resolved approval mode used when the agent was launched. */
+  resolvedApprovalMode?: string;
+  /** Canonical subagent config name used to recreate this agent. */
+  subagentName?: string;
+  /** UI hint preserved for resumed task rows. */
+  agentColor?: string;
+  /** Number of explicit resume attempts performed so far. */
+  resumeCount?: number;
+  /** Last terminal error, if any. */
+  lastError?: string;
 }
 
 /**
@@ -106,6 +127,62 @@ export function writeAgentMeta(metaPath: string, meta: AgentMeta): void {
   } catch (error) {
     debugLogger.warn(`Failed to write agent meta sidecar ${metaPath}:`, error);
   }
+}
+
+export function readAgentMeta(metaPath: string): AgentMeta | undefined {
+  try {
+    return JSON.parse(fs.readFileSync(metaPath, 'utf8')) as AgentMeta;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      debugLogger.warn(`Failed to read agent meta sidecar ${metaPath}:`, error);
+    }
+    return undefined;
+  }
+}
+
+export function patchAgentMeta(
+  metaPath: string,
+  updates: Partial<AgentMeta>,
+): AgentMeta | undefined {
+  const current = readAgentMeta(metaPath);
+  if (!current) return undefined;
+  const next: AgentMeta = {
+    ...current,
+    ...updates,
+  };
+  writeAgentMeta(metaPath, next);
+  return next;
+}
+
+export function readLastTranscriptRecordUuidSync(
+  jsonlPath: string,
+): string | null {
+  try {
+    const raw = fs.readFileSync(jsonlPath, 'utf8');
+    const lines = raw.split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const trimmed = lines[i]?.trim();
+      if (!trimmed) continue;
+      try {
+        const parsed = JSON.parse(trimmed) as ChatRecord;
+        return parsed.uuid ?? null;
+      } catch {
+        const recovered = _recoverObjectsFromLine<ChatRecord>(trimmed);
+        const lastRecovered = recovered[recovered.length - 1];
+        if (lastRecovered?.uuid) {
+          return lastRecovered.uuid;
+        }
+      }
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      debugLogger.warn(
+        `Failed to read last transcript record UUID from ${jsonlPath}:`,
+        error,
+      );
+    }
+  }
+  return null;
 }
 
 export interface AttachJsonlOptions {
@@ -128,6 +205,28 @@ export interface AttachJsonlOptions {
    * transcript is self-describing. Empty/omitted seeds nothing.
    */
   initialUserPrompt?: string;
+  /**
+   * Exact bootstrap history that seeded the agent before its first runtime
+   * turn. Used by transcript-first resume to reconstruct fork constraints.
+   */
+  bootstrapHistory?: Array<import('@google/genai').Content>;
+  /**
+   * Launching prompt that should be treated as the first model-facing task
+   * prompt during transcript-based resume. For forks this may differ from the
+   * bootstrap's visible user directive (e.g. `Begin.` vs full boilerplate).
+   */
+  launchTaskPrompt?: string;
+  /**
+   * When true, continue appending onto an existing transcript rather than
+   * starting a fresh UUID chain.
+   */
+  appendToExisting?: boolean;
+  /**
+   * Optional explicit parent UUID to use for the first appended record.
+   * Resume flows pass the last stable transcript UUID here so new records
+   * branch away from any dangling tail produced by an interrupted turn.
+   */
+  initialParentUuid?: string | null;
 }
 
 export interface AttachJsonlTranscriptResult {
@@ -151,7 +250,12 @@ export function attachJsonlTranscriptWriter(
   jsonlPath: string,
   options: AttachJsonlOptions,
 ): AttachJsonlTranscriptResult {
-  let lastUuid: string | null = null;
+  let lastUuid: string | null =
+    options.initialParentUuid !== undefined
+      ? options.initialParentUuid
+      : options.appendToExisting
+        ? readLastTranscriptRecordUuidSync(jsonlPath)
+        : null;
   let fd: number | null = null;
   let openFailed = false;
 
@@ -255,12 +359,37 @@ export function attachJsonlTranscriptWriter(
     });
   };
 
+  const recordSystem = (
+    subtype: NonNullable<ChatRecord['subtype']>,
+    payload: ChatRecord['systemPayload'],
+  ) => {
+    append({
+      ...baseFields('system'),
+      subtype,
+      systemPayload: payload,
+    });
+  };
+
   const onExternalMessage = (event: AgentExternalMessageEvent) => {
     recordUserMessage(event.text);
   };
 
+  if (options.bootstrapHistory && options.bootstrapHistory.length > 0) {
+    const payload: AgentBootstrapRecordPayload = {
+      kind: 'fork',
+      history: structuredClone(options.bootstrapHistory),
+    };
+    recordSystem('agent_bootstrap', payload);
+  }
+
   if (options.initialUserPrompt) {
     recordUserMessage(options.initialUserPrompt);
+  }
+
+  if (options.launchTaskPrompt) {
+    recordSystem('agent_launch_prompt', {
+      displayText: options.launchTaskPrompt,
+    });
   }
 
   emitter.on(AgentEventType.ROUND_TEXT, onRoundText);

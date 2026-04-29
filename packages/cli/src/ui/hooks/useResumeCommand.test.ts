@@ -111,7 +111,11 @@ describe('useResumeCommand', () => {
   });
 
   it('handleResume no-ops when config is null', async () => {
-    const historyManager = { clearItems: vi.fn(), loadHistory: vi.fn() };
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
     const startNewSession = vi.fn();
 
     const { result } = renderHook(() =>
@@ -135,7 +139,11 @@ describe('useResumeCommand', () => {
     resumeMocks.reset();
     resumeMocks.createPendingLoadSession();
 
-    const historyManager = { clearItems: vi.fn(), loadHistory: vi.fn() };
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
     const startNewSession = vi.fn();
     const geminiClient = {
       initialize: vi.fn(),
@@ -145,6 +153,10 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+      getBackgroundAgentResumeService: () => ({
+        buildRecoveredBackgroundAgentsNotice: vi.fn(),
+      }),
       getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
       getDebugLogger: () => ({
         warn: vi.fn(),

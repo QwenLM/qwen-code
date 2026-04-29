@@ -73,6 +73,7 @@ function escapeXml(text: string): string {
 
 export type BackgroundTaskStatus =
   | 'running'
+  | 'paused'
   | 'completed'
   | 'failed'
   | 'cancelled';
@@ -127,6 +128,8 @@ export interface BackgroundTaskEntry {
   recentActivities?: readonly BackgroundActivity[];
   /** Absolute path to the agent's on-disk JSONL transcript file. */
   outputFile?: string;
+  /** Absolute path to the agent's sidecar metadata file. */
+  metaPath?: string;
   /** Messages queued by SendMessage, drained between tool rounds. */
   pendingMessages?: string[];
   /**
@@ -259,6 +262,22 @@ export class BackgroundTaskRegistry {
     timer.unref?.();
   }
 
+  /**
+   * Marks a paused interrupted task as intentionally discarded/cancelled
+   * without emitting a task-notification. Used when the user explicitly
+   * abandons a recovered task instead of resuming it.
+   */
+  abandon(agentId: string): void {
+    const entry = this.agents.get(agentId);
+    if (!entry || entry.status !== 'paused') return;
+
+    entry.status = 'cancelled';
+    entry.endTime = Date.now();
+    entry.notified = true;
+    debugLogger.info(`Abandoned paused background agent: ${agentId}`);
+    this.emitStatusChange(entry);
+  }
+
   // Emit the terminal cancelled notification once the agent's natural
   // handler has confirmed that the reasoning loop ended because of the
   // abort (terminateMode === CANCELLED). Attaches the partial result and
@@ -337,7 +356,8 @@ export class BackgroundTaskRegistry {
    */
   hasUnfinalizedTasks(): boolean {
     for (const entry of this.agents.values()) {
-      if (!entry.notified) return true;
+      if (entry.status === 'running') return true;
+      if (entry.status === 'cancelled' && !entry.notified) return true;
     }
     return false;
   }

@@ -28,6 +28,7 @@ import {
   ToolNames,
   type BackgroundTaskEntry,
 } from '@qwen-code/qwen-code-core';
+import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 
 // Tool-name → display-name lookup (`run_shell_command` → `Shell`).
 const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
@@ -44,10 +45,10 @@ function formatActivityLabel(name: string, description: string | undefined) {
     : '';
   return singleLineDesc ? `${display}(${singleLineDesc})` : display;
 }
-import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 
 const STATUS_VERBS: Record<BackgroundTaskEntry['status'], string> = {
   running: 'Running',
+  paused: 'Paused',
   completed: 'Completed',
   failed: 'Failed',
   cancelled: 'Stopped',
@@ -63,6 +64,12 @@ function terminalStatusPresentation(
   status: BackgroundTaskEntry['status'],
 ): StatusPresentation | null {
   switch (status) {
+    case 'paused':
+      return {
+        icon: '\u23F8',
+        color: theme.status.warning,
+        labelColor: theme.status.warningDim,
+      };
     case 'completed':
       return {
         icon: '\u2714',
@@ -362,6 +369,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     enterDetail,
     exitDetail,
     cancelSelected,
+    resumeSelected,
   } = useBackgroundTaskViewActions();
   const config = useConfig();
 
@@ -484,6 +492,10 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
           closeDialog();
           return;
         }
+        if (key.sequence === 'r' && !key.ctrl && !key.meta) {
+          void resumeSelected();
+          return;
+        }
         if (key.sequence === 'x' && !key.ctrl && !key.meta) {
           cancelSelected();
           return;
@@ -509,6 +521,10 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         closeDialog();
         return;
       }
+      if (key.sequence === 'r' && !key.ctrl && !key.meta) {
+        void resumeSelected();
+        return;
+      }
       if (key.sequence === 'x' && !key.ctrl && !key.meta) {
         cancelSelected();
         return;
@@ -524,10 +540,12 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   if (dialogMode === 'list') {
     hints.push('\u2191/\u2193 select', 'Enter view');
     if (selectedEntry?.status === 'running') hints.push('x stop');
+    if (selectedEntry?.status === 'paused') hints.push('r resume', 'x abandon');
     hints.push('\u2190/Esc close');
   } else {
     hints.push('\u2190 go back', 'Esc/Enter/Space close');
     if (selectedEntry?.status === 'running') hints.push('x stop');
+    if (selectedEntry?.status === 'paused') hints.push('r resume', 'x abandon');
   }
 
   return (

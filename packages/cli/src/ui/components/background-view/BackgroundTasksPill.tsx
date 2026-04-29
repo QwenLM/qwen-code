@@ -16,14 +16,20 @@ import { theme } from '../../semantic-colors.js';
 import type { BackgroundTaskEntry } from '@qwen-code/qwen-code-core';
 
 /**
- * Pill label: counts running entries while any are running; once everything
- * has terminated, switches to a "done" form so the pill still invites
+ * Pill label: prefer live running counts, then paused resumable counts; once
+ * everything is terminal, switch to a "done" form so the pill still invites
  * reopening the dialog to inspect final state.
  */
 export function getPillLabel(entries: readonly BackgroundTaskEntry[]): string {
   const running = entries.filter((e) => e.status === 'running').length;
+  const paused = entries.filter((e) => e.status === 'paused').length;
   if (running > 0) {
     return running === 1 ? '1 local agent' : `${running} local agents`;
+  }
+  if (paused > 0) {
+    return paused === 1
+      ? '1 local agent paused'
+      : `${paused} local agents paused`;
   }
   return entries.length === 1
     ? '1 local agent done'

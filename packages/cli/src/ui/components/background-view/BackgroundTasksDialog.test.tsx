@@ -49,6 +49,8 @@ interface ProbeHandle {
 
 interface Harness {
   cancel: ReturnType<typeof vi.fn>;
+  resume: ReturnType<typeof vi.fn>;
+  abandon: ReturnType<typeof vi.fn>;
   setEntries: (next: readonly BackgroundTaskEntry[]) => void;
   pressKey: (key: { name?: string; sequence?: string }) => void;
   call: (fn: () => void) => void;
@@ -64,11 +66,15 @@ function setup(initial: readonly BackgroundTaskEntry[]): Harness {
   });
 
   const cancel = vi.fn();
+  const resume = vi.fn();
+  const abandon = vi.fn();
   const config = {
     getBackgroundTaskRegistry: () => ({
       cancel,
       setActivityChangeCallback: vi.fn(),
     }),
+    resumeBackgroundAgent: resume,
+    abandonBackgroundAgent: abandon,
   } as unknown as Config;
 
   const handle: { current: ProbeHandle | null } = { current: null };
@@ -108,6 +114,8 @@ function setup(initial: readonly BackgroundTaskEntry[]): Harness {
 
   return {
     cancel,
+    resume,
+    abandon,
     setEntries(next) {
       handlers.length = 0;
       act(() => handle.current!.setEntries(next));
@@ -195,5 +203,25 @@ describe('BackgroundTasksDialog', () => {
 
     h.setEntries([]);
     expect(h.probe.current!.state.selectedIndex).toBe(0);
+  });
+
+  it('resumes a paused task with the r key', () => {
+    const paused = entry({ agentId: 'a', status: 'paused' });
+    const h = setup([paused]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.pressKey({ sequence: 'r' });
+
+    expect(h.resume).toHaveBeenCalledWith('a');
+  });
+
+  it('abandons a paused task with the x key', () => {
+    const paused = entry({ agentId: 'a', status: 'paused' });
+    const h = setup([paused]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.pressKey({ sequence: 'x' });
+
+    expect(h.abandon).toHaveBeenCalledWith('a');
   });
 });

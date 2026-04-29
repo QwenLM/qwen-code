@@ -14,10 +14,14 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
+import { MessageType, type HistoryItem } from '../types.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
-  historyManager: Pick<UseHistoryManagerReturn, 'clearItems' | 'loadHistory'>;
+  historyManager: Pick<
+    UseHistoryManagerReturn,
+    'addItem' | 'clearItems' | 'loadHistory'
+  >;
   startNewSession: (sessionId: string) => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
@@ -63,7 +67,7 @@ export function useResumeCommand(
     options ?? {};
 
   const hasHistoryManager = !!historyManager;
-  const { clearItems, loadHistory } = historyManager || {};
+  const { addItem, clearItems, loadHistory } = historyManager || {};
   const handleResume = useCallback(
     async (sessionId: string) => {
       if (!config || !hasHistoryManager || !startNewSession) {
@@ -101,6 +105,19 @@ export function useResumeCommand(
         ?.rebuildTurnBoundaries(sessionData.conversation.messages);
       await config.getGeminiClient()?.initialize?.();
 
+      const recovered = await config.loadPausedBackgroundAgents(sessionId);
+      if (recovered.length > 0) {
+        addItem?.(
+          {
+            type: MessageType.INFO,
+            text: config
+              .getBackgroundAgentResumeService()
+              .buildRecoveredBackgroundAgentsNotice(recovered.length),
+          } as Omit<HistoryItem, 'id'>,
+          Date.now(),
+        );
+      }
+
       // Fire SessionStart event after resuming session
       try {
         await config
@@ -121,6 +138,7 @@ export function useResumeCommand(
       closeResumeDialog,
       config,
       hasHistoryManager,
+      addItem,
       clearItems,
       loadHistory,
       startNewSession,

@@ -228,6 +228,37 @@ describe('BackgroundTaskRegistry', () => {
     expect(abortController.signal.aborted).toBe(false);
   });
 
+  it('abandons a paused agent without emitting a notification', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+
+    registry.register({
+      agentId: 'paused-1',
+      description: 'paused agent',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    registry.abandon('paused-1');
+
+    expect(registry.get('paused-1')!.status).toBe('cancelled');
+    expect(registry.get('paused-1')!.notified).toBe(true);
+    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it('does not treat paused entries as unfinalized work', () => {
+    registry.register({
+      agentId: 'paused-1',
+      description: 'paused agent',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    expect(registry.hasUnfinalizedTasks()).toBe(false);
+  });
+
   it('lists running agents', () => {
     registry.register({
       agentId: 'a',

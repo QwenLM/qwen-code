@@ -61,6 +61,7 @@ import {
   getAgentJsonlPath,
   getAgentMetaPath,
   attachJsonlTranscriptWriter,
+  patchAgentMeta,
   writeAgentMeta,
 } from '../../agents/agent-transcript.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
@@ -640,6 +641,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     eventEmitter: AgentEventEmitter = this.eventEmitter,
   ): Promise<{
     subagent: AgentHeadless;
+    initialMessages?: Content[];
     taskPrompt: string;
   }> {
     const geminiClient = this.config.getGeminiClient();
@@ -740,7 +742,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       eventEmitter,
     );
 
-    return { subagent, taskPrompt };
+    return { subagent, initialMessages, taskPrompt };
   }
 
   // Runs the SubagentStop hook after execution. On a blocking decision, feeds the
@@ -1056,18 +1058,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // concurrent fork/subagent into the same transcript.
         const bgEventEmitter = new AgentEventEmitter();
         let bgSubagent: AgentHeadless;
+        let bgInitialMessages: Content[] | undefined;
+        let bgTaskPrompt: string;
         if (isFork) {
           const fork = await this.createForkSubagent(
             bgConfig as Config,
             bgEventEmitter,
           );
           bgSubagent = fork.subagent;
+          bgInitialMessages = fork.initialMessages;
+          bgTaskPrompt = fork.taskPrompt;
         } else {
           bgSubagent = await this.subagentManager.createAgentHeadless(
             subagentConfig,
             bgConfig as Config,
             { eventEmitter: bgEventEmitter },
           );
+          bgTaskPrompt = this.params.prompt;
         }
 
         const registry = this.config.getBackgroundTaskRegistry();
@@ -1100,6 +1107,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // self-describing — readers don't need to consult .meta.json to
             // know what the agent was asked to do.
             initialUserPrompt: this.params.prompt,
+            bootstrapHistory: isFork ? bgInitialMessages : undefined,
+            launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
           },
         );
         writeAgentMeta(metaPath, {
@@ -1112,7 +1121,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // top-level launches from the user session.
           parentAgentId: getCurrentAgentId(),
           createdAt: new Date().toISOString(),
+          status: 'running',
+          lastUpdatedAt: new Date().toISOString(),
+          resolvedApprovalMode,
+          subagentName: subagentConfig.name,
+          agentColor: subagentConfig.color,
+          resumeCount: 0,
         });
+        bgAbortController.signal.addEventListener(
+          'abort',
+          () => {
+            patchAgentMeta(metaPath, {
+              status: 'cancelled',
+              lastUpdatedAt: new Date().toISOString(),
+            });
+          },
+          { once: true },
+        );
 
         registry.register({
           agentId: hookOpts.agentId,
@@ -1124,6 +1149,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           toolUseId: this.callId,
           prompt: this.params.prompt,
           outputFile: jsonlPath,
+          metaPath,
         });
 
         // Subscribe to the subagent's tool-call event stream so the
@@ -1208,18 +1234,34 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             const completionStats = getCompletionStats();
             if (terminateMode === AgentTerminateMode.GOAL) {
               registry.complete(hookOpts.agentId, finalText, completionStats);
+              patchAgentMeta(metaPath, {
+                status: 'completed',
+                lastUpdatedAt: new Date().toISOString(),
+                lastError: undefined,
+              });
             } else if (terminateMode === AgentTerminateMode.CANCELLED) {
               registry.finalizeCancelled(
                 hookOpts.agentId,
                 finalText,
                 completionStats,
               );
+              patchAgentMeta(metaPath, {
+                status: 'cancelled',
+                lastUpdatedAt: new Date().toISOString(),
+                lastError: undefined,
+              });
             } else {
               registry.fail(
                 hookOpts.agentId,
                 finalText || `Agent terminated with mode: ${terminateMode}`,
                 completionStats,
               );
+              patchAgentMeta(metaPath, {
+                status: 'failed',
+                lastUpdatedAt: new Date().toISOString(),
+                lastError:
+                  finalText || `Agent terminated with mode: ${terminateMode}`,
+              });
             }
           } catch (error) {
             const errorMsg =
@@ -1235,8 +1277,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 errorMsg,
                 getCompletionStats(),
               );
+              patchAgentMeta(metaPath, {
+                status: 'cancelled',
+                lastUpdatedAt: new Date().toISOString(),
+                lastError: undefined,
+              });
             } else {
               registry.fail(hookOpts.agentId, errorMsg, getCompletionStats());
+              patchAgentMeta(metaPath, {
+                status: 'failed',
+                lastUpdatedAt: new Date().toISOString(),
+                lastError: errorMsg,
+              });
             }
           } finally {
             bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);

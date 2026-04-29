@@ -5,7 +5,7 @@
  */
 
 /**
- * @fileoverview TaskStop tool — lets the model cancel a running background task.
+ * @fileoverview TaskStop tool — lets the model stop a background task.
  */
 
 import type { Config } from '../config/config.js';
@@ -54,6 +54,26 @@ class TaskStopInvocation extends BaseToolInvocation<
       };
     }
 
+    if (entry.status === 'paused') {
+      const abandoned = this.config.abandonBackgroundAgent(this.params.task_id);
+      if (!abandoned) {
+        return {
+          llmContent: `Error: Background task "${this.params.task_id}" could not be cancelled from paused state.`,
+          returnDisplay: 'Task could not be cancelled.',
+          error: {
+            message: `Task could not be cancelled: ${this.params.task_id}`,
+            type: ToolErrorType.TASK_STOP_NOT_RUNNING,
+          },
+        };
+      }
+
+      const desc = entry.description;
+      return {
+        llmContent: `Cancelled paused background task "${this.params.task_id}".\nDescription: ${desc}`,
+        returnDisplay: `Cancelled: ${desc}`,
+      };
+    }
+
     if (entry.status !== 'running') {
       return {
         llmContent: `Error: Background task "${this.params.task_id}" is not running (status: ${entry.status}).`,
@@ -89,7 +109,7 @@ export class TaskStopTool extends BaseDeclarativeTool<
     super(
       TaskStopTool.Name,
       ToolDisplayNames.TASK_STOP,
-      'Cancel a running background task by its ID. The task ID is returned when the task is launched.',
+      'Stop a background task by its ID. Running tasks are cancelled; paused recovered tasks are abandoned without resuming them.',
       Kind.Other,
       {
         type: 'object',

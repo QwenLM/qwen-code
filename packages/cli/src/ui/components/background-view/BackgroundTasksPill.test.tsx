@@ -50,6 +50,12 @@ describe('getPillLabel', () => {
     );
   });
 
+  it('uses paused form when only paused entries remain', () => {
+    expect(getPillLabel([entry({ agentId: 'a', status: 'paused' })])).toBe(
+      '1 local agent paused',
+    );
+  });
+
   it('uses plural done form when all entries are terminal', () => {
     expect(
       getPillLabel([

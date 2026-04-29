@@ -13,6 +13,8 @@ import {
   getAgentJsonlPath,
   getAgentMetaPath,
   attachJsonlTranscriptWriter,
+  readAgentMeta,
+  readLastTranscriptRecordUuidSync,
   writeAgentMeta,
   type AgentMeta,
 } from './agent-transcript.js';
@@ -116,6 +118,32 @@ describe('agent-transcript', () => {
       });
       expect(fs.existsSync(metaPath)).toBe(true);
     });
+
+    it('reads back a previously-written meta sidecar', () => {
+      const metaPath = path.join(
+        tempDir,
+        'subagents',
+        's1',
+        'agent-a.meta.json',
+      );
+      writeAgentMeta(metaPath, {
+        agentId: 'a',
+        agentType: 'x',
+        description: 'd',
+        parentSessionId: 's',
+        parentAgentId: null,
+        createdAt: 'now',
+        status: 'running',
+        subagentName: 'explore',
+        resolvedApprovalMode: 'auto-edit',
+      });
+
+      expect(readAgentMeta(metaPath)).toMatchObject({
+        agentId: 'a',
+        status: 'running',
+        subagentName: 'explore',
+      });
+    });
   });
 
   describe('attachJsonlTranscriptWriter (canonical)', () => {
@@ -139,7 +167,14 @@ describe('agent-transcript', () => {
 
     function makeWriter(
       jsonlPath: string,
-      extra: { initialUserPrompt?: string } = {},
+      extra: {
+        initialUserPrompt?: string;
+        bootstrapHistory?: Array<{
+          role: 'user' | 'model';
+          parts: Array<{ text: string }>;
+        }>;
+        launchTaskPrompt?: string;
+      } = {},
     ) {
       const emitter = new AgentEventEmitter();
       const { cleanup } = attachJsonlTranscriptWriter(emitter, jsonlPath, {
@@ -180,6 +215,45 @@ describe('agent-transcript', () => {
       expect(r.version).toBe('1.2.3');
       expect(r.gitBranch).toBe('main');
       expect(r.parentUuid).toBeNull();
+    });
+
+    it('records fork bootstrap and launch prompt as system records before runtime events', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath, {
+        bootstrapHistory: [
+          { role: 'user', parts: [{ text: 'bootstrap env' }] },
+          { role: 'model', parts: [{ text: 'bootstrap ack' }] },
+        ],
+        initialUserPrompt: 'visible launch prompt',
+        launchTaskPrompt: 'Begin.',
+      });
+
+      emitter.emit(AgentEventType.ROUND_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'started',
+        thoughtText: '',
+        timestamp: Date.now(),
+      });
+      cleanup();
+
+      const records = readJsonl(jsonlPath);
+      expect(records.map((record) => [record.type, record.subtype])).toEqual([
+        ['system', 'agent_bootstrap'],
+        ['user', undefined],
+        ['system', 'agent_launch_prompt'],
+        ['assistant', undefined],
+      ]);
+      expect(records[0]?.systemPayload).toMatchObject({
+        kind: 'fork',
+        history: [
+          { role: 'user', parts: [{ text: 'bootstrap env' }] },
+          { role: 'model', parts: [{ text: 'bootstrap ack' }] },
+        ],
+      });
+      expect(records[2]?.systemPayload).toMatchObject({
+        displayText: 'Begin.',
+      });
     });
 
     it('writes a ROUND_TEXT event as an assistant record with text part', () => {
@@ -403,6 +477,33 @@ describe('agent-transcript', () => {
       });
 
       expect(fs.existsSync(jsonlPath)).toBe(false);
+    });
+
+    it('appends onto an existing transcript when appendToExisting is enabled', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const first = makeWriter(jsonlPath, {
+        initialUserPrompt: 'initial prompt',
+      });
+      first.cleanup();
+
+      const emitter = new AgentEventEmitter();
+      const { cleanup } = attachJsonlTranscriptWriter(emitter, jsonlPath, {
+        agentId: 'agent-x',
+        agentName: 'explore',
+        agentColor: 'blue',
+        sessionId: 'session-1',
+        cwd: '/proj',
+        version: '1.2.3',
+        appendToExisting: true,
+        initialUserPrompt: 'resume prompt',
+      });
+
+      cleanup();
+
+      const records = readJsonl(jsonlPath);
+      expect(records).toHaveLength(2);
+      expect(records[1].parentUuid).toBe(records[0].uuid);
+      expect(readLastTranscriptRecordUuidSync(jsonlPath)).toBe(records[1].uuid);
     });
   });
 });

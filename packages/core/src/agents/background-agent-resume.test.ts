@@ -1,0 +1,643 @@
+/**
+ * @license
+ * Copyright 2026 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import type { Config } from '../config/config.js';
+import { BackgroundTaskRegistry } from './background-tasks.js';
+import { BackgroundAgentResumeService } from './background-agent-resume.js';
+import {
+  getAgentJsonlPath,
+  getAgentMetaPath,
+  writeAgentMeta,
+} from './agent-transcript.js';
+import { AgentTerminateMode } from './runtime/agent-types.js';
+import { AgentEventEmitter } from './runtime/agent-events.js';
+import { AgentHeadless } from './runtime/agent-headless.js';
+import {
+  FORK_SUBAGENT_TYPE,
+  buildChildMessage,
+} from '../tools/agent/fork-subagent.js';
+
+describe('BackgroundAgentResumeService', () => {
+  let tempDir: string;
+  let registry: BackgroundTaskRegistry;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bg-agent-resume-'));
+    registry = new BackgroundTaskRegistry();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  function createService() {
+    const subagentManager = {
+      loadSubagent: vi.fn(async (name: string) =>
+        name === 'researcher'
+          ? {
+              name: 'researcher',
+              color: 'cyan',
+            }
+          : null,
+      ),
+      createAgentHeadless: vi.fn(),
+    };
+    const hookSystem = {
+      fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
+      fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
+    };
+    const config = {
+      storage: {
+        getProjectDir: () => tempDir,
+      },
+      getBackgroundTaskRegistry: () => registry,
+      getSubagentManager: () => subagentManager,
+      getHookSystem: () => hookSystem,
+      getApprovalMode: () => 'default',
+      getProjectRoot: () => tempDir,
+      getCliVersion: () => 'test-version',
+      getGeminiClient: () => undefined,
+      getSkipStartupContext: () => true,
+      getTranscriptPath: () => path.join(tempDir, 'session.jsonl'),
+    } as unknown as Config;
+
+    return {
+      service: new BackgroundAgentResumeService(config),
+      subagentManager,
+      hookSystem,
+    };
+  }
+
+  it('loads only interrupted running background agents as paused entries', async () => {
+    const sessionId = 'session-1';
+    const runningAgentId = 'agent-running';
+    const completedAgentId = 'agent-completed';
+
+    const runningMetaPath = getAgentMetaPath(
+      tempDir,
+      sessionId,
+      runningAgentId,
+    );
+    const completedMetaPath = getAgentMetaPath(
+      tempDir,
+      sessionId,
+      completedAgentId,
+    );
+
+    writeAgentMeta(runningMetaPath, {
+      agentId: runningAgentId,
+      agentType: 'researcher',
+      description: 'Investigate retry handling',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+    });
+    writeAgentMeta(completedMetaPath, {
+      agentId: completedAgentId,
+      agentType: 'researcher',
+      description: 'Already done',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+    });
+
+    fs.writeFileSync(
+      getAgentJsonlPath(tempDir, sessionId, runningAgentId),
+      [
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [{ text: 'Investigate retry handling' }],
+          },
+        }),
+        JSON.stringify({
+          uuid: 'u2',
+          parentUuid: 'u1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:01.000Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'Working on it' }] },
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+    fs.writeFileSync(
+      getAgentJsonlPath(tempDir, sessionId, completedAgentId),
+      '',
+      'utf8',
+    );
+
+    const { service, subagentManager } = createService();
+    const recovered = await service.loadPausedBackgroundAgents(sessionId);
+
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({
+      agentId: runningAgentId,
+      status: 'paused',
+      description: 'Investigate retry handling',
+      subagentType: 'researcher',
+      prompt: 'Investigate retry handling',
+      metaPath: runningMetaPath,
+      outputFile: getAgentJsonlPath(tempDir, sessionId, runningAgentId),
+    });
+    expect(registry.get(runningAgentId)?.status).toBe('paused');
+    expect(registry.get(completedAgentId)).toBeUndefined();
+    expect(subagentManager.loadSubagent).toHaveBeenCalledTimes(1);
+    expect(subagentManager.loadSubagent).toHaveBeenCalledWith('researcher');
+  });
+
+  it('keeps interrupted fork tasks visible as paused entries', async () => {
+    const sessionId = 'session-fork';
+    const agentId = 'agent-fork';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: FORK_SUBAGENT_TYPE,
+      description: 'Implicit fork background task',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: FORK_SUBAGENT_TYPE,
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      getAgentJsonlPath(tempDir, sessionId, agentId),
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: 'Implicit fork background task' }],
+        },
+      }) + '\n',
+      'utf8',
+    );
+
+    const { service, subagentManager } = createService();
+    const recovered = await service.loadPausedBackgroundAgents(sessionId);
+
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({
+      agentId,
+      status: 'paused',
+      subagentType: FORK_SUBAGENT_TYPE,
+      prompt: 'Implicit fork background task',
+    });
+    expect(subagentManager.loadSubagent).not.toHaveBeenCalled();
+  });
+
+  it('keeps missing subagents visible so they can be abandoned later', async () => {
+    const sessionId = 'session-missing';
+    const agentId = 'agent-missing';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'deleted-agent',
+      description: 'Background task whose agent file is gone',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'deleted-agent',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      getAgentJsonlPath(tempDir, sessionId, agentId),
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: 'Background task whose agent file is gone' }],
+        },
+      }) + '\n',
+      'utf8',
+    );
+
+    const { service, subagentManager } = createService();
+    const recovered = await service.loadPausedBackgroundAgents(sessionId);
+
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({
+      agentId,
+      status: 'paused',
+      subagentType: 'deleted-agent',
+      error: 'Subagent "deleted-agent" is no longer available.',
+    });
+    expect(subagentManager.loadSubagent).toHaveBeenCalledWith('deleted-agent');
+  });
+
+  it('falls back to legacy agentType metadata when resume fields are missing', async () => {
+    const sessionId = 'session-legacy';
+    const agentId = 'agent-legacy';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Legacy background task',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+    });
+    fs.writeFileSync(
+      getAgentJsonlPath(tempDir, sessionId, agentId),
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Legacy background task' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    const { service, subagentManager } = createService();
+    const recovered = await service.loadPausedBackgroundAgents(sessionId);
+
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({
+      agentId,
+      status: 'paused',
+      subagentType: 'researcher',
+      prompt: 'Legacy background task',
+    });
+    expect(subagentManager.loadSubagent).toHaveBeenCalledWith('researcher');
+  });
+
+  it('fires SubagentStart hooks when resuming and injects hook context', async () => {
+    const sessionId = 'session-resume';
+    const agentId = 'agent-resume';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume with hooks',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume with hooks' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume with hooks',
+      subagentType: 'researcher',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume with hooks',
+      outputFile,
+      metaPath,
+    });
+
+    const execute = vi.fn(
+      async (_context: { get: (key: string) => unknown }) => undefined,
+    );
+    const setExternalMessageProvider = vi.fn();
+    const subagent = {
+      execute,
+      setExternalMessageProvider,
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+
+    const { service, subagentManager, hookSystem } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    hookSystem.fireSubagentStartEvent.mockResolvedValue({
+      getAdditionalContext: () => 'resume-context',
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    expect(hookSystem.fireSubagentStartEvent).toHaveBeenCalledWith(
+      agentId,
+      'researcher',
+      expect.anything(),
+      expect.any(AbortSignal),
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
+    const firstCall = execute.mock.calls[0];
+    expect(firstCall).toBeDefined();
+    const contextArg = firstCall![0];
+    expect(contextArg).toBeDefined();
+    if (!contextArg) {
+      throw new Error('Expected resume execute context');
+    }
+    expect(contextArg.get('hook_context')).toBe('resume-context');
+    expect(contextArg.get('task_prompt')).toBe('continue');
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+  });
+
+  it('coalesces concurrent resume calls into a single running agent', async () => {
+    const sessionId = 'session-double';
+    const agentId = 'agent-double';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume once',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume once' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume once',
+      subagentType: 'researcher',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume once',
+      outputFile,
+      metaPath,
+    });
+
+    let releaseExecute: (() => void) | undefined;
+    const execute = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseExecute = resolve;
+        }),
+    );
+    const subagent = {
+      execute,
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+
+    const first = service.resumeBackgroundAgent(agentId, 'first message');
+    const second = service.resumeBackgroundAgent(agentId, 'second message');
+
+    await vi.waitFor(() => {
+      expect(subagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
+    });
+    expect(execute).toHaveBeenCalledTimes(1);
+
+    releaseExecute?.();
+    await Promise.all([first, second]);
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+  });
+
+  it('resumes fork agents from transcript bootstrap instead of current parent config', async () => {
+    const sessionId = 'session-fork-resume';
+    const agentId = 'agent-fork-resume';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+    const launchPrompt = 'Investigate the retry loop and patch it';
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: FORK_SUBAGENT_TYPE,
+      description: launchPrompt,
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: FORK_SUBAGENT_TYPE,
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      [
+        JSON.stringify({
+          uuid: 'sys1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'system',
+          subtype: 'agent_bootstrap',
+          systemPayload: {
+            kind: 'fork',
+            history: [
+              { role: 'user', parts: [{ text: 'bootstrap env' }] },
+              { role: 'model', parts: [{ text: 'bootstrap ack' }] },
+            ],
+          },
+        }),
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: 'sys1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.100Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: launchPrompt }] },
+        }),
+        JSON.stringify({
+          uuid: 'sys2',
+          parentUuid: 'u1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.200Z',
+          type: 'system',
+          subtype: 'agent_launch_prompt',
+          systemPayload: {
+            displayText: buildChildMessage(launchPrompt),
+          },
+        }),
+        JSON.stringify({
+          uuid: 'a1',
+          parentUuid: 'sys2',
+          sessionId,
+          timestamp: '2026-04-20T00:00:01.000Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'Working silently' }] },
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: launchPrompt,
+      subagentType: FORK_SUBAGENT_TYPE,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: launchPrompt,
+      outputFile,
+      metaPath,
+    });
+
+    const execute = vi.fn(async (_context: unknown) => undefined);
+    const subagent = {
+      execute,
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+
+    const createSpy = vi
+      .spyOn(AgentHeadless, 'create')
+      .mockResolvedValue(subagent as unknown as AgentHeadless);
+    const { service, subagentManager } = createService();
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    const createArgs = createSpy.mock.calls[0];
+    expect(createArgs).toBeDefined();
+    expect(createArgs![2]).toMatchObject({
+      initialMessages: [
+        { role: 'user', parts: [{ text: 'bootstrap env' }] },
+        { role: 'model', parts: [{ text: 'bootstrap ack' }] },
+        { role: 'user', parts: [{ text: buildChildMessage(launchPrompt) }] },
+        { role: 'model', parts: [{ text: 'Working silently' }] },
+      ],
+    });
+    expect(execute).toHaveBeenCalledTimes(1);
+    const executeCall = execute.mock.calls[0];
+    expect(executeCall).toBeDefined();
+    const contextArg = executeCall?.[0] as
+      | { get(key: string): unknown }
+      | undefined;
+    expect(contextArg).toBeDefined();
+    if (!contextArg) {
+      throw new Error('Expected resume execute context');
+    }
+    expect(contextArg.get('task_prompt')).toBe('continue');
+    createSpy.mockRestore();
+  });
+
+  it('keeps legacy fork tasks paused when transcript bootstrap is missing', async () => {
+    const sessionId = 'session-fork-legacy';
+    const agentId = 'agent-fork-legacy';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: FORK_SUBAGENT_TYPE,
+      description: 'Legacy fork task',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: FORK_SUBAGENT_TYPE,
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Legacy fork task' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Legacy fork task',
+      subagentType: FORK_SUBAGENT_TYPE,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Legacy fork task',
+      outputFile,
+      metaPath,
+    });
+
+    const createSpy = vi.spyOn(AgentHeadless, 'create');
+    const { service } = createService();
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeUndefined();
+    expect(registry.get(agentId)?.status).toBe('paused');
+    expect(registry.get(agentId)?.error).toContain(
+      'bootstrap transcript is missing',
+    );
+    expect(createSpy).not.toHaveBeenCalled();
+    createSpy.mockRestore();
+  });
+});

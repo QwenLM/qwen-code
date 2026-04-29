@@ -92,7 +92,9 @@ export interface ChatRecord {
     | 'notification'
     | 'cron'
     | 'custom_title'
-    | 'rewind';
+    | 'rewind'
+    | 'agent_bootstrap'
+    | 'agent_launch_prompt';
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -135,7 +137,8 @@ export interface ChatRecord {
     | AtCommandRecordPayload
     | CustomTitleRecordPayload
     | NotificationRecordPayload
-    | RewindRecordPayload;
+    | RewindRecordPayload
+    | AgentBootstrapRecordPayload;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
   agentId?: string;
@@ -149,6 +152,17 @@ export interface ChatRecord {
 
 export interface NotificationRecordPayload {
   displayText: string;
+}
+
+export interface AgentBootstrapRecordPayload {
+  /** Bootstrap kind for future-proof decoding. */
+  kind: 'fork';
+  /**
+   * Exact model-facing history prefix seeded before the agent emitted any
+   * runtime events. For forks, this includes the inherited parent context and
+   * the original first task prompt/user turn.
+   */
+  history: Content[];
 }
 
 /**
