@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useMemo } from 'react';
 import type { HistoryItem } from '../types.js';
 
 // Type for the updater function passed to updateHistoryItem
@@ -21,6 +21,7 @@ export interface UseHistoryManagerReturn {
   ) => void;
   clearItems: () => void;
   loadHistory: (newHistory: HistoryItem[]) => void;
+  truncateToItem: (itemId: number) => void;
 }
 
 /**
@@ -101,11 +102,23 @@ export function useHistory(): UseHistoryManagerReturn {
     messageIdCounterRef.current = 0;
   }, []);
 
-  return {
-    history,
-    addItem,
-    updateItem,
-    clearItems,
-    loadHistory,
-  };
+  // Truncates history to exclude the item with the given ID and everything after it.
+  const truncateToItem = useCallback((itemId: number) => {
+    setHistory((prev) => {
+      const index = prev.findIndex((h) => h.id === itemId);
+      return index === -1 ? prev : prev.slice(0, index);
+    });
+  }, []);
+
+  return useMemo(
+    () => ({
+      history,
+      addItem,
+      updateItem,
+      clearItems,
+      loadHistory,
+      truncateToItem,
+    }),
+    [history, addItem, updateItem, clearItems, loadHistory, truncateToItem],
+  );
 }

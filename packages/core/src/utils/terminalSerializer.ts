@@ -5,6 +5,7 @@
  */
 
 import type { IBufferCell, Terminal } from '@xterm/headless';
+
 export interface AnsiToken {
   text: string;
   bold: boolean;
@@ -18,6 +19,49 @@ export interface AnsiToken {
 
 export type AnsiLine = AnsiToken[];
 export type AnsiOutput = AnsiLine[];
+
+export interface SerializeTerminalToObjectOptions {
+  unwrapWrappedLines?: boolean;
+}
+
+const canMergeAnsiTokens = (left: AnsiToken, right: AnsiToken): boolean =>
+  left.bold === right.bold &&
+  left.italic === right.italic &&
+  left.underline === right.underline &&
+  left.dim === right.dim &&
+  left.inverse === right.inverse &&
+  left.fg === right.fg &&
+  left.bg === right.bg;
+
+const appendAnsiLineTokens = (target: AnsiLine, source: AnsiLine) => {
+  for (const token of source) {
+    const previous = target[target.length - 1];
+    if (previous && canMergeAnsiTokens(previous, token)) {
+      previous.text += token.text;
+    } else {
+      target.push({ ...token });
+    }
+  }
+};
+
+export function serializeTerminalToText(terminal: Terminal): string {
+  const buffer = terminal.buffer.active;
+  const lines: string[] = [];
+
+  for (let i = 0; i < buffer.length; i++) {
+    const line = buffer.getLine(i);
+    const lineContent = line ? line.translateToString(true) : '';
+
+    if (line?.isWrapped && lines.length > 0) {
+      lines[lines.length - 1] += lineContent;
+      continue;
+    }
+
+    lines.push(lineContent);
+  }
+
+  return lines.join('\n').trimEnd();
+}
 
 const enum Attribute {
   inverse = 1,
@@ -134,6 +178,7 @@ class Cell {
 export function serializeTerminalToObject(
   terminal: Terminal,
   scrollOffset: number = 0,
+  options: SerializeTerminalToObjectOptions = {},
 ): AnsiOutput {
   const buffer = terminal.buffer.active;
   const defaultFg = '';
@@ -199,7 +244,11 @@ export function serializeTerminalToObject(
       currentLine.push(token);
     }
 
-    result.push(currentLine);
+    if (options.unwrapWrappedLines && line.isWrapped && result.length > 0) {
+      appendAnsiLineTokens(result[result.length - 1], currentLine);
+    } else {
+      result.push(currentLine);
+    }
   }
 
   return result;

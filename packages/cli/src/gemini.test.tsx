@@ -584,6 +584,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       telemetryLogPrompts: undefined,
       telemetryOutfile: undefined,
       allowedMcpServerNames: undefined,
+      mcpConfig: undefined,
       allowedTools: undefined,
       acp: undefined,
       experimentalAcp: undefined,
@@ -595,10 +596,6 @@ describe('gemini.tsx main function kitty protocol', () => {
       openaiLoggingDir: undefined,
       proxy: undefined,
       includeDirectories: undefined,
-      tavilyApiKey: undefined,
-      googleApiKey: undefined,
-      googleSearchEngineId: undefined,
-      webSearchDefault: undefined,
       screenReader: undefined,
       inputFormat: undefined,
       outputFormat: undefined,
@@ -675,6 +672,7 @@ describe('startInteractiveUI', () => {
 
   vi.mock('./ui/utils/kittyProtocolDetector.js', () => ({
     detectAndEnableKittyProtocol: vi.fn(() => Promise.resolve(true)),
+    disableKittyProtocol: vi.fn(),
   }));
 
   vi.mock('./ui/utils/updateCheck.js', () => ({

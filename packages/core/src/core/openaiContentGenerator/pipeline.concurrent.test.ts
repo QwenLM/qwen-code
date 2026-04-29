@@ -18,8 +18,9 @@
  * and chunks routed by `index: 0` interleaved into corrupt JSON.
  *
  * With the fix, `processStreamWithLogging` creates a fresh
- * `ConverterStreamContext` at stream entry, so each concurrent generator
- * has its own parser. This test would fail deterministically on pre-fix
+ * request context with its own `toolCallParser` at stream entry, so each
+ * concurrent generator has its own parser. This test would fail
+ * deterministically on pre-fix
  * code because stream B's entry would wipe stream A's accumulator
  * mid-flight, and A's finish chunk would emit zero function calls
  * (`wasOutputTruncated`-style behavior).
@@ -29,12 +30,11 @@ import { describe, it, expect, vi } from 'vitest';
 import type OpenAI from 'openai';
 import type { GenerateContentParameters } from '@google/genai';
 import type { Part } from '@google/genai';
-import type { PipelineConfig } from './pipeline.js';
+import type { ErrorHandler, PipelineConfig } from './types.js';
 import { ContentGenerationPipeline } from './pipeline.js';
 import type { Config } from '../../config/config.js';
 import type { ContentGeneratorConfig, AuthType } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
-import type { ErrorHandler } from './errorHandler.js';
 
 type ChunkFactory = () => OpenAI.Chat.ChatCompletionChunk;
 

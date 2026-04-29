@@ -73,6 +73,10 @@ const getStatusText = (status: AgentResultDisplay['status']) => {
   }
 };
 
+const BackgroundManageHint: React.FC = () => (
+  <Text color={theme.text.secondary}> (↓ to manage)</Text>
+);
+
 const MAX_TOOL_CALLS = 5;
 const MAX_TASK_PROMPT_LINES = 5;
 
@@ -150,6 +154,7 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
             </Text>
             <StatusDot status={data.status} />
             <StatusIndicator status={data.status} />
+            {data.status === 'background' && <BackgroundManageHint />}
           </Box>
         )}
 
@@ -231,6 +236,7 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
         </Text>
         <StatusDot status={data.status} />
         <StatusIndicator status={data.status} />
+        {data.status === 'background' && <BackgroundManageHint />}
       </Box>
 
       {/* Task description */}

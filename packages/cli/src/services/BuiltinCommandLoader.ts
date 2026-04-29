@@ -8,6 +8,7 @@ import type { ICommandLoader } from './types.js';
 import type { SlashCommand } from '../ui/commands/types.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { aboutCommand } from '../ui/commands/aboutCommand.js';
+import { tasksCommand } from '../ui/commands/tasksCommand.js';
 import { agentsCommand } from '../ui/commands/agentsCommand.js';
 import { arenaCommand } from '../ui/commands/arenaCommand.js';
 import { approvalModeCommand } from '../ui/commands/approvalModeCommand.js';
@@ -37,6 +38,7 @@ import { dreamCommand } from '../ui/commands/dreamCommand.js';
 import { forgetCommand } from '../ui/commands/forgetCommand.js';
 import { memoryCommand } from '../ui/commands/memoryCommand.js';
 import { modelCommand } from '../ui/commands/modelCommand.js';
+import { manageModelsCommand } from '../ui/commands/manageModelsCommand.js';
 import { rememberCommand } from '../ui/commands/rememberCommand.js';
 import { planCommand } from '../ui/commands/planCommand.js';
 import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
@@ -46,6 +48,7 @@ import { recapCommand } from '../ui/commands/recapCommand.js';
 import { renameCommand } from '../ui/commands/renameCommand.js';
 import { restoreCommand } from '../ui/commands/restoreCommand.js';
 import { resumeCommand } from '../ui/commands/resumeCommand.js';
+import { rewindCommand } from '../ui/commands/rewindCommand.js';
 import { settingsCommand } from '../ui/commands/settingsCommand.js';
 import { skillsCommand } from '../ui/commands/skillsCommand.js';
 import { statsCommand } from '../ui/commands/statsCommand.js';
@@ -91,6 +94,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
     const allDefinitions: Array<SlashCommand | null> = [
       aboutCommand,
       agentsCommand,
+      tasksCommand,
       arenaCommand,
       approvalModeCommand,
       authCommand,
@@ -119,6 +123,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
         : []),
       memoryCommand,
       modelCommand,
+      manageModelsCommand,
       rememberCommand,
       planCommand,
       permissionsCommand,
@@ -128,6 +133,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       renameCommand,
       restoreCommand(this.config),
       resumeCommand,
+      rewindCommand,
       skillsCommand,
       statsCommand,
       summaryCommand,

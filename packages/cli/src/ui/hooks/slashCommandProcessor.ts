@@ -87,6 +87,7 @@ interface SlashCommandProcessorActions {
   openMemoryDialog: () => void;
   openSettingsDialog: () => void;
   openModelDialog: (options?: { fastModelMode?: boolean }) => void;
+  openManageModelsDialog: () => void;
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
@@ -103,6 +104,7 @@ interface SlashCommandProcessorActions {
   openExtensionsManagerDialog: () => void;
   openMcpDialog: () => void;
   openHooksDialog: () => void;
+  openRewindSelector: () => void;
 }
 
 /**
@@ -596,6 +598,9 @@ export const useSlashCommandProcessor = (
                     case 'fast-model':
                       actions.openModelDialog({ fastModelMode: true });
                       return { type: 'handled' };
+                    case 'manage-models':
+                      actions.openManageModelsDialog();
+                      return { type: 'handled' };
                     case 'trust':
                       actions.openTrustDialog();
                       return { type: 'handled' };
@@ -639,6 +644,9 @@ export const useSlashCommandProcessor = (
                     case 'extensions_manage':
                       actions.openExtensionsManagerDialog();
                       return { type: 'handled' };
+                    case 'rewind':
+                      actions.openRewindSelector();
+                      return { type: 'handled' };
                     case 'help':
                       return { type: 'handled' };
                     default: {
@@ -650,7 +658,6 @@ export const useSlashCommandProcessor = (
                   }
                 case 'load_history': {
                   config?.getGeminiClient()?.setHistory(result.clientHistory);
-                  config?.getGeminiClient()?.stripThoughtsFromHistory();
                   fullCommandContext.ui.clear();
                   result.history.forEach((item, index) => {
                     fullCommandContext.ui.addItem(item, index);

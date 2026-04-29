@@ -109,6 +109,7 @@ describe('SessionService - rename and custom title', () => {
       expect(writtenRecord.subtype).toBe('custom_title');
       expect(writtenRecord.systemPayload).toEqual({
         customTitle: 'my-feature',
+        titleSource: 'manual',
       });
       expect(writtenRecord.sessionId).toBe(sessionIdA);
     });
@@ -501,6 +502,85 @@ describe('SessionService - rename and custom title', () => {
 
       expect(result.items).toHaveLength(1);
       expect(result.items[0].customTitle).toBeUndefined();
+      expect(result.items[0].titleSource).toBeUndefined();
+    });
+
+    it('should surface titleSource on session list items', async () => {
+      const now = Date.now();
+      const titleContent =
+        JSON.stringify({
+          type: 'system',
+          subtype: 'custom_title',
+          systemPayload: {
+            customTitle: 'Fix login bug',
+            titleSource: 'auto',
+          },
+        }) + '\n';
+
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        size: titleContent.length,
+        isFile: () => true,
+      } as unknown as fs.Stats);
+
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      readSyncSpy.mockImplementation(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (_fd: number, buffer: any) => {
+          const data = Buffer.from(titleContent);
+          data.copy(buffer);
+          return data.length;
+        },
+      );
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].customTitle).toBe('Fix login bug');
+      expect(result.items[0].titleSource).toBe('auto');
+    });
+
+    it('leaves titleSource undefined for legacy records without the field', async () => {
+      // Back-compat: old sessions written before titleSource existed should
+      // be treated as manual (via `undefined` — consumers check `=== 'auto'`),
+      // so auto-generation never dims a title the user chose pre-upgrade.
+      const now = Date.now();
+      const titleContent =
+        JSON.stringify({
+          type: 'system',
+          subtype: 'custom_title',
+          systemPayload: { customTitle: 'legacy-title' },
+        }) + '\n';
+
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        size: titleContent.length,
+        isFile: () => true,
+      } as unknown as fs.Stats);
+
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      readSyncSpy.mockImplementation(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (_fd: number, buffer: any) => {
+          const data = Buffer.from(titleContent);
+          data.copy(buffer);
+          return data.length;
+        },
+      );
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].customTitle).toBe('legacy-title');
+      expect(result.items[0].titleSource).toBeUndefined();
     });
   });
 });

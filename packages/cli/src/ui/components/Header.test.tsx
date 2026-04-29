@@ -5,7 +5,7 @@
  */
 
 import { render } from 'ink-testing-library';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Header, AuthDisplayType } from './Header.js';
 import * as useTerminalSize from '../hooks/useTerminalSize.js';
 
@@ -20,8 +20,19 @@ const defaultProps = {
 };
 
 describe('<Header />', () => {
+  const originalNoColor = process.env['NO_COLOR'];
+
   beforeEach(() => {
+    delete process.env['NO_COLOR'];
     useTerminalSizeMock.mockReturnValue({ columns: 120, rows: 24 });
+  });
+
+  afterEach(() => {
+    if (originalNoColor === undefined) {
+      delete process.env['NO_COLOR'];
+    } else {
+      process.env['NO_COLOR'] = originalNoColor;
+    }
   });
 
   it('renders the ASCII logo on wide terminal', () => {
@@ -80,5 +91,13 @@ describe('<Header />', () => {
     const { lastFrame } = render(<Header {...defaultProps} />);
     expect(lastFrame()).toContain('┌');
     expect(lastFrame()).toContain('┐');
+  });
+
+  it('renders plain text when NO_COLOR disables gradient colors', () => {
+    process.env['NO_COLOR'] = '1';
+
+    const { lastFrame } = render(<Header {...defaultProps} />);
+
+    expect(lastFrame()).toContain('██╔═══██╗');
   });
 });

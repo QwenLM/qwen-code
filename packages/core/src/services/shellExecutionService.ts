@@ -17,6 +17,7 @@ import { getShellConfiguration } from '../utils/shell-utils.js';
 import pkg from '@xterm/headless';
 import {
   serializeTerminalToObject,
+  serializeTerminalToText,
   type AnsiOutput,
 } from '../utils/terminalSerializer.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
@@ -135,17 +136,6 @@ const isExpectedPtyExitRaceError = (error: unknown): boolean => {
   );
 };
 
-const getFullBufferText = (terminal: pkg.Terminal): string => {
-  const buffer = terminal.buffer.active;
-  const lines: string[] = [];
-  for (let i = 0; i < buffer.length; i++) {
-    const line = buffer.getLine(i);
-    const lineContent = line ? line.translateToString(true) : '';
-    lines.push(lineContent);
-  }
-  return lines.join('\n').trimEnd();
-};
-
 const replayTerminalOutput = async (
   output: string,
   cols: number,
@@ -163,7 +153,90 @@ const replayTerminalOutput = async (
     replayTerminal.write(output, () => resolve());
   });
 
-  return getFullBufferText(replayTerminal);
+  return serializeTerminalToText(replayTerminal);
+};
+
+const getLastNonEmptyAnsiLineIndex = (output: AnsiOutput): number => {
+  for (let i = output.length - 1; i >= 0; i--) {
+    const line = output[i];
+    if (
+      line
+        .map((segment) => segment.text)
+        .join('')
+        .trim().length > 0
+    ) {
+      return i;
+    }
+  }
+
+  return -1;
+};
+
+const trimTrailingEmptyAnsiLines = (output: AnsiOutput): AnsiOutput =>
+  output.slice(0, getLastNonEmptyAnsiLineIndex(output) + 1);
+
+const areAnsiOutputsEqual = (
+  left: AnsiOutput | null,
+  right: AnsiOutput,
+): boolean => {
+  if (!left || left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((leftLine, lineIndex) => {
+    const rightLine = right[lineIndex];
+    if (leftLine.length !== rightLine.length) {
+      return false;
+    }
+
+    return leftLine.every((leftToken, tokenIndex) => {
+      const rightToken = rightLine[tokenIndex];
+      return (
+        leftToken.text === rightToken.text &&
+        leftToken.bold === rightToken.bold &&
+        leftToken.italic === rightToken.italic &&
+        leftToken.underline === rightToken.underline &&
+        leftToken.dim === rightToken.dim &&
+        leftToken.inverse === rightToken.inverse &&
+        leftToken.fg === rightToken.fg &&
+        leftToken.bg === rightToken.bg
+      );
+    });
+  });
+};
+
+const createPlainAnsiLine = (text: string) => [
+  {
+    text,
+    bold: false,
+    italic: false,
+    underline: false,
+    dim: false,
+    inverse: false,
+    fg: '',
+    bg: '',
+  },
+];
+
+const serializePlainViewportToAnsiOutput = (
+  terminal: pkg.Terminal,
+  unwrapWrappedLines = false,
+): AnsiOutput => {
+  const buffer = terminal.buffer.active;
+  const lines: AnsiOutput = [];
+
+  for (let y = 0; y < terminal.rows; y++) {
+    const line = buffer.getLine(buffer.viewportY + y);
+    const lineContent = line ? line.translateToString(true) : '';
+
+    if (unwrapWrappedLines && line?.isWrapped && lines.length > 0) {
+      lines[lines.length - 1][0].text += lineContent;
+    } else {
+      lines.push(createPlainAnsiLine(lineContent));
+    }
+  }
+
+  return lines;
 };
 
 interface ProcessCleanupStrategy {
@@ -256,6 +329,7 @@ export class ShellExecutionService {
     abortSignal: AbortSignal,
     shouldUseNodePty: boolean,
     shellExecutionConfig: ShellExecutionConfig,
+    options: { streamStdout?: boolean } = {},
   ): Promise<ShellExecutionHandle> {
     if (shouldUseNodePty) {
       const ptyInfo = await getPty();
@@ -280,6 +354,7 @@ export class ShellExecutionService {
       cwd,
       onOutputEvent,
       abortSignal,
+      options.streamStdout ?? false,
     );
   }
 
@@ -288,6 +363,7 @@ export class ShellExecutionService {
     cwd: string,
     onOutputEvent: (event: ShellOutputEvent) => void,
     abortSignal: AbortSignal,
+    streamStdout: boolean,
   ): ShellExecutionHandle {
     try {
       const isWindows = os.platform() === 'win32';
@@ -342,26 +418,61 @@ export class ShellExecutionService {
             }
           }
 
-          outputChunks.push(data);
-
+          // Binary sniff applies in both modes — even streaming consumers
+          // (e.g. background shell output file) shouldn't pile up text-decoded
+          // garbage when the command actually emits binary (`cat /bin/ls`,
+          // image dumps, etc.). Track sniffed bytes by running sum so the
+          // accumulator is truly byte-bounded — the previous version recomputed
+          // sniffedBytes from `slice(0, 20)` on every call, which never grew
+          // past the first 20 chunks' total and let the chunk array leak on
+          // line-sized streams.
           if (isStreamingRawContent && sniffedBytes < MAX_SNIFF_SIZE) {
-            const sniffBuffer = Buffer.concat(outputChunks.slice(0, 20));
-            sniffedBytes = sniffBuffer.length;
-
+            outputChunks.push(data);
+            sniffedBytes += data.length;
+            const sniffBuffer = Buffer.concat(outputChunks);
             if (isBinary(sniffBuffer)) {
               isStreamingRawContent = false;
+              if (streamStdout) {
+                // Tell the streaming consumer to stop writing text chunks;
+                // drop the sniff accumulator now so it can be GC'd.
+                onOutputEvent({ type: 'binary_detected' });
+                outputChunks.length = 0;
+              }
+            } else if (streamStdout && sniffedBytes >= MAX_SNIFF_SIZE) {
+              // Sniff passed in streaming mode — text confirmed, drop the
+              // accumulator. Subsequent chunks fall through to the streaming
+              // emit path below without ever touching outputChunks.
+              outputChunks.length = 0;
             }
+          } else if (!streamStdout) {
+            // Buffered (foreground) mode past sniff: keep accumulating for
+            // the final emit at exit. Streaming mode does not accumulate.
+            outputChunks.push(data);
           }
 
-          if (isStreamingRawContent) {
-            const decoder = stream === 'stdout' ? stdoutDecoder : stderrDecoder;
-            const decodedChunk = decoder.decode(data, { stream: true });
+          if (!isStreamingRawContent) {
+            // Binary mode: drop further data. Foreground emits the
+            // binary_detected event from handleExit (existing behavior);
+            // background already emitted it above.
+            return;
+          }
 
-            if (stream === 'stdout') {
-              stdout += decodedChunk;
-            } else {
-              stderr += decodedChunk;
-            }
+          const decoder = stream === 'stdout' ? stdoutDecoder : stderrDecoder;
+          const decodedChunk = decoder.decode(data, { stream: true });
+
+          if (streamStdout) {
+            // Streaming text mode: push through immediately, no string
+            // accumulation. (Up to ~4KB may already have been emitted
+            // before binary detection trips — bounded, acceptable.)
+            onOutputEvent({ type: 'data', chunk: decodedChunk });
+            return;
+          }
+
+          // Buffered text mode: accumulate for the final cleaned-blob emit.
+          if (stream === 'stdout') {
+            stdout += decodedChunk;
+          } else {
+            stderr += decodedChunk;
           }
         };
 
@@ -378,7 +489,9 @@ export class ShellExecutionService {
           const finalStrippedOutput = stripAnsi(combinedOutput).trim();
 
           if (isStreamingRawContent) {
-            if (finalStrippedOutput) {
+            // In streaming mode chunks were already emitted as they arrived;
+            // re-emitting the final blob would duplicate everything.
+            if (!streamStdout && finalStrippedOutput) {
               onOutputEvent({ type: 'data', chunk: finalStrippedOutput });
             }
           } else {
@@ -536,7 +649,7 @@ export class ShellExecutionService {
 
         let processingChain = Promise.resolve();
         let decoder: TextDecoder | null = null;
-        let output: string | AnsiOutput | null = null;
+        let outputComparison: AnsiOutput | null = null;
         const outputChunks: Buffer[] = [];
         const error: Error | null = null;
         let exited = false;
@@ -558,7 +671,7 @@ export class ShellExecutionService {
 
           if (!shellExecutionConfig.disableDynamicLineTrimming) {
             if (!hasStartedOutput) {
-              const bufferText = getFullBufferText(headlessTerminal);
+              const bufferText = serializeTerminalToText(headlessTerminal);
               if (bufferText.trim().length === 0) {
                 return;
               }
@@ -567,53 +680,36 @@ export class ShellExecutionService {
           }
 
           let newOutput: AnsiOutput;
+          let newOutputComparison: AnsiOutput;
           if (shellExecutionConfig.showColor) {
             newOutput = serializeTerminalToObject(headlessTerminal);
+            newOutputComparison = serializeTerminalToObject(
+              headlessTerminal,
+              0,
+              { unwrapWrappedLines: true },
+            );
           } else {
-            const buffer = headlessTerminal.buffer.active;
-            const lines: AnsiOutput = [];
-            for (let y = 0; y < headlessTerminal.rows; y++) {
-              const line = buffer.getLine(buffer.viewportY + y);
-              const lineContent = line ? line.translateToString(true) : '';
-              lines.push([
-                {
-                  text: lineContent,
-                  bold: false,
-                  italic: false,
-                  underline: false,
-                  dim: false,
-                  inverse: false,
-                  fg: '',
-                  bg: '',
-                },
-              ]);
-            }
-            newOutput = lines;
+            newOutput = serializePlainViewportToAnsiOutput(headlessTerminal);
+            newOutputComparison = serializePlainViewportToAnsiOutput(
+              headlessTerminal,
+              true,
+            );
           }
 
-          let lastNonEmptyLine = -1;
-          for (let i = newOutput.length - 1; i >= 0; i--) {
-            const line = newOutput[i];
-            if (
-              line
-                .map((segment) => segment.text)
-                .join('')
-                .trim().length > 0
-            ) {
-              lastNonEmptyLine = i;
-              break;
-            }
-          }
-
-          const trimmedOutput = newOutput.slice(0, lastNonEmptyLine + 1);
+          const trimmedOutput = trimTrailingEmptyAnsiLines(newOutput);
+          const trimmedOutputComparison =
+            trimTrailingEmptyAnsiLines(newOutputComparison);
 
           const finalOutput = shellExecutionConfig.disableDynamicLineTrimming
             ? newOutput
             : trimmedOutput;
+          const finalOutputComparison =
+            shellExecutionConfig.disableDynamicLineTrimming
+              ? newOutputComparison
+              : trimmedOutputComparison;
 
-          // Using stringify for a quick deep comparison.
-          if (JSON.stringify(output) !== JSON.stringify(finalOutput)) {
-            output = finalOutput;
+          if (!areAnsiOutputsEqual(outputComparison, finalOutputComparison)) {
+            outputComparison = finalOutputComparison;
             onOutputEvent({
               type: 'data',
               chunk: finalOutput,
@@ -759,11 +855,11 @@ export class ShellExecutionService {
                     rows,
                   );
                 } else {
-                  fullOutput = getFullBufferText(headlessTerminal);
+                  fullOutput = serializeTerminalToText(headlessTerminal);
                 }
               } catch {
                 try {
-                  fullOutput = getFullBufferText(headlessTerminal);
+                  fullOutput = serializeTerminalToText(headlessTerminal);
                 } catch {
                   // Ignore fallback rendering errors and resolve with empty text.
                 }

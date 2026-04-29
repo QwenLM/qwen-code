@@ -6,8 +6,10 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  getTerminalRedrawStatsSnapshot,
   installTerminalRedrawOptimizer,
   optimizeMultilineEraseLines,
+  resetTerminalRedrawStats,
 } from './terminalRedrawOptimizer.js';
 
 const ESC = '\u001B[';
@@ -56,6 +58,7 @@ describe('optimizeMultilineEraseLines', () => {
 describe('installTerminalRedrawOptimizer', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
+    resetTerminalRedrawStats();
   });
 
   it('optimizes string writes and restores the original writer', () => {
@@ -85,6 +88,30 @@ describe('installTerminalRedrawOptimizer', () => {
     stdout.write(input);
 
     expect(write).toHaveBeenCalledWith(input, undefined, undefined);
+  });
+
+  it('tracks write, byte, clear, and erase optimization counters', () => {
+    const write = vi.fn(() => true);
+    const stdout = { write } as unknown as NodeJS.WriteStream;
+    installTerminalRedrawOptimizer(stdout);
+
+    stdout.write(
+      `${ERASE_LINE}${CURSOR_UP_ONE}${ERASE_LINE}${CURSOR_UP_ONE}${ERASE_LINE}${CURSOR_LEFT}`,
+    );
+    stdout.write(Buffer.from('ok'));
+    stdout.write('\u001B[2J\u001B[3J\u001B[H');
+
+    expect(getTerminalRedrawStatsSnapshot()).toEqual({
+      stdoutWriteCount: 3,
+      stdoutBytes:
+        Buffer.byteLength(
+          `${ESC}2A${ERASE_LINE}${CURSOR_DOWN_ONE}${ERASE_LINE}${CURSOR_DOWN_ONE}${ERASE_LINE}${ESC}2A${CURSOR_LEFT}`,
+        ) +
+        Buffer.byteLength('ok') +
+        Buffer.byteLength('\u001B[2J\u001B[3J\u001B[H'),
+      clearTerminalCount: 1,
+      eraseLinesOptimizedCount: 1,
+    });
   });
 
   it('can be disabled for terminal compatibility fallback', () => {

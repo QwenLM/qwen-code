@@ -145,6 +145,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
+      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
       getDebugLogger: () => ({
         warn: vi.fn(),
         debug: vi.fn(),
