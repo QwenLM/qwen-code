@@ -720,6 +720,39 @@ export function getWorkspaces(): Workspace[] {
   });
 }
 
+export function reorderWorkspaces(orderedIds: string[]): boolean {
+  const config = loadStoredConfig();
+  if (!config) return false;
+
+  const workspaceById = new Map(config.workspaces.map(workspace => [workspace.id, workspace]));
+  const seen = new Set<string>();
+  const reordered: Workspace[] = [];
+
+  for (const id of orderedIds) {
+    const workspace = workspaceById.get(id);
+    if (!workspace || seen.has(id)) continue;
+    reordered.push(workspace);
+    seen.add(id);
+  }
+
+  if (reordered.length === 0 && config.workspaces.length > 0) {
+    return false;
+  }
+
+  for (const workspace of config.workspaces) {
+    if (!seen.has(workspace.id)) {
+      reordered.push(workspace);
+    }
+  }
+
+  const changed = reordered.some((workspace, index) => workspace.id !== config.workspaces[index]?.id);
+  if (!changed) return true;
+
+  config.workspaces = reordered;
+  saveConfig(config);
+  return true;
+}
+
 export function getActiveWorkspace(): Workspace | null {
   const config = loadStoredConfig();
   if (!config || !config.activeWorkspaceId) {

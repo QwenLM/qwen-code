@@ -779,6 +779,12 @@ app.whenReady().then(async () => {
         return true
       })
 
+      // Persist local project-list ordering even when the active workspace is remote.
+      ipcMain.handle('workspace:reorder', async (_event, orderedIds: string[]) => {
+        const { reorderWorkspaces } = await import('@craft-agent/shared/config')
+        return reorderWorkspaces(orderedIds)
+      })
+
       // Cross-server RPC — invoke a channel on an arbitrary remote server
       ipcMain.handle('server:invokeOnServer', async (_event, url: string, token: string, channel: string, ...args: unknown[]) => {
         const { connectToRemote } = await import('./handlers/workspace')
