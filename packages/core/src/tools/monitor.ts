@@ -295,42 +295,6 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
     let exited = false;
 
-    child.on('exit', (code, sig) => {
-      exited = true;
-      // Flush remaining buffers
-      for (const buf of [stdoutBuf, stderrBuf]) {
-        if (buf.value.trim() && entry.status === 'running') {
-          throttledEmit(buf.value.trim());
-        }
-        buf.value = '';
-      }
-
-      if (entry.status !== 'running') return; // already settled
-
-      if (entryAc.signal.aborted) {
-        registry.cancel(monitorId);
-      } else if (code !== null && code !== 0) {
-        registry.fail(monitorId, `Exit code ${code}`);
-      } else if (sig) {
-        registry.fail(monitorId, `Killed by signal ${sig}`);
-      } else {
-        registry.complete(monitorId, code);
-      }
-
-      if (droppedLines > 0) {
-        debugLogger.info(
-          `Monitor ${monitorId} dropped ${droppedLines} lines due to throttling`,
-        );
-      }
-    });
-
-    child.on('error', (err) => {
-      exited = true;
-      if (entry.status === 'running') {
-        registry.fail(monitorId, getErrorMessage(err));
-      }
-    });
-
     // Wire abort → kill process (tree)
     const abortHandler = (): void => {
       if (!exited && child.pid) {
@@ -356,9 +320,53 @@ class MonitorToolInvocation extends BaseToolInvocation<
     };
     entryAc.signal.addEventListener('abort', abortHandler, { once: true });
 
-    // Clean up abort listener when process exits to prevent leaks
-    child.on('exit', () => {
+    // Shared cleanup: flush buffers, remove abort listener, log dropped lines.
+    // Called from both `exit` and `error` handlers to prevent leaks when
+    // `error` fires without a subsequent `exit` (e.g. ENOENT).
+    let cleanedUp = false;
+    const cleanup = (): void => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+
+      for (const buf of [stdoutBuf, stderrBuf]) {
+        if (buf.value.trim() && entry.status === 'running') {
+          throttledEmit(buf.value.trim());
+        }
+        buf.value = '';
+      }
+
       entryAc.signal.removeEventListener('abort', abortHandler);
+
+      if (droppedLines > 0) {
+        debugLogger.info(
+          `Monitor ${monitorId} dropped ${droppedLines} lines due to throttling`,
+        );
+      }
+    };
+
+    child.on('exit', (code, sig) => {
+      exited = true;
+      cleanup();
+
+      if (entry.status !== 'running') return; // already settled
+
+      if (entryAc.signal.aborted) {
+        registry.cancel(monitorId);
+      } else if (code !== null && code !== 0) {
+        registry.fail(monitorId, `Exit code ${code}`);
+      } else if (sig) {
+        registry.fail(monitorId, `Killed by signal ${sig}`);
+      } else {
+        registry.complete(monitorId, code);
+      }
+    });
+
+    child.on('error', (err) => {
+      exited = true;
+      cleanup();
+      if (entry.status === 'running') {
+        registry.fail(monitorId, getErrorMessage(err));
+      }
     });
 
     return {
