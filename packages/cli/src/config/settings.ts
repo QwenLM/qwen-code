@@ -537,6 +537,21 @@ function findEnvFile(settings: Settings, startDir: string): string | null {
       return geminiEnvPath;
     }
 
+    // When QWEN_HOME points outside the legacy home dir, prefer
+    // <QWEN_HOME>/.env over <homeDir>/.env at the home-dir step. Without
+    // this, the walk would return ~/.env before the post-loop fallback ever
+    // had a chance to consult QWEN_HOME, reversing the qwen-specific
+    // precedence we have for ~/.qwen/.env in the default case.
+    if (hasCustomConfigDir && currentDir === homeDir) {
+      const customQwenEnvPath = path.join(globalQwenDir, '.env');
+      if (
+        fs.existsSync(customQwenEnvPath) &&
+        canUseEnvFile(customQwenEnvPath)
+      ) {
+        return customQwenEnvPath;
+      }
+    }
+
     const envPath = path.join(currentDir, '.env');
     if (fs.existsSync(envPath) && canUseEnvFile(envPath)) {
       return envPath;

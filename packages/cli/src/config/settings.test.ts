@@ -3005,6 +3005,39 @@ describe('Settings Loading and Merging', () => {
         expect(process.env['DEBUG_MODE']).toEqual('1');
         expect(process.env['QWEN_HOME_TEST_VAR']).toEqual('hello');
       });
+
+      it('prefers QWEN_HOME/.env over ~/.env at the home-dir step', () => {
+        const customHome = '/tmp/qwen-home-custom';
+        process.env['QWEN_HOME'] = customHome;
+        const customGlobalEnvPath = path.join(customHome, '.env');
+        const homeEnvPath = path.join('/mock/home/user', '.env');
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, customGlobalEnvPath, homeEnvPath].includes(
+            p.toString(),
+          ),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH) return JSON.stringify({});
+            if (p === customGlobalEnvPath)
+              return 'QWEN_HOME_TEST_VAR=fromQwenHome';
+            if (p === homeEnvPath) return 'QWEN_HOME_TEST_VAR=fromHomeDir';
+            return '{}';
+          },
+        );
+
+        loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
+
+        // QWEN_HOME/.env must win — without the precedence fix, ~/.env would
+        // be returned by the walk-up before the QWEN_HOME fallback was ever
+        // consulted.
+        expect(process.env['QWEN_HOME_TEST_VAR']).toEqual('fromQwenHome');
+      });
     });
   });
 

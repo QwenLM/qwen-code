@@ -439,7 +439,10 @@ export async function start_sandbox(
     `/home/node/${SETTINGS_DIRECTORY_NAME}`,
   );
   if (!fs.existsSync(userSettingsDirOnHost)) {
-    fs.mkdirSync(userSettingsDirOnHost);
+    // recursive: a custom QWEN_HOME like /tmp/qwen/config can have a parent
+    // that doesn't exist yet on first run, and a non-recursive mkdir would
+    // throw ENOENT before we ever get to mount it.
+    fs.mkdirSync(userSettingsDirOnHost, { recursive: true });
   }
   args.push('--volume', `${userSettingsDirOnHost}:${userSettingsDirInSandbox}`);
   if (userSettingsDirInSandbox !== userSettingsDirOnHost) {
