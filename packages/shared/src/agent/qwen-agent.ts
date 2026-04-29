@@ -192,6 +192,58 @@ function jsonStringify(value: unknown): string {
   }
 }
 
+function parseJsonText(value: string): unknown | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function isJsonCodeFence(value: string): boolean {
+  return /^```(?:json|JSON)?\s*\r?\n/.test(value.trim());
+}
+
+function isDoctorOutput(value: unknown): boolean {
+  const record = toRecord(value);
+  return Array.isArray(record.checks) && isRecord(record.summary);
+}
+
+function formatJsonMarkdown(value: unknown): string {
+  return `\`\`\`json\n${jsonStringify(value)}\n\`\`\``;
+}
+
+function normalizeQwenAssistantText(
+  text: string,
+  options: { forceJsonFence?: boolean } = {},
+): string {
+  if (!text.trim() || isJsonCodeFence(text)) return text;
+
+  const parsed = parseJsonText(text);
+  if (!parsed) return text;
+  if (!options.forceJsonFence && !isDoctorOutput(parsed)) return text;
+
+  return formatJsonMarkdown(parsed);
+}
+
+function formatQwenSlashOutputHistoryItem(item: JsonRecord): string | undefined {
+  const text = asString(item.text);
+  if (text?.trim()) {
+    return normalizeQwenAssistantText(text, { forceJsonFence: true });
+  }
+
+  if (item.type === 'doctor') {
+    return formatJsonMarkdown({
+      checks: Array.isArray(item.checks) ? item.checks : [],
+      summary: toRecord(item.summary),
+    });
+  }
+
+  return undefined;
+}
+
 function isSlashCommandPrompt(message: string, attachments?: FileAttachment[]): boolean {
   if (attachments && attachments.length > 0) return false;
   return /^\/[A-Za-z][\w-]*(?:\s|$)/.test(message.trim());
@@ -352,6 +404,7 @@ export class QwenAgent extends BaseAgent {
   private sourceMcpServers: Record<string, SdkMcpServerConfig> = {};
   private currentTurnId: string | undefined;
   private currentAssistantText = '';
+  private currentIsSlashCommand = false;
   private toolNames = new Map<string, string>();
   private toolInputs = new Map<string, Record<string, unknown>>();
 
@@ -416,6 +469,7 @@ export class QwenAgent extends BaseAgent {
     this.abortReason = undefined;
     this.eventQueue.reset();
     this.currentAssistantText = '';
+    this.currentIsSlashCommand = isSlashCommandPrompt(message, attachments);
     this.currentTurnId = `qwen-turn-${promptRunId}`;
     this.toolNames.clear();
     this.toolInputs.clear();
@@ -503,6 +557,7 @@ export class QwenAgent extends BaseAgent {
       this._isProcessing = false;
       this.currentTurnId = undefined;
       this.currentAssistantText = '';
+      this.currentIsSlashCommand = false;
     }
   }
 
@@ -1279,6 +1334,7 @@ export class QwenAgent extends BaseAgent {
       isIntermediate?: boolean,
     ) => {
       if (!text) return;
+      const messageText = role === 'assistant' ? normalizeQwenAssistantText(text) : text;
       const previous = messages[messages.length - 1];
       if (
         previous
@@ -1287,14 +1343,14 @@ export class QwenAgent extends BaseAgent {
         && !previous.toolUseId
         && previous.isIntermediate === isIntermediate
       ) {
-        previous.content += text;
+        previous.content += messageText;
         return;
       }
 
       messages.push({
         id: nextId(),
         role,
-        content: text,
+        content: messageText,
         timestamp,
         isIntermediate,
       });
@@ -1427,8 +1483,12 @@ export class QwenAgent extends BaseAgent {
   }
 
   private isSameSlashCommandInvocationMessage(message: Message, slashMessage: Message): boolean {
-    return message.role === 'user'
-      && message.content.trim() === slashMessage.content.trim()
+    const messageContent = message.role === 'assistant'
+      ? normalizeQwenAssistantText(message.content).trim()
+      : message.content.trim();
+
+    return message.role === slashMessage.role
+      && messageContent === slashMessage.content.trim()
       && Math.abs(message.timestamp - slashMessage.timestamp) <= 10_000;
   }
 
@@ -1471,10 +1531,11 @@ export class QwenAgent extends BaseAgent {
         if (phase !== 'result') continue;
 
         const outputItems = Array.isArray(payload.outputHistoryItems) ? payload.outputHistoryItems : [];
-        const hasRenderableOutput = outputItems
+        const outputTexts = outputItems
           .filter(isRecord)
-          .some((item) => !!asString(item.text)?.trim());
-        if (!hasRenderableOutput) continue;
+          .map(formatQwenSlashOutputHistoryItem)
+          .filter((text): text is string => !!text?.trim());
+        if (outputTexts.length === 0) continue;
 
         const parentUuid = asString(record.parentUuid);
         const resultKey = parentUuid || `${rawCommand}:${timestamp}`;
@@ -1487,6 +1548,12 @@ export class QwenAgent extends BaseAgent {
           role: 'user',
           content: invocation?.rawCommand || rawCommand,
           timestamp: invocation?.timestamp ?? timestamp,
+        });
+        messages.push({
+          id: `qwen-${sessionId}-slash-${++idCounter}`,
+          role: 'assistant',
+          content: outputTexts.join('\n\n'),
+          timestamp,
         });
       }
     } catch (error) {
@@ -1512,9 +1579,12 @@ export class QwenAgent extends BaseAgent {
 
   private flushAssistantText(): void {
     if (!this.currentAssistantText) return;
+    const text = normalizeQwenAssistantText(this.currentAssistantText, {
+      forceJsonFence: this.currentIsSlashCommand,
+    });
     this.eventQueue.enqueue({
       type: 'text_complete',
-      text: this.currentAssistantText,
+      text,
       turnId: this.currentTurnId,
     });
     this.currentAssistantText = '';

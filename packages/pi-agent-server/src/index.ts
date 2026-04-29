@@ -1112,13 +1112,18 @@ function handleSessionEvent(event: AgentSessionEvent): void {
       // Speculative prefetch: if the assistant message contains 2+ prefetchable tool calls,
       // fire all requests to the main process in parallel NOW, before executeToolCalls
       // iterates sequentially. Each proxy tool's execute() will hit the cache.
+      type PrefetchableToolCall = { type: 'toolCall'; id: string; name: string; arguments?: unknown };
       const content = (msg as { content?: Array<{ type: string; id?: string; name?: string; arguments?: unknown }> }).content;
       if (Array.isArray(content)) {
-        const prefetchableToolCalls = content.filter(
-          (c) => c.type === 'toolCall' && c.name && isPrefetchableTool(c.name),
+        const prefetchableToolCalls = content.filter((c): c is PrefetchableToolCall =>
+          c.type === 'toolCall' &&
+          typeof c.id === 'string' &&
+          typeof c.name === 'string' &&
+          isPrefetchableTool(c.name),
         );
-        if (prefetchableToolCalls.length >= 2) {
-          debugLog(`Prefetching ${prefetchableToolCalls.length} parallel ${prefetchableToolCalls[0].name} calls`);
+        const firstToolCall = prefetchableToolCalls[0];
+        if (prefetchableToolCalls.length >= 2 && firstToolCall) {
+          debugLog(`Prefetching ${prefetchableToolCalls.length} parallel ${firstToolCall.name} calls`);
           for (const tc of prefetchableToolCalls) {
             const requestId = `prefetch-${tc.id}`;
             const promise = new Promise<{ content: string; isError: boolean }>((resolve) => {
@@ -1127,10 +1132,10 @@ function handleSessionEvent(event: AgentSessionEvent): void {
             send({
               type: 'tool_execute_request',
               requestId,
-              toolName: tc.name!,
+              toolName: tc.name,
               args: (tc.arguments ?? {}) as Record<string, unknown>,
             });
-            prefetchCache.set(tc.id!, promise);
+            prefetchCache.set(tc.id, promise);
           }
         }
       }

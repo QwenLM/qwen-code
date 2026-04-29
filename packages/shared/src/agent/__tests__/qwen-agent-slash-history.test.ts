@@ -157,6 +157,120 @@ describe('QwenAgent slash command history', () => {
     ]);
   });
 
+  it('formats slash command JSON output as a markdown json block', () => {
+    const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(runtimeRoot, cwd);
+    process.env.QWEN_RUNTIME_DIR = runtimeRoot;
+
+    const sessionId = 'a72a15d5-5096-4a15-b256-e7553763d94c';
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [
+      {
+        uuid: 'doctor-invocation',
+        sessionId,
+        timestamp: '2026-04-29T05:30:26.198Z',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: { phase: 'invocation', rawCommand: '/doctor' },
+      },
+      {
+        uuid: 'doctor-result',
+        parentUuid: 'doctor-invocation',
+        sessionId,
+        timestamp: '2026-04-29T05:30:26.335Z',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/doctor',
+          outputHistoryItems: [
+            {
+              type: 'assistant',
+              text: JSON.stringify({
+                checks: [
+                  {
+                    category: 'System',
+                    name: 'Node.js version',
+                    status: 'pass',
+                    message: 'v22.22.1',
+                  },
+                ],
+                summary: { pass: 1, warn: 0, fail: 0 },
+              }, null, 2),
+            },
+          ],
+        },
+      },
+    ]);
+
+    const agent = createAgent(cwd);
+    const messages = (agent as unknown as QwenHistoryInternals)
+      .mergeSlashCommandInvocationMessages(sessionId, [], cwd);
+    agent.destroy();
+
+    expect(messages.map(message => [message.role, message.content])).toEqual([
+      ['user', '/doctor'],
+      [
+        'assistant',
+        '```json\n{\n  "checks": [\n    {\n      "category": "System",\n      "name": "Node.js version",\n      "status": "pass",\n      "message": "v22.22.1"\n    }\n  ],\n  "summary": {\n    "pass": 1,\n    "warn": 0,\n    "fail": 0\n  }\n}\n```',
+      ],
+    ]);
+  });
+
+  it('restores structured doctor slash command output', () => {
+    const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(runtimeRoot, cwd);
+    process.env.QWEN_RUNTIME_DIR = runtimeRoot;
+
+    const sessionId = 'a72a15d5-5096-4a15-b256-e7553763d94d';
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [
+      {
+        uuid: 'doctor-invocation',
+        sessionId,
+        timestamp: '2026-04-29T05:30:26.198Z',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: { phase: 'invocation', rawCommand: '/doctor' },
+      },
+      {
+        uuid: 'doctor-result',
+        parentUuid: 'doctor-invocation',
+        sessionId,
+        timestamp: '2026-04-29T05:30:26.335Z',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/doctor',
+          outputHistoryItems: [
+            {
+              type: 'doctor',
+              checks: [
+                {
+                  category: 'System',
+                  name: 'Node.js version',
+                  status: 'pass',
+                  message: 'v24.11.1',
+                },
+              ],
+              summary: { pass: 1, warn: 0, fail: 0 },
+            },
+          ],
+        },
+      },
+    ]);
+
+    const agent = createAgent(cwd);
+    const messages = (agent as unknown as QwenHistoryInternals)
+      .mergeSlashCommandInvocationMessages(sessionId, [], cwd);
+    agent.destroy();
+
+    expect(messages[1]?.role).toBe('assistant');
+    expect(messages[1]?.content).toContain('```json\n{');
+    expect(messages[1]?.content).toContain('"message": "v24.11.1"');
+  });
+
   it('does not send Craft context while Qwen prompt context is disabled', () => {
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
     tempRoots.push(cwd);
