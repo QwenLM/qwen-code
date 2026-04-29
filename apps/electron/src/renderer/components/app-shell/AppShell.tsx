@@ -167,6 +167,10 @@ interface AppShellProps {
 type FilterMode = 'include' | 'exclude'
 
 const altClickTooltipLabel = isMac ? '⌥ click to exclude' : 'Alt click to exclude'
+const SIDEBAR_MIN_WIDTH = 180
+const SIDEBAR_MAX_WIDTH = 320
+const SESSION_LIST_MIN_WIDTH = 240
+const SESSION_LIST_MAX_WIDTH = 480
 
 /** Wraps children in a Tooltip that shows instantly on hover — only rendered when `show` is true. */
 function AltExcludeTooltip({ show, children }: { show: boolean; children: React.ReactNode }) {
@@ -537,7 +541,7 @@ function AppShellContent({
   const [sidebarWidth, setSidebarWidth] = React.useState(() => {
     return storage.get(storage.KEYS.sidebarWidth, 220)
   })
-  // Session list width in pixels (min 240, max 480)
+  // Session list width in pixels.
   const [sessionListWidth, setSessionListWidth] = React.useState(() => {
     return storage.get(storage.KEYS.sessionListWidth, 300)
   })
@@ -626,6 +630,7 @@ function AppShellContent({
     ? sessionListWidth
     : (effectiveSidebarAndNavigatorHidden || isSessionNavigatorCollapsed ? 0 : sessionListWidth)
   const isNavigatorResizeAvailable = !effectiveSidebarAndNavigatorHidden && effectiveNavigatorWidth > 0
+  const isSidebarResizeAvailable = !effectiveSidebarAndNavigatorHidden && isSidebarVisible
 
   // Derive source filter from navigation state (only when in sources navigator)
   const sourceFilter: SourceFilter | null = isSourcesNavigation(navState) ? navState.filter ?? null : null
@@ -1229,7 +1234,7 @@ function AppShellContent({
 
     const handleMouseMove = (e: MouseEvent) => {
       if (isResizing === 'sidebar') {
-        const newWidth = Math.min(Math.max(e.clientX, 180), 320)
+        const newWidth = Math.min(Math.max(e.clientX, SIDEBAR_MIN_WIDTH), SIDEBAR_MAX_WIDTH)
         setSidebarWidth(newWidth)
         if (resizeHandleRef.current) {
           const rect = resizeHandleRef.current.getBoundingClientRect()
@@ -1237,7 +1242,7 @@ function AppShellContent({
         }
       } else if (isResizing === 'session-list') {
         const offset = isSidebarVisible ? sidebarWidth : 0
-        const newWidth = Math.min(Math.max(e.clientX - offset, 240), 480)
+        const newWidth = Math.min(Math.max(e.clientX - offset, SESSION_LIST_MIN_WIDTH), SESSION_LIST_MAX_WIDTH)
         setSessionListWidth(newWidth)
         if (sessionListHandleRef.current) {
           const rect = sessionListHandleRef.current.getBoundingClientRect()
@@ -3188,8 +3193,8 @@ function AppShellContent({
           isResizing={!!isResizing}
         />
 
-        {/* Sidebar Resize Handle (absolute, hidden when the navigator is not visible) */}
-        {isNavigatorResizeAvailable && (
+        {/* Sidebar Resize Handle */}
+        {isSidebarResizeAvailable && (
         <div
           ref={resizeHandleRef}
           onMouseDown={(e) => { e.preventDefault(); setIsResizing('sidebar') }}
