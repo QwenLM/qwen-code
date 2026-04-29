@@ -4,7 +4,7 @@ import { formatDistanceToNowStrict } from "date-fns"
 import type { Locale } from "date-fns"
 import { AnimatePresence } from "motion/react"
 import { useSetAtom } from "jotai"
-import { Cloud, ExternalLink, Folder, FolderPlus, MessageSquare } from "lucide-react"
+import { ChevronDown, ChevronRight, Cloud, ExternalLink, Folder, FolderPlus, MessageSquare } from "lucide-react"
 import { toast } from "sonner"
 
 import { cn } from "@/lib/utils"
@@ -22,6 +22,7 @@ import {
 import { ContextMenuProvider } from "@/components/ui/menu-context"
 import { RenameDialog } from "@/components/ui/rename-dialog"
 import { SessionMenu } from "./SessionMenu"
+import { SquarePenRounded } from "../icons/SquarePenRounded"
 import { useSessionActions } from "@/hooks/useSessionActions"
 import { useWorkspaceIcons } from "@/hooks/useWorkspaceIcon"
 import { getSessionTitle, hasUnreadMeta, shortTimeLocale } from "@/utils/session"
@@ -37,6 +38,7 @@ interface WorkspaceProjectTreeProps {
   workspaceUnreadMap?: Record<string, boolean>
   onSelectWorkspace: (workspaceId: string, openInNewWindow?: boolean) => void | Promise<void>
   onSelectSession: (workspaceId: string, sessionId: string) => void | Promise<void>
+  onNewSession: (workspaceId: string) => void | Promise<void>
   onWorkspaceCreated?: (workspace: Workspace) => void
   sessionStatuses?: SessionStatus[]
   labels?: LabelConfig[]
@@ -72,30 +74,42 @@ function WorkspaceHeader({
   isActive,
   hasUnread,
   iconUrl,
+  isCollapsed,
+  newSessionLabel,
   openInNewWindowLabel,
-  onSelect,
+  onToggleCollapsed,
+  onNewSession,
   onOpenInNewWindow,
 }: {
   workspace: Workspace
   isActive: boolean
   hasUnread?: boolean
   iconUrl?: string
+  isCollapsed: boolean
+  newSessionLabel: string
   openInNewWindowLabel: string
-  onSelect: () => void
+  onToggleCollapsed: () => void
+  onNewSession: () => void
   onOpenInNewWindow: () => void
 }) {
   return (
     <div className="group/project flex items-center gap-1 px-2 pt-3 pb-1">
       <button
         type="button"
-        onClick={onSelect}
+        onClick={onToggleCollapsed}
+        aria-expanded={!isCollapsed}
         className={cn(
-          "min-w-0 flex flex-1 items-center gap-2 rounded-[6px] px-1.5 py-1 text-left transition-colors",
+          "min-w-0 flex flex-1 items-center gap-1.5 rounded-[6px] px-1.5 py-1 text-left transition-colors",
           "hover:bg-sidebar-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
           isActive && "text-foreground",
           !isActive && "text-foreground/62",
         )}
       >
+        {isCollapsed ? (
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />
+        ) : (
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />
+        )}
         <CrossfadeAvatar
           src={iconUrl}
           alt={workspace.name}
@@ -108,6 +122,18 @@ function WorkspaceHeader({
         </FadingText>
         {workspace.remoteServer && <Cloud className="h-3 w-3 shrink-0 text-muted-foreground/70" />}
         {hasUnread && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />}
+      </button>
+      <button
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation()
+          onNewSession()
+        }}
+        title={newSessionLabel}
+        aria-label={newSessionLabel}
+        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px] text-muted-foreground opacity-0 transition-all hover:bg-foreground/5 hover:text-foreground group-hover/project:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      >
+        <SquarePenRounded className="h-3.5 w-3.5" />
       </button>
       <button
         type="button"
@@ -213,6 +239,7 @@ export function WorkspaceProjectTree({
   workspaceUnreadMap,
   onSelectWorkspace,
   onSelectSession,
+  onNewSession,
   onWorkspaceCreated,
   sessionStatuses = [],
   labels = [],
@@ -234,6 +261,7 @@ export function WorkspaceProjectTree({
   const [renameDialogOpen, setRenameDialogOpen] = React.useState(false)
   const [renameSessionId, setRenameSessionId] = React.useState<string | null>(null)
   const [renameName, setRenameName] = React.useState("")
+  const [collapsedWorkspaceIds, setCollapsedWorkspaceIds] = React.useState<Set<string>>(() => new Set())
   const hasRemoteWorkspaces = React.useMemo(() => workspaces.some(workspace => workspace.remoteServer), [workspaces])
   const {
     handleFlagWithToast,
@@ -291,6 +319,28 @@ export function WorkspaceProjectTree({
     setRenameSessionId(null)
     setRenameName("")
   }, [onRenameSession, renameName, renameSessionId])
+
+  const toggleWorkspaceCollapsed = React.useCallback((workspaceId: string) => {
+    setCollapsedWorkspaceIds(prev => {
+      const next = new Set(prev)
+      if (next.has(workspaceId)) {
+        next.delete(workspaceId)
+      } else {
+        next.add(workspaceId)
+      }
+      return next
+    })
+  }, [])
+
+  const handleNewProjectSession = React.useCallback((workspaceId: string) => {
+    setCollapsedWorkspaceIds(prev => {
+      if (!prev.has(workspaceId)) return prev
+      const next = new Set(prev)
+      next.delete(workspaceId)
+      return next
+    })
+    void onNewSession(workspaceId)
+  }, [onNewSession])
 
   const menuConfig = React.useMemo<ProjectSessionMenuConfig>(() => ({
     sessionStatuses,
@@ -358,6 +408,7 @@ export function WorkspaceProjectTree({
 
       <div className="min-h-0 flex-1 overflow-y-auto pb-3 mask-fade-bottom">
         {workspaces.map((workspace) => {
+          const isCollapsed = collapsedWorkspaceIds.has(workspace.id)
           const sessions = [...(workspaceSessions.get(workspace.id) ?? [])]
             .filter(session => !session.hidden && !session.isArchived)
             .sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0))
@@ -369,11 +420,14 @@ export function WorkspaceProjectTree({
                 isActive={workspace.id === activeWorkspaceId}
                 hasUnread={workspaceUnreadMap?.[workspace.id]}
                 iconUrl={workspaceIconMap.get(workspace.id)}
+                isCollapsed={isCollapsed}
+                newSessionLabel={t("session.newSession")}
                 openInNewWindowLabel={t("sidebarMenu.openInNewWindow")}
-                onSelect={() => void onSelectWorkspace(workspace.id)}
+                onToggleCollapsed={() => toggleWorkspaceCollapsed(workspace.id)}
+                onNewSession={() => handleNewProjectSession(workspace.id)}
                 onOpenInNewWindow={() => void onSelectWorkspace(workspace.id, true)}
               />
-              {sessions.length > 0 ? (
+              {!isCollapsed && sessions.length > 0 ? (
                 <div className="grid gap-0.5">
                   {sessions.map((session) => (
                     <ProjectSessionRow
@@ -386,11 +440,11 @@ export function WorkspaceProjectTree({
                     />
                   ))}
                 </div>
-              ) : (
+              ) : !isCollapsed ? (
                 <div className="ml-7 mr-3 rounded-[6px] px-2 py-1.5 text-[12px] font-medium text-muted-foreground/65">
                   {t("session.noSessionsYet")}
                 </div>
-              )}
+              ) : null}
             </section>
           )
         })}
