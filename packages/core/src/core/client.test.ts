@@ -400,6 +400,9 @@ describe('Gemini Client (client.ts)', () => {
         warn: vi.fn(),
         error: vi.fn(),
       }),
+      getFileReadCache: vi.fn().mockReturnValue({
+        clear: vi.fn(),
+      }),
     } as unknown as Config;
 
     client = new GeminiClient(mockConfig);
