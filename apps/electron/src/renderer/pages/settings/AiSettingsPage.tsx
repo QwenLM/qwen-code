@@ -7,17 +7,12 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import { ChevronDown, ChevronRight } from 'lucide-react'
-import { motion, AnimatePresence } from 'motion/react'
-import { toast } from 'sonner'
 
 import { PanelHeader } from '@/components/app-shell/PanelHeader'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { HeaderMenu } from '@/components/ui/HeaderMenu'
 import { routes } from '@/lib/navigate'
 import type { DetailsPageMeta } from '@/lib/navigation-registry'
-import { cn } from '@/lib/utils'
-import { useWorkspaceIcon } from '@/hooks/useWorkspaceIcon'
 import { useAppShellContext } from '@/context/AppShellContext'
 import {
   SettingsSection,
@@ -25,7 +20,7 @@ import {
   SettingsMenuSelectRow,
   SettingsToggle,
 } from '@/components/settings'
-import type { LlmConnection, LlmConnectionWithStatus, ThinkingLevel, Workspace, WorkspaceSettings } from '../../../shared/types'
+import type { LlmConnection, LlmConnectionWithStatus, ThinkingLevel } from '../../../shared/types'
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVELS } from '@craft-agent/shared/agent/thinking-levels'
 import { getModelShortName, type ModelDefinition } from '@config/models'
 
@@ -64,167 +59,9 @@ function getModelOptionsForConnection(
   return []
 }
 
-const WORKSPACE_SETTING_LABELS: Partial<Record<keyof WorkspaceSettings, string>> = {
-  model: 'workspace model override',
-  thinkingLevel: 'workspace thinking override',
-}
-
-interface WorkspaceOverrideCardProps {
-  workspace: Workspace
-  modelOptions: Array<{ value: string; label: string; description?: string }>
-  onSettingsChange: () => void
-}
-
-function WorkspaceOverrideCard({ workspace, modelOptions, onSettingsChange }: WorkspaceOverrideCardProps) {
-  const { t } = useTranslation()
-  const [isExpanded, setIsExpanded] = useState(false)
-  const [settings, setSettings] = useState<WorkspaceSettings | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
-  const iconUrl = useWorkspaceIcon(workspace)
-
-  useEffect(() => {
-    const loadSettings = async () => {
-      if (!window.electronAPI) return
-      setIsLoading(true)
-      try {
-        const workspaceSettings = await window.electronAPI.getWorkspaceSettings(workspace.id)
-        setSettings(workspaceSettings)
-      } catch (error) {
-        console.error('Failed to load workspace settings:', error)
-      } finally {
-        setIsLoading(false)
-      }
-    }
-    loadSettings()
-  }, [workspace.id])
-
-  const updateSetting = useCallback(async <K extends keyof WorkspaceSettings>(key: K, value: WorkspaceSettings[K]) => {
-    if (!window.electronAPI) return
-
-    const previousValue = settings?.[key]
-    setSettings(prev => prev ? { ...prev, [key]: value } : prev)
-
-    try {
-      await window.electronAPI.updateWorkspaceSetting(workspace.id, key, value)
-      onSettingsChange()
-    } catch (error) {
-      setSettings(prev => prev ? { ...prev, [key]: previousValue } : prev)
-
-      const message = error instanceof Error ? error.message : 'Unknown error'
-      const settingLabel = WORKSPACE_SETTING_LABELS[key] ?? String(key)
-      console.error(`Failed to save ${String(key)}:`, error)
-      toast.error(t("toast.failedToSaveSetting", { setting: settingLabel }), {
-        description: message,
-      })
-    }
-  }, [workspace.id, onSettingsChange, settings, t])
-
-  const handleModelChange = useCallback((model: string) => {
-    updateSetting('model', model === 'global' ? undefined : model)
-  }, [updateSetting])
-
-  const handleThinkingChange = useCallback((level: string) => {
-    updateSetting('thinkingLevel', level === 'global' ? undefined : level as ThinkingLevel)
-  }, [updateSetting])
-
-  const hasOverrides = !!(settings?.model || settings?.thinkingLevel)
-  const currentModel = settings?.model || 'global'
-  const currentThinking = settings?.thinkingLevel || 'global'
-
-  const getSummary = () => {
-    if (!hasOverrides) return t("settings.ai.usingDefaults")
-    const parts: string[] = []
-    if (settings?.model) parts.push(getModelShortName(settings.model))
-    if (settings?.thinkingLevel) {
-      const level = THINKING_LEVELS.find(item => item.id === settings.thinkingLevel)
-      parts.push(level ? t(level.nameKey) : settings.thinkingLevel)
-    }
-    return parts.join(' · ')
-  }
-
-  return (
-    <SettingsCard>
-      <button
-        type="button"
-        onClick={() => setIsExpanded(!isExpanded)}
-        className="w-full flex items-center justify-between py-3 px-4 hover:bg-foreground/[0.02] transition-colors"
-      >
-        <div className="flex items-center gap-3 min-w-0">
-          <div
-            className={cn(
-              'w-6 h-6 rounded-full overflow-hidden bg-foreground/5 flex items-center justify-center shrink-0',
-              'ring-1 ring-border/50'
-            )}
-          >
-            {iconUrl ? (
-              <img src={iconUrl} alt="" className="w-full h-full object-cover" />
-            ) : (
-              <span className="text-xs font-medium text-muted-foreground">
-                {workspace.name?.charAt(0)?.toUpperCase() || 'W'}
-              </span>
-            )}
-          </div>
-          <div className="text-left min-w-0">
-            <div className="text-sm font-medium truncate">{workspace.name}</div>
-            <div className="text-xs text-muted-foreground truncate">
-              {isLoading ? t("common.loading") : getSummary()}
-            </div>
-          </div>
-        </div>
-        {isExpanded ? (
-          <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />
-        ) : (
-          <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
-        )}
-      </button>
-
-      <AnimatePresence initial={false}>
-        {isExpanded && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
-            className="overflow-hidden"
-          >
-            <div className="border-t border-border/50 px-4 py-2">
-              <SettingsMenuSelectRow
-                label={t("settings.ai.model")}
-                description={t("settings.ai.modelDesc")}
-                value={currentModel}
-                onValueChange={handleModelChange}
-                options={[
-                  { value: 'global', label: t("settings.ai.useDefault"), description: t("settings.ai.inheritFromApp") },
-                  ...modelOptions,
-                ]}
-                searchable={modelOptions.length > 8}
-              />
-              <SettingsMenuSelectRow
-                label={t("settings.ai.thinking")}
-                description={t("settings.ai.thinkingDesc")}
-                value={currentThinking}
-                onValueChange={handleThinkingChange}
-                options={[
-                  { value: 'global', label: t("settings.ai.useDefault"), description: t("settings.ai.inheritFromApp") },
-                  ...THINKING_LEVELS.map(({ id, nameKey, descriptionKey }) => ({
-                    value: id,
-                    label: t(nameKey),
-                    description: t(descriptionKey),
-                  })),
-                ]}
-              />
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </SettingsCard>
-  )
-}
-
 export default function AiSettingsPage() {
   const { t } = useTranslation()
-  const { llmConnections, refreshLlmConnections, activeWorkspaceId } = useAppShellContext()
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  const { llmConnections, refreshLlmConnections } = useAppShellContext()
   const [defaultThinking, setDefaultThinking] = useState<ThinkingLevel>(DEFAULT_THINKING_LEVEL)
   const [extendedPromptCache, setExtendedPromptCache] = useState(false)
   const [enable1MContext, setEnable1MContext] = useState(false)
@@ -233,9 +70,6 @@ export default function AiSettingsPage() {
     const load = async () => {
       if (!window.electronAPI) return
       try {
-        const ws = await window.electronAPI.getWorkspaces()
-        setWorkspaces(ws)
-
         const defaultThinkingLevel = await window.electronAPI.getDefaultThinkingLevel()
         setDefaultThinking(defaultThinkingLevel)
 
@@ -249,7 +83,7 @@ export default function AiSettingsPage() {
       }
     }
     load()
-  }, [activeWorkspaceId])
+  }, [])
 
   const qwenConnection = useMemo(() => (
     llmConnections.find(connection => connection.providerType === 'qwen') ?? llmConnections[0]
@@ -302,10 +136,6 @@ export default function AiSettingsPage() {
     await window.electronAPI?.setEnable1MContext(enabled)
   }, [])
 
-  const handleWorkspaceSettingsChange = useCallback(() => {
-    refreshLlmConnections?.()
-  }, [refreshLlmConnections])
-
   return (
     <div className="h-full flex flex-col">
       <PanelHeader title={t("settings.ai.title")} actions={<HeaderMenu route={routes.view.settings('ai')} />} />
@@ -338,21 +168,6 @@ export default function AiSettingsPage() {
                   />
                 </SettingsCard>
               </SettingsSection>
-
-              {workspaces.length > 0 && (
-                <SettingsSection title={t("settings.ai.workspaceOverrides")} description={t("settings.ai.workspaceOverridesDesc")}>
-                  <div className="space-y-2">
-                    {workspaces.map((workspace) => (
-                      <WorkspaceOverrideCard
-                        key={workspace.id}
-                        workspace={workspace}
-                        modelOptions={modelOptions}
-                        onSettingsChange={handleWorkspaceSettingsChange}
-                      />
-                    ))}
-                  </div>
-                </SettingsSection>
-              )}
 
               <SettingsSection title={t("settings.ai.performance")} description={t("settings.ai.performanceDesc")}>
                 <SettingsCard>
