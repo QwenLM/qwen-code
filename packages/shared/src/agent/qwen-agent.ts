@@ -219,7 +219,9 @@ function normalizeQwenAssistantText(
   text: string,
   options: { forceJsonFence?: boolean } = {},
 ): string {
-  if (!text.trim() || isJsonCodeFence(text)) return text;
+  const trimmed = text.trim();
+  if (!trimmed || isJsonCodeFence(trimmed)) return text;
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return text;
 
   const parsed = parseJsonText(text);
   if (!parsed) return text;
@@ -1343,7 +1345,10 @@ export class QwenAgent extends BaseAgent {
         && !previous.toolUseId
         && previous.isIntermediate === isIntermediate
       ) {
-        previous.content += messageText;
+        const nextContent = previous.content + text;
+        previous.content = role === 'assistant'
+          ? normalizeQwenAssistantText(nextContent)
+          : nextContent;
         return;
       }
 

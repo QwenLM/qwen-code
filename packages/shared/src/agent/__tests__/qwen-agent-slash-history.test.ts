@@ -212,7 +212,25 @@ describe('QwenAgent slash command history', () => {
       ['user', '/doctor'],
       [
         'assistant',
-        '```json\n{\n  "checks": [\n    {\n      "category": "System",\n      "name": "Node.js version",\n      "status": "pass",\n      "message": "v22.22.1"\n    }\n  ],\n  "summary": {\n    "pass": 1,\n    "warn": 0,\n    "fail": 0\n  }\n}\n```',
+        [
+          '```json',
+          '{',
+          '  "checks": [',
+          '    {',
+          '      "category": "System",',
+          '      "name": "Node.js version",',
+          '      "status": "pass",',
+          '      "message": "v22.22.1"',
+          '    }',
+          '  ],',
+          '  "summary": {',
+          '    "pass": 1,',
+          '    "warn": 0,',
+          '    "fail": 0',
+          '  }',
+          '}',
+          '```',
+        ].join('\n'),
       ],
     ]);
   });
