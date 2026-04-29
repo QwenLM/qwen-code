@@ -147,9 +147,9 @@ const ListBody: React.FC<{
   selectedIndex: number;
   maxRows: number;
 }> = ({ entries, selectedIndex, maxRows }) => {
-  // Keep the "Local agents (N)" section header rendered even when the list
-  // is empty, so the overlay doesn't collapse into a single line of
-  // empty-state text when the last agent finishes while the dialog is open.
+  // Keep the "Background tasks (N)" section header rendered even when the
+  // list is empty, so the overlay doesn't collapse into a single line of
+  // empty-state text when the last task finishes while the dialog is open.
   if (entries.length === 0) {
     return (
       <Box flexDirection="column">
@@ -189,7 +189,7 @@ const ListBody: React.FC<{
   return (
     <Box flexDirection="column">
       <Box paddingX={1}>
-        <Text bold>Local agents</Text>
+        <Text bold>Background tasks</Text>
         <Text color={theme.text.secondary}> ({entries.length})</Text>
       </Box>
       <Box flexDirection="column">
@@ -483,20 +483,34 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
 
   // List mode row budget: terminal height minus chrome (border 2 + title 1
   // + two marginTops 2 + hint 1) and list header ("N active agents" 1 +
-  // marginTop 1 + "Local agents (N)" 1) = 10.
+  // marginTop 1 + "Background tasks (N)" 1) = 10.
   const listMaxRows = Math.max(3, availableTerminalHeight - 10);
 
-  const selectedEntry = useMemo(
-    () => entries[selectedIndex] ?? null,
-    [entries, selectedIndex],
-  );
+  // Activity tick — bumped whenever the watched agent emits an activity
+  // update, *and* used as a useMemo dep below to refresh the live agent
+  // entry from the registry. The snapshot in useBackgroundTaskView
+  // intentionally only refreshes on `statusChange` (so the footer pill
+  // and AppContainer stay quiet during heavy tool traffic), but the
+  // detail body must see fresh `recentActivities` / `stats` between
+  // those transitions — so we re-read from the registry here.
+  const [activityTick, setActivityTick] = useState(0);
 
-  // Tick up a local counter on each activity callback to force the
-  // detail body to re-render while it's open. The main status
-  // subscription in useBackgroundTaskView intentionally ignores
-  // activity updates so the Footer pill and AppContainer don't re-run
-  // on every tool call a background agent makes.
-  const [, bumpActivity] = useState(0);
+  const selectedEntry = useMemo(() => {
+    const fromSnapshot = entries[selectedIndex] ?? null;
+    if (!fromSnapshot || fromSnapshot.kind !== 'agent') return fromSnapshot;
+    // Re-read the agent from the registry so detail-body fields the
+    // registry mutates between status transitions (recentActivities,
+    // stats) are fresh. The shallow spread inside useBackgroundTaskView
+    // captures `recentActivities` at refresh time, and `appendActivity`
+    // reassigns `entry.recentActivities = next` on the registry object —
+    // so the snapshot's reference is detached after the first activity.
+    const live = config.getBackgroundTaskRegistry().get(fromSnapshot.agentId);
+    return live ? { ...live, kind: 'agent' as const } : fromSnapshot;
+    // activityTick is a dep on purpose: the registry mutation is invisible
+    // to useMemo otherwise and we need to recompute on each activity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entries, selectedIndex, config, activityTick]);
+
   const selectedEntryId = selectedEntry ? entryId(selectedEntry) : undefined;
   // Activity callback is agent-only — shells don't emit per-tool events.
   const selectedAgentIdForActivity =
@@ -507,7 +521,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     const registry = config.getBackgroundTaskRegistry();
     const onActivity = (entry: BackgroundTaskEntry) => {
       if (entry.agentId !== selectedAgentIdForActivity) return;
-      bumpActivity((n) => n + 1);
+      setActivityTick((n) => n + 1);
     };
     registry.setActivityChangeCallback(onActivity);
     return () => registry.setActivityChangeCallback(undefined);
@@ -525,7 +539,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       selectedStatus !== 'running'
     )
       return;
-    const id = setInterval(() => bumpActivity((n) => n + 1), 1000);
+    const id = setInterval(() => setActivityTick((n) => n + 1), 1000);
     return () => clearInterval(id);
   }, [dialogOpen, dialogMode, selectedEntryId, selectedStatus]);
 

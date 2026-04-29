@@ -73,10 +73,20 @@ function setup(initial: readonly DialogEntry[]): Harness {
   });
 
   const cancel = vi.fn();
+  // Stub registry that resolves `.get(agentId)` against the current entries
+  // snapshot — the dialog now re-reads agent entries via `.get()` to pick up
+  // live activity/stats mutations the snapshot misses.
+  let currentEntries: readonly DialogEntry[] = initial;
   const config = {
     getBackgroundTaskRegistry: () => ({
       cancel,
       setActivityChangeCallback: vi.fn(),
+      get: (id: string) => {
+        const match = currentEntries.find(
+          (e) => e.kind === 'agent' && e.agentId === id,
+        );
+        return match;
+      },
     }),
   } as unknown as Config;
 
@@ -119,6 +129,7 @@ function setup(initial: readonly DialogEntry[]): Harness {
     cancel,
     setEntries(next) {
       handlers.length = 0;
+      currentEntries = next;
       act(() => handle.current!.setEntries(next));
     },
     pressKey(key) {
