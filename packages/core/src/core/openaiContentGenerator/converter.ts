@@ -1383,27 +1383,11 @@ function mergeConsecutiveAssistantMessages(
         // Combine tool calls
         const combinedToolCalls = [...lastToolCalls, ...currentToolCalls];
 
-        // Combine reasoning_content to maintain continuity (e.g., DeepSeek
-        // requires reasoning_content on every assistant message in the chain)
-        const lastReasoning = (
-          lastMessage as ExtendedChatCompletionAssistantMessageParam
-        ).reasoning_content;
-        const currentReasoning = (
-          message as ExtendedChatCompletionAssistantMessageParam
-        ).reasoning_content;
-        let combinedReasoning: string | null | undefined;
-        if (lastReasoning || currentReasoning) {
-          combinedReasoning = [lastReasoning, currentReasoning]
-            .filter((r): r is string => typeof r === 'string' && r.length > 0)
-            .join('\n');
-        }
-
         // Update the last message with combined data
         (
           lastMessage as OpenAI.Chat.ChatCompletionMessageParam & {
             content: string | OpenAI.Chat.ChatCompletionContentPart[] | null;
             tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
-            reasoning_content?: string | null;
           }
         ).content = combinedContent || null;
         if (combinedToolCalls.length > 0) {
@@ -1411,18 +1395,8 @@ function mergeConsecutiveAssistantMessages(
             lastMessage as OpenAI.Chat.ChatCompletionMessageParam & {
               content: string | OpenAI.Chat.ChatCompletionContentPart[] | null;
               tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
-              reasoning_content?: string | null;
             }
           ).tool_calls = combinedToolCalls;
-        }
-        if (combinedReasoning !== undefined) {
-          (
-            lastMessage as OpenAI.Chat.ChatCompletionMessageParam & {
-              content: string | OpenAI.Chat.ChatCompletionContentPart[] | null;
-              tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
-              reasoning_content?: string | null;
-            }
-          ).reasoning_content = combinedReasoning;
         }
 
         continue; // Skip adding the current message since it's been merged
