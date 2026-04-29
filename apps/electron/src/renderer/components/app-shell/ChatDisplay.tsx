@@ -1885,6 +1885,8 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
               connectionUnavailable,
               isEmptySession: session.messages.length === 0,
               currentConnection: session.llmConnection,
+              availableCommands: session.availableCommands,
+              availableSkills: session.availableSkills,
               onConnectionChange,
               contextStatus: {
                 isCompacting: session.currentStatus?.statusType === 'compacting',

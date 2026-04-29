@@ -80,7 +80,7 @@ import { isParentTaskTool } from '@craft-agent/shared/utils/toolNames'
 import { restoreFiles } from '@craft-agent/shared/utils/bundle-files'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { CraftMcpClient, McpClientPool, McpPoolServer } from '@craft-agent/shared/mcp'
-import { type Session, type SessionEvent, type FileAttachment, type SendMessageOptions, type UnreadSummary, type RemoteSessionTransferPayload, type ImportRemoteSessionTransferResult, RPC_CHANNELS, generateMessageId } from '@craft-agent/shared/protocol'
+import { type Session, type SessionEvent, type FileAttachment, type SendMessageOptions, type UnreadSummary, type RemoteSessionTransferPayload, type ImportRemoteSessionTransferResult, type AvailableSlashCommand, RPC_CHANNELS, generateMessageId } from '@craft-agent/shared/protocol'
 import { messageToStored, storedToMessage, type Message, type StoredAttachment, type ToolDisplayMeta } from '@craft-agent/core/types'
 import { formatPathsToRelative, formatToolInputPaths, perf, encodeIconToDataUrlAsync, getEmojiIcon, resetSummarizationClient, resolveToolIcon, readFileAttachment, selectSpreadMessages, normalizePath, truncateTitle } from '@craft-agent/shared/utils'
 import { loadAllSkills, loadSkillBySlug, invalidateSkillsCache, type LoadedSkill } from '@craft-agent/shared/skills'
@@ -760,6 +760,10 @@ interface ManagedSession {
     /** Model's context window size in tokens (from SDK modelUsage) */
     contextWindow?: number
   }
+  // Provider-advertised slash commands for the current session.
+  availableCommands?: AvailableSlashCommand[]
+  // Provider-advertised skill command names for the current session.
+  availableSkills?: string[]
   // Session status (user-controlled) - determines open vs closed
   // Dynamic status ID referencing workspace status config
   sessionStatus?: string
@@ -995,6 +999,8 @@ function managedToSession(m: ManagedSession, overrides?: Partial<Session>): Sess
     isProcessing: m.isProcessing,
     sessionFolderPath: getSessionStoragePath(m.workspace.rootPath, m.id),
     supportsBranching: resolveSupportsBranching(m),
+    availableCommands: m.availableCommands,
+    availableSkills: m.availableSkills,
     ...overrides,
   } as Session
 }
@@ -7178,6 +7184,17 @@ export class SessionManager implements ISessionManager {
             },
           }, workspaceId)
         }
+        break
+
+      case 'available_commands_update':
+        managed.availableCommands = event.availableCommands
+        managed.availableSkills = event.availableSkills
+        this.sendEvent({
+          type: 'available_commands_update',
+          sessionId: managed.id,
+          availableCommands: event.availableCommands,
+          availableSkills: event.availableSkills,
+        }, workspaceId)
         break
 
       case 'steer_undelivered':

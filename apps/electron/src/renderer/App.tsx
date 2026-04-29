@@ -54,6 +54,7 @@ import {
 import { sourcesAtom } from '@/atoms/sources'
 import { skillsAtom } from '@/atoms/skills'
 import { extractBadges } from '@/lib/mentions'
+import { extractCommandBadges } from '@/lib/slash-command-badges'
 import { getDefaultStore } from 'jotai'
 import {
   ShikiThemeProvider,
@@ -1237,19 +1238,9 @@ export default function App() {
         : []
       const badges: ContentBadge[] = [...(externalBadges || []), ...mentionBadges]
 
-      // Step 4.1: Detect SDK slash commands (e.g., /compact) and create command badges
-      // This makes /compact render as an inline badge rather than raw text
-      const commandMatch = message.match(/^\/([a-z]+)(\s|$)/i)
-      if (commandMatch && commandMatch[1].toLowerCase() === 'compact') {
-        const commandText = commandMatch[0].trimEnd() // "/compact" without trailing space
-        badges.unshift({
-          type: 'command',
-          label: 'Compact',
-          rawText: commandText,
-          start: 0,
-          end: commandText.length,
-        })
-      }
+      // Step 4.1: Detect slash commands and create command badges.
+      // The command text itself is preserved for the agent; the badge only affects display.
+      badges.unshift(...extractCommandBadges(message))
 
       // Step 4.2: Detect plan execution messages and create file badges
       // Pattern: "Read the plan at <path> and execute it."

@@ -61,7 +61,7 @@ import { EditPopover, getEditConfig } from '@/components/ui/EditPopover'
 import { SourceAvatar } from '@/components/ui/source-avatar'
 import { SourceSelectorPopover } from '@/components/ui/SourceSelectorPopover'
 import { FreeFormInputContextBadge } from './FreeFormInputContextBadge'
-import type { FileAttachment, LoadedSource, LoadedSkill } from '../../../../shared/types'
+import type { AvailableSlashCommand, FileAttachment, LoadedSource, LoadedSkill } from '../../../../shared/types'
 import type { PermissionMode } from '@craft-agent/shared/agent/modes'
 import { type ThinkingLevel, THINKING_LEVELS, getThinkingLevelNameKey } from '@craft-agent/shared/agent/thinking-levels'
 import { useEscapeInterrupt } from '@/context/EscapeInterruptContext'
@@ -228,6 +228,10 @@ export interface FreeFormInputProps {
   onConnectionChange?: (connectionSlug: string) => void
   /** When true, the session's locked connection has been removed */
   connectionUnavailable?: boolean
+  /** Provider-advertised slash commands for the current session. */
+  availableCommands?: AvailableSlashCommand[]
+  /** Provider-advertised skill command names for the current session. */
+  availableSkills?: string[]
 }
 
 /**
@@ -281,7 +285,10 @@ export function FreeFormInput({
   onFollowUpClick,
   onFollowUpIndexClick,
   compactMode = false,
+  currentConnection,
   connectionUnavailable = false,
+  availableCommands = [],
+  availableSkills = [],
 }: FreeFormInputProps) {
   const { t } = useTranslation()
 
@@ -305,6 +312,14 @@ export function FreeFormInput({
   const qwenConnection = React.useMemo(() => (
     llmConnections.find(c => c.providerType === 'qwen') ?? llmConnections[0]
   ), [llmConnections])
+  const currentLlmConnection = React.useMemo(() => {
+    const connectionSlug = currentConnection ?? appShellCtx?.workspaceDefaultLlmConnection
+    if (connectionSlug) {
+      return llmConnections.find(c => c.slug === connectionSlug) ?? null
+    }
+    return qwenConnection ?? null
+  }, [appShellCtx?.workspaceDefaultLlmConnection, currentConnection, llmConnections, qwenConnection])
+  const enableQwenSlashCommands = !connectionUnavailable && currentLlmConnection?.providerType === 'qwen'
 
   // Compute available models from Qwen Code. In the real app this list is
   // populated from ACP session/new models.availableModels; playground keeps
@@ -880,7 +895,23 @@ export function FreeFormInput({
     activeCommands,
     recentFolders,
     homeDir,
+    availableCommands,
+    availableSkills,
+    enableQwenCommands: enableQwenSlashCommands,
   })
+  const richInputSlashCommandNames = React.useMemo(() => {
+    const names = new Set<string>(['compact'])
+    for (const section of inlineSlash.sections) {
+      for (const item of section.items) {
+        if ('type' in item && item.type === 'folder') continue
+        const commandText = 'insertText' in item ? item.insertText?.trim() : undefined
+        if (!commandText?.startsWith('/')) continue
+        const commandName = commandText.slice(1).split(/\s+/)[0]
+        if (commandName) names.add(commandName)
+      }
+    }
+    return [...names]
+  }, [inlineSlash.sections])
 
   // Handle mention selection (sources, skills, files)
   const handleMentionSelect = React.useCallback((item: MentionItem) => {
@@ -1373,10 +1404,15 @@ export function FreeFormInput({
 
   // Handle inline slash command selection (removes the /command text)
   const handleInlineSlashCommandSelect = React.useCallback((commandId: SlashCommandId) => {
-    const newValue = inlineSlash.handleSelectCommand(commandId)
+    const { value: newValue, cursorPosition } = inlineSlash.handleSelectCommand(commandId)
     setInput(newValue)
     syncToParent(newValue)
-    richInputRef.current?.focus()
+    setTimeout(() => {
+      richInputRef.current?.focus()
+      if (cursorPosition !== undefined) {
+        richInputRef.current?.setSelectionRange(cursorPosition, cursorPosition)
+      }
+    }, 0)
   }, [inlineSlash, syncToParent])
 
   // Handle inline slash folder selection (inserts a directory badge)
@@ -1641,6 +1677,7 @@ export function FreeFormInput({
           skills={skills}
           sources={sources}
           workspaceId={workspaceSlug}
+          slashCommandNames={richInputSlashCommandNames}
           className="pl-5 pr-4 pt-4 pb-3 overflow-y-auto min-h-[88px]"
           style={{ maxHeight: inputMaxHeight }}
           data-tutorial="chat-input"

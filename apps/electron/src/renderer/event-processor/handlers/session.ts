@@ -39,6 +39,7 @@ import type {
   AuthRequestEvent,
   AuthCompletedEvent,
   UsageUpdateEvent,
+  AvailableCommandsUpdateEvent,
   Effect,
 } from '../types'
 import type { Message } from '../../../shared/types'
@@ -472,6 +473,28 @@ export function handleConnectionChanged(
         ...session,
         llmConnection: event.connectionSlug,
         ...(event.supportsBranching !== undefined && { supportsBranching: event.supportsBranching }),
+      },
+      streaming,
+    },
+    effects: [],
+  }
+}
+
+/**
+ * Handle available_commands_update - sync provider slash commands and skills.
+ */
+export function handleAvailableCommandsUpdate(
+  state: SessionState,
+  event: AvailableCommandsUpdateEvent
+): ProcessResult {
+  const { session, streaming } = state
+
+  return {
+    state: {
+      session: {
+        ...session,
+        availableCommands: event.availableCommands,
+        availableSkills: event.availableSkills,
       },
       streaming,
     },
