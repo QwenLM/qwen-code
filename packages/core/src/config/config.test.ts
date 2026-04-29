@@ -314,6 +314,33 @@ describe('Server Config (config.ts)', () => {
     expect(config.getSystemPrompt()).toBeUndefined();
   });
 
+  describe('startNewSession', () => {
+    it('clears the FileReadCache so a new session does not inherit prior reads', () => {
+      // Regression guard: the file-read cache backs ReadFile's
+      // file_unchanged placeholder, whose correctness depends on the
+      // model having seen the prior read earlier in the *current*
+      // conversation. /clear and resume both go through
+      // startNewSession(), so it must drop cache entries the new
+      // session has never seen.
+      const config = new Config(baseParams);
+      const cache = config.getFileReadCache();
+      cache.recordRead(
+        '/tmp/whatever.ts',
+        {
+          dev: 1,
+          ino: 100,
+          mtimeMs: 1_000_000,
+          size: 42,
+        } as unknown as import('node:fs').Stats,
+        { full: true, cacheable: true },
+      );
+      expect(cache.size()).toBe(1);
+
+      config.startNewSession();
+      expect(cache.size()).toBe(0);
+    });
+  });
+
   describe('initialize', () => {
     it('should throw an error if checkpointing is enabled and GitService fails', async () => {
       const gitError = new Error('Git is not installed');

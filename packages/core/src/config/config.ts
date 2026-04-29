@@ -1346,6 +1346,13 @@ export class Config {
     this.chatRecordingService = this.chatRecordingEnabled
       ? new ChatRecordingService(this)
       : undefined;
+    // The file-read cache is session-scoped: its `file_unchanged`
+    // placeholder relies on the model having seen the prior full read
+    // earlier in the *current* conversation. Carrying entries across
+    // /clear or session resume would let a follow-up Read return the
+    // placeholder despite the new session never having received the
+    // file contents.
+    this.fileReadCache.clear();
     if (this.initialized) {
       logStartSession(this, new StartSessionEvent(this));
     }
