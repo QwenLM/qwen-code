@@ -91,6 +91,11 @@ function findLastFinalMessageId(messages: Message[]): string | undefined {
   return undefined
 }
 
+function resolveMessageCount(sessionMessageCount: number | undefined, messages: Message[]): number | undefined {
+  if (sessionMessageCount != null) return sessionMessageCount
+  return messages.length > 0 ? messages.length : undefined
+}
+
 /**
  * Extract metadata from a full session object
  */
@@ -109,7 +114,7 @@ export function extractSessionMeta(session: Session): SessionMeta {
   return {
     ...sessionFields,
     lastFinalMessageId: sessionLastFinal ?? findLastFinalMessageId(messages),
-    messageCount: messageCount ?? messages.length ?? 0,
+    messageCount: resolveMessageCount(messageCount, messages),
     isAsyncOperationOngoing: isAsyncOperationOngoing ?? isRegeneratingTitle,
     isRegeneratingTitle,
   } as SessionMeta
