@@ -156,7 +156,7 @@ describe('MonitorTool', () => {
       };
 
       expect(details.type).toBe('exec');
-      expect(details.permissionRules).toEqual(['Bash(tail -f *)']);
+      expect(details.permissionRules).toEqual(['Monitor(tail -f *)']);
     });
 
     it('does not consult Bash permission rules for monitor commands', async () => {
@@ -188,8 +188,8 @@ describe('MonitorTool', () => {
       expect(pm.isCommandAllowed).not.toHaveBeenCalled();
       // Both subcommands remain in confirmation scope
       expect(details.permissionRules).toEqual([
-        'Bash(git add *)',
-        'Bash(git commit *)',
+        'Monitor(git add *)',
+        'Monitor(git commit *)',
       ]);
     });
 
@@ -206,7 +206,9 @@ describe('MonitorTool', () => {
         permissionRules?: string[];
       };
 
-      expect(details.permissionRules).toEqual(['Bash(python -c "print(1)")']);
+      expect(details.permissionRules).toEqual([
+        'Monitor(python -c "print(1)")',
+      ]);
     });
   });
 
