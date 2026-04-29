@@ -504,25 +504,29 @@ export function handleUserMessage(
   )
 
   let updatedMessages: Message[]
+  let preserveProcessingForLateQueuedEvent = false
 
   if (existingIndex >= 0) {
     const existingMessage = session.messages[existingIndex]
+    const isLateQueuedEvent = status === 'queued' && existingMessage.isQueued === false
+    preserveProcessingForLateQueuedEvent = isLateQueuedEvent
 
-    // Event sequence protection: don't regress from 'processing' back to 'queued'
-    // This handles out-of-order events (e.g., 'processing' arrives before 'queued')
-    if (status === 'queued' && existingMessage.isQueued === false) {
-      // Already progressed past queued state, ignore this late 'queued' event
-      return { state, effects: [] }
-    }
-
-    // Update existing message - remove isPending, add isQueued if status is 'queued'
+    // Update existing message with the backend-authoritative payload.
+    // This matters for providers that expand slash commands before persistence:
+    // the optimistic bubble may contain "/command args", while the confirmed
+    // message contains the full rendered prompt.
     updatedMessages = session.messages.map((m, i) => {
       if (i === existingIndex) {
         return {
           ...m,
+          ...message,
           id: message.id,  // Use backend's ID as canonical
+          attachments: message.attachments ?? existingMessage.attachments,
+          badges: message.badges ?? existingMessage.badges,
           isPending: false,
-          isQueued: status === 'queued',
+          // Event sequence protection: don't regress from processing back to queued.
+          // This handles out-of-order events (e.g., 'processing' arrives before 'queued').
+          isQueued: isLateQueuedEvent ? false : status === 'queued',
         }
       }
       return m
@@ -545,7 +549,9 @@ export function handleUserMessage(
         lastMessageAt: Date.now(),
         lastMessageRole: 'user',  // Clear plan badge when user responds
         // Set isProcessing when message is accepted/processing (enables multi-window sync)
-        isProcessing: status === 'accepted' || status === 'processing',
+        isProcessing: preserveProcessingForLateQueuedEvent
+          ? session.isProcessing
+          : status === 'accepted' || status === 'processing',
       },
       streaming,
     },
@@ -913,4 +919,3 @@ export function handleUsageUpdate(
     effects: [],
   }
 }
-
