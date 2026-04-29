@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import { type ChatCompressionInfo, CompressionStatus } from '../core/turn.js';
@@ -265,6 +265,23 @@ export class ChatCompressionService {
     let canCalculateNewTokenCount = false;
 
     if (!isSummaryEmpty) {
+      // If any model turn in the preserved history has thought content, the
+      // compressed acknowledgment turn must also carry a thought part so that
+      // converters preserving reasoning_content (e.g., DeepSeek thinking mode)
+      // see a continuous chain across all assistant messages.
+      const hasThoughtContentInKeep = historyToKeep.some(
+        (content) =>
+          content.role === 'model' &&
+          content.parts?.some((part) => 'thought' in part && part.thought),
+      );
+
+      const ackParts: Part[] = [
+        { text: 'Got it. Thanks for the additional context!' },
+      ];
+      if (hasThoughtContentInKeep) {
+        ackParts.push({ text: ' ', thought: true });
+      }
+
       extraHistory = [
         {
           role: 'user',
@@ -272,7 +289,7 @@ export class ChatCompressionService {
         },
         {
           role: 'model',
-          parts: [{ text: 'Got it. Thanks for the additional context!' }],
+          parts: ackParts,
         },
         ...historyToKeep,
       ];
