@@ -3076,6 +3076,125 @@ describe('Settings Loading and Merging', () => {
         cwdSpy.mockRestore();
       });
 
+      it('does not exclude DEBUG/DEBUG_MODE from a workspace .qwen/.env', () => {
+        const cwdSpy = vi
+          .spyOn(process, 'cwd')
+          .mockReturnValue(MOCK_WORKSPACE_DIR);
+        const workspaceQwenEnvPath = path.join(
+          MOCK_WORKSPACE_DIR,
+          QWEN_DIR,
+          '.env',
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, workspaceQwenEnvPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH) return JSON.stringify({});
+            if (p === workspaceQwenEnvPath)
+              return 'DEBUG=true\nDEBUG_MODE=1\nQWEN_HOME_TEST_VAR=hello';
+            return '{}';
+          },
+        );
+
+        loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
+
+        // Per docs, `.qwen/.env` files are never filtered by excludedEnvVars,
+        // even when nested inside a workspace.
+        expect(process.env['DEBUG']).toEqual('true');
+        expect(process.env['DEBUG_MODE']).toEqual('1');
+        expect(process.env['QWEN_HOME_TEST_VAR']).toEqual('hello');
+        cwdSpy.mockRestore();
+      });
+
+      it('still blocks QWEN_HOME from a workspace .qwen/.env', () => {
+        delete process.env['QWEN_HOME'];
+        delete process.env['QWEN_RUNTIME_DIR'];
+
+        const cwdSpy = vi
+          .spyOn(process, 'cwd')
+          .mockReturnValue(MOCK_WORKSPACE_DIR);
+        const workspaceQwenEnvPath = path.join(
+          MOCK_WORKSPACE_DIR,
+          QWEN_DIR,
+          '.env',
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, workspaceQwenEnvPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH) return JSON.stringify({});
+            if (p === workspaceQwenEnvPath)
+              return [
+                'QWEN_HOME=/tmp/hijack',
+                'QWEN_RUNTIME_DIR=/tmp/hijack-runtime',
+                'OTHER_VAR=ok',
+              ].join('\n');
+            return '{}';
+          },
+        );
+
+        loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
+
+        // A workspace `.qwen/.env` is exempt from `excludedEnvVars` but must
+        // still be blocked from redirecting global state.
+        expect(process.env['QWEN_HOME']).toBeUndefined();
+        expect(process.env['QWEN_RUNTIME_DIR']).toBeUndefined();
+        expect(process.env['OTHER_VAR']).toEqual('ok');
+
+        delete process.env['OTHER_VAR'];
+        cwdSpy.mockRestore();
+      });
+
+      it('redirects user settings path when QWEN_HOME is set in ~/.qwen/.env', () => {
+        delete process.env['QWEN_HOME'];
+
+        const cwdSpy = vi
+          .spyOn(process, 'cwd')
+          .mockReturnValue(MOCK_WORKSPACE_DIR);
+        const userQwenEnvPath = path.join('/mock/home/user', QWEN_DIR, '.env');
+        const customSettingsPath = path.join(
+          '/tmp/from-user-env',
+          'settings.json',
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [userQwenEnvPath, customSettingsPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === userQwenEnvPath) return 'QWEN_HOME=/tmp/from-user-env';
+            if (p === customSettingsPath) return JSON.stringify({});
+            return '{}';
+          },
+        );
+
+        const loaded = loadSettings(MOCK_WORKSPACE_DIR);
+
+        // Without the pre-pass fix, USER_SETTINGS_PATH (frozen at module load)
+        // would still point at the legacy ~/.qwen/settings.json while other
+        // Storage paths use /tmp/from-user-env. The pre-pass keeps them
+        // consistent.
+        expect(process.env['QWEN_HOME']).toEqual('/tmp/from-user-env');
+        expect(loaded.user.path).toEqual(customSettingsPath);
+        cwdSpy.mockRestore();
+      });
+
       it('prefers QWEN_HOME/.env over ~/.env at the home-dir step', () => {
         const customHome = '/tmp/qwen-home-custom';
         process.env['QWEN_HOME'] = customHome;
