@@ -210,6 +210,7 @@
   "chat.scrollUpForEarlier": "Nach oben scrollen für ältere Nachrichten ({{count}} weitere)",
   "chat.selectedText": "Ausgewählter Text",
   "chat.session": "Sitzung",
+  "chat.emptyTitle": "Was sollen wir bauen?",
   "chat.sessionFiles": "Sitzungsdateien",
   "chat.sessionFilesEmpty": "Dateien, die in diesem Chat angehängt oder erstellt werden, erscheinen hier.",
   "chat.sessionFilesLoading": "Laden...",

@@ -1453,6 +1453,75 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   // At render time, prevSessionIdForScrollRef still has the OLD session ID, so we can detect the switch
   const isSessionSwitchForScroll = prevSessionIdForScrollRef.current !== null && prevSessionIdForScrollRef.current !== session?.id
   const skipScrollToBottom = isSessionSwitchForScroll && isSearchActive
+  const showCenteredEmptyComposer = !compactMode
+    && !messagesLoading
+    && !session?.isProcessing
+    && !structuredInput
+    && session?.messages.length === 0
+
+  const renderChatInputZone = (className?: string) => {
+    if (!session) return null
+
+    return (
+      <ChatInputZone
+        compactMode={compactMode}
+        permissionMode={permissionMode}
+        onPermissionModeChange={onPermissionModeChange}
+        tasks={backgroundTasks}
+        sessionId={session.id}
+        sessionFolderPath={sessionFolderPath}
+        onKillTask={(taskId) => killTask(taskId, backgroundTasks.find(t => t.id === taskId)?.type ?? 'shell')}
+        onInsertMessage={onInputChange}
+        sessionLabels={session.labels}
+        labels={labels}
+        onLabelsChange={onLabelsChange}
+        sessionStatuses={sessionStatuses}
+        currentSessionStatus={session.sessionStatus || 'todo'}
+        onSessionStatusChange={onSessionStatusChange}
+        className={className}
+        inputProps={{
+          placeholder,
+          disabled: isInputDisabled,
+          isProcessing: session.isProcessing,
+          onAnimatedHeightChange: handleAnimatedHeightChange,
+          onSubmit: handleSubmit,
+          onStop: handleStop,
+          textareaRef,
+          currentModel,
+          onModelChange,
+          thinkingLevel,
+          onThinkingLevelChange,
+          enabledModes,
+          structuredInput,
+          onStructuredResponse: handleStructuredResponse,
+          inputValue,
+          onInputChange,
+          attachmentsValue,
+          onAttachmentsChange,
+          sources,
+          enabledSourceSlugs: session.enabledSourceSlugs,
+          onSourcesChange,
+          skills,
+          workspaceId,
+          workingDirectory,
+          onWorkingDirectoryChange,
+          disableSend: disableSend || connectionUnavailable,
+          connectionUnavailable,
+          isEmptySession: session.messages.length === 0,
+          currentConnection: session.llmConnection,
+          onConnectionChange,
+          contextStatus: {
+            isCompacting: session.currentStatus?.statusType === 'compacting',
+            inputTokens: session.tokenUsage?.inputTokens,
+            contextWindow: session.tokenUsage?.contextWindow,
+          },
+          followUpItems: followUpInputItems,
+          onFollowUpClick: handleFollowUpChipClick,
+          onFollowUpIndexClick: handleFollowUpIndexClick,
+        }}
+      />
+    )
+  }
 
   return (
     <div ref={zoneRef} className="flex h-full flex-col min-w-0" data-focus-zone="chat">
@@ -1460,8 +1529,24 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
         <div className="flex flex-1 flex-col min-h-0 min-w-0 relative">
           {/* Content layer */}
           <div className="flex flex-1 flex-col min-h-0 min-w-0 relative z-10">
+            {showCenteredEmptyComposer ? (
+              <div className="flex flex-1 min-h-0 min-w-0 items-center justify-center px-4 pt-8 pb-[10vh]">
+                <motion.div
+                  key="empty-composer"
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.18, ease: 'easeOut' }}
+                  className="w-full"
+                >
+                  <h1 className="mx-auto mb-8 max-w-[840px] text-center text-[30px] font-semibold leading-tight tracking-normal text-foreground sm:text-[34px]">
+                    {t('chat.emptyTitle')}
+                  </h1>
+                  {renderChatInputZone('mt-0 px-0 pb-0 @xs/panel:px-0')}
+                </motion.div>
+              </div>
+            ) : null}
           {/* === MESSAGES AREA: Scrollable list of message bubbles === */}
-          <div className="relative flex-1 min-h-0">
+          <div className={cn("relative flex-1 min-h-0", showCenteredEmptyComposer && "hidden")}>
             {/* Mask wrapper - fades content at top and bottom over transparent/image backgrounds */}
             <div
               className="h-full"
@@ -1840,62 +1925,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
           </div>
 
           {/* === INPUT CONTAINER: FreeForm or Structured Input === */}
-          <ChatInputZone
-            compactMode={compactMode}
-            permissionMode={permissionMode}
-            onPermissionModeChange={onPermissionModeChange}
-            tasks={backgroundTasks}
-            sessionId={session.id}
-            sessionFolderPath={sessionFolderPath}
-            onKillTask={(taskId) => killTask(taskId, backgroundTasks.find(t => t.id === taskId)?.type ?? 'shell')}
-            onInsertMessage={onInputChange}
-            sessionLabels={session.labels}
-            labels={labels}
-            onLabelsChange={onLabelsChange}
-            sessionStatuses={sessionStatuses}
-            currentSessionStatus={session.sessionStatus || 'todo'}
-            onSessionStatusChange={onSessionStatusChange}
-            inputProps={{
-              placeholder,
-              disabled: isInputDisabled,
-              isProcessing: session.isProcessing,
-              onAnimatedHeightChange: handleAnimatedHeightChange,
-              onSubmit: handleSubmit,
-              onStop: handleStop,
-              textareaRef,
-              currentModel,
-              onModelChange,
-              thinkingLevel,
-              onThinkingLevelChange,
-              enabledModes,
-              structuredInput,
-              onStructuredResponse: handleStructuredResponse,
-              inputValue,
-              onInputChange,
-              attachmentsValue,
-              onAttachmentsChange,
-              sources,
-              enabledSourceSlugs: session.enabledSourceSlugs,
-              onSourcesChange,
-              skills,
-              workspaceId,
-              workingDirectory,
-              onWorkingDirectoryChange,
-              disableSend: disableSend || connectionUnavailable,
-              connectionUnavailable,
-              isEmptySession: session.messages.length === 0,
-              currentConnection: session.llmConnection,
-              onConnectionChange,
-              contextStatus: {
-                isCompacting: session.currentStatus?.statusType === 'compacting',
-                inputTokens: session.tokenUsage?.inputTokens,
-                contextWindow: session.tokenUsage?.contextWindow,
-              },
-              followUpItems: followUpInputItems,
-              onFollowUpClick: handleFollowUpChipClick,
-              onFollowUpIndexClick: handleFollowUpIndexClick,
-            }}
-          />
+          {!showCenteredEmptyComposer && renderChatInputZone()}
           </div>
         </div>
       ) : null}

@@ -210,6 +210,7 @@
   "chat.scrollUpForEarlier": "向上滚动查看更早的消息 (还有 {{count}} 条)",
   "chat.selectedText": "选中文本",
   "chat.session": "会话",
+  "chat.emptyTitle": "我们该构建什么",
   "chat.sessionFiles": "会话文件",
   "chat.sessionFilesEmpty": "此聊天中附加或创建的文件将显示在这里。",
   "chat.sessionFilesLoading": "加载中...",

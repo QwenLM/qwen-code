@@ -210,6 +210,7 @@
   "chat.scrollUpForEarlier": "上にスクロールして以前のメッセージを表示 (あと {{count}} 件)",
   "chat.selectedText": "選択テキスト",
   "chat.session": "セッション",
+  "chat.emptyTitle": "何を構築しましょうか？",
   "chat.sessionFiles": "セッションファイル",
   "chat.sessionFilesEmpty": "このチャットで添付または作成されたファイルがここに表示されます。",
   "chat.sessionFilesLoading": "読み込み中...",

@@ -210,6 +210,7 @@
   "chat.scrollUpForEarlier": "Görgess fel a korábbi üzenetekért (még {{count}})",
   "chat.selectedText": "Kijelölt szöveg",
   "chat.session": "Munkamenet",
+  "chat.emptyTitle": "Mit építsünk?",
   "chat.sessionFiles": "Munkamenet fájlok",
   "chat.sessionFilesEmpty": "Az ebben a csevegésben csatolt vagy létrehozott fájlok itt jelennek meg.",
   "chat.sessionFilesLoading": "Betöltés...",
