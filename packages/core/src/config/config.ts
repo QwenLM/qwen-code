@@ -636,6 +636,7 @@ export class Config {
   private readonly overrideExtensions?: string[];
 
   private readonly cliVersion?: string;
+  private runtimeStatusEnabled = false;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = false;
   private readonly emitToolUseSummaries: boolean = true;
@@ -1349,7 +1350,17 @@ export class Config {
     // /clear, /reset, /new, and /resume all flow through this method,
     // so handling the swap centrally covers every same-PID session
     // transition. Best-effort: must never block /clear or /resume.
-    if (previousSessionId !== this.sessionId) {
+    //
+    // Only refresh when THIS process established its own sidecar at
+    // startup (interactive UI). A non-interactive `/clear` (e.g.
+    // qwen --prompt-interactive) must not delete a sibling shell's
+    // sidecar that happens to share the outgoing session id —
+    // mirrors kimi-cli PR #2082's "write only when a session is
+    // established for this process" rule.
+    if (
+      this.runtimeStatusEnabled &&
+      previousSessionId !== this.sessionId
+    ) {
       const oldPath = this.storage.getRuntimeStatusPath(previousSessionId);
       const newPath = this.storage.getRuntimeStatusPath(this.sessionId);
       const cliVersion = this.cliVersion ?? null;
@@ -1370,6 +1381,19 @@ export class Config {
     }
 
     return this.sessionId;
+  }
+
+  /**
+   * Marks this Config as the owner of a runtime.json sidecar for the
+   * current PID. Call once after the initial sidecar write succeeds
+   * (typically from the interactive UI bootstrap). When set, subsequent
+   * startNewSession() calls will refresh the sidecar on session swap;
+   * when unset, startNewSession() leaves sibling sidecars alone so a
+   * short-lived non-interactive process can't trample a concurrent
+   * shell's sidecar that happens to share the outgoing session id.
+   */
+  markRuntimeStatusEnabled(): void {
+    this.runtimeStatusEnabled = true;
   }
 
   /**

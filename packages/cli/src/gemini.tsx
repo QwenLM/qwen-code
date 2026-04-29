@@ -188,6 +188,11 @@ export async function startInteractiveUI(
       workDir: config.getTargetDir(),
       qwenVersion: version,
     });
+    // Mark this process as the runtime.json owner so subsequent
+    // session swaps (/clear, /resume, etc.) refresh the sidecar.
+    // Non-interactive entry points never reach here, so they won't
+    // trample a sibling shell's sidecar on the same session id.
+    config.markRuntimeStatusEnabled();
   } catch {
     // ignored: best-effort, never block UI startup.
   }
