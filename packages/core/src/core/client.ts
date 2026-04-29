@@ -40,7 +40,6 @@ import {
 
 // Services
 import {
-  ChatCompressionService,
   COMPRESSION_PRESERVE_THRESHOLD,
   COMPRESSION_TOKEN_THRESHOLD,
 } from '../services/chatCompressionService.js';
@@ -136,12 +135,6 @@ export class GeminiClient {
   private forceFullIdeContext = true;
 
   /**
-   * At any point in this conversation, was compression triggered without
-   * being forced and did it fail?
-   */
-  private hasFailedCompressionAttempt = false;
-
-  /**
    * Promises for pending background memory tasks (dream / extract).
    * Each promise resolves with a count of memory files touched (0 = nothing written).
    * Consumed by the CLI via `consumePendingMemoryTaskPromises()`.
@@ -173,6 +166,9 @@ export class GeminiClient {
         resumedSessionData.conversation,
       );
       await this.startChat(resumedHistory);
+      this.getChat().setLastPromptTokenCount(
+        uiTelemetryService.getLastPromptTokenCount(),
+      );
     } else {
       await this.startChat();
     }
@@ -277,7 +273,6 @@ export class GeminiClient {
 
   async startChat(extraHistory?: Content[]): Promise<GeminiChat> {
     this.forceFullIdeContext = true;
-    this.hasFailedCompressionAttempt = false;
     // Clear stale cache params on session reset to prevent cross-session leakage
     clearCacheSafeParams();
 
@@ -724,14 +719,10 @@ export class GeminiClient {
       return new Turn(this.getChat(), prompt_id);
     }
 
-    const compressed = await this.tryCompressChat(prompt_id, false, signal);
-
-    if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
-      yield { type: GeminiEventType.ChatCompressed, value: compressed };
-    }
-
-    // Check session token limit after compression.
-    // `lastPromptTokenCount` is treated as authoritative for the (possibly compressed) history;
+    // Auto-compaction happens inside GeminiChat.sendMessageStream and surfaces
+    // via the `compressed → ChatCompressed` bridge in turn.ts. Manual /compress
+    // still calls tryCompressChat directly for the full reset (env refresh +
+    // forceFullIdeContext flip).
     const sessionTokenLimit = this.config.getSessionTokenLimit();
     if (sessionTokenLimit > 0) {
       const lastPromptTokenCount = uiTelemetryService.getLastPromptTokenCount();
@@ -868,6 +859,13 @@ export class GeminiClient {
       // automatically from uiTelemetryService by the reporter.
       if (arenaAgentClient && event.type === GeminiEventType.Finished) {
         await arenaAgentClient.updateStatus();
+      }
+
+      // Re-send a full IDE context blob on the next regular message — auto
+      // compaction inside chat.sendMessageStream may have summarized away
+      // the previous IDE-context turn.
+      if (event.type === GeminiEventType.ChatCompressed) {
+        this.forceFullIdeContext = true;
       }
 
       yield event;
@@ -1135,49 +1133,30 @@ export class GeminiClient {
     }
   }
 
+  /**
+   * Wrapper around {@link GeminiChat.tryCompress} that restores main-session
+   * startup context after successful compaction and flips the IDE full-context
+   * flag for the next regular message.
+   */
   async tryCompressChat(
     prompt_id: string,
     force: boolean = false,
     signal?: AbortSignal,
   ): Promise<ChatCompressionInfo> {
-    const compressionService = new ChatCompressionService();
-
-    const { newHistory, info } = await compressionService.compress(
-      this.getChat(),
+    const info = await this.getChat().tryCompress(
       prompt_id,
-      force,
       this.config.getModel(),
-      this.config,
-      this.hasFailedCompressionAttempt,
+      force,
       signal,
     );
-
-    // Handle compression result
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
-      // Success: update chat with new compressed history
-      if (newHistory) {
-        const chatRecordingService = this.config.getChatRecordingService();
-        chatRecordingService?.recordChatCompression({
-          info,
-          compressedHistory: newHistory,
-        });
-
-        await this.startChat(newHistory);
-        uiTelemetryService.setLastPromptTokenCount(info.newTokenCount);
-        this.forceFullIdeContext = true;
-      }
-    } else if (
-      info.compressionStatus ===
-        CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
-      info.compressionStatus ===
-        CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY
-    ) {
-      // Track failed attempts (only mark as failed if not forced)
-      if (!force) {
-        this.hasFailedCompressionAttempt = true;
-      }
+      const compressedHistory = this.getChat().getHistory();
+      await this.startChat(compressedHistory);
+      this.getChat().setLastPromptTokenCount(info.newTokenCount);
+      // Re-send a full IDE context blob on the next regular message —
+      // compression dropped the previous context turn from history.
+      this.forceFullIdeContext = true;
     }
-
     return info;
   }
 }

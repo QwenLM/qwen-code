@@ -540,6 +540,18 @@ export class AgentCore {
           continue;
         }
 
+        // GeminiChat already mutated its own history; surface to the debug
+        // log so subagent compactions show up alongside the main session's.
+        if (streamEvent.type === 'compressed') {
+          this.runtimeContext
+            .getDebugLogger()
+            .debug(
+              `[AGENT-COMPACT] subagent=${this.subagentId} round=${turnCounter} ` +
+                `tokens ${streamEvent.info.originalTokenCount} -> ${streamEvent.info.newTokenCount}`,
+            );
+          continue;
+        }
+
         // Handle chunk events
         if (streamEvent.type === 'chunk') {
           const resp = streamEvent.value;
