@@ -11,6 +11,7 @@ import { MainContent } from '../components/MainContent.js';
 import { DialogManager } from '../components/DialogManager.js';
 import { Composer } from '../components/Composer.js';
 import { ExitWarning } from '../components/ExitWarning.js';
+import { StickyTodoList } from '../components/StickyTodoList.js';
 import { BtwMessage } from '../components/messages/BtwMessage.js';
 import { AgentTabBar } from '../components/agent-view/AgentTabBar.js';
 import { AgentChatView } from '../components/agent-view/AgentChatView.js';
@@ -19,6 +20,7 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAgentViewState } from '../contexts/AgentViewContext.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { StreamingState } from '../types.js';
 
 export const DefaultAppLayout: React.FC = () => {
   const uiState = useUIState();
@@ -27,6 +29,12 @@ export const DefaultAppLayout: React.FC = () => {
   const { columns: terminalWidth } = useTerminalSize();
   const hasAgents = agents.size > 0;
   const isAgentTab = activeView !== 'main' && agents.has(activeView);
+  const stickyTodoWidth = Math.min(uiState.mainAreaWidth, 64);
+  const shouldShowStickyTodos =
+    uiState.stickyTodos !== null &&
+    !uiState.dialogsVisible &&
+    !uiState.isFeedbackDialogOpen &&
+    uiState.streamingState !== StreamingState.WaitingForConfirmation;
 
   // Clear terminal on view switch so previous view's <Static> output
   // is removed. refreshStatic clears the terminal and bumps the
@@ -69,6 +77,12 @@ export const DefaultAppLayout: React.FC = () => {
               </Box>
             ) : (
               <>
+                {shouldShowStickyTodos && (
+                  <StickyTodoList
+                    todos={uiState.stickyTodos!}
+                    width={stickyTodoWidth}
+                  />
+                )}
                 {uiState.btwItem && (
                   <Box marginX={2} width={uiState.mainAreaWidth}>
                     <BtwMessage

@@ -65,7 +65,7 @@ for (const workspace of buildOrder) {
   // After cli is built, generate the JSON Schema for settings
   // so the vscode-ide-companion extension can provide IntelliSense
   if (workspace === 'packages/cli') {
-    execSync('npx tsx scripts/generate-settings-schema.ts', {
+    execSync('node --import tsx/esm scripts/generate-settings-schema.ts', {
       stdio: 'inherit',
       cwd: root,
     });

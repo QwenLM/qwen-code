@@ -136,6 +136,7 @@ export class AgentHeadless {
   private readonly core: AgentCore;
   private finalText: string = '';
   private terminateMode: AgentTerminateMode = AgentTerminateMode.ERROR;
+  private externalMessageProvider?: () => string[];
 
   private constructor(core: AgentCore) {
     this.core = core;
@@ -192,21 +193,18 @@ export class AgentHeadless {
   async execute(
     context: ContextState,
     externalSignal?: AbortSignal,
-    options?: {
-      extraHistory?: Array<import('@google/genai').Content>;
-      /** Override generationConfig for cache sharing (fork subagent). */
-      generationConfigOverride?: import('@google/genai').GenerateContentConfig;
-      /** Override tool declarations for cache sharing (fork subagent). */
-      toolsOverride?: Array<import('@google/genai').FunctionDeclaration>;
-      /** Skip env bootstrap injection (fork already inherits parent env). */
-      skipEnvHistory?: boolean;
-    },
   ): Promise<void> {
-    const chat = await this.core.createChat(context, {
-      extraHistory: options?.extraHistory,
-      generationConfigOverride: options?.generationConfigOverride,
-      skipEnvHistory: options?.skipEnvHistory,
-    });
+    // Record the initial user turn in the observable message log before
+    // anything that can throw — createChat / prepareTools failures still
+    // get a transcript showing the task that was asked, which is what
+    // the background-agent detail view reads via AgentCore.getMessages().
+    // Mirrors AgentInteractive's run loop.
+    const initialTaskText = String(
+      (context.get('task_prompt') as string) ?? 'Get Started!',
+    );
+    this.core.pushMessage('user', initialTaskText);
+
+    const chat = await this.core.createChat(context);
 
     if (!chat) {
       this.terminateMode = AgentTerminateMode.ERROR;
@@ -225,11 +223,8 @@ export class AgentHeadless {
       abortController.abort();
     }
 
-    const toolsList = options?.toolsOverride ?? this.core.prepareTools();
+    const toolsList = await this.core.prepareTools();
 
-    const initialTaskText = String(
-      (context.get('task_prompt') as string) ?? 'Get Started!',
-    );
     const initialMessages = [
       { role: 'user' as const, parts: [{ text: initialTaskText }] },
     ];
@@ -267,6 +262,7 @@ export class AgentHeadless {
           maxTurns: this.core.runConfig.max_turns,
           maxTimeMinutes: this.core.runConfig.max_time_minutes,
           startTimeMs: startTime,
+          getExternalMessages: this.externalMessageProvider,
         },
       );
 
@@ -361,6 +357,14 @@ export class AgentHeadless {
 
   getTerminateMode(): AgentTerminateMode {
     return this.terminateMode;
+  }
+
+  /**
+   * Sets a callback that the reasoning loop calls between tool rounds
+   * to drain external messages (e.g. from SendMessage tool).
+   */
+  setExternalMessageProvider(provider: () => string[]): void {
+    this.externalMessageProvider = provider;
   }
 
   get name(): string {

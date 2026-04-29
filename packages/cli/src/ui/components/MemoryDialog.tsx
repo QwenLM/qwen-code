@@ -393,7 +393,9 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
                 {index + 1}. {item.label}
               </Text>
               {item.description ? (
-                <Text color={theme.text.secondary}>{`  ${item.description}`}</Text>
+                <Text
+                  color={theme.text.secondary}
+                >{`  ${item.description}`}</Text>
               ) : null}
             </Box>
           );

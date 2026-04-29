@@ -227,4 +227,65 @@ describe('clearCommand', () => {
     expect(mockResetChat).not.toHaveBeenCalled();
     expect(nullConfigContext.ui.clear).toHaveBeenCalledTimes(1);
   });
+
+  describe('non-interactive mode', () => {
+    let nonInteractiveContext: ReturnType<typeof createMockCommandContext>;
+
+    beforeEach(() => {
+      nonInteractiveContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        services: {
+          config: {
+            getHookSystem: mockGetHookSystem,
+            startNewSession: mockStartNewSession,
+            getGeminiClient: vi.fn().mockReturnValue({
+              resetChat: mockResetChat,
+            } as unknown as GeminiClient),
+            getModel: vi.fn().mockReturnValue('test-model'),
+            getApprovalMode: vi.fn().mockReturnValue('default'),
+            getToolRegistry: vi.fn().mockReturnValue({
+              getAllTools: vi.fn().mockReturnValue([]),
+            }),
+          },
+        },
+        session: {
+          startNewSession: vi.fn(),
+        },
+      });
+    });
+
+    it('should return context boundary message in non-interactive mode', async () => {
+      if (!clearCommand.action)
+        throw new Error('clearCommand must have an action.');
+
+      const result = await clearCommand.action(nonInteractiveContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'Context cleared. Previous messages are no longer in context.',
+      });
+    });
+
+    it('should still call resetChat in non-interactive mode', async () => {
+      if (!clearCommand.action)
+        throw new Error('clearCommand must have an action.');
+
+      await clearCommand.action(nonInteractiveContext, '');
+
+      expect(mockResetChat).toHaveBeenCalledTimes(1);
+    });
+
+    it('should still fire session events in non-interactive mode', async () => {
+      if (!clearCommand.action)
+        throw new Error('clearCommand must have an action.');
+
+      await clearCommand.action(nonInteractiveContext, '');
+
+      expect(mockFireSessionEndEvent).toHaveBeenCalledWith(
+        SessionEndReason.Clear,
+      );
+      expect(mockFireSessionStartEvent).toHaveBeenCalled();
+    });
+  });
 });

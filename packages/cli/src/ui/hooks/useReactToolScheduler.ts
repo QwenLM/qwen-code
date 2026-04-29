@@ -313,6 +313,8 @@ export function mapToDisplay(
               (trackedCall as TrackedExecutingToolCall).liveOutput ?? undefined,
             confirmationDetails: undefined,
             ptyId: (trackedCall as TrackedExecutingToolCall).pid,
+            executionStartTime: (trackedCall as TrackedExecutingToolCall)
+              .executionStartTime,
           };
         case 'validating': // Fallthrough
         case 'scheduled':
@@ -341,7 +343,9 @@ export function mapToDisplay(
   return {
     type: 'tool_group',
     tools: toolDisplays,
-    memoryWriteCount: toolDisplays.filter((t) => t.isMemoryOp === 'write').length || undefined,
-    memoryReadCount: toolDisplays.filter((t) => t.isMemoryOp === 'read').length || undefined,
+    memoryWriteCount:
+      toolDisplays.filter((t) => t.isMemoryOp === 'write').length || undefined,
+    memoryReadCount:
+      toolDisplays.filter((t) => t.isMemoryOp === 'read').length || undefined,
   };
 }

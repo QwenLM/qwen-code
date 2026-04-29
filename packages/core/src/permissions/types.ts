@@ -59,6 +59,8 @@ export interface PermissionRule {
    * Set automatically during parsing based on the tool name/category.
    */
   specifierKind?: SpecifierKind;
+  /** True if the raw rule was malformed (e.g. unbalanced parens) and should never match. */
+  invalid?: boolean;
 }
 
 /** A complete set of permission rules organized by type. */

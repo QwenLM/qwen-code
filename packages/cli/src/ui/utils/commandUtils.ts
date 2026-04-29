@@ -7,6 +7,7 @@
 import type { SpawnOptions } from 'node:child_process';
 import { spawn } from 'node:child_process';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import type { SlashCommand } from '../commands/types.js';
 
 /**
  * Common Windows console code pages (CP) used for encoding conversions.
@@ -183,3 +184,83 @@ export const getUrlOpenCommand = (): string => {
   }
   return openCmd;
 };
+
+/**
+ * Represents a slash command token found mid-input (not at position 0).
+ * e.g., in "hello /st", startPos=6, partialCommand="st"
+ */
+export type MidInputSlashCommand = {
+  /** Full token including slash, e.g. "/st" */
+  token: string;
+  /** Position of the "/" in the full input string */
+  startPos: number;
+  /** Command portion without slash, e.g. "st" */
+  partialCommand: string;
+};
+
+/**
+ * Finds a slash command token that appears mid-input (not at position 0).
+ * Only triggers when the "/" is preceded by whitespace and the cursor is
+ * right at or within the partial command (no text between cursor and slash).
+ *
+ * Returns null when input starts with "/" (handled by start-of-line completion).
+ */
+export function findMidInputSlashCommand(
+  input: string,
+  cursorOffset: number,
+): MidInputSlashCommand | null {
+  // Start-of-line slash handled by existing dropdown completion
+  if (input.startsWith('/')) return null;
+
+  const beforeCursor = input.slice(0, cursorOffset);
+
+  // Match: whitespace then "/" then optional command chars, anchored at end
+  // Capture whitespace instead of lookbehind to avoid JSC JIT regression
+  const match = beforeCursor.match(/\s\/([a-zA-Z0-9_:-]*)$/);
+  if (!match || match.index === undefined) return null;
+
+  const slashPos = match.index + 1; // +1 to skip the captured whitespace char
+  const textAfterSlash = input.slice(slashPos + 1);
+
+  // Extend to next space (or end of input) to find the full command name
+  const commandMatch = textAfterSlash.match(/^[a-zA-Z0-9_:-]*/);
+  const fullCommand = commandMatch ? commandMatch[0] : '';
+
+  // Only show ghost text when cursor is exactly at the end of the token.
+  // If the cursor is inside the token or past it, return null.
+  if (cursorOffset !== slashPos + 1 + fullCommand.length) return null;
+
+  return {
+    token: '/' + fullCommand,
+    startPos: slashPos,
+    partialCommand: input.slice(slashPos + 1, cursorOffset),
+  };
+}
+
+/**
+ * Finds the best (alphabetically first) prefix-matching command for a partial
+ * command string. Returns the completion suffix and full command name, or null.
+ *
+ * e.g. partialCommand="st" → { suffix: "ats", fullCommand: "stats" }
+ */
+export function getBestSlashCommandMatch(
+  partialCommand: string,
+  commands: readonly SlashCommand[],
+): { suffix: string; fullCommand: string } | null {
+  if (!partialCommand) return null;
+  const query = partialCommand.toLowerCase();
+  let best: { suffix: string; fullCommand: string } | null = null;
+  for (const cmd of commands) {
+    // Only suggest model-invocable commands for mid-input completion,
+    // since built-in commands typed in the middle of text won't be executed.
+    if (!cmd.modelInvocable) continue;
+    const name = cmd.name.toLowerCase();
+    if (name.startsWith(query) && name !== query) {
+      const suffix = cmd.name.slice(partialCommand.length);
+      if (!best || cmd.name < best.fullCommand) {
+        best = { suffix, fullCommand: cmd.name };
+      }
+    }
+  }
+  return best;
+}

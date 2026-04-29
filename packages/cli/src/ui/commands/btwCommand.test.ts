@@ -52,6 +52,12 @@ describe('btwCommand', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetCacheSafeParams.mockReturnValue({
+      generationConfig: {},
+      history: [],
+      model: 'test-model',
+      version: 1,
+    });
     mockContext = createMockCommandContext({
       services: {
         config: createConfig(),
@@ -153,6 +159,107 @@ describe('btwCommand', () => {
         expect.objectContaining({
           cacheSafeParams: expect.objectContaining({ model: 'test-model' }),
           userMessage: expect.stringContaining('my question'),
+        }),
+      );
+    });
+
+    it('should fall back to live Gemini client context when no saved cache params exist', async () => {
+      mockGetCacheSafeParams.mockReturnValue(null);
+      mockRunForkedAgent.mockResolvedValue({
+        text: 'answer',
+        usage: { inputTokens: 5, outputTokens: 2, cacheHitTokens: 0 },
+      });
+
+      const geminiClient = {
+        getHistory: vi
+          .fn()
+          .mockReturnValue([
+            { role: 'user', parts: [{ text: '杭州天气如何？' }] },
+          ]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'You are helpful',
+            tools: [],
+          }),
+        }),
+      };
+
+      const liveContext = createMockCommandContext({
+        services: {
+          config: createConfig({
+            getGeminiClient: () => geminiClient,
+          }),
+        },
+      });
+
+      await btwCommand.action!(liveContext, 'how ?');
+      await flushPromises();
+
+      expect(mockRunForkedAgent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cacheSafeParams: expect.objectContaining({
+            generationConfig: expect.objectContaining({
+              systemInstruction: 'You are helpful',
+            }),
+            history: [{ role: 'user', parts: [{ text: '杭州天气如何？' }] }],
+            model: 'test-model',
+          }),
+          userMessage: expect.stringContaining('how ?'),
+        }),
+      );
+    });
+
+    it('should prefer live Gemini client history over a stale saved cache snapshot', async () => {
+      mockGetCacheSafeParams.mockReturnValue({
+        generationConfig: {
+          systemInstruction: 'stale system prompt',
+          tools: [],
+        },
+        history: [{ role: 'user', parts: [{ text: '旧问题' }] }],
+        model: 'stale-model',
+        version: 99,
+      });
+      mockRunForkedAgent.mockResolvedValue({
+        text: 'answer',
+        usage: { inputTokens: 5, outputTokens: 2, cacheHitTokens: 0 },
+      });
+
+      const geminiClient = {
+        getHistory: vi.fn().mockReturnValue([
+          { role: 'user', parts: [{ text: '杭州天气如何？' }] },
+          { role: 'user', parts: [{ text: '请顺便解释一下湿度怎么看' }] },
+        ]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'live system prompt',
+            tools: [],
+          }),
+        }),
+      };
+
+      const liveContext = createMockCommandContext({
+        services: {
+          config: createConfig({
+            getGeminiClient: () => geminiClient,
+          }),
+        },
+      });
+
+      await btwCommand.action!(liveContext, 'how ?');
+      await flushPromises();
+
+      expect(mockRunForkedAgent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cacheSafeParams: expect.objectContaining({
+            generationConfig: expect.objectContaining({
+              systemInstruction: 'live system prompt',
+            }),
+            history: [
+              { role: 'user', parts: [{ text: '杭州天气如何？' }] },
+              { role: 'user', parts: [{ text: '请顺便解释一下湿度怎么看' }] },
+            ],
+            model: 'test-model',
+          }),
         }),
       );
     });
@@ -325,111 +432,6 @@ describe('btwCommand', () => {
 
       // Now the completed setBtwItem has been called
       expect(mockContext.ui.setBtwItem).toHaveBeenCalledTimes(2);
-    });
-  });
-
-  describe('non-interactive mode', () => {
-    let nonInteractiveContext: CommandContext;
-
-    beforeEach(() => {
-      nonInteractiveContext = createMockCommandContext({
-        executionMode: 'non_interactive',
-        services: {
-          config: createConfig(),
-        },
-      });
-    });
-
-    it('should return info message on success', async () => {
-      mockRunForkedAgent.mockResolvedValue({
-        text: 'the answer',
-        usage: { inputTokens: 5, outputTokens: 2, cacheHitTokens: 0 },
-      });
-
-      const result = await btwCommand.action!(
-        nonInteractiveContext,
-        'my question',
-      );
-
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'info',
-        content: 'btw> my question\nthe answer',
-      });
-    });
-
-    it('should return error message on failure', async () => {
-      mockRunForkedAgent.mockRejectedValue(new Error('network error'));
-
-      const result = await btwCommand.action!(
-        nonInteractiveContext,
-        'my question',
-      );
-
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'error',
-        content: 'Failed to answer btw question: network error',
-      });
-    });
-  });
-
-  describe('acp mode', () => {
-    let acpContext: CommandContext;
-
-    beforeEach(() => {
-      acpContext = createMockCommandContext({
-        executionMode: 'acp',
-        services: {
-          config: createConfig(),
-        },
-      });
-    });
-
-    it('should return stream_messages generator on success', async () => {
-      mockRunForkedAgent.mockResolvedValue({
-        text: 'streamed answer',
-        usage: { inputTokens: 5, outputTokens: 3, cacheHitTokens: 0 },
-      });
-
-      const result = (await btwCommand.action!(acpContext, 'my question')) as {
-        type: string;
-        messages: AsyncGenerator;
-      };
-
-      expect(result.type).toBe('stream_messages');
-
-      const messages = [];
-      for await (const msg of result.messages) {
-        messages.push(msg);
-      }
-
-      expect(messages).toEqual([
-        { messageType: 'info', content: 'Thinking...' },
-        { messageType: 'info', content: 'btw> my question\nstreamed answer' },
-      ]);
-    });
-
-    it('should yield error message on failure', async () => {
-      mockRunForkedAgent.mockRejectedValue(new Error('api failure'));
-
-      const result = (await btwCommand.action!(acpContext, 'my question')) as {
-        type: string;
-        messages: AsyncGenerator;
-      };
-
-      const messages = [];
-      for await (const msg of result.messages) {
-        messages.push(msg);
-      }
-
-      expect(messages).toEqual([
-        { messageType: 'info', content: 'Thinking...' },
-        {
-          messageType: 'error',
-          content: 'Failed to answer btw question: api failure',
-        },
-      ]);
     });
   });
 });

@@ -143,7 +143,10 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
     : trimmed;
 
   if (truncated.length > MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES) {
-    const cutAt = truncated.lastIndexOf('\n', MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES);
+    const cutAt = truncated.lastIndexOf(
+      '\n',
+      MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES,
+    );
     truncated = truncated.slice(
       0,
       cutAt > 0 ? cutAt : MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES,
@@ -231,6 +234,4 @@ export function appendManagedAutoMemoryToUserMemory(
   return `${trimmedUserMemory}\n\n---\n\n${managedPrompt}`;
 }
 
-export {
-  MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
-};
+export { MAX_MANAGED_AUTO_MEMORY_INDEX_LINES };

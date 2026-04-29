@@ -71,10 +71,7 @@ describe('parseSlashCommand', () => {
   });
 
   it('should parse a subcommand with arguments', () => {
-    const result = parseSlashCommand(
-      '/config set theme dark',
-      mockCommands,
-    );
+    const result = parseSlashCommand('/config set theme dark', mockCommands);
     expect(result.commandToExecute?.name).toBe('set');
     expect(result.args).toBe('theme dark');
     expect(result.canonicalPath).toEqual(['config', 'set']);

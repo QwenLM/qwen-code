@@ -443,6 +443,8 @@ export default {
   'Vision Model Preview': 'Aperçu du modèle de vision',
   'Tool Schema Compliance': 'Conformité au schéma des outils',
   'Auto (detect from system)': 'Auto (détecter depuis le système)',
+  'Auto (detect terminal theme)': 'Auto (détecter le thème du terminal)',
+  Auto: 'Auto',
   Text: 'Texte',
   JSON: 'JSON',
   Plan: 'Plan',
@@ -1343,6 +1345,8 @@ export default {
     "Payant · Jusqu'à 6 000 requêtes/5h · Tous les modèles Alibaba Cloud Coding Plan",
   'Alibaba Cloud Coding Plan': 'Plan de codage Alibaba Cloud',
   'Bring your own API key': 'Apportez votre propre clé API',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    'Authentification basée sur le navigateur avec des fournisseurs tiers (par exemple OpenRouter, ModelScope)',
   'API-KEY': 'CLÉ-API',
   'Use coding plan credentials or your own api-keys/providers.':
     'Utilisez les identifiants du plan de codage ou vos propres clés API/fournisseurs.',

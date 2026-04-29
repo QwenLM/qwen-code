@@ -413,6 +413,8 @@ export default {
   'Tool Schema Compliance': '工具 Schema 兼容性',
   // Settings enum options
   'Auto (detect from system)': '自动（从系统检测）',
+  'Auto (detect terminal theme)': '自动（检测终端主题）',
+  Auto: '自动',
   Text: '文本',
   JSON: 'JSON',
   Plan: '规划',
@@ -576,6 +578,7 @@ export default {
   '(user)': '（用户）',
   '[not set]': '［未设置］',
   '[value stored in keychain]': '［值存储在钥匙串中］',
+  'Value:': '值：',
   'Manage extension settings.': '管理扩展设置。',
   'You need to specify a command (set or list).':
     '您需要指定命令（set 或 list）。',
@@ -1023,12 +1026,20 @@ export default {
     '按 Enter 开始认证，Esc 返回',
   'Authenticating... Please complete the login in your browser.':
     '认证中... 请在浏览器中完成登录。',
+  'Press c to copy the authorization URL to your clipboard.':
+    '按 c 复制授权 URL 到剪贴板。',
+  'Copy request sent to your terminal. If paste is empty, copy the URL above manually.':
+    '已向终端发送复制请求；若粘贴为空，请手动复制上方 URL。',
+  'Cannot write to terminal — copy the URL above manually.':
+    '无法写入终端，请手动复制上方 URL。',
   'Press Enter or Esc to go back': '按 Enter 或 Esc 返回',
 
   // MCP Server Detail
   'Command:': '命令：',
   'Working Directory:': '工作目录：',
   'Capabilities:': '功能：',
+  'No server selected': '未选择服务器',
+  prompts: '提示',
 
   // MCP Tool List
   'No tools available for this server.': '此服务器没有可用工具。',
@@ -1041,7 +1052,9 @@ export default {
   '{{current}}/{{total}}': '{{current}}/{{total}}',
 
   // MCP Tool Detail
+  required: '必需',
   Type: '类型',
+  Enum: '枚举',
   Parameters: '参数',
   'No tool selected': '未选择工具',
   Annotations: '注解',
@@ -1278,6 +1291,8 @@ export default {
     '付费 \u00B7 每 5 小时最多 6,000 次请求 \u00B7 支持阿里云百炼 Coding Plan 全部模型',
   'Alibaba Cloud Coding Plan': '阿里云百炼 Coding Plan',
   'Bring your own API key': '使用自己的 API 密钥',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    '基于浏览器的第三方提供商认证（例如 OpenRouter、ModelScope）',
   'Use coding plan credentials or your own api-keys/providers.':
     '使用 Coding Plan 凭证或您自己的 API 密钥/提供商。',
   OpenAI: 'OpenAI',
@@ -1754,6 +1769,11 @@ export default {
   // Context Usage
   // ============================================================================
   'Context Usage': '上下文使用情况',
+  '% used': '% 已用',
+  '% context used': '% 上下文已用',
+  'Context exceeds limit! Use /compress or /clear to reduce.':
+    '上下文超出限制！请使用 /compress 或 /clear 来减少上下文。',
+  'Use /compress or /clear': '使用 /compress 或 /clear',
   'Context window': '上下文窗口',
   Used: '已用',
   Free: '空闲',

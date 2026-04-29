@@ -315,6 +315,8 @@ export default {
   'Vision Model Preview': 'ビジョンモデルプレビュー',
   'Tool Schema Compliance': 'ツールスキーマ準拠',
   'Auto (detect from system)': '自動(システムから検出)',
+  'Auto (detect terminal theme)': '自動（端末テーマを検出）',
+  Auto: '自動',
   'check session stats. Usage: /stats [model|tools]':
     'セッション統計を確認。使い方: /stats [model|tools]',
   'Show model-specific usage statistics.': 'モデル別の使用統計を表示',
@@ -1020,6 +1022,8 @@ export default {
     '有料 \u00B7 5時間最大6,000リクエスト \u00B7 すべての Alibaba Cloud Coding Plan モデル',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
   'Bring your own API key': '自分のAPIキーを使用',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    'サードパーティプロバイダーによるブラウザベースの認証（例：OpenRouter、ModelScope）',
   'API-KEY': 'API-KEY',
   'Use coding plan credentials or your own api-keys/providers.':
     'Coding Planの認証情報またはご自身のAPIキー/プロバイダーをご利用ください。',
@@ -1395,6 +1399,11 @@ export default {
   // Context Usage Component
   // ============================================================================
   'Context Usage': 'コンテキスト使用量',
+  '% used': '% 使用',
+  '% context used': '% コンテキスト使用',
+  'Context exceeds limit! Use /compress or /clear to reduce.':
+    'コンテキストが制限を超えています！/compress または /clear を使用して減らしてください。',
+  'Use /compress or /clear': '/compress または /clear を使用',
   'No API response yet. Send a message to see actual usage.':
     'API応答はありません。メッセージを送信して実際の使用量を確認してください。',
   'Estimated pre-conversation overhead': '推定事前会話オーバーヘッド',

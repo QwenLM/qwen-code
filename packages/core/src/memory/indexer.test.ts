@@ -23,7 +23,10 @@ describe('managed auto-memory indexer', () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'auto-memory-indexer-'));
     projectRoot = path.join(tempDir, 'project');
     await fs.mkdir(projectRoot, { recursive: true });
-    await ensureAutoMemoryScaffold(projectRoot, new Date('2026-04-01T00:00:00.000Z'));
+    await ensureAutoMemoryScaffold(
+      projectRoot,
+      new Date('2026-04-01T00:00:00.000Z'),
+    );
   });
 
   afterEach(async () => {
@@ -49,9 +52,7 @@ describe('managed auto-memory indexer', () => {
       },
     ]);
 
-    expect(content).toBe(
-      '- [User Memory](user/terse.md) — User profile',
-    );
+    expect(content).toBe('- [User Memory](user/terse.md) — User profile');
   });
 
   it('rewrites MEMORY.md from topic file contents', async () => {
@@ -76,7 +77,10 @@ describe('managed auto-memory indexer', () => {
 
     await rebuildManagedAutoMemoryIndex(projectRoot);
 
-    const index = await fs.readFile(getAutoMemoryIndexPath(projectRoot), 'utf-8');
+    const index = await fs.readFile(
+      getAutoMemoryIndexPath(projectRoot),
+      'utf-8',
+    );
     expect(index).toContain('[Project Memory](project/repo-workspaces.md)');
     expect(index).toContain('The repo uses pnpm workspaces.');
   });

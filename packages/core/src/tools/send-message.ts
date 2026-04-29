@@ -5,23 +5,39 @@
  */
 
 /**
- * send_message tool — send a message to a teammate.
+ * send_message tool — send a message to a teammate or a background task.
  *
- * Supports plain text messages and structured messages
- * (shutdown_request, shutdown_response) following the
- * kimi-code pattern.
+ * Two routing modes:
+ * - Team mode: `to` matches a teammate name (or "*" for broadcast). Messages
+ *   route through TeamManager. Supports structured messages like
+ *   `shutdown_request`.
+ * - Background-task mode: `task_id` matches an entry in the background task
+ *   registry. The message is queued and delivered at the next tool-round
+ *   boundary.
  */
 
-import type { ToolInvocation, ToolResult } from './tools.js';
-import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
+import { ToolErrorType } from './tool-error.js';
+import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { getAgentName } from '../agents/team/identity.js';
+import {
+  BaseDeclarativeTool,
+  BaseToolInvocation,
+  Kind,
+  type ToolInvocation,
+  type ToolResult,
+} from './tools.js';
 
 export interface SendMessageParams {
-  to: string;
+  /** Recipient teammate name, or "*" for broadcast (team mode). */
+  to?: string;
+  /** Background-task ID, from the launch response (background mode). */
+  task_id?: string;
+  /** Message text to send. */
   message: string;
+  /** Optional 5-10 word summary for UI display (team mode). */
   summary?: string;
+  /** Structured control message type (team mode). */
   type?: 'shutdown_request';
 }
 
@@ -30,21 +46,62 @@ class SendMessageInvocation extends BaseToolInvocation<
   ToolResult
 > {
   constructor(
-    private config: Config,
+    private readonly config: Config,
     params: SendMessageParams,
   ) {
     super(params);
   }
 
   getDescription(): string {
+    if (this.params.task_id) {
+      return `Send message to task ${this.params.task_id}`;
+    }
     const preview = this.params.summary ?? this.params.message.slice(0, 50);
     return `Send to ${this.params.to}: ${preview}`;
   }
 
   async execute(): Promise<ToolResult> {
+    // Route 1: background task by task_id.
+    if (this.params.task_id) {
+      const registry = this.config.getBackgroundTaskRegistry();
+      const entry = registry.get(this.params.task_id);
+
+      if (!entry) {
+        return {
+          llmContent: `Error: No background task found with ID "${this.params.task_id}".`,
+          returnDisplay: 'Task not found.',
+          error: {
+            message: `Task not found: ${this.params.task_id}`,
+            type: ToolErrorType.SEND_MESSAGE_NOT_FOUND,
+          },
+        };
+      }
+
+      if (entry.status !== 'running') {
+        return {
+          llmContent: `Error: Background task "${this.params.task_id}" is not running (status: ${entry.status}). Cannot send messages to stopped tasks.`,
+          returnDisplay: `Task not running (${entry.status}).`,
+          error: {
+            message: `Task is ${entry.status}: ${this.params.task_id}`,
+            type: ToolErrorType.SEND_MESSAGE_NOT_RUNNING,
+          },
+        };
+      }
+
+      registry.queueMessage(this.params.task_id, this.params.message);
+
+      return {
+        llmContent: `Message queued for delivery to background task "${this.params.task_id}". The task will receive it at the next tool-round boundary.`,
+        returnDisplay: `Message queued for ${entry.description}`,
+      };
+    }
+
+    // Route 2: teammate by name via TeamManager.
     const teamManager = this.config.getTeamManager();
     if (!teamManager) {
-      const msg = 'No active team. Create a team first.';
+      const msg =
+        'No active team and no task_id provided. ' +
+        'Either create a team first, or pass `task_id` to message a background task.';
       return {
         llmContent: msg,
         returnDisplay: msg,
@@ -97,14 +154,14 @@ export class SendMessageTool extends BaseDeclarativeTool<
 > {
   static readonly Name = ToolNames.SEND_MESSAGE;
 
-  constructor(private config: Config) {
+  constructor(private readonly config: Config) {
     super(
       SendMessageTool.Name,
       ToolDisplayNames.SEND_MESSAGE,
-      'Send a message to a teammate. Use bare name (no @). ' +
-        'Set to "*" to broadcast to all teammates. ' +
-        'Your text output is NOT visible to other agents — ' +
-        'use this tool to communicate.',
+      'Send a message to a teammate (use "to") or to a running background task (use "task_id"). ' +
+        'For teams, set "to" to a bare teammate name (no @) or "*" to broadcast. ' +
+        'For background tasks, set "task_id" to the id from the launch response. ' +
+        'Your text output is NOT visible to other agents — use this tool to communicate.',
       Kind.Other,
       {
         type: 'object',
@@ -112,6 +169,11 @@ export class SendMessageTool extends BaseDeclarativeTool<
           to: {
             type: 'string',
             description: 'Recipient teammate name, or "*" for broadcast.',
+          },
+          task_id: {
+            type: 'string',
+            description:
+              'The ID of the running background task (from the launch response).',
           },
           message: {
             type: 'string',
@@ -130,7 +192,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
               'instead of plain text delivery.',
           },
         },
-        required: ['to', 'message'],
+        required: ['message'],
         additionalProperties: false,
       },
     );

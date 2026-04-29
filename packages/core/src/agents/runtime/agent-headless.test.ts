@@ -48,6 +48,7 @@ import type {
   ToolConfig,
 } from './agent-types.js';
 import { AgentTerminateMode } from './agent-types.js';
+import { WriteFileTool } from '../../tools/write-file.js';
 
 vi.mock('../../core/geminiChat.js');
 vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
@@ -133,11 +134,16 @@ async function createMockConfig(
   await config.refreshAuth(AuthType.USE_GEMINI);
 
   // Mock ToolRegistry
-  const mockToolRegistry = {
+  const mockToolRegistryBase = {
+    warmAll: vi.fn().mockResolvedValue(undefined),
     getTool: vi.fn(),
     getFunctionDeclarations: vi.fn().mockReturnValue([]),
     getFunctionDeclarationsFiltered: vi.fn().mockReturnValue([]),
     getAllToolNames: vi.fn().mockReturnValue([]),
+  };
+  const mockToolRegistry = {
+    ...mockToolRegistryBase,
+    ensureTool: vi.fn(async (name: string) => mockToolRegistry.getTool(name)),
     ...toolRegistryMocks,
   } as unknown as ToolRegistry;
 
@@ -231,8 +237,6 @@ describe('subagent.ts', () => {
 
     const defaultModelConfig: ModelConfig = {
       model: 'qwen3-coder-plus',
-      temp: 0.5, // Specific temp to test override
-      top_p: 1,
     };
 
     const defaultRunConfig: RunConfig = {
@@ -439,8 +443,6 @@ describe('subagent.ts', () => {
         // Check Generation Config
         const generationConfig = getGenerationConfigFromMock();
 
-        // Check temperature override
-        expect(generationConfig.temperature).toBe(defaultModelConfig.temp);
         expect(generationConfig.systemInstruction).toContain(
           'Hello Agent, your task is Testing.',
         );
@@ -556,15 +558,20 @@ describe('subagent.ts', () => {
         expect(sysPrompt).not.toContain('---');
       });
 
-      it('should use initialMessages instead of systemPrompt if provided', async () => {
+      it('should replace env history with initialMessages when both initialMessages and systemPrompt are set', async () => {
         const { config } = await createMockConfig();
         vi.mocked(GeminiChat).mockClear();
 
         const initialMessages: Content[] = [
-          { role: 'user', parts: [{ text: 'Hi' }] },
+          { role: 'user', parts: [{ text: 'prior user turn' }] },
+          { role: 'model', parts: [{ text: 'prior model turn' }] },
         ];
-        const promptConfig: PromptConfig = { initialMessages };
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'System ${name}.',
+          initialMessages,
+        };
         const context = new ContextState();
+        context.set('name', 'Agent');
 
         // Model stops immediately
         mockSendMessageStream.mockImplementation(createMockStream(['stop']));
@@ -583,15 +590,44 @@ describe('subagent.ts', () => {
         const generationConfig = getGenerationConfigFromMock();
         const history = callArgs[2];
 
-        expect(generationConfig.systemInstruction).toBeUndefined();
-        expect(history).toEqual([
-          { role: 'user', parts: [{ text: 'Env Context' }] },
-          {
-            role: 'model',
-            parts: [{ text: 'Got it. Thanks for the context!' }],
-          },
-          ...initialMessages,
-        ]);
+        // systemPrompt is templated normally.
+        expect(generationConfig.systemInstruction).toContain('System Agent.');
+        expect(generationConfig.systemInstruction).toContain(
+          'Important Rules:',
+        );
+        // Env bootstrap is skipped; history is exactly initialMessages.
+        expect(history).toEqual(initialMessages);
+      });
+
+      it('should use renderedSystemPrompt verbatim and bypass templating', async () => {
+        const { config } = await createMockConfig();
+        vi.mocked(GeminiChat).mockClear();
+
+        const rendered = 'Verbatim parent system prompt ${name}';
+        const promptConfig: PromptConfig = {
+          renderedSystemPrompt: rendered,
+          initialMessages: [
+            { role: 'user', parts: [{ text: 'hi' }] },
+            { role: 'model', parts: [{ text: 'ok' }] },
+          ],
+        };
+        const context = new ContextState();
+
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.execute(context);
+
+        const generationConfig = getGenerationConfigFromMock();
+        // No ${name} substitution and no non-interactive rules appended.
+        expect(generationConfig.systemInstruction).toBe(rendered);
       });
 
       it('should throw an error if template variables are missing', async () => {
@@ -618,11 +654,11 @@ describe('subagent.ts', () => {
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
       });
 
-      it('should validate that systemPrompt and initialMessages are mutually exclusive', async () => {
+      it('should validate that systemPrompt and renderedSystemPrompt are mutually exclusive', async () => {
         const { config } = await createMockConfig();
         const promptConfig: PromptConfig = {
           systemPrompt: 'System',
-          initialMessages: [{ role: 'user', parts: [{ text: 'Hi' }] }],
+          renderedSystemPrompt: 'Rendered',
         };
         const context = new ContextState();
 
@@ -635,7 +671,7 @@ describe('subagent.ts', () => {
         );
 
         await expect(agent.execute(context)).rejects.toThrow(
-          'PromptConfig cannot have both `systemPrompt` and `initialMessages` defined.',
+          'PromptConfig cannot have both `systemPrompt` and `renderedSystemPrompt` defined.',
         );
         expect(agent.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
       });
@@ -1191,6 +1227,219 @@ describe('subagent.ts', () => {
         const readResult = toolResultEvents.find((e) => e.name === 'read_file');
         expect(readResult).toBeDefined();
         expect(readResult!.success).toBe(true);
+      });
+
+      it('should mark truncated subagent write_file calls as output-truncated errors', async () => {
+        const writeFileToolDef: FunctionDeclaration = {
+          name: WriteFileTool.Name,
+          description: 'Writes a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([writeFileToolDef]),
+          getTool: vi.fn().mockImplementation((name: string) => {
+            if (name === WriteFileTool.Name) {
+              return new WriteFileTool(config);
+            }
+            return undefined;
+          }),
+        });
+
+        const toolConfig: ToolConfig = { tools: [WriteFileTool.Name] };
+        const toolResultEvents: AgentToolResultEvent[] = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.TOOL_RESULT, (event: unknown) => {
+          toolResultEvents.push(event as AgentToolResultEvent);
+        });
+
+        mockSendMessageStream.mockImplementation(async () =>
+          (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call_write',
+                    name: WriteFileTool.Name,
+                    args: { file_path: '/tmp/truncated.txt' },
+                  },
+                ],
+              },
+            };
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    finishReason: 'MAX_TOKENS',
+                    content: { parts: [] },
+                  },
+                ],
+              },
+            };
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'done' }],
+                    },
+                  },
+                ],
+              },
+            };
+          })(),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        const writeResult = toolResultEvents.find(
+          (event) => event.name === WriteFileTool.Name,
+        );
+        expect(writeResult).toBeDefined();
+        expect(writeResult!.success).toBe(false);
+        expect(writeResult!.error).toContain(
+          'truncated due to max_tokens limit',
+        );
+        expect(writeResult!.error).toContain(
+          'rejected to prevent writing truncated content',
+        );
+        expect(writeResult!.error).not.toContain(
+          "params must have required property 'content'",
+        );
+      });
+
+      it('should NOT reject write_file when truncated attempt is followed by successful retry', async () => {
+        const writeFileToolDef: FunctionDeclaration = {
+          name: WriteFileTool.Name,
+          description: 'Writes a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([writeFileToolDef]),
+          getTool: vi.fn().mockImplementation((name: string) => {
+            if (name === WriteFileTool.Name) {
+              return new WriteFileTool(config);
+            }
+            return undefined;
+          }),
+        });
+
+        const toolConfig: ToolConfig = { tools: [WriteFileTool.Name] };
+        const toolResultEvents: AgentToolResultEvent[] = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.TOOL_RESULT, (event: unknown) => {
+          toolResultEvents.push(event as AgentToolResultEvent);
+        });
+
+        // First call: truncated (MAX_TOKENS). Retry resets state, second call:
+        // complete write_file. The scheduler should see wasOutputTruncated=false
+        // for the retried response and allow the tool to proceed.
+        let callCount = 0;
+        mockSendMessageStream.mockImplementation(async () => {
+          callCount++;
+          if (callCount === 1) {
+            // First round: truncated response with incomplete write_file args
+            return (async function* () {
+              yield {
+                type: 'chunk',
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call_write_truncated',
+                      name: WriteFileTool.Name,
+                      args: { file_path: '/tmp/retry-test.txt' },
+                    },
+                  ],
+                },
+              };
+              yield {
+                type: 'retry',
+              };
+              // After retry, complete response with all required args
+              yield {
+                type: 'chunk',
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call_write_complete',
+                      name: WriteFileTool.Name,
+                      args: {
+                        file_path: '/tmp/retry-test.txt',
+                        content: 'hello',
+                      },
+                    },
+                  ],
+                },
+              };
+              yield {
+                type: 'chunk',
+                value: {
+                  candidates: [
+                    { finishReason: 'STOP', content: { parts: [] } },
+                  ],
+                },
+              };
+            })();
+          }
+          // Second round: plain text response to end the agent loop
+          return (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    finishReason: 'STOP',
+                    content: { parts: [{ text: 'done' }] },
+                  },
+                ],
+              },
+            };
+          })();
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        const writeResult = toolResultEvents.find(
+          (event) => event.name === WriteFileTool.Name,
+        );
+        expect(writeResult).toBeDefined();
+        // After retry the wasOutputTruncated flag must have been cleared, so
+        // the call should NOT be rejected with a truncation error — even if
+        // execution fails for unrelated reasons (e.g. mock filesystem).
+        expect(writeResult!.error).not.toContain(
+          'truncated due to max_tokens limit',
+        );
+        expect(writeResult!.error).not.toContain(
+          'rejected to prevent writing truncated content',
+        );
       });
     });
   });

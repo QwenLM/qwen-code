@@ -270,13 +270,13 @@ export class TestRig {
       child.stdin!.write(execOptions.input);
     }
 
-    if (
+    const keepStdinOpen =
       typeof promptOrOptions === 'object' &&
-      !promptOrOptions.stdinDoesNotEnd
-    ) {
+      promptOrOptions !== null &&
+      promptOrOptions.stdinDoesNotEnd === true;
+    if (!keepStdinOpen) {
       child.stdin!.end();
     }
-    child.stdin!.end();
 
     child.stdout!.on('data', (data: Buffer) => {
       stdout += data;

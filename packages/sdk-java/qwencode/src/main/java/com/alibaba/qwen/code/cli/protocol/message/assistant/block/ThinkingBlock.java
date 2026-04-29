@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.cli.protocol.message.assistant.block;
 
 import com.alibaba.fastjson2.annotation.JSONType;
-import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ThingkingAssistantContent;
+import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ThinkingAssistantContent;
 
 /**
  * Represents a thinking content block.
@@ -10,7 +10,7 @@ import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ThingkingAssista
  * @version $Id: 0.0.1
  */
 @JSONType(typeKey = "type", typeName = "thinking")
-public class ThinkingBlock extends ContentBlock<String> implements ThingkingAssistantContent {
+public class ThinkingBlock extends ContentBlock<String> implements ThinkingAssistantContent {
     /**
      * The thinking content.
      */

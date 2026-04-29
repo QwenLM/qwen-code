@@ -2290,4 +2290,303 @@ describe('GeminiChat', async () => {
       expect(chat.getHistory()).toEqual([]);
     });
   });
+
+  describe('output token recovery', () => {
+    function makeChunk(
+      parts: Array<{ text?: string; functionCall?: unknown }>,
+      finishReason?: string,
+    ): GenerateContentResponse {
+      return {
+        candidates: [
+          {
+            content: { role: 'model', parts },
+            ...(finishReason ? { finishReason } : {}),
+          },
+        ],
+      } as unknown as GenerateContentResponse;
+    }
+
+    function makeStream(chunks: GenerateContentResponse[]) {
+      return (async function* () {
+        for (const c of chunks) {
+          yield c;
+        }
+      })();
+    }
+
+    it('should enter recovery loop when escalated response is also truncated', async () => {
+      // Three streams: initial (MAX_TOKENS) → escalated (MAX_TOKENS) →
+      // recovery (STOP).
+      const streams = [
+        makeStream([makeChunk([{ text: 'Hello' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: ' world' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: ' ending.' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a long essay' },
+        'prompt-recovery',
+      );
+
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      const retries = events.filter((e) => e.type === StreamEventType.RETRY);
+      // One RETRY for escalation (isContinuation undefined/false),
+      // one for recovery (isContinuation true).
+      expect(retries.length).toBe(2);
+      expect(retries[0]!.type).toBe(StreamEventType.RETRY);
+      expect((retries[0] as { isContinuation?: boolean }).isContinuation).toBe(
+        undefined,
+      );
+      expect((retries[1] as { isContinuation?: boolean }).isContinuation).toBe(
+        true,
+      );
+      // API called 3 times: initial + escalation + recovery.
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        3,
+      );
+    });
+
+    it('should skip recovery when truncated turn has a functionCall', async () => {
+      // Initial stream returns a functionCall + MAX_TOKENS. Escalated stream
+      // returns the same (functionCall + MAX_TOKENS). Recovery must NOT run
+      // because appending a user turn after functionCall is invalid.
+      const streams = [
+        makeStream([
+          makeChunk(
+            [
+              {
+                functionCall: { name: 'write_file', args: { file_path: '/x' } },
+              },
+            ],
+            'MAX_TOKENS',
+          ),
+        ]),
+        makeStream([
+          makeChunk(
+            [
+              {
+                functionCall: { name: 'write_file', args: { file_path: '/x' } },
+              },
+            ],
+            'MAX_TOKENS',
+          ),
+        ]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a file' },
+        'prompt-recovery-skip',
+      );
+
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      // Only the escalation RETRY should fire; no continuation RETRY.
+      const continuations = events.filter(
+        (e) =>
+          e.type === StreamEventType.RETRY &&
+          (e as { isContinuation?: boolean }).isContinuation === true,
+      );
+      expect(continuations.length).toBe(0);
+
+      // API called twice: initial + escalation. No recovery calls.
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+
+      // History should end with the truncated model turn that has the
+      // functionCall. No dangling user recovery message.
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      expect(lastEntry.role).toBe('model');
+      expect(
+        lastEntry.parts?.some((p) => 'functionCall' in p && p.functionCall),
+      ).toBe(true);
+    });
+
+    it('should cap recovery attempts at MAX_OUTPUT_RECOVERY_ATTEMPTS (3)', async () => {
+      // Every stream returns MAX_TOKENS with text (no functionCall).
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => makeStream([makeChunk([{ text: 'x' }], 'MAX_TOKENS')]),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'infinite loop test' },
+        'prompt-recovery-cap',
+      );
+
+      // Consume
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      // 1 initial + 1 escalation + 3 recovery = 5 total.
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        5,
+      );
+    });
+
+    it('should pop dangling recovery message and emit STOP chunk when recovery throws', async () => {
+      const streams = [
+        makeStream([makeChunk([{ text: 'partial' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'still partial' }], 'MAX_TOKENS')]),
+        // Recovery stream throws (simulate by yielding no chunks; this makes
+        // processStreamResponse reject with NO_FINISH_REASON).
+        (async function* () {
+          /* empty stream */
+        })(),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'recovery fails' },
+        'prompt-recovery-fail',
+      );
+
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      // The last chunk should be the synthetic STOP chunk from the catch.
+      const chunkEvents = events.filter(
+        (e) => e.type === StreamEventType.CHUNK,
+      );
+      const lastChunk = chunkEvents[chunkEvents.length - 1]!;
+      expect(
+        (lastChunk as { value: GenerateContentResponse }).value.candidates?.[0]
+          ?.finishReason,
+      ).toBe('STOP');
+
+      // History should NOT end with a dangling user recovery message,
+      // and roles must strictly alternate so providers don't reject the
+      // next turn with "consecutive same-role content" errors.
+      const history = chat.getHistory();
+      for (let i = 1; i < history.length; i++) {
+        expect(history[i]!.role).not.toBe(history[i - 1]!.role);
+      }
+      const lastEntry = history[history.length - 1]!;
+      // Last entry should be the escalated model response, not a user
+      // recovery message, and must carry actual parts so the turn is
+      // not an empty placeholder.
+      expect(lastEntry.role).toBe('model');
+      expect(lastEntry.parts!.length).toBeGreaterThan(0);
+    });
+
+    it('should stop recovery mid-loop when a later iteration emits functionCall', async () => {
+      // Covers the cross-iteration guard: iter 1 returns plain text (recovery
+      // proceeds), iter 2 returns a functionCall (recovery must break before
+      // iter 3 pushes another user turn after the functionCall).
+      const streams = [
+        makeStream([makeChunk([{ text: 'initial' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'escalated' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'recovery 1 text' }], 'MAX_TOKENS')]),
+        makeStream([
+          makeChunk(
+            [
+              {
+                functionCall: { name: 'write_file', args: { file_path: '/x' } },
+              },
+            ],
+            'MAX_TOKENS',
+          ),
+        ]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'mixed recovery' },
+        'prompt-recovery-mixed',
+      );
+
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      // Should call: 1 initial + 1 escalation + 2 recovery (iter 1 text,
+      // iter 2 functionCall) = 4 total. The guard fires at the start of
+      // iter 3 before any further API call.
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        4,
+      );
+
+      // History must end on the functionCall model turn (not a dangling
+      // recovery user turn).
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      expect(lastEntry.role).toBe('model');
+      expect(
+        lastEntry.parts?.some((p) => 'functionCall' in p && p.functionCall),
+      ).toBe(true);
+    });
+
+    it('should coalesce successful recovery iterations into the preceding model turn', async () => {
+      // Two recovery iterations then a clean STOP. Without coalescing, the
+      // internal OUTPUT_RECOVERY_MESSAGE would persist as a real user turn
+      // and bias every later model call.
+      const streams = [
+        makeStream([makeChunk([{ text: 'A' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'B' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'C' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'D' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'essay' },
+        'prompt-recovery-coalesce',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      const history = chat.getHistory();
+      // Exactly one user turn + one model turn — the recovery pairs should
+      // be folded back into the preceding model entry.
+      expect(history.length).toBe(2);
+      expect(history[0]!.role).toBe('user');
+      expect(history[1]!.role).toBe('model');
+
+      // The control prompt must NOT appear anywhere in durable history.
+      const flattened = JSON.stringify(history);
+      expect(flattened).not.toContain('Resume directly');
+      expect(flattened).not.toContain('Output token limit hit');
+
+      // All escalation + recovery content must be preserved in the merged
+      // model turn, in order (B escalation → C recovery-1 → D recovery-2).
+      const mergedText = (history[1]!.parts ?? [])
+        .map((p) => ('text' in p ? ((p as { text?: string }).text ?? '') : ''))
+        .join('');
+      expect(mergedText).toBe('BCD');
+    });
+  });
 });

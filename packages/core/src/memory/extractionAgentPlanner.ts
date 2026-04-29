@@ -6,7 +6,7 @@
 
 import type { Config } from '../config/config.js';
 import { runForkedAgent, getCacheSafeParams } from '../utils/forkedAgent.js';
-import { buildFunctionResponseParts } from '../agents/runtime/forkSubagent.js';
+import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import type { Content } from '@google/genai';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type {
@@ -324,7 +324,6 @@ export async function runAutoMemoryExtractionByAgent(
       ToolNames.EDIT,
     ],
     extraHistory,
-    skipEnvHistory: true,
   });
 
   if (result.status !== 'completed') {

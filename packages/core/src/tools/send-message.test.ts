@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SendMessageTool } from './send-message.js';
+import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
+import { ToolErrorType } from './tool-error.js';
+import type { Config } from '../config/config.js';
 
-function makeConfig(opts?: {
+function makeTeamConfig(opts?: {
   teamManager?: {
     sendMessage: (...args: unknown[]) => Promise<void>;
     broadcast: (...args: unknown[]) => Promise<void>;
@@ -16,19 +19,20 @@ function makeConfig(opts?: {
 }) {
   return {
     getTeamManager: () => opts?.teamManager ?? null,
-  } as unknown as import('../config/config.js').Config;
+    getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
+  } as unknown as Config;
 }
 
-describe('SendMessageTool', () => {
+describe('SendMessageTool — team mode', () => {
   it('has the correct name', () => {
-    const tool = new SendMessageTool(makeConfig());
+    const tool = new SendMessageTool(makeTeamConfig());
     expect(tool.name).toBe('send_message');
   });
 
   it('sends a message via TeamManager', async () => {
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     const tool = new SendMessageTool(
-      makeConfig({
+      makeTeamConfig({
         teamManager: {
           sendMessage,
           broadcast: vi.fn(),
@@ -49,7 +53,7 @@ describe('SendMessageTool', () => {
   it('broadcasts with "*"', async () => {
     const broadcast = vi.fn().mockResolvedValue(undefined);
     const tool = new SendMessageTool(
-      makeConfig({
+      makeTeamConfig({
         teamManager: {
           sendMessage: vi.fn(),
           broadcast,
@@ -67,8 +71,8 @@ describe('SendMessageTool', () => {
     expect(broadcast).toHaveBeenCalledWith('hey all', 'leader');
   });
 
-  it('returns error when no team is active', async () => {
-    const tool = new SendMessageTool(makeConfig());
+  it('returns error when no team is active and no task_id given', async () => {
+    const tool = new SendMessageTool(makeTeamConfig());
     const invocation = tool.build({
       to: 'alice',
       message: 'hello',
@@ -81,7 +85,7 @@ describe('SendMessageTool', () => {
   it('routes shutdown_request via requestShutdown', async () => {
     const requestShutdown = vi.fn().mockResolvedValue(undefined);
     const tool = new SendMessageTool(
-      makeConfig({
+      makeTeamConfig({
         teamManager: {
           sendMessage: vi.fn(),
           broadcast: vi.fn(),
@@ -103,8 +107,136 @@ describe('SendMessageTool', () => {
   });
 
   it('validates required params', () => {
-    const tool = new SendMessageTool(makeConfig());
+    const tool = new SendMessageTool(makeTeamConfig());
+    // `message` is required.
     expect(() => tool.build({} as never)).toThrow();
     expect(() => tool.build({ to: 'alice' } as never)).toThrow();
+  });
+});
+
+describe('SendMessageTool — background-task mode', () => {
+  let registry: BackgroundTaskRegistry;
+  let config: Config;
+  let tool: SendMessageTool;
+
+  beforeEach(() => {
+    registry = new BackgroundTaskRegistry();
+    config = {
+      getBackgroundTaskRegistry: () => registry,
+      getTeamManager: () => null,
+    } as unknown as Config;
+    tool = new SendMessageTool(config);
+  });
+
+  it('queues a message for a running task', async () => {
+    registry.register({
+      agentId: 'agent-1',
+      description: 'test agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'agent-1', message: 'do more work' },
+      new AbortController().signal,
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('Message queued');
+    expect(registry.get('agent-1')!.pendingMessages).toEqual(['do more work']);
+  });
+
+  it('queues multiple messages in order', async () => {
+    registry.register({
+      agentId: 'agent-1',
+      description: 'test agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    await tool.validateBuildAndExecute(
+      { task_id: 'agent-1', message: 'first' },
+      new AbortController().signal,
+    );
+    await tool.validateBuildAndExecute(
+      { task_id: 'agent-1', message: 'second' },
+      new AbortController().signal,
+    );
+
+    expect(registry.get('agent-1')!.pendingMessages).toEqual([
+      'first',
+      'second',
+    ]);
+  });
+
+  it('returns error for non-existent task', async () => {
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'nope', message: 'hello' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.llmContent).toContain('No background task found');
+  });
+
+  it('returns error for non-running task', async () => {
+    registry.register({
+      agentId: 'agent-1',
+      description: 'test agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+    registry.complete('agent-1', 'done');
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'agent-1', message: 'hello' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
+    expect(result.llmContent).toContain('not running');
+  });
+
+  it('rejects messages for a cancelled task', async () => {
+    // Once task_stop fires, the reasoning loop is winding down — there is
+    // no next tool-round boundary to drain into, so the message would be
+    // silently dropped. Reject instead of accepting a message that will
+    // never be delivered.
+    registry.register({
+      agentId: 'agent-1',
+      description: 'test agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+    registry.cancel('agent-1');
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'agent-1', message: 'too late' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
+    expect(registry.get('agent-1')!.pendingMessages).toEqual([]);
+  });
+
+  it('includes task description in success display', async () => {
+    registry.register({
+      agentId: 'agent-1',
+      description: 'Search for auth code',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'agent-1', message: 'focus on login' },
+      new AbortController().signal,
+    );
+
+    expect(result.returnDisplay).toContain('Search for auth code');
   });
 });

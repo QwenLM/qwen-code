@@ -208,7 +208,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       const toolRegistry = this.cliConfig.getToolRegistry();
       await toolRegistry.discoverToolsForServer(this.serverName);
 
-      const newTool = toolRegistry.getTool(
+      const newTool = await toolRegistry.ensureTool(
         `mcp__${this.serverName}__${this.serverToolName}`,
       );
       if (newTool instanceof DiscoveredMCPTool) {

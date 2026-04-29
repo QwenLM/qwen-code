@@ -111,6 +111,7 @@ export class QwenSessionUpdateHandler {
             title: (update.title as string) || undefined,
             status: (update.status as string) || undefined,
             rawInput: update.rawInput,
+            rawOutput: (update as { rawOutput?: unknown }).rawOutput,
             content: update.content as
               | Array<Record<string, unknown>>
               | undefined,
@@ -134,6 +135,7 @@ export class QwenSessionUpdateHandler {
             title: (update.title as string) || undefined,
             status: (update.status as string) || undefined,
             rawInput: update.rawInput,
+            rawOutput: (update as { rawOutput?: unknown }).rawOutput,
             content: update.content as
               | Array<Record<string, unknown>>
               | undefined,
@@ -198,6 +200,11 @@ export class QwenSessionUpdateHandler {
           ).availableCommands;
           if (commands && this.callbacks.onAvailableCommands) {
             this.callbacks.onAvailableCommands(commands);
+          }
+
+          const meta = (update as { _meta?: SessionUpdateMeta | null })._meta;
+          if (this.callbacks.onAvailableSkills) {
+            this.callbacks.onAvailableSkills(meta?.availableSkills ?? []);
           }
         } catch (err) {
           console.warn(

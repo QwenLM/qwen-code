@@ -67,7 +67,10 @@ describe('auto-memory storage scaffold', () => {
     const now = new Date('2026-04-01T08:00:00.000Z');
     await ensureAutoMemoryScaffold(projectRoot, now);
 
-    const index = await fs.readFile(getAutoMemoryIndexPath(projectRoot), 'utf-8');
+    const index = await fs.readFile(
+      getAutoMemoryIndexPath(projectRoot),
+      'utf-8',
+    );
     expect(index).toBe(createDefaultAutoMemoryIndex());
 
     const metadata = JSON.parse(
@@ -82,20 +85,34 @@ describe('auto-memory storage scaffold', () => {
       updatedAt: '2026-04-01T08:00:00.000Z',
     });
 
-    await expect(fs.stat(getAutoMemoryRoot(projectRoot))).resolves.toBeDefined();
-    await expect(fs.access(getAutoMemoryTopicPath(projectRoot, 'user'))).rejects.toThrow();
+    await expect(
+      fs.stat(getAutoMemoryRoot(projectRoot)),
+    ).resolves.toBeDefined();
+    await expect(
+      fs.access(getAutoMemoryTopicPath(projectRoot, 'user')),
+    ).rejects.toThrow();
   });
 
   it('is idempotent and preserves existing index content', async () => {
-    await ensureAutoMemoryScaffold(projectRoot, new Date('2026-04-01T08:00:00.000Z'));
-    const customIndex = '# Existing Index\n\n- keep me\n';
-    await fs.writeFile(getAutoMemoryIndexPath(projectRoot), customIndex, 'utf-8');
-
-    await ensureAutoMemoryScaffold(projectRoot, new Date('2026-04-02T08:00:00.000Z'));
-
-    await expect(fs.readFile(getAutoMemoryIndexPath(projectRoot), 'utf-8')).resolves.toBe(
-      customIndex,
+    await ensureAutoMemoryScaffold(
+      projectRoot,
+      new Date('2026-04-01T08:00:00.000Z'),
     );
+    const customIndex = '# Existing Index\n\n- keep me\n';
+    await fs.writeFile(
+      getAutoMemoryIndexPath(projectRoot),
+      customIndex,
+      'utf-8',
+    );
+
+    await ensureAutoMemoryScaffold(
+      projectRoot,
+      new Date('2026-04-02T08:00:00.000Z'),
+    );
+
+    await expect(
+      fs.readFile(getAutoMemoryIndexPath(projectRoot), 'utf-8'),
+    ).resolves.toBe(customIndex);
   });
 
   it('returns null when the auto-memory index does not exist yet', async () => {

@@ -21,34 +21,64 @@ vi.mock('../../core/contentGenerator.js', () => ({
   }),
 }));
 
-// Mock AgentCore and AgentInteractive to avoid real model calls
+// Mock AgentCore and AgentInteractive to avoid real model calls.
+// The mock must also expose the observable-state accessors that
+// AgentInteractive now delegates to (getMessages, pendingApprovals,
+// liveOutputs, shellPids, pushMessage, etc.) — otherwise agent lifecycle
+// methods like abort() / addMessage() fail on missing prototype methods.
 vi.mock('../runtime/agent-core.js', () => ({
-  AgentCore: vi.fn().mockImplementation(() => ({
-    subagentId: 'mock-id',
-    name: 'mock-agent',
-    eventEmitter: {
+  AgentCore: vi.fn().mockImplementation(() => {
+    const messages: Array<Record<string, unknown>> = [];
+    const pendingApprovals = new Map<string, unknown>();
+    const liveOutputs = new Map<string, unknown>();
+    const shellPids = new Map<string, number>();
+    const emitter = {
       on: vi.fn(),
       off: vi.fn(),
       emit: vi.fn(),
-    },
-    stats: {
-      start: vi.fn(),
-      getSummary: vi.fn().mockReturnValue({}),
-    },
-    createChat: vi.fn().mockResolvedValue({}),
-    prepareTools: vi.fn().mockReturnValue([]),
-    runReasoningLoop: vi.fn().mockResolvedValue({
-      text: 'Done',
-      terminateMode: null,
-      turnsUsed: 1,
-    }),
-    getEventEmitter: vi.fn().mockReturnValue({
-      on: vi.fn(),
-      off: vi.fn(),
-      emit: vi.fn(),
-    }),
-    getExecutionSummary: vi.fn().mockReturnValue({}),
-  })),
+    };
+    return {
+      subagentId: 'mock-id',
+      name: 'mock-agent',
+      eventEmitter: emitter,
+      stats: {
+        start: vi.fn(),
+        getSummary: vi.fn().mockReturnValue({}),
+      },
+      createChat: vi.fn().mockResolvedValue({}),
+      prepareTools: vi.fn().mockReturnValue([]),
+      runReasoningLoop: vi.fn().mockResolvedValue({
+        text: 'Done',
+        terminateMode: null,
+        turnsUsed: 1,
+      }),
+      getEventEmitter: vi.fn().mockReturnValue(emitter),
+      getExecutionSummary: vi.fn().mockReturnValue({}),
+      getMessages: () => messages,
+      getPendingApprovals: () => pendingApprovals,
+      getLiveOutputs: () => liveOutputs,
+      getShellPids: () => shellPids,
+      pushMessage: (
+        role: string,
+        content: string,
+        options?: { thought?: boolean; metadata?: Record<string, unknown> },
+      ) => {
+        const message: Record<string, unknown> = {
+          role,
+          content,
+          timestamp: Date.now(),
+        };
+        if (options?.thought) message['thought'] = true;
+        if (options?.metadata) message['metadata'] = options.metadata;
+        messages.push(message);
+      },
+      setPendingApproval: (callId: string, details: unknown) =>
+        pendingApprovals.set(callId, details),
+      deletePendingApproval: (callId: string) =>
+        pendingApprovals.delete(callId),
+      clearPendingApprovals: () => pendingApprovals.clear(),
+    };
+  }),
 }));
 
 function createMockToolRegistry() {
@@ -488,9 +518,10 @@ describe('InProcessBackend', () => {
 
       expect(agentContext.getContentGenerator()).toBe(agentGenerator);
       expect(agentContext.getAuthType()).toBe('anthropic');
+      expect(backend.getAgentContentGenerator('agent-1')).toBe(agentGenerator);
     });
 
-    it('should not create per-agent ContentGenerator without authOverrides', async () => {
+    it('should expose inherited ContentGenerator without authOverrides', async () => {
       const mockCreate = createContentGenerator as ReturnType<typeof vi.fn>;
       mockCreate.mockClear();
 
@@ -498,6 +529,9 @@ describe('InProcessBackend', () => {
       await backend.spawnAgent(createSpawnConfig('agent-1'));
 
       expect(mockCreate).not.toHaveBeenCalled();
+      expect(backend.getAgentContentGenerator('agent-1')).toBe(
+        mockContentGenerator,
+      );
     });
 
     it('should fall back to parent ContentGenerator if per-agent creation fails', async () => {
@@ -523,6 +557,7 @@ describe('InProcessBackend', () => {
 
       // Falls back to parent's content generator
       expect(agentContext.getContentGenerator()).toBe(mockContentGenerator);
+      expect(backend.getAgentContentGenerator('agent-1')).toBeUndefined();
     });
 
     it('should give different agents different ContentGenerators', async () => {

@@ -213,6 +213,26 @@ export async function activate(context: vscode.ExtensionContext) {
     supportsSecondarySidebar,
   );
 
+  // Register copy commands for webview context menu
+  // Only send to the first provider with an active webview (the one the user right-clicked)
+  const sendCopyToActive = (action: string) => {
+    for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
+      []) {
+      if (provider.sendCopyCommand(action)) break;
+    }
+  };
+  context.subscriptions.push(
+    vscode.commands.registerCommand('qwen-code.copyMessage', () =>
+      sendCopyToActive('copyMessage'),
+    ),
+    vscode.commands.registerCommand('qwen-code.copyAllMessages', () =>
+      sendCopyToActive('copyAllMessages'),
+    ),
+    vscode.commands.registerCommand('qwen-code.copyLastReply', () =>
+      sendCopyToActive('copyLastReply'),
+    ),
+  );
+
   context.subscriptions.push(
     vscode.workspace.onDidCloseTextDocument((doc) => {
       if (doc.uri.scheme === DIFF_SCHEME) {

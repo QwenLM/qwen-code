@@ -369,6 +369,8 @@ export default {
   'Tool Schema Compliance': 'Соответствие схеме инструмента',
   // Варианты перечислений настроек
   'Auto (detect from system)': 'Авто (определить из системы)',
+  'Auto (detect terminal theme)': 'Авто (определить тему терминала)',
+  Auto: 'Авто',
   Text: 'Текст',
   JSON: 'JSON',
   Plan: 'План',
@@ -1229,6 +1231,8 @@ export default {
     'Платно \u00B7 До 6 000 запросов/5 часов \u00B7 Все модели Alibaba Cloud Coding Plan',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
   'Bring your own API key': 'Используйте свой API-ключ',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    'Браузерная аутентификация с использованием сторонних провайдеров (например, OpenRouter, ModelScope)',
   'API-KEY': 'API-KEY',
   'Use coding plan credentials or your own api-keys/providers.':
     'Используйте учетные данные Coding Plan или свои собственные API-ключи/провайдеры.',
@@ -1823,6 +1827,11 @@ export default {
   // Context Usage Component
   // ============================================================================
   'Context Usage': 'Использование контекста',
+  '% used': '% использовано',
+  '% context used': '% контекста использовано',
+  'Context exceeds limit! Use /compress or /clear to reduce.':
+    'Контекст превышает лимит! Используйте /compress или /clear для уменьшения.',
+  'Use /compress or /clear': 'Используйте /compress или /clear',
   'No API response yet. Send a message to see actual usage.':
     'Пока нет ответа от API. Отправьте сообщение, чтобы увидеть фактическое использование.',
   'Estimated pre-conversation overhead':
