@@ -96,6 +96,25 @@ function resolveMessageCount(sessionMessageCount: number | undefined, messages: 
   return messages.length > 0 ? messages.length : undefined
 }
 
+function shouldPreserveExistingMessages(currentSession: Session | null | undefined, nextSession: Session): currentSession is Session {
+  return !!currentSession
+    && currentSession.workspaceId === nextSession.workspaceId
+    && (currentSession.messages?.length ?? 0) > 0
+    && (nextSession.messages?.length ?? 0) === 0
+    && nextSession.messageCount !== 0
+}
+
+function mergeSessionWithoutDroppingMessages(currentSession: Session | null | undefined, nextSession: Session): Session {
+  if (!shouldPreserveExistingMessages(currentSession, nextSession)) {
+    return nextSession
+  }
+
+  return {
+    ...nextSession,
+    messages: currentSession.messages,
+  }
+}
+
 /**
  * Extract metadata from a full session object
  */
@@ -266,6 +285,8 @@ export const updateStreamingContentAtom = atom(
 export const initializeSessionsAtom = atom(
   null,
   (get, set, sessions: Session[]) => {
+    const previousLoadedSessions = get(loadedSessionsAtom)
+
     // Clean up stale atom family entries from previous workspace.
     // Without this, switching workspaces leaves orphaned atoms in memory
     // and components subscribed to old session IDs see stale/empty data.
@@ -277,13 +298,24 @@ export const initializeSessionsAtom = atom(
         backgroundTasksAtomFamily.remove(oldId)
       }
     }
-    // Reset loaded sessions tracking — new workspace needs fresh lazy loading
-    set(loadedSessionsAtom, new Set<string>())
 
-    // Set individual session atoms
+    const nextLoadedSessions = new Set<string>()
+
+    // Set individual session atoms. getSessions() returns metadata-only
+    // payloads, so preserve any already-loaded messages for sessions that are
+    // still present in the same workspace.
     for (const session of sessions) {
-      set(sessionAtomFamily(session.id), session)
+      const currentSession = get(sessionAtomFamily(session.id))
+      const nextSession = mergeSessionWithoutDroppingMessages(currentSession, session)
+      set(sessionAtomFamily(session.id), nextSession)
+
+      const hasMessages = (nextSession.messages?.length ?? 0) > 0
+      const incomingHadMessages = (session.messages?.length ?? 0) > 0
+      if (incomingHadMessages || (previousLoadedSessions.has(session.id) && hasMessages)) {
+        nextLoadedSessions.add(session.id)
+      }
     }
+    set(loadedSessionsAtom, nextLoadedSessions)
 
     // Build metadata map
     const metaMap = new Map<string, SessionMeta>()
@@ -298,10 +330,11 @@ export const initializeSessionsAtom = atom(
       .map(s => s.id)
     set(sessionIdsAtom, ids)
 
-    // NOTE: Do NOT mark sessions as loaded here
-    // Sessions from getSessions() have empty messages: [] to save memory
-    // Messages are lazy-loaded via ensureSessionMessagesLoadedAtom when session is opened
-    // This reduces initial memory usage from ~500MB to ~50MB for 300+ sessions
+    // NOTE: Do NOT mark metadata-only sessions as loaded here.
+    // Sessions from getSessions() have empty messages: [] to save memory.
+    // Already-loaded sessions keep their loaded flag only when their existing
+    // messages were preserved above.
+    // This reduces initial memory usage from ~500MB to ~50MB for 300+ sessions.
   }
 )
 
@@ -333,19 +366,20 @@ export const refreshSessionsMetadataAtom = atom(
       }
     }
 
-    // Update each session atom, preserving messages for loaded sessions
+    // Update each session atom, preserving messages for metadata refreshes.
+    // The loadedSessionsAtom flag can lag behind when the backend briefly
+    // returns empty messages during lazy-load recovery, so the atom's existing
+    // non-empty messages are the stronger signal here.
     const unloadedIds: string[] = []
     for (const session of sessions) {
       const currentSession = get(sessionAtomFamily(session.id))
-      const shouldPreserveMessages = !!currentSession && loadedSessionIds.has(session.id)
-      const nextSession = shouldPreserveMessages && currentSession
-        ? { ...session, messages: currentSession.messages }
-        : session
+      const nextSession = mergeSessionWithoutDroppingMessages(currentSession, session)
+      const hasMessages = (nextSession.messages?.length ?? 0) > 0
 
       set(sessionAtomFamily(session.id), nextSession)
 
       // Track sessions that lost their messages so lazy-loading re-fetches them
-      if (!shouldPreserveMessages && loadedSessionIds.has(session.id)) {
+      if (!hasMessages && loadedSessionIds.has(session.id)) {
         unloadedIds.push(session.id)
       }
     }

@@ -183,6 +183,86 @@ describe('session message loading atoms', () => {
   })
 })
 
+describe('initializeSessionsAtom', () => {
+  it('preserves already-loaded messages when reinitialized from metadata for the same workspace', () => {
+    const store = createStore()
+    const existingMessages = [msg('m1'), msg('m2', 'assistant')]
+
+    store.set(sessionAtomFamily('s1'), makeSession({
+      id: 's1',
+      workspaceId: 'workspace-1',
+      messages: existingMessages,
+      name: 'Old title',
+    }))
+    store.set(sessionIdsAtom, ['s1'])
+    store.set(loadedSessionsAtom, new Set(['s1']))
+
+    store.set(initializeSessionsAtom, [
+      makeSession({
+        id: 's1',
+        workspaceId: 'workspace-1',
+        messages: [],
+        messageCount: 2,
+        name: 'Fresh title',
+      }),
+    ])
+
+    const session = store.get(sessionAtomFamily('s1'))
+    expect(session?.messages.map(m => m.id)).toEqual(['m1', 'm2'])
+    expect(session?.name).toBe('Fresh title')
+    expect(store.get(loadedSessionsAtom).has('s1')).toBe(true)
+    expect(store.get(sessionMetaMapAtom).get('s1')?.name).toBe('Fresh title')
+  })
+
+  it('does not preserve messages across different workspaces', () => {
+    const store = createStore()
+
+    store.set(sessionAtomFamily('s1'), makeSession({
+      id: 's1',
+      workspaceId: 'workspace-old',
+      messages: [msg('old-message')],
+    }))
+    store.set(sessionIdsAtom, ['s1'])
+    store.set(loadedSessionsAtom, new Set(['s1']))
+
+    store.set(initializeSessionsAtom, [
+      makeSession({
+        id: 's1',
+        workspaceId: 'workspace-new',
+        messages: [],
+      }),
+    ])
+
+    const session = store.get(sessionAtomFamily('s1'))
+    expect(session?.messages).toEqual([])
+    expect(session?.workspaceId).toBe('workspace-new')
+    expect(store.get(loadedSessionsAtom).has('s1')).toBe(false)
+  })
+
+  it('does not preserve messages when metadata confirms the session is empty', () => {
+    const store = createStore()
+
+    store.set(sessionAtomFamily('s1'), makeSession({
+      id: 's1',
+      messages: [msg('old-message')],
+    }))
+    store.set(sessionIdsAtom, ['s1'])
+    store.set(loadedSessionsAtom, new Set(['s1']))
+
+    store.set(initializeSessionsAtom, [
+      makeSession({
+        id: 's1',
+        messages: [],
+        messageCount: 0,
+      }),
+    ])
+
+    const session = store.get(sessionAtomFamily('s1'))
+    expect(session?.messages).toEqual([])
+    expect(store.get(loadedSessionsAtom).has('s1')).toBe(false)
+  })
+})
+
 describe('refreshSessionsMetadataAtom', () => {
   it('preserves messages for already-loaded sessions', () => {
     const store = createStore()
@@ -202,6 +282,23 @@ describe('refreshSessionsMetadataAtom', () => {
     // Messages should be preserved from the existing atom
     const session = store.get(sessionAtomFamily('s1'))
     expect(session?.messages.map(m => m.id)).toEqual(['m1', 'm2'])
+  })
+
+  it('preserves existing messages even when loaded tracking is stale', () => {
+    const store = createStore()
+    const existingMessages = [msg('m1'), msg('m2', 'assistant')]
+
+    store.set(sessionAtomFamily('s1'), makeSession({ id: 's1', messages: existingMessages }))
+    store.set(loadedSessionsAtom, new Set<string>())
+
+    store.set(refreshSessionsMetadataAtom, {
+      sessions: [makeSession({ id: 's1', messages: [], messageCount: 2 })],
+      loadedSessionIds: new Set<string>(),
+    })
+
+    const session = store.get(sessionAtomFamily('s1'))
+    expect(session?.messages.map(m => m.id)).toEqual(['m1', 'm2'])
+    expect(store.get(loadedSessionsAtom).has('s1')).toBe(false)
   })
 
   it('marks sessions as unloaded when atom was cleared but loadedSessionIds still tracked them', () => {
