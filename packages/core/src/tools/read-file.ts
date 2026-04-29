@@ -7,6 +7,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import type { Stats } from 'node:fs';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import type { ToolInvocation, ToolLocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
@@ -127,6 +128,42 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   }
 
   async execute(): Promise<ToolResult> {
+    const absPath = path.resolve(this.params.file_path);
+    const cache = this.config.getFileReadCache();
+    // A "full" Read consumes the whole file: no offset, no limit, no PDF
+    // page range. Only full Reads are eligible for the file_unchanged
+    // fast-path; range-scoped Reads always go through, since the model
+    // may legitimately ask for a different slice next time.
+    const isFullRead =
+      this.params.offset === undefined &&
+      this.params.limit === undefined &&
+      this.params.pages === undefined;
+
+    // Stat up front so we can consult the cache before doing any heavy
+    // work. processSingleFileContent re-stats anyway; the extra syscall
+    // here is microseconds. If stat fails we fall through to the normal
+    // pipeline so its error handling stays the single source of truth.
+    let stats: Stats | undefined;
+    try {
+      stats = await fs.stat(absPath);
+    } catch {
+      // Surface the error via processSingleFileContent below.
+    }
+
+    if (stats && isFullRead) {
+      const status = cache.check(stats);
+      if (
+        status.state === 'fresh' &&
+        status.entry.lastReadAt !== undefined &&
+        status.entry.lastReadWasFull &&
+        status.entry.lastReadCacheable &&
+        (status.entry.lastWriteAt === undefined ||
+          status.entry.lastReadAt > status.entry.lastWriteAt)
+      ) {
+        return this.unchangedResult(absPath);
+      }
+    }
+
     const result = await processSingleFileContent(
       this.params.file_path,
       this.config,
@@ -146,6 +183,18 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       };
     }
 
+    // Record a cache entry so that subsequent identical Reads can hit
+    // the file_unchanged fast-path. We only mark the entry "cacheable"
+    // when the produced content is plain text — for binary, image,
+    // audio, video, PDF, and notebook reads the model wants the full
+    // structured payload re-emitted, not a placeholder.
+    if (stats) {
+      const cacheable =
+        typeof result.llmContent === 'string' &&
+        result.originalLineCount !== undefined;
+      cache.recordRead(absPath, stats, { full: isFullRead, cacheable });
+    }
+
     let llmContent: PartUnion;
     if (result.isTruncated) {
       const [start, end] = result.linesShown!;
@@ -158,15 +207,13 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     // For memory files, prepend a per-file staleness caveat so the model knows
     // the content is a point-in-time snapshot and may be stale.
     const projectRoot = this.config.getTargetDir();
-    if (
-      typeof llmContent === 'string' &&
-      isAutoMemPath(path.resolve(this.params.file_path), projectRoot)
-    ) {
-      // Only compute mtime when we actually need the note (avoids extra stat on
-      // every non-memory file read).
+    if (typeof llmContent === 'string' && isAutoMemPath(absPath, projectRoot)) {
+      // Reuse the stat from above when we have it; only re-stat as a
+      // fallback so memory-file behavior survives a stat failure earlier
+      // (which would leave `stats` undefined).
       try {
-        const stat = await fs.stat(path.resolve(this.params.file_path));
-        const note = memoryFreshnessNote(stat.mtimeMs);
+        const memStat = stats ?? (await fs.stat(absPath));
+        const note = memoryFreshnessNote(memStat.mtimeMs);
         if (note) {
           llmContent = note + llmContent;
         }
@@ -198,6 +245,35 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     return {
       llmContent,
       returnDisplay: result.returnDisplay || '',
+    };
+  }
+
+  /**
+   * Build the placeholder ToolResult returned when the cache indicates
+   * the file has not changed since the model last fully read it. The
+   * placeholder explicitly references the prior conversation and warns
+   * about external mutations the cache cannot observe (shell writes,
+   * MCP tools, other processes), so the model can decide to re-read
+   * with explicit offset/limit if it suspects drift.
+   *
+   * No `logFileOperation` is emitted on this path: the file_unchanged
+   * fast-path bypasses the read pipeline entirely, and the existing
+   * `FileOperationEvent` schema has no representation for "served from
+   * cache". A dedicated cache-hit metric can be added when telemetry
+   * needs visibility into the fast-path's effectiveness.
+   */
+  private unchangedResult(absPath: string): ToolResult {
+    const relativePath = shortenPath(
+      makeRelative(absPath, this.config.getTargetDir()),
+    );
+    const llmContent =
+      `[File ${relativePath} unchanged since last read in this session — ` +
+      `content was provided earlier in this conversation. ` +
+      `If you modified this file via shell or external tools, re-read with ` +
+      `explicit offset/limit to fetch current content.]`;
+    return {
+      llmContent,
+      returnDisplay: `Unchanged: ${relativePath}`,
     };
   }
 }

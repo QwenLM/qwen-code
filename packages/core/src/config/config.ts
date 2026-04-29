@@ -62,6 +62,7 @@ import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
+import { FileReadCache } from '../services/fileReadCache.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -547,6 +548,7 @@ export class Config {
   private subagentManager!: SubagentManager;
   private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
   private readonly backgroundShellRegistry = new BackgroundShellRegistry();
+  private readonly fileReadCache = new FileReadCache();
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
@@ -2494,6 +2496,15 @@ export class Config {
 
   getBackgroundShellRegistry(): BackgroundShellRegistry {
     return this.backgroundShellRegistry;
+  }
+
+  /**
+   * Session-scoped cache that tracks Read / Edit / WriteFile operations
+   * on files. One instance per Config, which means each subagent that
+   * creates its own Config inherently starts with an empty cache.
+   */
+  getFileReadCache(): FileReadCache {
+    return this.fileReadCache;
   }
 
   /**

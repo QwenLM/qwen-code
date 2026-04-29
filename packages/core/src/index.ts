@@ -139,6 +139,7 @@ export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
 export * from './services/fileDiscoveryService.js';
+export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
 export * from './services/gitService.js';
 export * from './services/gitWorktreeService.js';
