@@ -108,17 +108,14 @@ function flattenContentParts(
 }
 
 // DeepSeek's thinking mode requires reasoning_content to be replayed on every
-// prior assistant turn that carried tool_calls. The model may legitimately
-// return a tool round without reasoning text, so the field can be missing
-// when we rebuild the request. Send an empty string in that case so the API
-// contract is satisfied. https://github.com/QwenLM/qwen-code/issues/3695
+// prior assistant turn, including ones without tool_calls. The model may
+// legitimately return a turn without reasoning text, so the field can be
+// missing when we rebuild the request. Send an empty string in that case so
+// the API contract is satisfied. https://github.com/QwenLM/qwen-code/issues/3695
 function ensureReasoningContentOnToolCalls(
   message: OpenAI.Chat.ChatCompletionMessageParam,
 ): OpenAI.Chat.ChatCompletionMessageParam {
   if (message.role !== 'assistant') {
-    return message;
-  }
-  if (!Array.isArray(message.tool_calls) || message.tool_calls.length === 0) {
     return message;
   }
   const extended = message as ExtendedChatCompletionAssistantMessageParam;
