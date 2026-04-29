@@ -7,18 +7,22 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { TaskStopTool } from './task-stop.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
+import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import type { Config } from '../config/config.js';
 import { ToolErrorType } from './tool-error.js';
 
 describe('TaskStopTool', () => {
   let registry: BackgroundTaskRegistry;
+  let shellRegistry: BackgroundShellRegistry;
   let config: Config;
   let tool: TaskStopTool;
 
   beforeEach(() => {
     registry = new BackgroundTaskRegistry();
+    shellRegistry = new BackgroundShellRegistry();
     config = {
       getBackgroundTaskRegistry: () => registry,
+      getBackgroundShellRegistry: () => shellRegistry,
     } as unknown as Config;
     tool = new TaskStopTool(config);
   });
@@ -90,5 +94,94 @@ describe('TaskStopTool', () => {
 
     expect(result.llmContent).toContain('Search for auth code');
     expect(result.returnDisplay).toContain('Search for auth code');
+  });
+
+  describe('background shell support', () => {
+    it('cancels a running background shell', async () => {
+      const ac = new AbortController();
+      shellRegistry.register({
+        shellId: 'bg_a1b2c3d4',
+        command: 'npm run dev',
+        cwd: '/work',
+        status: 'running',
+        startTime: Date.now(),
+        outputPath: '/tmp/bg-out/shell-bg_a1b2c3d4.output',
+        abortController: ac,
+      });
+
+      const result = await tool.validateBuildAndExecute(
+        { task_id: 'bg_a1b2c3d4' },
+        new AbortController().signal,
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('background shell "bg_a1b2c3d4"');
+      expect(result.llmContent).toContain('npm run dev');
+      expect(result.llmContent).toContain(
+        '/tmp/bg-out/shell-bg_a1b2c3d4.output',
+      );
+      // task_stop only requests cancellation — the entry stays `running`
+      // until the spawn handler observes the abort and settles the entry
+      // with the real exit moment. Without this guarantee, /tasks would
+      // report a terminal-but-still-draining shell.
+      expect(shellRegistry.get('bg_a1b2c3d4')!.status).toBe('running');
+      expect(shellRegistry.get('bg_a1b2c3d4')!.endTime).toBeUndefined();
+      expect(ac.signal.aborted).toBe(true);
+    });
+
+    it('returns NOT_RUNNING when the shell already exited', async () => {
+      shellRegistry.register({
+        shellId: 'bg_done',
+        command: 'true',
+        cwd: '/work',
+        status: 'running',
+        startTime: Date.now() - 1000,
+        outputPath: '/tmp/bg-out/shell-bg_done.output',
+        abortController: new AbortController(),
+      });
+      shellRegistry.complete('bg_done', 0, Date.now());
+
+      const result = await tool.validateBuildAndExecute(
+        { task_id: 'bg_done' },
+        new AbortController().signal,
+      );
+
+      expect(result.error?.type).toBe(ToolErrorType.TASK_STOP_NOT_RUNNING);
+      expect(result.llmContent).toContain('Background shell "bg_done"');
+      expect(result.llmContent).toContain('completed');
+    });
+
+    it('prefers an agent over a shell when both have the same id (defensive)', async () => {
+      // IDs cannot collide in practice (different naming schemes), but the
+      // tool's lookup order should still be deterministic if they ever do.
+      const agentAc = new AbortController();
+      const shellAc = new AbortController();
+      registry.register({
+        agentId: 'shared-id',
+        description: 'agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: agentAc,
+      });
+      shellRegistry.register({
+        shellId: 'shared-id',
+        command: 'shell-cmd',
+        cwd: '/work',
+        status: 'running',
+        startTime: Date.now(),
+        outputPath: '/tmp/x.out',
+        abortController: shellAc,
+      });
+
+      const result = await tool.validateBuildAndExecute(
+        { task_id: 'shared-id' },
+        new AbortController().signal,
+      );
+
+      expect(result.llmContent).toContain('background agent');
+      expect(agentAc.signal.aborted).toBe(true);
+      expect(shellAc.signal.aborted).toBe(false);
+      expect(shellRegistry.get('shared-id')!.status).toBe('running');
+    });
   });
 });

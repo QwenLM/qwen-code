@@ -93,6 +93,29 @@ export class BackgroundShellRegistry {
   }
 
   /**
+   * Request cancellation without marking the entry terminal.
+   *
+   * Triggers the entry's AbortController so the spawn handler can tear the
+   * process down, but leaves `status='running'` until the settle path
+   * observes the abort and records the real exit moment + outcome via
+   * `complete()` / `fail()` / `cancel()`. This keeps the registry honest:
+   * a cancelled shell only shows its terminal `endTime` once the process
+   * has actually drained, and a cancel-vs-exit race can't permanently hide
+   * a real completed/failed result.
+   *
+   * Used by the `task_stop` tool path; the immediate-mark `cancel()` above
+   * is reserved for `abortAll()` / shutdown, where the CLI process is
+   * tearing down anyway and there is no settle handler to wait for.
+   *
+   * Idempotent: no-op on entries that aren't `running`.
+   */
+  requestCancel(shellId: string): void {
+    const entry = this.entries.get(shellId);
+    if (!entry || entry.status !== 'running') return;
+    entry.abortController.abort();
+  }
+
+  /**
    * Cancel every still-running entry. Called on session/Config shutdown so
    * background shells don't outlive the CLI process and leak orphaned
    * children. Symmetric with `BackgroundTaskRegistry.abortAll()` for the

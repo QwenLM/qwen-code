@@ -40,43 +40,81 @@ class TaskStopInvocation extends BaseToolInvocation<
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
-    const registry = this.config.getBackgroundTaskRegistry();
-    const entry = registry.get(this.params.task_id);
+    const taskId = this.params.task_id;
 
-    if (!entry) {
+    // Subagent registry first (Phase A control plane). Agent IDs follow the
+    // pattern `<subagentName>-<suffix>`, so they cannot collide with shell
+    // IDs (which are `bg_<8 hex chars>` from the background shell pool).
+    const agentRegistry = this.config.getBackgroundTaskRegistry();
+    const agentEntry = agentRegistry.get(taskId);
+    if (agentEntry) {
+      if (agentEntry.status !== 'running') {
+        return notRunningError('agent', taskId, agentEntry.status);
+      }
+      agentRegistry.cancel(taskId);
+      // The terminal task-notification is emitted by the agent's own handler
+      // (via registry.complete/fail) rather than cancel(), so the parent
+      // model still receives the agent's real partial/final result — not just
+      // a bare "cancelled" message — once the reasoning loop unwinds.
+      const desc = agentEntry.description;
       return {
-        llmContent: `Error: No background task found with ID "${this.params.task_id}".`,
-        returnDisplay: 'Task not found.',
-        error: {
-          message: `Task not found: ${this.params.task_id}`,
-          type: ToolErrorType.TASK_STOP_NOT_FOUND,
-        },
+        llmContent:
+          `Cancellation requested for background agent "${taskId}". ` +
+          `A final task-notification carrying the agent's last result will ` +
+          `follow.\nDescription: ${desc}`,
+        returnDisplay: `Cancelled: ${desc}`,
       };
     }
 
-    if (entry.status !== 'running') {
+    // Background shell registry (Phase B). Settles asynchronously when the
+    // child process exits in response to the AbortController; the registry
+    // entry's terminal state (`cancelled`) and final exit code/output stay
+    // observable via `/tasks` and the on-disk output file.
+    const shellRegistry = this.config.getBackgroundShellRegistry();
+    const shellEntry = shellRegistry.get(taskId);
+    if (shellEntry) {
+      if (shellEntry.status !== 'running') {
+        return notRunningError('shell', taskId, shellEntry.status);
+      }
+      // requestCancel triggers the AbortController only — the registry's
+      // settle path records the real terminal status + endTime once the
+      // process actually drains. Calling cancel(id, Date.now()) here would
+      // mark the entry terminal immediately and lose the real exit info.
+      shellRegistry.requestCancel(taskId);
       return {
-        llmContent: `Error: Background task "${this.params.task_id}" is not running (status: ${entry.status}).`,
-        returnDisplay: `Task not running (${entry.status}).`,
-        error: {
-          message: `Task is ${entry.status}: ${this.params.task_id}`,
-          type: ToolErrorType.TASK_STOP_NOT_RUNNING,
-        },
+        llmContent:
+          `Cancellation requested for background shell "${taskId}". ` +
+          `Final status will be visible via /tasks once the process drains; ` +
+          `captured output remains at ${shellEntry.outputPath}.\n` +
+          `Command: ${shellEntry.command}`,
+        returnDisplay: `Cancelled shell: ${shellEntry.command}`,
       };
     }
 
-    registry.cancel(this.params.task_id);
-
-    // The terminal task-notification is emitted by the task's own handler
-    // (via registry.complete/fail) rather than cancel(), so the parent model
-    // still receives the task's real partial/final result — not just a bare
-    // "cancelled" message — once the reasoning loop unwinds.
-    const desc = entry.description;
     return {
-      llmContent: `Cancellation requested for background task "${this.params.task_id}". A final task-notification carrying the task's last result will follow.\nDescription: ${desc}`,
-      returnDisplay: `Cancelled: ${desc}`,
+      llmContent: `Error: No background task found with ID "${taskId}".`,
+      returnDisplay: 'Task not found.',
+      error: {
+        message: `Task not found: ${taskId}`,
+        type: ToolErrorType.TASK_STOP_NOT_FOUND,
+      },
     };
   }
+}
+
+function notRunningError(
+  kind: 'agent' | 'shell',
+  taskId: string,
+  status: string,
+): ToolResult {
+  return {
+    llmContent: `Error: Background ${kind} "${taskId}" is not running (status: ${status}).`,
+    returnDisplay: `Task not running (${status}).`,
+    error: {
+      message: `${kind} is ${status}: ${taskId}`,
+      type: ToolErrorType.TASK_STOP_NOT_RUNNING,
+    },
+  };
 }
 
 export class TaskStopTool extends BaseDeclarativeTool<

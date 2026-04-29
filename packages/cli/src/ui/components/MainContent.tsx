@@ -73,6 +73,7 @@ export const MainContent = () => {
     mainAreaWidth,
     staticAreaMaxItemHeight,
     availableTerminalHeight,
+    historyRemountKey,
   } = uiState;
 
   // Set of callIds whose label is absorbed by a compact-mode tool_group header.
@@ -238,7 +239,7 @@ export const MainContent = () => {
   return (
     <>
       <Static
-        key={`${uiState.historyRemountKey}-${uiState.currentModel}-${renderMode}`}
+        key={`${historyRemountKey}-${uiState.currentModel}-${renderMode}`}
         items={[
           <AppHeader key="app-header" version={version} />,
           <DebugModeNotification key="debug-notification" />,

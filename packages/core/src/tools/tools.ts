@@ -697,7 +697,7 @@ export interface ToolAskUserQuestionConfirmationDetails {
       label: string;
       description: string;
     }>;
-    multiSelect: boolean;
+    multiSelect?: boolean;
   }>;
   metadata?: {
     source?: string;
