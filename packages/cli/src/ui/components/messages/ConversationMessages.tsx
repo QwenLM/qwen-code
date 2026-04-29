@@ -99,7 +99,12 @@ function slicePendingTextForHeight(
   const previewText = text
     .split('\n')
     .filter((line) => !markdownFenceDelimiterRegex.test(line))
-    .join('\n');
+    .join('\n')
+    // Some models stream long runs of trailing newlines after useful content.
+    // Keep those out of the live viewport so blank rows do not push stable
+    // streaming text into scrollback on every repaint. The committed transcript
+    // still renders the full assistant message through MarkdownDisplay.
+    .trimEnd();
 
   return sliceTextByVisualHeight(previewText, maxHeight, maxWidth, {
     minHeight: MIN_PENDING_PREVIEW_HEIGHT,

@@ -76,6 +76,10 @@ type Summary = Counts & {
   rawMermaidFenceCount: number;
   maxFrameHiddenMarkerCount: number;
   maxFrameRawMermaidFenceCount: number;
+  stallSentinelExpectedCount: number;
+  stallSentinelOccurrenceCount: number;
+  maxFrameStallSentinelOccurrenceCount: number;
+  minPostDoneViewportStallSentinelOccurrenceCount: number | null;
   terminal: {
     cols: number;
     rows: number;
@@ -185,11 +189,66 @@ function markdownChunks(): string[] {
   return lines.flatMap((line) => [line, '\n']);
 }
 
+const STALL_SENTINELS = [
+  'QWEN_A1',
+  'QWEN_B1',
+  'QWEN_C1',
+  'QWEN_D1',
+  'QWEN_E1',
+  'QWEN_F1',
+];
+
+function markdownStallChunks(): string[] {
+  const lines = [
+    'Here is a deterministic Mermaid flowchart used by the TUI stall regression:',
+    '',
+    '```mermaid',
+    'flowchart TD',
+    '    A[QWEN_A1] --> B[QWEN_B1]',
+    '    B --> C[QWEN_C1]',
+    '    C --> D[QWEN_D1]',
+    '    D --> E[QWEN_E1]',
+    '    E --> F[QWEN_F1]',
+    '```',
+    '',
+    'This sentence arrives before the server intentionally stalls.',
+  ];
+
+  return lines.flatMap((line) => [line, '\n']);
+}
+
+function markdownBlankTailChunks(): string[] {
+  return [...markdownStallChunks(), ...Array.from({ length: 80 }, () => '\n')];
+}
+
 function defaultChunks(): string[] {
   return Array.from({ length: STREAM_CHUNK_COUNT }, (_, index) => {
     const marker = String(index).padStart(3, '0');
     return `clear-storm-${marker}-alpha clear-storm-${marker}-beta clear-storm-${marker}-gamma `;
   });
+}
+
+function getChunksForPayload(payload: string): string[] {
+  if (payload === 'markdown') {
+    return markdownChunks();
+  }
+
+  if (payload === 'markdown-stall') {
+    return markdownStallChunks();
+  }
+
+  if (payload === 'markdown-blank-tail') {
+    return markdownBlankTailChunks();
+  }
+
+  return defaultChunks();
+}
+
+function countStallSentinels(text: string): number {
+  return STALL_SENTINELS.reduce(
+    (total, sentinel) => total + countOccurrences(text, sentinel),
+    0,
+  );
 }
 
 function streamOpenAIResponse(res: ServerResponse, payload: string): void {
@@ -214,10 +273,28 @@ function streamOpenAIResponse(res: ServerResponse, payload: string): void {
     choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
   });
 
-  const chunks = payload === 'markdown' ? markdownChunks() : defaultChunks();
+  const chunks = getChunksForPayload(payload);
   chunks.push(STREAM_DONE);
+  const streamIntervalMs = envNumber(
+    'QWEN_TUI_E2E_STREAM_INTERVAL_MS',
+    STREAM_INTERVAL_MS,
+  );
+  const stallBeforeFinishMs =
+    payload === 'markdown-stall' || payload === 'markdown-blank-tail'
+      ? envNumber('QWEN_TUI_E2E_STREAM_STALL_MS', 8000)
+      : 0;
 
   let index = 0;
+  const finish = () => {
+    send({
+      ...base,
+      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 10, completion_tokens: 221, total_tokens: 231 },
+    });
+    res.write('data: [DONE]\n\n');
+    res.end();
+  };
+
   const timer = setInterval(() => {
     if (index < chunks.length) {
       send({
@@ -235,14 +312,13 @@ function streamOpenAIResponse(res: ServerResponse, payload: string): void {
     }
 
     clearInterval(timer);
-    send({
-      ...base,
-      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-      usage: { prompt_tokens: 10, completion_tokens: 221, total_tokens: 231 },
-    });
-    res.write('data: [DONE]\n\n');
-    res.end();
-  }, STREAM_INTERVAL_MS);
+    if (stallBeforeFinishMs > 0) {
+      setTimeout(finish, stallBeforeFinishMs);
+      return;
+    }
+
+    finish();
+  }, streamIntervalMs);
 }
 
 async function startFakeOpenAIServer(payload: string): Promise<FakeServer> {
@@ -432,6 +508,10 @@ async function main(): Promise<void> {
     envNumber('QWEN_TUI_E2E_STREAMING_RESIZE_EVERY_FRAMES', 8),
   );
   const streamPayload = process.env['QWEN_TUI_E2E_STREAM_PAYLOAD'] ?? 'default';
+  const frameCount = Math.max(
+    1,
+    envNumber('QWEN_TUI_E2E_FRAME_COUNT', FRAME_COUNT),
+  );
 
   if (existsSync(outputDir)) {
     rmSync(outputDir, { recursive: true });
@@ -466,9 +546,15 @@ async function main(): Promise<void> {
   const frames: string[] = [];
   const frameHiddenMarkerCounts: number[] = [];
   const frameRawMermaidFenceCounts: number[] = [];
+  const frameStallSentinelOccurrenceCounts: number[] = [];
+  const postDoneViewportStallSentinelOccurrenceCounts: number[] = [];
 
   const recordMarkdownFrameMetrics = async () => {
-    if (streamPayload !== 'markdown') {
+    if (
+      streamPayload !== 'markdown' &&
+      streamPayload !== 'markdown-stall' &&
+      streamPayload !== 'markdown-blank-tail'
+    ) {
       return;
     }
 
@@ -477,6 +563,18 @@ async function main(): Promise<void> {
       countPattern(screen, /\.\.\. first \d+ lines hidden \.\.\./g),
     );
     frameRawMermaidFenceCounts.push(countOccurrences(screen, '```mermaid'));
+    if (
+      streamPayload === 'markdown-stall' ||
+      streamPayload === 'markdown-blank-tail'
+    ) {
+      frameStallSentinelOccurrenceCounts.push(countStallSentinels(screen));
+      if (terminal.getOutput().includes(STREAM_DONE)) {
+        const viewport = await terminal.getViewportText();
+        postDoneViewportStallSentinelOccurrenceCounts.push(
+          countStallSentinels(viewport),
+        );
+      }
+    }
   };
 
   try {
@@ -491,7 +589,7 @@ async function main(): Promise<void> {
     await terminal.type('\n');
 
     let resizeIndex = 0;
-    for (let index = 0; index < FRAME_COUNT; index += 1) {
+    for (let index = 0; index < frameCount; index += 1) {
       if (
         streamingResizeCols.length > 0 &&
         index % streamingResizeEveryFrames === 0
@@ -526,19 +624,48 @@ async function main(): Promise<void> {
       0,
       ...frameRawMermaidFenceCounts,
     );
+    const stallSentinelExpectedCount =
+      streamPayload === 'markdown-stall' ||
+      streamPayload === 'markdown-blank-tail'
+        ? STALL_SENTINELS.length
+        : 0;
+    const stallSentinelOccurrenceCount =
+      streamPayload === 'markdown-stall' ||
+      streamPayload === 'markdown-blank-tail'
+        ? countStallSentinels(finalScreen)
+        : 0;
+    const maxFrameStallSentinelOccurrenceCount = Math.max(
+      0,
+      ...frameStallSentinelOccurrenceCounts,
+    );
+    const minPostDoneViewportStallSentinelOccurrenceCount =
+      postDoneViewportStallSentinelOccurrenceCounts.length > 0
+        ? Math.min(...postDoneViewportStallSentinelOccurrenceCounts)
+        : null;
     const gifPath = generateGif(frames, outputDir);
     const markdownPass =
-      streamPayload !== 'markdown' ||
+      (streamPayload !== 'markdown' && streamPayload !== 'markdown-stall') ||
       (hiddenMarkerCount === 0 &&
         rawMermaidFenceCount === 0 &&
         maxFrameHiddenMarkerCount === 0 &&
         maxFrameRawMermaidFenceCount === 0);
+    const markdownStallPass =
+      (streamPayload !== 'markdown-stall' &&
+        streamPayload !== 'markdown-blank-tail') ||
+      (stallSentinelOccurrenceCount <= stallSentinelExpectedCount &&
+        maxFrameStallSentinelOccurrenceCount <= stallSentinelExpectedCount);
+    const markdownBlankTailPass =
+      streamPayload !== 'markdown-blank-tail' ||
+      (minPostDoneViewportStallSentinelOccurrenceCount !== null &&
+        minPostDoneViewportStallSentinelOccurrenceCount > 0);
     const pass =
       counts.clearTerminalPairCount >= minClearTerminalPairs &&
       counts.clearTerminalPairCount <= maxClearTerminalPairs &&
       frames.length >= minFrames &&
       countOccurrences(finalScreen, STREAM_DONE) === 1 &&
-      markdownPass;
+      markdownPass &&
+      markdownStallPass &&
+      markdownBlankTailPass;
 
     const summary: Summary = {
       repoRoot,
@@ -556,6 +683,10 @@ async function main(): Promise<void> {
       rawMermaidFenceCount,
       maxFrameHiddenMarkerCount,
       maxFrameRawMermaidFenceCount,
+      stallSentinelExpectedCount,
+      stallSentinelOccurrenceCount,
+      maxFrameStallSentinelOccurrenceCount,
+      minPostDoneViewportStallSentinelOccurrenceCount,
       terminal: {
         cols: terminalCols,
         rows: terminalRows,

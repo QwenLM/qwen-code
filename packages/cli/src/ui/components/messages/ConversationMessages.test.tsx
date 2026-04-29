@@ -128,6 +128,34 @@ describe('<ConversationMessages />', () => {
     expect(output).not.toMatch(/^\s*1\s+flowchart TD$/m);
   });
 
+  it('ignores trailing blank lines in pending live preview before slicing (#3279)', () => {
+    const text = [
+      'Here is a deterministic Mermaid flowchart:',
+      '```mermaid',
+      'flowchart TD',
+      '    A[QWEN_A1] --> B[QWEN_B1]',
+      '    B --> C[QWEN_C1]',
+      '```',
+      ...Array.from({ length: 30 }, () => ''),
+    ].join('\n');
+
+    const { lastFrame } = renderWithProviders(
+      <AssistantMessage
+        text={text}
+        isPending={true}
+        availableTerminalHeight={6}
+        contentWidth={42}
+      />,
+    );
+    const output = lastFrame() ?? '';
+
+    expect(output.trim()).not.toBe('');
+    expect(output).not.toContain('lines hidden');
+    expect(output).not.toContain('```mermaid');
+    expect(output).toContain('QWEN_A1');
+    expect(output).toContain('QWEN_C1');
+  });
+
   it('renders rich markdown once the assistant message is committed', () => {
     const text = ['```mermaid', 'flowchart TD', '```'].join('\n');
 

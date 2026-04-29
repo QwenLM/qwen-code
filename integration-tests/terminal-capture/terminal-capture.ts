@@ -736,6 +736,42 @@ export class TerminalCapture {
     });
   }
 
+  /**
+   * Get only the currently visible viewport rows from xterm.js.
+   *
+   * `getScreenText()` intentionally includes scrollback. For regressions where
+   * a live pending frame pushes useful content above the visible viewport (for
+   * example a long trailing blank Markdown tail), tests need the viewport slice
+   * specifically.
+   */
+  async getViewportText(): Promise<string> {
+    if (!this.page) throw new Error('Not initialized');
+    await this.flush();
+    return this.page.evaluate(() => {
+      const W = window as unknown as Record<string, unknown>;
+      const term = W['term'] as {
+        rows: number;
+        buffer: {
+          active: {
+            baseY: number;
+            getLine: (
+              i: number,
+            ) =>
+              | { translateToString: (trimRight?: boolean) => string }
+              | undefined;
+          };
+        };
+      };
+      const buf = term.buffer.active;
+      const lines: string[] = [];
+      for (let row = 0; row < term.rows; row += 1) {
+        const line = buf.getLine(buf.baseY + row);
+        lines.push(line ? line.translateToString(true) : '');
+      }
+      return lines.join('\n');
+    });
+  }
+
   // ── Cleanup ──────────────────────────────
 
   /**

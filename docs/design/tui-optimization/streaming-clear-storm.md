@@ -391,28 +391,28 @@ Run failure-first validation against a separate `origin/main` checkout:
 
 ```bash
 QWEN_TUI_E2E_REPO=/path/to/main-checkout \
-QWEN_TUI_E2E_OUT=/tmp/qwen-tui/main-streaming \
+QWEN_TUI_E2E_OUT=<artifact-dir>/main-streaming \
 QWEN_TUI_E2E_MIN_CLEAR_PAIRS=1 \
 QWEN_TUI_E2E_MAX_CLEAR_PAIRS=Infinity \
 QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
 npm run capture:streaming-clear-storm
 
 QWEN_TUI_E2E_REPO=/path/to/main-checkout \
-QWEN_TUI_E2E_OUT=/tmp/qwen-tui/main-narrow-streaming \
+QWEN_TUI_E2E_OUT=<artifact-dir>/main-narrow-streaming \
 QWEN_TUI_E2E_MIN_CLEAR_PAIRS=1 \
 QWEN_TUI_E2E_MAX_CLEAR_PAIRS=Infinity \
 QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
 npm run capture:narrow-streaming-regression
 
 QWEN_TUI_E2E_REPO=/path/to/main-checkout \
-QWEN_TUI_E2E_OUT=/tmp/qwen-tui/main-narrow-markdown \
+QWEN_TUI_E2E_OUT=<artifact-dir>/main-narrow-markdown \
 QWEN_TUI_E2E_MIN_CLEAR_PAIRS=1 \
 QWEN_TUI_E2E_MAX_CLEAR_PAIRS=Infinity \
 QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
 npm run capture:narrow-markdown-regression
 
 QWEN_TUI_E2E_REPO=/path/to/main-checkout \
-QWEN_TUI_E2E_OUT=/tmp/qwen-tui/main-resize \
+QWEN_TUI_E2E_OUT=<artifact-dir>/main-resize \
 QWEN_TUI_E2E_MIN_CLEAR_PAIRS=1 \
 QWEN_TUI_E2E_MAX_CLEAR_PAIRS=Infinity \
 QWEN_TUI_E2E_PYTHON=/path/to/python-with-pillow \
@@ -508,6 +508,61 @@ Revalidated after the Claude Code cross-check and live-preview suppression:
 | -------------------------------- | ------------ | ----------- | ----------: | -------------------: | ---------------: | -----------------------: | -------------------: | -----: | ------ |
 | Narrow Markdown + Mermaid resize | fixed branch | strict pass |           0 |                    0 |                0 |                        0 |                    0 |     93 | passed |
 
+### Blank-Tail Streaming Reproduction
+
+Manual side-by-side testing found a second, more model-shaped trigger: the
+duplicate scrollback did not reliably appear when text streamed continuously, and
+it did not appear during a pure server/network stall. It reproduced when the
+assistant had already emitted useful Markdown content and then streamed a long
+tail of blank lines before the final done event. That tail made the bounded live
+preview spend its budget on empty rows, pushing stable content into terminal
+scrollback where repeated live frames became visible as duplicate Mermaid/list
+lines.
+
+Claude Code avoids the same shape by only rendering complete streaming lines and
+by treating the current Markdown block as an unstable suffix. Qwen keeps the
+existing plain-text pending preview, but applies the same principle locally:
+trailing blank rows are not part of the useful live viewport. They are trimmed
+before pending-height slicing, while the final committed assistant message still
+renders through `MarkdownDisplay`.
+
+New deterministic capture scenarios:
+
+- `capture:narrow-markdown-stall-regression` streams deterministic Mermaid
+  content, then holds the connection open. This verifies a pure stall is not the
+  root cause.
+- `capture:narrow-markdown-blank-tail-regression` streams the same content,
+  appends 80 newline chunks, then holds the connection open. This is the
+  failure-first reproduction for the manual "long blank screen, then repeated
+  output" report.
+
+Validation metric: six unique sentinel labels (`QWEN_A1` through `QWEN_F1`) are
+present in the raw model payload. The final screen and every captured frame must
+not show more than six sentinel occurrences; the post-done viewport must still
+contain at least one sentinel occurrence so the fix is not hiding all useful
+content.
+
+| Scenario                   | Branch            | Expected                    | Final sentinel occurrences | Max frame sentinel occurrences | Post-done viewport min | Result |
+| -------------------------- | ----------------- | --------------------------- | -------------------------: | -----------------------------: | ---------------------: | ------ |
+| Narrow Markdown stall      | fixed branch      | pure stall does not repeat  |                          6 |                              6 |                      6 | passed |
+| Narrow Markdown blank tail | before source fix | failure-first reproduction  |                         12 |                             12 |                      6 | failed |
+| Narrow Markdown blank tail | fixed branch      | strict pass, no duplication |                          6 |                              6 |                      6 | passed |
+
+Commands:
+
+```bash
+cd integration-tests/terminal-capture
+
+QWEN_TUI_E2E_OUT=<artifact-dir>/narrow-markdown-stall \
+  npm run capture:narrow-markdown-stall-regression
+
+QWEN_TUI_E2E_OUT=<artifact-dir>/narrow-markdown-blank-tail-before \
+  npm run capture:narrow-markdown-blank-tail-regression
+
+QWEN_TUI_E2E_OUT=<artifact-dir>/narrow-markdown-blank-tail-after \
+  npm run capture:narrow-markdown-blank-tail-regression
+```
+
 ## Claude Code Cross-Check
 
 Claude Code does not avoid this class by relying on a larger per-message
@@ -538,6 +593,8 @@ surface. The practical Qwen path is to port the narrow principles:
 - live pending output must be a bounded viewport, not an ever-growing transcript;
 - live pending output must not write synthetic truncation markers or Markdown
   delimiter rows that can become repeated scrollback artifacts;
+- live pending output must ignore trailing blank rows while the model is still
+  streaming, so an empty tail cannot become the live viewport;
 - completed/stable content should move to `<Static>` and render with full
   Markdown fidelity;
 - evidence must inspect live-frame scrollback, not only the final settled
@@ -578,7 +635,8 @@ large renderer wholesale:
 
 - The streaming fix is complete for the reproduced assistant/thought
   clear-storm class because pending dynamic height is bounded below the
-  terminal viewport before Ink layout.
+  terminal viewport before Ink layout, and trailing blank streaming tails are
+  removed from the live viewport before slicing.
 - The #3279 narrow Markdown path is covered by two guards: complete
   code/table/list blocks leave the pending region earlier, and the remaining
   pending tail uses the measured dynamic height budget instead of a fixed
