@@ -12,6 +12,7 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import type { ForkedAgentResult } from '../utils/forkedAgent.js';
 import { runForkedAgent } from '../utils/forkedAgent.js';
+import { escapeShellArg, getShellConfiguration } from '../utils/shell-utils.js';
 import {
   buildConsolidationTaskPrompt,
   getTranscriptDir,
@@ -75,16 +76,20 @@ describe('dreamAgentPlanner', () => {
       '-tmp-project',
       'chats',
     );
+    const quotedTranscriptDir = escapeShellArg(
+      `${transcriptDir}${path.sep}`,
+      getShellConfiguration().shell,
+    );
     const prompt = buildConsolidationTaskPrompt(
       path.join(tempDir, 'memory'),
       transcriptDir,
     );
 
     expect(prompt).toContain(
-      `grep -rn "<narrow term>" '${transcriptDir}/' --include="*.jsonl" | tail -50`,
+      `grep -rn "<narrow term>" ${quotedTranscriptDir} --include="*.jsonl" | tail -50`,
     );
     expect(prompt).not.toContain(
-      `grep -rn "<narrow term>" ${transcriptDir}/ --include="*.jsonl" | tail -50`,
+      `grep -rn "<narrow term>" ${transcriptDir}${path.sep} --include="*.jsonl" | tail -50`,
     );
   });
 
