@@ -5127,26 +5127,46 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
-   * Update the content of a specific message in a session
-   * Used by preview window to save edited content back to the original message
+   * Update the latest user message content and notify renderers.
    */
-  updateMessageContent(sessionId: string, messageId: string, content: string): void {
+  async updateMessageContent(sessionId: string, messageId: string, content: string): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (!managed) {
       sessionLog.warn(`Cannot update message: session ${sessionId} not found`)
-      return
+      throw new Error(`Session ${sessionId} not found`)
     }
+
+    await this.ensureMessagesLoaded(managed)
 
     const message = managed.messages.find(m => m.id === messageId)
     if (!message) {
       sessionLog.warn(`Cannot update message: message ${messageId} not found in session ${sessionId}`)
-      return
+      throw new Error(`Message ${messageId} not found`)
     }
 
-    // Update the message content
-    message.content = content
-    // Persist the updated session
+    if (message.role !== 'user') {
+      sessionLog.warn(`Cannot update message: message ${messageId} is not a user message`)
+      throw new Error('Only user messages can be edited')
+    }
+
+    const lastUserMessage = managed.messages.findLast(m => m.role === 'user')
+    if (lastUserMessage?.id !== messageId) {
+      sessionLog.warn(`Cannot update message: message ${messageId} is not the latest user message`)
+      throw new Error('Only the latest sent message can be edited')
+    }
+
+    const nextContent = content.trim()
+    if (!nextContent) {
+      throw new Error('Message content cannot be empty')
+    }
+
+    message.content = nextContent
+    if (message.badges && message.badges.length > 0) {
+      delete message.badges
+    }
+
     this.persistSession(managed)
+    this.sendEvent({ type: 'message_content_updated', sessionId, message }, managed.workspace.id)
     sessionLog.info(`Updated message ${messageId} content in session ${sessionId}`)
   }
 

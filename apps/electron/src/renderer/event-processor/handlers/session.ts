@@ -33,6 +33,7 @@ import type {
   SessionModelChangedEvent,
   LLMConnectionChangedEvent,
   UserMessageEvent,
+  MessageContentUpdatedEvent,
   MessageAnnotationsUpdatedEvent,
   SessionSharedEvent,
   SessionUnsharedEvent,
@@ -575,6 +576,35 @@ export function handleUserMessage(
         isProcessing: preserveProcessingForLateQueuedEvent
           ? session.isProcessing
           : status === 'accepted' || status === 'processing',
+      },
+      streaming,
+    },
+    effects: [],
+  }
+}
+
+/**
+ * Handle message_content_updated - replace a message with the backend-authoritative version.
+ */
+export function handleMessageContentUpdated(
+  state: SessionState,
+  event: MessageContentUpdatedEvent
+): ProcessResult {
+  const { session, streaming } = state
+
+  return {
+    state: {
+      session: {
+        ...session,
+        messages: session.messages.map(m =>
+          m.id === event.message.id
+            ? {
+                ...event.message,
+                isPending: event.message.isPending ?? m.isPending,
+                isQueued: event.message.isQueued ?? m.isQueued,
+              }
+            : m
+        ),
       },
       streaming,
     },

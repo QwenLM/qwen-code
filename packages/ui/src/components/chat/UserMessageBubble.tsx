@@ -11,9 +11,11 @@
  * - Pending/queued states (Electron only)
  */
 
+import * as React from 'react'
 import type { ReactNode } from 'react'
 import type { StoredAttachment, ContentBadge } from '@craft-agent/core'
 import { normalizePath } from '@craft-agent/core/utils'
+import { Check, Copy, Pencil, SendHorizontal, X } from 'lucide-react'
 import { cn } from '../../lib/utils'
 import { Markdown } from '../markdown'
 import { FileTypeIcon, getFileTypeLabel } from './attachment-helpers'
@@ -26,6 +28,57 @@ const SKILL_ICON_TEXT = '✦'
 const SOURCE_ICON_TEXT = '⊕'
 const CONTEXT_ICON_TEXT = '⚙'
 const COMMAND_ICON_TEXT = '/'
+
+function formatMessageTime(timestamp?: number): string | null {
+  if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) return null
+
+  return new Intl.DateTimeFormat(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date(timestamp))
+}
+
+function MessageActionButton({
+  label,
+  onClick,
+  disabled,
+  children,
+}: {
+  label: string
+  onClick: () => void
+  disabled?: boolean
+  children: ReactNode
+}) {
+  const button = (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      disabled={disabled}
+      onMouseDown={(event) => event.preventDefault()}
+      onClick={onClick}
+      className={cn(
+        'inline-flex size-6 items-center justify-center rounded-[5px] text-muted-foreground transition-colors',
+        'hover:bg-foreground/5 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+        disabled && 'pointer-events-none opacity-40'
+      )}
+    >
+      {children}
+    </button>
+  )
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        {button}
+      </TooltipTrigger>
+      <TooltipContent side="top">
+        {label}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
 
 /**
  * Check if a badge is an edit_request badge (identified by XML tag in rawText)
@@ -322,6 +375,14 @@ export interface UserMessageBubbleProps {
   isQueued?: boolean
   /** Compact mode - reduces padding for popover embedding */
   compactMode?: boolean
+  /** Sent timestamp in milliseconds, displayed under the bubble */
+  timestamp?: number
+  /** Copy the visible message text */
+  onCopy?: (content: string) => void | Promise<void>
+  /** Save edited visible message text */
+  onEdit?: (content: string) => void | Promise<void>
+  /** Whether the edit action should be available */
+  canEdit?: boolean
 }
 
 export function UserMessageBubble({
@@ -334,9 +395,18 @@ export function UserMessageBubble({
   isPending,
   isQueued,
   compactMode,
+  timestamp,
+  onCopy,
+  onEdit,
+  canEdit,
 }: UserMessageBubbleProps) {
   const { t } = useTranslation()
   const hasAttachments = attachments && attachments.length > 0
+  const [isEditing, setIsEditing] = React.useState(false)
+  const [draft, setDraft] = React.useState(content)
+  const [isSaving, setIsSaving] = React.useState(false)
+  const [copied, setCopied] = React.useState(false)
+  const copyResetTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Separate edit_request badges (rendered above bubble) from other badges (rendered inline)
   const editRequestBadges = badges?.filter(isEditRequestBadge) ?? []
@@ -356,6 +426,82 @@ export function UserMessageBubble({
     }
     displayContent = displayContent.trim()
   }
+
+  const messageTime = formatMessageTime(timestamp)
+  const dateTime = typeof timestamp === 'number' && Number.isFinite(timestamp)
+    ? new Date(timestamp).toISOString()
+    : undefined
+  const visibleContent = displayContent.trim()
+  const showCopyAction = !!onCopy && !compactMode
+  const showEditAction = !!onEdit && !!canEdit && !compactMode
+  const showMetaRow = !compactMode && (!!messageTime || showCopyAction || showEditAction)
+
+  React.useEffect(() => {
+    if (!isEditing) setDraft(visibleContent)
+  }, [isEditing, visibleContent])
+
+  React.useEffect(() => {
+    setCopied(false)
+  }, [visibleContent])
+
+  React.useEffect(() => {
+    return () => {
+      if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
+    }
+  }, [])
+
+  const handleCancelEdit = React.useCallback(() => {
+    setDraft(visibleContent)
+    setIsEditing(false)
+  }, [visibleContent])
+
+  React.useEffect(() => {
+    if (isEditing && !showEditAction) handleCancelEdit()
+  }, [handleCancelEdit, isEditing, showEditAction])
+
+  const handleSaveEdit = React.useCallback(async () => {
+    if (!onEdit || isSaving) return
+
+    const nextContent = draft.trim()
+    if (!nextContent || nextContent === visibleContent) {
+      handleCancelEdit()
+      return
+    }
+
+    setIsSaving(true)
+    try {
+      await onEdit(nextContent)
+      setIsEditing(false)
+    } catch {
+      // Caller owns user-facing error handling; keep the draft open for correction.
+    } finally {
+      setIsSaving(false)
+    }
+  }, [draft, handleCancelEdit, isSaving, onEdit, visibleContent])
+
+  const handleEditKeyDown = React.useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      handleCancelEdit()
+    }
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault()
+      void handleSaveEdit()
+    }
+  }, [handleCancelEdit, handleSaveEdit])
+
+  const handleCopy = React.useCallback(async () => {
+    if (!onCopy) return
+
+    try {
+      await onCopy(visibleContent)
+      setCopied(true)
+      if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
+      copyResetTimeoutRef.current = setTimeout(() => setCopied(false), 1600)
+    } catch {
+      // Caller owns user-facing error handling.
+    }
+  }, [onCopy, visibleContent])
 
   return (
     <div className={cn("flex flex-col items-end gap-3 w-full", className)}>
@@ -427,28 +573,82 @@ export function UserMessageBubble({
         </div>
       )}
 
-      {/* Text content bubble */}
-      <div
-        className={cn(
-          "max-w-[80%] bg-user-message-bubble rounded-[16px] break-words min-w-0 select-text [&_p]:m-0",
-          compactMode ? "px-4 py-2" : "px-5 py-3.5",
-          isPending && "animate-shimmer"
-        )}
-      >
-        {hasInlineBadges
-          ? renderContentWithBadges(displayContent, inlineBadges, onUrlClick, onFileClick)
-          : (
-            <Markdown
-              mode="minimal"
-              onUrlClick={onUrlClick}
-              onFileClick={onFileClick}
-              className="text-sm [&_a]:underline [&_code]:bg-foreground/10 [&_p]:whitespace-pre-wrap"
-            >
-              {displayContent}
-            </Markdown>
-          )
-        }
-      </div>
+      {isEditing ? (
+        <div className="flex w-[min(80%,42rem)] flex-col items-end gap-2">
+          <textarea
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={handleEditKeyDown}
+            autoFocus
+            rows={Math.min(8, Math.max(2, draft.split('\n').length))}
+            className={cn(
+              'w-full resize-y rounded-[16px] bg-user-message-bubble px-5 py-3.5 text-sm leading-relaxed text-foreground',
+              'outline-none ring-1 ring-foreground/10 transition-shadow focus:ring-2 focus:ring-ring/40'
+            )}
+          />
+          <TooltipProvider>
+            <div className="flex items-center gap-1">
+              <MessageActionButton label={t('common.cancel')} onClick={handleCancelEdit} disabled={isSaving}>
+                <X className="size-3.5" />
+              </MessageActionButton>
+              <MessageActionButton
+                label={isSaving ? t('settings.input.sending') : t('shortcuts.sendMessage')}
+                onClick={() => void handleSaveEdit()}
+                disabled={isSaving || draft.trim().length === 0}
+              >
+                <SendHorizontal className="size-3.5" />
+              </MessageActionButton>
+            </div>
+          </TooltipProvider>
+        </div>
+      ) : (
+        <div className="group/message flex max-w-[80%] flex-col items-end gap-1">
+          {/* Text content bubble */}
+          <div
+            className={cn(
+              "w-fit max-w-full bg-user-message-bubble rounded-[16px] break-words min-w-0 select-text [&_p]:m-0",
+              compactMode ? "px-4 py-2" : "px-5 py-3.5",
+              isPending && "animate-shimmer"
+            )}
+          >
+            {hasInlineBadges
+              ? renderContentWithBadges(displayContent, inlineBadges, onUrlClick, onFileClick)
+              : (
+                <Markdown
+                  mode="minimal"
+                  onUrlClick={onUrlClick}
+                  onFileClick={onFileClick}
+                  className="text-sm [&_a]:underline [&_code]:bg-foreground/10 [&_p]:whitespace-pre-wrap"
+                >
+                  {displayContent}
+                </Markdown>
+              )
+            }
+          </div>
+
+          {showMetaRow && (
+            <TooltipProvider>
+              <div className="flex h-5 items-center justify-end gap-1.5 pr-0.5 text-[11px] font-medium tabular-nums text-muted-foreground/70 opacity-0 pointer-events-none transition-opacity duration-150 select-none group-hover/message:pointer-events-auto group-hover/message:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100">
+                {messageTime && (
+                  <time dateTime={dateTime}>
+                    {messageTime}
+                  </time>
+                )}
+                {showCopyAction && (
+                  <MessageActionButton label={copied ? t('common.copied') : t('common.copy')} onClick={() => { void handleCopy() }}>
+                    {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                  </MessageActionButton>
+                )}
+                {showEditAction && (
+                  <MessageActionButton label={t('common.edit')} onClick={() => setIsEditing(true)}>
+                    <Pencil className="size-3.5" />
+                  </MessageActionButton>
+                )}
+              </div>
+            </TooltipProvider>
+          )}
+        </div>
+      )}
 
       {/* Queued badge */}
       {isQueued && (

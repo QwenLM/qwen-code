@@ -395,6 +395,15 @@ export interface UserMessageEvent {
 }
 
 /**
+ * Message content update event
+ */
+export interface MessageContentUpdatedEvent {
+  type: 'message_content_updated'
+  sessionId: string
+  message: Message
+}
+
+/**
  * Message annotation update event
  */
 export interface MessageAnnotationsUpdatedEvent {
@@ -517,6 +526,7 @@ export type AgentEvent =
   | TaskProgressEvent
   | TaskCompletedEvent
   | UserMessageEvent
+  | MessageContentUpdatedEvent
   | MessageAnnotationsUpdatedEvent
   | SessionSharedEvent
   | SessionUnsharedEvent

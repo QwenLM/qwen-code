@@ -1255,6 +1255,32 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     })
   }
 
+  const handleCopyUserMessage = useCallback(async (content: string) => {
+    try {
+      await navigator.clipboard.writeText(content)
+    } catch (error) {
+      console.error('[ChatDisplay] Failed to copy user message:', error)
+      toast.error(t('toast.copyFailed'))
+      throw error
+    }
+  }, [t])
+
+  const handleEditUserMessage = useCallback(async (messageId: string, content: string) => {
+    if (!session) return
+
+    try {
+      await window.electronAPI.sessionCommand(session.id, {
+        type: 'updateMessageContent',
+        messageId,
+        content,
+      })
+    } catch (error) {
+      const description = error instanceof Error ? error.message : t('toast.unknownError')
+      toast.error(t('common.error'), { description })
+      throw error
+    }
+  }, [session?.id, t])
+
   const handleSaveAndSendFollowUp = useCallback((_target: {
     messageId: string
     annotationId: string
@@ -1357,6 +1383,15 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   const allTurns = React.useMemo(() => {
     if (!session) return []
     return groupMessagesByTurn(session.messages)
+  }, [session?.messages])
+
+  const latestUserMessageId = React.useMemo(() => {
+    if (!session) return undefined
+    for (let index = session.messages.length - 1; index >= 0; index--) {
+      const message = session.messages[index]
+      if (message?.role === 'user') return message.id
+    }
+    return undefined
   }, [session?.messages])
 
   // Keep ref in sync for scroll handler
@@ -1644,6 +1679,14 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                             onOpenUrl={onOpenUrl}
                             sessionId={session?.id}
                             compactMode={compactMode}
+                            canEditUserMessage={
+                              turn.message.id === latestUserMessageId &&
+                              !turn.message.isPending &&
+                              !turn.message.isQueued &&
+                              !session?.isProcessing
+                            }
+                            onCopyUserMessage={handleCopyUserMessage}
+                            onEditUserMessage={handleEditUserMessage}
                           />
                         </div>
                       )
@@ -2098,6 +2141,12 @@ interface MessageBubbleProps {
   compactMode?: boolean
   /** Callback to resend the user message that preceded an error */
   onRetry?: () => void
+  /** Whether this user message can be edited */
+  canEditUserMessage?: boolean
+  /** Copy a user message's visible text */
+  onCopyUserMessage?: (content: string) => void | Promise<void>
+  /** Save edited user message text */
+  onEditUserMessage?: (messageId: string, content: string) => void | Promise<void>
 }
 
 /**
@@ -2185,6 +2234,9 @@ function MessageBubble({
   onPopOut,
   compactMode,
   onRetry,
+  canEditUserMessage,
+  onCopyUserMessage,
+  onEditUserMessage,
 }: MessageBubbleProps) {
   const { t } = useTranslation()
 
@@ -2200,6 +2252,10 @@ function MessageBubble({
         onUrlClick={onOpenUrl}
         onFileClick={onOpenFile}
         compactMode={compactMode}
+        timestamp={message.timestamp}
+        onCopy={onCopyUserMessage}
+        onEdit={onEditUserMessage ? (content) => onEditUserMessage(message.id, content) : undefined}
+        canEdit={canEditUserMessage}
       />
     )
   }
@@ -2334,7 +2390,13 @@ const MemoizedMessageBubble = React.memo(MessageBubble, (prev, next) => {
     prev.message.id === next.message.id &&
     prev.message.content === next.message.content &&
     prev.message.role === next.message.role &&
+    prev.message.timestamp === next.message.timestamp &&
+    prev.message.isPending === next.message.isPending &&
+    prev.message.isQueued === next.message.isQueued &&
+    prev.message.attachments === next.message.attachments &&
+    prev.message.badges === next.message.badges &&
     prev.sessionId === next.sessionId &&
-    prev.compactMode === next.compactMode
+    prev.compactMode === next.compactMode &&
+    prev.canEditUserMessage === next.canEditUserMessage
   )
 })

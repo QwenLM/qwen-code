@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
-import { handleMessageAnnotationsUpdated } from '../session'
-import type { SessionState, MessageAnnotationsUpdatedEvent } from '../../types'
+import { handleMessageAnnotationsUpdated, handleMessageContentUpdated } from '../session'
+import type { MessageContentUpdatedEvent, SessionState, MessageAnnotationsUpdatedEvent } from '../../types'
 
 function makeState(messages: any[]): SessionState {
   return {
@@ -47,5 +47,30 @@ describe('handleMessageAnnotationsUpdated', () => {
     const next = handleMessageAnnotationsUpdated(state, event)
     expect((next.state.session.messages[0] as any).annotations).toEqual([])
     expect((next.state.session.messages[1] as any).annotations).toEqual(annotations)
+  })
+})
+
+describe('handleMessageContentUpdated', () => {
+  it('replaces only the targeted message with the authoritative payload', () => {
+    const state = makeState([
+      { id: 'msg-a', role: 'user', content: 'alpha', timestamp: 100 },
+      { id: 'msg-b', role: 'user', content: 'beta', timestamp: 200, badges: [{ type: 'source' }] },
+    ])
+
+    const event: MessageContentUpdatedEvent = {
+      type: 'message_content_updated',
+      sessionId: 'session-1',
+      message: {
+        id: 'msg-b',
+        role: 'user',
+        content: 'edited beta',
+        timestamp: 200,
+      } as any,
+    }
+
+    const next = handleMessageContentUpdated(state, event)
+    expect((next.state.session.messages[0] as any).content).toBe('alpha')
+    expect((next.state.session.messages[1] as any).content).toBe('edited beta')
+    expect((next.state.session.messages[1] as any).badges).toBeUndefined()
   })
 })
