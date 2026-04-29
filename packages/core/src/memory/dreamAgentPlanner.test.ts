@@ -13,6 +13,7 @@ import { Storage } from '../config/storage.js';
 import type { ForkedAgentResult } from '../utils/forkedAgent.js';
 import { runForkedAgent } from '../utils/forkedAgent.js';
 import {
+  buildConsolidationTaskPrompt,
   getTranscriptDir,
   planManagedAutoMemoryDreamByAgent,
 } from './dreamAgentPlanner.js';
@@ -63,6 +64,27 @@ describe('dreamAgentPlanner', () => {
     );
     expect(getTranscriptDir(projectRoot)).not.toContain(
       `${path.sep}.qwen${path.sep}tmp${path.sep}`,
+    );
+  });
+
+  it('shell-quotes the transcript directory in the grep example', () => {
+    const transcriptDir = path.join(
+      tempDir,
+      'runtime dir; touch BAD',
+      'projects',
+      '-tmp-project',
+      'chats',
+    );
+    const prompt = buildConsolidationTaskPrompt(
+      path.join(tempDir, 'memory'),
+      transcriptDir,
+    );
+
+    expect(prompt).toContain(
+      `grep -rn "<narrow term>" '${transcriptDir}/' --include="*.jsonl" | tail -50`,
+    );
+    expect(prompt).not.toContain(
+      `grep -rn "<narrow term>" ${transcriptDir}/ --include="*.jsonl" | tail -50`,
     );
   });
 
