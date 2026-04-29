@@ -139,10 +139,12 @@ class MonitorToolInvocation extends BaseToolInvocation<
         const rules = await extractCommandRules(sub);
         allRules.push(...rules);
       }
-      permissionRules = [...new Set(allRules)].map((rule) => `Bash(${rule})`);
+      permissionRules = [...new Set(allRules)].map(
+        (rule) => `Monitor(${rule})`,
+      );
     } catch (e) {
       debugLogger.warn('Failed to extract monitor command rules:', e);
-      permissionRules = [`Bash(${command})`];
+      permissionRules = [`Monitor(${command})`];
     }
 
     return {

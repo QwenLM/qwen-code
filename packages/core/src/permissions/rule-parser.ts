@@ -118,6 +118,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   Lsp: 'lsp',
   LspTool: 'lsp',
 
+  // Monitor tool
+  monitor: 'monitor',
+  Monitor: 'monitor',
+  MonitorTool: 'monitor',
+
   // Legacy edit tool name
   replace: 'edit',
 };
@@ -125,7 +130,7 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
 /**
  * Shell tool canonical names.
  */
-const SHELL_TOOL_NAMES = new Set(['run_shell_command']);
+const SHELL_TOOL_NAMES = new Set(['run_shell_command', 'monitor']);
 
 /**
  * File-reading tools — "Read" rules apply to all of these (best-effort).
@@ -305,6 +310,8 @@ const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
   write_file: 'Edit',
   // Shell
   run_shell_command: 'Bash',
+  // Monitor
+  monitor: 'Monitor',
   // Web
   web_fetch: 'WebFetch',
   // Agent / Skill
@@ -419,6 +426,7 @@ const DISPLAY_NAME_TO_VERB: Readonly<Record<string, string>> = {
   Read: 'read files',
   Edit: 'edit files',
   Bash: 'run commands',
+  Monitor: 'monitor commands',
   WebFetch: 'fetch from',
   Agent: 'use agent',
   Skill: 'use skill',
@@ -494,9 +502,13 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
         parts.push(`${verb} in ${cleanPath}`);
         break;
       }
-      case 'command':
-        parts.push(`run '${specifier}' commands`);
+      case 'command': {
+        const cmdVerb = DISPLAY_NAME_TO_VERB[displayName] ?? 'run';
+        // Extract just the verb word (e.g. "run commands" → "run", "monitor commands" → "monitor")
+        const verbWord = cmdVerb.split(' ')[0]!;
+        parts.push(`${verbWord} '${specifier}' commands`);
         break;
+      }
       case 'domain':
         parts.push(`${verb} ${specifier}`);
         break;
