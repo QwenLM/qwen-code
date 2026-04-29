@@ -57,6 +57,10 @@ export interface DialogCloseOptions {
   // Welcome back dialog
   showWelcomeBackDialog: boolean;
   handleWelcomeBackClose: () => void;
+
+  // Help dialog
+  isHelpDialogOpen?: boolean;
+  closeHelpDialog?: () => void;
 }
 
 /**
@@ -89,6 +93,11 @@ export function useDialogClose(options: DialogCloseOptions) {
     if (options.isSettingsDialogOpen) {
       // Mimic ESC behavior: onSelect(undefined, selectedScope)
       options.closeSettingsDialog();
+      return true;
+    }
+
+    if (options.isHelpDialogOpen && options.closeHelpDialog) {
+      options.closeHelpDialog();
       return true;
     }
 

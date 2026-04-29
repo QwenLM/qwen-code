@@ -15,6 +15,7 @@ import {
   getUrlOpenCommand,
   CodePage,
   findMidInputSlashCommand,
+  findSlashCommandTokens,
 } from './commandUtils.js';
 
 // Mock child_process
@@ -534,5 +535,86 @@ describe('findMidInputSlashCommand', () => {
   it('returns null when / is not preceded by whitespace', () => {
     // "hello/review", no space before slash
     expect(findMidInputSlashCommand('hello/review', 12)).toBeNull();
+  });
+});
+
+describe('findSlashCommandTokens', () => {
+  const mockCommands = [
+    {
+      name: 'review',
+      description: 'Review code',
+      kind: 'built-in' as const,
+      modelInvocable: true,
+      userInvocable: true,
+      hidden: false,
+    },
+    {
+      name: 'clear',
+      description: 'Clear conversation',
+      kind: 'built-in' as const,
+      modelInvocable: false,
+      userInvocable: true,
+      hidden: false,
+    },
+    {
+      name: 'hidden-cmd',
+      description: 'Hidden',
+      kind: 'built-in' as const,
+      modelInvocable: true,
+      userInvocable: true,
+      hidden: true,
+    },
+  ] as Parameters<typeof findSlashCommandTokens>[1];
+
+  it('returns empty array for empty text', () => {
+    expect(findSlashCommandTokens('', mockCommands)).toEqual([]);
+  });
+
+  it('marks line-start known command as valid', () => {
+    const tokens = findSlashCommandTokens('/clear some args', mockCommands);
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({ commandName: 'clear', valid: true });
+  });
+
+  it('marks line-start hidden command as invalid', () => {
+    const tokens = findSlashCommandTokens('/hidden-cmd', mockCommands);
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({
+      commandName: 'hidden-cmd',
+      valid: false,
+    });
+  });
+
+  it('marks mid-input modelInvocable command as valid', () => {
+    const tokens = findSlashCommandTokens(
+      'please /review this code',
+      mockCommands,
+    );
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({ commandName: 'review', valid: true });
+  });
+
+  it('marks mid-input non-modelInvocable command as invalid', () => {
+    const tokens = findSlashCommandTokens(
+      'please /clear everything',
+      mockCommands,
+    );
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({ commandName: 'clear', valid: false });
+  });
+
+  it('marks unknown token as invalid', () => {
+    const tokens = findSlashCommandTokens('/usr/bin/something', mockCommands);
+    // /usr matches nothing, so invalid
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({ commandName: 'usr', valid: false });
+  });
+
+  it('returns correct start and end positions', () => {
+    const text = 'run /review now';
+    const tokens = findSlashCommandTokens(text, mockCommands);
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0].start).toBe(4);
+    expect(tokens[0].end).toBe(11); // '/review' is 7 chars, starts at 4
   });
 });

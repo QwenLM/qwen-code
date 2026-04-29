@@ -47,6 +47,7 @@ import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
 import { SessionPicker } from './SessionPicker.js';
 import { RewindSelector } from './RewindSelector.js';
 import { MemoryDialog } from './MemoryDialog.js';
+import { Help } from './Help.js';
 import { t } from '../../i18n/index.js';
 
 interface DialogManagerProps {
@@ -252,6 +253,18 @@ export const DialogManager = ({
   }
   if (uiState.isMemoryDialogOpen) {
     return <MemoryDialog onClose={uiActions.closeMemoryDialog} />;
+  }
+  if (uiState.isHelpDialogOpen) {
+    return (
+      <Help
+        commands={uiState.slashCommands}
+        width={mainAreaWidth}
+        activeTab={uiState.activeHelpTab}
+        onTabChange={uiActions.setHelpTab}
+        onClose={uiActions.closeHelpDialog}
+        isInteractive
+      />
+    );
   }
   if (uiState.isApprovalModeDialogOpen) {
     const currentMode = config.getApprovalMode();

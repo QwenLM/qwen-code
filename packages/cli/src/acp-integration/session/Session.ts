@@ -54,6 +54,8 @@ import {
   getSubagentSystemReminder,
   getArenaSystemReminder,
 } from '@qwen-code/qwen-code-core';
+import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
+import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
 
 import { RequestError } from '@agentclientprotocol/sdk';
 import type {
@@ -976,13 +978,24 @@ export class Session implements SessionContext {
         'acp',
       );
 
-      // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol
+      // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol.
+      // Keep existing fields stable and attach Phase 3 metadata under _meta for
+      // forward-compatible clients.
       const availableCommands: AvailableCommand[] = slashCommands.map(
-        (cmd) => ({
-          name: cmd.name,
-          description: cmd.description,
-          input: cmd.argumentHint ? { hint: cmd.argumentHint } : null,
-        }),
+        (cmd) =>
+          ({
+            name: cmd.name,
+            description: cmd.description,
+            input: cmd.argumentHint ? { hint: cmd.argumentHint } : null,
+            _meta: {
+              argumentHint: cmd.argumentHint,
+              source: cmd.source,
+              sourceLabel: cmd.sourceLabel,
+              supportedModes: getEffectiveSupportedModes(cmd),
+              subcommands: getCommandSubcommandNames(cmd),
+              modelInvocable: cmd.modelInvocable === true,
+            },
+          }) as AvailableCommand,
       );
 
       let availableSkills: string[] | undefined;

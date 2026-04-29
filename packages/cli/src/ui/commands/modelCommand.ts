@@ -20,6 +20,7 @@ export const modelCommand: SlashCommand = {
   get description() {
     return t('Switch the model for this session (--fast for suggestion model)');
   },
+  argumentHint: '[--fast] [<model-id>]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (_context, partialArg) => {

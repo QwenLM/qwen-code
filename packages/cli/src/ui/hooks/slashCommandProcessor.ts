@@ -39,6 +39,7 @@ import type {
 import { MessageType } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { type CommandContext, type SlashCommand } from '../commands/types.js';
+import type { RecentSlashCommand } from './useSlashCompletion.js';
 import { CommandService } from '../../services/CommandService.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
@@ -103,6 +104,7 @@ interface SlashCommandProcessorActions {
   openMcpDialog: () => void;
   openHooksDialog: () => void;
   openRewindSelector: () => void;
+  openHelpDialog: () => void;
 }
 
 /**
@@ -128,6 +130,9 @@ export const useSlashCommandProcessor = (
 ) => {
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
+  const [recentCommands, setRecentCommands] = useState<
+    ReadonlyMap<string, RecentSlashCommand>
+  >(new Map());
   const [reloadTrigger, setReloadTrigger] = useState(0);
 
   const reloadCommands = useCallback(() => {
@@ -489,6 +494,18 @@ export const useSlashCommandProcessor = (
 
       try {
         if (commandToExecute) {
+          if (!commandToExecute.hidden) {
+            setRecentCommands((previous) => {
+              const next = new Map(previous);
+              const existing = next.get(commandToExecute.name);
+              next.set(commandToExecute.name, {
+                name: commandToExecute.name,
+                usedAt: Date.now(),
+                count: (existing?.count ?? 0) + 1,
+              });
+              return next;
+            });
+          }
           if (commandToExecute.action) {
             const fullCommandContext: CommandContext = {
               ...commandContext,
@@ -637,6 +654,7 @@ export const useSlashCommandProcessor = (
                       actions.openRewindSelector();
                       return { type: 'handled' };
                     case 'help':
+                      actions.openHelpDialog();
                       return { type: 'handled' };
                     default: {
                       const unhandled: never = result.dialog;
@@ -853,6 +871,7 @@ export const useSlashCommandProcessor = (
   return {
     handleSlashCommand,
     slashCommands: commands,
+    recentSlashCommands: recentCommands,
     pendingHistoryItems,
     btwItem,
     setBtwItem,
