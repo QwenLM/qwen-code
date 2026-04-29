@@ -58,6 +58,8 @@ export interface KittyImagePlaceholder {
 
 const CACHE_LIMIT = 40;
 const PNG_CACHE_LIMIT = 20;
+const CACHE_BYTE_LIMIT = 32 * 1024 * 1024;
+const PNG_CACHE_BYTE_LIMIT = 32 * 1024 * 1024;
 const DEFAULT_RENDER_TIMEOUT_MS = 8000;
 const DEFAULT_MERMAID_RENDER_WIDTH = 1280;
 const MAX_MERMAID_PNG_BYTES = 8 * 1024 * 1024;
@@ -199,6 +201,8 @@ const cachedPngResults = new Map<
   string,
   { ok: true; png: Buffer } | { ok: false; error: string }
 >();
+let cachedResultsBytes = 0;
+let cachedPngResultsBytes = 0;
 
 export function detectTerminalImageProtocol(
   env: NodeJS.ProcessEnv = process.env,
@@ -508,10 +512,29 @@ function remember<T extends MermaidImageRenderResult>(
   key: string,
   result: T,
 ): T {
+  const resultBytes = estimateResultBytes(result);
+  if (resultBytes > CACHE_BYTE_LIMIT) {
+    cachedResults.delete(key);
+    return result;
+  }
+
+  const existing = cachedResults.get(key);
+  if (existing) {
+    cachedResultsBytes -= estimateResultBytes(existing);
+  }
   cachedResults.set(key, result);
-  if (cachedResults.size > CACHE_LIMIT) {
+  cachedResultsBytes += resultBytes;
+  while (
+    cachedResults.size > CACHE_LIMIT ||
+    cachedResultsBytes > CACHE_BYTE_LIMIT
+  ) {
     const oldest = cachedResults.keys().next().value;
-    if (oldest) cachedResults.delete(oldest);
+    if (!oldest) break;
+    const oldestResult = cachedResults.get(oldest);
+    if (oldestResult) {
+      cachedResultsBytes -= estimateResultBytes(oldestResult);
+    }
+    cachedResults.delete(oldest);
   }
   return result;
 }
@@ -519,12 +542,61 @@ function remember<T extends MermaidImageRenderResult>(
 function rememberPng<
   T extends { ok: true; png: Buffer } | { ok: false; error: string },
 >(key: string, result: T): T {
+  const resultBytes = estimatePngResultBytes(result);
+  if (resultBytes > PNG_CACHE_BYTE_LIMIT) {
+    cachedPngResults.delete(key);
+    return result;
+  }
+
+  const existing = cachedPngResults.get(key);
+  if (existing) {
+    cachedPngResultsBytes -= estimatePngResultBytes(existing);
+  }
   cachedPngResults.set(key, result);
-  if (cachedPngResults.size > PNG_CACHE_LIMIT) {
+  cachedPngResultsBytes += resultBytes;
+  while (
+    cachedPngResults.size > PNG_CACHE_LIMIT ||
+    cachedPngResultsBytes > PNG_CACHE_BYTE_LIMIT
+  ) {
     const oldest = cachedPngResults.keys().next().value;
-    if (oldest) cachedPngResults.delete(oldest);
+    if (!oldest) break;
+    const oldestResult = cachedPngResults.get(oldest);
+    if (oldestResult) {
+      cachedPngResultsBytes -= estimatePngResultBytes(oldestResult);
+    }
+    cachedPngResults.delete(oldest);
   }
   return result;
+}
+
+function estimateResultBytes(result: MermaidImageRenderResult): number {
+  switch (result.kind) {
+    case 'terminal-image':
+      return (
+        Buffer.byteLength(result.sequence, 'utf8') +
+        (result.placeholder?.lines.reduce(
+          (total, line) => total + Buffer.byteLength(line, 'utf8'),
+          0,
+        ) ?? 0)
+      );
+    case 'ansi':
+      return result.lines.reduce(
+        (total, line) => total + Buffer.byteLength(line, 'utf8'),
+        0,
+      );
+    case 'unavailable':
+      return Buffer.byteLength(result.reason, 'utf8');
+    default: {
+      const exhaustive: never = result;
+      return exhaustive;
+    }
+  }
+}
+
+function estimatePngResultBytes(
+  result: { ok: true; png: Buffer } | { ok: false; error: string },
+): number {
+  return result.ok ? result.png.byteLength : Buffer.byteLength(result.error);
 }
 
 function findMmdc(env: NodeJS.ProcessEnv): string | null {
@@ -572,9 +644,11 @@ function findExecutable(
     addCandidates(localRendererDir);
   }
   for (const dir of (env['PATH'] ?? '').split(path.delimiter).filter(Boolean)) {
+    const normalizedDir = normalizeExecutableDir(dir);
     if (
       !allowLocalRenderers &&
-      normalizeExecutableDir(dir) === localRendererDir
+      (normalizedDir === localRendererDir ||
+        normalizedDir.endsWith(`${path.sep}node_modules${path.sep}.bin`))
     ) {
       continue;
     }

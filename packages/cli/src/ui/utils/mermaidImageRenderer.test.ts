@@ -108,6 +108,36 @@ describe('mermaid image renderer', () => {
     }
   });
 
+  it('does not auto-discover node_modules renderers from PATH without opt-in', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-path-mmdc-'));
+    tempDirs.push(tempDir);
+    const binDir = path.join(
+      tempDir,
+      'packages',
+      'app',
+      'node_modules',
+      '.bin',
+    );
+    fs.mkdirSync(binDir, { recursive: true });
+    createFakeMmdc(binDir);
+
+    const result = renderMermaidImageSync({
+      source: 'flowchart TD\n  A[Start] --> B[End]',
+      contentWidth: 80,
+      availableTerminalHeight: 20,
+      env: {
+        PATH: binDir,
+        QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'kitty',
+      },
+    });
+
+    expect(result.kind).toBe('unavailable');
+    expect(result.kind === 'unavailable' && result.reason).toContain(
+      'Mermaid CLI (mmdc) was not found',
+    );
+  });
+
   it('detects forced terminal image protocols', () => {
     expect(
       detectTerminalImageProtocol({
@@ -254,5 +284,50 @@ describe('mermaid image renderer', () => {
     expect(result.kind === 'unavailable' && result.reason).toContain(
       'exceeded',
     );
+  });
+
+  it('evicts Mermaid image caches by retained byte size', () => {
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-mmdc-'));
+    tempDirs.push(binDir);
+    const countPath = path.join(binDir, 'count.txt');
+    createFakeMmdc(binDir, [
+      'const fs = require("node:fs");',
+      `const countPath = ${JSON.stringify(countPath)};`,
+      'let count = 0;',
+      'try { count = Number(fs.readFileSync(countPath, "utf8")) || 0; } catch {}',
+      'fs.writeFileSync(countPath, String(count + 1));',
+      'const out = process.argv[process.argv.indexOf("-o") + 1];',
+      `fs.writeFileSync(out, Buffer.concat([Buffer.from("${PNG_1X1.toString(
+        'base64',
+      )}", "base64"), Buffer.alloc(7 * 1024 * 1024)]));`,
+    ]);
+
+    const env = {
+      PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+      QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
+      QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'iterm2',
+    };
+
+    for (let index = 0; index < 5; index++) {
+      const result = renderMermaidImageSync({
+        source: `flowchart TD\n  A${index}[Start] --> B${index}[End]`,
+        contentWidth: 80,
+        availableTerminalHeight: 20,
+        env,
+      });
+      expect(result.kind).toBe('terminal-image');
+    }
+
+    expect(fs.readFileSync(countPath, 'utf8')).toBe('5');
+
+    const result = renderMermaidImageSync({
+      source: 'flowchart TD\n  A0[Start] --> B0[End]',
+      contentWidth: 80,
+      availableTerminalHeight: 20,
+      env,
+    });
+
+    expect(result.kind).toBe('terminal-image');
+    expect(fs.readFileSync(countPath, 'utf8')).toBe('6');
   });
 });
