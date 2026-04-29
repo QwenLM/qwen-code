@@ -192,7 +192,14 @@ export function BackgroundTaskViewProvider({
   const resumeSelected = useCallback(async () => {
     if (!config) return;
     const target = entries[selectedIndex];
-    if (!target || target.status !== 'paused') return;
+    if (
+      !target ||
+      target.kind !== 'agent' ||
+      target.status !== 'paused' ||
+      target.error
+    ) {
+      return;
+    }
     await config.resumeBackgroundAgent(target.agentId);
   }, [config, entries, selectedIndex]);
 

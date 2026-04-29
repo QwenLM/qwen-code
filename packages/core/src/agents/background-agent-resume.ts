@@ -670,6 +670,7 @@ export class BackgroundAgentResumeService {
             await this.runSubagentStopHookLoop(subagent, {
               agentId: meta.agentId,
               agentType: meta.agentType,
+              transcriptPath: outputFile,
               resolvedMode,
               signal: bgAbortController.signal,
             });
@@ -918,15 +919,14 @@ export class BackgroundAgentResumeService {
     opts: {
       agentId: string;
       agentType: string;
+      transcriptPath: string;
       resolvedMode: PermissionMode;
       signal?: AbortSignal;
     },
   ): Promise<void> {
-    const { agentId, agentType, resolvedMode, signal } = opts;
+    const { agentId, agentType, transcriptPath, resolvedMode, signal } = opts;
     const hookSystem = this.config.getHookSystem();
     if (!hookSystem) return;
-
-    const transcriptPath = this.config.getTranscriptPath();
     let stopHookActive = false;
     const maxIterations = 5;
 

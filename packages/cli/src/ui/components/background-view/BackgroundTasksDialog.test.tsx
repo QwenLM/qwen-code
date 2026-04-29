@@ -244,4 +244,28 @@ describe('BackgroundTasksDialog', () => {
 
     expect(h.abandon).toHaveBeenCalledWith('a');
   });
+
+  it('does not resume blocked paused tasks and surfaces the blocked reason', () => {
+    const blocked = entry({
+      agentId: 'a',
+      status: 'paused',
+      error: 'Legacy fork bootstrap transcript is missing.',
+    });
+    const h = setup([blocked]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    expect(h.lastFrame()).not.toContain('r resume');
+    expect(h.lastFrame()).toContain('x abandon');
+
+    h.pressKey({ sequence: 'r' });
+    expect(h.resume).not.toHaveBeenCalled();
+
+    h.call(() => h.probe.current!.actions.enterDetail());
+    const detailFrame = h.lastFrame();
+    expect(detailFrame).toContain('Resume blocked');
+    expect(detailFrame).toContain(
+      'Legacy fork bootstrap transcript is missing.',
+    );
+    expect(detailFrame).not.toContain('r resume');
+  });
 });

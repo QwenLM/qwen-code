@@ -272,7 +272,8 @@ const AgentDetailBody: React.FC<{
   // row sits at the bottom of the Progress block. Cap at 5 in case the
   // registry ever raises its buffer.
   const activities = (entry.recentActivities ?? []).slice(-5);
-  const hasError = entry.status === 'failed' && Boolean(entry.error);
+  const hasError = Boolean(entry.error);
+  const errorTitle = entry.status === 'paused' ? 'Resume blocked' : 'Error';
 
   // Prompt: show at most 5 newline-delimited segments, each row truncated
   // to one visual line. Append an ellipsis if the source had more.
@@ -361,7 +362,7 @@ const AgentDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold color={theme.status.error}>
-              Error
+              {errorTitle}
             </Text>
           </Box>
           <Box>
@@ -658,17 +659,28 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
 
   if (!dialogOpen) return null;
 
+  const selectedEntryAllowsResume =
+    selectedEntry?.kind === 'agent' &&
+    selectedEntry.status === 'paused' &&
+    !selectedEntry.error;
+
   // Hint footer — context-sensitive.
   const hints: string[] = [];
   if (dialogMode === 'list') {
     hints.push('\u2191/\u2193 select', 'Enter view');
     if (selectedEntry?.status === 'running') hints.push('x stop');
-    if (selectedEntry?.status === 'paused') hints.push('r resume', 'x abandon');
+    if (selectedEntryAllowsResume) hints.push('r resume');
+    if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
+      hints.push('x abandon');
+    }
     hints.push('\u2190/Esc close');
   } else {
     hints.push('\u2190 go back', 'Esc/Enter/Space close');
     if (selectedEntry?.status === 'running') hints.push('x stop');
-    if (selectedEntry?.status === 'paused') hints.push('r resume', 'x abandon');
+    if (selectedEntryAllowsResume) hints.push('r resume');
+    if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
+      hints.push('x abandon');
+    }
   }
 
   return (

@@ -382,6 +382,79 @@ describe('BackgroundAgentResumeService', () => {
     });
   });
 
+  it('passes the sidechain transcript path to SubagentStop hooks on resume', async () => {
+    const sessionId = 'session-stop-hook';
+    const agentId = 'agent-stop-hook';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume stop hook path',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume stop hook path' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume stop hook path',
+      subagentType: 'researcher',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume stop hook path',
+      outputFile,
+      metaPath,
+    });
+
+    const subagent = {
+      execute: vi.fn(async () => undefined),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+
+    const { service, subagentManager, hookSystem } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    await vi.waitFor(() => {
+      expect(hookSystem.fireSubagentStopEvent).toHaveBeenCalledWith(
+        agentId,
+        'researcher',
+        outputFile,
+        'done',
+        false,
+        expect.anything(),
+        expect.any(AbortSignal),
+      );
+    });
+  });
+
   it('coalesces concurrent resume calls into a single running agent', async () => {
     const sessionId = 'session-double';
     const agentId = 'agent-double';
