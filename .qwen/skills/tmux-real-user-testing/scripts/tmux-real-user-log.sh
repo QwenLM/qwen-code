@@ -82,7 +82,7 @@ case "$cmd" in
     session=$1
     shift
     for key in "$@"; do
-      tmux send-keys -t "$session" "$key"
+      tmux send-keys -t "$session" -- "$key"
       sleep 0.15
     done
     ;;
@@ -91,7 +91,7 @@ case "$cmd" in
     require_args 2 $# type-submit
     session=$1
     text=$2
-    tmux send-keys -t "$session" "$text"
+    tmux send-keys -t "$session" -- "$text"
     sleep 0.5
     tmux send-keys -t "$session" Enter
     ;;

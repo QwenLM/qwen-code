@@ -214,23 +214,24 @@ For each step, define:
 ### Short example: testing /auth → OAuth
 
 ```bash
+HELPER=.qwen/skills/tmux-real-user-testing/scripts/tmux-real-user-log.sh
+
 # Start
-eval "$(bash .qwen/skills/tmux-real-user-testing/scripts/tmux-real-user-log.sh \
-  start auth-test . npm run dev -- --approval-mode yolo)"
+eval "$(bash "$HELPER" start auth-test . npm run dev -- --approval-mode yolo)"
 # → prints SESSION=... OUTDIR=...
 
 # Trigger /auth, navigate to OAuth provider
-bash scripts/tmux-real-user-log.sh type-submit "$SESSION" /auth
-bash scripts/tmux-real-user-log.sh snapshot "$SESSION" "$OUTDIR" "01 auth menu"
-bash scripts/tmux-real-user-log.sh send "$SESSION" Down Down Enter
-bash scripts/tmux-real-user-log.sh snapshot "$SESSION" "$OUTDIR" "02 provider selected"
+bash "$HELPER" type-submit "$SESSION" /auth
+bash "$HELPER" snapshot "$SESSION" "$OUTDIR" "01 auth menu"
+bash "$HELPER" send "$SESSION" Down Down Enter
+bash "$HELPER" snapshot "$SESSION" "$OUTDIR" "02 provider selected"
 
 # Wait for OAuth flow to complete (may involve browser interaction)
-bash scripts/tmux-real-user-log.sh wait-for "$SESSION" "$OUTDIR" "Successfully configured|Error|failed"
-bash scripts/tmux-real-user-log.sh snapshot "$SESSION" "$OUTDIR" "03 auth result"
+bash "$HELPER" wait-for "$SESSION" "$OUTDIR" "Successfully configured|Error|failed"
+bash "$HELPER" snapshot "$SESSION" "$OUTDIR" "03 auth result"
 
 # Finish
-bash scripts/tmux-real-user-log.sh finish "$SESSION" "$OUTDIR"
+bash "$HELPER" finish "$SESSION" "$OUTDIR"
 ```
 
 For flows involving browser OAuth callbacks, the `wait-for` poll will catch the
