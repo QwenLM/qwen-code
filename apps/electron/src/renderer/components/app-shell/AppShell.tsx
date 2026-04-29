@@ -1942,6 +1942,24 @@ function AppShellContent({
     setTimeout(() => focusZone('chat', { intent: 'programmatic' }), 50)
   }, [activeWorkspace, focusZone])
 
+  const handleNewProjectSession = useCallback(async (workspaceId: string) => {
+    setSearchActive(false)
+    setSearchQuery('')
+
+    const createSessionInCurrentWorkspace = () => {
+      navigate(routes.action.newSession())
+      setTimeout(() => focusZone('chat', { intent: 'programmatic' }), 50)
+    }
+
+    if (workspaceId !== activeWorkspaceId) {
+      await Promise.resolve(onSelectWorkspace(workspaceId))
+      setTimeout(createSessionInCurrentWorkspace, 50)
+      return
+    }
+
+    createSessionInCurrentWorkspace()
+  }, [activeWorkspaceId, focusZone, onSelectWorkspace])
+
   const handleSelectProjectSession = useCallback(async (workspaceId: string, sessionId: string) => {
     setSearchActive(false)
     setSearchQuery('')
@@ -2258,6 +2276,7 @@ function AppShellContent({
                   workspaceUnreadMap={workspaceUnreadMap}
                   onSelectWorkspace={onSelectWorkspace}
                   onSelectSession={handleSelectProjectSession}
+                  onNewSession={handleNewProjectSession}
                   onWorkspaceCreated={() => onRefreshWorkspaces?.()}
                   sessionStatuses={effectiveSessionStatuses}
                   labels={displayLabelConfigs}
