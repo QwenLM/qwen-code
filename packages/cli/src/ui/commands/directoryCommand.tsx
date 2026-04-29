@@ -15,6 +15,7 @@ import {
   ConditionalRulesRegistry,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
+import { SettingScope } from '../../config/settings.js';
 
 export function expandHomeDir(p: string): string {
   if (!p) {
@@ -90,7 +91,7 @@ export const directoryCommand: SlashCommand = {
       action: async (context: CommandContext, args: string) => {
         const {
           ui: { addItem },
-          services: { config },
+          services: { config, settings },
         } = context;
         const [...rest] = args.split(' ');
 
@@ -136,9 +137,10 @@ export const directoryCommand: SlashCommand = {
         const errors: string[] = [];
 
         for (const pathToAdd of pathsToAdd) {
+          const directory = expandHomeDir(pathToAdd.trim());
           try {
-            workspaceContext.addDirectory(expandHomeDir(pathToAdd.trim()));
-            added.push(pathToAdd.trim());
+            workspaceContext.addDirectory(directory);
+            added.push(directory);
           } catch (e) {
             const error = e as Error;
             errors.push(
@@ -150,15 +152,33 @@ export const directoryCommand: SlashCommand = {
           }
         }
 
+        if (added.length > 0) {
+          try {
+            const existingIncludeDirectories =
+              settings.workspace.settings.context?.includeDirectories ?? [];
+            const includeDirectories = Array.from(
+              new Set([...existingIncludeDirectories, ...added]),
+            );
+            settings.setValue(
+              SettingScope.Workspace,
+              'context.includeDirectories',
+              includeDirectories,
+            );
+          } catch (error) {
+            errors.push(
+              t('Error saving directories to workspace settings: {{error}}', {
+                error: (error as Error).message,
+              }),
+            );
+          }
+        }
+
         try {
           if (config.shouldLoadMemoryFromIncludeDirectories()) {
             const { memoryContent, fileCount, conditionalRules, projectRoot } =
               await loadServerHierarchicalMemory(
                 config.getWorkingDir(),
-                [
-                  ...config.getWorkspaceContext().getDirectories(),
-                  ...pathsToAdd,
-                ],
+                [...config.getWorkspaceContext().getDirectories(), ...added],
                 config.getFileService(),
                 config.getExtensionContextFilePaths(),
                 config.getFolderTrust(),

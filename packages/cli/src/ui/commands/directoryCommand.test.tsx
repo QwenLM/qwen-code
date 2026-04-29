@@ -9,6 +9,7 @@ import { directoryCommand, expandHomeDir } from './directoryCommand.js';
 import type { Config, WorkspaceContext } from '@qwen-code/qwen-code-core';
 import type { CommandContext } from './types.js';
 import { MessageType } from '../types.js';
+import { SettingScope } from '../../config/settings.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -55,6 +56,10 @@ describe('directoryCommand', () => {
         config: mockConfig,
         settings: {
           merged: {},
+          workspace: {
+            settings: {},
+          },
+          setValue: vi.fn(),
         },
       },
       ui: {
@@ -104,6 +109,39 @@ describe('directoryCommand', () => {
           text: `Successfully added directories:\n- ${newPath}`,
         }),
         expect.any(Number),
+      );
+    });
+
+    it('should persist added directories to workspace settings', async () => {
+      const existingPath = path.normalize('/home/user/existing-project');
+      const newPath = path.normalize('/home/user/new-project');
+      mockContext.services.settings.workspace.settings = {
+        context: { includeDirectories: [existingPath] },
+      };
+
+      if (!addCommand?.action) throw new Error('No action');
+      await addCommand.action(mockContext, newPath);
+
+      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'context.includeDirectories',
+        [existingPath, newPath],
+      );
+    });
+
+    it('should not duplicate existing workspace settings when persisting', async () => {
+      const existingPath = path.normalize('/home/user/existing-project');
+      mockContext.services.settings.workspace.settings = {
+        context: { includeDirectories: [existingPath] },
+      };
+
+      if (!addCommand?.action) throw new Error('No action');
+      await addCommand.action(mockContext, existingPath);
+
+      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'context.includeDirectories',
+        [existingPath],
       );
     });
 
