@@ -2794,11 +2794,7 @@ export class SessionManager implements ISessionManager {
     const targetProviderType = targetBackendContext.connection?.providerType
       ?? (targetBackendContext.provider === 'pi' ? 'pi' : 'anthropic')
     const targetPiAuthProvider = targetBackendContext.connection?.piAuthProvider
-    const shouldUseAcpDefaultPermissionMode =
-      targetBackendContext.provider === 'qwen' && options?.permissionMode === undefined
-    const sessionPermissionMode = shouldUseAcpDefaultPermissionMode
-      ? undefined
-      : defaultPermissionMode
+    const sessionPermissionMode = defaultPermissionMode
 
     // Resolve working directory from options:
     // - 'user_default' or undefined: Use workspace's configured default

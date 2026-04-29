@@ -95,6 +95,7 @@ import { type SessionStatusId, type SessionStatus, statusConfigsToSessionStatuse
 import { useStatuses } from "@/hooks/useStatuses"
 import { useLabels } from "@/hooks/useLabels"
 import { useViews } from "@/hooks/useViews"
+import { defaultSessionOptions } from "@/hooks/useSessionOptions"
 import { useContainerWidth } from "@/hooks/useContainerWidth"
 import { LabelIcon, LabelValueTypeIcon } from "@/components/ui/label-icon"
 import { filterSessionStatuses as filterLabelMenuStates } from "@/components/ui/label-menu"
@@ -138,6 +139,7 @@ import {
   RADIUS_INNER,
 } from "./panel-constants"
 import { hasOpenOverlay } from "@/lib/overlay-detection"
+import { getNextPermissionMode } from "@/lib/permission-mode-cycle"
 import { clearSourceIconCaches } from "@/lib/icon-cache"
 import { dispatchFocusInputEvent } from "./input/focus-input-events"
 
@@ -1085,7 +1087,8 @@ function AppShellContent({
 
   // Shift+Tab cycles permission mode through enabled modes (textarea handles its own, this handles when focus is elsewhere)
   // In multi-panel, targets the focused panel's session
-  const effectiveSessionId = focusedSessionId ?? session.selected
+  const navSessionId = isSessionsNavigation(navState) ? navState.details?.sessionId ?? null : null
+  const effectiveSessionId = focusedSessionId ?? navSessionId ?? (panelCount === 0 ? session.selected : null)
 
   // Focus chat input for the target session only (multi-panel safe).
   const focusChatInputForSession = useCallback((targetSessionId?: string | null) => {
@@ -1096,16 +1099,11 @@ function AppShellContent({
   useAction('chat.cyclePermissionMode', () => {
     if (effectiveSessionId) {
       const currentOptions = contextValue.sessionOptions.get(effectiveSessionId)
-      const currentMode = currentOptions?.permissionMode ?? 'ask'
-      // Cycle through enabled permission modes
-      const modes = enabledModes.length >= 2 ? enabledModes : [...PERMISSION_MODE_ORDER]
-      const currentIndex = modes.indexOf(currentMode)
-      // If current mode not in enabled list, jump to first enabled mode
-      const nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % modes.length
-      const nextMode = modes[nextIndex]
+      const currentMode = currentOptions?.permissionMode ?? defaultSessionOptions.permissionMode
+      const nextMode = getNextPermissionMode(currentMode, enabledModes)
       contextValue.onSessionOptionsChange(effectiveSessionId, { permissionMode: nextMode })
     }
-  })
+  }, { enabled: () => Boolean(effectiveSessionId) })
 
   const handleToggleSidebar = useCallback(() => {
     if (isSidebarAndNavigatorHidden) {

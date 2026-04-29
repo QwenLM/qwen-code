@@ -62,7 +62,7 @@ export default function WorkspaceSettingsPage() {
   const [renameDialogOpen, setRenameDialogOpen] = useState(false)
   const [wsIconUrl, setWsIconUrl] = useState<string | null>(null)
   const [isUploadingIcon, setIsUploadingIcon] = useState(false)
-  const [permissionMode, setPermissionMode] = useState<PermissionMode>('ask')
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>('allow-all')
   const [workingDirectory, setWorkingDirectory] = useState('')
   const [localMcpEnabled, setLocalMcpEnabled] = useState(true)
   const [isLoadingWorkspace, setIsLoadingWorkspace] = useState(true)
@@ -89,7 +89,7 @@ export default function WorkspaceSettingsPage() {
         if (settings) {
           setWsName(settings.name || '')
           setWsNameEditing(settings.name || '')
-          setPermissionMode(settings.permissionMode || 'ask')
+          setPermissionMode(settings.permissionMode || 'allow-all')
           setWorkingDirectory(settings.workingDirectory || '')
           setLocalMcpEnabled(settings.localMcpEnabled ?? true)
           // Load cyclable permission modes from workspace settings

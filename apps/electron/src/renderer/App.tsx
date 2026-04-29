@@ -450,11 +450,11 @@ export default function App() {
     // Initialize unified sessionOptions from session data.
     const optionsMap = new Map<string, SessionOptions>()
     for (const s of loadedSessions) {
-      const hasNonDefaultMode = s.permissionMode && s.permissionMode !== 'ask'
+      const hasNonDefaultMode = s.permissionMode && s.permissionMode !== defaultSessionOptions.permissionMode
       const hasNonDefaultThinking = s.thinkingLevel && s.thinkingLevel !== DEFAULT_THINKING_LEVEL
       if (hasNonDefaultMode || hasNonDefaultThinking) {
         optionsMap.set(s.id, {
-          permissionMode: s.permissionMode ?? 'ask',
+          permissionMode: s.permissionMode ?? defaultSessionOptions.permissionMode,
           thinkingLevel: s.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
         })
       }

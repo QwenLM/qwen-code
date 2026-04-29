@@ -52,6 +52,7 @@ import {
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 import { cn } from '@/lib/utils'
 import { coerceInputText } from '@/lib/input-text'
+import { getNextPermissionMode } from '@/lib/permission-mode-cycle'
 import { isMac, PATH_SEP, getPathBasename } from '@/lib/platform'
 import { applySmartTypography } from '@/lib/smart-typography'
 import { AttachmentPreview } from '../AttachmentPreview'
@@ -1296,6 +1297,13 @@ export function FreeFormInput({
         inlineLabel.close()
         return
       }
+    }
+
+    if (e.key === 'Tab' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && onPermissionModeChange) {
+      e.preventDefault()
+      e.stopPropagation()
+      onPermissionModeChange(getNextPermissionMode(permissionMode, enabledModes))
+      return
     }
 
     // Skip submission during IME composition - user is confirming composed characters, not sending

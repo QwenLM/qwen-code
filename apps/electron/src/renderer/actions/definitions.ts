@@ -193,6 +193,7 @@ export const actions = {
     description: 'Switch between YOLO, Plan mode, Ask before edits, and Edit automatically',
     defaultHotkey: 'shift+tab',
     category: 'Chat',
+    when: '!inputFocus && !menuOpen',
   },
   'chat.nextSearchMatch': {
     id: 'chat.nextSearchMatch',
