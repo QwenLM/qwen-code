@@ -87,6 +87,21 @@ const MAX_VERBOSE_TOOL_CALLS = 12;
 const MAX_TASK_PROMPT_LINES = 5;
 const DEFAULT_DETAIL_HEIGHT = 18;
 
+// Approximate fixed-row cost of the default/verbose layout, derived from the
+// JSX structure below: 1 header + (1 "Task Detail:" label + 1 internal gap +
+// optional 1 "...N task lines hidden..." footer) + (1 "Tools:" label + 1
+// marginBottom) + 1 footer + 3 inter-section gaps. We subtract this from the
+// parent-provided `availableHeight` so the budget for the prompt and
+// tool-call lists actually fits inside the assigned frame.
+const RUNNING_FIXED_OVERHEAD = 10;
+// In completed/cancelled/failed mode we lose the running footer but gain the
+// ExecutionSummary block (~5 rows) and the ToolUsage block (~4 rows) plus an
+// extra inter-block gap, so the overhead grows.
+const COMPLETED_FIXED_OVERHEAD = 18;
+// "Status icon + name + description" + "truncated output" — each tool call
+// commits two visual rows in default/verbose mode.
+const ROWS_PER_TOOL_CALL = 2;
+
 function truncateToVisualWidth(text: string, maxWidth: number): string {
   const visualWidth = Math.max(1, Math.floor(maxWidth));
   const ellipsis = '...';
@@ -136,29 +151,33 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
     4,
     Math.floor(availableHeight ?? DEFAULT_DETAIL_HEIGHT),
   );
+  // Treat `availableHeight` as the *total* component budget. Subtract the
+  // fixed overhead (header, section labels, gaps, footer/result block) before
+  // splitting the remainder between the prompt preview and the tool-call
+  // list. This guarantees the rendered frame doesn't grow past the budget the
+  // parent layout assigned us, which is the precondition for Ink to keep the
+  // SubAgent display inside its static slot instead of clearing+redrawing.
+  const fixedOverhead =
+    data.status === 'running'
+      ? RUNNING_FIXED_OVERHEAD
+      : COMPLETED_FIXED_OVERHEAD;
+  const renderableBudget = Math.max(2, detailHeight - fixedOverhead);
+  // Prompt gets ~1/3 of the remainder, tool-call list gets the rest. Both are
+  // clamped to >=1 so we always render at least one of each kind, even in
+  // pathological "availableHeight smaller than overhead" cases.
+  const promptBudget = Math.max(1, Math.floor(renderableBudget / 3));
+  const toolBudget = Math.max(
+    1,
+    Math.floor((renderableBudget - promptBudget) / ROWS_PER_TOOL_CALL),
+  );
   const maxTaskPromptLines =
     displayMode === 'verbose'
-      ? Math.max(1, Math.min(8, Math.floor(detailHeight / 3)))
-      : Math.max(
-          1,
-          Math.min(MAX_TASK_PROMPT_LINES, Math.floor(detailHeight / 3)),
-        );
+      ? Math.min(8, promptBudget)
+      : Math.min(MAX_TASK_PROMPT_LINES, promptBudget);
   const maxToolCalls =
     displayMode === 'verbose'
-      ? Math.max(
-          1,
-          Math.min(
-            MAX_VERBOSE_TOOL_CALLS,
-            Math.floor((detailHeight - maxTaskPromptLines - 4) / 2),
-          ),
-        )
-      : Math.max(
-          1,
-          Math.min(
-            MAX_TOOL_CALLS,
-            Math.floor((detailHeight - maxTaskPromptLines - 4) / 2),
-          ),
-        );
+      ? Math.min(MAX_VERBOSE_TOOL_CALLS, toolBudget)
+      : Math.min(MAX_TOOL_CALLS, toolBudget);
 
   const agentColor = useMemo(() => {
     const colorOption = COLOR_OPTIONS.find(
@@ -190,7 +209,11 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
     return '';
   }, [displayMode, data, maxTaskPromptLines, maxToolCalls]);
 
-  // Handle keyboard shortcuts to control display mode
+  // Handle keyboard shortcuts to control display mode. Scope the listener to
+  // running subagents only — every completed/historical AgentExecutionDisplay
+  // mounted in the chat history would otherwise toggle in lock-step on a
+  // single Ctrl+E / Ctrl+F press, reflowing the entire scrollback and
+  // re-introducing the flicker this component is meant to prevent.
   useKeypress(
     (key) => {
       if (key.ctrl && key.name === 'e') {
@@ -205,7 +228,7 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
         );
       }
     },
-    { isActive: true },
+    { isActive: data.status === 'running' },
   );
 
   if (displayMode === 'compact') {
