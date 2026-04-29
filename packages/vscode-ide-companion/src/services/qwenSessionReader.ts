@@ -24,7 +24,6 @@ export interface QwenMessage {
     output: number;
     cached: number;
     thoughts: number;
-    tool: number;
     total: number;
   };
   model?: string;

@@ -91,7 +91,6 @@ describe('<ModelStatsDisplay />', () => {
             total: 30,
             cached: 0,
             thoughts: 0,
-            tool: 0,
           },
         }),
       },
@@ -108,7 +107,6 @@ describe('<ModelStatsDisplay />', () => {
     const output = lastFrame();
     expect(output).not.toContain('Cached');
     expect(output).not.toContain('Thoughts');
-    expect(output).not.toContain('Tool');
     expect(output).toMatchSnapshot();
   });
 
@@ -123,7 +121,6 @@ describe('<ModelStatsDisplay />', () => {
             total: 30,
             cached: 5,
             thoughts: 2,
-            tool: 0,
           },
         }),
         'gemini-2.5-flash': mainOnly({
@@ -134,7 +131,6 @@ describe('<ModelStatsDisplay />', () => {
             total: 15,
             cached: 0,
             thoughts: 0,
-            tool: 3,
           },
         }),
       },
@@ -151,7 +147,6 @@ describe('<ModelStatsDisplay />', () => {
     const output = lastFrame();
     expect(output).toContain('Cached');
     expect(output).toContain('Thoughts');
-    expect(output).toContain('Tool');
     expect(output).toMatchSnapshot();
   });
 
@@ -166,7 +161,6 @@ describe('<ModelStatsDisplay />', () => {
             total: 300,
             cached: 50,
             thoughts: 10,
-            tool: 5,
           },
         }),
         'gemini-2.5-flash': mainOnly({
@@ -177,7 +171,6 @@ describe('<ModelStatsDisplay />', () => {
             total: 600,
             cached: 100,
             thoughts: 20,
-            tool: 10,
           },
         }),
       },
@@ -212,7 +205,6 @@ describe('<ModelStatsDisplay />', () => {
             total: 999999999,
             cached: 123456789,
             thoughts: 111111111,
-            tool: 222222222,
           },
         }),
       },
@@ -240,7 +232,6 @@ describe('<ModelStatsDisplay />', () => {
             total: 30,
             cached: 5,
             thoughts: 2,
-            tool: 1,
           },
         }),
       },
@@ -281,7 +272,6 @@ describe('<ModelStatsDisplay />', () => {
         total: 30,
         cached: 0,
         thoughts: 0,
-        tool: 0,
       },
     });
 
@@ -309,7 +299,6 @@ describe('<ModelStatsDisplay />', () => {
               total: 60,
               cached: 0,
               thoughts: 0,
-              tool: 0,
             },
             bySource: {
               [MAIN_SOURCE]: mainCore,
