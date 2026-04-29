@@ -96,11 +96,17 @@ class MonitorToolInvocation extends BaseToolInvocation<
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
     const command = stripShellWrapper(this.params.command);
-    const pm = this.config.getPermissionManager?.();
     const subCommands = splitCommands(command);
     const confirmableSubCommands: string[] = [];
 
     for (const sub of subCommands) {
+      // Only filter out read-only commands via AST analysis.
+      // We intentionally do NOT consult pm.isCommandAllowed() here because
+      // that evaluates under 'run_shell_command' context, which would let
+      // existing Bash(...) allow rules shrink the monitor confirmation scope.
+      // Monitor is a long-running background process with a different risk
+      // profile than one-shot shell execution and should maintain its own
+      // permission boundary.
       let isReadOnly = false;
       try {
         isReadOnly = await isShellCommandReadOnlyAST(sub);
@@ -111,16 +117,6 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
       if (isReadOnly) {
         continue;
-      }
-
-      if (pm) {
-        try {
-          if ((await pm.isCommandAllowed(sub)) === 'allow') {
-            continue;
-          }
-        } catch (e) {
-          debugLogger.warn('PermissionManager command check failed:', e);
-        }
       }
 
       confirmableSubCommands.push(sub);

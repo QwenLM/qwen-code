@@ -154,14 +154,19 @@ describe('MonitorTool', () => {
       expect(details.permissionRules).toEqual(['Bash(tail -f *)']);
     });
 
-    it('filters already-allowed subcommands from permission rules', async () => {
+    it('does not consult Bash permission rules for monitor commands', async () => {
+      // Monitor should NOT use pm.isCommandAllowed() because that evaluates
+      // under 'run_shell_command' context, mixing permission boundaries.
       const pm = {
-        isCommandAllowed: vi
-          .fn()
-          .mockResolvedValueOnce('allow')
-          .mockResolvedValueOnce('ask'),
+        isCommandAllowed: vi.fn().mockResolvedValue('allow'),
       };
       mockConfig.getPermissionManager = vi.fn().mockReturnValue(pm);
+
+      // Neither subcommand is read-only
+      mockIsShellCommandReadOnlyAST.mockResolvedValue(false);
+      mockExtractCommandRules
+        .mockResolvedValueOnce(['git add *'])
+        .mockResolvedValueOnce(['git commit *']);
 
       const invocation = createInvocation({
         command: 'git add file && git commit -m "msg"',
@@ -173,12 +178,14 @@ describe('MonitorTool', () => {
         permissionRules?: string[];
       };
 
-      expect(pm.isCommandAllowed).toHaveBeenNthCalledWith(1, 'git add file');
-      expect(pm.isCommandAllowed).toHaveBeenNthCalledWith(
-        2,
-        'git commit -m "msg"',
-      );
-      expect(details.permissionRules).toEqual(['Bash(git commit *)']);
+      // pm.isCommandAllowed must NOT be called — monitor maintains its own
+      // permission boundary separate from run_shell_command
+      expect(pm.isCommandAllowed).not.toHaveBeenCalled();
+      // Both subcommands remain in confirmation scope
+      expect(details.permissionRules).toEqual([
+        'Bash(git add *)',
+        'Bash(git commit *)',
+      ]);
     });
 
     it('falls back to a Bash-scoped rule if command extraction fails', async () => {
