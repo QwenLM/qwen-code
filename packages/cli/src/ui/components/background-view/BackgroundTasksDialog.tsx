@@ -29,6 +29,14 @@ import {
   type BackgroundTaskEntry,
 } from '@qwen-code/qwen-code-core';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
+import {
+  type DialogEntry,
+  entryId,
+} from '../../hooks/useBackgroundTaskView.js';
+
+// `DialogEntry['status']` widens the shell status union with the agent-only
+// `paused` state, so dialog handlers can switch on a single combined enum.
+type EntryStatus = DialogEntry['status'];
 
 // Tool-name → display-name lookup (`run_shell_command` → `Shell`).
 const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
@@ -46,7 +54,7 @@ function formatActivityLabel(name: string, description: string | undefined) {
   return singleLineDesc ? `${display}(${singleLineDesc})` : display;
 }
 
-const STATUS_VERBS: Record<BackgroundTaskEntry['status'], string> = {
+const STATUS_VERBS: Record<EntryStatus, string> = {
   running: 'Running',
   paused: 'Paused',
   completed: 'Completed',
@@ -61,7 +69,7 @@ interface StatusPresentation {
 }
 
 function terminalStatusPresentation(
-  status: BackgroundTaskEntry['status'],
+  status: EntryStatus,
 ): StatusPresentation | null {
   switch (status) {
     case 'paused':
@@ -93,11 +101,18 @@ function terminalStatusPresentation(
   }
 }
 
-function rowLabel(entry: BackgroundTaskEntry): string {
-  return buildBackgroundEntryLabel(entry, { includePrefix: false });
+function rowLabel(entry: DialogEntry): string {
+  if (entry.kind === 'agent') {
+    return buildBackgroundEntryLabel(entry, { includePrefix: false });
+  }
+  // Shell row: `[shell] <command>`. Prefix mirrors the dialog's "section"
+  // visual hint without needing per-kind section headers (which would
+  // complicate the windowing math). The command itself is plain text and
+  // already truncated by the row renderer's MaxSizedBox.
+  return `[shell] ${entry.command}`;
 }
 
-function elapsedFor(entry: BackgroundTaskEntry): string {
+function elapsedFor(entry: { startTime: number; endTime?: number }): string {
   const elapsedMs = Math.max(
     0,
     (entry.endTime ?? Date.now()) - entry.startTime,
@@ -133,18 +148,18 @@ function truncateToWidth(text: string, maxWidth: number): string {
 // ─── List mode ─────────────────────────────────────────────
 
 const ListBody: React.FC<{
-  entries: readonly BackgroundTaskEntry[];
+  entries: readonly DialogEntry[];
   selectedIndex: number;
   maxRows: number;
 }> = ({ entries, selectedIndex, maxRows }) => {
-  // Keep the "Local agents (N)" section header rendered even when the list
-  // is empty, so the overlay doesn't collapse into a single line of
-  // empty-state text when the last agent finishes while the dialog is open.
+  // Keep the "Background tasks (N)" section header rendered even when the
+  // list is empty, so the overlay doesn't collapse into a single line of
+  // empty-state text when the last task finishes while the dialog is open.
   if (entries.length === 0) {
     return (
       <Box flexDirection="column">
         <Box paddingX={1}>
-          <Text bold>Local agents</Text>
+          <Text bold>Background tasks</Text>
           <Text color={theme.text.secondary}> (0)</Text>
         </Box>
         <Box paddingX={1}>
@@ -179,7 +194,7 @@ const ListBody: React.FC<{
   return (
     <Box flexDirection="column">
       <Box paddingX={1}>
-        <Text bold>Local agents</Text>
+        <Text bold>Background tasks</Text>
         <Text color={theme.text.secondary}> ({entries.length})</Text>
       </Box>
       <Box flexDirection="column">
@@ -200,7 +215,7 @@ const ListBody: React.FC<{
               ? terminal.labelColor
               : theme.text.primary;
           return (
-            <Box key={entry.agentId} flexDirection="row" paddingX={1}>
+            <Box key={entryId(entry)} flexDirection="row" paddingX={1}>
               <Text color={isSelected ? theme.text.accent : undefined}>
                 {isSelected ? '> ' : '  '}
               </Text>
@@ -223,11 +238,22 @@ const ListBody: React.FC<{
 // ─── Detail mode ───────────────────────────────────────────
 
 const DetailBody: React.FC<{
+  entry: DialogEntry;
+  maxHeight: number;
+  maxWidth: number;
+}> = ({ entry, maxHeight, maxWidth }) =>
+  entry.kind === 'agent' ? (
+    <AgentDetailBody entry={entry} maxHeight={maxHeight} maxWidth={maxWidth} />
+  ) : (
+    <ShellDetailBody entry={entry} maxHeight={maxHeight} maxWidth={maxWidth} />
+  );
+
+const AgentDetailBody: React.FC<{
   entry: BackgroundTaskEntry;
   maxHeight: number;
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
-  const title = `${entry.subagentType ?? 'Agent'} \u203A ${rowLabel(entry)}`;
+  const title = `${entry.subagentType ?? 'Agent'} \u203A ${buildBackgroundEntryLabel(entry, { includePrefix: false })}`;
 
   const terminal = terminalStatusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
@@ -349,6 +375,85 @@ const DetailBody: React.FC<{
   );
 };
 
+const ShellDetailBody: React.FC<{
+  entry: import('@qwen-code/qwen-code-core').BackgroundShellEntry;
+  maxHeight: number;
+  maxWidth: number;
+}> = ({ entry, maxHeight, maxWidth }) => {
+  const title = `Shell \u203A ${entry.command}`;
+
+  const terminal = terminalStatusPresentation(entry.status);
+  const dimSubtitleParts: string[] = [elapsedFor(entry)];
+  if (entry.pid !== undefined) {
+    dimSubtitleParts.push(`pid ${entry.pid}`);
+  }
+  if (entry.status === 'completed' && entry.exitCode !== undefined) {
+    dimSubtitleParts.push(`exit ${entry.exitCode}`);
+  }
+
+  const hasError = entry.status === 'failed' && Boolean(entry.error);
+
+  return (
+    <MaxSizedBox
+      maxHeight={maxHeight}
+      maxWidth={maxWidth}
+      overflowDirection="bottom"
+    >
+      <Box>
+        <Text bold color={theme.text.accent}>
+          {title}
+        </Text>
+      </Box>
+      <Box>
+        {terminal && (
+          <Text color={terminal.color}>
+            {`${terminal.icon} ${STATUS_VERBS[entry.status]} \u00B7 `}
+          </Text>
+        )}
+        <Text color={theme.text.secondary}>
+          {dimSubtitleParts.join(' \u00B7 ')}
+        </Text>
+      </Box>
+
+      <Box />
+      <Box>
+        <Text bold dimColor>
+          Working dir
+        </Text>
+      </Box>
+      <Box>
+        <Text wrap="truncate-end">{entry.cwd}</Text>
+      </Box>
+
+      <Box />
+      <Box>
+        <Text bold dimColor>
+          Output file
+        </Text>
+      </Box>
+      <Box>
+        <Text wrap="truncate-end">{entry.outputPath}</Text>
+      </Box>
+
+      {hasError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={theme.status.error}>
+              Error
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.status.error} wrap="wrap">
+              {entry.error}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+    </MaxSizedBox>
+  );
+};
+
 // ─── Dialog shell ──────────────────────────────────────────
 
 interface BackgroundTasksDialogProps {
@@ -384,31 +489,49 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
 
   // List mode row budget: terminal height minus chrome (border 2 + title 1
   // + two marginTops 2 + hint 1) and list header ("N active agents" 1 +
-  // marginTop 1 + "Local agents (N)" 1) = 10.
+  // marginTop 1 + "Background tasks (N)" 1) = 10.
   const listMaxRows = Math.max(3, availableTerminalHeight - 10);
 
-  const selectedEntry = useMemo(
-    () => entries[selectedIndex] ?? null,
-    [entries, selectedIndex],
-  );
+  // Activity tick — bumped whenever the watched agent emits an activity
+  // update, *and* used as a useMemo dep below to refresh the live agent
+  // entry from the registry. The snapshot in useBackgroundTaskView
+  // intentionally only refreshes on `statusChange` (so the footer pill
+  // and AppContainer stay quiet during heavy tool traffic), but the
+  // detail body must see fresh `recentActivities` / `stats` between
+  // those transitions — so we re-read from the registry here.
+  const [activityTick, setActivityTick] = useState(0);
 
-  // Tick up a local counter on each activity callback to force the
-  // detail body to re-render while it's open. The main status
-  // subscription in useBackgroundTaskView intentionally ignores
-  // activity updates so the Footer pill and AppContainer don't re-run
-  // on every tool call a background agent makes.
-  const [, bumpActivity] = useState(0);
-  const selectedAgentId = selectedEntry?.agentId;
+  const selectedEntry = useMemo(() => {
+    const fromSnapshot = entries[selectedIndex] ?? null;
+    if (!fromSnapshot || fromSnapshot.kind !== 'agent') return fromSnapshot;
+    // Re-read the agent from the registry so detail-body fields the
+    // registry mutates between status transitions (recentActivities,
+    // stats) are fresh. The shallow spread inside useBackgroundTaskView
+    // captures `recentActivities` at refresh time, and `appendActivity`
+    // reassigns `entry.recentActivities = next` on the registry object —
+    // so the snapshot's reference is detached after the first activity.
+    const live = config.getBackgroundTaskRegistry().get(fromSnapshot.agentId);
+    return live ? { ...live, kind: 'agent' as const } : fromSnapshot;
+    // activityTick is a dep on purpose: the registry mutation is invisible
+    // to useMemo otherwise and we need to recompute on each activity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entries, selectedIndex, config, activityTick]);
+
+  const selectedEntryId = selectedEntry ? entryId(selectedEntry) : undefined;
+  // Activity callback is agent-only — shells don't emit per-tool events.
+  const selectedAgentIdForActivity =
+    selectedEntry?.kind === 'agent' ? selectedEntry.agentId : undefined;
   useEffect(() => {
-    if (!dialogOpen || dialogMode !== 'detail' || !selectedAgentId) return;
+    if (!dialogOpen || dialogMode !== 'detail' || !selectedAgentIdForActivity)
+      return;
     const registry = config.getBackgroundTaskRegistry();
     const onActivity = (entry: BackgroundTaskEntry) => {
-      if (entry.agentId !== selectedAgentId) return;
-      bumpActivity((n) => n + 1);
+      if (entry.agentId !== selectedAgentIdForActivity) return;
+      setActivityTick((n) => n + 1);
     };
     registry.setActivityChangeCallback(onActivity);
     return () => registry.setActivityChangeCallback(undefined);
-  }, [dialogOpen, dialogMode, config, selectedAgentId]);
+  }, [dialogOpen, dialogMode, config, selectedAgentIdForActivity]);
 
   // Wall-clock tick for the running agent's duration. Activity callbacks
   // fire when tools run, but duration needs to advance even when the agent
@@ -418,13 +541,13 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     if (
       !dialogOpen ||
       dialogMode !== 'detail' ||
-      !selectedAgentId ||
+      !selectedEntryId ||
       selectedStatus !== 'running'
     )
       return;
-    const id = setInterval(() => bumpActivity((n) => n + 1), 1000);
+    const id = setInterval(() => setActivityTick((n) => n + 1), 1000);
     return () => clearInterval(id);
-  }, [dialogOpen, dialogMode, selectedAgentId, selectedStatus]);
+  }, [dialogOpen, dialogMode, selectedEntryId, selectedStatus]);
 
   // Auto-fallback to the list view when the selected agent reaches a
   // terminal state while the user is watching it live. We only exit on
@@ -433,8 +556,8 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   // view itself renders terminal state fine, so this is a UX choice
   // (return focus to the running roster) rather than a correctness fix.
   const initialDetailStatusRef = useRef<{
-    agentId: string;
-    status: BackgroundTaskEntry['status'];
+    entryId: string;
+    status: EntryStatus;
   } | null>(null);
   useEffect(() => {
     if (!dialogOpen || dialogMode !== 'detail') {
@@ -445,18 +568,18 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     // drop back to the list so we don't sit on a "No entry to show" screen.
     // Hitting this path now is unlikely — terminal entries stay in the
     // registry — but the entry could disappear if the registry is reset.
-    if (!selectedAgentId) {
+    if (!selectedEntryId) {
       initialDetailStatusRef.current = null;
       exitDetail();
       return;
     }
     const seen = initialDetailStatusRef.current;
-    if (!seen || seen.agentId !== selectedAgentId) {
+    if (!seen || seen.entryId !== selectedEntryId) {
       // First render in detail mode for this entry — remember the status we
       // opened with so we can detect a transition away from 'running' later.
       if (selectedStatus) {
         initialDetailStatusRef.current = {
-          agentId: selectedAgentId,
+          entryId: selectedEntryId,
           status: selectedStatus,
         };
       }
@@ -469,7 +592,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     ) {
       exitDetail();
     }
-  }, [dialogOpen, dialogMode, selectedAgentId, selectedStatus, exitDetail]);
+  }, [dialogOpen, dialogMode, selectedEntryId, selectedStatus, exitDetail]);
 
   useKeypress(
     (key) => {

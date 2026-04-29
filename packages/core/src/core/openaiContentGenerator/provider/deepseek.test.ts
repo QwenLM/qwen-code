@@ -178,6 +178,89 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
         content: 'Hello \n\n[Unsupported content type: image_url]',
       });
     });
+
+    // https://github.com/QwenLM/qwen-code/issues/3695 — DeepSeek's thinking
+    // mode rejects subsequent requests when a prior tool-calling assistant
+    // turn omits reasoning_content, even if the model itself returned no
+    // reasoning text. The provider must always send the field.
+    it('injects empty reasoning_content on tool-calling assistant turns missing it', () => {
+      const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'deepseek-v4-flash',
+        messages: [
+          { role: 'user', content: 'list markdown files' },
+          {
+            role: 'assistant',
+            content: null,
+            tool_calls: [
+              {
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'glob', arguments: '{"pattern":"**/*.md"}' },
+              },
+            ],
+          },
+          {
+            role: 'tool',
+            tool_call_id: 'call_1',
+            content: 'Found 2 matching file(s)',
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(originalRequest, userPromptId);
+
+      const assistant = result.messages?.[1] as {
+        role: string;
+        reasoning_content?: string;
+      };
+      expect(assistant.role).toBe('assistant');
+      expect(assistant.reasoning_content).toBe('');
+    });
+
+    it('preserves existing reasoning_content on tool-calling assistant turns', () => {
+      const originalRequest = {
+        model: 'deepseek-v4-flash',
+        messages: [
+          { role: 'user' as const, content: 'list markdown files' },
+          {
+            role: 'assistant' as const,
+            content: null,
+            reasoning_content: 'Let me glob first.',
+            tool_calls: [
+              {
+                id: 'call_1',
+                type: 'function' as const,
+                function: { name: 'glob', arguments: '{"pattern":"**/*.md"}' },
+              },
+            ],
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(originalRequest, userPromptId);
+
+      const assistant = result.messages?.[1] as {
+        reasoning_content?: string;
+      };
+      expect(assistant.reasoning_content).toBe('Let me glob first.');
+    });
+
+    it('does not add reasoning_content to assistant turns without tool_calls', () => {
+      const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'deepseek-v4-flash',
+        messages: [
+          { role: 'user', content: 'hi' },
+          { role: 'assistant', content: 'hello' },
+        ],
+      };
+
+      const result = provider.buildRequest(originalRequest, userPromptId);
+
+      const assistant = result.messages?.[1] as {
+        reasoning_content?: string;
+      };
+      expect(assistant.reasoning_content).toBeUndefined();
+    });
   });
 
   describe('getDefaultGenerationConfig', () => {
