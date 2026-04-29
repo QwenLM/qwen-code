@@ -852,6 +852,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -880,6 +881,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -908,6 +910,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -936,6 +939,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -964,6 +968,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -993,6 +998,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1021,6 +1027,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1050,6 +1057,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1079,6 +1087,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1108,6 +1117,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1137,6 +1147,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1168,6 +1179,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1197,6 +1209,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1228,6 +1241,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
