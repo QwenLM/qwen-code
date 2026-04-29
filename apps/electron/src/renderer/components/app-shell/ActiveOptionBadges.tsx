@@ -515,7 +515,6 @@ function PermissionModeDropdown({ permissionMode, onPermissionModeChange, sessio
           commandGroups={DEFAULT_SLASH_COMMAND_GROUPS}
           activeCommands={activeCommands}
           onSelect={handleSelect}
-          showFilter
         />
       </PopoverContent>
     </Popover>

@@ -288,7 +288,11 @@ function CommandItemContent({
   showDescription?: boolean
 }) {
   const { t } = useTranslation()
-  const label = MODE_COMMAND_IDS.has(command.id) ? t(`mode.${command.id}`, command.label) : command.label
+  const isModeCommand = MODE_COMMAND_IDS.has(command.id)
+  const label = isModeCommand ? t(`mode.${command.id}`, command.label) : command.label
+  const activeIndicatorClassName = isModeCommand
+    ? PERMISSION_MODE_CONFIG[command.id as PermissionMode].colorClass.bg
+    : 'bg-accent'
   return (
     <>
       <div className="shrink-0 text-muted-foreground">{command.icon}</div>
@@ -303,7 +307,7 @@ function CommandItemContent({
         )}
       </div>
       {isActive && (
-        <div className="shrink-0 h-4 w-4 rounded-full bg-current flex items-center justify-center">
+        <div className={cn("shrink-0 h-4 w-4 rounded-full flex items-center justify-center", activeIndicatorClassName)}>
           <Check className="h-2.5 w-2.5 text-white dark:text-black" strokeWidth={3} />
         </div>
       )}
