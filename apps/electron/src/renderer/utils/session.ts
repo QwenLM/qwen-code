@@ -1,5 +1,6 @@
 import * as React from "react"
 import i18next from "i18next"
+import { truncateTitle } from "@craft-agent/shared/utils/title-generator"
 import type { Session, Message } from "../../shared/types"
 import type { SessionMeta } from "../atoms/sessions"
 import type { SessionStatusId } from "../config/session-status-config"
@@ -26,7 +27,7 @@ function sanitizePreview(content: string): string {
  */
 export function getSessionTitle(session: SessionLike | SessionMeta): string {
   if (session.name) {
-    return session.name
+    return truncateTitle(session.name)
   }
 
   // Check loaded messages first (only available on full Session)
@@ -35,8 +36,7 @@ export function getSessionTitle(session: SessionLike | SessionMeta): string {
     if (firstUserMessage?.content) {
       const sanitized = sanitizePreview(firstUserMessage.content)
       if (sanitized) {
-        const trimmed = sanitized.slice(0, 50)
-        return trimmed.length < sanitized.length ? trimmed + '…' : trimmed
+        return truncateTitle(sanitized)
       }
     }
   }
@@ -45,8 +45,7 @@ export function getSessionTitle(session: SessionLike | SessionMeta): string {
   if (session.preview) {
     const sanitized = sanitizePreview(session.preview)
     if (sanitized) {
-      const trimmed = sanitized.slice(0, 50)
-      return trimmed.length < sanitized.length ? trimmed + '…' : trimmed
+      return truncateTitle(sanitized)
     }
   }
 

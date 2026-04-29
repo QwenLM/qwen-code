@@ -103,12 +103,12 @@ export function PanelHeader({
       initial={false}
       animate={{ opacity: title ? 1 : 0 }}
       transition={{ duration: 0.15 }}
-      className="flex items-center gap-1"
+      className="flex min-w-0 max-w-full items-center gap-1"
     >
       <h1 className={cn(
-        "text-sm font-semibold truncate font-sans leading-tight",
+        "min-w-0 max-w-full text-sm font-semibold truncate font-sans leading-tight",
         isRegeneratingTitle && "animate-shimmer-text"
-      )}>{title}</h1>
+      )} title={title}>{title}</h1>
       {badge}
     </motion.div>
   )
@@ -128,7 +128,7 @@ export function PanelHeader({
               <button
                 onClick={() => setDropdownOpen(true)}
                 className={cn(
-                  "flex items-center gap-1 px-2 py-1 rounded-md titlebar-no-drag min-w-0",
+                  "flex max-w-full items-center gap-1 px-2 py-1 rounded-md titlebar-no-drag min-w-0",
                   "hover:bg-foreground/[0.03] transition-colors",
                   "focus:outline-none focus-visible:ring-1 focus-visible:ring-ring",
                   dropdownOpen && "bg-foreground/[0.03]"

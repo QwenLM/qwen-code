@@ -7,11 +7,27 @@
  * - CodexAgent: Uses OpenAI SDK
  */
 
+/** Max characters used for persisted/displayed session titles. */
+export const MAX_TITLE_LENGTH = 60;
+
 /** Slice text at the last word boundary within `max` characters. */
 export function sliceAtWord(text: string, max: number): string {
   if (text.length <= max) return text;
   const lastSpace = text.lastIndexOf(' ', max);
   return lastSpace > 0 ? text.slice(0, lastSpace) : text.slice(0, max);
+}
+
+/** Truncate a title so the returned string never exceeds `max` characters. */
+export function truncateTitle(title: string, max = MAX_TITLE_LENGTH): string {
+  const cleaned = title.trim();
+  if (cleaned.length <= max) return cleaned;
+  if (max <= 0) return '';
+  if (max === 1) return '…';
+
+  const sliceMax = max - 1;
+  const sliced = sliceAtWord(cleaned, sliceMax).trimEnd();
+  const prefix = sliced.length > 0 ? sliced : cleaned.slice(0, sliceMax);
+  return `${prefix}…`;
 }
 
 /**
@@ -221,9 +237,9 @@ export function validateTitle(title: string | null | undefined): string | null {
 
   cleaned = cleaned.trim();
 
-  // Reject empty, too long, or too many words (likely preamble leakage)
-  if (cleaned.length === 0 || cleaned.length >= 100) return null;
+  // Reject empty or too many words (likely preamble leakage)
+  if (cleaned.length === 0) return null;
   if (cleaned.split(/\s+/).length > MAX_TITLE_WORDS) return null;
 
-  return cleaned;
+  return truncateTitle(cleaned);
 }

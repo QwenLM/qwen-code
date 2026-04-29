@@ -336,6 +336,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   // Get display title for header - use getSessionTitle for consistent fallback logic with SessionList
   // Priority: name > first user message > preview > "New chat"
   const displayTitle = session ? getSessionTitle(session) : (sessionMeta ? getSessionTitle(sessionMeta) : t('chat.session'))
+  const renameInitialTitle = session?.name || sessionMeta?.name || displayTitle
   const isFlagged = session?.isFlagged || sessionMeta?.isFlagged || false
   const isArchived = session?.isArchived || sessionMeta?.isArchived || false
   const sharedUrl = session?.sharedUrl || sessionMeta?.sharedUrl || null
@@ -353,9 +354,9 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
 
   // Session action handlers
   const handleRename = React.useCallback(() => {
-    setRenameName(displayTitle)
+    setRenameName(renameInitialTitle)
     setRenameDialogOpen(true)
-  }, [displayTitle])
+  }, [renameInitialTitle])
 
   const handleRenameSubmit = React.useCallback(() => {
     if (renameName.trim() && renameName.trim() !== displayTitle) {

@@ -71,6 +71,7 @@ export function SessionItem({
   }))
   const hasPendingPrompt = ctx.hasPendingPrompt?.(item.id) ?? false
   const previewText = isCompactMode ? getSessionPreviewText(item) : null
+  const renameTitle = item.name || title
   const messagingBindingsBySession = useAtomValue(messagingBindingsBySessionAtom)
   const sessionBindings = messagingBindingsBySession.get(item.id) ?? []
   const hasMessagingBinding = sessionBindings.length > 0
@@ -124,7 +125,7 @@ export function SessionItem({
           sessionStatuses={ctx.sessionStatuses}
           labels={ctx.labels}
           onLabelsChange={ctx.onLabelsChange ? (ls) => ctx.onLabelsChange!(item.id, ls) : undefined}
-          onRename={() => ctx.onRenameClick(item.id, title)}
+          onRename={() => ctx.onRenameClick(item.id, renameTitle)}
           onFlag={() => ctx.onFlag?.(item.id)}
           onUnflag={() => ctx.onUnflag?.(item.id)}
           onArchive={() => ctx.onArchive?.(item.id)}

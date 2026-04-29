@@ -5,6 +5,8 @@ import {
   isLowSignal,
   sanitizeLanguage,
   validateTitle,
+  truncateTitle,
+  MAX_TITLE_LENGTH,
   buildTitlePrompt,
   buildRegenerateTitlePrompt,
 } from '../title-generator.ts';
@@ -34,6 +36,27 @@ describe('sliceAtWord', () => {
     const text = 'x ' + 'a'.repeat(500);
     const result = sliceAtWord(text, 10);
     expect(result).toBe('x');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// truncateTitle
+// ---------------------------------------------------------------------------
+describe('truncateTitle', () => {
+  test('returns short titles unchanged', () => {
+    expect(truncateTitle('Dark Mode Support')).toBe('Dark Mode Support');
+  });
+
+  test('truncates at a word boundary and includes ellipsis within the cap', () => {
+    const result = truncateTitle('one two three four five six', 16);
+    expect(result).toBe('one two three…');
+    expect(result.length).toBeLessThanOrEqual(16);
+  });
+
+  test('hard-cuts long words within the cap', () => {
+    const result = truncateTitle('a'.repeat(MAX_TITLE_LENGTH + 10));
+    expect(result).toBe(`${'a'.repeat(MAX_TITLE_LENGTH - 1)}…`);
+    expect(result.length).toBe(MAX_TITLE_LENGTH);
   });
 });
 
@@ -289,12 +312,14 @@ describe('validateTitle', () => {
 
   // --- Length/word-count bounds ---
 
-  test('rejects titles >= 100 chars', () => {
-    expect(validateTitle('a'.repeat(100))).toBeNull();
+  test('truncates titles over the character cap', () => {
+    const result = validateTitle('a'.repeat(MAX_TITLE_LENGTH + 10));
+    expect(result).toBe(`${'a'.repeat(MAX_TITLE_LENGTH - 1)}…`);
+    expect(result?.length).toBe(MAX_TITLE_LENGTH);
   });
 
-  test('accepts title of 99 chars', () => {
-    expect(validateTitle('a'.repeat(99))).toBe('a'.repeat(99));
+  test('accepts title at the character cap', () => {
+    expect(validateTitle('a'.repeat(MAX_TITLE_LENGTH))).toBe('a'.repeat(MAX_TITLE_LENGTH));
   });
 
   test('rejects titles with more than 10 words', () => {

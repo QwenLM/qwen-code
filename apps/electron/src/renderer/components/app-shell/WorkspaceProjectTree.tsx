@@ -165,6 +165,7 @@ function ProjectSessionRow({
   onSelect: () => void
 }) {
   const title = getSessionTitle(session)
+  const renameTitle = session.name || title
   const row = (
     <button
       type="button"
@@ -213,7 +214,7 @@ function ProjectSessionRow({
             sessionStatuses={menuConfig.sessionStatuses}
             labels={menuConfig.labels}
             onLabelsChange={menuConfig.onLabelsChange ? (labels) => menuConfig.onLabelsChange!(session.id, labels) : undefined}
-            onRename={() => menuConfig.onRenameClick(session.id, title)}
+            onRename={() => menuConfig.onRenameClick(session.id, renameTitle)}
             onFlag={() => menuConfig.onFlag?.(session.id)}
             onUnflag={() => menuConfig.onUnflag?.(session.id)}
             onArchive={() => menuConfig.onArchive?.(session.id)}
