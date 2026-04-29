@@ -1643,8 +1643,6 @@ export const AppContainer = (props: AppContainerProps) => {
     pager: settings.merged.tools?.shell?.pager,
     showColor: settings.merged.tools?.shell?.showColor,
   });
-  const isInitialMount = useRef(true);
-
   useEffect(() => {
     if (activePtyId) {
       ShellExecutionService.resizePty(
@@ -1661,21 +1659,6 @@ export const AppContainer = (props: AppContainerProps) => {
       setShowIdeRestartPrompt(true);
     }
   }, [ideNeedsRestart]);
-
-  useEffect(() => {
-    if (isInitialMount.current) {
-      isInitialMount.current = false;
-      return;
-    }
-
-    const handler = setTimeout(() => {
-      refreshStatic();
-    }, 300);
-
-    return () => {
-      clearTimeout(handler);
-    };
-  }, [terminalWidth, refreshStatic]);
 
   useEffect(() => {
     const unsubscribe = ideContextStore.subscribe(setIdeContextState);
