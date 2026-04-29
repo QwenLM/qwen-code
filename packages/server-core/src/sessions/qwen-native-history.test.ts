@@ -98,6 +98,262 @@ describe('Qwen native history loading', () => {
     expect(imported?.llmConnection).toBe('qwen-code')
   })
 
+  it('skips placeholder provider-native sessions with no renderable history', async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), 'craft-managed-workspace-'))
+    const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'))
+    tempRoots.push(workspaceRoot, projectRoot)
+
+    const sessionId = '4b0597de-374c-42c2-a032-58351d825115'
+    const timestamp = Date.parse('2026-04-24T05:41:59.862Z')
+    saveWorkspaceConfig(workspaceRoot, {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      defaults: {
+        defaultLlmConnection: 'qwen-code',
+        workingDirectory: projectRoot,
+      },
+      localMcpServers: { enabled: true },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    })
+
+    let loadCalls = 0
+    const manager = new SessionManager({
+      createExternalSessionAgent: () => ({
+        listSessions: async () => ({
+          sessions: [{
+            sessionId,
+            cwd: projectRoot,
+            title: null,
+            updatedAt: new Date(timestamp).toISOString(),
+          }],
+        }),
+        loadSessionMessages: async (requestedSessionId: string, options?: { cwd?: string }) => {
+          loadCalls += 1
+          expect(requestedSessionId).toBe(sessionId)
+          expect(options?.cwd).toBe(projectRoot)
+          return []
+        },
+        destroy: () => {},
+        dispose: () => {},
+      } as unknown as AgentBackend),
+    })
+
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    }
+
+    await (manager as unknown as {
+      doRefreshExternalSessionsForWorkspace: (workspace: Workspace) => Promise<void>
+    }).doRefreshExternalSessionsForWorkspace(workspace)
+
+    expect(loadCalls).toBe(1)
+    expect(loadSession(workspaceRoot, sessionId)).toBeNull()
+    expect(manager.getSessions(workspace.id).some(session => session.id === sessionId)).toBe(false)
+  })
+
+  it('removes existing empty placeholder mirrors from provider-native sync', async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), 'craft-managed-workspace-'))
+    const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'))
+    tempRoots.push(workspaceRoot, projectRoot)
+
+    const sessionId = '5ed6265d-321d-4dc4-b186-8c69de6e20ba'
+    const timestamp = Date.parse('2026-04-24T05:41:59.862Z')
+    saveWorkspaceConfig(workspaceRoot, {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      defaults: {
+        defaultLlmConnection: 'qwen-code',
+        workingDirectory: projectRoot,
+      },
+      localMcpServers: { enabled: true },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    })
+
+    await saveSession({
+      id: sessionId,
+      workspaceRootPath: workspaceRoot,
+      sdkSessionId: sessionId,
+      sdkCwd: projectRoot,
+      workingDirectory: projectRoot,
+      name: '(session)',
+      createdAt: timestamp,
+      lastUsedAt: timestamp,
+      lastMessageAt: timestamp,
+      permissionMode: 'ask',
+      llmConnection: 'qwen-code',
+      connectionLocked: true,
+      model: 'glm-5.1(openai)',
+      thinkingLevel: 'medium',
+      messages: [],
+      tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 },
+    })
+
+    const manager = new SessionManager({
+      createExternalSessionAgent: () => ({
+        listSessions: async () => ({
+          sessions: [{
+            sessionId,
+            cwd: projectRoot,
+            title: '(session)',
+            updatedAt: new Date(timestamp).toISOString(),
+          }],
+        }),
+        loadSessionMessages: async () => [],
+        destroy: () => {},
+        dispose: () => {},
+      } as unknown as AgentBackend),
+    })
+
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    }
+    const managed = createManagedSession({
+      id: sessionId,
+      sdkSessionId: sessionId,
+      sdkCwd: projectRoot,
+      workingDirectory: projectRoot,
+      name: '(session)',
+      createdAt: timestamp,
+      lastUsedAt: timestamp,
+      lastMessageAt: timestamp,
+      messageCount: 0,
+      llmConnection: 'qwen-code',
+      connectionLocked: true,
+      model: 'glm-5.1(openai)',
+      thinkingLevel: 'medium',
+    }, workspace)
+    ;(manager as unknown as { sessions: Map<string, typeof managed> }).sessions.set(sessionId, managed)
+
+    await (manager as unknown as {
+      doRefreshExternalSessionsForWorkspace: (workspace: Workspace) => Promise<void>
+    }).doRefreshExternalSessionsForWorkspace(workspace)
+
+    expect(loadSession(workspaceRoot, sessionId)).toBeNull()
+    expect(manager.getSessions(workspace.id).some(session => session.id === sessionId)).toBe(false)
+  })
+
+  it('repairs placeholder mirrors that only captured slash command output', async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), 'craft-managed-workspace-'))
+    const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'))
+    tempRoots.push(workspaceRoot, projectRoot)
+
+    const sessionId = 'b1e2b1a0-8ea5-4af5-85ba-dff6232c9c02'
+    const invocationTimestamp = Date.parse('2026-03-25T07:36:47.100Z')
+    const resultTimestamp = Date.parse('2026-03-25T07:36:53.143Z')
+    const output = 'This may take a couple minutes. Sit tight!Insight report generated successfully!'
+    saveWorkspaceConfig(workspaceRoot, {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      defaults: {
+        defaultLlmConnection: 'qwen-code',
+        workingDirectory: projectRoot,
+      },
+      localMcpServers: { enabled: true },
+      createdAt: invocationTimestamp,
+      updatedAt: invocationTimestamp,
+    })
+
+    await saveSession({
+      id: sessionId,
+      workspaceRootPath: workspaceRoot,
+      sdkSessionId: sessionId,
+      sdkCwd: projectRoot,
+      workingDirectory: projectRoot,
+      name: '(session)',
+      createdAt: invocationTimestamp,
+      lastUsedAt: resultTimestamp,
+      lastMessageAt: resultTimestamp,
+      permissionMode: 'ask',
+      llmConnection: 'qwen-code',
+      connectionLocked: true,
+      model: 'glm-5.1(openai)',
+      thinkingLevel: 'medium',
+      messages: [{ id: 'old-output', type: 'assistant', content: output, timestamp: resultTimestamp }],
+      tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 },
+    })
+
+    const nativeMessages: Message[] = [
+      { id: 'qwen-slash-1', role: 'user', content: '/insight', timestamp: invocationTimestamp },
+      { id: 'qwen-output-1', role: 'assistant', content: output, timestamp: resultTimestamp },
+    ]
+    let loadCalls = 0
+    const manager = new SessionManager({
+      createExternalSessionAgent: () => ({
+        listSessions: async () => ({
+          sessions: [{
+            sessionId,
+            cwd: projectRoot,
+            title: '(session)',
+            updatedAt: new Date(resultTimestamp).toISOString(),
+          }],
+        }),
+        loadSessionMessages: async (requestedSessionId: string, options?: { cwd?: string }) => {
+          loadCalls += 1
+          expect(requestedSessionId).toBe(sessionId)
+          expect(options?.cwd).toBe(projectRoot)
+          return nativeMessages
+        },
+        destroy: () => {},
+        dispose: () => {},
+      } as unknown as AgentBackend),
+    })
+
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: invocationTimestamp,
+    }
+    const managed = createManagedSession({
+      id: sessionId,
+      sdkSessionId: sessionId,
+      sdkCwd: projectRoot,
+      workingDirectory: projectRoot,
+      name: '(session)',
+      createdAt: invocationTimestamp,
+      lastUsedAt: resultTimestamp,
+      lastMessageAt: resultTimestamp,
+      messageCount: 1,
+      lastMessageRole: 'assistant',
+      llmConnection: 'qwen-code',
+      connectionLocked: true,
+      model: 'glm-5.1(openai)',
+      thinkingLevel: 'medium',
+    }, workspace)
+    ;(manager as unknown as { sessions: Map<string, typeof managed> }).sessions.set(sessionId, managed)
+
+    await (manager as unknown as {
+      doRefreshExternalSessionsForWorkspace: (workspace: Workspace) => Promise<void>
+    }).doRefreshExternalSessionsForWorkspace(workspace)
+
+    const repaired = await manager.getSession(sessionId)
+    await manager.flushSession(sessionId)
+
+    expect(loadCalls).toBe(1)
+    expect(repaired?.messages.map(message => [message.role, message.content])).toEqual([
+      ['user', '/insight'],
+      ['assistant', output],
+    ])
+    expect(loadSession(workspaceRoot, sessionId)?.messages.map(message => [message.type, message.content])).toEqual([
+      ['user', '/insight'],
+      ['assistant', output],
+    ])
+  })
+
   it('backfills an already-loaded empty local session from provider-native history', async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), 'craft-qwen-history-'))
     tempRoots.push(workspaceRoot)

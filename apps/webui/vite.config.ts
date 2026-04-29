@@ -3,6 +3,13 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { resolve } from 'path'
 
+function devServerPort(envName: string, fallback: number): number {
+  const value = process.env[envName]
+  if (!value) return fallback
+  const port = Number(value)
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : fallback
+}
+
 export default defineConfig({
   plugins: [
     react({
@@ -85,7 +92,7 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5175,
+    port: devServerPort('CRAFT_WEBUI_DEV_PORT', 5175),
     open: false,
   },
 })

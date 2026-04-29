@@ -1,6 +1,6 @@
-import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'node:fs'
+import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync } from 'node:fs'
 import { uptime as osUptime } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { OAuthFlowStore } from '@craft-agent/shared/auth'
 import { ensureConfigDir, loadStoredConfig, saveConfig } from '@craft-agent/shared/config'
 import { CONFIG_DIR } from '@craft-agent/shared/config/paths'
@@ -113,7 +113,7 @@ export function generateServerToken(): string {
 // Startup lock file
 // ---------------------------------------------------------------------------
 
-const LOCK_FILE = join(CONFIG_DIR, '.server.lock')
+const LOCK_FILE = process.env.CRAFT_SERVER_LOCK_FILE || join(CONFIG_DIR, '.server.lock')
 
 interface LockPayload {
   pid: number
@@ -163,6 +163,8 @@ function isLockFromPreviousBoot(startedAt: number): boolean {
 }
 
 function acquireServerLock(logger: PlatformServices['logger']): void {
+  mkdirSync(dirname(LOCK_FILE), { recursive: true })
+
   if (existsSync(LOCK_FILE)) {
     try {
       const content = readFileSync(LOCK_FILE, 'utf-8')

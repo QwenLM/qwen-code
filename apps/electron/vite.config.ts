@@ -8,6 +8,13 @@ import { resolve } from 'path'
 // SENTRY_ORG, SENTRY_PROJECT to CI secrets. See CLAUDE.md "Sentry Error Tracking" section.
 // import { sentryVitePlugin } from '@sentry/vite-plugin'
 
+function devServerPort(envName: string, fallback: number): number {
+  const value = process.env[envName]
+  if (!value) return fallback
+  const port = Number(value)
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : fallback
+}
+
 export default defineConfig({
   plugins: [
     react({
@@ -68,7 +75,7 @@ export default defineConfig({
     }
   },
   server: {
-    port: 5173,
+    port: devServerPort('CRAFT_VITE_PORT', 5173),
     open: false
   }
 })

@@ -3,6 +3,13 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { resolve } from 'path'
 
+function devServerPort(envName: string, fallback: number): number {
+  const value = process.env[envName]
+  if (!value) return fallback
+  const port = Number(value)
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : fallback
+}
+
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -27,7 +34,7 @@ export default defineConfig({
     include: ['react', 'react-dom'],
   },
   server: {
-    port: 5174, // Different from Electron dev server
+    port: devServerPort('CRAFT_VIEWER_PORT', 5174), // Different from Electron dev server
     open: true,
     proxy: {
       // Proxy API requests to production R2 during local dev

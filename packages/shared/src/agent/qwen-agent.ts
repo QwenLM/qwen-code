@@ -6,6 +6,9 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir, platform, tmpdir } from 'node:os';
+import { isAbsolute, join, resolve } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 
 import {
@@ -65,6 +68,11 @@ type HistoryCollector = {
   updates: JsonRecord[];
 };
 
+type SlashCommandInvocation = {
+  rawCommand: string;
+  timestamp: number;
+};
+
 const QWEN_CONTEXT_WINDOW = 1_000_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_INITIALIZE_TIMEOUT_MS = 60_000;
@@ -98,6 +106,39 @@ function toQwenModelDefinition(value: unknown): ModelDefinition | null {
 
 function toRecord(value: unknown): JsonRecord {
   return isRecord(value) ? value : {};
+}
+
+function parseQwenTimestamp(value: unknown): number | undefined {
+  const raw = asString(value);
+  if (!raw) return undefined;
+  const timestamp = Date.parse(raw);
+  return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+
+function sanitizeQwenCwd(cwd: string): string {
+  const normalizedCwd = platform() === 'win32' ? cwd.toLowerCase() : cwd;
+  return normalizedCwd.replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+function resolveQwenRuntimeDir(dir: string): string {
+  if (dir === '~') return homedir();
+  if (dir.startsWith('~/') || dir.startsWith('~\\')) {
+    return join(homedir(), ...dir.slice(2).split(/[/\\]+/).filter(Boolean));
+  }
+  return isAbsolute(dir) ? dir : resolve(dir);
+}
+
+function getQwenRuntimeDir(): string {
+  const envDir = process.env.QWEN_RUNTIME_DIR;
+  if (envDir) return resolveQwenRuntimeDir(envDir);
+
+  const homeDir = homedir();
+  return homeDir ? join(homeDir, '.qwen') : join(tmpdir(), '.qwen');
+}
+
+function getQwenTranscriptPath(sessionId: string, cwd: string): string {
+  const projectId = sanitizeQwenCwd(resolve(cwd));
+  return join(getQwenRuntimeDir(), 'projects', projectId, 'chats', `${sessionId}.jsonl`);
 }
 
 function jsonStringify(value: unknown): string {
@@ -555,7 +596,8 @@ export class QwenAgent extends BaseAgent {
         mcpServers: this.buildAcpMcpServers(),
       }), 60_000);
 
-      return this.buildHistoryMessages(sessionId, collector.updates);
+      const messages = this.buildHistoryMessages(sessionId, collector.updates);
+      return this.mergeSlashCommandInvocationMessages(sessionId, messages, options.cwd || this.resolvedCwd());
     } finally {
       this.historyCollectors.delete(sessionId);
     }
@@ -1250,6 +1292,98 @@ export class QwenAgent extends BaseAgent {
         default:
           break;
       }
+    }
+
+    return messages;
+  }
+
+  private mergeSlashCommandInvocationMessages(sessionId: string, messages: Message[], cwd: string): Message[] {
+    const slashMessages = this.loadSlashCommandInvocationMessages(sessionId, cwd);
+    if (slashMessages.length === 0) return messages;
+
+    const additions = slashMessages.filter((slashMessage) =>
+      !messages.some((message) => this.isSameSlashCommandInvocationMessage(message, slashMessage)),
+    );
+    if (additions.length === 0) return messages;
+
+    return [...messages, ...additions]
+      .map((message, index) => ({ message, index }))
+      .sort((a, b) => {
+        const timestampDelta = a.message.timestamp - b.message.timestamp;
+        if (timestampDelta !== 0) return timestampDelta;
+        if (a.message.role === 'user' && b.message.role !== 'user') return -1;
+        if (a.message.role !== 'user' && b.message.role === 'user') return 1;
+        return a.index - b.index;
+      })
+      .map(({ message }) => message);
+  }
+
+  private isSameSlashCommandInvocationMessage(message: Message, slashMessage: Message): boolean {
+    return message.role === 'user'
+      && message.content.trim() === slashMessage.content.trim()
+      && Math.abs(message.timestamp - slashMessage.timestamp) <= 10_000;
+  }
+
+  private loadSlashCommandInvocationMessages(sessionId: string, cwd: string): Message[] {
+    const transcriptPath = getQwenTranscriptPath(sessionId, cwd);
+    if (!existsSync(transcriptPath)) return [];
+
+    const invocations = new Map<string, SlashCommandInvocation>();
+    const seenResults = new Set<string>();
+    const messages: Message[] = [];
+    let idCounter = 0;
+
+    try {
+      const lines = readFileSync(transcriptPath, 'utf8').split(/\r?\n/);
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        let record: JsonRecord;
+        try {
+          record = toRecord(JSON.parse(trimmed));
+        } catch {
+          continue;
+        }
+
+        if (record.type !== 'system' || record.subtype !== 'slash_command') continue;
+
+        const payload = toRecord(record.systemPayload);
+        const rawCommand = asString(payload.rawCommand)?.trim();
+        if (!rawCommand) continue;
+
+        const phase = asString(payload.phase);
+        const timestamp = parseQwenTimestamp(record.timestamp) ?? Date.now();
+        if (phase === 'invocation') {
+          const uuid = asString(record.uuid);
+          if (uuid) invocations.set(uuid, { rawCommand, timestamp });
+          continue;
+        }
+
+        if (phase !== 'result') continue;
+
+        const outputItems = Array.isArray(payload.outputHistoryItems) ? payload.outputHistoryItems : [];
+        const hasRenderableOutput = outputItems
+          .filter(isRecord)
+          .some((item) => !!asString(item.text)?.trim());
+        if (!hasRenderableOutput) continue;
+
+        const parentUuid = asString(record.parentUuid);
+        const resultKey = parentUuid || `${rawCommand}:${timestamp}`;
+        if (seenResults.has(resultKey)) continue;
+        seenResults.add(resultKey);
+
+        const invocation = parentUuid ? invocations.get(parentUuid) : undefined;
+        messages.push({
+          id: `qwen-${sessionId}-slash-${++idCounter}`,
+          role: 'user',
+          content: invocation?.rawCommand || rawCommand,
+          timestamp: invocation?.timestamp ?? timestamp,
+        });
+      }
+    } catch (error) {
+      this.debug(`Failed to read Qwen slash command history from ${transcriptPath}: ${error instanceof Error ? error.message : String(error)}`);
+      return [];
     }
 
     return messages;

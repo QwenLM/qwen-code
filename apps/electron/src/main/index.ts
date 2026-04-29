@@ -6,7 +6,19 @@ loadShellEnv()
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, nativeTheme, shell } from 'electron'
 import { createHash, randomUUID } from 'crypto'
 import { hostname, homedir } from 'os'
+import { mkdirSync } from 'fs'
 import * as Sentry from '@sentry/electron/main'
+
+// Multi-worktree dev instances need separate Electron userData directories.
+// This isolates Chromium's single-instance lock, cache, cookies, and local storage.
+if (process.env.CRAFT_USER_DATA_DIR) {
+  try {
+    mkdirSync(process.env.CRAFT_USER_DATA_DIR, { recursive: true })
+    app.setPath('userData', process.env.CRAFT_USER_DATA_DIR)
+  } catch (error) {
+    console.warn('[main] Failed to set CRAFT_USER_DATA_DIR:', error)
+  }
+}
 
 // Initialize Sentry error tracking as early as possible after app import.
 // Only enabled in production (packaged) builds to avoid noise during development.
@@ -282,6 +294,10 @@ app.on('open-url', (event, url) => {
 // Handle deeplink on Windows/Linux (single instance check)
 const gotTheLock = app.requestSingleInstanceLock()
 if (!gotTheLock) {
+  mainLog.warn('Another Craft Agents instance already owns the Electron single-instance lock; quitting.', {
+    userData: app.getPath('userData'),
+    appName: app.getName(),
+  })
   app.quit()
 } else {
   app.on('second-instance', (_event, commandLine, _workingDirectory) => {

@@ -5,11 +5,10 @@
 
 import { spawn, type Subprocess } from "bun";
 import { existsSync, rmSync, cpSync, readFileSync, statSync, mkdirSync } from "fs";
-import { createHash } from "crypto";
-import { execFileSync } from "child_process";
-import { join, basename, dirname } from "path";
+import { join } from "path";
 import * as esbuild from "esbuild";
 import { downloadUv, type Platform, type Arch } from "./build/common";
+import { detectDevInstance, resolveDevPort } from "./dev-instance";
 
 const ROOT_DIR = join(import.meta.dir, "..");
 const ELECTRON_DIR = join(ROOT_DIR, "apps/electron");
@@ -76,107 +75,29 @@ async function ensureBundledUvForCurrentPlatform(): Promise<void> {
   });
 }
 
-type DevInstanceConfig = {
-  instanceNumber: string;
-  vitePort: string;
-  appName: string;
-  configDir: string;
-  deeplinkScheme: string;
-  label: string;
-};
-
-function hashNumber(value: string): number {
-  const hex = createHash("sha256").update(value).digest("hex").slice(0, 8);
-  return parseInt(hex, 16);
-}
-
-function sanitizeInstanceLabel(value: string): string {
-  return value
-    .trim()
-    .replace(/[^a-zA-Z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 32)
-    .toLowerCase() || "worktree";
-}
-
-function gitOutput(args: string[]): string | undefined {
-  try {
-    return execFileSync("git", args, {
-      cwd: ROOT_DIR,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim() || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function isLinkedGitWorktree(): boolean {
-  const gitPath = join(ROOT_DIR, ".git");
-  if (!existsSync(gitPath)) return false;
-  try {
-    return !statSync(gitPath).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-function resolveWorktreeInstanceConfig(): DevInstanceConfig | null {
-  if (!isLinkedGitWorktree()) return null;
-
-  const hash = hashNumber(ROOT_DIR);
-  const branchName = gitOutput(["branch", "--show-current"]);
-  const parentName = basename(dirname(ROOT_DIR));
-  const label = sanitizeInstanceLabel(branchName || parentName || ROOT_DIR);
-  const shortHash = hash.toString(36).slice(0, 6);
-
-  return {
-    instanceNumber: String((hash % 90) + 10),
-    vitePort: String(41_000 + (hash % 20_000)),
-    appName: `Craft Agents [${label}]`,
-    configDir: join(process.env.HOME || "", `.craft-agent-${label}-${shortHash}`),
-    deeplinkScheme: `craftagents${shortHash}`,
-    label,
-  };
-}
-
-function applyInstanceDefaults(config: DevInstanceConfig, source: string): void {
-  process.env.CRAFT_INSTANCE_NUMBER ||= config.instanceNumber;
-  process.env.CRAFT_VITE_PORT ||= config.vitePort;
-  process.env.CRAFT_APP_NAME ||= config.appName;
-  process.env.CRAFT_CONFIG_DIR ||= config.configDir;
-  process.env.CRAFT_DEEPLINK_SCHEME ||= config.deeplinkScheme;
-
-  console.log(
-    `🔢 ${source} detected (${config.label}): ` +
-    `port=${process.env.CRAFT_VITE_PORT}, app="${process.env.CRAFT_APP_NAME}", config=${process.env.CRAFT_CONFIG_DIR}`
-  );
-}
-
 // Multi-instance detection.
 // 1. Explicit numbered folders still map craft-agents-1 → ~/.craft-agent-1.
 // 2. Linked git worktrees get stable path-derived instances automatically.
 function detectInstance(): void {
-  const folderName = basename(ROOT_DIR);
-  const match = folderName.match(/-(\d+)$/);
+  const instance = detectDevInstance(ROOT_DIR);
+  if (!instance) return;
 
-  if (match) {
-    const instanceNum = match[1];
-    applyInstanceDefaults({
-      instanceNumber: instanceNum,
-      vitePort: `${instanceNum}173`,
-      appName: `Craft Agents [${instanceNum}]`,
-      configDir: join(process.env.HOME || "", `.craft-agent-${instanceNum}`),
-      deeplinkScheme: `craftagents${instanceNum}`,
-      label: instanceNum,
-    }, "Numbered dev instance");
-    return;
+  process.env.CRAFT_INSTANCE_NUMBER ||= instance.instanceNumber;
+  process.env.CRAFT_VITE_PORT ||= String(instance.resolvePort(5173));
+  process.env.CRAFT_APP_NAME ||= instance.appName;
+  if (instance.configDir) {
+    process.env.CRAFT_CONFIG_DIR ||= instance.configDir;
   }
+  process.env.CRAFT_USER_DATA_DIR ||= instance.userDataDir;
+  process.env.CRAFT_SERVER_LOCK_FILE ||= instance.serverLockFile;
+  process.env.CRAFT_DEEPLINK_SCHEME ||= instance.deeplinkScheme;
 
-  const worktreeConfig = resolveWorktreeInstanceConfig();
-  if (worktreeConfig) {
-    applyInstanceDefaults(worktreeConfig, "Git worktree dev instance");
-  }
+  const configDir = process.env.CRAFT_CONFIG_DIR || "~/.craft-agent";
+  console.log(
+    `🔢 ${instance.source} detected (${instance.label}): ` +
+    `port=${process.env.CRAFT_VITE_PORT}, app="${process.env.CRAFT_APP_NAME}", ` +
+    `config=${configDir}, userData=${process.env.CRAFT_USER_DATA_DIR}`
+  );
 }
 
 // Load .env file if it exists
@@ -360,7 +281,7 @@ function getOAuthDefines(): Record<string, string> {
 
 // Get environment variables for electron process
 function getElectronEnv(): Record<string, string> {
-  const vitePort = process.env.CRAFT_VITE_PORT || "5173";
+  const vitePort = String(resolveDevPort(ROOT_DIR, 5173, "CRAFT_VITE_PORT").port);
 
   // Codex binary path is resolved at runtime by the binary-resolver module.
   // It checks: CODEX_PATH env var > bundled binary > local dev fork > system PATH.
@@ -370,6 +291,8 @@ function getElectronEnv(): Record<string, string> {
     ...process.env as Record<string, string>,
     VITE_DEV_SERVER_URL: `http://localhost:${vitePort}`,
     CRAFT_CONFIG_DIR: process.env.CRAFT_CONFIG_DIR || "",
+    CRAFT_USER_DATA_DIR: process.env.CRAFT_USER_DATA_DIR || "",
+    CRAFT_SERVER_LOCK_FILE: process.env.CRAFT_SERVER_LOCK_FILE || "",
     CRAFT_APP_NAME: process.env.CRAFT_APP_NAME || "Craft Agents",
     CRAFT_DEEPLINK_SCHEME: process.env.CRAFT_DEEPLINK_SCHEME || "craftagents",
     CRAFT_INSTANCE_NUMBER: process.env.CRAFT_INSTANCE_NUMBER || "",
@@ -510,7 +433,8 @@ async function main(): Promise<void> {
   // Build WhatsApp worker bundle so the adapter can spawn it on demand
   await buildWaWorker();
 
-  const vitePort = process.env.CRAFT_VITE_PORT || "5173";
+  const vitePort = String(resolveDevPort(ROOT_DIR, 5173, "CRAFT_VITE_PORT").port);
+  process.env.CRAFT_VITE_PORT ||= vitePort;
   const oauthDefines = getOAuthDefines();
 
   // Kill any existing process on the Vite port

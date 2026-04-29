@@ -171,6 +171,7 @@ const MAX_ANNOTATION_JSON_BYTES = 32 * 1024
 const EXTERNAL_SESSION_LIST_SYNC_INTERVAL_MS = 5_000
 const EXTERNAL_SESSION_LIST_PAGE_SIZE = 100
 const EXTERNAL_SESSION_LIST_MAX_PAGES = 20
+const EXTERNAL_SESSION_PLACEHOLDER_TITLE = '(session)'
 
 /**
  * Text sent to the session when a plan is approved from outside the desktop
@@ -1772,6 +1773,9 @@ export class SessionManager implements ISessionManager {
           connectionSlug: backendContext.connection.slug,
           model: backendContext.resolvedModel,
           defaultThinkingLevel: normalizeThinkingLevel(workspaceConfig?.defaults?.thinkingLevel) ?? getDefaultThinkingLevel(),
+          loadMessages: agent.loadSessionMessages
+            ? (sessionInfo) => agent.loadSessionMessages!(sessionInfo.sessionId, { cwd: sessionInfo.cwd })
+            : undefined,
         })
         if (didUpsert) seenSdkSessionIds.add(info.sessionId)
       }
@@ -1890,19 +1894,115 @@ export class SessionManager implements ISessionManager {
     return Number.isFinite(parsed) ? parsed : Date.now()
   }
 
+  private hasNoRenderableLocalMessages(managed: ManagedSession): boolean {
+    const loadedMessageCount = managed.messages.length
+    const persistedMessageCount = managed.messageCount ?? loadedMessageCount
+    return loadedMessageCount === 0 && persistedMessageCount === 0
+  }
+
+  private shouldInspectExternalPlaceholderSession(managed?: ManagedSession): boolean {
+    if (!managed) return true
+    if (this.hasNoRenderableLocalMessages(managed)) return true
+    if (managed.preview) return false
+
+    const hasLoadedUserMessage = managed.messages.some(message =>
+      message.role === 'user' && message.content.trim()
+    )
+    if (hasLoadedUserMessage) return false
+
+    const persistedMessageCount = managed.messageCount ?? managed.messages.length
+    return persistedMessageCount > 0 && managed.lastMessageRole === 'assistant'
+  }
+
+  private extractMessagePreview(messages: Message[]): string | undefined {
+    const firstUserMessage = messages.find(message => message.role === 'user')
+    if (!firstUserMessage?.content) return undefined
+
+    const sanitized = firstUserMessage.content
+      .replace(/<edit_request>[\s\S]*?<\/edit_request>/g, '')
+      .replace(/<[^>]+>/g, '')
+      .replace(/\[skill:(?:[\w-]+:)?[\w-]+\]/g, '')
+      .replace(/\[source:[\w-]+\]/g, '')
+      .replace(/\[file:[^\]]+\]/g, '')
+      .replace(/\[folder:[^\]]+\]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+    return sanitized.substring(0, 150) || undefined
+  }
+
+  private async loadExternalListedMessages(
+    info: BackendSessionInfo,
+    loadMessages?: (info: BackendSessionInfo) => Promise<Message[] | undefined>,
+  ): Promise<Message[] | undefined> {
+    if (!loadMessages) return undefined
+    try {
+      return await loadMessages(info)
+    } catch (error) {
+      sessionLog.debug(`Failed to inspect provider-native session ${info.sessionId}:`, error)
+      return undefined
+    }
+  }
+
+  private removeExternalListedLocalMirror(workspace: Workspace, managed: ManagedSession): void {
+    this.sessions.delete(managed.id)
+    unregisterSessionScopedToolCallbacks(managed.id)
+    deleteStoredSession(workspace.rootPath, managed.id)
+    this.automationSystems.get(workspace.rootPath)?.removeSessionMetadata(managed.id)
+  }
+
+  private applyLoadedExternalMessages(managed: ManagedSession, messages: Message[]): void {
+    managed.messages = messages
+    managed.messageCount = messages.length
+    managed.preview = this.extractMessagePreview(messages)
+
+    const lastMessage = messages[messages.length - 1]
+    if (lastMessage) {
+      managed.lastMessageAt = lastMessage.timestamp
+      if (
+        lastMessage.role === 'user' ||
+        lastMessage.role === 'assistant' ||
+        lastMessage.role === 'tool' ||
+        lastMessage.role === 'plan' ||
+        lastMessage.role === 'error'
+      ) {
+        managed.lastMessageRole = lastMessage.role
+      }
+      managed.lastUsedAt = Math.max(managed.lastUsedAt ?? 0, lastMessage.timestamp)
+    }
+
+    const lastFinalAssistant = [...messages]
+      .reverse()
+      .find(message => message.role === 'assistant' && !message.isIntermediate)
+    managed.lastFinalMessageId = lastFinalAssistant?.id
+  }
+
   private async upsertExternalListedSession(args: {
     workspace: Workspace
     info: BackendSessionInfo
     connectionSlug: string
     model: string
     defaultThinkingLevel: ThinkingLevel
+    loadMessages?: (info: BackendSessionInfo) => Promise<Message[] | undefined>
   }): Promise<boolean> {
-    const { workspace, info, connectionSlug, model, defaultThinkingLevel } = args
+    const { workspace, info, connectionSlug, model, defaultThinkingLevel, loadMessages } = args
     if (!info.sessionId || !info.cwd) return false
 
     const timestamp = this.parseExternalSessionTimestamp(info.updatedAt)
-    const title = info.title?.trim() || '(session)'
+    const title = info.title?.trim() || EXTERNAL_SESSION_PLACEHOLDER_TITLE
     const managed = this.findManagedSessionBySdkSessionId(workspace.id, info.sessionId)
+    let inspectedMessages: Message[] | undefined
+
+    if (title === EXTERNAL_SESSION_PLACEHOLDER_TITLE && this.shouldInspectExternalPlaceholderSession(managed)) {
+      inspectedMessages = await this.loadExternalListedMessages(info, loadMessages)
+
+      if (!inspectedMessages || inspectedMessages.length === 0) {
+        if (managed && !managed.isProcessing && this.hasNoRenderableLocalMessages(managed)) {
+          this.removeExternalListedLocalMirror(workspace, managed)
+        }
+        return !!managed && (managed.isProcessing || !this.hasNoRenderableLocalMessages(managed))
+      }
+    }
 
     if (managed) {
       managed.sdkSessionId = info.sessionId
@@ -1914,9 +2014,15 @@ export class SessionManager implements ISessionManager {
       if (!managed.llmConnection) managed.llmConnection = connectionSlug
       if (!managed.model && model) managed.model = model
       if (!managed.thinkingLevel) managed.thinkingLevel = defaultThinkingLevel
+      if (inspectedMessages?.length) {
+        this.applyLoadedExternalMessages(managed, inspectedMessages)
+        managed.messagesLoaded = true
+        this.persistSession(managed)
+      }
       return true
     }
 
+    const lastInspectedMessage = inspectedMessages?.[inspectedMessages.length - 1]
     const storedSession: StoredSession = {
       id: info.sessionId,
       workspaceRootPath: workspace.rootPath,
@@ -1925,14 +2031,14 @@ export class SessionManager implements ISessionManager {
       workingDirectory: info.cwd,
       name: title,
       createdAt: timestamp,
-      lastUsedAt: timestamp,
-      lastMessageAt: timestamp,
+      lastUsedAt: Math.max(timestamp, lastInspectedMessage?.timestamp ?? timestamp),
+      lastMessageAt: lastInspectedMessage?.timestamp ?? timestamp,
       permissionMode: 'ask',
       llmConnection: connectionSlug,
       connectionLocked: true,
       model,
       thinkingLevel: defaultThinkingLevel,
-      messages: [],
+      messages: inspectedMessages?.map(messageToStored) ?? [],
       tokenUsage: { ...DEFAULT_TOKEN_USAGE },
     }
 
@@ -1940,9 +2046,13 @@ export class SessionManager implements ISessionManager {
 
     const storedMetadata = pickSessionFields(storedSession) as { id: string } & Partial<ManagedSession>
     const imported = createManagedSession(storedMetadata, workspace, {
-      messagesLoaded: false,
+      messages: inspectedMessages ?? [],
+      messagesLoaded: !!inspectedMessages,
       tokenUsage: { ...storedSession.tokenUsage },
     })
+    if (inspectedMessages?.length) {
+      this.applyLoadedExternalMessages(imported, inspectedMessages)
+    }
     this.sessions.set(imported.id, imported)
     setPermissionMode(imported.id, imported.permissionMode ?? 'ask', { changedBy: 'restore' })
 
@@ -2529,28 +2639,7 @@ export class SessionManager implements ISessionManager {
         return 'empty'
       }
 
-      managed.messages = messages
-      managed.messageCount = messages.length
-
-      const lastMessage = messages[messages.length - 1]
-      if (lastMessage) {
-        managed.lastMessageAt = lastMessage.timestamp
-        if (
-          lastMessage.role === 'user' ||
-          lastMessage.role === 'assistant' ||
-          lastMessage.role === 'tool' ||
-          lastMessage.role === 'plan' ||
-          lastMessage.role === 'error'
-        ) {
-          managed.lastMessageRole = lastMessage.role
-        }
-        managed.lastUsedAt = Math.max(managed.lastUsedAt ?? 0, lastMessage.timestamp)
-      }
-
-      const lastFinalAssistant = [...messages]
-        .reverse()
-        .find(message => message.role === 'assistant' && !message.isIntermediate)
-      managed.lastFinalMessageId = lastFinalAssistant?.id
+      this.applyLoadedExternalMessages(managed, messages)
 
       sessionLog.info(`Loaded ${messages.length} provider-native message(s) for session ${managed.id}`)
       return 'loaded'

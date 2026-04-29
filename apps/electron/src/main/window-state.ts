@@ -29,8 +29,8 @@ export interface WindowState {
   lastFocusedWorkspaceId?: string
 }
 
-const CONFIG_DIR = join(homedir(), '.craft-agent')
-const WINDOW_STATE_FILE = join(CONFIG_DIR, 'window-state.json')
+const STATE_DIR = process.env.CRAFT_USER_DATA_DIR || process.env.CRAFT_CONFIG_DIR || join(homedir(), '.craft-agent')
+const WINDOW_STATE_FILE = join(STATE_DIR, 'window-state.json')
 
 /**
  * Save the current window state (windows with bounds and type)
@@ -38,8 +38,8 @@ const WINDOW_STATE_FILE = join(CONFIG_DIR, 'window-state.json')
 export function saveWindowState(state: WindowState): void {
   try {
     // Ensure config directory exists
-    if (!existsSync(CONFIG_DIR)) {
-      mkdirSync(CONFIG_DIR, { recursive: true })
+    if (!existsSync(STATE_DIR)) {
+      mkdirSync(STATE_DIR, { recursive: true })
     }
 
     writeFileSync(WINDOW_STATE_FILE, JSON.stringify(state, null, 2), 'utf-8')
