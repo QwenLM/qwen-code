@@ -15,6 +15,11 @@ import type { OpenAIResponseParsingOptions } from './responseParsingOptions.js';
 import type { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { TaggedThinkingParser } from './taggedThinkingParser.js';
 
+export interface StreamingTextDeltaState {
+  emittedText: string;
+  cumulativeMode: boolean;
+}
+
 export interface RequestContext {
   model: string;
   modalities: InputModalities;
@@ -26,6 +31,8 @@ export interface RequestContext {
   // user message for strict OpenAI-compat servers. See ContentGeneratorConfig
   // for details.
   splitToolMedia?: boolean;
+  textDeltaState?: StreamingTextDeltaState;
+  reasoningDeltaState?: StreamingTextDeltaState;
 }
 
 export interface ErrorHandler {
