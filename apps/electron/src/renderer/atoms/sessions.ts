@@ -43,7 +43,7 @@ export interface SessionMeta {
   hasUnread?: boolean
   /** Labels for filtering (additive tags, many-per-session) */
   labels?: string[]
-  /** Permission mode ('safe', 'ask', 'allow-all') — used by view expressions */
+  /** Permission mode — used by view expressions */
   permissionMode?: string
   /** Session status for filtering */
   sessionStatus?: string

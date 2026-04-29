@@ -23,8 +23,8 @@ function buildConfig(overrides?: Partial<ModeConfig>): ModeConfig {
     blockedCommandHints: [
       {
         command: 'printf',
-        reason: 'printf is not in the default Explore-mode read-only allowlist.',
-        context: 'Explore mode intentionally keeps a narrow command surface.',
+        reason: 'printf is not in the default Plan-mode read-only allowlist.',
+        context: 'Plan mode intentionally keeps a narrow command surface.',
         tryInstead: [
           'Use `echo` for simple separators and labels.',
         ],
@@ -32,14 +32,14 @@ function buildConfig(overrides?: Partial<ModeConfig>): ModeConfig {
       },
       {
         command: 'sed',
-        reason: 'Only print-only sed is allowed in Explore mode by default.',
+        reason: 'Only print-only sed is allowed in Plan mode by default.',
         whenNotMatching: '^sed\\s+-n\\b',
         whenNotMatchingRegex: /^sed\s+-n\b/,
       },
     ],
     readOnlyMcpPatterns: [],
     allowedApiEndpoints: [],
-    displayName: 'Explore',
+    displayName: 'Plan mode',
     shortcutHint: 'SHIFT+TAB',
     ...overrides,
   };
@@ -55,8 +55,8 @@ describe('mode-manager blocked command hints', () => {
 
     const formatted = formatBashRejectionMessage(rejection!, config);
 
-    expect(formatted).toContain('Why: printf is not in the default Explore-mode read-only allowlist.');
-    expect(formatted).toContain('Context: Explore mode intentionally keeps a narrow command surface.');
+    expect(formatted).toContain('Why: printf is not in the default Plan-mode read-only allowlist.');
+    expect(formatted).toContain('Context: Plan mode intentionally keeps a narrow command surface.');
     expect(formatted).toContain('Try instead:');
     expect(formatted).toContain('Example: `echo \'--- files ---\'`');
 
@@ -73,7 +73,7 @@ describe('mode-manager blocked command hints', () => {
     expect(rejection?.type).toBe('no_safe_pattern');
 
     const formatted = formatBashRejectionMessage(rejection!, config);
-    expect(formatted).toContain('Why: Only print-only sed is allowed in Explore mode by default.');
+    expect(formatted).toContain('Why: Only print-only sed is allowed in Plan mode by default.');
   });
 
   it('does not reject sed -n read-only command', () => {

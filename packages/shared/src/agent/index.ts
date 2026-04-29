@@ -60,7 +60,7 @@ export {
   formatSessionState,
   // Mode manager singleton (for advanced use cases)
   modeManager,
-  // Default Explore mode patterns (for UI display)
+  // Default Plan mode patterns (for UI display)
   SAFE_MODE_CONFIG,
   // Types
   type ModeState,

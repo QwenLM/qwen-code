@@ -1,7 +1,7 @@
 /**
  * Bash Command Validator
  *
- * Uses bash-parser to create a proper AST and validate commands in Explore mode.
+ * Uses bash-parser to create a proper AST and validate commands in Plan mode.
  * This enables compound commands like `git status && git log` to be allowed
  * when all parts are safe, while still blocking dangerous constructs.
  *
@@ -237,7 +237,7 @@ function validateNode(
         allowed: false,
         reason: {
           type: 'parse_error',
-          error: `Unsupported shell construct: "${node.type}". Only simple commands, pipelines, logical expressions (&&/||), and subshells are supported in Explore mode`,
+          error: `Unsupported shell construct: "${node.type}". Only simple commands, pipelines, logical expressions (&&/||), and subshells are supported in Plan mode`,
         },
       };
   }

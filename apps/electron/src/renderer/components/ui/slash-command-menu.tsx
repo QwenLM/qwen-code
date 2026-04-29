@@ -162,7 +162,7 @@ function flattenSections(sections: SlashSection[]): (SlashCommand | SlashFolderI
 // Shared: Command Item Content
 // ============================================================================
 
-const MODE_COMMAND_IDS = new Set<string>(['safe', 'ask', 'allow-all'])
+const MODE_COMMAND_IDS = new Set<string>(PERMISSION_MODE_ORDER)
 
 function CommandItemContent({ command, isActive }: { command: SlashCommand; isActive: boolean }) {
   const { t } = useTranslation()

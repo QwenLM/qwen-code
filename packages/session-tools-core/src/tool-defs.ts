@@ -168,7 +168,7 @@ export const SpawnSessionSchema = z.object({
   llmConnection: z.string().optional().describe('Connection slug (e.g., "anthropic-api", "codex")'),
   model: z.string().optional().describe('Model ID override'),
   enabledSourceSlugs: z.array(z.string()).optional().describe('Source slugs to enable in the new session'),
-  permissionMode: z.enum(['safe', 'ask', 'allow-all']).optional().describe('Permission mode for the new session'),
+  permissionMode: z.enum(['allow-all', 'safe', 'ask', 'auto-edit']).optional().describe('Permission mode for the new session'),
   thinkingLevel: z.enum(['off', 'low', 'medium', 'high', 'xhigh', 'max']).optional()
     .describe('Reasoning level for the new session. Silently ignored on non-reasoning models (e.g. gpt-4o, gemini-2.5-flash). Omit to inherit the workspace default.'),
   labels: z.array(z.string()).optional().describe('Labels for the new session'),
@@ -350,7 +350,7 @@ Use this tool when you need to transform large datasets (20+ rows) into structur
 
   script_sandbox: `Run quick inline diagnostics in a sandboxed subprocess with network isolation.
 
-Use this for short Python/Node/Bun snippets when strict Explore-mode Bash parsing blocks inline diagnostics.
+Use this for short Python/Node/Bun snippets when strict Plan-mode Bash parsing blocks inline diagnostics.
 
 **Behavior:**
 - Executes script source from \`script\` in a temporary file
@@ -495,7 +495,7 @@ export type SessionToolHandler = (ctx: SessionToolContext, args: any) => Promise
 /** Where a session tool is executed. */
 export type SessionToolExecutionMode = 'registry' | 'backend';
 
-/** Safe/Explore mode behavior for a session tool. */
+/** Safe/Plan mode behavior for a session tool. */
 export type SessionToolSafeMode = 'allow' | 'block';
 
 interface SessionToolDefBase {

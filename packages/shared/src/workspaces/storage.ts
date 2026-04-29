@@ -23,7 +23,7 @@ import { getDefaultStatusConfig, saveStatusConfig, ensureDefaultIconFiles } from
 import { getDefaultLabelConfig, saveLabelConfig } from '../labels/storage.ts';
 import { loadConfigDefaults } from '../config/storage.ts';
 import { CONFIG_DIR } from '../config/paths.ts';
-import { parsePermissionMode, PERMISSION_MODE_ORDER } from '../agent/mode-types.ts';
+import { parsePermissionMode, normalizeCyclablePermissionModes } from '../agent/mode-types.ts';
 import { normalizeThinkingLevel } from '../agent/thinking-levels.ts';
 import type {
   WorkspaceConfig,
@@ -123,14 +123,7 @@ export function loadWorkspaceConfig(rootPath: string): WorkspaceConfig | null {
     }
 
     if (Array.isArray(config.defaults?.cyclablePermissionModes)) {
-      const normalized = config.defaults.cyclablePermissionModes
-        .map(mode => (typeof mode === 'string' ? parsePermissionMode(mode) : null))
-        .filter((mode): mode is NonNullable<typeof mode> => !!mode)
-        .filter((mode, index, arr) => arr.indexOf(mode) === index);
-
-      config.defaults.cyclablePermissionModes = normalized.length >= 2
-        ? normalized
-        : [...PERMISSION_MODE_ORDER];
+      config.defaults.cyclablePermissionModes = normalizeCyclablePermissionModes(config.defaults.cyclablePermissionModes);
     }
 
     if (config.defaults && 'thinkingLevel' in config.defaults) {

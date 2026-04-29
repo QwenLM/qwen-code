@@ -16,30 +16,32 @@ import { z } from 'zod';
 /**
  * Available permission modes (internal storage keys).
  *
- * UI-facing canonical names are:
- * - explore  -> safe
- * - ask      -> ask
- * - execute  -> allow-all
+ * Qwen Code / ACP mode mapping:
+ * - yolo              -> allow-all
+ * - plan              -> safe
+ * - default           -> ask
+ * - auto-edit         -> auto-edit
  */
-export type PermissionMode = 'safe' | 'ask' | 'allow-all';
+export type PermissionMode = 'allow-all' | 'safe' | 'ask' | 'auto-edit';
 
 /**
  * Canonical mode names used in user-facing/session-state surfaces.
  */
-export type PermissionModeCanonical = 'explore' | 'ask' | 'execute';
+export type PermissionModeCanonical = 'explore' | 'ask' | 'execute' | 'auto-edit';
 
 /**
  * Order of modes for cycling with SHIFT+TAB
  */
-export const PERMISSION_MODE_ORDER: PermissionMode[] = ['safe', 'ask', 'allow-all'];
+export const PERMISSION_MODE_ORDER: PermissionMode[] = ['allow-all', 'safe', 'ask', 'auto-edit'];
 
 /**
  * Internal -> canonical mapping.
  */
 export const PERMISSION_MODE_TO_CANONICAL: Record<PermissionMode, PermissionModeCanonical> = {
+  'allow-all': 'execute',
   safe: 'explore',
   ask: 'ask',
-  'allow-all': 'execute',
+  'auto-edit': 'auto-edit',
 };
 
 /**
@@ -49,6 +51,7 @@ export const CANONICAL_TO_PERMISSION_MODE: Record<PermissionModeCanonical, Permi
   explore: 'safe',
   ask: 'ask',
   execute: 'allow-all',
+  'auto-edit': 'auto-edit',
 };
 
 /**
@@ -70,12 +73,48 @@ export function parsePermissionMode(mode: string): PermissionMode | null {
   if (normalized === 'safe') return 'safe';
   if (normalized === 'ask') return 'ask';
   if (normalized === 'allow-all') return 'allow-all';
+  if (normalized === 'auto-edit') return 'auto-edit';
 
   if (normalized === 'explore') return 'safe';
+  if (normalized === 'plan' || normalized === 'plan-mode' || normalized === 'plan mode') return 'safe';
   if (normalized === 'execute') return 'allow-all';
+  if (normalized === 'yolo') return 'allow-all';
+  if (normalized === 'default') return 'ask';
   if (normalized === 'ask-to-edit' || normalized === 'ask_to_edit' || normalized === 'ask to edit') return 'ask';
+  if (normalized === 'ask-before-edits' || normalized === 'ask_before_edits' || normalized === 'ask before edits') return 'ask';
+  if (normalized === 'edit-automatically' || normalized === 'edit_automatically' || normalized === 'edit automatically') return 'auto-edit';
 
   return null;
+}
+
+const LEGACY_CYCLABLE_PERMISSION_MODE_SETS: PermissionMode[][] = [
+  ['safe', 'allow-all'],
+  ['safe', 'ask', 'allow-all'],
+];
+
+function isLegacyCyclablePermissionModeSet(modes: PermissionMode[]): boolean {
+  return LEGACY_CYCLABLE_PERMISSION_MODE_SETS.some(legacy =>
+    legacy.length === modes.length && legacy.every((mode, index) => modes[index] === mode)
+  );
+}
+
+export function normalizeCyclablePermissionModes(
+  modes: readonly unknown[] | undefined,
+): PermissionMode[] {
+  const normalized: PermissionMode[] = [];
+
+  for (const mode of modes ?? []) {
+    if (typeof mode !== 'string') continue;
+    const parsed = parsePermissionMode(mode);
+    if (!parsed || normalized.includes(parsed)) continue;
+    normalized.push(parsed);
+  }
+
+  if (normalized.length < 2 || isLegacyCyclablePermissionModeSet(normalized)) {
+    return [...PERMISSION_MODE_ORDER];
+  }
+
+  return normalized;
 }
 
 // ============================================================
@@ -105,7 +144,7 @@ const PatternSchema = z.union([
 ]);
 
 /**
- * Command-specific block hint for clearer Explore-mode rejection messages.
+ * Command-specific block hint for clearer Plan-mode rejection messages.
  */
 const BlockedCommandHintSchema = z.object({
   /** Command name (normalized lowercase base command, e.g. "printf") */
@@ -128,7 +167,7 @@ export type BlockedCommandHintRule = z.infer<typeof BlockedCommandHintSchema>;
  * Permissions JSON configuration schema
  *
  * Note: Core write tools (Write, Edit, MultiEdit, NotebookEdit) are hardcoded in
- * SAFE_MODE_CONFIG and always blocked in Explore mode. The blockedTools field
+ * SAFE_MODE_CONFIG and always blocked in Plan mode. The blockedTools field
  * allows users to block additional tools beyond these defaults.
  */
 export const PermissionsConfigSchema = z.object({
@@ -140,7 +179,7 @@ export const PermissionsConfigSchema = z.object({
   allowedMcpPatterns: z.array(PatternSchema).optional(),
   /** API endpoint rules - method + path pattern */
   allowedApiEndpoints: z.array(ApiEndpointRuleSchema).optional(),
-  /** File paths to allow writes in Explore mode (glob patterns) */
+  /** File paths to allow writes in Plan mode (glob patterns) */
   allowedWritePaths: z.array(PatternSchema).optional(),
   /** Additional tools to block (extends the hardcoded defaults) */
   blockedTools: z.array(PatternSchema).optional(),
@@ -239,7 +278,7 @@ export interface ModeConfig {
   readOnlyMcpPatterns: RegExp[];
   /** Fine-grained API endpoint rules (method + path pattern) */
   allowedApiEndpoints: CompiledApiEndpointRule[];
-  /** File paths allowed for writes in Explore mode (glob patterns) */
+  /** File paths allowed for writes in Plan mode (glob patterns) */
   allowedWritePaths?: string[];
   /** User-friendly name */
   displayName: string;
@@ -265,7 +304,7 @@ export interface ModeConfig {
 export const SAFE_MODE_CONFIG: ModeConfig = {
   // Tools that are always blocked (no read-only variant) - these are hardcoded
   // as they represent fundamental write operations that should never be allowed
-  // in Explore mode regardless of user configuration
+  // in Plan mode regardless of user configuration
   blockedTools: new Set([
     'Write',
     'Edit',
@@ -273,12 +312,12 @@ export const SAFE_MODE_CONFIG: ModeConfig = {
     'NotebookEdit',
   ]),
   // Empty fallbacks - actual patterns loaded from default.json
-  // If default.json is missing, no bash commands will be auto-allowed in Explore mode
+  // If default.json is missing, no bash commands will be auto-allowed in Plan mode
   readOnlyBashPatterns: [],
   blockedCommandHints: [],
   readOnlyMcpPatterns: [],
   allowedApiEndpoints: [],
-  displayName: 'Explore',
+  displayName: 'Plan mode',
   shortcutHint: 'SHIFT+TAB',
 };
 
@@ -301,12 +340,24 @@ export const PERMISSION_MODE_CONFIG: Record<PermissionMode, {
     border: string;
   };
 }> = {
+  'allow-all': {
+    displayName: 'YOLO',
+    shortName: 'YOLO',
+    description: 'Auto-approves every tool request.',
+    // Repeat icon from Lucide (loop)
+    svgPath: 'm17 1 4 4-4 4M3 11V9a4 4 0 0 1 4-4h14M7 23l-4-4 4-4M21 13v2a4 4 0 0 1-4 4H3',
+    colorClass: {
+      text: 'text-accent',
+      bg: 'bg-accent',
+      border: 'border-accent',
+    },
+  },
   'safe': {
-    displayName: 'Explore',
-    shortName: 'Explore',
-    description: 'Read-only exploration. Blocks writes, never prompts.',
-    // Compass icon from Lucide
-    svgPath: 'M16.24 7.76l-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z',
+    displayName: 'Plan mode',
+    shortName: 'Plan',
+    description: 'Plan and inspect before making edits.',
+    // Clipboard list icon from Lucide
+    svgPath: 'M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M9 2h6v4H9z M9 12h6 M9 16h6',
     colorClass: {
       text: 'text-foreground/60',
       bg: 'bg-foreground/60',
@@ -314,9 +365,9 @@ export const PERMISSION_MODE_CONFIG: Record<PermissionMode, {
     },
   },
   'ask': {
-    displayName: 'Ask to Edit',
+    displayName: 'Ask before edits',
     shortName: 'Ask',
-    description: 'Prompts before making edits.',
+    description: 'Prompts before applying edits.',
     // Info icon from Lucide
     svgPath: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM12 8v4m0 4h.01',
     colorClass: {
@@ -325,16 +376,16 @@ export const PERMISSION_MODE_CONFIG: Record<PermissionMode, {
       border: 'border-info',
     },
   },
-  'allow-all': {
-    displayName: 'Execute',
-    shortName: 'Execute',
-    description: 'Automatic execution, no prompts.',
-    // Repeat icon from Lucide (loop)
-    svgPath: 'm17 1 4 4-4 4M3 11V9a4 4 0 0 1 4-4h14M7 23l-4-4 4-4M21 13v2a4 4 0 0 1-4 4H3',
+  'auto-edit': {
+    displayName: 'Edit automatically',
+    shortName: 'Auto edit',
+    description: 'Applies edits automatically; asks for other risky tools.',
+    // Square pen icon from Lucide
+    svgPath: 'M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7 M18.375 2.625a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4Z',
     colorClass: {
-      text: 'text-accent',
-      bg: 'bg-accent',
-      border: 'border-accent',
+      text: 'text-success',
+      bg: 'bg-success',
+      border: 'border-success',
     },
   },
 };

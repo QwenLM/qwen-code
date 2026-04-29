@@ -741,7 +741,7 @@ interface ManagedSession {
   isArchived?: boolean
   /** Timestamp when session was archived (for retention policy) */
   archivedAt?: number
-  /** Permission mode for this session ('safe', 'ask', 'allow-all') */
+  /** Permission mode for this session */
   permissionMode?: PermissionMode
   /** Previous permission mode (preserved across restarts for session_state modeTransition context) */
   previousPermissionMode?: PermissionMode
@@ -2745,6 +2745,11 @@ export class SessionManager implements ISessionManager {
     const targetProviderType = targetBackendContext.connection?.providerType
       ?? (targetBackendContext.provider === 'pi' ? 'pi' : 'anthropic')
     const targetPiAuthProvider = targetBackendContext.connection?.piAuthProvider
+    const shouldUseAcpDefaultPermissionMode =
+      targetBackendContext.provider === 'qwen' && options?.permissionMode === undefined
+    const sessionPermissionMode = shouldUseAcpDefaultPermissionMode
+      ? undefined
+      : defaultPermissionMode
 
     // Resolve working directory from options:
     // - 'user_default' or undefined: Use workspace's configured default
@@ -2950,7 +2955,7 @@ export class SessionManager implements ISessionManager {
     const storedSession = await createStoredSession(workspaceRootPath, {
       name: options?.name,
       slugHint: options?.slugHint,
-      permissionMode: defaultPermissionMode,
+      permissionMode: sessionPermissionMode,
       workingDirectory: resolvedWorkingDir,
       hidden: options?.hidden,
       sessionStatus: options?.sessionStatus,
@@ -3011,7 +3016,7 @@ export class SessionManager implements ISessionManager {
     const isBranch = !!validatedBranch
 
     const managed = createManagedSession(storedSession, workspace, {
-      permissionMode: defaultPermissionMode,
+      permissionMode: sessionPermissionMode,
       workingDirectory: resolvedWorkingDir,
       model: resolvedModel,
       llmConnection: options?.llmConnection,
@@ -3806,6 +3811,7 @@ export class SessionManager implements ISessionManager {
         managed.permissionMode = mode
         const diagnostics = getPermissionModeDiagnostics(managed.id)
         managed.previousPermissionMode = diagnostics.previousPermissionMode
+        this.persistSession(managed)
         sessionLog.info('Permission mode changed (agent callback)', {
           sessionId: managed.id,
           permissionMode: mode,
@@ -4451,7 +4457,7 @@ export class SessionManager implements ISessionManager {
 
   /**
    * Dispatch a plan approval for a session, equivalent to the desktop
-   * "Accept plan" button. Switches the session out of Explore mode (safe)
+   * "Accept plan" button. Switches the session out of Plan mode (safe)
    * into allow-all if needed so the plan can execute without per-tool
    * prompts, then sends the approval message through the normal sendMessage
    * path.
@@ -6381,7 +6387,7 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
-   * Set the permission mode for a session ('safe', 'ask', 'allow-all')
+   * Set the permission mode for a session
    */
   setSessionPermissionMode(sessionId: string, mode: PermissionMode): void {
     const managed = this.sessions.get(sessionId)

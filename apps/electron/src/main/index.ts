@@ -392,7 +392,7 @@ app.whenReady().then(async () => {
   })
 
   // Register PowerShell validator root so it can find the bundled parser script
-  // (Windows only: validates PowerShell commands in Explore mode using AST analysis)
+  // (Windows only: validates PowerShell commands in Plan mode using AST analysis)
   setPowerShellValidatorRoot(join(__dirname, 'resources'))
 
   // Initialize bundled docs

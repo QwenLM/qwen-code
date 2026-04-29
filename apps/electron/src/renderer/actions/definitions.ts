@@ -190,7 +190,7 @@ export const actions = {
   'chat.cyclePermissionMode': {
     id: 'chat.cyclePermissionMode',
     label: 'Cycle Permission Mode',
-    description: 'Switch between Explore, Ask, and Execute modes',
+    description: 'Switch between YOLO, Plan mode, Ask before edits, and Edit automatically',
     defaultHotkey: 'shift+tab',
     category: 'Chat',
   },

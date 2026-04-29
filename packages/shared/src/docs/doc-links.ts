@@ -70,7 +70,7 @@ export const DOCS: Record<DocFeature, DocInfo> = {
     path: '/core-concepts/permissions',
     title: 'Permissions',
     summary:
-      'Control how much autonomy your agent has. Explore mode is read-only, Ask to Edit prompts before changes, and Execute mode runs without prompts.',
+      'Control how much autonomy your agent has. Plan mode is plan-first, Ask before edits prompts before changes, Edit automatically applies edits, and YOLO runs without prompts.',
   },
   labels: {
     path: '/labels/overview',

@@ -231,7 +231,7 @@ export interface PatternWithComment {
  *
  * Note: blockedTools (Write, Edit, MultiEdit, NotebookEdit) are hardcoded in
  * SAFE_MODE_CONFIG and not configurable here - they're fundamental write
- * operations that must always be blocked in Explore mode.
+ * operations that must always be blocked in Plan mode.
  */
 export interface PermissionsCustomConfig {
   /** Additional bash patterns to allow (with optional comments for error messages) */
@@ -240,7 +240,7 @@ export interface PermissionsCustomConfig {
   allowedMcpPatterns: string[];
   /** API endpoint rules for fine-grained control */
   allowedApiEndpoints: ApiEndpointRule[];
-  /** File paths to allow writes in Explore mode (glob pattern strings) */
+  /** File paths to allow writes in Plan mode (glob pattern strings) */
   allowedWritePaths: string[];
   /** Command-specific hints for blocked Bash commands */
   blockedCommandHints: BlockedCommandHintRule[];
@@ -259,7 +259,7 @@ export interface MergedPermissionsConfig {
   readOnlyMcpPatterns: RegExp[];
   /** Fine-grained API endpoint rules */
   allowedApiEndpoints: CompiledApiEndpointRule[];
-  /** File paths allowed for writes in Explore mode (glob patterns) */
+  /** File paths allowed for writes in Plan mode (glob patterns) */
   allowedWritePaths: string[];
   /** Display name for error messages */
   displayName: string;

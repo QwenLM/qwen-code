@@ -8,7 +8,7 @@
  * - config.json: Main app configuration
  * - preferences.json: User preferences
  * - sources/{slug}/config.json: Workspace-scoped source configs
- * - permissions.json: Permission rules for Explore mode
+ * - permissions.json: Permission rules for Plan mode
  * - tool-icons/tool-icons.json: CLI tool icon mappings
  */
 

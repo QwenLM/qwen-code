@@ -21,7 +21,7 @@ describe('mode transition session_state context', () => {
     const diagnostics = getPermissionModeDiagnostics(sessionId);
     expect(diagnostics.permissionMode).toBe('allow-all');
     expect(diagnostics.previousPermissionMode).toBe('safe');
-    expect(diagnostics.transitionDisplay).toBe('Explore -> Execute');
+    expect(diagnostics.transitionDisplay).toBe('Plan mode -> YOLO');
 
     const stateBlock = formatSessionState(sessionId, {
       plansFolderPath: '/tmp/plans',
@@ -29,11 +29,11 @@ describe('mode transition session_state context', () => {
     });
 
     expect(stateBlock).toContain('permissionMode: execute');
-    expect(stateBlock).toContain('modeTransition: Explore -> Execute');
+    expect(stateBlock).toContain('modeTransition: Plan mode -> YOLO');
     expect(stateBlock).toContain('modeChangedBy: user');
     expect(stateBlock).toContain('modeChangedAt: 2026-03-02T08:00:00.000Z');
     expect(stateBlock).toContain('modeVersion: 2');
-    expect(stateBlock).toContain('modeChangeSummary: Last mode change by user at 2026-03-02T08:00:00.000Z (Explore -> Execute, modeVersion=2)');
+    expect(stateBlock).toContain('modeChangeSummary: Last mode change by user at 2026-03-02T08:00:00.000Z (Plan mode -> YOLO, modeVersion=2)');
     expect(stateBlock).toContain('modeChangeUserSignal: The user changed mode manually. Apply this mode immediately for this turn.');
 
     cleanupModeState(sessionId);
@@ -84,11 +84,11 @@ describe('mode transition session_state context', () => {
     const diagnostics = getPermissionModeDiagnostics(sessionId);
     expect(diagnostics.permissionMode).toBe('allow-all');
     expect(diagnostics.previousPermissionMode).toBe('safe');
-    expect(diagnostics.transitionDisplay).toBe('Explore -> Execute');
+    expect(diagnostics.transitionDisplay).toBe('Plan mode -> YOLO');
 
     const stateBlock = formatSessionState(sessionId);
     expect(stateBlock).toContain('permissionMode: execute');
-    expect(stateBlock).toContain('modeTransition: Explore -> Execute');
+    expect(stateBlock).toContain('modeTransition: Plan mode -> YOLO');
     expect(stateBlock).toContain('modeChangeSummary: Last mode change by restore');
     expect(stateBlock).not.toContain('modeChangeUserSignal:');
 

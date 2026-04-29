@@ -1461,7 +1461,7 @@ export const chatComponents: ComponentEntry[] = [
       },
       {
         name: 'Safe + Compact',
-        description: 'Explore mode style in compact embedding',
+        description: 'Plan mode style in compact embedding',
         props: {
           permissionMode: 'safe',
           compactMode: true,

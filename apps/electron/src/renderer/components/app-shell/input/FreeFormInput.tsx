@@ -62,7 +62,7 @@ import { SourceAvatar } from '@/components/ui/source-avatar'
 import { SourceSelectorPopover } from '@/components/ui/SourceSelectorPopover'
 import { FreeFormInputContextBadge } from './FreeFormInputContextBadge'
 import type { FileAttachment, LoadedSource, LoadedSkill } from '../../../../shared/types'
-import type { PermissionMode } from '@craft-agent/shared/agent/modes'
+import { PERMISSION_MODE_ORDER, type PermissionMode } from '@craft-agent/shared/agent/modes'
 import { type ThinkingLevel, THINKING_LEVELS, getThinkingLevelNameKey } from '@craft-agent/shared/agent/thinking-levels'
 import { useEscapeInterrupt } from '@/context/EscapeInterruptContext'
 import { hasOpenOverlay } from '@/lib/overlay-detection'
@@ -253,7 +253,7 @@ export function FreeFormInput({
   onThinkingLevelChange,
   permissionMode = 'ask',
   onPermissionModeChange,
-  enabledModes = ['safe', 'ask', 'allow-all'],
+  enabledModes = [...PERMISSION_MODE_ORDER],
   inputValue,
   onInputChange,
   attachmentsValue,
@@ -597,7 +597,7 @@ export function FreeFormInput({
         draftInput,
       })
 
-      // Switch to allow-all (Auto) mode if in Explore mode (allow execution without prompts)
+      // Switch to YOLO mode if in Plan mode (allow execution without prompts)
       // Only switch if currently in safe mode - if user is in 'ask' mode, respect their choice
       if (permissionMode === 'safe') {
         onPermissionModeChange?.('allow-all')
@@ -624,7 +624,7 @@ export function FreeFormInput({
       const shouldIncludeDraft = e.detail?.includeDraftInput !== false
       const draftInputSnapshot = shouldIncludeDraft ? consumeInputDraftSnapshot() : ''
 
-      // Switch to allow-all (Auto) mode if in Explore mode
+      // Switch to YOLO mode if in Plan mode
       if (permissionMode === 'safe') {
         onPermissionModeChange?.('allow-all')
       }
@@ -839,17 +839,13 @@ export function FreeFormInput({
   const activeCommands = React.useMemo(() => {
     const active: SlashCommandId[] = []
     // Add the currently active permission mode
-    if (permissionMode === 'safe') active.push('safe')
-    else if (permissionMode === 'ask') active.push('ask')
-    else if (permissionMode === 'allow-all') active.push('allow-all')
+    if (PERMISSION_MODE_ORDER.includes(permissionMode)) active.push(permissionMode)
     return active
   }, [permissionMode])
 
   // Handle slash command selection (mode/feature commands)
   const handleSlashCommand = React.useCallback((commandId: SlashCommandId) => {
-    if (commandId === 'safe') onPermissionModeChange?.('safe')
-    else if (commandId === 'ask') onPermissionModeChange?.('ask')
-    else if (commandId === 'allow-all') onPermissionModeChange?.('allow-all')
+    if (PERMISSION_MODE_ORDER.includes(commandId as PermissionMode)) onPermissionModeChange?.(commandId as PermissionMode)
     else if (commandId === 'compact' && !isProcessing) onSubmit('/compact', undefined)
   }, [onPermissionModeChange, isProcessing, onSubmit])
 

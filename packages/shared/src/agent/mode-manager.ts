@@ -5,8 +5,9 @@
  * Each session has its own mode state - no global state contamination.
  *
  * Available Permission Modes:
- * - 'safe': Read-only exploration mode (blocks writes, never prompts)
+ * - 'safe': Plan-first mode (blocks writes, never prompts)
  * - 'ask': Ask for permission on dangerous operations (default interactive behavior)
+ * - 'auto-edit': Apply edits automatically, ask for other risky operations
  * - 'allow-all': Skip all permission checks (everything allowed)
  */
 
@@ -408,7 +409,7 @@ export function consumeUserModeSignal(sessionId: string): void {
 /**
  * Cycle to the next permission mode (for SHIFT+TAB)
  * @param sessionId - The session to cycle mode for
- * @param enabledModes - Optional list of enabled modes to cycle through (defaults to all 3)
+ * @param enabledModes - Optional list of enabled modes to cycle through (defaults to all modes)
  * Returns the new mode
  */
 export function cyclePermissionMode(
@@ -639,7 +640,7 @@ export interface RelevantPatternInfo {
 }
 
 /**
- * Detailed reason why a bash command was rejected in Explore mode.
+ * Detailed reason why a bash command was rejected in Plan mode.
  * Used to provide helpful error messages that explain exactly what was blocked and why.
  */
 export type BashRejectionReason =
@@ -920,7 +921,7 @@ function generateMismatchSuggestion(
     }
 
     return `The pattern expects a subcommand after \`${firstWord}\`, but found flag \`${failedToken}\`. ` +
-      `Run from the target directory or switch to Ask/Execute mode.`;
+      `Run from the target directory or switch to Ask before edits, Edit automatically, or YOLO.`;
   }
 
   // Detect possible typos in subcommands using simple heuristics
@@ -1114,7 +1115,7 @@ export function getBashRejectionReason(command: string, config: ToolCheckConfig)
   if (isWindows && looksLikeCmdBuiltin(trimmedCommand)) {
     return {
       type: 'parse_error',
-      error: 'Windows CMD syntax (if/for/set/copy/move) is not supported in Explore mode. Use PowerShell equivalents or bash commands instead.',
+      error: 'Windows CMD syntax (if/for/set/copy/move) is not supported in Plan mode. Use PowerShell equivalents or bash commands instead.',
     };
   }
 
@@ -1355,7 +1356,7 @@ function formatPermissionGuidance(config: ToolCheckConfig): string {
   // Only include guidance if permission paths are available
   if (config.permissionPaths) {
     lines.push('');
-    lines.push('To see what commands are allowed in Explore mode, read:');
+    lines.push('To see what commands are allowed in Plan mode, read:');
     lines.push(`  • ${config.permissionPaths.workspacePath}`);
     lines.push(`  • ${config.permissionPaths.appDefaultPath}`);
     lines.push('');
@@ -1383,7 +1384,7 @@ function isKnownBashParserTokenizerBug(error: string): boolean {
  * Includes actionable guidance on how to customize permissions.
  */
 export function formatBashRejectionMessage(reason: BashRejectionReason, config: ToolCheckConfig): string {
-  const modeSwitchHint = `Switch to Ask or Allow All mode (${config.shortcutHint}) to run it.`;
+  const modeSwitchHint = `Switch to Ask before edits, Edit automatically, or YOLO (${config.shortcutHint}) to run it.`;
   const permissionGuidance = formatPermissionGuidance(config);
 
   switch (reason.type) {
@@ -1798,6 +1799,7 @@ export type ToolCheckResult =
  * Returns different results based on the permission mode:
  * - 'safe': Block writes entirely (no prompting)
  * - 'ask': Allow but may require permission for dangerous operations
+ * - 'auto-edit': Allow but may require permission for non-edit dangerous operations
  * - 'allow-all': Allow everything
  */
 export function shouldAllowToolInMode(
@@ -1826,8 +1828,9 @@ export function shouldAllowToolInMode(
     return { allowed: true };
   }
 
-  // In 'ask' mode, all tools are allowed (user will be prompted for confirmation)
-  if (mode === 'ask') {
+  // In 'ask' and 'auto-edit' modes, tools pass the mode gate. The prompt
+  // decision pipeline decides which operations need user confirmation.
+  if (mode === 'ask' || mode === 'auto-edit') {
     return { allowed: true };
   }
 
@@ -1890,7 +1893,7 @@ export function shouldAllowToolInMode(
           debug(`[Mode] Write target "${targetPath}" is not in plans or data folder`);
           const pathHint = options?.plansFolderPath ? getPathHint(targetPath, options.plansFolderPath, options?.dataFolderPath) : null;
           const lines = [
-            `Write blocked (Explore mode) - target not in allowed folders:`,
+            `Write blocked (Plan mode) - target not in allowed folders:`,
             ``,
             `  Target: ${targetPath}`,
           ];
@@ -1907,9 +1910,9 @@ export function shouldAllowToolInMode(
           const dataHint = options?.dataFolderPath ? `For data output, write to: ${options.dataFolderPath}` : null;
           lines.push(
             ``,
-            `Allowed paths in Explore mode:`,
+            `Allowed paths in Plan mode:`,
             ...[plansHint, dataHint].filter(Boolean).map(p => `• ${p}`),
-            `• Or ask the user to switch to Ask or Auto mode (${config.shortcutHint}) to enable writes anywhere`
+            `• Or ask the user to switch to Ask before edits, Edit automatically, or YOLO (${config.shortcutHint}) to enable writes anywhere`
           );
           return {
             allowed: false,
@@ -1927,7 +1930,7 @@ export function shouldAllowToolInMode(
     // No command provided - block with generic message
     return {
       allowed: false,
-      reason: `Bash command is missing or invalid. Switch to Ask or Allow All mode (${config.shortcutHint}) to run it.`,
+      reason: `Bash command is missing or invalid. Switch to Ask before edits, Edit automatically, or YOLO (${config.shortcutHint}) to run it.`,
     };
   }
 
@@ -1965,7 +1968,7 @@ export function shouldAllowToolInMode(
         debug(`[Mode] ${toolName} target "${filePath}" not in allowed folders or allowedWritePaths`);
         const pathHint = options?.plansFolderPath ? getPathHint(filePath, options.plansFolderPath, options?.dataFolderPath) : null;
         const lines = [
-          `${toolName} blocked (Explore mode) - target not in allowed folders:`,
+          `${toolName} blocked (Plan mode) - target not in allowed folders:`,
           ``,
           `  Target: ${filePath}`,
         ];
@@ -1982,9 +1985,9 @@ export function shouldAllowToolInMode(
         const dataHint = options?.dataFolderPath ? `For data output, write to: ${options.dataFolderPath}` : null;
         lines.push(
           ``,
-          `Allowed paths in Explore mode:`,
+          `Allowed paths in Plan mode:`,
           ...[plansHint, dataHint].filter(Boolean).map(p => `• ${p}`),
-          `• Or ask the user to switch to Ask or Auto mode (${config.shortcutHint}) to enable writes anywhere`
+          `• Or ask the user to switch to Ask before edits, Edit automatically, or YOLO (${config.shortcutHint}) to enable writes anywhere`
         );
         return {
           allowed: false,
@@ -2020,10 +2023,10 @@ export function shouldAllowToolInMode(
         return { allowed: true };
       }
 
-      // Write/auth/admin session tools - blocked in Explore mode
+      // Write/auth/admin session tools - blocked in Plan mode
       return {
         allowed: false,
-        reason: `Session configuration changes are blocked in ${config.displayName}. Switch to Ask or Allow All mode (${config.shortcutHint}) to create, update, or delete sources and agents.`
+        reason: `Session configuration changes are blocked in ${config.displayName}. Switch to Ask before edits, Edit automatically, or YOLO (${config.shortcutHint}) to create, update, or delete sources and agents.`
       };
     }
 
@@ -2038,7 +2041,7 @@ export function shouldAllowToolInMode(
       }
       return {
         allowed: false,
-        reason: `API ${method} ${path ?? ''} is blocked in ${config.displayName}. Switch to Ask or Allow All mode (${config.shortcutHint}) to make changes.`
+        reason: `API ${method} ${path ?? ''} is blocked in ${config.displayName}. Switch to Ask before edits, Edit automatically, or YOLO (${config.shortcutHint}) to make changes.`
       };
     }
 
@@ -2047,7 +2050,7 @@ export function shouldAllowToolInMode(
     }
     return {
       allowed: false,
-      reason: `MCP write operations are blocked in ${config.displayName}. Switch to Ask or Allow All mode (${config.shortcutHint}) to make changes.`
+      reason: `MCP write operations are blocked in ${config.displayName}. Switch to Ask before edits, Edit automatically, or YOLO (${config.shortcutHint}) to make changes.`
     };
   }
 
@@ -2061,7 +2064,7 @@ export function shouldAllowToolInMode(
     }
     return {
       allowed: false,
-      reason: `API ${method} ${path ?? ''} is blocked in ${config.displayName}. Switch to Ask or Allow All mode (${config.shortcutHint}) to make changes.`
+      reason: `API ${method} ${path ?? ''} is blocked in ${config.displayName}. Switch to Ask before edits, Edit automatically, or YOLO (${config.shortcutHint}) to make changes.`
     };
   }
 
@@ -2077,18 +2080,18 @@ function getBlockReasonWithConfig(toolName: string, config: ToolCheckConfig): st
   const shortcut = config.shortcutHint;
 
   if (toolName === 'Bash') {
-    return `Bash commands are blocked in ${displayName}. Switch to Ask or Allow All mode (${shortcut}) to run commands.`;
+    return `Bash commands are blocked in ${displayName}. Switch to Ask before edits, Edit automatically, or YOLO (${shortcut}) to run commands.`;
   }
   if (toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit') {
-    return `File modifications are blocked in ${displayName}. Switch to Ask or Allow All mode (${shortcut}) to make changes.`;
+    return `File modifications are blocked in ${displayName}. Switch to Ask before edits, Edit automatically, or YOLO (${shortcut}) to make changes.`;
   }
   if (toolName.startsWith('mcp__')) {
-    return `MCP write operations are blocked in ${displayName}. Switch to Ask or Allow All mode (${shortcut}) to make changes.`;
+    return `MCP write operations are blocked in ${displayName}. Switch to Ask before edits, Edit automatically, or YOLO (${shortcut}) to make changes.`;
   }
   if (toolName.startsWith('api_')) {
-    return `API mutations are blocked in ${displayName}. Switch to Ask or Allow All mode (${shortcut}) to make changes.`;
+    return `API mutations are blocked in ${displayName}. Switch to Ask before edits, Edit automatically, or YOLO (${shortcut}) to make changes.`;
   }
-  return `${toolName} is blocked in ${displayName}. Switch to Ask or Allow All mode (${shortcut}) to use this tool.`;
+  return `${toolName} is blocked in ${displayName}. Switch to Ask before edits, Edit automatically, or YOLO (${shortcut}) to use this tool.`;
 }
 
 /**

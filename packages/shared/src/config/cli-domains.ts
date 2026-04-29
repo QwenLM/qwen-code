@@ -134,7 +134,7 @@ export interface BashPatternRule {
 }
 
 /**
- * Derive the canonical Explore-mode read-only craft-agent bash patterns from
+ * Derive the canonical Plan-mode read-only craft-agent bash patterns from
  * CLI domain policies. Keeps permissions regexes aligned with command metadata.
  */
 export function getCraftAgentReadOnlyBashPatterns(): BashPatternRule[] {

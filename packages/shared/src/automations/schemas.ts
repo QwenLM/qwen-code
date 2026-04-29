@@ -134,7 +134,7 @@ export const AutomationMatcherSchema = z.object({
   matcher: z.string().optional(),
   cron: z.string().optional(),
   timezone: z.string().optional(),
-  permissionMode: z.enum(['safe', 'ask', 'allow-all']).optional(),
+  permissionMode: z.enum(['allow-all', 'safe', 'ask', 'auto-edit']).optional(),
   labels: z.array(z.string()).optional(),
   enabled: z.boolean().optional(),
   conditions: z.array(AutomationConditionSchema).optional(),

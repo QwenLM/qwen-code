@@ -15,7 +15,7 @@
   "workspaceDefaults": {
     "thinkingLevel": "think",
     "permissionMode": "safe",
-    "cyclablePermissionModes": ["safe", "allow-all"],
+    "cyclablePermissionModes": ["allow-all", "safe", "ask", "auto-edit"],
     "localMcpServers": {
       "enabled": true
     }

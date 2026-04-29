@@ -127,12 +127,12 @@ const EDIT_CONFIGS: Record<EditContextKey, (location: string) => EditConfig> = {
       context:
         'The user is on the Settings Screen and pressed the edit button on Workspace Permission settings. ' +
         'Their intent is likely to update the setting immediately unless otherwise specified. ' +
-        'The permissions.json file configures Explore mode rules. It can contain: allowedBashPatterns, ' +
+        'The permissions.json file configures Plan mode rules. It can contain: allowedBashPatterns, ' +
         'allowedMcpPatterns, allowedApiEndpoints, blockedTools, and allowedWritePaths. ' +
         'After editing, call config_validate with target "permissions" to verify the changes. ' +
         'Confirm clearly when done.',
     },
-    example: "Allow running 'make build' in Explore mode",
+    example: "Allow running 'make build' in Plan mode",
     displayLabelKey: 'editPopover.label.permissionSettings',
     exampleKey: 'editPopover.example.workspacePermissions',
     model: 'default',
@@ -146,7 +146,7 @@ const EDIT_CONFIGS: Record<EditContextKey, (location: string) => EditConfig> = {
       filePath: location, // location is the full path for default permissions
       context:
         'The user is editing app-level default permissions (~/.craft-agent/permissions/default.json). ' +
-        'This file configures Explore mode rules that apply to ALL workspaces. ' +
+        'This file configures Plan mode rules that apply to ALL workspaces. ' +
         'It can contain: allowedBashPatterns, allowedMcpPatterns, allowedApiEndpoints, blockedTools, and allowedWritePaths. ' +
         'Each pattern can be a string or an object with pattern and comment fields. ' +
         'Be careful - these are app-wide defaults. ' +
@@ -250,7 +250,7 @@ const EDIT_CONFIGS: Record<EditContextKey, (location: string) => EditConfig> = {
         'After editing, call config_validate with target "permissions" and the source slug to verify the changes. ' +
         'Confirm clearly when done.',
     },
-    example: 'Allow list operations in Explore mode',
+    example: 'Allow list operations in Plan mode',
     displayLabelKey: 'editPopover.label.sourcePermissions',
     exampleKey: 'editPopover.example.sourcePermissions',
     model: 'default',
@@ -264,7 +264,7 @@ const EDIT_CONFIGS: Record<EditContextKey, (location: string) => EditConfig> = {
       filePath: `${location}/permissions.json`,
       context:
         'The user is viewing the Tools list for an MCP source and wants to modify tool permissions. ' +
-        'Edit the permissions.json file to control which tools are allowed in Explore mode. ' +
+        'Edit the permissions.json file to control which tools are allowed in Plan mode. ' +
         'Use allowedMcpPatterns to allow specific tools (e.g., ["list_*", "get_*"] for read-only). ' +
         'Use blockedTools to explicitly block specific tools. ' +
         'Patterns are auto-scoped to this source. ' +

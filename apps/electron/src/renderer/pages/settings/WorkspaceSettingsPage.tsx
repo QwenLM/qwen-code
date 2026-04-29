@@ -26,7 +26,7 @@ import { RenameDialog } from '@/components/ui/rename-dialog'
 import type { PermissionMode, WorkspaceSettings, LoadedSource } from '../../../shared/types'
 import { useDirectoryPicker } from '@/hooks/useDirectoryPicker'
 import { ServerDirectoryBrowser } from '@/components/ServerDirectoryBrowser'
-import { PERMISSION_MODE_CONFIG } from '@craft-agent/shared/agent/mode-types'
+import { PERMISSION_MODE_ORDER } from '@craft-agent/shared/agent/mode-types'
 import type { DetailsPageMeta } from '@/lib/navigation-registry'
 import { SourceAvatar } from '@/components/ui/source-avatar'
 import { toast } from 'sonner'
@@ -72,7 +72,7 @@ export default function WorkspaceSettingsPage() {
   const [enabledSourceSlugs, setEnabledSourceSlugs] = useState<string[]>([])
 
   // Mode cycling state
-  const [enabledModes, setEnabledModes] = useState<PermissionMode[]>(['safe', 'ask', 'allow-all'])
+  const [enabledModes, setEnabledModes] = useState<PermissionMode[]>([...PERMISSION_MODE_ORDER])
   const [modeCyclingError, setModeCyclingError] = useState<string | null>(null)
 
   // Load workspace settings when active workspace changes
@@ -438,9 +438,10 @@ export default function WorkspaceSettingsPage() {
                   value={permissionMode}
                   onValueChange={(v) => handlePermissionModeChange(v as PermissionMode)}
                   options={[
-                    { value: 'safe', label: t("mode.explore"), description: t("mode.exploreDesc") },
+                    { value: 'allow-all', label: t("mode.allow-all"), description: t("mode.yoloDesc") },
+                    { value: 'safe', label: t("mode.safe"), description: t("mode.planDesc") },
                     { value: 'ask', label: t("mode.ask"), description: t("mode.askDesc") },
-                    { value: 'allow-all', label: t("mode.execute"), description: t("mode.executeDesc") },
+                    { value: 'auto-edit', label: t("mode.auto-edit"), description: t("mode.autoEditDesc") },
                   ]}
                 />
               </SettingsCard>
@@ -452,11 +453,12 @@ export default function WorkspaceSettingsPage() {
               description={t("settings.workspace.modeCyclingDesc")}
             >
               <SettingsCard>
-                {(['safe', 'ask', 'allow-all'] as const).map((m) => {
+                {PERMISSION_MODE_ORDER.map((m) => {
                   const modeTranslations: Record<string, { label: string; desc: string }> = {
-                    'safe': { label: t("mode.explore"), desc: t("mode.exploreFullDesc") },
+                    'allow-all': { label: t("mode.allow-all"), desc: t("mode.yoloFullDesc") },
+                    'safe': { label: t("mode.safe"), desc: t("mode.planFullDesc") },
                     'ask': { label: t("mode.askToEdit"), desc: t("mode.askFullDesc") },
-                    'allow-all': { label: t("mode.execute"), desc: t("mode.executeFullDesc") },
+                    'auto-edit': { label: t("mode.auto-edit"), desc: t("mode.autoEditFullDesc") },
                   }
                   const isEnabled = enabledModes.includes(m)
                   return (

@@ -23,7 +23,7 @@ let mockIsReadOnlyBashCommandWithConfig = mock(
   (_command: string, _config: any) => false
 );
 
-let mockEffectivePermissionMode: 'safe' | 'ask' | 'allow-all' = 'safe';
+let mockEffectivePermissionMode: 'allow-all' | 'safe' | 'ask' | 'auto-edit' = 'safe';
 
 // Paths resolve from THIS file's location (core/__tests__/)
 mock.module('../../mode-manager.ts', () => ({
@@ -177,7 +177,7 @@ describe('runPreToolUseChecks', () => {
     it('blocks when shouldAllowToolInMode returns not allowed', () => {
       mockShouldAllowToolInMode.mockImplementation(() => ({
         allowed: false,
-        reason: 'Bash is not allowed in Explore mode',
+        reason: 'Bash is not allowed in Plan mode',
       }));
 
       const result = runPreToolUseChecks(createInput({
@@ -188,8 +188,8 @@ describe('runPreToolUseChecks', () => {
 
       expect(result.type).toBe('block');
       if (result.type === 'block') {
-        expect(result.reason).toContain('Bash is not allowed in Explore mode');
-        expect(result.reason).toContain('Effective mode: Explore');
+        expect(result.reason).toContain('Bash is not allowed in Plan mode');
+        expect(result.reason).toContain('Effective mode: Plan mode');
         expect(result.reason).toContain('Last mode change: user at 2026-02-28T18:00:00.000Z (modeVersion=7)');
       }
     });
@@ -728,6 +728,33 @@ describe('runPreToolUseChecks', () => {
       }
     });
 
+    it('auto-allows file writes in edit automatically mode', () => {
+      mockEffectivePermissionMode = 'auto-edit';
+
+      const result = runPreToolUseChecks(createInput({
+        toolName: 'Edit',
+        input: { file_path: '/test/file.ts', old_string: 'a', new_string: 'b' },
+        permissionMode: 'auto-edit',
+      }));
+
+      expect(result.type).toBe('allow');
+    });
+
+    it('still prompts for bash commands in edit automatically mode', () => {
+      mockEffectivePermissionMode = 'auto-edit';
+
+      const result = runPreToolUseChecks(createInput({
+        toolName: 'Bash',
+        input: { command: 'npm install express' },
+        permissionMode: 'auto-edit',
+      }));
+
+      expect(result.type).toBe('prompt');
+      if (result.type === 'prompt') {
+        expect(result.promptType).toBe('bash');
+      }
+    });
+
     it('does not prompt in allow-all mode', () => {
       mockEffectivePermissionMode = 'allow-all';
 
@@ -807,7 +834,7 @@ describe('runPreToolUseChecks', () => {
       expect(result.type).toBe('block');
       if (result.type === 'block') {
         expect(result.reason).toContain('Not allowed');
-        expect(result.reason).toContain('Effective mode: Explore');
+        expect(result.reason).toContain('Effective mode: Plan mode');
       }
     });
 

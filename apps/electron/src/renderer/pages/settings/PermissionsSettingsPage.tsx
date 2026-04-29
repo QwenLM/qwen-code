@@ -1,7 +1,7 @@
 /**
  * PermissionsSettingsPage
  *
- * Displays permissions configuration for Explore mode.
+ * Displays permissions configuration for Plan mode.
  * Shows both default patterns (from ~/.craft-agent/permissions/default.json)
  * and custom workspace additions (from workspace permissions.json).
  *
@@ -38,7 +38,7 @@ export const meta: DetailsPageMeta = {
 
 /**
  * Build default permissions data from ~/.craft-agent/permissions/default.json.
- * These are the Explore mode patterns that can be customized by the user.
+ * These are the Plan mode patterns that can be customized by the user.
  * Patterns can include comments which are displayed in the table.
  *
  * Note: We only show allowed patterns here. Anything not on this list is implicitly denied.

@@ -2,7 +2,7 @@
  * PowerShell Command Validator
  *
  * Uses PowerShell's native System.Management.Automation.Language.Parser to create
- * a proper AST and validate commands in Explore mode. This mirrors the approach
+ * a proper AST and validate commands in Plan mode. This mirrors the approach
  * used by bash-validator.ts but for PowerShell syntax.
  *
  * AST Node Types (from PowerShell):

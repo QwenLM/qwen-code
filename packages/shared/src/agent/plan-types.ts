@@ -210,21 +210,23 @@ export function addRefinementEntry(
 // Permission Mode UI Messages (single source of truth)
 // ============================================
 // Permission modes control tool execution behavior.
-// User can cycle via SHIFT+TAB: Safe → Ask → Allow All → Safe
+// User can cycle via SHIFT+TAB: YOLO -> Plan mode -> Ask before edits -> Edit automatically
 
 import type { PermissionMode } from './mode-manager.ts';
 import { PERMISSION_MODE_CONFIG } from './mode-types.ts';
 
 /** User-visible messages for each permission mode */
 export const PERMISSION_MODE_MESSAGES: Record<PermissionMode, string> = {
-  'safe': `${PERMISSION_MODE_CONFIG['safe'].displayName} mode active. Read-only exploration enabled.`,
-  'ask': `${PERMISSION_MODE_CONFIG['ask'].displayName} mode active. Prompts for dangerous operations.`,
+  'safe': `${PERMISSION_MODE_CONFIG['safe'].displayName} active. Plan-first workflow enabled.`,
+  'ask': `${PERMISSION_MODE_CONFIG['ask'].displayName} mode active. Prompts before edits and dangerous operations.`,
+  'auto-edit': `${PERMISSION_MODE_CONFIG['auto-edit'].displayName} mode active. File edits are automatic; other risky operations may prompt.`,
   'allow-all': `${PERMISSION_MODE_CONFIG['allow-all'].displayName} mode active. All operations permitted.`,
 };
 
 /** System prompts sent to Claude when mode changes */
 export const PERMISSION_MODE_PROMPTS: Record<PermissionMode, string> = {
-  'safe': `The user has switched to ${PERMISSION_MODE_CONFIG['safe'].displayName} mode (read-only). You can read files, search, and explore the codebase, but write operations (Bash, Write, Edit, API calls) are blocked. Focus on understanding and explaining rather than making changes.`,
-  'ask': `The user has switched to ${PERMISSION_MODE_CONFIG['ask'].displayName} mode. Most operations are allowed, but dangerous bash commands will prompt for user approval. You have access to write operations.`,
+  'safe': `The user has switched to ${PERMISSION_MODE_CONFIG['safe'].displayName}. You can read files, search, and explore the codebase, but write operations (Bash, Write, Edit, API calls) are blocked until a plan is accepted or the mode changes.`,
+  'ask': `The user has switched to ${PERMISSION_MODE_CONFIG['ask'].displayName} mode. Most operations are allowed, but edits and dangerous commands will prompt for user approval.`,
+  'auto-edit': `The user has switched to ${PERMISSION_MODE_CONFIG['auto-edit'].displayName} mode. File edits can be applied without prompting, but other risky operations may still ask for user approval.`,
   'allow-all': `The user has switched to ${PERMISSION_MODE_CONFIG['allow-all'].displayName} mode. All operations are permitted without prompts. Use with care.`,
 };

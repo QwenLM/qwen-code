@@ -49,13 +49,16 @@ describe('PermissionManager', () => {
       permissionManager.setPermissionMode('ask');
 
       const nextMode = permissionManager.cyclePermissionMode();
-      expect(nextMode).toBe('allow-all');
+      expect(nextMode).toBe('auto-edit');
 
       const nextMode2 = permissionManager.cyclePermissionMode();
-      expect(nextMode2).toBe('safe');
+      expect(nextMode2).toBe('allow-all');
 
       const nextMode3 = permissionManager.cyclePermissionMode();
-      expect(nextMode3).toBe('ask');
+      expect(nextMode3).toBe('safe');
+
+      const nextMode4 = permissionManager.cyclePermissionMode();
+      expect(nextMode4).toBe('ask');
     });
   });
 
@@ -175,6 +178,11 @@ describe('PermissionManager', () => {
       // The test verifies the expected behavior based on isDangerousCommand
       expect(permissionManager.isDangerousCommand('ls')).toBe(false);
       expect(permissionManager.isDangerousCommand('cat')).toBe(false);
+    });
+
+    it('should require permission for dangerous commands in edit automatically mode', () => {
+      permissionManager.setPermissionMode('auto-edit');
+      expect(permissionManager.requiresBashPermission('rm file.txt')).toBe(true);
     });
   });
 

@@ -86,6 +86,7 @@ import { useFocusContext } from "@/context/FocusContext"
 import { getSessionTitle } from "@/utils/session"
 import { useSetAtom } from "jotai"
 import type { Session, Workspace, FileAttachment, PermissionRequest, LoadedSource, LoadedSkill, PermissionMode, SourceFilter, AutomationFilter } from "../../../shared/types"
+import { PERMISSION_MODE_ORDER } from '@craft-agent/shared/agent/mode-types'
 import { extractSessionMeta, sessionMetaMapAtom, sendToWorkspaceAtom, type SessionMeta } from "@/atoms/sessions"
 import { sourcesAtom } from "@/atoms/sources"
 import { skillsAtom } from "@/atoms/skills"
@@ -847,7 +848,7 @@ function AppShellContent({
   const [localMcpEnabled, setLocalMcpEnabled] = React.useState(true)
 
   // Enabled permission modes for Shift+Tab cycling (min 2 modes)
-  const [enabledModes, setEnabledModes] = React.useState<PermissionMode[]>(['safe', 'ask', 'allow-all'])
+  const [enabledModes, setEnabledModes] = React.useState<PermissionMode[]>([...PERMISSION_MODE_ORDER])
 
   // Load workspace settings (for localMcpEnabled and cyclablePermissionModes) on workspace change
   React.useEffect(() => {
@@ -1092,7 +1093,7 @@ function AppShellContent({
       const currentOptions = contextValue.sessionOptions.get(effectiveSessionId)
       const currentMode = currentOptions?.permissionMode ?? 'ask'
       // Cycle through enabled permission modes
-      const modes = enabledModes.length >= 2 ? enabledModes : ['safe', 'ask', 'allow-all'] as PermissionMode[]
+      const modes = enabledModes.length >= 2 ? enabledModes : [...PERMISSION_MODE_ORDER]
       const currentIndex = modes.indexOf(currentMode)
       // If current mode not in enabled list, jump to first enabled mode
       const nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % modes.length

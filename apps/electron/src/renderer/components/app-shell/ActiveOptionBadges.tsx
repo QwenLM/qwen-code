@@ -4,7 +4,7 @@ import { cn } from '@/lib/utils'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { SlashCommandMenu, DEFAULT_SLASH_COMMAND_GROUPS, type SlashCommandId } from '@/components/ui/slash-command-menu'
 import { ChevronDown, Info } from 'lucide-react'
-import { PERMISSION_MODE_CONFIG, type PermissionMode } from '@craft-agent/shared/agent/modes'
+import { PERMISSION_MODE_CONFIG, PERMISSION_MODE_ORDER, type PermissionMode } from '@craft-agent/shared/agent/modes'
 import type { BackgroundTask } from './ActiveTasksBar'
 import { LabelIcon, LabelValueTypeIcon } from '@/components/ui/label-icon'
 import { LabelValuePopover } from '@/components/ui/label-value-popover'
@@ -442,9 +442,10 @@ function PermissionModeDropdown({ permissionMode, onPermissionModeChange, sessio
 
   // Handle command selection from dropdown
   const handleSelect = React.useCallback((commandId: SlashCommandId) => {
-    if (commandId === 'safe' || commandId === 'ask' || commandId === 'allow-all') {
-      setOptimisticMode(commandId)
-      onPermissionModeChange?.(commandId)
+    if (PERMISSION_MODE_ORDER.includes(commandId as PermissionMode)) {
+      const mode = commandId as PermissionMode
+      setOptimisticMode(mode)
+      onPermissionModeChange?.(mode)
     }
     setOpen(false)
   }, [onPermissionModeChange])
@@ -453,10 +454,15 @@ function PermissionModeDropdown({ permissionMode, onPermissionModeChange, sessio
   const config = PERMISSION_MODE_CONFIG[optimisticMode]
 
   // Mode-specific styling using CSS variables (theme-aware)
-  // - safe (Explore): foreground at 60% opacity - subtle, read-only feel
-  // - ask (Ask to Edit): info color - amber, prompts for edits
-  // - allow-all (Auto): accent color - purple, full autonomy
+  // - allow-all (YOLO): accent color - full autonomy
+  // - safe (Plan mode): foreground at 60% opacity - subtle, planning feel
+  // - ask (Ask before edits): info color - prompts for edits
+  // - auto-edit (Edit automatically): success color - edits flow through
   const modeStyles: Record<PermissionMode, { className: string; shadowVar: string }> = {
+    'allow-all': {
+      className: 'bg-accent/5 text-accent',
+      shadowVar: 'var(--accent-rgb)',
+    },
     'safe': {
       className: 'bg-foreground/5 text-foreground/60',
       shadowVar: 'var(--foreground-rgb)',
@@ -465,9 +471,9 @@ function PermissionModeDropdown({ permissionMode, onPermissionModeChange, sessio
       className: 'bg-info/10 text-info',
       shadowVar: 'var(--info-rgb)',
     },
-    'allow-all': {
-      className: 'bg-accent/5 text-accent',
-      shadowVar: 'var(--accent-rgb)',
+    'auto-edit': {
+      className: 'bg-success/10 text-success',
+      shadowVar: 'var(--success-rgb)',
     },
   }
   const currentStyle = modeStyles[optimisticMode]
@@ -515,4 +521,3 @@ function PermissionModeDropdown({ permissionMode, onPermissionModeChange, sessio
     </Popover>
   )
 }
-

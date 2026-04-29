@@ -18,7 +18,7 @@ import { DEFAULT_THINKING_LEVEL } from '@craft-agent/shared/agent/thinking-level
  * All session-scoped options in one place.
  */
 export interface SessionOptions {
-  /** Permission mode ('safe', 'ask', 'allow-all') */
+  /** Permission mode */
   permissionMode: PermissionMode
   /** Monotonic version from backend permission mode state (used to ignore stale events) */
   permissionModeVersion?: number
@@ -46,4 +46,3 @@ export function mergeSessionOptions(
     ...updates,
   }
 }
-

@@ -53,7 +53,7 @@ function setupWorkspaceConfigDir() {
       workspaceDefaults: {
         thinkingLevel: 'off',
         permissionMode: 'ask',
-        cyclablePermissionModes: ['safe', 'ask', 'allow-all'],
+        cyclablePermissionModes: ['allow-all', 'safe', 'ask', 'auto-edit'],
         localMcpServers: { enabled: true },
       },
     }, null, 2),

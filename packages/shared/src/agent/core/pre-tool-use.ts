@@ -849,9 +849,9 @@ export function runPreToolUseChecks(ctx: PreToolUseInput): PreToolUseCheckResult
   }
 
   // ============================================================
-  // 6. ASK MODE PROMPT DECISION
+  // 6. PROMPT DECISION
   // ============================================================
-  if (effectivePermissionMode === 'ask') {
+  if (effectivePermissionMode === 'ask' || effectivePermissionMode === 'auto-edit') {
     const promptInfo = shouldPromptInAskMode(
       toolName,
       input, // Use original input for permission decisions (before stripping)
@@ -860,28 +860,31 @@ export function runPreToolUseChecks(ctx: PreToolUseInput): PreToolUseCheckResult
       plansFolderPath,
       onDebug,
     );
-    if (promptInfo) {
+    const shouldPrompt = effectivePermissionMode === 'auto-edit' && promptInfo?.promptType === 'file_write'
+      ? null
+      : promptInfo;
+    if (shouldPrompt) {
       const adminWrappedInput =
-        promptInfo.promptType === 'admin_approval' &&
-        promptInfo.command &&
+        shouldPrompt.promptType === 'admin_approval' &&
+        shouldPrompt.command &&
         typeof currentInput.command === 'string' &&
         process.platform === 'darwin'
-          ? { ...currentInput, command: wrapCommandForMacAdminPrompt(promptInfo.command) }
+          ? { ...currentInput, command: wrapCommandForMacAdminPrompt(shouldPrompt.command) }
           : undefined;
 
       return {
         type: 'prompt',
-        promptType: promptInfo.promptType,
-        description: promptInfo.description,
-        command: promptInfo.command,
+        promptType: shouldPrompt.promptType,
+        description: shouldPrompt.description,
+        command: shouldPrompt.command,
         modifiedInput: adminWrappedInput ?? (wasModified ? currentInput : undefined),
-        appName: promptInfo.appName,
-        reason: promptInfo.reason,
-        impact: promptInfo.impact,
-        requiresSystemPrompt: promptInfo.requiresSystemPrompt,
-        rememberForMinutes: promptInfo.rememberForMinutes,
-        commandHash: promptInfo.commandHash,
-        approvalTtlSeconds: promptInfo.approvalTtlSeconds,
+        appName: shouldPrompt.appName,
+        reason: shouldPrompt.reason,
+        impact: shouldPrompt.impact,
+        requiresSystemPrompt: shouldPrompt.requiresSystemPrompt,
+        rememberForMinutes: shouldPrompt.rememberForMinutes,
+        commandHash: shouldPrompt.commandHash,
+        approvalTtlSeconds: shouldPrompt.approvalTtlSeconds,
       };
     }
   }
@@ -1030,7 +1033,7 @@ export function shouldPromptInAskMode(
     }
 
     // Auto-allow read-only commands using full AST-based validation
-    // (same pipeline as Explore mode — catches redirects, substitutions, pipes to write commands)
+    // (same pipeline as Plan mode — catches redirects, substitutions, pipes to write commands)
     const mergedConfig = permissionsConfigCache.getMergedConfig(permissionsContext);
     if (isReadOnlyBashCommandWithConfig(command, mergedConfig)) {
       onDebug?.(`Auto-allowing read-only command: ${baseCommand}`);

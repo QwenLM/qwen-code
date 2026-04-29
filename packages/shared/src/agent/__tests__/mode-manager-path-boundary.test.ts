@@ -115,7 +115,7 @@ describe('mode-manager path containment for plans/data exceptions', () => {
     expect(result.allowed).toBe(false);
     if (!result.allowed) {
       expect(result.reason).toContain('read-only allowlist');
-      expect(result.reason).not.toContain('Write blocked (Explore mode) - target not in allowed folders');
+      expect(result.reason).not.toContain('Write blocked (Plan mode) - target not in allowed folders');
     }
   });
 });

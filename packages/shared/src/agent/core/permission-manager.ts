@@ -216,17 +216,17 @@ export class PermissionManager {
   requiresBashPermission(command: string): boolean {
     const mode = this.getPermissionMode();
 
-    // Execute mode never requires permission
+    // YOLO mode never requires permission
     if (mode === 'allow-all') {
       return false;
     }
 
-    // Explore mode blocks commands, doesn't ask
+    // Plan mode blocks commands, doesn't ask
     if (mode === 'safe') {
       return false;
     }
 
-    // In ask mode, check if command is dangerous
+    // In Ask before edits and Edit automatically modes, check if command is dangerous
     const baseCommand = this.getBaseCommand(command);
     return this.isDangerousCommand(baseCommand);
   }

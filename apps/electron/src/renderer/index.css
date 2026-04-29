@@ -68,14 +68,14 @@
    Base colors:
    - background: Light/dark surface
    - foreground: Text and icons
-   - accent: Brand purple (highlights, Auto mode)
+   - accent: Brand purple (highlights, auto-edit mode)
    - info: Amber (warnings, Ask mode)
    - success: Green (connected, checkmarks)
    - destructive: Red (errors, failed)
 
    Variants:
    - /50 = 50% alpha (transparency) - for borders, hovers, overlays
-   - -50 = 50% mix toward background (solid) - for Explore mode
+   - -50 = 50% mix toward background (solid) - for Plan mode
 
    Example: bg-foreground/10, text-accent, bg-foreground-60
 ============================================================================= */
@@ -90,7 +90,7 @@
   --foreground-rgb: 38, 36, 42;             /* RGB for shadow borders */
   --user-message-bubble: oklch(from var(--foreground) l c h / 0.05);
   --user-message-bubble-dimmed: oklch(from var(--foreground) l c h / 0.03);
-  --accent: oklch(0.62 0.13 293);           /* purple - brand, Auto mode */
+  --accent: oklch(0.62 0.13 293);           /* purple - brand, auto-edit mode */
   --accent-rgb: 104, 78, 133;               /* darkened RGB for shadow-tinted (70% of accent) */
   --info: oklch(0.75 0.16 70);              /* amber - warnings, Ask mode */
   --info-rgb: 180, 120, 40;                 /* RGB for shadow-tinted */
@@ -128,7 +128,7 @@
     rgba(0, 0, 0, calc(var(--shadow-blur-opacity) * 0.33)) 0px 24px 24px 0px;
 
   /* === MIX VARIANTS (solid interpolation toward background) === */
-  /* Use -2, -3, -5, -10, -20, ..., -90, -95 for solid colors (e.g., separators, Explore mode) */
+  /* Use -2, -3, -5, -10, -20, ..., -90, -95 for solid colors (e.g., separators, Plan mode) */
   --foreground-1\.5: color-mix(in srgb, var(--foreground) 1.5%, var(--background));
   --foreground-2: color-mix(in srgb, var(--foreground) 2%, var(--background));
   --foreground-3: color-mix(in srgb, var(--foreground) 3%, var(--background));

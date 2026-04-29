@@ -54,7 +54,7 @@ export interface Session {
   messages: Message[]
   isProcessing: boolean
   isFlagged?: boolean
-  /** Permission mode for this session ('safe', 'ask', 'allow-all') */
+  /** Permission mode for this session */
   permissionMode?: PermissionMode
   sessionStatus?: SessionStatus
   /** Labels (additive tags, many-per-session — bare IDs or "id::value" entries) */

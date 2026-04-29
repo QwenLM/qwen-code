@@ -47,7 +47,7 @@ describe('BaseAgent', () => {
   describe('Permission Mode', () => {
     it('should have a permission mode', () => {
       const mode = agent.getPermissionMode();
-      expect(['safe', 'ask', 'allow-all']).toContain(mode);
+      expect(['allow-all', 'safe', 'ask', 'auto-edit']).toContain(mode);
     });
 
     it('should allow setting permission mode', () => {

@@ -25,7 +25,7 @@ export type CSSColor = string;
 export interface ThemeColors {
   background?: CSSColor;
   foreground?: CSSColor;
-  accent?: CSSColor; // Brand purple (Execute mode)
+  accent?: CSSColor; // Brand purple (YOLO mode)
   info?: CSSColor; // Amber (Ask mode, warnings)
   success?: CSSColor; // Green
   destructive?: CSSColor; // Red

@@ -49,9 +49,9 @@ export interface PermissionManagerConfig {
   sessionId: string;
   /** Working directory for the session */
   workingDirectory?: string;
-  /** Plans folder path (writes to this folder are allowed in Explore mode) */
+  /** Plans folder path (writes to this folder are allowed in Plan mode) */
   plansFolderPath?: string;
-  /** Data folder path (writes to this folder are allowed in Explore mode for transform_data output) */
+  /** Data folder path (writes to this folder are allowed in Plan mode for transform_data output) */
   dataFolderPath?: string;
 }
 

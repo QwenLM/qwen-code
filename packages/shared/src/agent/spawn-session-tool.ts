@@ -66,7 +66,7 @@ Only use 'attachments' for existing file paths on disk — the tool reads them a
         .describe('Model ID override'),
       enabledSourceSlugs: z.array(z.string()).optional()
         .describe('Source slugs to enable in the new session'),
-      permissionMode: z.enum(['safe', 'ask', 'allow-all']).optional()
+      permissionMode: z.enum(['allow-all', 'safe', 'ask', 'auto-edit']).optional()
         .describe('Permission mode for the new session'),
       thinkingLevel: z.enum(['off', 'low', 'medium', 'high', 'xhigh', 'max']).optional()
         .describe('Reasoning level for the new session. Silently ignored on non-reasoning models (e.g. gpt-4o, gemini-2.5-flash). Omit to inherit the workspace default.'),

@@ -41,6 +41,10 @@ function ModeIcon({ mode, className }: { mode: PermissionMode; className?: strin
 // ============================================================================
 
 const MODE_STYLES: Record<PermissionMode, { className: string; shadowVar: string }> = {
+  'allow-all': {
+    className: 'bg-accent/5 text-accent',
+    shadowVar: 'var(--accent-rgb)',
+  },
   safe: {
     className: 'bg-foreground/5 text-foreground/60',
     shadowVar: 'var(--foreground-rgb)',
@@ -49,9 +53,9 @@ const MODE_STYLES: Record<PermissionMode, { className: string; shadowVar: string
     className: 'bg-info/10 text-info',
     shadowVar: 'var(--info-rgb)',
   },
-  'allow-all': {
-    className: 'bg-accent/5 text-accent',
-    shadowVar: 'var(--accent-rgb)',
+  'auto-edit': {
+    className: 'bg-success/10 text-success',
+    shadowVar: 'var(--success-rgb)',
   },
 }
 

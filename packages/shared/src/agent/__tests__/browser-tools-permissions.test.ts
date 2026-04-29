@@ -1,7 +1,7 @@
 /**
  * Tests for browser tool permission handling across permission modes.
  *
- * browser_tool should be allowed in safe/Explore mode because it is
+ * browser_tool should be allowed in safe/Plan mode because it is
  * an interactive browsing operation and does not mutate local files/system state.
  */
 import { describe, it, expect } from 'bun:test';

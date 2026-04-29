@@ -157,10 +157,12 @@ function qwenInitializeTimeoutMs(): number {
 
 function mapPermissionModeToQwen(mode: PermissionMode): string {
   switch (mode) {
-    case 'safe':
-      return 'plan';
     case 'allow-all':
       return 'yolo';
+    case 'safe':
+      return 'plan';
+    case 'auto-edit':
+      return 'auto-edit';
     case 'ask':
     default:
       return 'default';
@@ -173,8 +175,9 @@ function mapQwenModeToPermissionMode(mode: string | undefined): PermissionMode |
       return 'safe';
     case 'yolo':
       return 'allow-all';
-    case 'default':
     case 'auto-edit':
+      return 'auto-edit';
+    case 'default':
       return 'ask';
     default:
       return undefined;
@@ -290,6 +293,8 @@ export class QwenAgent extends BaseAgent {
   private permissionRequestCounter = 0;
   private toolIdCounter = 0;
   private planUpdateCounter = 0;
+  private hasInitialModeOverride = false;
+  private pendingModeOverride: PermissionMode | null = null;
 
   private pendingPermissions = new Map<string, PendingPermission>();
   private miniCollectors = new Map<string, MiniCollector>();
@@ -310,6 +315,10 @@ export class QwenAgent extends BaseAgent {
     super(config, config.model || '', QWEN_CONTEXT_WINDOW);
     this._supportsBranching = false;
     this.persistedQwenSessionId = config.session?.sdkSessionId || null;
+    this.pendingModeOverride = config.session?.permissionMode && !config.session?.sdkSessionId
+      ? config.session.permissionMode
+      : null;
+    this.hasInitialModeOverride = this.pendingModeOverride !== null;
 
     if (!config.isHeadless) {
       this.startConfigWatcher();
@@ -504,12 +513,16 @@ export class QwenAgent extends BaseAgent {
   }
 
   override setPermissionMode(mode: PermissionMode): void {
+    this.hasInitialModeOverride = true;
+    this.pendingModeOverride = mode;
     super.setPermissionMode(mode);
     void this.forwardPermissionMode(mode);
   }
 
   override cyclePermissionMode(): PermissionMode {
+    this.hasInitialModeOverride = true;
     const mode = super.cyclePermissionMode();
+    this.pendingModeOverride = mode;
     void this.forwardPermissionMode(mode);
     return mode;
   }
@@ -875,6 +888,7 @@ export class QwenAgent extends BaseAgent {
         this.qwenSessionId = existingSessionId;
         this.persistedQwenSessionId = existingSessionId;
         this.recordSessionModels(result);
+        this.recordSessionModes(result);
         this.config.onSdkSessionIdUpdate?.(existingSessionId);
         await this.applySessionSettings(existingSessionId);
         return;
@@ -896,6 +910,7 @@ export class QwenAgent extends BaseAgent {
     this.qwenSessionId = sessionId;
     this.persistedQwenSessionId = sessionId;
     this.recordSessionModels(result);
+    this.recordSessionModes(result);
     this.config.onSdkSessionIdUpdate?.(sessionId);
     await this.applySessionSettings(sessionId);
   }
@@ -929,6 +944,18 @@ export class QwenAgent extends BaseAgent {
     }
   }
 
+  private recordSessionModes(result: JsonRecord): void {
+    if (this.pendingModeOverride) return;
+
+    const modeState = toRecord(result.modes);
+    const currentModeId = asString(modeState.currentModeId);
+    const mode = mapQwenModeToPermissionMode(currentModeId);
+
+    if (!mode || mode === this.getPermissionMode()) return;
+
+    this.applyAcpPermissionMode(mode);
+  }
+
   private async forwardModel(model: string, sessionId = this.qwenSessionId): Promise<void> {
     if (!model || !sessionId) return;
 
@@ -950,7 +977,9 @@ export class QwenAgent extends BaseAgent {
   }
 
   private async applySessionSettings(sessionId: string): Promise<void> {
-    await this.forwardPermissionMode(this.getPermissionMode(), sessionId);
+    if (this.hasInitialModeOverride) {
+      await this.forwardPermissionMode(this.getPermissionMode(), sessionId);
+    }
 
     if (this._model) {
       await this.forwardModel(this._model, sessionId);
@@ -959,12 +988,20 @@ export class QwenAgent extends BaseAgent {
 
   private async forwardPermissionMode(mode: PermissionMode, sessionId = this.qwenSessionId): Promise<void> {
     if (!sessionId || !this.connection || this.connection.signal.aborted) return;
-    await this.callAcp('session/set_mode', (connection) => connection.setSessionMode({
-      sessionId,
-      modeId: mapPermissionModeToQwen(mode),
-    }), 10_000).catch((error) => {
+    try {
+      await this.callAcp('session/set_mode', (connection) => connection.setSessionMode({
+        sessionId,
+        modeId: mapPermissionModeToQwen(mode),
+      }), 10_000);
+      if (this.pendingModeOverride === mode) {
+        this.pendingModeOverride = null;
+      }
+    } catch (error) {
       this.debug(`Qwen mode switch failed: ${error instanceof Error ? error.message : String(error)}`);
-    });
+      if (this.pendingModeOverride === mode) {
+        this.pendingModeOverride = null;
+      }
+    }
   }
 
   private resolvedCwd(): string {
@@ -1505,6 +1542,16 @@ export class QwenAgent extends BaseAgent {
     const modeId = asString(update.modeId) || asString(update.currentModeId);
     const mode = mapQwenModeToPermissionMode(modeId);
     if (!mode || mode === this.getPermissionMode()) return;
+    this.applyAcpPermissionMode(mode);
+  }
+
+  private applyAcpPermissionMode(mode: PermissionMode): void {
+    if (this.pendingModeOverride) {
+      if (mode !== this.pendingModeOverride) return;
+      this.pendingModeOverride = null;
+    }
+
+    if (mode === this.getPermissionMode()) return;
     this.permissionManager.setPermissionMode(mode);
     this.onPermissionModeChange?.(mode);
   }

@@ -573,32 +573,33 @@ Co-Authored-By: Craft Agent <agents-noreply@craft.do>
 
 | Mode | Description |
 |------|-------------|
-| **${PERMISSION_MODE_CONFIG['safe'].displayName}** | Read-only. Explore, search, read files. Guide the user through the problem space and potential solutions to their problems/tasks/questions. You can use the write/edit to tool to write/edit plans only. |
-| **${PERMISSION_MODE_CONFIG['ask'].displayName}** | Prompts before edits. Read operations run freely. |
 | **${PERMISSION_MODE_CONFIG['allow-all'].displayName}** | Full autonomous execution. No prompts. |
+| **${PERMISSION_MODE_CONFIG['safe'].displayName}** | Plan-first mode. Explore, search, read files, and write plans before implementation. |
+| **${PERMISSION_MODE_CONFIG['ask'].displayName}** | Prompts before edits. Read operations run freely. |
+| **${PERMISSION_MODE_CONFIG['auto-edit'].displayName}** | Applies file edits automatically. Other risky tools may still ask for approval. |
 
-**Mode switching is normal:** Users may switch between exploration and implementation multiple times during the same conversation. Do not be surprised when this happens. Adapt to the current mode and respect the user's latest intention as it changes.
+**Mode switching is normal:** Users may switch between planning and implementation multiple times during the same conversation. Do not be surprised when this happens. Adapt to the current mode and respect the user's latest intention as it changes.
 
-Current mode is in \`<session_state>\`, along with last mode-transition metadata when available (for example: \`modeTransition\`, \`modeChangedBy\`, \`modeChangedAt\`, \`modeVersion\`). \`plansFolderPath\` shows the **exact path** where you can write plan files. \`dataFolderPath\` shows where you can write data files (e.g. \`transform_data\` output). In Explore mode, writes are only allowed to these two folders — writes to any other location will be blocked.
+Current mode is in \`<session_state>\`, along with last mode-transition metadata when available (for example: \`modeTransition\`, \`modeChangedBy\`, \`modeChangedAt\`, \`modeVersion\`). \`plansFolderPath\` shows the **exact path** where you can write plan files. \`dataFolderPath\` shows where you can write data files (e.g. \`transform_data\` output). In ${PERMISSION_MODE_CONFIG['safe'].displayName}, writes are only allowed to these two folders — writes to any other location will be blocked.
 
-**${PERMISSION_MODE_CONFIG['safe'].displayName} mode:** Read, search, and explore freely. Use \`SubmitPlan\` when ready to implement - the user sees an "Accept Plan" button to transition to execution. 
+**${PERMISSION_MODE_CONFIG['safe'].displayName}:** Read, search, and explore freely. Use \`SubmitPlan\` when ready to implement - the user sees an "Accept Plan" button to transition to execution.
 Be decisive: when you have enough context, present your approach and ask "Ready for a plan?" or write it directly. This will help the user move forward.
 
 !!Important!! - Before executing a plan you need to present it to the user via SubmitPlan tool.
 When presenting a plan via SubmitPlan the system will interrupt your current run and wait for user confirmation. Expect, and prepare for this.
-Never try to execute a plan without submitting it first - it will fail, especially if user is in ${PERMISSION_MODE_CONFIG['safe'].displayName} mode.
+Never try to execute a plan without submitting it first - it will fail, especially if user is in ${PERMISSION_MODE_CONFIG['safe'].displayName}.
 
 **CRITICAL:** You MUST write plan files to the **exact \`plansFolderPath\`** and data files to the **exact \`dataFolderPath\`** from \`<session_state>\`. These folders already exist (created by the system). Writes to any other path (including the parent session folder) will be blocked.
 **Do NOT** write to \`.copilot-config/\`, \`session-state/\`, or any other directory — those paths will be rejected. Use ONLY \`plansFolderPath\` or \`dataFolderPath\`.
 ${backendName === 'Codex' ? `
 ### Planning tools (Codex)
 - **update_plan** — Live task tracking within a turn/session (statuses: pending/in_progress/completed). Does not pause execution or request approval.
-- **SubmitPlan** — User-facing implementation proposal (markdown plan file + approval gate). In Explore mode, required before execution and pauses for user confirmation.
+- **SubmitPlan** — User-facing implementation proposal (markdown plan file + approval gate). In Plan mode, required before execution and pauses for user confirmation.
 
 Recommended flow:
 1. Start multi-step work with \`update_plan\`.
 2. Keep \`update_plan\` updated as steps progress for turncard/tasklist accuracy.
-3. When ready to implement (especially in Explore mode), write the plan file and call \`SubmitPlan\`.
+3. When ready to implement (especially in Plan mode), write the plan file and call \`SubmitPlan\`.
 4. After acceptance and execution starts, continue using \`update_plan\` for granular progress.
 
 **Writing plan files (Codex):** Create plan files using shell commands. Do NOT use heredocs (\`<<EOF\`) as they are blocked by the sandbox.
@@ -649,7 +650,7 @@ The \`session\` MCP server provides tools for managing external sources:
 1. Read \`${DOC_REFS.sources}\` for the full setup guide
 2. Search \`craft-agents-docs\` for service-specific guides
 3. Create \`config.json\` in \`sources/{slug}/\`
-4. Create \`permissions.json\` for Explore mode
+4. Create \`permissions.json\` for Plan mode
 5. Write \`guide.md\` with usage instructions
 6. Run \`source_test\` to validate — **once only, before auth**
 7. Trigger the appropriate auth tool
@@ -748,7 +749,7 @@ The file should contain \`{"rows": [...]}\` or just a rows array \`[...]\`. Inli
 - Input files: relative to session dir (e.g., \`long_responses/tool_result_abc.txt\`)
 - Output file: written to session \`data/\` dir
 - Runs in isolated subprocess (no API keys, 30s timeout)
-- Available in all permission modes including Explore
+- Available in all permission modes including Plan mode
 
 **Example:**
 \`\`\`
