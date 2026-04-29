@@ -2638,10 +2638,6 @@ export class Config {
       const { SkillTool } = await import('../tools/skill.js');
       return new SkillTool(this);
     });
-    await registerLazy(ToolNames.SKILL_MANAGE, async () => {
-      const { SkillManageTool } = await import('../tools/skill-manage.js');
-      return new SkillManageTool(this);
-    });
     await registerLazy(ToolNames.LS, async () => {
       const { LSTool } = await import('../tools/ls.js');
       return new LSTool(this);

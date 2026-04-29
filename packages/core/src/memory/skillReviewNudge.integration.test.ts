@@ -59,7 +59,8 @@ describe('Skill Nudge E2E Integration Tests', () => {
         projectRoot,
         sessionId: 'test-session-1',
         history: sampleHistory,
-        toolCallCount: 5, // Below default threshold of 20
+        toolCallCount: 5,
+        skillsModified: false, // Below default threshold of 20
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
@@ -76,6 +77,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD - 1,
+        skillsModified: false,
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
@@ -95,6 +97,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        skillsModified: false,
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
@@ -111,6 +114,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD + 10,
+        skillsModified: false,
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
@@ -127,6 +131,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: 30,
+        skillsModified: false,
         threshold: customThreshold,
         enabled: true,
         config: mockConfig,
@@ -137,79 +142,38 @@ describe('Skill Nudge E2E Integration Tests', () => {
     });
   });
 
-  // ─── Test 3: skill_manage Call Resets Counter ──────────────────────────────
+  // ─── Test 3: Skills Modified In Session ──────────────────────────────────
 
-  describe('Test 3: skill_manage function call in history should prevent nudge', () => {
-    it('should skip when history contains skill_manage call', () => {
-      const historyWithSkillManage: Content[] = [
-        { role: 'user', parts: [{ text: 'Create a skill' }] },
-        {
-          role: 'model',
-          parts: [
-            {
-              functionCall: {
-                name: 'skill_manage',
-                args: {
-                  action: 'create',
-                  name: 'my-skill',
-                  content: '---\nname: my-skill\n---\n',
-                },
-              },
-            },
-          ],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                name: 'skill_manage',
-                response: { output: 'Success' },
-              },
-            },
-          ],
-        },
-      ];
-
+  describe('Test 3: skills modified in session should prevent nudge', () => {
+    it('should skip when skillsModified is true', () => {
       const result = mgr.scheduleSkillReview({
         projectRoot,
         sessionId: 'test-session-1',
-        history: historyWithSkillManage,
+        history: sampleHistory,
         toolCallCount: 30, // Well above threshold
         threshold: AUTO_SKILL_THRESHOLD,
+        skillsModified: true,
         enabled: true,
         config: mockConfig,
       });
 
       expect(result.status).toBe('skipped');
-      expect(result.skippedReason).toBe('skill_manage_called');
+      expect(result.skippedReason).toBe('skills_modified_in_session');
     });
 
-    it('should not trigger nudge even with high toolCallCount if skill_manage was used', () => {
+    it('should not trigger nudge even with high toolCallCount if skills were modified', () => {
       const result = mgr.scheduleSkillReview({
         projectRoot,
         sessionId: 'test-session-1',
-        history: [
-          { role: 'user', parts: [{ text: 'Many tool calls...' }] },
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  name: 'skill_manage',
-                  args: { action: 'patch' },
-                },
-              },
-            ],
-          },
-        ],
+        history: sampleHistory,
         toolCallCount: 100,
+        skillsModified: true,
         enabled: true,
         config: mockConfig,
       });
 
       expect(result.status).toBe('skipped');
-      expect(result.skippedReason).toBe('skill_manage_called');
+      expect(result.skippedReason).toBe('skills_modified_in_session');
     });
   });
 
@@ -222,6 +186,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        skillsModified: false,
         enabled: false,
         config: mockConfig,
       });
@@ -236,6 +201,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        skillsModified: false,
         config: undefined,
       });
 
@@ -249,6 +215,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        skillsModified: false,
         enabled: true,
         config: mockConfig,
       });
@@ -267,6 +234,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        skillsModified: false,
         enabled: true,
         config: mockConfig,
       });
@@ -290,6 +258,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        skillsModified: false,
         enabled: true,
         config: mockConfig,
       });
@@ -299,6 +268,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'session-2',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        skillsModified: false,
         enabled: true,
         config: mockConfig,
       });
@@ -327,6 +297,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         history: sampleHistory,
         toolCallCount,
         threshold,
+        skillsModified: false,
         enabled: true,
         config: mockConfig,
       });
@@ -351,6 +322,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        skillsModified: false,
         enabled: true,
         config: mockConfig,
       });
@@ -374,6 +346,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD - 1,
+        skillsModified: false,
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
@@ -388,6 +361,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        skillsModified: false,
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
@@ -402,6 +376,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD + 1,
+        skillsModified: false,
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
@@ -420,6 +395,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        skillsModified: false,
         enabled: true,
         config: mockConfig,
       });

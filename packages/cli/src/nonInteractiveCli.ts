@@ -453,7 +453,12 @@ export async function runNonInteractive(
             adapter.emitToolResult(finalRequestInfo, toolResponse);
             config
               .getGeminiClient()
-              .recordCompletedToolCall(finalRequestInfo.name);
+              .recordCompletedToolCall(
+                finalRequestInfo.name,
+                typeof finalRequestInfo.args['file_path'] === 'string'
+                  ? finalRequestInfo.args['file_path']
+                  : undefined,
+              );
 
             if (toolResponse.responseParts) {
               toolResponseParts.push(...toolResponse.responseParts);
@@ -604,7 +609,12 @@ export async function runNonInteractive(
                   adapter.emitToolResult(requestInfo, toolResponse);
                   config
                     .getGeminiClient()
-                    .recordCompletedToolCall(requestInfo.name);
+                    .recordCompletedToolCall(
+                      requestInfo.name,
+                      typeof requestInfo.args['file_path'] === 'string'
+                        ? requestInfo.args['file_path']
+                        : undefined,
+                    );
 
                   if (toolResponse.responseParts) {
                     itemToolResponseParts.push(...toolResponse.responseParts);

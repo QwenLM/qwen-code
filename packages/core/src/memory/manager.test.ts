@@ -245,6 +245,7 @@ describe('MemoryManager', () => {
         history: [],
         toolCallCount: 1,
         threshold: 2,
+        skillsModified: false,
         config: makeMockConfig(),
       });
 
@@ -255,25 +256,21 @@ describe('MemoryManager', () => {
       expect(runSkillReviewByAgent).not.toHaveBeenCalled();
     });
 
-    it('skips when skill_manage was called in history', () => {
+    it('skips when skills were modified in session', () => {
       const mgr = new MemoryManager();
       const result = mgr.scheduleSkillReview({
         projectRoot: '/project',
         sessionId: 'sess',
-        history: [
-          {
-            role: 'model',
-            parts: [{ functionCall: { name: 'skill_manage', args: {} } }],
-          },
-        ],
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
         toolCallCount: 20,
         threshold: 2,
+        skillsModified: true,
         config: makeMockConfig(),
       });
 
       expect(result).toEqual({
         status: 'skipped',
-        skippedReason: 'skill_manage_called',
+        skippedReason: 'skills_modified_in_session',
       });
       expect(runSkillReviewByAgent).not.toHaveBeenCalled();
     });
@@ -286,6 +283,7 @@ describe('MemoryManager', () => {
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
         toolCallCount: 2,
         threshold: 2,
+        skillsModified: false,
         config: makeMockConfig(),
         maxTurns: 3,
         timeoutMs: 30_000,
@@ -540,6 +538,7 @@ describe('MemoryManager', () => {
         toolCallCount: 25,
         threshold: 20,
         enabled: true,
+        skillsModified: false,
         config,
       });
 
@@ -563,6 +562,7 @@ describe('MemoryManager', () => {
         toolCallCount: 25,
         threshold: 20,
         enabled: true,
+        skillsModified: false,
         config,
       });
 

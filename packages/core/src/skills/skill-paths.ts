@@ -29,7 +29,7 @@ export function assertProjectSkillPath(
 ): void {
   if (!isProjectSkillPath(targetPath, projectRoot)) {
     throw new Error(
-      `skill_manage can only write to ${getProjectSkillsRoot(projectRoot)}. ` +
+      `Skills writes are restricted to ${getProjectSkillsRoot(projectRoot)}. ` +
         'Use the Skills UI to manage user or bundled skills.',
     );
   }
@@ -75,7 +75,7 @@ export async function assertRealProjectSkillPath(
         !real.startsWith(realSkillsRoot + path.sep)
       ) {
         throw new Error(
-          `skill_manage: symlink traversal detected — resolved path "${real}" ` +
+          `Skills write blocked: symlink traversal detected — resolved path "${real}" ` +
             `is outside the project skills directory "${realSkillsRoot}".`,
         );
       }

@@ -696,7 +696,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // exclusion list does not apply. Recursive forks are blocked by the
       // ALS-based `isInForkExecution()` guard.
       // However, we still exclude tools that must never be available to
-      // any subagent (agent, skill_manage, cron tools).
+      // any subagent (agent, cron tools).
       const parentToolDecls: FunctionDeclaration[] =
         (
           generationConfig.tools as Array<{

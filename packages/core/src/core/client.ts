@@ -48,6 +48,7 @@ import { LoopDetectionService } from '../services/loopDetectionService.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
+import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
 
 // Telemetry
@@ -129,6 +130,7 @@ export class GeminiClient {
   private chat?: GeminiChat;
   private sessionTurnCount = 0;
   private toolCallCount = 0;
+  private skillsModifiedInSession = false;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
 
   private readonly loopDetector: LoopDetectionService;
@@ -534,6 +536,7 @@ export class GeminiClient {
         history,
         config: this.config,
         toolCallCount: this.toolCallCount,
+        skillsModified: this.skillsModifiedInSession,
         enabled: autoSkillEnabled,
         threshold: 20,
         maxTurns: 8,
@@ -549,6 +552,7 @@ export class GeminiClient {
       }
     }
     this.toolCallCount = 0;
+    this.skillsModifiedInSession = false;
 
     if (!this.config.getManagedAutoMemoryEnabled()) {
       return;
@@ -609,10 +613,13 @@ export class GeminiClient {
     return promises;
   }
 
-  recordCompletedToolCall(toolName: string): void {
-    if (toolName === 'skill_manage') {
-      this.toolCallCount = 0;
-      return;
+  recordCompletedToolCall(toolName: string, filePath?: string): void {
+    if (
+      filePath &&
+      (toolName === 'write_file' || toolName === 'edit') &&
+      isProjectSkillPath(filePath, this.config.getProjectRoot())
+    ) {
+      this.skillsModifiedInSession = true;
     }
     this.toolCallCount += 1;
   }

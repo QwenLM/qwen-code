@@ -40,7 +40,6 @@ import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { logMemoryExtract, MemoryExtractEvent } from '../telemetry/index.js';
-import { ToolNames } from '../tools/tool-names.js';
 import { isAutoMemPath } from './paths.js';
 import {
   getAutoMemoryConsolidationLockPath,
@@ -119,6 +118,7 @@ export interface ScheduleSkillReviewParams {
   sessionId: string;
   history: Content[];
   toolCallCount: number;
+  skillsModified: boolean;
   now?: Date;
   config?: Config;
   enabled?: boolean;
@@ -130,7 +130,7 @@ export interface ScheduleSkillReviewParams {
 export interface SkillReviewScheduleResult {
   status: 'scheduled' | 'skipped';
   taskId?: string;
-  skippedReason?: 'below_threshold' | 'skill_manage_called' | 'disabled';
+  skippedReason?: 'below_threshold' | 'skills_modified_in_session' | 'disabled';
   promise?: Promise<MemoryTaskRecord>;
 }
 
@@ -249,14 +249,6 @@ function historyWritesToMemory(
 ): boolean {
   return history.some((msg) =>
     (msg.parts ?? []).some((p) => partWritesToMemory(p, projectRoot)),
-  );
-}
-
-function historyCallsSkillManage(history: Content[]): boolean {
-  return history.some((msg) =>
-    (msg.parts ?? []).some(
-      (p) => p.functionCall?.name === ToolNames.SKILL_MANAGE,
-    ),
   );
 }
 
@@ -687,8 +679,8 @@ export class MemoryManager {
       return { status: 'skipped', skippedReason: 'disabled' };
     }
 
-    if (historyCallsSkillManage(params.history)) {
-      return { status: 'skipped', skippedReason: 'skill_manage_called' };
+    if (params.skillsModified) {
+      return { status: 'skipped', skippedReason: 'skills_modified_in_session' };
     }
 
     const threshold = params.threshold ?? AUTO_SKILL_THRESHOLD;

@@ -41,7 +41,7 @@ describe('skill project paths', () => {
     const sibling = path.join(projectRoot, '.qwen', 'skills-evil', 'SKILL.md');
     expect(isProjectSkillPath(sibling, projectRoot)).toBe(false);
     expect(() => assertProjectSkillPath(sibling, projectRoot)).toThrow(
-      'skill_manage can only write to',
+      'Skills writes are restricted to',
     );
   });
 

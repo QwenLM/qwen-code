@@ -74,7 +74,6 @@ import { type ContextState, templateString } from './agent-headless.js';
  */
 export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
-  ToolNames.SKILL_MANAGE,
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
@@ -310,9 +309,7 @@ export class AgentCore {
 
     const excludedFromSubagents = EXCLUDED_TOOLS_FOR_SUBAGENTS;
     // When a subagent has an explicit tools list (not wildcard), only the
-    // recursive-spawn guard (AgentTool) is enforced. Other exclusions like
-    // SKILL_MANAGE are intentionally bypassed because the caller has
-    // explicitly opted in to those tools (e.g. the skill review agent).
+    // recursive-spawn guard (AgentTool) is enforced.
     const recursionGuardOnly = new Set<string>([ToolNames.AGENT]);
 
     if (this.toolConfig) {

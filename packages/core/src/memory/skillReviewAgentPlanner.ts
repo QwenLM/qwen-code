@@ -5,6 +5,7 @@
  */
 
 import type { Content } from '@google/genai';
+import * as fs from 'node:fs/promises';
 import type { Config } from '../config/config.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type {
@@ -39,12 +40,29 @@ type SkillScopedPermissionManager = Pick<
   | 'isToolEnabled'
 >;
 
+/**
+ * Returns true if the file at `filePath` exists and contains
+ * `source: auto-skill` in its YAML frontmatter block.
+ * Returns false if the file does not exist (caller may allow creation).
+ */
+async function hasAutoSkillSource(filePath: string): Promise<boolean | null> {
+  let content: string;
+  try {
+    content = await fs.readFile(filePath, 'utf-8');
+  } catch {
+    // File does not exist — allow creation.
+    return null;
+  }
+  const match = /^---\r?\n([\s\S]*?)\r?\n---/m.exec(content);
+  if (!match) return false;
+  return /^\s*source:\s*auto-skill\s*$/m.test(match[1]);
+}
+
 function isScopedTool(toolName: string): boolean {
   return (
     toolName === ToolNames.SHELL ||
     toolName === ToolNames.EDIT ||
-    toolName === ToolNames.WRITE_FILE ||
-    toolName === ToolNames.SKILL_MANAGE
+    toolName === ToolNames.WRITE_FILE
   );
 }
 
@@ -78,12 +96,18 @@ async function evaluateScopedDecision(
       return isReadOnly ? 'allow' : 'deny';
     }
     case ToolNames.EDIT:
-    case ToolNames.WRITE_FILE:
-      return ctx.filePath && isProjectSkillPath(ctx.filePath, projectRoot)
-        ? 'allow'
-        : 'deny';
-    case ToolNames.SKILL_MANAGE:
-      return 'allow';
+    case ToolNames.WRITE_FILE: {
+      if (!ctx.filePath || !isProjectSkillPath(ctx.filePath, projectRoot)) {
+        return 'deny';
+      }
+      // For existing files, verify source: auto-skill is present.
+      const sourceFlag = await hasAutoSkillSource(ctx.filePath);
+      if (sourceFlag === null) {
+        // File does not exist yet — allow creation.
+        return 'allow';
+      }
+      return sourceFlag ? 'allow' : 'deny';
+    }
     default:
       return 'default';
   }
@@ -97,9 +121,9 @@ function getScopedDenyRule(
     case ToolNames.SHELL:
       return 'ManagedSkillReview(run_shell_command: read-only only)';
     case ToolNames.EDIT:
-      return `ManagedSkillReview(edit: only within ${getProjectSkillsRoot(projectRoot)})`;
+      return `ManagedSkillReview(edit: only within ${getProjectSkillsRoot(projectRoot)} and only on skills with 'source: auto-skill' in frontmatter)`;
     case ToolNames.WRITE_FILE:
-      return `ManagedSkillReview(write_file: only within ${getProjectSkillsRoot(projectRoot)})`;
+      return `ManagedSkillReview(write_file: only within ${getProjectSkillsRoot(projectRoot)}; existing files must have 'source: auto-skill' in frontmatter)`;
     default:
       return undefined;
   }
@@ -145,12 +169,16 @@ export function createSkillScopedAgentConfig(
 
 const SKILL_REVIEW_SYSTEM_PROMPT = [
   'You are reviewing this conversation to extract reusable skills.',
-  'You may create new skills or update existing ones.',
-  'Do NOT delete any skills unless the user has explicitly requested deletion in this conversation. Autonomous deletion is not permitted.',
   '',
   'Review the conversation above and consider saving or updating a skill if appropriate.',
   '',
-  'Focus on: was a non-trivial approach used to complete a task that required trial and error, or changing course due to experiential findings along the way, or did the user expect or desire a different method or outcome? If a relevant skill already exists, update it with what you learned. Otherwise, create a new skill if the approach is reusable.',
+  "Focus on: was a non-trivial approach used to complete a task that required trial and error, or changing course due to experiential findings along the way, or did the user expect or desire a different method or outcome? If a relevant skill already exists and has 'source: auto-skill' in its frontmatter, update it with what you learned. Otherwise, create a new skill if the approach is reusable.",
+  '',
+  'IMPORTANT constraints:',
+  "- You may ONLY modify skill files that contain 'source: auto-skill' in their YAML frontmatter. Always read a skill file before editing it.",
+  '- Do NOT touch skills that lack this marker — they were created by the user.',
+  "- When creating a new skill, you MUST include 'source: auto-skill' in the frontmatter so future review agents can safely update it.",
+  '- Do NOT delete any skill. Only create or update.',
   '',
   "If nothing is worth saving, just say 'Nothing to save.' and stop.",
 ].join('\n');
@@ -176,13 +204,15 @@ function buildTaskPrompt(skillsRoot: string): string {
   return [
     `Project skills directory: \`${skillsRoot}\``,
     '',
-    'Use `list_directory` and `read_file` to inspect existing skills before writing.',
-    'Use `skill_manage` to create or update project-level skills only.',
-    'Each skill requires a SKILL.md with YAML frontmatter:',
+    'Use `ls` and `read_file` to inspect existing skills before writing.',
+    'Use `write_file` to create a new skill, `edit` to update an existing auto-skill.',
+    "Each skill lives at .qwen/skills/<name>/SKILL.md. Skills you create MUST include 'source: auto-skill' in the frontmatter:",
     '',
     '---',
     'name: <skill-name>',
     'description: <one-line description>',
+    'source: auto-skill',
+    `extracted_at: '${new Date().toISOString()}'`,
     '---',
     '',
     '<markdown body with the procedure/approach>',
@@ -215,7 +245,6 @@ export async function runSkillReviewByAgent(params: {
       ToolNames.SHELL,
       ToolNames.WRITE_FILE,
       ToolNames.EDIT,
-      ToolNames.SKILL_MANAGE,
     ],
     extraHistory: buildAgentHistory(params.history),
   });
