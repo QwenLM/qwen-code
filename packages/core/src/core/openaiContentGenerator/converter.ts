@@ -60,30 +60,137 @@ export interface ExtendedCompletionChunkDelta
 
 const CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH = 20;
 
+function isStreamDebugEnabled(): boolean {
+  const value = process.env['QWEN_STREAM_DEBUG'];
+  if (!value) {
+    return false;
+  }
+
+  return !['0', 'false', 'off', 'no'].includes(value.trim().toLowerCase());
+}
+
+function createStreamingTextDeltaState(): StreamingTextDeltaState {
+  return {
+    emittedText: '',
+    cumulativeMode: false,
+    chunkIndex: 0,
+    rawBytes: 0,
+    emittedBytes: 0,
+    suppressedBytes: 0,
+    cumulativeDeltaCount: 0,
+    exactRepeatCount: 0,
+    maxPrefixOverlapBytes: 0,
+  };
+}
+
+function byteLength(text: string): number {
+  return Buffer.byteLength(text, 'utf8');
+}
+
+function logStreamingTextDeltaMetrics(
+  streamPart: 'text' | 'reasoning',
+  rawDelta: string,
+  emittedDelta: string,
+  state: StreamingTextDeltaState,
+  prefixOverlapBytes: number,
+  event: 'incremental' | 'cumulative-suffix' | 'cumulative-repeat' | 'stale',
+): void {
+  state.chunkIndex += 1;
+
+  const rawDeltaBytes = byteLength(rawDelta);
+  const emittedDeltaBytes = byteLength(emittedDelta);
+  const suppressedBytes = Math.max(0, rawDeltaBytes - emittedDeltaBytes);
+
+  state.rawBytes += rawDeltaBytes;
+  state.emittedBytes += emittedDeltaBytes;
+  state.suppressedBytes += suppressedBytes;
+  state.maxPrefixOverlapBytes = Math.max(
+    state.maxPrefixOverlapBytes,
+    prefixOverlapBytes,
+  );
+
+  if (event === 'cumulative-suffix') {
+    state.cumulativeDeltaCount += 1;
+  } else if (event === 'cumulative-repeat') {
+    state.cumulativeDeltaCount += 1;
+    state.exactRepeatCount += 1;
+  }
+
+  if (!isStreamDebugEnabled()) {
+    return;
+  }
+
+  debugLogger.debug('stream_delta_metrics', {
+    streamPart,
+    event,
+    chunkIndex: state.chunkIndex,
+    rawDeltaBytes,
+    emittedDeltaBytes,
+    suppressedBytes,
+    prefixOverlapBytes,
+    cumulativeMode: state.cumulativeMode,
+    totals: {
+      rawBytes: state.rawBytes,
+      emittedBytes: state.emittedBytes,
+      suppressedBytes: state.suppressedBytes,
+      cumulativeDeltaCount: state.cumulativeDeltaCount,
+      exactRepeatCount: state.exactRepeatCount,
+      maxPrefixOverlapBytes: state.maxPrefixOverlapBytes,
+    },
+  });
+}
+
 // Some OpenAI-compatible providers send accumulated content in each
 // delta.content field. Normalize that shape to incremental suffixes before the
 // Gemini stream layer appends it to the live transcript.
 function normalizeStreamingTextDelta(
   rawDelta: string,
   state: StreamingTextDeltaState,
+  streamPart: 'text' | 'reasoning',
 ): string {
   if (rawDelta.length === 0) {
+    logStreamingTextDeltaMetrics(streamPart, rawDelta, '', state, 0, 'stale');
     return '';
   }
 
   if (state.emittedText.length === 0) {
     state.emittedText = rawDelta;
+    logStreamingTextDeltaMetrics(
+      streamPart,
+      rawDelta,
+      rawDelta,
+      state,
+      0,
+      'incremental',
+    );
     return rawDelta;
   }
 
   if (state.cumulativeMode) {
     if (rawDelta.startsWith(state.emittedText)) {
       const suffix = rawDelta.slice(state.emittedText.length);
+      const prefixOverlapBytes = byteLength(state.emittedText);
       state.emittedText = rawDelta;
+      logStreamingTextDeltaMetrics(
+        streamPart,
+        rawDelta,
+        suffix,
+        state,
+        prefixOverlapBytes,
+        'cumulative-suffix',
+      );
       return suffix;
     }
 
     if (state.emittedText.startsWith(rawDelta)) {
+      logStreamingTextDeltaMetrics(
+        streamPart,
+        rawDelta,
+        '',
+        state,
+        byteLength(rawDelta),
+        'stale',
+      );
       return '';
     }
 
@@ -95,8 +202,17 @@ function normalizeStreamingTextDelta(
     rawDelta.length > state.emittedText.length
   ) {
     const suffix = rawDelta.slice(state.emittedText.length);
+    const prefixOverlapBytes = byteLength(state.emittedText);
     state.emittedText = rawDelta;
     state.cumulativeMode = true;
+    logStreamingTextDeltaMetrics(
+      streamPart,
+      rawDelta,
+      suffix,
+      state,
+      prefixOverlapBytes,
+      'cumulative-suffix',
+    );
     return suffix;
   }
 
@@ -105,10 +221,26 @@ function normalizeStreamingTextDelta(
     rawDelta.length >= CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH
   ) {
     state.cumulativeMode = true;
+    logStreamingTextDeltaMetrics(
+      streamPart,
+      rawDelta,
+      '',
+      state,
+      byteLength(rawDelta),
+      'cumulative-repeat',
+    );
     return '';
   }
 
   state.emittedText += rawDelta;
+  logStreamingTextDeltaMetrics(
+    streamPart,
+    rawDelta,
+    rawDelta,
+    state,
+    0,
+    'incremental',
+  );
   return rawDelta;
 }
 
@@ -995,10 +1127,9 @@ export function convertOpenAIChunkToGemini(
     if (reasoningText) {
       const normalizedReasoningText = normalizeStreamingTextDelta(
         reasoningText,
-        (requestContext.reasoningDeltaState ??= {
-          emittedText: '',
-          cumulativeMode: false,
-        }),
+        (requestContext.reasoningDeltaState ??=
+          createStreamingTextDeltaState()),
+        'reasoning',
       );
       if (normalizedReasoningText) {
         parts.push({ text: normalizedReasoningText, thought: true });
@@ -1010,10 +1141,8 @@ export function convertOpenAIChunkToGemini(
       if (typeof choice.delta.content === 'string') {
         const normalizedContent = normalizeStreamingTextDelta(
           choice.delta.content,
-          (requestContext.textDeltaState ??= {
-            emittedText: '',
-            cumulativeMode: false,
-          }),
+          (requestContext.textDeltaState ??= createStreamingTextDeltaState()),
+          'text',
         );
         if (normalizedContent) {
           parts.push({ text: normalizedContent });

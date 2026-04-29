@@ -587,16 +587,39 @@ stream pipeline. Text and reasoning streams use separate state, and short exact
 repeated chunks such as `ha`, `ha` are still preserved so ordinary model
 repetition is not blindly removed.
 
+When `QWEN_STREAM_DEBUG=1` is set, the converter also writes per-chunk
+`stream_delta_metrics` records to the normal debug log. Those records include:
+
+- `rawDeltaBytes`: bytes received from the provider for this chunk;
+- `emittedDeltaBytes`: bytes forwarded to the Gemini stream after
+  normalization;
+- `suppressedBytes`: bytes removed as repeated cumulative prefix;
+- `prefixOverlapBytes`: how many bytes matched the previously emitted text;
+- `cumulativeDeltaCount` and `exactRepeatCount`: stream-level counters that
+  distinguish cumulative provider behavior from normal incremental chunks.
+
+This makes source attribution easier:
+
+- high `suppressedBytes` with `cumulativeDeltaCount > 0` means the provider is
+  sending cumulative deltas and the converter is trimming them;
+- repeated final text with low `suppressedBytes` usually means the model itself
+  generated repeated content;
+- source sentinel counts staying fixed while screen sentinel counts grow means
+  the TUI renderer is duplicating output.
+
 Validation metric: eight unique table sentinel labels
 (`QWEN_TABLE_01` through `QWEN_TABLE_08`) are present in the fake model payload.
 The final screen and every captured frame must not show more than eight sentinel
-occurrences.
+occurrences. The capture summary also reports amplification ratios:
+`tableSentinelAmplificationRatio` and
+`maxFrameTableSentinelAmplificationRatio`; values above `1` mean the terminal
+screen contains more copies than the source payload.
 
-| Scenario                               | Branch                | Expected                         | Final sentinel occurrences | Max frame sentinel occurrences | Result |
-| -------------------------------------- | --------------------- | -------------------------------- | -------------------------: | -----------------------------: | ------ |
-| Narrow Markdown table incremental      | fixed branch          | normal incremental stream stable |                          8 |                              8 | passed |
-| Narrow Markdown table cumulative delta | before cumulative fix | failure-first reproduction       |                        112 |                            112 | failed |
-| Narrow Markdown table cumulative delta | fixed branch          | strict pass, no duplicate append |                          8 |                              8 | passed |
+| Scenario                               | Branch                | Expected                         | Final sentinel occurrences | Max frame sentinel occurrences | Amplification | Result |
+| -------------------------------------- | --------------------- | -------------------------------- | -------------------------: | -----------------------------: | ------------: | ------ |
+| Narrow Markdown table incremental      | fixed branch          | normal incremental stream stable |                          8 |                              8 |           1.0 | passed |
+| Narrow Markdown table cumulative delta | before cumulative fix | failure-first reproduction       |                        112 |                            112 |          14.0 | failed |
+| Narrow Markdown table cumulative delta | fixed branch          | strict pass, no duplicate append |                          8 |                              8 |           1.0 | passed |
 
 Commands:
 

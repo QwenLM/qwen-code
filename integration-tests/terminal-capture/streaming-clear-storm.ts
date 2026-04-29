@@ -79,10 +79,14 @@ type Summary = Counts & {
   stallSentinelExpectedCount: number;
   stallSentinelOccurrenceCount: number;
   maxFrameStallSentinelOccurrenceCount: number;
+  stallSentinelAmplificationRatio: number | null;
+  maxFrameStallSentinelAmplificationRatio: number | null;
   minPostDoneViewportStallSentinelOccurrenceCount: number | null;
   tableSentinelExpectedCount: number;
   tableSentinelOccurrenceCount: number;
   maxFrameTableSentinelOccurrenceCount: number;
+  tableSentinelAmplificationRatio: number | null;
+  maxFrameTableSentinelAmplificationRatio: number | null;
   terminal: {
     cols: number;
     rows: number;
@@ -303,6 +307,13 @@ function countTableSentinels(text: string): number {
     (total, sentinel) => total + countOccurrences(text, sentinel),
     0,
   );
+}
+
+function amplificationRatio(
+  occurrences: number,
+  expectedCount: number,
+): number | null {
+  return expectedCount > 0 ? occurrences / expectedCount : null;
 }
 
 function isMarkdownTablePayload(payload: string): boolean {
@@ -710,6 +721,14 @@ async function main(): Promise<void> {
       0,
       ...frameStallSentinelOccurrenceCounts,
     );
+    const stallSentinelAmplificationRatio = amplificationRatio(
+      stallSentinelOccurrenceCount,
+      stallSentinelExpectedCount,
+    );
+    const maxFrameStallSentinelAmplificationRatio = amplificationRatio(
+      maxFrameStallSentinelOccurrenceCount,
+      stallSentinelExpectedCount,
+    );
     const minPostDoneViewportStallSentinelOccurrenceCount =
       postDoneViewportStallSentinelOccurrenceCounts.length > 0
         ? Math.min(...postDoneViewportStallSentinelOccurrenceCounts)
@@ -723,6 +742,14 @@ async function main(): Promise<void> {
     const maxFrameTableSentinelOccurrenceCount = Math.max(
       0,
       ...frameTableSentinelOccurrenceCounts,
+    );
+    const tableSentinelAmplificationRatio = amplificationRatio(
+      tableSentinelOccurrenceCount,
+      tableSentinelExpectedCount,
+    );
+    const maxFrameTableSentinelAmplificationRatio = amplificationRatio(
+      maxFrameTableSentinelOccurrenceCount,
+      tableSentinelExpectedCount,
     );
     const gifPath = generateGif(frames, outputDir);
     const markdownPass =
@@ -773,10 +800,14 @@ async function main(): Promise<void> {
       stallSentinelExpectedCount,
       stallSentinelOccurrenceCount,
       maxFrameStallSentinelOccurrenceCount,
+      stallSentinelAmplificationRatio,
+      maxFrameStallSentinelAmplificationRatio,
       minPostDoneViewportStallSentinelOccurrenceCount,
       tableSentinelExpectedCount,
       tableSentinelOccurrenceCount,
       maxFrameTableSentinelOccurrenceCount,
+      tableSentinelAmplificationRatio,
+      maxFrameTableSentinelAmplificationRatio,
       terminal: {
         cols: terminalCols,
         rows: terminalRows,

@@ -1514,6 +1514,17 @@ describe('OpenAIContentConverter', () => {
         '\n| `A[Text]` | Node |',
       ]);
       expect(emitted.join('')).toBe(chunks[chunks.length - 1]);
+      expect(ctx.textDeltaState).toEqual(
+        expect.objectContaining({
+          chunkIndex: 4,
+          cumulativeDeltaCount: 3,
+          exactRepeatCount: 0,
+        }),
+      );
+      expect(ctx.textDeltaState?.suppressedBytes).toBeGreaterThan(0);
+      expect(ctx.textDeltaState?.rawBytes).toBeGreaterThan(
+        ctx.textDeltaState?.emittedBytes ?? 0,
+      );
     });
 
     it('should ignore repeated cumulative chunks with no new suffix', () => {
@@ -1542,6 +1553,13 @@ describe('OpenAIContentConverter', () => {
       });
 
       expect(emitted).toEqual([content, '']);
+      expect(ctx.textDeltaState).toEqual(
+        expect.objectContaining({
+          chunkIndex: 2,
+          cumulativeDeltaCount: 1,
+          exactRepeatCount: 1,
+        }),
+      );
     });
 
     it('should preserve repeated short incremental content chunks', () => {
@@ -1569,6 +1587,14 @@ describe('OpenAIContentConverter', () => {
       });
 
       expect(emitted).toEqual(['ha', 'ha']);
+      expect(ctx.textDeltaState).toEqual(
+        expect.objectContaining({
+          chunkIndex: 2,
+          cumulativeDeltaCount: 0,
+          exactRepeatCount: 0,
+          suppressedBytes: 0,
+        }),
+      );
     });
   });
 

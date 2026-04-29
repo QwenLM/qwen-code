@@ -16,6 +16,13 @@ import type { StreamingToolCallParser } from './streamingToolCallParser.js';
 export interface StreamingTextDeltaState {
   emittedText: string;
   cumulativeMode: boolean;
+  chunkIndex: number;
+  rawBytes: number;
+  emittedBytes: number;
+  suppressedBytes: number;
+  cumulativeDeltaCount: number;
+  exactRepeatCount: number;
+  maxPrefixOverlapBytes: number;
 }
 
 export interface RequestContext {
