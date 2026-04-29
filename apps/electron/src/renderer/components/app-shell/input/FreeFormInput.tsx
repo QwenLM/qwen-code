@@ -91,6 +91,22 @@ function formatTokenCount(tokens: number): string {
   return tokens.toString()
 }
 
+function clampUsagePercent(percent: number): number {
+  return Math.max(0, Math.min(100, percent))
+}
+
+function formatUsagePercent(percent: number): string {
+  return Number.isInteger(percent) ? percent.toString() : percent.toFixed(1)
+}
+
+function getModelContextWindowFromList(
+  models: Array<ModelDefinition | string> | undefined,
+  modelId: string,
+): number | undefined {
+  const model = models?.find(item => typeof item !== 'string' && item.id === modelId)
+  return typeof model === 'string' ? undefined : model?.contextWindow
+}
+
 function stripPiPrefixForDisplay(value: string): string {
   return value.startsWith('pi/') ? value.slice(3) : value
 }
@@ -104,6 +120,105 @@ function formatFollowUpChipText(text: string, fallback: string, maxLength = 50):
     : normalized
 }
 
+interface ContextUsageIndicatorProps {
+  usedTokens: number
+  totalTokens?: number
+  isCompacting?: boolean
+  usagePercent?: number
+  usedDisplay?: string
+  totalDisplay?: string
+}
+
+function ContextUsageIndicator({
+  usedTokens,
+  totalTokens,
+  isCompacting = false,
+  usagePercent,
+  usedDisplay,
+  totalDisplay,
+}: ContextUsageIndicatorProps) {
+  const { t } = useTranslation()
+  const percent = usagePercent != null
+    ? clampUsagePercent(usagePercent)
+    : totalTokens && totalTokens > 0
+    ? clampUsagePercent(Math.round((usedTokens / totalTokens) * 100))
+    : null
+  const ringPercent = percent ?? 0
+  const percentDisplay = percent !== null ? formatUsagePercent(percent) : null
+  const usedLabel = usedDisplay ?? formatTokenCount(usedTokens)
+  const totalLabel = totalDisplay ?? (totalTokens ? formatTokenCount(totalTokens) : t('common.unknown'))
+  const percentLabel = percent !== null
+    ? t('chat.contextUsage.percentUsed', { percent: percentDisplay })
+    : t('chat.contextUsage.percentUnknown')
+  const ariaLabel = percent !== null
+    ? t('chat.contextUsage.ariaLabel', { percent: percentDisplay, used: usedLabel, total: totalLabel })
+    : t('chat.contextUsage.ariaLabelUnknown', { used: usedLabel, total: totalLabel })
+  const toneClass = percent === null
+    ? 'text-foreground/45'
+    : percent >= 95
+      ? 'text-destructive'
+      : percent >= 80
+        ? 'text-info'
+        : 'text-foreground/60'
+
+  return (
+    <Tooltip delayDuration={150}>
+      <TooltipTrigger asChild>
+        <span
+          role="meter"
+          tabIndex={0}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={percent ?? undefined}
+          aria-label={ariaLabel}
+          className={cn(
+            "mr-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px] text-foreground/60 outline-none transition-colors hover:bg-foreground/5 focus-visible:ring-1 focus-visible:ring-ring",
+            toneClass,
+          )}
+        >
+          <svg className="h-[18px] w-[18px]" viewBox="0 0 18 18" aria-hidden="true">
+            <circle
+              cx="9"
+              cy="9"
+              r="6.5"
+              fill="none"
+              strokeWidth="3"
+              className="stroke-foreground/15"
+            />
+            <circle
+              cx="9"
+              cy="9"
+              r="6.5"
+              fill="none"
+              pathLength="100"
+              strokeWidth="3"
+              strokeLinecap="round"
+              strokeDasharray={`${ringPercent} 100`}
+              className={cn(
+                "origin-center -rotate-90 stroke-current transition-all duration-300",
+                isCompacting && "animate-pulse",
+              )}
+            />
+          </svg>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="top" sideOffset={8} className="w-[240px] px-4 py-3 text-center">
+        <div className="text-[13px] font-semibold text-muted-foreground">
+          {t('chat.contextUsage.title')}
+        </div>
+        <div className="mt-1 text-[20px] font-semibold leading-none text-foreground">
+          {percentLabel}
+        </div>
+        <div className="mt-3 text-[13px] font-semibold text-foreground">
+          {t('chat.contextUsage.usedOfTotal', { used: usedLabel, total: totalLabel })}
+        </div>
+        <div className="mt-3 text-[12px] font-medium text-muted-foreground">
+          {isCompacting ? t('chat.contextUsage.compacting') : t('chat.contextUsage.autoCompact')}
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  )
+}
 
 /** Platform-specific modifier key for keyboard shortcuts */
 const cmdKey = isMac ? '⌘' : 'Ctrl'
@@ -213,6 +328,12 @@ export interface FreeFormInputProps {
     inputTokens?: number
     /** Model's context window size in tokens */
     contextWindow?: number
+    /** Percent used, if supplied by the provider's native /context report */
+    usagePercent?: number
+    /** Provider-formatted input token count, if available */
+    inputTokensDisplay?: string
+    /** Provider-formatted context window, if available */
+    contextWindowDisplay?: string
   }
   /** Follow-up annotations shown as context chips above the input */
   followUpItems?: FollowUpInputItem[]
@@ -309,7 +430,10 @@ export function FreeFormInput({
   // Read Qwen Code model metadata from context.
   // Uses optional variant so playground (no provider) doesn't crash.
   const appShellCtx = useOptionalAppShellContext()
-  const llmConnections = appShellCtx?.llmConnections ?? []
+  const llmConnections = React.useMemo(
+    () => appShellCtx?.llmConnections ?? [],
+    [appShellCtx?.llmConnections],
+  )
   const qwenConnection = React.useMemo(() => (
     llmConnections.find(c => c.providerType === 'qwen') ?? llmConnections[0]
   ), [llmConnections])
@@ -352,6 +476,36 @@ export function FreeFormInput({
     return typeof model === 'string' ? stripPiPrefixForDisplay(model) : model.name
   }, [availableModels, currentModel, t])
 
+  const currentModelContextWindow = React.useMemo(() => {
+    if (contextStatus?.contextWindow && contextStatus.contextWindow > 0) {
+      return contextStatus.contextWindow
+    }
+
+    return getModelContextWindowFromList(currentLlmConnection?.models, currentModel)
+      ?? getModelContextWindowFromList(availableModels, currentModel)
+      ?? getModelContextWindow(currentModel)
+  }, [availableModels, contextStatus?.contextWindow, currentLlmConnection?.models, currentModel])
+
+  const contextUsageIndicator = React.useMemo(() => {
+    const usedTokens = Math.max(0, contextStatus?.inputTokens ?? 0)
+    if (!currentModelContextWindow && usedTokens === 0) return null
+
+    return {
+      usedTokens,
+      totalTokens: currentModelContextWindow,
+      isCompacting: contextStatus?.isCompacting,
+      usagePercent: contextStatus?.usagePercent,
+      usedDisplay: contextStatus?.inputTokensDisplay,
+      totalDisplay: contextStatus?.contextWindowDisplay,
+    }
+  }, [
+    contextStatus?.inputTokens,
+    contextStatus?.isCompacting,
+    contextStatus?.usagePercent,
+    contextStatus?.inputTokensDisplay,
+    contextStatus?.contextWindowDisplay,
+    currentModelContextWindow,
+  ])
 
   // Access sessionStatuses and onSessionStatusChange from context for the # menu state picker
   const sessionStatuses = appShellCtx?.sessionStatuses ?? []
@@ -1924,10 +2078,22 @@ export function FreeFormInput({
           {/* Spacer */}
           <div className="flex-1" />
 
-          {/* Right side: Model + Send - never shrink so they're always visible */}
+          {/* Right side: Context + Model + Send - never shrink so they're always visible */}
           <div className="flex items-center shrink-0">
-          {/* 5. Model Selector - Hidden in compact mode (EditPopover embedding) */}
-          {!compactMode && (
+            {/* 4. Context Usage Indicator */}
+            {!compactMode && contextUsageIndicator && (
+              <ContextUsageIndicator
+                usedTokens={contextUsageIndicator.usedTokens}
+                totalTokens={contextUsageIndicator.totalTokens}
+                isCompacting={contextUsageIndicator.isCompacting}
+                usagePercent={contextUsageIndicator.usagePercent}
+                usedDisplay={contextUsageIndicator.usedDisplay}
+                totalDisplay={contextUsageIndicator.totalDisplay}
+              />
+            )}
+
+            {/* 5. Model Selector - Hidden in compact mode (EditPopover embedding) */}
+            {!compactMode && (
             <DropdownMenu open={modelDropdownOpen} onOpenChange={setModelDropdownOpen}>
               <Tooltip>
                 <TooltipTrigger asChild>

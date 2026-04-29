@@ -30,19 +30,30 @@ function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
+function asNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
 function toQwenModelDefinition(value: unknown): ModelDefinition | null {
   const model = toRecord(value);
   const id = asString(model.modelId);
   if (!id) return null;
 
   const name = asString(model.name) || id;
+  const generationConfig = toRecord(model.generationConfig);
+  const contextWindow =
+    asNumber(model.contextWindowSize)
+    ?? asNumber(model.contextWindow)
+    ?? asNumber(generationConfig.contextWindowSize)
+    ?? QWEN_CONTEXT_WINDOW;
+
   return {
     id,
     name,
     shortName: name,
     description: asString(model.description) || '',
     provider: 'qwen',
-    contextWindow: QWEN_CONTEXT_WINDOW,
+    contextWindow,
   };
 }
 

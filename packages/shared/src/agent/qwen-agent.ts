@@ -95,13 +95,20 @@ function toQwenModelDefinition(value: unknown): ModelDefinition | null {
   const id = asString(model.modelId);
   if (!id) return null;
   const name = asString(model.name) || id;
+  const generationConfig = toRecord(model.generationConfig);
+  const contextWindow =
+    asNumber(model.contextWindowSize)
+    ?? asNumber(model.contextWindow)
+    ?? asNumber(generationConfig.contextWindowSize)
+    ?? QWEN_CONTEXT_WINDOW;
+
   return {
     id,
     name,
     shortName: name,
     description: asString(model.description) || '',
     provider: 'qwen',
-    contextWindow: QWEN_CONTEXT_WINDOW,
+    contextWindow,
   };
 }
 

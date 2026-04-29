@@ -128,6 +128,58 @@ function getTurnKey(turn: Turn): string {
   return `turn-${turn.turnId}-${turn.timestamp}`
 }
 
+interface ParsedContextUsage {
+  inputTokens: number
+  contextWindow: number
+  usagePercent?: number
+  inputTokensDisplay?: string
+  contextWindowDisplay?: string
+}
+
+function parseCompactTokenAmount(value: string, unit?: string): number | null {
+  const numeric = Number(value.replace(/,/g, ''))
+  if (!Number.isFinite(numeric)) return null
+
+  const multiplier = unit?.toLowerCase() === 'm'
+    ? 1_000_000
+    : unit?.toLowerCase() === 'k'
+      ? 1_000
+      : 1
+
+  return Math.round(numeric * multiplier)
+}
+
+function formatParsedTokenDisplay(value: string, unit?: string): string {
+  return `${value}${unit?.toLowerCase() ?? ''}`
+}
+
+function parseContextUsageReport(content: string): ParsedContextUsage | null {
+  if (!/^##\s+Context Usage\b/m.test(content)) return null
+
+  const contextWindowMatch = content.match(/Context window:\s*([\d.,]+)\s*([kKmM])?\s*tokens/i)
+  const usedMatch = content.match(/^\s*Used\s+([\d.,]+)\s*([kKmM])?\s*tokens\s*\(([\d.]+)%\)/mi)
+  if (!contextWindowMatch || !usedMatch) return null
+
+  const contextWindow = parseCompactTokenAmount(contextWindowMatch[1]!, contextWindowMatch[2])
+  const inputTokens = parseCompactTokenAmount(usedMatch[1]!, usedMatch[2])
+  if (contextWindow == null || inputTokens == null) return null
+
+  const usagePercent = Number(usedMatch[3])
+  return {
+    inputTokens,
+    contextWindow,
+    usagePercent: Number.isFinite(usagePercent) ? usagePercent : undefined,
+    inputTokensDisplay: formatParsedTokenDisplay(usedMatch[1]!, usedMatch[2]),
+    contextWindowDisplay: formatParsedTokenDisplay(contextWindowMatch[1]!, contextWindowMatch[2]),
+  }
+}
+
+function getLatestContextUsageReport(messages: Message[]): ParsedContextUsage | null {
+  const lastMessage = [...messages].reverse().find(message => message.role === 'assistant' || message.role === 'user')
+  if (!lastMessage || lastMessage.role !== 'assistant') return null
+  return parseContextUsageReport(lastMessage.content)
+}
+
 interface ChatDisplayProps {
   session: Session | null
   onSendMessage: (message: string, attachments?: FileAttachment[], skillSlugs?: string[]) => void
@@ -1493,6 +1545,11 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     && !session?.isProcessing
     && !structuredInput
     && session?.messages.length === 0
+  const sessionMessages = session?.messages
+  const latestContextUsageReport = useMemo(
+    () => sessionMessages ? getLatestContextUsageReport(sessionMessages) : null,
+    [sessionMessages]
+  )
 
   const renderChatInputZone = (className?: string) => {
     if (!session) return null
@@ -1549,8 +1606,11 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
           onConnectionChange,
           contextStatus: {
             isCompacting: session.currentStatus?.statusType === 'compacting',
-            inputTokens: session.tokenUsage?.inputTokens,
-            contextWindow: session.tokenUsage?.contextWindow,
+            inputTokens: latestContextUsageReport?.inputTokens ?? session.tokenUsage?.inputTokens,
+            contextWindow: latestContextUsageReport?.contextWindow ?? session.tokenUsage?.contextWindow,
+            usagePercent: latestContextUsageReport?.usagePercent,
+            inputTokensDisplay: latestContextUsageReport?.inputTokensDisplay,
+            contextWindowDisplay: latestContextUsageReport?.contextWindowDisplay,
           },
           followUpItems: followUpInputItems,
           onFollowUpClick: handleFollowUpChipClick,
