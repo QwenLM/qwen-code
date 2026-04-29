@@ -225,7 +225,11 @@ export function sliceTextByVisualHeight(
 
   flushCurrentLine();
 
-  if (visualLineCount <= targetMaxHeight) {
+  // Compare against `visibleContentHeight`, not `targetMaxHeight`: when a
+  // caller asks us to reserve rows for a separate footer/header (e.g. the
+  // "...N task lines hidden..." line), the budget for the actual content is
+  // `visibleContentHeight` and exceeding it must still trigger truncation.
+  if (visualLineCount <= visibleContentHeight) {
     return { text, hiddenLinesCount: 0 };
   }
 

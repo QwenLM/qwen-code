@@ -118,9 +118,36 @@ describe('<AgentExecutionDisplay />', () => {
     );
   });
 
-  it('keeps the rendered completed frame within availableHeight', () => {
+  it('survives the running → completed transition while expanded', () => {
+    // Real path: subagent is running, the user expands it (ctrl+e) so
+    // displayMode becomes 'default', then the same instance rerenders with
+    // completed data. The completed-state budget must still hold the
+    // expanded layout inside availableHeight, and ctrl+e must become a
+    // no-op on the completed instance so it doesn't drag historical
+    // displays through mode toggles.
     const availableHeight = 30;
-    const { lastFrame } = render(
+    const { lastFrame, rerender } = render(
+      <AgentExecutionDisplay
+        data={makeRunningData(8)}
+        availableHeight={availableHeight}
+        childWidth={80}
+        config={makeFakeConfig()}
+      />,
+    );
+
+    // Expand the running display.
+    act(() => {
+      keypressHandler?.({ ctrl: true, name: 'e' });
+    });
+    const expandedRunningFrame = lastFrame() ?? '';
+    expect(expandedRunningFrame).toContain('Task Detail:');
+    expect(expandedRunningFrame).toContain('Tools:');
+
+    // Re-render the same component instance with completed data, preserving
+    // displayMode. Without an overhead-aware completed budget the
+    // ExecutionSummary + ToolUsage blocks would push the frame past
+    // availableHeight here.
+    rerender(
       <AgentExecutionDisplay
         data={makeCompletedData(8)}
         availableHeight={availableHeight}
@@ -129,31 +156,19 @@ describe('<AgentExecutionDisplay />', () => {
       />,
     );
 
-    act(() => {
-      keypressHandler?.({ ctrl: true, name: 'e' });
-    });
-
-    expect(visualRowCount(lastFrame() ?? '')).toBeLessThanOrEqual(
+    const completedFrame = lastFrame() ?? '';
+    expect(visualRowCount(completedFrame)).toBeLessThanOrEqual(
       availableHeight,
     );
-  });
 
-  it('does not respond to ctrl+e once the subagent has completed', () => {
-    const { lastFrame } = render(
-      <AgentExecutionDisplay
-        data={makeCompletedData(2)}
-        availableHeight={20}
-        childWidth={80}
-        config={makeFakeConfig()}
-      />,
-    );
-
+    // useKeypress is now `{ isActive: false }`; ctrl+e on the completed
+    // instance must not toggle anything. The mock unsets keypressHandler
+    // when isActive is false, so the call below is a no-op and the frame
+    // is identical.
     const before = lastFrame() ?? '';
     act(() => {
       keypressHandler?.({ ctrl: true, name: 'e' });
     });
-    const after = lastFrame() ?? '';
-
-    expect(after).toBe(before);
+    expect(lastFrame() ?? '').toBe(before);
   });
 });

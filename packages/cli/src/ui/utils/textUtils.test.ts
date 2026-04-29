@@ -54,6 +54,18 @@ describe('textUtils', () => {
       expect(sliced.hiddenLinesCount).toBeGreaterThan(0);
       expect(sliced.text.split('\n').length).toBeLessThanOrEqual(3);
     });
+
+    it('subtracts reservedRows before deciding whether to truncate', () => {
+      // With reservedRows=1 and maxHeight=3 the visible content budget is 2.
+      // A 3-line input must therefore truncate to 2 rows (not return
+      // unchanged just because it fits inside the unreserved 3-row budget).
+      const sliced = sliceTextByVisualHeight('a\nb\nc', 3, 80, {
+        reservedRows: 1,
+        overflowDirection: 'bottom',
+      });
+
+      expect(sliced).toEqual({ text: 'a\nb', hiddenLinesCount: 1 });
+    });
   });
 
   describe('escapeAnsiCtrlCodes', () => {

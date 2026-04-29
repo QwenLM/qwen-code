@@ -95,9 +95,12 @@ const DEFAULT_DETAIL_HEIGHT = 18;
 // tool-call lists actually fits inside the assigned frame.
 const RUNNING_FIXED_OVERHEAD = 10;
 // In completed/cancelled/failed mode we lose the running footer but gain the
-// ExecutionSummary block (~5 rows) and the ToolUsage block (~4 rows) plus an
-// extra inter-block gap, so the overhead grows.
-const COMPLETED_FIXED_OVERHEAD = 18;
+// ExecutionSummary block (header + 3 rows) and the ToolUsage block (header +
+// up to 2 wrapped rows) plus an extra inter-block gap, so the overhead grows.
+// Calibrated against the running→completed transition test: assigning <22
+// here lets the completed expanded frame edge past availableHeight when the
+// SubAgent finishes mid-expand.
+const COMPLETED_FIXED_OVERHEAD = 22;
 // "Status icon + name + description" + "truncated output" — each tool call
 // commits two visual rows in default/verbose mode.
 const ROWS_PER_TOOL_CALL = 2;
@@ -186,13 +189,29 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
     return colorOption?.value || theme.text.accent;
   }, [data.subagentColor]);
 
+  // Slice the prompt once at the parent so the rendered TaskPromptSection
+  // and the footer's "ctrl+f to show more" hint share the same source of
+  // truth. Counting `data.taskPrompt.split('\n').length` would only see hard
+  // newlines and miss soft-wrapped overflow, so a long single-line prompt
+  // could be visually truncated without surfacing the hint.
+  const promptChildWidth = Math.max(1, childWidth - 2);
+  const slicedPrompt = useMemo(
+    () =>
+      sliceTextByVisualHeight(
+        data.taskPrompt,
+        maxTaskPromptLines,
+        promptChildWidth,
+        { minHeight: 1, overflowDirection: 'bottom' },
+      ),
+    [data.taskPrompt, maxTaskPromptLines, promptChildWidth],
+  );
+
   const footerText = React.useMemo(() => {
     // This component only listens to keyboard shortcut events when the subagent is running
     if (data.status !== 'running') return '';
 
     if (displayMode === 'default') {
-      const hasMoreLines =
-        data.taskPrompt.split('\n').length > maxTaskPromptLines;
+      const hasMoreLines = slicedPrompt.hiddenLinesCount > 0;
       const hasMoreToolCalls =
         data.toolCalls && data.toolCalls.length > maxToolCalls;
 
@@ -207,7 +226,13 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
     }
 
     return '';
-  }, [displayMode, data, maxTaskPromptLines, maxToolCalls]);
+  }, [
+    displayMode,
+    data.status,
+    data.toolCalls,
+    slicedPrompt.hiddenLinesCount,
+    maxToolCalls,
+  ]);
 
   // Handle keyboard shortcuts to control display mode. Scope the listener to
   // running subagents only — every completed/historical AgentExecutionDisplay
@@ -329,10 +354,9 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
 
       {/* Task description */}
       <TaskPromptSection
-        taskPrompt={data.taskPrompt}
+        slicedPrompt={slicedPrompt}
         displayMode={displayMode}
         maxVisualLines={maxTaskPromptLines}
-        childWidth={childWidth - 2}
       />
 
       {/* Progress section for running tasks */}
@@ -393,23 +417,16 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
 };
 
 /**
- * Task prompt section with truncation support
+ * Task prompt section. Receives the already-sliced prompt from the parent so
+ * footer hint and section content share one source of truth for whether
+ * content was hidden (covers soft-wrapped overflow in addition to explicit
+ * newlines).
  */
 const TaskPromptSection: React.FC<{
-  taskPrompt: string;
+  slicedPrompt: { text: string; hiddenLinesCount: number };
   displayMode: DisplayMode;
   maxVisualLines: number;
-  childWidth: number;
-}> = ({ taskPrompt, displayMode, maxVisualLines, childWidth }) => {
-  const slicedPrompt = sliceTextByVisualHeight(
-    taskPrompt,
-    maxVisualLines,
-    childWidth,
-    {
-      minHeight: 1,
-      overflowDirection: 'bottom',
-    },
-  );
+}> = ({ slicedPrompt, displayMode, maxVisualLines }) => {
   const shouldTruncate = slicedPrompt.hiddenLinesCount > 0;
 
   return (
