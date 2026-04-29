@@ -228,25 +228,31 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
     // changes already fill the `MAX_FILES` slot.
     stats.filesCount += untrackedCount;
     const untrackedPaths = splitNulDelimited(untrackedOut);
-    // Keep line-counting decoupled from per-file rendering. We read up to
-    // `MAX_FILES` untracked files for their line counts (bounds worst-case
-    // I/O at ~50 MB) and fold all of them into `linesAdded`, even if only
-    // `remainingSlots` of them end up as visible rows. That avoids the
-    // header silently under-reporting additions when tracked changes have
-    // already filled the per-file map.
-    const countable = untrackedPaths.slice(0, MAX_FILES);
-    const countableStats = await Promise.all(
-      countable.map((relPath) =>
-        countUntrackedLines(path.join(gitRoot, relPath)),
-      ),
+    // Read line counts for *every* untracked path that survived the
+    // `>MAX_FILES_FOR_DETAILS` fast-path filter (so up to ~500 files at the
+    // outer cap, not just the first MAX_FILES). Otherwise a workspace with
+    // 51-500 untracked files would surface in the header as e.g. "60 files
+    // changed, +50 lines" — the +50 only covering the first 50 files,
+    // bypassing the contributions of the remaining 10. Concurrency is
+    // bounded to MAX_FILES so peak heap stays around
+    // `MAX_FILES * UNTRACKED_READ_CHUNK_BYTES` (~3.2 MB) regardless of how
+    // many untracked files are in the slow-path window.
+    const lineStats = await mapWithConcurrency(
+      untrackedPaths,
+      MAX_FILES,
+      (relPath) => countUntrackedLines(path.join(gitRoot, relPath)),
     );
-    for (const s of countableStats) stats.linesAdded += s.added;
+    for (const s of lineStats) stats.linesAdded += s.added;
 
+    // Per-file rendering still caps at MAX_FILES — only the first
+    // `remainingSlots` untracked entries become visible rows. The rest are
+    // already folded into `linesAdded` above and into `filesCount`, so
+    // `hiddenCount` covers them faithfully on the renderer side.
     const remainingSlots = Math.max(0, MAX_FILES - perFileStats.size);
-    const visibleCount = Math.min(remainingSlots, countable.length);
+    const visibleCount = Math.min(remainingSlots, untrackedPaths.length);
     for (let i = 0; i < visibleCount; i++) {
-      const relPath = countable[i] ?? '';
-      const u = countableStats[i] ?? {
+      const relPath = untrackedPaths[i] ?? '';
+      const u = lineStats[i] ?? {
         added: 0,
         isBinary: false,
         truncated: false,
@@ -850,6 +856,35 @@ async function isInTransientGitState(gitRoot: string): Promise<boolean> {
     ),
   );
   return results.some(Boolean);
+}
+
+/**
+ * Run an async mapper over `items` with at most `limit` operations in
+ * flight at once. Used for untracked-file line counting so a workspace with
+ * a few hundred untracked files doesn't open 500 file descriptors in
+ * parallel — peak heap stays at `limit * UNTRACKED_READ_CHUNK_BYTES`
+ * regardless of `items.length`.
+ *
+ * Order-preserving: `results[i]` corresponds to `items[i]`. Failures
+ * propagate as thrown errors (`countUntrackedLines` already swallows its
+ * own I/O errors, so callers here see no rejections in practice).
+ */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const effective = Math.max(1, limit);
+  const results: R[] = new Array(items.length);
+  for (let i = 0; i < items.length; i += effective) {
+    const slice = items.slice(i, i + effective);
+    const batch = await Promise.all(slice.map((item) => fn(item)));
+    for (let j = 0; j < batch.length; j++) {
+      results[i + j] = batch[j] as R;
+    }
+  }
+  return results;
 }
 
 async function runGit(args: string[], cwd: string): Promise<string | null> {

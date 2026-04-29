@@ -22,6 +22,7 @@ import {
   type DiffRenderRow,
   type HistoryItemDiffStats,
 } from '../types.js';
+import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
 
 async function diffAction(
   context: CommandContext,
@@ -212,13 +213,21 @@ function formatRowsText(rows: DiffRenderRow[]): string[] {
 
   const out: string[] = [];
   for (const r of rows) {
+    // Escape ANSI / control-byte sequences in the filename. Git permits
+    // bytes like `\x1b` in tracked / untracked paths, and the
+    // non-interactive (and ACP) text path streams straight to stdout / logs
+    // / transports without going through the interactive history's
+    // `escapeAnsiCtrlCodes(item)` sanitizer in `HistoryItemDisplay`. Without
+    // this hop, a hostile filename could inject color resets, cursor moves,
+    // or full screen clears into CI logs and any consumer's terminal.
+    const safeName = escapeAnsiCtrlCodes(r.filename);
     if (r.isBinary) {
       const suffix = r.isUntracked
         ? ` ${t('(binary, new)')}`
         : r.isDeleted
           ? ` ${t('(binary, deleted)')}`
           : ` ${t('(binary)')}`;
-      out.push(`  ${padMarker('~', statColumnWidth)}  ${r.filename}${suffix}`);
+      out.push(`  ${padMarker('~', statColumnWidth)}  ${safeName}${suffix}`);
       continue;
     }
     const added = `+${String(r.added ?? 0).padStart(addWidth)}`;
@@ -229,7 +238,7 @@ function formatRowsText(rows: DiffRenderRow[]): string[] {
     } else if (r.isDeleted) {
       suffix = ` ${t('(deleted)')}`;
     }
-    out.push(`  ${added} ${removed}  ${r.filename}${suffix}`);
+    out.push(`  ${added} ${removed}  ${safeName}${suffix}`);
   }
   return out;
 }

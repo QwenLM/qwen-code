@@ -464,3 +464,66 @@ describe('diffCommand registration', () => {
     ]);
   });
 });
+
+describe('renderDiffModelText filename sanitization', () => {
+  // Regression for the non-interactive ANSI-injection vector: the
+  // interactive path runs the full HistoryItem through
+  // `escapeAnsiCtrlCodes(item)` in `HistoryItemDisplay`, but text output
+  // (non-interactive / ACP) was streaming `r.filename` straight into
+  // stdout / logs / transports without that hop. A hostile filename like
+  // `evil\x1b[31m.txt` could therefore inject color resets, cursor moves,
+  // or full screen clears into CI logs. The renderer now pipes filenames
+  // through `escapeAnsiCtrlCodes` at the text boundary.
+  let mockFetchGitDiff: Mock;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFetchGitDiff = vi.mocked(fetchGitDiff);
+  });
+
+  async function renderText(perFileStats: Map<string, unknown>) {
+    if (!diffCommand.action) throw new Error('Command has no action');
+    mockFetchGitDiff.mockResolvedValue({
+      stats: { filesCount: 1, linesAdded: 1, linesRemoved: 0 },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      perFileStats: perFileStats as any,
+    } satisfies GitDiffResult);
+    const result = await diffCommand.action(makeContextWithCwd(), '');
+    return (result as { content: string }).content;
+  }
+
+  it('escapes raw ANSI escape sequences embedded in tracked filenames', async () => {
+    const evil = 'safe\x1b[31mEVIL\x1b[0m.txt';
+    const content = await renderText(
+      new Map([[evil, { added: 1, removed: 0, isBinary: false }]]),
+    );
+    // The raw ESC byte must not survive into the text output — it would
+    // otherwise be interpreted as an SGR by any downstream terminal.
+    expect(content).not.toContain('\x1b[');
+    // The literal escaped form is what `escapeAnsiCtrlCodes` produces.
+    expect(content).toContain('\\u001b[31m');
+  });
+
+  it('escapes ANSI sequences in untracked / binary / deleted suffix rows', async () => {
+    const evilBinary = 'img\x1b[2J.png';
+    const evilUntracked = 'note\x1b[H.md';
+    const evilDeleted = 'gone\x1b[0K.txt';
+    const content = await renderText(
+      new Map<string, unknown>([
+        [evilBinary, { added: 0, removed: 0, isBinary: true }],
+        [
+          evilUntracked,
+          { added: 1, removed: 0, isBinary: false, isUntracked: true },
+        ],
+        [
+          evilDeleted,
+          { added: 0, removed: 1, isBinary: false, isDeleted: true },
+        ],
+      ]),
+    );
+    expect(content).not.toContain('\x1b[');
+    // All three suffix branches still render their markers.
+    expect(content).toContain('(binary)');
+    expect(content).toContain('(new)');
+    expect(content).toContain('(deleted)');
+  });
+});

@@ -1216,4 +1216,30 @@ describe('fetchGitDiff untracked counting', () => {
     // Per-file map is still capped at MAX_FILES.
     expect(result!.perFileStats.size).toBe(MAX_FILES);
   });
+
+  it('line-counts every untracked file in the slow path, not just the first MAX_FILES', async () => {
+    // Regression for the under-counted-totals bug: with 0 tracked changes
+    // and 51-500 untracked files, the slow path used to read line counts
+    // for `untrackedPaths.slice(0, MAX_FILES)` only, so files beyond the
+    // per-file display cap silently dropped out of `stats.linesAdded`.
+    // This test puts MAX_FILES + 10 = 60 untracked one-line files in a
+    // clean repo and asserts every one of them contributes to the total.
+    const extra = 10;
+    const totalUntracked = MAX_FILES + extra;
+    for (let i = 0; i < totalUntracked; i++) {
+      // Padded filenames so `ls-files --others` returns them in stable
+      // order — otherwise the "first MAX_FILES" slicing in the bug case
+      // could randomly cover the test files.
+      const name = `u${String(i).padStart(3, '0')}.txt`;
+      await fs.writeFile(path.join(repo, name), 'one-line\n');
+    }
+    const result = await fetchGitDiff(repo);
+    expect(result).not.toBeNull();
+    expect(result!.stats.filesCount).toBe(totalUntracked);
+    // Every untracked file is one line, so totals must equal totalUntracked.
+    // Pre-fix this would have been MAX_FILES (= 50).
+    expect(result!.stats.linesAdded).toBe(totalUntracked);
+    // Visible per-file rows still cap at MAX_FILES.
+    expect(result!.perFileStats.size).toBe(MAX_FILES);
+  });
 });
