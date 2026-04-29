@@ -10,6 +10,7 @@ import {
   forceSessionMessagesReloadAtom,
   refreshSessionsMetadataAtom,
   initializeSessionsAtom,
+  extractSessionMeta,
 } from '../sessions'
 
 function msg(id: string, role: Message['role'] = 'user'): Message {
@@ -31,6 +32,28 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     ...overrides,
   } as Session
 }
+
+describe('extractSessionMeta', () => {
+  it('keeps messageCount unknown for metadata-only sessions without an explicit count', () => {
+    const meta = extractSessionMeta(makeSession({ messages: [] }))
+
+    expect(meta.messageCount).toBeUndefined()
+  })
+
+  it('honors explicit zero messageCount for confirmed empty sessions', () => {
+    const meta = extractSessionMeta(makeSession({ messages: [], messageCount: 0 }))
+
+    expect(meta.messageCount).toBe(0)
+  })
+
+  it('derives messageCount from loaded messages when no explicit count exists', () => {
+    const meta = extractSessionMeta(makeSession({
+      messages: [msg('m1'), msg('m2', 'assistant')],
+    }))
+
+    expect(meta.messageCount).toBe(2)
+  })
+})
 
 describe('session message loading atoms', () => {
   const originalWindow = globalThis.window
