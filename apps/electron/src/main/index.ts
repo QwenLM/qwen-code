@@ -764,6 +764,21 @@ app.whenReady().then(async () => {
         return remove(workspaceId)
       })
 
+      // Persist local project-list pinning even when the active workspace is remote.
+      ipcMain.handle('workspace:pinned:set', async (_event, workspaceId: string, pinned: boolean) => {
+        const { getWorkspaceByNameOrId } = await import('@craft-agent/shared/config')
+        const { loadWorkspaceConfig, saveWorkspaceConfig } = await import('@craft-agent/shared/workspaces')
+        const workspace = getWorkspaceByNameOrId(workspaceId)
+        if (!workspace) return false
+
+        const config = loadWorkspaceConfig(workspace.rootPath)
+        if (!config) return false
+
+        config.pinned = Boolean(pinned)
+        saveWorkspaceConfig(workspace.rootPath, config)
+        return true
+      })
+
       // Cross-server RPC — invoke a channel on an arbitrary remote server
       ipcMain.handle('server:invokeOnServer', async (_event, url: string, token: string, channel: string, ...args: unknown[]) => {
         const { connectToRemote } = await import('./handlers/workspace')

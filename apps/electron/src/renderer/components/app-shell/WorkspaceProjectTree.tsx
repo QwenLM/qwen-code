@@ -4,7 +4,7 @@ import { formatDistanceToNowStrict } from "date-fns"
 import type { Locale } from "date-fns"
 import { AnimatePresence } from "motion/react"
 import { useSetAtom } from "jotai"
-import { ChevronDown, ChevronRight, Cloud, ExternalLink, Folder, FolderPlus, MessageSquare } from "lucide-react"
+import { ChevronDown, ChevronRight, Cloud, ExternalLink, Folder, FolderPlus, MessageSquare, Pencil, Pin, PinOff, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { cn } from "@/lib/utils"
@@ -18,6 +18,8 @@ import {
   ContextMenu,
   ContextMenuTrigger,
   StyledContextMenuContent,
+  StyledContextMenuItem,
+  StyledContextMenuSeparator,
 } from "@/components/ui/styled-context-menu"
 import { ContextMenuProvider } from "@/components/ui/menu-context"
 import { RenameDialog } from "@/components/ui/rename-dialog"
@@ -40,6 +42,7 @@ interface WorkspaceProjectTreeProps {
   onSelectSession: (workspaceId: string, sessionId: string) => void | Promise<void>
   onNewSession: (workspaceId: string) => void | Promise<void>
   onWorkspaceCreated?: (workspace: Workspace) => void
+  onWorkspaceChanged?: () => void
   sessionStatuses?: SessionStatus[]
   labels?: LabelConfig[]
   onDeleteSession: (sessionId: string, skipConfirmation?: boolean) => Promise<boolean>
@@ -75,24 +78,40 @@ function WorkspaceHeader({
   hasUnread,
   iconUrl,
   isCollapsed,
+  isPinned,
   newSessionLabel,
   openInNewWindowLabel,
+  renameLabel,
+  pinLabel,
+  unpinLabel,
+  removeLabel,
   onToggleCollapsed,
   onNewSession,
   onOpenInNewWindow,
+  onRename,
+  onTogglePinned,
+  onRemove,
 }: {
   workspace: Workspace
   isActive: boolean
   hasUnread?: boolean
   iconUrl?: string
   isCollapsed: boolean
+  isPinned: boolean
   newSessionLabel: string
   openInNewWindowLabel: string
+  renameLabel: string
+  pinLabel: string
+  unpinLabel: string
+  removeLabel: string
   onToggleCollapsed: () => void
   onNewSession: () => void
   onOpenInNewWindow: () => void
+  onRename: () => void
+  onTogglePinned: () => void
+  onRemove: () => void
 }) {
-  return (
+  const header = (
     <div className="group/project flex items-center gap-1 px-2 pt-3 pb-1">
       <button
         type="button"
@@ -100,7 +119,7 @@ function WorkspaceHeader({
         aria-expanded={!isCollapsed}
         className={cn(
           "min-w-0 flex flex-1 items-center gap-1.5 rounded-[6px] px-1.5 py-1 text-left transition-colors",
-          "hover:bg-sidebar-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          "hover:bg-sidebar-hover data-[state=open]:bg-sidebar-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
           isActive && "text-foreground",
           !isActive && "text-foreground/62",
         )}
@@ -120,6 +139,7 @@ function WorkspaceHeader({
         <FadingText className="min-w-0 flex-1 text-[13px] font-medium" fadeWidth={32}>
           {workspace.name}
         </FadingText>
+        {isPinned && <Pin className="h-3 w-3 shrink-0 text-muted-foreground/70" />}
         {workspace.remoteServer && <Cloud className="h-3 w-3 shrink-0 text-muted-foreground/70" />}
         {hasUnread && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />}
       </button>
@@ -148,6 +168,34 @@ function WorkspaceHeader({
         <ExternalLink className="h-3.5 w-3.5" />
       </button>
     </div>
+  )
+
+  return (
+    <ContextMenu modal={true}>
+      <ContextMenuTrigger asChild>
+        {header}
+      </ContextMenuTrigger>
+      <StyledContextMenuContent minWidth="min-w-48">
+        <StyledContextMenuItem onClick={onRename}>
+          <Pencil className="h-3.5 w-3.5" />
+          <span className="flex-1">{renameLabel}</span>
+        </StyledContextMenuItem>
+        <StyledContextMenuItem onClick={onTogglePinned}>
+          {isPinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
+          <span className="flex-1">{isPinned ? unpinLabel : pinLabel}</span>
+        </StyledContextMenuItem>
+        <StyledContextMenuSeparator />
+        <StyledContextMenuItem onClick={onOpenInNewWindow}>
+          <ExternalLink className="h-3.5 w-3.5" />
+          <span className="flex-1">{openInNewWindowLabel}</span>
+        </StyledContextMenuItem>
+        <StyledContextMenuSeparator />
+        <StyledContextMenuItem onClick={onRemove} variant="destructive">
+          <Trash2 className="h-3.5 w-3.5" />
+          <span className="flex-1">{removeLabel}</span>
+        </StyledContextMenuItem>
+      </StyledContextMenuContent>
+    </ContextMenu>
   )
 }
 
@@ -242,6 +290,7 @@ export function WorkspaceProjectTree({
   onSelectSession,
   onNewSession,
   onWorkspaceCreated,
+  onWorkspaceChanged,
   sessionStatuses = [],
   labels = [],
   onDeleteSession,
@@ -262,8 +311,17 @@ export function WorkspaceProjectTree({
   const [renameDialogOpen, setRenameDialogOpen] = React.useState(false)
   const [renameSessionId, setRenameSessionId] = React.useState<string | null>(null)
   const [renameName, setRenameName] = React.useState("")
+  const [renameWorkspaceDialogOpen, setRenameWorkspaceDialogOpen] = React.useState(false)
+  const [renameWorkspaceId, setRenameWorkspaceId] = React.useState<string | null>(null)
+  const [renameWorkspaceName, setRenameWorkspaceName] = React.useState("")
   const [collapsedWorkspaceIds, setCollapsedWorkspaceIds] = React.useState<Set<string>>(() => new Set())
   const hasRemoteWorkspaces = React.useMemo(() => workspaces.some(workspace => workspace.remoteServer), [workspaces])
+  const orderedWorkspaces = React.useMemo(() => {
+    return workspaces
+      .map((workspace, index) => ({ workspace, index }))
+      .sort((a, b) => Number(Boolean(b.workspace.pinned)) - Number(Boolean(a.workspace.pinned)) || a.index - b.index)
+      .map(({ workspace }) => workspace)
+  }, [workspaces])
   const {
     handleFlagWithToast,
     handleUnflagWithToast,
@@ -320,6 +378,91 @@ export function WorkspaceProjectTree({
     setRenameSessionId(null)
     setRenameName("")
   }, [onRenameSession, renameName, renameSessionId])
+
+  const handleWorkspaceRenameClick = React.useCallback((workspace: Workspace) => {
+    setRenameWorkspaceId(workspace.id)
+    setRenameWorkspaceName(workspace.name)
+    requestAnimationFrame(() => {
+      setRenameWorkspaceDialogOpen(true)
+    })
+  }, [])
+
+  const handleWorkspaceRenameDialogOpenChange = React.useCallback((open: boolean) => {
+    setRenameWorkspaceDialogOpen(open)
+    if (!open) {
+      setRenameWorkspaceId(null)
+      setRenameWorkspaceName("")
+    }
+  }, [])
+
+  const handleWorkspaceRenameSubmit = React.useCallback(async () => {
+    const nextName = renameWorkspaceName.trim()
+    if (!renameWorkspaceId || !nextName) return
+
+    try {
+      await window.electronAPI.updateWorkspaceSetting(renameWorkspaceId, "name", nextName)
+      onWorkspaceChanged?.()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t("toast.unknownError")
+      toast.error(t("toast.failedToSaveSetting", { setting: t("common.rename") }), {
+        description: message,
+      })
+    } finally {
+      setRenameWorkspaceDialogOpen(false)
+      setRenameWorkspaceId(null)
+      setRenameWorkspaceName("")
+    }
+  }, [onWorkspaceChanged, renameWorkspaceId, renameWorkspaceName, t])
+
+  const handleToggleWorkspacePinned = React.useCallback(async (workspace: Workspace) => {
+    const pinned = !workspace.pinned
+    try {
+      const saved = await window.electronAPI.setWorkspacePinned(workspace.id, pinned)
+      if (!saved) {
+        toast.error(t("toast.failedToSaveSetting", { setting: t(pinned ? "workspace.pinWorkspace" : "workspace.unpinWorkspace") }))
+        return
+      }
+      toast.success(t(pinned ? "toast.pinnedWorkspace" : "toast.unpinnedWorkspace", { name: workspace.name }))
+      onWorkspaceChanged?.()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t("toast.unknownError")
+      toast.error(t("toast.failedToSaveSetting", { setting: t(pinned ? "workspace.pinWorkspace" : "workspace.unpinWorkspace") }), {
+        description: message,
+      })
+    }
+  }, [onWorkspaceChanged, t])
+
+  const handleRemoveWorkspace = React.useCallback(async (workspace: Workspace) => {
+    if (workspaces.length <= 1) {
+      toast.error(t("toast.cannotRemoveOnlyWorkspace"))
+      return
+    }
+
+    try {
+      const removed = await window.electronAPI.removeWorkspace(workspace.id)
+      if (!removed) {
+        toast.error(t("toast.failedToRemoveWorkspace"))
+        return
+      }
+
+      toast.success(t("toast.removedWorkspace", { name: workspace.name }))
+
+      if (workspace.id === activeWorkspaceId) {
+        const remaining = await window.electronAPI.getWorkspaces()
+        const nextWorkspace = remaining[0]
+        if (nextWorkspace) {
+          await Promise.resolve(onSelectWorkspace(nextWorkspace.id))
+        }
+      }
+
+      onWorkspaceChanged?.()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t("toast.unknownError")
+      toast.error(t("toast.failedToRemoveWorkspace"), {
+        description: message,
+      })
+    }
+  }, [activeWorkspaceId, onSelectWorkspace, onWorkspaceChanged, t, workspaces.length])
 
   const toggleWorkspaceCollapsed = React.useCallback((workspaceId: string) => {
     setCollapsedWorkspaceIds(prev => {
@@ -408,7 +551,7 @@ export function WorkspaceProjectTree({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto pb-3 mask-fade-bottom">
-        {workspaces.map((workspace) => {
+        {orderedWorkspaces.map((workspace) => {
           const isCollapsed = collapsedWorkspaceIds.has(workspace.id)
           const sessions = [...(workspaceSessions.get(workspace.id) ?? [])]
             .filter(session => !session.hidden && !session.isArchived)
@@ -422,11 +565,19 @@ export function WorkspaceProjectTree({
                 hasUnread={workspaceUnreadMap?.[workspace.id]}
                 iconUrl={workspaceIconMap.get(workspace.id)}
                 isCollapsed={isCollapsed}
+                isPinned={Boolean(workspace.pinned)}
                 newSessionLabel={t("session.newSession")}
                 openInNewWindowLabel={t("sidebarMenu.openInNewWindow")}
+                renameLabel={t("common.rename")}
+                pinLabel={t("workspace.pinWorkspace")}
+                unpinLabel={t("workspace.unpinWorkspace")}
+                removeLabel={t("workspace.removeWorkspace")}
                 onToggleCollapsed={() => toggleWorkspaceCollapsed(workspace.id)}
                 onNewSession={() => handleNewProjectSession(workspace.id)}
                 onOpenInNewWindow={() => void onSelectWorkspace(workspace.id, true)}
+                onRename={() => handleWorkspaceRenameClick(workspace)}
+                onTogglePinned={() => void handleToggleWorkspacePinned(workspace)}
+                onRemove={() => void handleRemoveWorkspace(workspace)}
               />
               {!isCollapsed && sessions.length > 0 ? (
                 <div className="grid gap-0.5">
@@ -458,6 +609,15 @@ export function WorkspaceProjectTree({
         onValueChange={setRenameName}
         onSubmit={handleRenameSubmit}
         placeholder={t("session.enterSessionName")}
+      />
+      <RenameDialog
+        open={renameWorkspaceDialogOpen}
+        onOpenChange={handleWorkspaceRenameDialogOpenChange}
+        title={t("settings.workspace.renameWorkspace")}
+        value={renameWorkspaceName}
+        onValueChange={setRenameWorkspaceName}
+        onSubmit={() => void handleWorkspaceRenameSubmit()}
+        placeholder={t("settings.workspace.enterWorkspaceName")}
       />
     </div>
   )

@@ -106,6 +106,7 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
 
     return {
       name: config?.name,
+      pinned: config?.pinned ?? false,
       model: config?.defaults?.model,
       permissionMode: config?.defaults?.permissionMode,
       cyclablePermissionModes: config?.defaults?.cyclablePermissionModes,
@@ -125,7 +126,7 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
       : value
 
     // Validate key is a known workspace setting
-    const validKeys = ['name', 'model', 'enabledSourceSlugs', 'permissionMode', 'cyclablePermissionModes', 'thinkingLevel', 'workingDirectory', 'localMcpEnabled', 'defaultLlmConnection']
+    const validKeys = ['name', 'pinned', 'model', 'enabledSourceSlugs', 'permissionMode', 'cyclablePermissionModes', 'thinkingLevel', 'workingDirectory', 'localMcpEnabled', 'defaultLlmConnection']
     if (!validKeys.includes(key)) {
       throw new Error(`Invalid workspace setting key: ${key}. Valid keys: ${validKeys.join(', ')}`)
     }
@@ -154,6 +155,8 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
     // Handle 'name' specially - it's a top-level config property, not in defaults
     if (key === 'name') {
       config.name = String(normalizedValue).trim()
+    } else if (key === 'pinned') {
+      config.pinned = Boolean(normalizedValue)
     } else if (key === 'localMcpEnabled') {
       // Store in localMcpServers.enabled (top-level, not in defaults)
       config.localMcpServers = config.localMcpServers || { enabled: true }

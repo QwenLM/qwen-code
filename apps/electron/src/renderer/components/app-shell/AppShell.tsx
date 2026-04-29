@@ -1621,8 +1621,11 @@ function AppShellContent({
 
   // Ensure session messages are loaded when selected
   React.useEffect(() => {
-    if (session.selected) {
-      ensureMessagesLoaded(session.selected)
+    const selectedSessionId = session.selected
+    if (selectedSessionId) {
+      ensureMessagesLoaded(selectedSessionId).catch((error) => {
+        console.error(`[AppShell] Failed to pre-load messages for session ${selectedSessionId}:`, error)
+      })
     }
   }, [session.selected, ensureMessagesLoaded])
 
@@ -2422,6 +2425,7 @@ function AppShellContent({
                   onSelectSession={handleSelectProjectSession}
                   onNewSession={handleNewProjectSession}
                   onWorkspaceCreated={() => onRefreshWorkspaces?.()}
+                  onWorkspaceChanged={() => onRefreshWorkspaces?.()}
                   sessionStatuses={effectiveSessionStatuses}
                   labels={displayLabelConfigs}
                   onDeleteSession={handleDeleteSession}

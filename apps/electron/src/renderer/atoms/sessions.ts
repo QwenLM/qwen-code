@@ -149,6 +149,12 @@ export const loadedSessionsAtom = atom<Set<string>>(new Set<string>())
  */
 const sessionLoadingPromises = new Map<string, Promise<Session | null>>()
 
+function markSessionMessagesLoaded(get: Getter, set: Setter, sessionId: string): void {
+  const newLoadedSessions = new Set(get(loadedSessionsAtom))
+  newLoadedSessions.add(sessionId)
+  set(loadedSessionsAtom, newLoadedSessions)
+}
+
 /**
  * Currently active session ID - the session displayed in the main content area
  * This replaces the tab-based session selection
@@ -546,7 +552,16 @@ async function loadSessionMessages(
     // Fetch messages from main process
     const loadedSession = await window.electronAPI.getSessionMessages(sessionId)
     if (!loadedSession) {
-      return get(sessionAtomFamily(sessionId))
+      const existingSession = get(sessionAtomFamily(sessionId))
+      const expectedMessageCount = get(sessionMetaMapAtom).get(sessionId)?.messageCount
+        ?? existingSession?.messageCount
+
+      if (expectedMessageCount === 0) {
+        markSessionMessagesLoaded(get, set, sessionId)
+        return existingSession
+      }
+
+      throw new Error(`Messages for session ${sessionId} are unavailable`)
     }
 
     // Merge messages and disk-only fields into existing session, preserving in-memory UI state.
@@ -600,9 +615,7 @@ async function loadSessionMessages(
     // If we had to preserve stale in-memory messages because the backend returned
     // an empty array during lazy-load recovery, keep the session reloadable.
     if (!preservedStaleMessages) {
-      const newLoadedSessions = new Set(get(loadedSessionsAtom))
-      newLoadedSessions.add(sessionId)
-      set(loadedSessionsAtom, newLoadedSessions)
+      markSessionMessagesLoaded(get, set, sessionId)
     }
 
     return mergedSession

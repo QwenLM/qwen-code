@@ -27,6 +27,7 @@ export interface WorkspaceInfo {
   name: string;
   slug: string;              // Server-computed from rootPath basename
   lastAccessedAt?: number;
+  pinned?: boolean;
   iconUrl?: string;
   mcpUrl?: string;
   mcpAuthType?: McpAuthType;
@@ -71,4 +72,3 @@ export interface StoredConfig {
   activeSessionId: string | null;  // Currently active session (primary scope)
   model?: string;
 }
-

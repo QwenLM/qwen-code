@@ -716,7 +716,7 @@ export function getWorkspaces(): Workspace[] {
     }
 
     const slug = extractWorkspaceSlugFromPath(w.rootPath, w.id);
-    return { ...w, name, slug, iconUrl };
+    return { ...w, name, slug, iconUrl, pinned: wsConfig?.pinned ?? w.pinned };
   });
 }
 
@@ -902,6 +902,7 @@ export function syncWorkspaces(): void {
       name: wsConfig.name,
       slug: extractWorkspaceSlugFromPath(rootPath, ''),
       rootPath,
+      pinned: wsConfig.pinned,
       createdAt: wsConfig.createdAt || Date.now(),
     };
 

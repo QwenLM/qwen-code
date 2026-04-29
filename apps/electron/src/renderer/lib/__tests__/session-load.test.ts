@@ -68,4 +68,12 @@ describe('shouldShowForegroundMessageLoading', () => {
   it('hides loading once the session is marked loaded', () => {
     expect(shouldShowForegroundMessageLoading(true, 0)).toBe(false)
   })
+
+  it('hides loading for metadata-confirmed empty sessions', () => {
+    expect(shouldShowForegroundMessageLoading(false, 0, 0)).toBe(false)
+  })
+
+  it('shows loading for unloaded sessions that metadata says have messages', () => {
+    expect(shouldShowForegroundMessageLoading(false, 0, 2)).toBe(true)
+  })
 })

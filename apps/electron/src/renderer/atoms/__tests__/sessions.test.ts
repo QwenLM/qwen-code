@@ -109,6 +109,55 @@ describe('session message loading atoms', () => {
     expect(secondResult?.messages.map((message) => message.id)).toEqual(['m1', 'm2'])
     expect(store.get(loadedSessionsAtom).has(sessionId)).toBe(true)
   })
+
+  it('throws when the backend cannot provide messages for a non-empty session', async () => {
+    const store = createStore()
+    const sessionId = 'session-1'
+
+    globalThis.window = {
+      electronAPI: {
+        getSessionMessages: async () => null,
+      },
+    } as unknown as typeof window
+
+    store.set(sessionAtomFamily(sessionId), makeSession({
+      id: sessionId,
+      messages: [],
+      messageCount: 2,
+    }))
+
+    let error: unknown
+    try {
+      await store.set(ensureSessionMessagesLoadedAtom, sessionId)
+    } catch (err) {
+      error = err
+    }
+
+    expect(error).toBeInstanceOf(Error)
+    expect(store.get(loadedSessionsAtom).has(sessionId)).toBe(false)
+  })
+
+  it('marks metadata-empty sessions as loaded when the backend returns no payload', async () => {
+    const store = createStore()
+    const sessionId = 'session-1'
+
+    globalThis.window = {
+      electronAPI: {
+        getSessionMessages: async () => null,
+      },
+    } as unknown as typeof window
+
+    store.set(sessionAtomFamily(sessionId), makeSession({
+      id: sessionId,
+      messages: [],
+      messageCount: 0,
+    }))
+
+    const result = await store.set(ensureSessionMessagesLoadedAtom, sessionId)
+
+    expect(result?.id).toBe(sessionId)
+    expect(store.get(loadedSessionsAtom).has(sessionId)).toBe(true)
+  })
 })
 
 describe('refreshSessionsMetadataAtom', () => {

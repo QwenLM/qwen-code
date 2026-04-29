@@ -509,6 +509,7 @@ export interface UpdateInfo {
 
 export interface WorkspaceSettings {
   name?: string
+  pinned?: boolean
   model?: string
   permissionMode?: PermissionMode
   cyclablePermissionModes?: PermissionMode[]

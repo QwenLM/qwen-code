@@ -3,8 +3,12 @@ import type { TransportConnectionState } from '../../shared/types'
 export function shouldShowForegroundMessageLoading(
   messagesLoaded: boolean,
   visibleMessageCount: number | null | undefined,
+  expectedMessageCount?: number | null,
 ): boolean {
-  return !messagesLoaded && (visibleMessageCount ?? 0) === 0
+  if (messagesLoaded) return false
+  if ((visibleMessageCount ?? 0) > 0) return false
+  if (expectedMessageCount === 0) return false
+  return true
 }
 
 export function shouldTreatSessionLoadFailureAsTransportFallback(
