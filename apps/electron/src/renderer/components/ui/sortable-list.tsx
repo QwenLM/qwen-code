@@ -111,8 +111,8 @@ interface SortableListProps<T extends SortableItemData> {
   items: T[]
   /** Called with the new ordered array after a drop */
   onReorder: (items: T[]) => void
-  /** Render function for each item. `isDragging` is true when this item is the ghost. */
-  renderItem: (item: T, isDragging: boolean) => React.ReactNode
+  /** Render function for each item. `isDragging` is true for the active ghost, `isSorting` while any drag is active. */
+  renderItem: (item: T, isDragging: boolean, isSorting: boolean) => React.ReactNode
   /** Render the drag overlay content (floating clone). Falls back to renderItem. */
   renderOverlay?: (item: T) => React.ReactNode
   /** Show DragOverlay clone while dragging (default: true) */
@@ -188,7 +188,7 @@ export function SortableList<T extends SortableItemData>({
               isDragActive={activeId === item.id}
               hideWhileDragging={showOverlay}
             >
-              {renderItem(item, activeId === item.id)}
+              {renderItem(item, activeId === item.id, activeId !== null)}
             </SortableItemWrapper>
           ))}
         </div>
@@ -208,7 +208,7 @@ export function SortableList<T extends SortableItemData>({
                 boxShadow: '0 0 0 1px rgba(63, 63, 68, 0.05), 0px 15px 15px 0 rgba(34, 33, 81, 0.25)',
               }}
             >
-              {(renderOverlay ?? renderItem)(activeItem, false)}
+              {renderOverlay ? renderOverlay(activeItem) : renderItem(activeItem, false, true)}
             </div>
           ) : null}
         </DragOverlay>

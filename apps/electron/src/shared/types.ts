@@ -244,6 +244,7 @@ export interface ElectronAPI {
   relaunchApp(): Promise<void>
   removeWorkspace(workspaceId: string): Promise<boolean>
   setWorkspacePinned(workspaceId: string, pinned: boolean): Promise<boolean>
+  reorderWorkspaces(orderedIds: string[]): Promise<boolean>
   invokeOnServer(url: string, token: string, channel: string, ...args: any[]): Promise<any>
 
   // Remote session transfer (main-process orchestrated, supports chunked upload)

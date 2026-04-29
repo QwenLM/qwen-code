@@ -31,6 +31,7 @@ import { getSessionTitle, hasUnreadMeta, shortTimeLocale } from "@/utils/session
 import { Spinner, Tooltip, TooltipContent, TooltipTrigger } from "@craft-agent/ui"
 import type { LabelConfig } from "@craft-agent/shared/labels"
 import type { SessionStatus, SessionStatusId } from "@/config/session-status-config"
+import { SortableList } from "@/components/ui/sortable-list"
 
 interface WorkspaceProjectTreeProps {
   workspaces: Workspace[]
@@ -112,13 +113,13 @@ function WorkspaceHeader({
   onRemove: () => void
 }) {
   const header = (
-    <div className="group/project flex items-center gap-1 px-2 pt-3 pb-1">
+    <div className="group/project flex items-center gap-1 px-1 pt-3 pb-1">
       <button
         type="button"
         onClick={onToggleCollapsed}
         aria-expanded={!isCollapsed}
         className={cn(
-          "min-w-0 flex flex-1 items-center gap-1.5 rounded-[6px] px-1.5 py-1 text-left transition-colors",
+          "min-w-0 flex flex-1 cursor-grab items-center gap-1.5 rounded-[6px] px-1 py-1 text-left transition-colors active:cursor-grabbing",
           "hover:bg-sidebar-hover data-[state=open]:bg-sidebar-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
           isActive && "text-foreground",
           !isActive && "text-foreground/62",
@@ -145,6 +146,7 @@ function WorkspaceHeader({
       </button>
       <button
         type="button"
+        data-no-dnd="true"
         onClick={(event) => {
           event.stopPropagation()
           onNewSession()
@@ -157,6 +159,7 @@ function WorkspaceHeader({
       </button>
       <button
         type="button"
+        data-no-dnd="true"
         onClick={(event) => {
           event.stopPropagation()
           onOpenInNewWindow()
@@ -196,6 +199,46 @@ function WorkspaceHeader({
         </StyledContextMenuItem>
       </StyledContextMenuContent>
     </ContextMenu>
+  )
+}
+
+function WorkspaceDragOverlay({
+  workspace,
+  isActive,
+  hasUnread,
+  iconUrl,
+  isPinned,
+}: {
+  workspace: Workspace
+  isActive: boolean
+  hasUnread?: boolean
+  iconUrl?: string
+  isPinned: boolean
+}) {
+  return (
+    <div className="flex w-[260px] items-center gap-1 px-1 py-1">
+      <div
+        className={cn(
+          "min-w-0 flex flex-1 items-center gap-1.5 rounded-[6px] px-1 py-1 text-left",
+          isActive ? "text-foreground" : "text-foreground/78",
+        )}
+      >
+        <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />
+        <CrossfadeAvatar
+          src={iconUrl}
+          alt={workspace.name}
+          className="h-4 w-4 rounded-[4px] ring-1 ring-border/40"
+          fallbackClassName="bg-muted text-[10px] rounded-[4px]"
+          fallback={<Folder className="h-3.5 w-3.5" />}
+        />
+        <FadingText className="min-w-0 flex-1 text-[13px] font-medium" fadeWidth={32}>
+          {workspace.name}
+        </FadingText>
+        {isPinned && <Pin className="h-3 w-3 shrink-0 text-muted-foreground/70" />}
+        {workspace.remoteServer && <Cloud className="h-3 w-3 shrink-0 text-muted-foreground/70" />}
+        {hasUnread && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />}
+      </div>
+    </div>
   )
 }
 
@@ -315,13 +358,38 @@ export function WorkspaceProjectTree({
   const [renameWorkspaceId, setRenameWorkspaceId] = React.useState<string | null>(null)
   const [renameWorkspaceName, setRenameWorkspaceName] = React.useState("")
   const [collapsedWorkspaceIds, setCollapsedWorkspaceIds] = React.useState<Set<string>>(() => new Set())
+  const [optimisticWorkspaceOrder, setOptimisticWorkspaceOrder] = React.useState<string[] | null>(null)
   const hasRemoteWorkspaces = React.useMemo(() => workspaces.some(workspace => workspace.remoteServer), [workspaces])
+  const workspaceOrderKey = React.useMemo(() => workspaces.map(workspace => workspace.id).join("\0"), [workspaces])
+
+  React.useEffect(() => {
+    setOptimisticWorkspaceOrder(null)
+  }, [workspaceOrderKey])
+
   const orderedWorkspaces = React.useMemo(() => {
-    return workspaces
+    const workspaceMap = new Map(workspaces.map(workspace => [workspace.id, workspace]))
+    const sourceWorkspaces = optimisticWorkspaceOrder
+      ? [
+          ...optimisticWorkspaceOrder
+            .map(id => workspaceMap.get(id))
+            .filter((workspace): workspace is Workspace => Boolean(workspace)),
+          ...workspaces.filter(workspace => !optimisticWorkspaceOrder.includes(workspace.id)),
+        ]
+      : workspaces
+
+    return sourceWorkspaces
       .map((workspace, index) => ({ workspace, index }))
       .sort((a, b) => Number(Boolean(b.workspace.pinned)) - Number(Boolean(a.workspace.pinned)) || a.index - b.index)
       .map(({ workspace }) => workspace)
-  }, [workspaces])
+  }, [optimisticWorkspaceOrder, workspaces])
+  const pinnedWorkspaces = React.useMemo(
+    () => orderedWorkspaces.filter(workspace => Boolean(workspace.pinned)),
+    [orderedWorkspaces],
+  )
+  const unpinnedWorkspaces = React.useMemo(
+    () => orderedWorkspaces.filter(workspace => !workspace.pinned),
+    [orderedWorkspaces],
+  )
   const {
     handleFlagWithToast,
     handleUnflagWithToast,
@@ -486,6 +554,34 @@ export function WorkspaceProjectTree({
     void onNewSession(workspaceId)
   }, [onNewSession])
 
+  const handleWorkspaceGroupReorder = React.useCallback((group: "pinned" | "unpinned", reorderedGroup: Workspace[]) => {
+    const pinnedIds = pinnedWorkspaces.map(workspace => workspace.id)
+    const unpinnedIds = unpinnedWorkspaces.map(workspace => workspace.id)
+    const reorderedIds = reorderedGroup.map(workspace => workspace.id)
+    const orderedIds = group === "pinned"
+      ? [...reorderedIds, ...unpinnedIds]
+      : [...pinnedIds, ...reorderedIds]
+
+    setOptimisticWorkspaceOrder(orderedIds)
+
+    window.electronAPI.reorderWorkspaces(orderedIds)
+      .then((saved) => {
+        if (!saved) {
+          setOptimisticWorkspaceOrder(null)
+          toast.error(t("toast.failedToSaveSetting", { setting: t("sidebar.projects", "Projects") }))
+          return
+        }
+        onWorkspaceChanged?.()
+      })
+      .catch((error) => {
+        setOptimisticWorkspaceOrder(null)
+        const message = error instanceof Error ? error.message : t("toast.unknownError")
+        toast.error(t("toast.failedToSaveSetting", { setting: t("sidebar.projects", "Projects") }), {
+          description: message,
+        })
+      })
+  }, [onWorkspaceChanged, pinnedWorkspaces, t, unpinnedWorkspaces])
+
   const menuConfig = React.useMemo<ProjectSessionMenuConfig>(() => ({
     sessionStatuses,
     labels,
@@ -520,6 +616,83 @@ export function WorkspaceProjectTree({
     setSendToWorkspace,
   ])
 
+  const renderWorkspaceSection = (workspace: Workspace, isSorting: boolean) => {
+    const isCollapsed = collapsedWorkspaceIds.has(workspace.id)
+    const sessions = [...(workspaceSessions.get(workspace.id) ?? [])]
+      .filter(session => !session.hidden && !session.isArchived)
+      .sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0))
+
+    return (
+      <section key={workspace.id} aria-label={workspace.name}>
+        <WorkspaceHeader
+          workspace={workspace}
+          isActive={workspace.id === activeWorkspaceId}
+          hasUnread={workspaceUnreadMap?.[workspace.id]}
+          iconUrl={workspaceIconMap.get(workspace.id)}
+          isCollapsed={isCollapsed || isSorting}
+          isPinned={Boolean(workspace.pinned)}
+          newSessionLabel={t("session.newSession")}
+          openInNewWindowLabel={t("sidebarMenu.openInNewWindow")}
+          renameLabel={t("common.rename")}
+          pinLabel={t("workspace.pinWorkspace")}
+          unpinLabel={t("workspace.unpinWorkspace")}
+          removeLabel={t("workspace.removeWorkspace")}
+          onToggleCollapsed={() => toggleWorkspaceCollapsed(workspace.id)}
+          onNewSession={() => handleNewProjectSession(workspace.id)}
+          onOpenInNewWindow={() => void onSelectWorkspace(workspace.id, true)}
+          onRename={() => handleWorkspaceRenameClick(workspace)}
+          onTogglePinned={() => void handleToggleWorkspacePinned(workspace)}
+          onRemove={() => void handleRemoveWorkspace(workspace)}
+        />
+        {!isSorting && !isCollapsed && sessions.length > 0 ? (
+          <div className="grid gap-0.5" data-no-dnd="true">
+            {sessions.map((session) => (
+              <ProjectSessionRow
+                key={session.id}
+                workspaceId={workspace.id}
+                session={session}
+                isSelected={session.id === selectedSessionId}
+                menuConfig={menuConfig}
+                onSelect={() => void onSelectSession(workspace.id, session.id)}
+              />
+            ))}
+          </div>
+        ) : !isSorting && !isCollapsed ? (
+          <div
+            className="ml-7 mr-3 rounded-[6px] px-2 py-1.5 text-[12px] font-medium text-muted-foreground/65"
+            data-no-dnd="true"
+          >
+            {t("session.noSessionsYet")}
+          </div>
+        ) : null}
+      </section>
+    )
+  }
+
+  const renderWorkspaceOverlay = (workspace: Workspace) => (
+    <WorkspaceDragOverlay
+      workspace={workspace}
+      isActive={workspace.id === activeWorkspaceId}
+      hasUnread={workspaceUnreadMap?.[workspace.id]}
+      iconUrl={workspaceIconMap.get(workspace.id)}
+      isPinned={Boolean(workspace.pinned)}
+    />
+  )
+
+  const renderWorkspaceGroup = (items: Workspace[], group: "pinned" | "unpinned") => {
+    if (items.length === 0) return null
+
+    return (
+      <SortableList
+        items={items}
+        onReorder={(reorderedItems) => handleWorkspaceGroupReorder(group, reorderedItems)}
+        className="grid gap-0"
+        renderItem={(workspace, _isDragging, isSorting) => renderWorkspaceSection(workspace, isSorting)}
+        renderOverlay={renderWorkspaceOverlay}
+      />
+    )
+  }
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <AnimatePresence>
@@ -551,55 +724,8 @@ export function WorkspaceProjectTree({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto pb-3 mask-fade-bottom">
-        {orderedWorkspaces.map((workspace) => {
-          const isCollapsed = collapsedWorkspaceIds.has(workspace.id)
-          const sessions = [...(workspaceSessions.get(workspace.id) ?? [])]
-            .filter(session => !session.hidden && !session.isArchived)
-            .sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0))
-
-          return (
-            <section key={workspace.id} aria-label={workspace.name}>
-              <WorkspaceHeader
-                workspace={workspace}
-                isActive={workspace.id === activeWorkspaceId}
-                hasUnread={workspaceUnreadMap?.[workspace.id]}
-                iconUrl={workspaceIconMap.get(workspace.id)}
-                isCollapsed={isCollapsed}
-                isPinned={Boolean(workspace.pinned)}
-                newSessionLabel={t("session.newSession")}
-                openInNewWindowLabel={t("sidebarMenu.openInNewWindow")}
-                renameLabel={t("common.rename")}
-                pinLabel={t("workspace.pinWorkspace")}
-                unpinLabel={t("workspace.unpinWorkspace")}
-                removeLabel={t("workspace.removeWorkspace")}
-                onToggleCollapsed={() => toggleWorkspaceCollapsed(workspace.id)}
-                onNewSession={() => handleNewProjectSession(workspace.id)}
-                onOpenInNewWindow={() => void onSelectWorkspace(workspace.id, true)}
-                onRename={() => handleWorkspaceRenameClick(workspace)}
-                onTogglePinned={() => void handleToggleWorkspacePinned(workspace)}
-                onRemove={() => void handleRemoveWorkspace(workspace)}
-              />
-              {!isCollapsed && sessions.length > 0 ? (
-                <div className="grid gap-0.5">
-                  {sessions.map((session) => (
-                    <ProjectSessionRow
-                      key={session.id}
-                      workspaceId={workspace.id}
-                      session={session}
-                      isSelected={session.id === selectedSessionId}
-                      menuConfig={menuConfig}
-                      onSelect={() => void onSelectSession(workspace.id, session.id)}
-                    />
-                  ))}
-                </div>
-              ) : !isCollapsed ? (
-                <div className="ml-7 mr-3 rounded-[6px] px-2 py-1.5 text-[12px] font-medium text-muted-foreground/65">
-                  {t("session.noSessionsYet")}
-                </div>
-              ) : null}
-            </section>
-          )
-        })}
+        {renderWorkspaceGroup(pinnedWorkspaces, "pinned")}
+        {renderWorkspaceGroup(unpinnedWorkspaces, "unpinned")}
       </div>
       <RenameDialog
         open={renameDialogOpen}
