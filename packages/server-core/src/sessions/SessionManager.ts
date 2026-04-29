@@ -1910,12 +1910,48 @@ export class SessionManager implements ISessionManager {
     }
   }
 
-  private findManagedSessionBySdkSessionId(workspaceId: string, sdkSessionId: string): ManagedSession | undefined {
-    for (const managed of this.sessions.values()) {
-      if (managed.workspace.id !== workspaceId) continue
-      if (managed.sdkSessionId === sdkSessionId || managed.id === sdkSessionId) return managed
+  private findManagedSessionsBySdkSessionId(workspaceId: string, sdkSessionId: string): ManagedSession[] {
+    return Array.from(this.sessions.values()).filter((managed) =>
+      managed.workspace.id === workspaceId &&
+      (managed.sdkSessionId === sdkSessionId || managed.id === sdkSessionId)
+    )
+  }
+
+  private selectManagedSessionBySdkSessionId(workspaceId: string, sdkSessionId: string): ManagedSession | undefined {
+    const matches = this.findManagedSessionsBySdkSessionId(workspaceId, sdkSessionId)
+    if (matches.length === 0) return undefined
+
+    const byActivityDesc = (a: ManagedSession, b: ManagedSession) =>
+      Math.max(b.lastMessageAt ?? 0, b.lastUsedAt ?? 0) - Math.max(a.lastMessageAt ?? 0, a.lastUsedAt ?? 0)
+
+    // Prefer the Craft-owned session when it has already captured this provider
+    // session ID. A provider-native mirror uses id === sdkSessionId and should not
+    // win once the real local session is linked.
+    const localOwners = matches.filter((managed) => managed.id !== sdkSessionId)
+    if (localOwners.length > 0) {
+      return localOwners.sort(byActivityDesc)[0]
     }
-    return undefined
+
+    return matches.sort(byActivityDesc)[0]
+  }
+
+  private removeDuplicateExternalListedMirrors(
+    workspace: Workspace,
+    owner: ManagedSession,
+    sdkSessionId: string,
+  ): void {
+    const matches = this.findManagedSessionsBySdkSessionId(workspace.id, sdkSessionId)
+    for (const duplicate of matches) {
+      if (duplicate.id === owner.id) continue
+      if (duplicate.isProcessing) continue
+
+      // Only delete provider-native mirror records. If two Craft-owned sessions
+      // somehow share an SDK ID, keep both rather than risking user data loss.
+      if (duplicate.id === sdkSessionId) {
+        sessionLog.info(`Removing duplicate provider-native mirror ${duplicate.id}; owner is ${owner.id}`)
+        this.removeExternalListedLocalMirror(workspace, duplicate)
+      }
+    }
   }
 
   private parseExternalSessionTimestamp(updatedAt?: string | null): number {
@@ -2020,7 +2056,10 @@ export class SessionManager implements ISessionManager {
 
     const timestamp = this.parseExternalSessionTimestamp(info.updatedAt)
     const title = info.title?.trim() || EXTERNAL_SESSION_PLACEHOLDER_TITLE
-    const managed = this.findManagedSessionBySdkSessionId(workspace.id, info.sessionId)
+    const managed = this.selectManagedSessionBySdkSessionId(workspace.id, info.sessionId)
+    if (managed) {
+      this.removeDuplicateExternalListedMirrors(workspace, managed, info.sessionId)
+    }
     let inspectedMessages: Message[] | undefined
 
     if (title === EXTERNAL_SESSION_PLACEHOLDER_TITLE && this.shouldInspectExternalPlaceholderSession(managed)) {

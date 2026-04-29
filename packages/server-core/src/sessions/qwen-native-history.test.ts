@@ -98,6 +98,139 @@ describe('Qwen native history loading', () => {
     expect(imported?.llmConnection).toBe('qwen-code')
   })
 
+  it('removes provider-native mirrors once a Craft session owns the same SDK session ID', async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), 'craft-managed-workspace-'))
+    const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'))
+    tempRoots.push(workspaceRoot, projectRoot)
+
+    const craftSessionId = '260429-dynamic-crystal'
+    const sdkSessionId = '07db68e4-c974-4720-9a30-b089cd2665d5'
+    const olderTimestamp = Date.parse('2026-04-29T01:40:50.344Z')
+    const newerTimestamp = Date.parse('2026-04-29T03:41:13.728Z')
+
+    saveWorkspaceConfig(workspaceRoot, {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      defaults: {
+        defaultLlmConnection: 'qwen-code',
+        workingDirectory: projectRoot,
+      },
+      localMcpServers: { enabled: true },
+      createdAt: olderTimestamp,
+      updatedAt: newerTimestamp,
+    })
+
+    await saveSession({
+      id: craftSessionId,
+      workspaceRootPath: workspaceRoot,
+      sdkSessionId,
+      sdkCwd: projectRoot,
+      workingDirectory: projectRoot,
+      name: '无敌',
+      createdAt: newerTimestamp - 30_000,
+      lastUsedAt: newerTimestamp,
+      lastMessageAt: newerTimestamp,
+      permissionMode: 'allow-all',
+      llmConnection: 'qwen-code',
+      connectionLocked: true,
+      model: 'glm-5.1(openai)',
+      thinkingLevel: 'medium',
+      messages: [
+        { id: 'local-user', type: 'user', content: '/compact', timestamp: newerTimestamp - 10_000 },
+        { id: 'local-info', type: 'info', content: 'Response interrupted', timestamp: newerTimestamp },
+      ],
+      tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 },
+    })
+
+    await saveSession({
+      id: sdkSessionId,
+      workspaceRootPath: workspaceRoot,
+      sdkSessionId,
+      sdkCwd: projectRoot,
+      workingDirectory: projectRoot,
+      name: '无敌',
+      createdAt: olderTimestamp - 30_000,
+      lastUsedAt: olderTimestamp,
+      lastMessageAt: olderTimestamp,
+      permissionMode: 'ask',
+      llmConnection: 'qwen-code',
+      connectionLocked: true,
+      model: 'glm-5.1(openai)',
+      thinkingLevel: 'medium',
+      messages: [
+        { id: 'mirror-user', type: 'user', content: '/compact', timestamp: olderTimestamp - 1_000 },
+        { id: 'mirror-assistant', type: 'assistant', content: 'done', timestamp: olderTimestamp },
+      ],
+      tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 },
+    })
+
+    const manager = new SessionManager({
+      createExternalSessionAgent: () => ({
+        listSessions: async () => ({
+          sessions: [{
+            sessionId: sdkSessionId,
+            cwd: projectRoot,
+            title: '无敌',
+            updatedAt: new Date(olderTimestamp).toISOString(),
+          }],
+        }),
+        destroy: () => {},
+        dispose: () => {},
+      } as unknown as AgentBackend),
+    })
+
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: olderTimestamp,
+    }
+    const craftManaged = createManagedSession({
+      id: craftSessionId,
+      sdkSessionId,
+      sdkCwd: projectRoot,
+      workingDirectory: projectRoot,
+      name: '无敌',
+      createdAt: newerTimestamp - 30_000,
+      lastUsedAt: newerTimestamp,
+      lastMessageAt: newerTimestamp,
+      messageCount: 2,
+      llmConnection: 'qwen-code',
+      connectionLocked: true,
+      model: 'glm-5.1(openai)',
+      thinkingLevel: 'medium',
+    }, workspace)
+    const mirrorManaged = createManagedSession({
+      id: sdkSessionId,
+      sdkSessionId,
+      sdkCwd: projectRoot,
+      workingDirectory: projectRoot,
+      name: '无敌',
+      createdAt: olderTimestamp - 30_000,
+      lastUsedAt: olderTimestamp,
+      lastMessageAt: olderTimestamp,
+      messageCount: 2,
+      llmConnection: 'qwen-code',
+      connectionLocked: true,
+      model: 'glm-5.1(openai)',
+      thinkingLevel: 'medium',
+    }, workspace)
+    ;(manager as unknown as { sessions: Map<string, typeof craftManaged> }).sessions.set(craftSessionId, craftManaged)
+    ;(manager as unknown as { sessions: Map<string, typeof mirrorManaged> }).sessions.set(sdkSessionId, mirrorManaged)
+
+    await (manager as unknown as {
+      doRefreshExternalSessionsForWorkspace: (workspace: Workspace) => Promise<void>
+    }).doRefreshExternalSessionsForWorkspace(workspace)
+
+    const sessions = manager.getSessions(workspace.id)
+    expect(sessions.map(session => session.id)).toContain(craftSessionId)
+    expect(sessions.map(session => session.id)).not.toContain(sdkSessionId)
+    expect(sessions.filter(session => session.name === '无敌')).toHaveLength(1)
+    expect(loadSession(workspaceRoot, sdkSessionId)).toBeNull()
+  })
+
   it('syncs Craft session titles to Qwen custom titles through the provider rename hook', async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), 'craft-managed-workspace-'))
     const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'))
