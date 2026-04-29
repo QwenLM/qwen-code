@@ -1003,6 +1003,8 @@
   "sidebar.mcps": "MCP-k",
   "sidebar.newSession": "Új munkamenet",
   "sidebar.projects": "Projektek",
+  "sidebar.expandDisplay": "Továbbiak megjelenítése",
+  "sidebar.collapseDisplay": "Kevesebb megjelenítése",
   "sidebar.scheduled": "Ütemezett",
   "sidebar.search": "Keresés",
   "sidebar.searchStatusesLabels": "Állapotok és címkék keresése...",

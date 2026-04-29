@@ -73,6 +73,8 @@ interface ProjectSessionMenuConfig {
   onSendToWorkspace: (sessionIds: string[]) => void
 }
 
+const PROJECT_SESSION_PREVIEW_LIMIT = 5
+
 function WorkspaceHeader({
   workspace,
   isActive,
@@ -358,6 +360,7 @@ export function WorkspaceProjectTree({
   const [renameWorkspaceId, setRenameWorkspaceId] = React.useState<string | null>(null)
   const [renameWorkspaceName, setRenameWorkspaceName] = React.useState("")
   const [collapsedWorkspaceIds, setCollapsedWorkspaceIds] = React.useState<Set<string>>(() => new Set())
+  const [expandedWorkspaceSessionIds, setExpandedWorkspaceSessionIds] = React.useState<Set<string>>(() => new Set())
   const [optimisticWorkspaceOrder, setOptimisticWorkspaceOrder] = React.useState<string[] | null>(null)
   const hasRemoteWorkspaces = React.useMemo(() => workspaces.some(workspace => workspace.remoteServer), [workspaces])
   const workspaceOrderKey = React.useMemo(() => workspaces.map(workspace => workspace.id).join("\0"), [workspaces])
@@ -554,6 +557,18 @@ export function WorkspaceProjectTree({
     void onNewSession(workspaceId)
   }, [onNewSession])
 
+  const toggleWorkspaceSessionsExpanded = React.useCallback((workspaceId: string) => {
+    setExpandedWorkspaceSessionIds(prev => {
+      const next = new Set(prev)
+      if (next.has(workspaceId)) {
+        next.delete(workspaceId)
+      } else {
+        next.add(workspaceId)
+      }
+      return next
+    })
+  }, [])
+
   const handleWorkspaceGroupReorder = React.useCallback((group: "pinned" | "unpinned", reorderedGroup: Workspace[]) => {
     const pinnedIds = pinnedWorkspaces.map(workspace => workspace.id)
     const unpinnedIds = unpinnedWorkspaces.map(workspace => workspace.id)
@@ -618,9 +633,15 @@ export function WorkspaceProjectTree({
 
   const renderWorkspaceSection = (workspace: Workspace, isSorting: boolean) => {
     const isCollapsed = collapsedWorkspaceIds.has(workspace.id)
+    const isSessionListExpanded = expandedWorkspaceSessionIds.has(workspace.id)
     const sessions = [...(workspaceSessions.get(workspace.id) ?? [])]
       .filter(session => !session.hidden && !session.isArchived)
       .sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0))
+    const visibleSessions = isSessionListExpanded ? sessions : sessions.slice(0, PROJECT_SESSION_PREVIEW_LIMIT)
+    const canToggleSessionList = sessions.length > PROJECT_SESSION_PREVIEW_LIMIT
+    const sessionListToggleLabel = isSessionListExpanded
+      ? t("sidebar.collapseDisplay")
+      : t("sidebar.expandDisplay")
 
     return (
       <section key={workspace.id} aria-label={workspace.name}>
@@ -646,7 +667,7 @@ export function WorkspaceProjectTree({
         />
         {!isSorting && !isCollapsed && sessions.length > 0 ? (
           <div className="grid gap-0.5" data-no-dnd="true">
-            {sessions.map((session) => (
+            {visibleSessions.map((session) => (
               <ProjectSessionRow
                 key={session.id}
                 workspaceId={workspace.id}
@@ -656,6 +677,18 @@ export function WorkspaceProjectTree({
                 onSelect={() => void onSelectSession(workspace.id, session.id)}
               />
             ))}
+            {canToggleSessionList && (
+              <button
+                type="button"
+                onClick={() => toggleWorkspaceSessionsExpanded(workspace.id)}
+                aria-expanded={isSessionListExpanded}
+                aria-label={sessionListToggleLabel}
+                title={sessionListToggleLabel}
+                className="ml-7 mr-2 flex h-8 min-w-0 items-center rounded-[6px] px-2 text-left text-[12px] font-semibold text-muted-foreground/65 transition-colors hover:bg-sidebar-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                <span className="truncate">{sessionListToggleLabel}</span>
+              </button>
+            )}
           </div>
         ) : !isSorting && !isCollapsed ? (
           <div

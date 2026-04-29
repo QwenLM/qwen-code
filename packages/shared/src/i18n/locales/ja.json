@@ -1003,6 +1003,8 @@
   "sidebar.mcps": "MCPs",
   "sidebar.newSession": "新規セッション",
   "sidebar.projects": "プロジェクト",
+  "sidebar.expandDisplay": "もっと表示",
+  "sidebar.collapseDisplay": "折りたたむ",
   "sidebar.scheduled": "スケジュール済み",
   "sidebar.search": "検索",
   "sidebar.searchStatusesLabels": "ステータスとラベルを検索...",

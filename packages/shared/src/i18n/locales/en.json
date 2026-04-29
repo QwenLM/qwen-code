@@ -1003,6 +1003,8 @@
   "sidebar.mcps": "MCPs",
   "sidebar.newSession": "New Session",
   "sidebar.projects": "Projects",
+  "sidebar.expandDisplay": "Show more",
+  "sidebar.collapseDisplay": "Show less",
   "sidebar.scheduled": "Scheduled",
   "sidebar.search": "Search",
   "sidebar.searchStatusesLabels": "Search statuses & labels...",
