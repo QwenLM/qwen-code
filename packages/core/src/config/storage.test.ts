@@ -194,10 +194,15 @@ describe('Storage – runtime path methods use getRuntimeBaseDir', () => {
     );
   });
 
-  it('getGlobalIdeDir uses custom runtime base dir', () => {
+  it('getGlobalIdeDir is anchored to the global Qwen dir, not runtime base dir', () => {
     const customDir = path.resolve('custom');
     Storage.setRuntimeBaseDir(customDir);
-    expect(Storage.getGlobalIdeDir()).toBe(path.join(customDir, 'ide'));
+    // IDE lock files are discovery anchors shared with the VS Code companion,
+    // which can only see env vars (not settings-based runtimeOutputDir), so
+    // getGlobalIdeDir must follow getGlobalQwenDir to keep both sides aligned.
+    expect(Storage.getGlobalIdeDir()).toBe(
+      path.join(Storage.getGlobalQwenDir(), 'ide'),
+    );
   });
 
   it('getProjectDir uses custom runtime base dir', () => {

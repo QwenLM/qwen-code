@@ -210,6 +210,15 @@ export async function start_sandbox(
       ...nodeArgs,
     ].join(' ');
 
+    // Canonicalize via realpathSync so seatbelt's `subpath` matcher sees the
+    // same path the kernel will. mkdirSync first because realpathSync throws
+    // on missing dirs and a custom QWEN_HOME / QWEN_RUNTIME_DIR may not exist
+    // yet on first run.
+    const qwenDir = Storage.getGlobalQwenDir();
+    const runtimeDir = Storage.getRuntimeBaseDir();
+    fs.mkdirSync(qwenDir, { recursive: true });
+    fs.mkdirSync(runtimeDir, { recursive: true });
+
     const args = [
       '-D',
       `TARGET_DIR=${fs.realpathSync(process.cwd())}`,
@@ -220,9 +229,9 @@ export async function start_sandbox(
       '-D',
       `CACHE_DIR=${fs.realpathSync(execSync(`getconf DARWIN_USER_CACHE_DIR`).toString().trim())}`,
       '-D',
-      `QWEN_DIR=${path.resolve(Storage.getGlobalQwenDir())}`,
+      `QWEN_DIR=${fs.realpathSync(qwenDir)}`,
       '-D',
-      `RUNTIME_DIR=${path.resolve(Storage.getRuntimeBaseDir())}`,
+      `RUNTIME_DIR=${fs.realpathSync(runtimeDir)}`,
     ];
 
     // Add included directories from the workspace context
