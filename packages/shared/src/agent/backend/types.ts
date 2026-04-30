@@ -12,7 +12,7 @@
  * - AsyncGenerator for streaming: Consistent with existing CraftAgent API
  */
 
-import type { AgentEvent, AvailableSlashCommand, Message } from '@craft-agent/core/types';
+import type { AgentEvent, AvailableSlashCommand, Message, MessageTextElement } from '@craft-agent/core/types';
 import type { FileAttachment } from '../../utils/files.ts';
 import type { ThinkingLevel } from '../thinking-levels.ts';
 import type { PermissionMode } from '../mode-manager.ts';
@@ -284,6 +284,8 @@ export interface ChatOptions {
   isRetry?: boolean;
   /** Override thinking level for this message only */
   thinkingOverride?: ThinkingLevel;
+  /** Semantic annotations for the user-authored text. */
+  textElements?: MessageTextElement[];
 }
 
 export interface BackendSessionInfo {

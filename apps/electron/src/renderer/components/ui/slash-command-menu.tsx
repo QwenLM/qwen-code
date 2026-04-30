@@ -106,6 +106,10 @@ const compactCommand: SlashCommand = {
 const QWEN_COMMAND_ID_PREFIX = 'qwen:'
 const QWEN_SKILL_ID_PREFIX = 'qwen-skill:'
 const HIDDEN_QWEN_SLASH_NAMES = new Set(['model', 'skills'])
+const EMPTY_AVAILABLE_COMMANDS: AvailableSlashCommand[] = []
+const EMPTY_AVAILABLE_SKILLS: string[] = []
+const EMPTY_ACTIVE_COMMANDS: SlashCommandId[] = []
+const EMPTY_RECENT_FOLDERS: string[] = []
 
 const FALLBACK_QWEN_COMMANDS: AvailableSlashCommand[] = [
   { name: 'status', description: 'Show version info' },
@@ -146,8 +150,8 @@ function getCommandInputHint(command: AvailableSlashCommand): string | undefined
 }
 
 export function createQwenSlashSections({
-  availableCommands = [],
-  availableSkills = [],
+  availableCommands = EMPTY_AVAILABLE_COMMANDS,
+  availableSkills = EMPTY_AVAILABLE_SKILLS,
   enabled = true,
 }: {
   availableCommands?: AvailableSlashCommand[]
@@ -699,11 +703,11 @@ export function useInlineSlashCommand({
   inputRef,
   onSelectCommand,
   onSelectFolder,
-  activeCommands = [],
-  recentFolders = [],
+  activeCommands = EMPTY_ACTIVE_COMMANDS,
+  recentFolders = EMPTY_RECENT_FOLDERS,
   homeDir,
-  availableCommands = [],
-  availableSkills = [],
+  availableCommands = EMPTY_AVAILABLE_COMMANDS,
+  availableSkills = EMPTY_AVAILABLE_SKILLS,
   enableQwenCommands = false,
 }: UseInlineSlashCommandOptions): UseInlineSlashCommandReturn {
   const [isOpen, setIsOpen] = React.useState(false)
@@ -712,6 +716,27 @@ export function useInlineSlashCommand({
   const [slashStart, setSlashStart] = React.useState(-1)
   // Store current input state for handleSelect
   const currentInputRef = React.useRef({ value: '', cursorPosition: 0 })
+
+  const updateMenuPosition = React.useCallback((textBeforeCursor: string) => {
+    if (!inputRef.current) return
+
+    const caretRect = inputRef.current.getCaretRect?.()
+    if (caretRect && caretRect.x > 0) {
+      setPosition({
+        x: caretRect.x,
+        y: caretRect.y,
+      })
+      return
+    }
+
+    const rect = inputRef.current.getBoundingClientRect()
+    const lineHeight = 20
+    const linesBeforeCursor = textBeforeCursor.split('\n').length - 1
+    setPosition({
+      x: rect.left,
+      y: rect.top + (linesBeforeCursor + 1) * lineHeight,
+    })
+  }, [inputRef])
 
   // Build sections from commands and folders
   const sections = React.useMemo((): SlashSection[] => {
@@ -790,28 +815,7 @@ export function useInlineSlashCommand({
       const matchStart = textBeforeCursor.lastIndexOf('/')
       setSlashStart(matchStart)
       setFilter(filterText)
-
-      if (inputRef.current) {
-        // Try to get actual caret position from the input element
-        const caretRect = inputRef.current.getCaretRect?.()
-
-        if (caretRect && caretRect.x > 0) {
-          // Use actual caret position
-          setPosition({
-            x: caretRect.x,
-            y: caretRect.y,
-          })
-        } else {
-          // Fallback: position at input element's left edge
-          const rect = inputRef.current.getBoundingClientRect()
-          const lineHeight = 20
-          const linesBeforeCursor = textBeforeCursor.split('\n').length - 1
-          setPosition({
-            x: rect.left,
-            y: rect.top + (linesBeforeCursor + 1) * lineHeight,
-          })
-        }
-      }
+      updateMenuPosition(textBeforeCursor)
 
       setIsOpen(true)
     } else {
@@ -819,7 +823,24 @@ export function useInlineSlashCommand({
       setFilter('')
       setSlashStart(-1)
     }
-  }, [inputRef, sections])
+  }, [sections, updateMenuPosition])
+
+  React.useEffect(() => {
+    const { value, cursorPosition } = currentInputRef.current
+    const textBeforeCursor = value.slice(0, cursorPosition)
+    const slashMatch = textBeforeCursor.match(/(?:^|\s)\/([^\n]*)$/)
+    if (!slashMatch) return
+
+    const filterText = slashMatch[1] || ''
+    const filteredSections = filterSections(sections, filterText)
+    const hasFilteredItems = filteredSections.some(s => s.items.length > 0)
+    if (!hasFilteredItems) return
+
+    setSlashStart(textBeforeCursor.lastIndexOf('/'))
+    setFilter(filterText)
+    updateMenuPosition(textBeforeCursor)
+    setIsOpen(true)
+  }, [sections, updateMenuPosition])
 
   const handleSelectCommand = React.useCallback((commandId: SlashCommandId): { value: string; cursorPosition?: number } => {
     // Capture values BEFORE any state changes to avoid race conditions

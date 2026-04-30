@@ -13,8 +13,8 @@
 
 import * as React from 'react'
 import type { ReactNode } from 'react'
-import type { StoredAttachment, ContentBadge } from '@craft-agent/core'
-import { normalizePath } from '@craft-agent/core/utils'
+import type { StoredAttachment, ContentBadge, MessageTextElement } from '@craft-agent/core'
+import { normalizePath, textElementsToContentBadges } from '@craft-agent/core/utils'
 import { Check, Copy, Pencil, SendHorizontal, X } from 'lucide-react'
 import { cn } from '../../lib/utils'
 import { Markdown } from '../markdown'
@@ -367,8 +367,8 @@ export interface UserMessageBubbleProps {
   onFileClick?: (path: string) => void
   /** Stored attachments (images, documents) */
   attachments?: StoredAttachment[]
-  /** Content badges for inline display (sources, skills) */
-  badges?: ContentBadge[]
+  /** Semantic text elements for inline references and collapsed ranges */
+  textElements?: MessageTextElement[]
   /** Whether the message is pending (shimmer animation) */
   isPending?: boolean
   /** Whether the message is queued (badge shown) */
@@ -391,7 +391,7 @@ export function UserMessageBubble({
   onUrlClick,
   onFileClick,
   attachments,
-  badges,
+  textElements,
   isPending,
   isQueued,
   compactMode,
@@ -408,9 +408,14 @@ export function UserMessageBubble({
   const [copied, setCopied] = React.useState(false)
   const copyResetTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  const resolvedBadges = React.useMemo(
+    () => textElementsToContentBadges(content, textElements),
+    [content, textElements]
+  )
+
   // Separate edit_request badges (rendered above bubble) from other badges (rendered inline)
-  const editRequestBadges = badges?.filter(isEditRequestBadge) ?? []
-  const inlineBadges = badges?.filter(b => !isEditRequestBadge(b)) ?? []
+  const editRequestBadges = resolvedBadges?.filter(isEditRequestBadge) ?? []
+  const inlineBadges = resolvedBadges?.filter(b => !isEditRequestBadge(b)) ?? []
   const hasEditRequestBadges = editRequestBadges.length > 0
   const hasInlineBadges = inlineBadges.length > 0
 

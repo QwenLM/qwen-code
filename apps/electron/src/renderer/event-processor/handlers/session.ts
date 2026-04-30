@@ -546,7 +546,7 @@ export function handleUserMessage(
           ...message,
           id: message.id,  // Use backend's ID as canonical
           attachments: message.attachments ?? existingMessage.attachments,
-          badges: message.badges ?? existingMessage.badges,
+          textElements: message.textElements ?? existingMessage.textElements,
           isPending: false,
           // Event sequence protection: don't regress from processing back to queued.
           // This handles out-of-order events (e.g., 'processing' arrives before 'queued').

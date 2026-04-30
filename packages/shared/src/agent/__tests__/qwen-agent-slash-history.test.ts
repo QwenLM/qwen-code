@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentEvent, Message } from '@craft-agent/core/types';
 import { QwenAgent } from '../qwen-agent.ts';
@@ -9,6 +9,12 @@ import type { BackendConfig } from '../backend/types.ts';
 type QwenHistoryInternals = {
   mergeSlashCommandInvocationMessages: (sessionId: string, messages: Message[], cwd: string) => Message[];
   buildHistoryMessages: (sessionId: string, updates: Record<string, unknown>[], cwd: string) => Message[];
+  persistQwenTranscriptTextElements: (
+    sessionId: string,
+    cwd: string,
+    sourceElements?: NonNullable<Message['textElements']>,
+  ) => void;
+  applyQwenTranscriptTextElements: (messages: Message[], sessionId: string, cwd: string) => Message[];
 };
 
 type QwenPromptBlock = {
@@ -69,13 +75,22 @@ function createAgent(cwd: string): QwenAgent {
 }
 
 function writeQwenTranscript(runtimeRoot: string, cwd: string, sessionId: string, records: unknown[]): void {
-  const projectId = cwd.replace(/[^a-zA-Z0-9]/g, '-');
+  const projectId = resolve(cwd).replace(/[^a-zA-Z0-9]/g, '-');
   const transcriptDir = join(runtimeRoot, 'projects', projectId, 'chats');
   mkdirSync(transcriptDir, { recursive: true });
   writeFileSync(
     join(transcriptDir, `${sessionId}.jsonl`),
     records.map(record => JSON.stringify(record)).join('\n') + '\n',
   );
+}
+
+function readQwenTranscript(runtimeRoot: string, cwd: string, sessionId: string): Record<string, unknown>[] {
+  const projectId = resolve(cwd).replace(/[^a-zA-Z0-9]/g, '-');
+  const transcriptPath = join(runtimeRoot, 'projects', projectId, 'chats', `${sessionId}.jsonl`);
+  return readFileSync(transcriptPath, 'utf8')
+    .trim()
+    .split('\n')
+    .map(line => JSON.parse(line) as Record<string, unknown>);
 }
 
 async function readNextQueuedEvent(agent: QwenAgent): Promise<AgentEvent | undefined> {
@@ -182,16 +197,10 @@ describe('QwenAgent slash command history', () => {
       ['user', '/insight', Date.parse(insightInvocation)],
       ['assistant', 'This may take a couple minutes. Sit tight!', Date.parse(insightResult)],
     ]);
-    expect(messages[0]?.badges).toEqual([{
-      type: 'command',
-      label: 'insight',
-      rawText: '/insight',
-      start: 0,
-      end: 8,
-    }]);
+    expect(messages[0]?.textElements).toBeUndefined();
   });
 
-  it('derives file badges from Qwen user history without a Craft metadata sidecar', () => {
+  it('does not derive text elements from Qwen user history without metadata', () => {
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
     tempRoots.push(cwd);
 
@@ -210,13 +219,139 @@ describe('QwenAgent slash command history', () => {
     );
     agent.destroy();
 
-    expect(messages[0]?.badges).toEqual([{
-      type: 'file',
-      label: 'qwen-agent.ts',
-      rawText: '@packages/shared/src/agent/qwen-agent.ts:42',
-      start: 15,
-      end: 58,
-      filePath: join(cwd, 'packages/shared/src/agent/qwen-agent.ts'),
+    expect(messages[0]?.textElements).toBeUndefined();
+  });
+
+  it('writes slash command text elements into the Qwen transcript user record', () => {
+    const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(runtimeRoot, cwd);
+    process.env.QWEN_RUNTIME_DIR = runtimeRoot;
+
+    const sessionId = 'session-with-slash-metadata';
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [{
+      uuid: 'u1',
+      parentUuid: null,
+      sessionId,
+      timestamp: '2026-04-30T08:02:52.927Z',
+      type: 'user',
+      cwd,
+      version: 'test',
+      message: { role: 'user', parts: [{ text: '/qc-helper hello' }] },
+    }]);
+
+    const agent = createAgent(cwd);
+    (agent as unknown as QwenHistoryInternals).persistQwenTranscriptTextElements(
+      sessionId,
+      cwd,
+      [{
+        type: 'slash_command',
+        byte_range: { start: 0, end: 10 },
+        placeholder: '/qc-helper',
+        label: 'qc-helper',
+        target: 'qc-helper',
+      }],
+    );
+
+    const records = readQwenTranscript(runtimeRoot, cwd, sessionId);
+    agent.destroy();
+
+    expect(records[0]?.textElements).toEqual([{
+      type: 'slash_command',
+      byte_range: { start: 0, end: 10 },
+      placeholder: '/qc-helper',
+      label: 'qc-helper',
+      target: 'qc-helper',
+    }]);
+  });
+
+  it('writes skill text elements into the Qwen transcript user record', () => {
+    const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(runtimeRoot, cwd);
+    process.env.QWEN_RUNTIME_DIR = runtimeRoot;
+
+    const sessionId = 'session-with-skill-metadata';
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [{
+      uuid: 'u1',
+      parentUuid: null,
+      sessionId,
+      timestamp: '2026-04-30T08:02:52.927Z',
+      type: 'user',
+      cwd,
+      version: 'test',
+      message: { role: 'user', parts: [{ text: '@qc-helper' }] },
+    }]);
+
+    const agent = createAgent(cwd);
+    (agent as unknown as QwenHistoryInternals).persistQwenTranscriptTextElements(
+      sessionId,
+      cwd,
+      [{
+        type: 'skill',
+        byte_range: { start: 0, end: 17 },
+        placeholder: '[skill:qc-helper]',
+        label: 'qc-helper',
+        target: 'qc-helper',
+      }],
+    );
+
+    const records = readQwenTranscript(runtimeRoot, cwd, sessionId);
+    agent.destroy();
+
+    expect(records[0]?.textElements).toEqual([{
+      type: 'skill',
+      byte_range: { start: 0, end: 10 },
+      placeholder: '@qc-helper',
+      label: 'qc-helper',
+      target: 'qc-helper',
+    }]);
+  });
+
+  it('loads text elements back from the Qwen transcript', () => {
+    const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(runtimeRoot, cwd);
+    process.env.QWEN_RUNTIME_DIR = runtimeRoot;
+
+    const sessionId = 'session-with-persisted-text-elements';
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [{
+      uuid: 'u1',
+      parentUuid: null,
+      sessionId,
+      timestamp: '2026-04-30T08:02:52.927Z',
+      type: 'user',
+      cwd,
+      version: 'test',
+      message: { role: 'user', parts: [{ text: '@qc-helper' }] },
+      textElements: [{
+        type: 'skill',
+        byte_range: { start: 0, end: 10 },
+        placeholder: '@qc-helper',
+        label: 'qc-helper',
+        target: 'qc-helper',
+      }],
+    }]);
+
+    const agent = createAgent(cwd);
+    const messages = (agent as unknown as QwenHistoryInternals).applyQwenTranscriptTextElements(
+      [{
+        id: 'message-1',
+        role: 'user',
+        content: '@qc-helper',
+        timestamp: Date.parse('2026-04-30T08:02:52.927Z'),
+      }],
+      sessionId,
+      cwd,
+    );
+    agent.destroy();
+
+    expect(messages[0]?.textElements).toEqual([{
+      type: 'skill',
+      byte_range: { start: 0, end: 10 },
+      placeholder: '@qc-helper',
+      label: 'qc-helper',
+      target: 'qc-helper',
     }]);
   });
 

@@ -6,9 +6,9 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir, platform, tmpdir } from 'node:os';
-import { basename, isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 
 import {
@@ -22,13 +22,15 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import type { AgentEvent, AvailableSlashCommand, ContentBadge, Message } from '@craft-agent/core/types';
+import type { AgentEvent, AvailableSlashCommand, Message, MessageTextElement } from '@craft-agent/core/types';
+import { utf16IndexToByteOffset } from '@craft-agent/core/utils';
 import type { FileAttachment } from '../utils/files.ts';
 import type { ModelDefinition } from '../config/models.ts';
 import { getProxyEnvVars } from '../config/proxy-env.ts';
 import { getCoAuthorPreference } from '../config/preferences.ts';
 import { getSessionPlansPath } from '../sessions/storage.ts';
 import { getSystemPrompt } from '../prompts/system.ts';
+import { resolveFileMentions, resolveSourceMentions } from '../mentions/index.ts';
 
 import { BaseAgent } from './base-agent.ts';
 import type {
@@ -78,24 +80,6 @@ type SlashCommandInvocation = {
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_INITIALIZE_TIMEOUT_MS = 60_000;
 const INCLUDE_CRAFT_CONTEXT_IN_QWEN_PROMPTS = false;
-const UNSUPPORTED_SLASH_BADGE_NAMES = new Set(['model', 'skills']);
-const QWEN_FILE_EXTENSIONS = [
-  'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs',
-  'py', 'rs', 'go', 'java', 'rb', 'swift', 'kt',
-  'c', 'cc', 'cpp', 'cxx', 'h', 'hh', 'hpp', 'cs',
-  'css', 'scss', 'less', 'html', 'vue', 'svelte',
-  'json', 'jsonl', 'yaml', 'yml', 'toml', 'xml',
-  'sh', 'bash', 'zsh', 'fish',
-  'md', 'mdx', 'txt', 'log',
-  'sql', 'graphql', 'proto',
-  'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg',
-  'pdf', 'csv', 'tsv',
-].join('|');
-const QWEN_FILE_EXTENSION_REGEX = new RegExp(`\\.(${QWEN_FILE_EXTENSIONS})(?::\\d+(?::\\d+)?)?$`, 'i');
-const QWEN_FILE_PATH_REGEX = new RegExp(
-  `(?:^|[\\s([\\{<])(@?(?:/|~/|\\./|\\.\\./|[A-Za-z0-9_][\\w\\-./@]*)[\\w\\-./@]*\\.(?:${QWEN_FILE_EXTENSIONS})(?::\\d+(?::\\d+)?)?)(?=[\\s)\\]}\\.,:;!?>]|$)`,
-  'gi',
-);
 
 function isRecord(value: unknown): value is JsonRecord {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -275,158 +259,124 @@ function getQwenTranscriptPath(sessionId: string, cwd: string): string {
   return join(getQwenRuntimeDir(), 'projects', projectId, 'chats', `${sessionId}.jsonl`);
 }
 
-function normalizeSlashCommandBadgeName(value: string): string {
-  return value.trim().replace(/^\/+/, '').toLowerCase();
+function qwenSkillNameFromTextElement(element: MessageTextElement): string | undefined {
+  const raw = (element.target || element.label || element.placeholder || '').trim();
+  if (!raw) return undefined;
+
+  const bracketMatch = /^\[skill:([^\]]+)\]$/.exec(raw);
+  const normalized = (bracketMatch?.[1] ?? raw).trim();
+  const withoutPlugin = normalized.startsWith('.agents:')
+    ? normalized.slice('.agents:'.length).trim()
+    : normalized;
+  return withoutPlugin.split(':').pop()?.trim() || withoutPlugin;
 }
 
-function extractQwenCommandBadges(text: string): ContentBadge[] {
-  const match = /^(\s*)(\/([A-Za-z][\w-]*))(?=\s|$)/.exec(text);
-  if (!match) return [];
-
-  const commandText = match[2];
-  const commandName = match[3];
-  if (!commandText || !commandName) return [];
-
-  const normalizedName = normalizeSlashCommandBadgeName(commandName);
-  if (!normalizedName || UNSUPPORTED_SLASH_BADGE_NAMES.has(normalizedName)) return [];
-
-  const start = match[1]?.length ?? 0;
-  return [{
-    type: 'command',
-    label: commandText.replace(/^\/+/, ''),
-    rawText: commandText,
-    start,
-    end: start + commandText.length,
-  }];
+function rangesOverlapBytes(a: MessageTextElement, b: MessageTextElement): boolean {
+  return a.byte_range.start < b.byte_range.end && b.byte_range.start < a.byte_range.end;
 }
 
-function stripFileLineSuffix(value: string): string {
-  if (!QWEN_FILE_EXTENSION_REGEX.test(value)) return value;
-  return value.replace(/:\d+(?::\d+)?$/, '');
-}
-
-function stripTrailingPathPunctuation(value: string): string {
-  return value.replace(/[.,;!?]+$/, '');
-}
-
-function resolveFileUrlPath(value: string): string | undefined {
-  if (!/^file:/i.test(value)) return undefined;
-  try {
-    const url = new URL(value);
-    if (url.protocol !== 'file:') return undefined;
-    const pathname = decodeURIComponent(url.pathname || '');
-    if (!pathname && !url.hostname) return undefined;
-    return url.hostname ? `//${decodeURIComponent(url.hostname)}${pathname}` : pathname;
-  } catch {
-    return undefined;
-  }
-}
-
-function resolveQwenDisplayFilePath(rawPath: string, cwd: string): string | undefined {
-  const cleaned = stripFileLineSuffix(stripTrailingPathPunctuation(rawPath.trim()));
-  if (!cleaned || /^https?:\/\//i.test(cleaned)) return undefined;
-
-  const withoutMentionPrefix = cleaned.startsWith('@') ? cleaned.slice(1) : cleaned;
-  const fileUrlPath = resolveFileUrlPath(withoutMentionPrefix);
-  const candidate = fileUrlPath ?? withoutMentionPrefix;
-  if (!QWEN_FILE_EXTENSION_REGEX.test(candidate)) return undefined;
-
-  if (candidate.startsWith('~/')) {
-    return join(homedir(), candidate.slice(2));
+function qwenTranscriptPlaceholderFromSourceElement(sourceElement: MessageTextElement): string | undefined {
+  if (sourceElement.type === 'skill') {
+    const skillName = qwenSkillNameFromTextElement(sourceElement);
+    return skillName ? `@${skillName}` : undefined;
   }
 
-  if (isAbsolute(candidate)) return candidate;
-  if (candidate.startsWith('./') || candidate.startsWith('../') || candidate.includes('/')) {
-    return resolve(cwd, candidate);
+  return sourceElement.placeholder || undefined;
+}
+
+function findNonOverlappingPlaceholderStart(
+  content: string,
+  placeholder: string,
+  elements: MessageTextElement[],
+): number {
+  let start = content.indexOf(placeholder);
+  while (start >= 0) {
+    const candidate: MessageTextElement = {
+      type: 'context',
+      byte_range: {
+        start: utf16IndexToByteOffset(content, start),
+        end: utf16IndexToByteOffset(content, start + placeholder.length),
+      },
+      placeholder,
+    };
+    if (!elements.some(existing => rangesOverlapBytes(existing, candidate))) return start;
+    start = content.indexOf(placeholder, start + placeholder.length);
+  }
+  return -1;
+}
+
+function buildQwenTranscriptTextElements(
+  content: string,
+  sourceElements?: MessageTextElement[],
+): MessageTextElement[] | undefined {
+  const elements: MessageTextElement[] = [];
+
+  for (const sourceElement of sourceElements ?? []) {
+    const placeholder = qwenTranscriptPlaceholderFromSourceElement(sourceElement);
+    if (!placeholder) continue;
+
+    const start = findNonOverlappingPlaceholderStart(content, placeholder, elements);
+    if (start < 0) continue;
+
+    const element: MessageTextElement = {
+      type: sourceElement.type,
+      byte_range: {
+        start: utf16IndexToByteOffset(content, start),
+        end: utf16IndexToByteOffset(content, start + placeholder.length),
+      },
+      placeholder,
+      ...(sourceElement.label ? { label: sourceElement.label } : {}),
+      ...(sourceElement.target ? { target: sourceElement.target } : {}),
+      ...(sourceElement.metadata ? { metadata: sourceElement.metadata } : {}),
+    };
+
+    if (sourceElement.type === 'skill') {
+      const skillName = qwenSkillNameFromTextElement(sourceElement);
+      if (skillName) {
+        element.target = skillName;
+        element.label = sourceElement.label || skillName;
+      }
+    }
+
+    elements.push(element);
   }
 
-  return undefined;
+  elements.sort((a, b) => a.byte_range.start - b.byte_range.start);
+  return elements.length > 0 ? elements : undefined;
 }
 
-function getQwenDisplayFileBadgeType(filePath: string): 'file' | 'folder' {
-  try {
-    return statSync(filePath).isDirectory() ? 'folder' : 'file';
-  } catch {
-    return 'file';
-  }
-}
+function toQwenTranscriptTextElements(value: unknown): MessageTextElement[] | undefined {
+  if (!Array.isArray(value)) return undefined;
 
-function rangesOverlap(a: { start: number; end: number }, b: { start: number; end: number }): boolean {
-  return a.start < b.end && b.start < a.end;
-}
+  const byteOffset = (offset: unknown): number | undefined => {
+    if (typeof offset === 'number' && Number.isFinite(offset) && offset >= 0) return offset;
+    if (typeof offset !== 'string') return undefined;
+    const parsed = Number(offset);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+  };
 
-function addFileBadgeIfValid(
-  badges: ContentBadge[],
-  args: {
-    content: string;
-    cwd: string;
-    rawText: string;
-    start: number;
-    end: number;
-    label?: string;
-  },
-): void {
-  const { cwd, rawText, start, end, label } = args;
-  if (badges.some((badge) => rangesOverlap(badge, { start, end }))) return;
+  const elements = value
+    .filter(isRecord)
+    .map((element): MessageTextElement | null => {
+      const type = asString(element.type) as MessageTextElement['type'] | undefined;
+      const byteRange = toRecord(element.byte_range);
+      const start = byteOffset(byteRange.start);
+      const end = byteOffset(byteRange.end);
+      const placeholder = asString(element.placeholder);
+      if (!type || start == null || end == null || !placeholder) return null;
+      if (!['source', 'skill', 'context', 'slash_command', 'file', 'folder'].includes(type)) return null;
+      return {
+        type,
+        byte_range: { start, end },
+        placeholder,
+        ...(asString(element.label) ? { label: asString(element.label) } : {}),
+        ...(asString(element.target) ? { target: asString(element.target) } : {}),
+        ...(isRecord(element.metadata) ? { metadata: element.metadata } : {}),
+      };
+    })
+    .filter((element): element is MessageTextElement => !!element);
 
-  const filePath = resolveQwenDisplayFilePath(rawText, cwd);
-  if (!filePath) return;
-
-  badges.push({
-    type: getQwenDisplayFileBadgeType(filePath),
-    label: label?.trim() || basename(filePath) || rawText,
-    rawText: args.content.slice(start, end),
-    start,
-    end,
-    filePath,
-  });
-}
-
-function extractQwenFileBadges(text: string, cwd: string, existingBadges: ContentBadge[] = []): ContentBadge[] {
-  const badges: ContentBadge[] = [...existingBadges];
-
-  const markdownLinkRegex = /\[([^\]]+)\]\(([^)\s]+)\)/g;
-  let markdownMatch: RegExpExecArray | null;
-  while ((markdownMatch = markdownLinkRegex.exec(text)) !== null) {
-    const linkText = markdownMatch[1];
-    const target = markdownMatch[2];
-    if (!target) continue;
-    addFileBadgeIfValid(badges, {
-      content: text,
-      cwd,
-      rawText: target,
-      start: markdownMatch.index,
-      end: markdownMatch.index + markdownMatch[0].length,
-      label: linkText,
-    });
-  }
-
-  QWEN_FILE_PATH_REGEX.lastIndex = 0;
-  let pathMatch: RegExpExecArray | null;
-  while ((pathMatch = QWEN_FILE_PATH_REGEX.exec(text)) !== null) {
-    const rawPath = pathMatch[1];
-    if (!rawPath) continue;
-
-    const pathOffset = pathMatch[0].indexOf(rawPath);
-    const start = pathMatch.index + pathOffset;
-    const rawText = stripTrailingPathPunctuation(rawPath);
-    addFileBadgeIfValid(badges, {
-      content: text,
-      cwd,
-      rawText,
-      start,
-      end: start + rawText.length,
-    });
-  }
-
-  return badges.slice(existingBadges.length);
-}
-
-function deriveQwenUserBadges(content: string, cwd: string): ContentBadge[] | undefined {
-  const commandBadges = extractQwenCommandBadges(content);
-  const fileBadges = extractQwenFileBadges(content, cwd, commandBadges);
-  const badges = [...commandBadges, ...fileBadges].sort((a, b) => a.start - b.start);
-  return badges.length > 0 ? badges : undefined;
+  return elements.length > 0 ? elements : undefined;
 }
 
 function jsonStringify(value: unknown): string {
@@ -709,6 +659,36 @@ export class QwenAgent extends BaseAgent {
     this.config.onSdkSessionIdCleared?.();
   }
 
+  protected override extractSkillPaths(message: string): {
+    skillPaths: Map<string, string>;
+    cleanMessage: string;
+    missingSkills: string[];
+  } {
+    const withQwenSkills = message.replace(
+      /\[skill:([^\]]+)\]/g,
+      (_match, rawSkill: string) => {
+        const normalized = rawSkill.trim();
+        const skillName = normalized.startsWith('.agents:')
+          ? normalized.slice('.agents:'.length).trim()
+          : normalized;
+        return skillName ? `@${skillName}` : '';
+      },
+    );
+    const withSources = resolveSourceMentions(withQwenSkills);
+    const workDir = this.config.session?.workingDirectory ?? this.workingDirectory;
+    const cleanMessage = resolveFileMentions(withSources, workDir).trim();
+
+    if (withQwenSkills !== message) {
+      this.debug('[extractSkillPaths] Qwen skill mentions are passed to ACP as @skill references');
+    }
+
+    return {
+      skillPaths: new Map(),
+      cleanMessage: cleanMessage || message.trim(),
+      missingSkills: [],
+    };
+  }
+
   override updateWorkingDirectory(path: string): void {
     super.updateWorkingDirectory(path);
     if (this.qwenSessionId) {
@@ -725,7 +705,7 @@ export class QwenAgent extends BaseAgent {
   protected async *chatImpl(
     messageParam: string,
     attachments?: FileAttachment[],
-    _options?: ChatOptions,
+    options?: ChatOptions,
   ): AsyncGenerator<AgentEvent> {
     let message = messageParam;
     const promptRunId = ++this.promptRunCounter;
@@ -769,6 +749,12 @@ export class QwenAgent extends BaseAgent {
       if (!sessionId) throw new Error('Qwen ACP session was not created');
 
       const prompt = this.buildPromptBlocks(message, attachments);
+      let transcriptTextElementsPersisted = false;
+      const persistTranscriptTextElements = () => {
+        if (transcriptTextElementsPersisted) return;
+        transcriptTextElementsPersisted = true;
+        this.persistQwenTranscriptTextElements(sessionId, this.resolvedCwd(), options?.textElements);
+      };
       const promptPromise = this.callAcp(
         'session/prompt',
         (connection) => connection.prompt({ sessionId, prompt }),
@@ -779,6 +765,7 @@ export class QwenAgent extends BaseAgent {
         .then((result) => {
           if (this.activePromptRunId !== promptRunId) return;
           const stopReason = asString(toRecord(result).stopReason);
+          persistTranscriptTextElements();
           this.flushAssistantText();
           this.eventQueue.enqueue({ type: 'complete' });
           this.eventQueue.complete();
@@ -787,10 +774,12 @@ export class QwenAgent extends BaseAgent {
         .catch((error) => {
           if (this.activePromptRunId !== promptRunId) return;
           if (this.abortReason) {
+            persistTranscriptTextElements();
             this.eventQueue.complete();
             return;
           }
           const message = error instanceof Error ? error.message : String(error);
+          persistTranscriptTextElements();
           this.eventQueue.enqueue({ type: 'error', message });
           this.eventQueue.enqueue({ type: 'complete' });
           this.eventQueue.complete();
@@ -986,8 +975,9 @@ export class QwenAgent extends BaseAgent {
       const messages = this.buildHistoryMessages(sessionId, collector.updates, cwd);
       const availableCommandsSnapshot = this.extractAvailableCommandsSnapshot(collector.updates);
       const mergedMessages = this.mergeSlashCommandInvocationMessages(sessionId, messages, cwd);
+      const messagesWithTextElements = this.applyQwenTranscriptTextElements(mergedMessages, sessionId, cwd);
       return {
-        messages: mergedMessages,
+        messages: messagesWithTextElements,
         ...(availableCommandsSnapshot ?? {}),
       };
     } finally {
@@ -1482,6 +1472,143 @@ export class QwenAgent extends BaseAgent {
       || process.cwd();
   }
 
+  private extractQwenRecordText(record: JsonRecord): string {
+    const message = toRecord(record.message);
+    const parts = Array.isArray(message.parts) ? message.parts.filter(isRecord) : [];
+    return parts
+      .map(part => asString(part.text))
+      .filter((text): text is string => !!text)
+      .join('\n\n');
+  }
+
+  private getQwenTranscriptPatchContent(record: JsonRecord): string {
+    if (record.type === 'system' && record.subtype === 'slash_command') {
+      const payload = toRecord(record.systemPayload);
+      if (payload.phase === 'invocation') {
+        return asString(payload.rawCommand) || '';
+      }
+    }
+    return this.extractQwenRecordText(record);
+  }
+
+  private isPatchableQwenUserRecord(record: JsonRecord, sessionId: string): boolean {
+    if (record.sessionId !== sessionId) return false;
+    if (record.type === 'user') return true;
+    if (record.type !== 'system' || record.subtype !== 'slash_command') return false;
+    return toRecord(record.systemPayload).phase === 'invocation';
+  }
+
+  private persistQwenTranscriptTextElements(
+    sessionId: string,
+    cwd: string,
+    sourceElements?: MessageTextElement[],
+  ): void {
+    const transcriptPath = getQwenTranscriptPath(sessionId, cwd);
+    if (!existsSync(transcriptPath)) return;
+
+    let fileContent: string;
+    try {
+      fileContent = readFileSync(transcriptPath, 'utf8');
+    } catch (error) {
+      this.debug(`Failed to read Qwen transcript for text elements: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+
+    const hadTrailingNewline = fileContent.endsWith('\n');
+    const lines = fileContent.split(/\r?\n/);
+    if (lines[lines.length - 1] === '') lines.pop();
+
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index];
+      if (!line?.trim()) continue;
+
+      let record: JsonRecord;
+      try {
+        record = JSON.parse(line) as JsonRecord;
+      } catch {
+        continue;
+      }
+
+      if (!this.isPatchableQwenUserRecord(record, sessionId)) continue;
+
+      const content = this.getQwenTranscriptPatchContent(record);
+      const textElements = buildQwenTranscriptTextElements(content, sourceElements);
+      if (!textElements) return;
+
+      const existing = JSON.stringify(record.textElements ?? null);
+      const next = JSON.stringify(textElements);
+      if (existing === next) return;
+
+      record.textElements = textElements;
+      lines[index] = JSON.stringify(record);
+
+      const tmpPath = `${transcriptPath}.craft-text-elements-${process.pid}-${Date.now()}.tmp`;
+      try {
+        writeFileSync(tmpPath, lines.join('\n') + (hadTrailingNewline ? '\n' : ''), 'utf8');
+        renameSync(tmpPath, transcriptPath);
+        this.debug(`Wrote ${textElements.length} text element(s) into Qwen transcript ${transcriptPath}`);
+      } catch (error) {
+        this.debug(`Failed to write Qwen transcript text elements: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return;
+    }
+  }
+
+  private readQwenTranscriptTextElements(
+    sessionId: string,
+    cwd: string,
+  ): Array<{ content: string; textElements: MessageTextElement[] }> {
+    const transcriptPath = getQwenTranscriptPath(sessionId, cwd);
+    if (!existsSync(transcriptPath)) return [];
+
+    let fileContent: string;
+    try {
+      fileContent = readFileSync(transcriptPath, 'utf8');
+    } catch {
+      return [];
+    }
+
+    const records: Array<{ content: string; textElements: MessageTextElement[] }> = [];
+    for (const line of fileContent.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+
+      let record: JsonRecord;
+      try {
+        record = JSON.parse(line) as JsonRecord;
+      } catch {
+        continue;
+      }
+
+      if (!this.isPatchableQwenUserRecord(record, sessionId)) continue;
+      const textElements = toQwenTranscriptTextElements(record.textElements);
+      if (!textElements) continue;
+
+      const content = this.getQwenTranscriptPatchContent(record);
+      if (!content) continue;
+      records.push({ content, textElements });
+    }
+
+    return records;
+  }
+
+  private applyQwenTranscriptTextElements(messages: Message[], sessionId: string, cwd: string): Message[] {
+    const records = this.readQwenTranscriptTextElements(sessionId, cwd);
+    if (records.length === 0) return messages;
+
+    const remaining = [...records];
+    for (const message of messages) {
+      if (message.role !== 'user' || message.textElements?.length) continue;
+
+      const index = remaining.findIndex(record => record.content === message.content);
+      if (index < 0) continue;
+
+      message.textElements = remaining[index]!.textElements;
+      remaining.splice(index, 1);
+    }
+
+    return messages;
+  }
+
   private buildAcpMcpServers(): McpServer[] {
     if (this.config.poolServerUrl) {
       return [{
@@ -1717,9 +1844,6 @@ export class QwenAgent extends BaseAgent {
         previous.content = role === 'assistant'
           ? normalizeQwenAssistantText(nextContent)
           : nextContent;
-        if (role === 'user') {
-          previous.badges = deriveQwenUserBadges(previous.content, cwd);
-        }
         return;
       }
 
@@ -1730,7 +1854,6 @@ export class QwenAgent extends BaseAgent {
         content,
         timestamp,
         isIntermediate,
-        ...(role === 'user' ? { badges: deriveQwenUserBadges(content, cwd) } : {}),
       });
     };
 
@@ -1927,7 +2050,6 @@ export class QwenAgent extends BaseAgent {
           role: 'user',
           content: userContent,
           timestamp: invocation?.timestamp ?? timestamp,
-          badges: deriveQwenUserBadges(userContent, cwd),
         });
         messages.push({
           id: `qwen-${sessionId}-slash-${++idCounter}`,

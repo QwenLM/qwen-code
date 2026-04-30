@@ -38,7 +38,13 @@ function createFullMessage(): Message {
     isBackground: true,
     isError: false,
     attachments: [{ id: 'att-1', type: 'text', name: 'file.txt', mimeType: 'text/plain', size: 100, storedPath: '/path' }],
-    badges: [{ type: 'source', label: 'Linear', rawText: '@linear', start: 0, end: 7 }],
+    textElements: [{
+      type: 'source',
+      byte_range: { start: 0, end: 7 },
+      placeholder: '@linear',
+      label: 'Linear',
+      target: 'linear',
+    }],
     annotations: [{
       id: 'ann-1',
       schemaVersion: 1,
@@ -118,7 +124,7 @@ describe('messageToStored/storedToMessage round-trip', () => {
       'toolDuration', 'toolIntent', 'toolDisplayName', 'toolDisplayMeta',
       'parentToolUseId',
       'taskId', 'shellId', 'elapsedSeconds', 'isBackground',
-      'isError', 'attachments', 'badges', 'annotations',
+      'isError', 'attachments', 'textElements', 'annotations',
       'isIntermediate', 'turnId', 'infoLevel',
       'errorCode', 'errorTitle', 'errorDetails', 'errorOriginal', 'errorCanRetry',
       'planPath',
@@ -159,7 +165,7 @@ describe('messageToStored/storedToMessage round-trip', () => {
     expect(restored.isBackground).toBe(original.isBackground)
     expect(restored.isError).toBe(original.isError)
     expect(restored.attachments).toEqual(original.attachments)
-    expect(restored.badges).toEqual(original.badges)
+    expect(restored.textElements).toEqual(original.textElements)
     expect(restored.annotations).toEqual(original.annotations)
     expect(restored.isIntermediate).toBe(original.isIntermediate)
     expect(restored.turnId).toBe(original.turnId)

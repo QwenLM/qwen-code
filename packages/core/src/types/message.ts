@@ -107,6 +107,26 @@ export interface ContentBadge {
   filePath?: string;
 }
 
+export type MessageTextElementType = 'source' | 'skill' | 'context' | 'slash_command' | 'file' | 'folder';
+
+export interface MessageTextElement {
+  /** Semantic text element type, independent of presentation. */
+  type: MessageTextElementType;
+  /** UTF-8 byte offsets into the message content. */
+  byte_range: {
+    start: number;
+    end: number;
+  };
+  /** Original placeholder text occupying the byte range. */
+  placeholder: string;
+  /** Optional display label for rendering. */
+  label?: string;
+  /** Optional stable target, such as a source slug, skill slug, command name, or file path. */
+  target?: string;
+  /** Optional element-specific data kept out of the top-level protocol. */
+  metadata?: Record<string, unknown>;
+}
+
 /**
  * Author metadata for annotations
  */
@@ -273,8 +293,8 @@ export interface Message {
   isBackground?: boolean;   // Flag for UI differentiation
   // Stored attachments for user messages (persistent, no base64)
   attachments?: StoredAttachment[];
-  // Content badges for inline display (sources, skills)
-  badges?: ContentBadge[];
+  // Semantic text elements for inline references and collapsed ranges
+  textElements?: MessageTextElement[];
   /** Annotation payloads for this message */
   annotations?: AnnotationV1[];
   isError?: boolean;
@@ -361,8 +381,8 @@ export interface StoredMessage {
   isError?: boolean;
   /** Stored attachments for user messages (persisted to disk) */
   attachments?: StoredAttachment[];
-  /** Content badges for inline display (sources, skills) */
-  badges?: ContentBadge[];
+  /** Semantic text elements for inline references and collapsed ranges */
+  textElements?: MessageTextElement[];
   /** Annotations persisted at message level */
   annotations?: AnnotationV1[];
   // Turn grouping - critical for TurnCard rendering after reload

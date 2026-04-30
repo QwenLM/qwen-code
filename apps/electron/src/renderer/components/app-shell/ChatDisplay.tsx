@@ -2306,7 +2306,7 @@ function MessageBubble({
       <UserMessageBubble
         content={message.content}
         attachments={message.attachments}
-        badges={message.badges}
+        textElements={message.textElements}
         isPending={message.isPending}
         isQueued={message.isQueued}
         onUrlClick={onOpenUrl}
@@ -2454,7 +2454,7 @@ const MemoizedMessageBubble = React.memo(MessageBubble, (prev, next) => {
     prev.message.isPending === next.message.isPending &&
     prev.message.isQueued === next.message.isQueued &&
     prev.message.attachments === next.message.attachments &&
-    prev.message.badges === next.message.badges &&
+    prev.message.textElements === next.message.textElements &&
     prev.sessionId === next.sessionId &&
     prev.compactMode === next.compactMode &&
     prev.canEditUserMessage === next.canEditUserMessage

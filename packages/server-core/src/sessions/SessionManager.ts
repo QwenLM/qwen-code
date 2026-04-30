@@ -72,6 +72,7 @@ import {
   type SessionMetadata,
   type SessionStatus,
   type SessionHeader,
+  type SessionConfig,
   pickSessionFields,
 } from '@craft-agent/shared/sessions'
 import { loadWorkspaceSources, loadAllSources, getSourcesBySlugs, isSourceUsable, type LoadedSource, type McpServerConfig, getSourcesNeedingAuth, getSourceCredentialManager, getSourceServerBuilder, type SourceWithCredential, isApiOAuthProvider, hasRenewEndpoint, SERVER_BUILD_ERRORS, TokenRefreshManager, createTokenGetter } from '@craft-agent/shared/sources'
@@ -83,8 +84,9 @@ import { isParentTaskTool } from '@craft-agent/shared/utils/toolNames'
 import { restoreFiles } from '@craft-agent/shared/utils/bundle-files'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { CraftMcpClient, McpClientPool, McpPoolServer } from '@craft-agent/shared/mcp'
-import { type Session, type SessionEvent, type FileAttachment, type SendMessageOptions, type UnreadSummary, type RemoteSessionTransferPayload, type ImportRemoteSessionTransferResult, type AvailableSlashCommand, RPC_CHANNELS, generateMessageId } from '@craft-agent/shared/protocol'
+import { type Session, type SessionEvent, type FileAttachment, type SendMessageOptions, type UnreadSummary, type RemoteSessionTransferPayload, type ImportRemoteSessionTransferResult, type AvailableSlashCommand, type RefreshAvailableCommandsOptions, RPC_CHANNELS, generateMessageId } from '@craft-agent/shared/protocol'
 import { messageToStored, storedToMessage, type Message, type StoredAttachment, type ToolDisplayMeta } from '@craft-agent/core/types'
+import { textElementsToContentBadges } from '@craft-agent/core/utils'
 import { formatPathsToRelative, formatToolInputPaths, perf, encodeIconToDataUrlAsync, getEmojiIcon, resetSummarizationClient, resolveToolIcon, readFileAttachment, selectSpreadMessages, normalizePath, truncateTitle } from '@craft-agent/shared/utils'
 import { loadAllSkills, loadSkillBySlug, invalidateSkillsCache, type LoadedSkill } from '@craft-agent/shared/skills'
 import { invalidateContextFileCache } from '@craft-agent/shared/prompts/system'
@@ -5303,8 +5305,8 @@ export class SessionManager implements ISessionManager {
     }
 
     message.content = nextContent
-    if (message.badges && message.badges.length > 0) {
-      delete message.badges
+    if (message.textElements && message.textElements.length > 0) {
+      delete message.textElements
     }
 
     this.persistSession(managed)
@@ -5606,7 +5608,7 @@ export class SessionManager implements ISessionManager {
         content: message,
         timestamp: this.monotonic(),
         attachments: storedAttachments,
-        badges: options?.badges,
+        textElements: options?.textElements,
       }
       managed.messages.push(userMessage)
 
@@ -5647,7 +5649,7 @@ export class SessionManager implements ISessionManager {
         content: message,
         timestamp: this.monotonic(),
         attachments: storedAttachments, // Include for persistence (has thumbnailBase64)
-        badges: options?.badges,  // Include content badges (sources, skills with embedded icons)
+        textElements: options?.textElements,
       }
       managed.messages.push(userMessage)
 
@@ -5671,8 +5673,9 @@ export class SessionManager implements ISessionManager {
         // Replace bracket mentions with their display labels (e.g. [skill:ws:commit] -> "Commit")
         // so titles show human-readable names instead of raw IDs
         let titleSource = message
-        if (options?.badges) {
-          for (const badge of options.badges) {
+        const displayBadges = textElementsToContentBadges(message, options?.textElements)
+        if (displayBadges) {
+          for (const badge of displayBadges) {
             if (badge.rawText && badge.label) {
               titleSource = titleSource.replace(badge.rawText, badge.label)
             }
@@ -5751,15 +5754,34 @@ export class SessionManager implements ISessionManager {
     // This prevents the finally block from clobbering state when a follow-up message arrives.
     const myGeneration = managed.processingGeneration
 
+    const invokedSkillSlugs = options?.skillSlugs ?? []
+    const shouldPreEnableLocalSkillSources = (() => {
+      if (invokedSkillSlugs.length === 0) return false
+
+      const workspaceConfig = loadWorkspaceConfig(managed.workspace.rootPath)
+      const backendContext = resolveBackendContext({
+        sessionConnectionSlug: managed.llmConnection,
+        workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
+        managedModel: managed.model,
+      })
+
+      if (backendContext.connection?.providerType === 'qwen') {
+        sessionLog.info(`Skipping local skill source pre-enable for Qwen ACP session: ${invokedSkillSlugs.join(', ')}`)
+        return false
+      }
+
+      return true
+    })()
+
     // Pre-enable sources required by invoked skills (Issue #249)
     // This eliminates the two-turn penalty where the agent discovers missing sources at runtime.
     // Uses targeted loadSkillBySlug() instead of loadAllSkills() to avoid O(N) filesystem scans.
-    if (options?.skillSlugs?.length) {
+    if (shouldPreEnableLocalSkillSources) {
       try {
         const workspaceRoot = managed.workspace.rootPath
 
         const requiredSources = new Set<string>()
-        for (const slug of options.skillSlugs) {
+        for (const slug of invokedSkillSlugs) {
           const skill = loadSkillBySlug(workspaceRoot, slug, managed.workingDirectory)
           if (skill?.metadata.requiredSources) {
             for (const src of skill.metadata.requiredSources) {
@@ -5909,7 +5931,9 @@ export class SessionManager implements ISessionManager {
       }
 
       sendSpan.mark('chat.starting')
-      const chatIterator = agent.chat(effectiveMessage, attachments)
+      const chatIterator = agent.chat(effectiveMessage, attachments, {
+        textElements: options?.textElements,
+      })
       sessionLog.info('Got chat iterator, starting iteration...')
 
       for await (const event of chatIterator) {
@@ -6746,9 +6770,148 @@ export class SessionManager implements ISessionManager {
     }
   }
 
-  async refreshAvailableCommands(sessionId: string): Promise<{ success: boolean; availableCommands?: AvailableCommandsSnapshot['availableCommands']; availableSkills?: string[]; error?: string }> {
+  private async refreshDraftAvailableCommands(options: RefreshAvailableCommandsOptions): Promise<{ success: boolean; availableCommands?: AvailableCommandsSnapshot['availableCommands']; availableSkills?: string[]; error?: string }> {
+    if (!options.workspaceId) {
+      return { success: false, error: 'Workspace is required for draft slash command discovery' }
+    }
+
+    const workspace = getWorkspaceByNameOrId(options.workspaceId)
+    if (!workspace) {
+      return { success: false, error: `Workspace ${options.workspaceId} not found` }
+    }
+
+    const workspaceConfig = loadWorkspaceConfig(workspace.rootPath)
+    const globalDefaults = loadConfigDefaults()
+    const workingDirectory = options.workingDirectory
+      ?? workspaceConfig?.defaults?.workingDirectory
+      ?? undefined
+    const permissionMode = options.permissionMode
+      ?? workspaceConfig?.defaults?.permissionMode
+      ?? globalDefaults.workspaceDefaults.permissionMode
+    const thinkingLevel = normalizeThinkingLevel(options.thinkingLevel)
+      ?? normalizeThinkingLevel(workspaceConfig?.defaults?.thinkingLevel)
+      ?? getDefaultThinkingLevel()
+    const backendContext = resolveBackendContext({
+      sessionConnectionSlug: options.llmConnection,
+      workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
+      managedModel: options.model,
+    })
+    const connection = backendContext.connection
+
+    if (backendContext.provider !== 'qwen') {
+      return { success: false, error: 'Provider does not support slash command discovery' }
+    }
+
+    const sessionId = `draft-commands-${randomUUID()}`
+    sessionLog.info('refreshAvailableCommands: starting draft discovery', {
+      sessionId,
+      workspaceId: workspace.id,
+      llmConnection: connection?.slug ?? options.llmConnection,
+      workingDirectory,
+    })
+
+    const miniModel = connection ? (getMiniModel(connection) ?? connection.defaultModel) : undefined
+    const now = Date.now()
+    const draftSession: SessionConfig = {
+      id: sessionId,
+      workspaceRootPath: workspace.rootPath,
+      createdAt: now,
+      lastUsedAt: now,
+      lastMessageAt: now,
+      workingDirectory,
+      model: options.model,
+      llmConnection: options.llmConnection,
+      permissionMode,
+      thinkingLevel,
+      enabledSourceSlugs: options.enabledSourceSlugs,
+    }
+
+    const agent = createBackendFromResolvedContext({
+      context: backendContext,
+      hostRuntime: buildBackendHostRuntimeContext(),
+      coreConfig: {
+        workspace,
+        miniModel,
+        thinkingLevel,
+        session: draftSession,
+        onAvailableModelsUpdate: connection?.providerType === 'qwen'
+          ? (models, currentModelId) => this.updateQwenConnectionModels(connection.slug, models, currentModelId)
+          : undefined,
+        envOverrides: {
+          CRAFT_WORKSPACE_PATH: workspace.rootPath,
+          ...(miniModel ? { ANTHROPIC_DEFAULT_HAIKU_MODEL: miniModel } : {}),
+        },
+        isHeadless: !AGENT_FLAGS.defaultModesEnabled,
+        skipConfigWatcher: true,
+        initialSources: {
+          enabledSources: [],
+          mcpServers: {},
+          apiServers: {},
+          enabledSlugs: [],
+        },
+      },
+    }) as AgentInstance
+
+    try {
+      agent.onDebug = (message: string) => {
+        sessionLog.info(`[draft slash] ${message}`)
+      }
+      agent.onBackendAuthRequired = (reason: string) => {
+        sessionLog.warn(`Draft slash command discovery auth required: ${reason}`)
+      }
+
+      const postInitResult = await agent.postInit()
+      if (postInitResult.authWarning) {
+        sessionLog.warn(`Draft slash command discovery auth warning: ${postInitResult.authWarning}`)
+      }
+
+      if (!agent.refreshAvailableCommands) {
+        return { success: false, error: 'Provider does not support slash command discovery' }
+      }
+
+      const snapshot = await agent.refreshAvailableCommands()
+      if (!snapshot || (snapshot.availableCommands.length === 0 && (!snapshot.availableSkills || snapshot.availableSkills.length === 0))) {
+        sessionLog.warn('refreshAvailableCommands: draft discovery returned no commands', {
+          sessionId,
+          llmConnection: connection?.slug ?? options.llmConnection,
+          workingDirectory,
+        })
+        return { success: false, error: 'No provider slash commands available' }
+      }
+
+      sessionLog.info('refreshAvailableCommands: draft discovery received commands', {
+        sessionId,
+        commandCount: snapshot.availableCommands.length,
+        skillCount: snapshot.availableSkills?.length ?? 0,
+        commandNames: snapshot.availableCommands.map(command => command.name),
+        skillNames: snapshot.availableSkills ?? [],
+      })
+
+      return { success: true, ...snapshot }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      sessionLog.warn(`refreshAvailableCommands draft discovery failed: ${message}`)
+      return { success: false, error: message }
+    } finally {
+      const nativeSessionId = agent.getSessionId()
+      if (nativeSessionId && agent.deleteBackendSession) {
+        try {
+          await agent.deleteBackendSession(nativeSessionId, { cwd: workingDirectory ?? workspace.rootPath })
+        } catch (deleteError) {
+          const message = deleteError instanceof Error ? deleteError.message : String(deleteError)
+          sessionLog.warn(`Draft slash command discovery cleanup failed for ${nativeSessionId}: ${message}`)
+        }
+      }
+      agent.destroy()
+    }
+  }
+
+  async refreshAvailableCommands(sessionId: string, options?: RefreshAvailableCommandsOptions): Promise<{ success: boolean; availableCommands?: AvailableCommandsSnapshot['availableCommands']; availableSkills?: string[]; error?: string }> {
     const managed = this.sessions.get(sessionId)
     if (!managed) {
+      if (options?.workspaceId) {
+        return this.refreshDraftAvailableCommands(options)
+      }
       sessionLog.warn(`refreshAvailableCommands: session ${sessionId} not found`)
       return { success: false, error: 'Session not found' }
     }

@@ -314,7 +314,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
         return sessionManager.refreshTitle(sessionId)
       case 'refreshAvailableCommands':
         log.info(`IPC: refreshAvailableCommands received for session ${sessionId}`)
-        return sessionManager.refreshAvailableCommands(sessionId)
+        return sessionManager.refreshAvailableCommands(sessionId, command)
       // Connection selection (locked after first message)
       case 'setConnection':
         log.info(`IPC: setConnection received for session ${sessionId}, connection: ${command.connectionSlug}`)

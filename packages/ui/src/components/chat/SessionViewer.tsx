@@ -165,7 +165,7 @@ export function SessionViewer({
                     <UserMessageBubble
                       content={turn.message.content}
                       attachments={turn.message.attachments}
-                      badges={turn.message.badges}
+                      textElements={turn.message.textElements}
                       onUrlClick={platformActions.onOpenUrl}
                       onFileClick={platformActions.onOpenFile}
                     />
