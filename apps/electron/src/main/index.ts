@@ -96,8 +96,7 @@ import { setSearchPlatform, setImageProcessor } from '@craft-agent/server-core/s
 import { createApplicationMenu } from './menu'
 import { WindowManager } from './window-manager'
 import { loadWindowState, saveWindowState } from './window-state'
-import { getWorkspaces, getWorkspaceByNameOrId, loadStoredConfig, addWorkspace, saveConfig } from '@craft-agent/shared/config'
-import { getDefaultWorkspacesDir } from '@craft-agent/shared/workspaces'
+import { ensureDefaultConversationWorkspace, getWorkspaces, getWorkspaceByNameOrId, isProtectedWorkspace } from '@craft-agent/shared/config'
 import { initializeDocs } from '@craft-agent/shared/docs'
 import { initializeReleaseNotes } from '@craft-agent/shared/release-notes'
 import { ensureDefaultPermissions } from '@craft-agent/shared/agent/permissions-config'
@@ -322,23 +321,25 @@ if (!gotTheLock) {
 }
 
 // Helper to create initial windows on startup
-async function createInitialWindows(): Promise<void> {
+async function createInitialWindows(options: { createDefaultWorkspace: boolean }): Promise<void> {
   if (!windowManager) return
 
   // Load saved window state
   const savedState = loadWindowState()
   let workspaces = getWorkspaces()
 
-  // If no workspaces exist, create default "My Workspace" on first run
+  // If no workspaces exist, create the protected default conversation entry on first run.
+  // Thin clients intentionally skip this so the renderer can show the remote picker.
   if (workspaces.length === 0) {
-    // Ensure config file exists (addWorkspace requires it)
-    if (!loadStoredConfig()) {
-      saveConfig({ workspaces: [], activeWorkspaceId: null, activeSessionId: null })
+    if (!options.createDefaultWorkspace) {
+      windowManager.createWindow({ workspaceId: '' })
+      mainLog.info('Created workspace-picker window without a local workspace')
+      return
     }
-    const defaultPath = join(getDefaultWorkspacesDir(), 'my-workspace')
-    addWorkspace({ rootPath: defaultPath, name: 'My Workspace' })
+
+    ensureDefaultConversationWorkspace()
     workspaces = getWorkspaces() // Refresh after creation
-    mainLog.info('Created default workspace on first run')
+    mainLog.info('Created default conversation workspace on first run')
   }
 
   const validWorkspaceIds = workspaces.map(ws => ws.id)
@@ -370,8 +371,15 @@ async function createInitialWindows(): Promise<void> {
   }
 
   // Default: open window for first workspace
-  windowManager.createWindow({ workspaceId: workspaces[0].id })
-  mainLog.info(`Created window for first workspace: ${workspaces[0].name}`)
+  const firstWorkspace = workspaces[0]
+  if (!firstWorkspace) {
+    windowManager.createWindow({ workspaceId: '' })
+    mainLog.info('Created workspace-picker window because no workspaces are available')
+    return
+  }
+
+  windowManager.createWindow({ workspaceId: firstWorkspace.id })
+  mainLog.info(`Created window for first workspace: ${firstWorkspace.name}`)
 }
 
 app.whenReady().then(async () => {
@@ -760,7 +768,9 @@ app.whenReady().then(async () => {
 
       // Remove workspace from config (cleanup stale entries)
       ipcMain.handle('workspace:remove', async (_event, workspaceId: string) => {
-        const { removeWorkspace: remove } = await import('@craft-agent/shared/config')
+        const { getWorkspaceByNameOrId, isProtectedWorkspace, removeWorkspace: remove } = await import('@craft-agent/shared/config')
+        const workspace = getWorkspaceByNameOrId(workspaceId)
+        if (isProtectedWorkspace(workspace)) return false
         return remove(workspaceId)
       })
 
@@ -770,6 +780,7 @@ app.whenReady().then(async () => {
         const { loadWorkspaceConfig, saveWorkspaceConfig } = await import('@craft-agent/shared/workspaces')
         const workspace = getWorkspaceByNameOrId(workspaceId)
         if (!workspace) return false
+        if (isProtectedWorkspace(workspace)) return false
 
         const config = loadWorkspaceConfig(workspace.rootPath)
         if (!config) return false
@@ -1031,7 +1042,7 @@ app.whenReady().then(async () => {
     // Create initial windows (restores from saved state or opens first workspace)
     // In headless mode the server runs without any UI — skip window creation.
     if (!isHeadless) {
-      await createInitialWindows()
+      await createInitialWindows({ createDefaultWorkspace: !isClientOnly })
     }
 
     // Run credential health check at startup to detect issues early

@@ -12,6 +12,7 @@ import type {
   ContentBadge,
   ToolDisplayMeta,
   AnnotationV1,
+  WorkspaceKind,
   PermissionRequest as BasePermissionRequest,
   AvailableSlashCommand as BaseAvailableSlashCommand,
 } from '@craft-agent/core/types'
@@ -512,6 +513,8 @@ export interface UpdateInfo {
 
 export interface WorkspaceSettings {
   name?: string
+  kind?: WorkspaceKind
+  isProtected?: boolean
   pinned?: boolean
   model?: string
   permissionMode?: PermissionMode

@@ -10,6 +10,7 @@
  */
 
 import * as React from 'react'
+import { useTranslation } from 'react-i18next'
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { Cloud, CloudOff, Monitor, Send } from 'lucide-react'
 import { toast } from 'sonner'
@@ -25,6 +26,7 @@ import { Button } from '@/components/ui/button'
 import { CrossfadeAvatar } from '@/components/ui/avatar'
 import { useWorkspaceIcons } from '@/hooks/useWorkspaceIcon'
 import { cn } from '@/lib/utils'
+import { getWorkspaceDisplayName, getWorkspaceInitial } from '@/utils/workspace'
 import type { Workspace, ExportResourcesOptions, ResourceImportMode } from '../../../shared/types'
 
 export type SendResourceType = 'source' | 'skill' | 'automation'
@@ -62,6 +64,7 @@ export function SendResourceToWorkspaceDialog({
   activeWorkspaceId,
   onTransferComplete,
 }: SendResourceToWorkspaceDialogProps) {
+  const { t } = useTranslation()
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null)
   const [isSending, setIsSending] = useState(false)
   const workspaceIconMap = useWorkspaceIcons(workspaces)
@@ -223,6 +226,7 @@ export function SendResourceToWorkspaceDialog({
               const healthStatus = remoteHealthMap.get(workspace.id)
               const isDisconnected = isRemote && healthStatus === 'error'
               const isChecking = isRemote && healthStatus === 'checking'
+              const displayName = getWorkspaceDisplayName(workspace, t)
 
               return (
                 <button
@@ -239,12 +243,12 @@ export function SendResourceToWorkspaceDialog({
                 >
                   <CrossfadeAvatar
                     src={workspaceIconMap.get(workspace.id)}
-                    alt={workspace.name}
+                    alt={displayName}
                     className="h-5 w-5 rounded-full ring-1 ring-border/50 shrink-0"
                     fallbackClassName="bg-muted text-[10px] rounded-full"
-                    fallback={workspace.name?.charAt(0) || 'W'}
+                    fallback={getWorkspaceInitial(workspace, t)}
                   />
-                  <span className="flex-1 truncate">{workspace.name}</span>
+                  <span className="flex-1 truncate">{displayName}</span>
                   {isRemote ? (
                     isDisconnected ? (
                       <CloudOff className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />

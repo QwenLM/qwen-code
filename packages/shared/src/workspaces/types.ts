@@ -13,6 +13,7 @@
 
 import type { PermissionMode } from '../agent/mode-manager.ts';
 import type { ThinkingLevel } from '../agent/thinking-levels.ts';
+import type { WorkspaceKind } from '@craft-agent/core/types';
 
 /**
  * Local MCP server configuration
@@ -34,6 +35,8 @@ export interface WorkspaceConfig {
   id: string;
   name: string;
   slug: string; // Folder name (URL-safe)
+  kind?: WorkspaceKind;
+  isProtected?: boolean;
   pinned?: boolean;
 
   /**

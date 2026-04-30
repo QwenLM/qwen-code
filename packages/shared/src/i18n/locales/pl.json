@@ -1283,6 +1283,8 @@
   "webui.logOut": "Wyloguj się",
   "workspace.addWorkspace": "Dodaj Workspace…",
   "workspace.addWorkspaceDesc": "Gdzie twoje pomysły spotykają narzędzia, które je urzeczywistniają.",
+  "workspace.conversations": "Czaty",
+  "workspace.defaultConversation": "Czaty",
   "workspace.pinWorkspace": "Przypnij projekt",
   "workspace.unpinWorkspace": "Odepnij projekt",
   "workspace.chooseExistingFolder": "Wybierz istniejący folder",

@@ -9,6 +9,7 @@ import { isSessionsNavigation, useNavigation, useNavigationState } from '@/conte
 import { newSessionDraftAtom, NEW_SESSION_DRAFT_ID } from '@/atoms/new-session-draft'
 import { defaultSessionOptions } from '@/hooks/useSessionOptions'
 import { resolveEffectiveConnectionSlug } from '@config/llm-connections'
+import { getWorkspaceDisplayName } from '@/utils/workspace'
 import type { CreateSessionOptions, FileAttachment, PermissionMode, Session, WorkspaceSettings } from '../../shared/types'
 import type { ThinkingLevel } from '@craft-agent/shared/agent/thinking-levels'
 
@@ -39,6 +40,10 @@ export default function DraftChatPage() {
   const activeWorkspace = React.useMemo(
     () => workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null,
     [activeWorkspaceId, workspaces]
+  )
+  const activeWorkspaceName = React.useMemo(
+    () => activeWorkspace ? getWorkspaceDisplayName(activeWorkspace, t) : '',
+    [activeWorkspace, t]
   )
   const [workspaceSettings, setWorkspaceSettings] = React.useState<WorkspaceSettings | null>(null)
 
@@ -161,7 +166,7 @@ export default function DraftChatPage() {
   const draftSession = React.useMemo<Session>(() => ({
     id: NEW_SESSION_DRAFT_ID,
     workspaceId: activeWorkspaceId ?? '',
-    workspaceName: activeWorkspace?.name ?? '',
+    workspaceName: activeWorkspaceName,
     lastMessageAt: 0,
     messages: [],
     isProcessing: isCreating,
@@ -175,7 +180,7 @@ export default function DraftChatPage() {
     labels: sessionLabels,
   }), [
     activeWorkspaceId,
-    activeWorkspace?.name,
+    activeWorkspaceName,
     isCreating,
     permissionMode,
     thinkingLevel,

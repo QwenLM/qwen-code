@@ -21,6 +21,7 @@ import { HeaderMenu } from '@/components/ui/HeaderMenu'
 import { useAppShellContext } from '@/context/AppShellContext'
 import { cn } from '@/lib/utils'
 import { routes } from '@/lib/navigate'
+import { getWorkspaceDisplayName, isProtectedWorkspace } from '@/utils/workspace'
 import { Spinner } from '@craft-agent/ui'
 import { RenameDialog } from '@/components/ui/rename-dialog'
 import type { PermissionMode, WorkspaceSettings, LoadedSource } from '../../../shared/types'
@@ -54,6 +55,9 @@ export default function WorkspaceSettingsPage() {
   // Get active workspace from context
   const appShellContext = useAppShellContext()
   const activeWorkspaceId = appShellContext.activeWorkspaceId
+  const activeWorkspace = appShellContext.workspaces.find((workspace) => workspace.id === activeWorkspaceId)
+  const protectedWorkspace = isProtectedWorkspace(activeWorkspace)
+  const workspaceDisplayName = getWorkspaceDisplayName(activeWorkspace, t)
   const onRefreshWorkspaces = appShellContext.onRefreshWorkspaces
 
   // Workspace settings state
@@ -190,7 +194,7 @@ export default function WorkspaceSettingsPage() {
   // Workspace icon upload handler
   const handleIconUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (!file || !activeWorkspaceId || !window.electronAPI) return
+    if (!file || protectedWorkspace || !activeWorkspaceId || !window.electronAPI) return
 
     // Validate file type
     const validTypes = ['image/png', 'image/jpeg', 'image/svg+xml', 'image/webp', 'image/gif']
@@ -239,7 +243,7 @@ export default function WorkspaceSettingsPage() {
       // Reset the input so the same file can be selected again
       e.target.value = ''
     }
-  }, [activeWorkspaceId, onRefreshWorkspaces])
+  }, [activeWorkspaceId, onRefreshWorkspaces, protectedWorkspace])
 
   // Workspace settings handlers
   const handlePermissionModeChange = useCallback(
@@ -360,8 +364,8 @@ export default function WorkspaceSettingsPage() {
               <SettingsCard>
                 <SettingsRow
                   label={t("common.name")}
-                  description={wsName || t("settings.workspace.untitled")}
-                  action={
+                  description={protectedWorkspace ? workspaceDisplayName : (wsName || t("settings.workspace.untitled"))}
+                  action={protectedWorkspace ? undefined : (
                     <button
                       type="button"
                       onClick={() => {
@@ -372,11 +376,11 @@ export default function WorkspaceSettingsPage() {
                     >
                       {t("common.edit")}
                     </button>
-                  }
+                  )}
                 />
                 <SettingsRow
                   label={t("settings.workspace.icon")}
-                  action={
+                  action={protectedWorkspace ? undefined : (
                     <label className="cursor-pointer">
                       <input
                         type="file"
@@ -389,7 +393,7 @@ export default function WorkspaceSettingsPage() {
                         {isUploadingIcon ? t("common.uploading") : t("common.change")}
                       </span>
                     </label>
-                  }
+                  )}
                 >
                   <div
                     className={cn(
@@ -403,30 +407,32 @@ export default function WorkspaceSettingsPage() {
                       <img src={wsIconUrl} alt="" className="w-full h-full object-cover" />
                     ) : (
                       <span className="text-xs font-medium text-muted-foreground">
-                        {wsName?.charAt(0)?.toUpperCase() || 'W'}
+                        {(protectedWorkspace ? workspaceDisplayName : wsName)?.charAt(0)?.toUpperCase() || 'W'}
                       </span>
                     )}
                   </div>
                 </SettingsRow>
               </SettingsCard>
 
-              <RenameDialog
-                open={renameDialogOpen}
-                onOpenChange={setRenameDialogOpen}
-                title={t("settings.workspace.renameWorkspace")}
-                value={wsNameEditing}
-                onValueChange={setWsNameEditing}
-                onSubmit={() => {
-                  const newName = wsNameEditing.trim()
-                  if (newName && newName !== wsName) {
-                    setWsName(newName)
-                    updateWorkspaceSetting('name', newName)
-                    onRefreshWorkspaces?.()
-                  }
-                  setRenameDialogOpen(false)
-                }}
-                placeholder={t("settings.workspace.enterWorkspaceName")}
-              />
+              {!protectedWorkspace && (
+                <RenameDialog
+                  open={renameDialogOpen}
+                  onOpenChange={setRenameDialogOpen}
+                  title={t("settings.workspace.renameWorkspace")}
+                  value={wsNameEditing}
+                  onValueChange={setWsNameEditing}
+                  onSubmit={() => {
+                    const newName = wsNameEditing.trim()
+                    if (newName && newName !== wsName) {
+                      setWsName(newName)
+                      updateWorkspaceSetting('name', newName)
+                      onRefreshWorkspaces?.()
+                    }
+                    setRenameDialogOpen(false)
+                  }}
+                  placeholder={t("settings.workspace.enterWorkspaceName")}
+                />
+              )}
             </SettingsSection>
 
             {/* Permissions */}
@@ -520,7 +526,7 @@ export default function WorkspaceSettingsPage() {
                 <SettingsRow
                   label={t("settings.workspace.defaultWorkingDir")}
                   description={workingDirectory || t("settings.workspace.defaultWorkingDirDesc")}
-                  action={
+                  action={protectedWorkspace ? undefined : (
                     <div className="flex items-center gap-2">
                       {workingDirectory && (
                         <button
@@ -539,7 +545,7 @@ export default function WorkspaceSettingsPage() {
                         {t("common.change")}
                       </button>
                     </div>
-                  }
+                  )}
                 />
                 <SettingsToggle
                   label={t("settings.workspace.localMcpServers")}

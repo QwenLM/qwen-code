@@ -31,6 +31,7 @@ import {
 import { useWorkspaceIcons } from '@/hooks/useWorkspaceIcon'
 import { Info_DataTable, SortableHeader } from '@/components/info/Info_DataTable'
 import { Info_Badge } from '@/components/info/Info_Badge'
+import { getWorkspaceDisplayName } from '@/utils/workspace'
 import type { PresetTheme } from '@config/theme'
 
 export const meta: DetailsPageMeta = {
@@ -301,6 +302,7 @@ export default function AppearanceSettingsPage() {
                     {workspaces.map((workspace) => {
                       const wsTheme = workspaceThemes[workspace.id]
                       const hasCustomTheme = wsTheme !== undefined
+                      const displayName = getWorkspaceDisplayName(workspace, t)
                       return (
                         <SettingsRow
                           key={workspace.id}
@@ -315,7 +317,7 @@ export default function AppearanceSettingsPage() {
                               ) : (
                                 <div className="w-4 h-4 rounded bg-foreground/10" />
                               )}
-                              <span>{workspace.name}</span>
+                              <span>{displayName}</span>
                             </div>
                           }
                         >
