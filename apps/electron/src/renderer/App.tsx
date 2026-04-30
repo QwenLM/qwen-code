@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { useTheme } from '@/hooks/useTheme'
 import type { ThemeOverrides } from '@config/theme'
 import { useSetAtom, useStore, useAtomValue, useAtom } from 'jotai'
-import type { Session, Workspace, SessionEvent, Message, FileAttachment, StoredAttachment, PermissionRequest, CredentialRequest, CredentialResponse, SetupNeeds, SessionStatus, NewChatActionParams, ContentBadge, LlmConnectionWithStatus, PermissionModeState } from '../shared/types'
+import type { Session, Workspace, SessionEvent, Message, FileAttachment, StoredAttachment, PermissionRequest, CredentialRequest, CredentialResponse, SetupNeeds, SessionStatus, NewChatActionParams, ContentBadge, LlmConnectionWithStatus, PermissionModeState, LoadedSkill } from '../shared/types'
 import type { SessionDraft, DraftAttachmentRef } from '@craft-agent/shared/config'
 import type { SessionOptions, SessionOptionUpdates } from './hooks/useSessionOptions'
 import { defaultSessionOptions, mergeSessionOptions } from './hooks/useSessionOptions'
@@ -62,6 +62,7 @@ import { sourcesAtom } from '@/atoms/sources'
 import { skillsAtom } from '@/atoms/skills'
 import { extractBadges } from '@/lib/mentions'
 import { extractCommandBadges } from '@/lib/slash-command-badges'
+import { contentBadgesToTextElements } from '@craft-agent/core/utils'
 import { getDefaultStore } from 'jotai'
 import {
   ShikiThemeProvider,
@@ -84,6 +85,30 @@ type AppState = 'loading' | 'onboarding' | 'reauth' | 'workspace-picker' | 'read
 
 /** Type for the Jotai store returned by useStore() */
 type JotaiStore = ReturnType<typeof getDefaultStore>
+
+function skillsForBadgeExtraction(skills: LoadedSkill[], skillSlugs?: string[]): LoadedSkill[] {
+  if (!skillSlugs?.length) return skills
+
+  const seen = new Set(skills.map(skill => skill.slug))
+  const syntheticSkills = skillSlugs
+    .filter(slug => {
+      if (seen.has(slug)) return false
+      seen.add(slug)
+      return true
+    })
+    .map((slug): LoadedSkill => ({
+      slug,
+      metadata: {
+        name: slug,
+        description: '',
+      },
+      content: '',
+      path: '',
+      source: 'project',
+    }))
+
+  return syntheticSkills.length > 0 ? [...skills, ...syntheticSkills] : skills
+}
 
 /**
  * Helper to handle background task events from the agent.
@@ -1431,12 +1456,13 @@ export default function App() {
         )
       }
 
-      // Step 3: Extract badges from mentions (sources/skills) with embedded icons
-      // Badges are self-contained for display in UserMessageBubble and viewer
-      // Merge with any externally provided badges (e.g., from EditPopover context badges)
+      // Step 3: Extract inline metadata from mentions, commands, and contextual badges.
+      // ContentBadge is only an input-side helper; messages persist/render textElements.
+      // Merge with any externally provided badges (e.g., from EditPopover context badges).
       // Use workspace slug (not UUID) for skill qualification - SDK expects "workspaceSlug:skillSlug"
+      const badgeSkills = skillsForBadgeExtraction(skills, skillSlugs)
       const mentionBadges: ContentBadge[] = windowWorkspaceSlug
-        ? extractBadges(message, skills, sources, windowWorkspaceSlug)
+        ? extractBadges(message, badgeSkills, sources, windowWorkspaceSlug)
         : []
       const badges: ContentBadge[] = [...(externalBadges || []), ...mentionBadges]
 
@@ -1462,6 +1488,7 @@ export default function App() {
           end: prefix.length + filePath.length,
         })
       }
+      const textElements = contentBadgesToTextElements(message, badges)
 
       // Step 5: Create user message with StoredAttachments (for UI display)
       // Mark as isPending for optimistic UI - will be confirmed by user_message event
@@ -1471,7 +1498,7 @@ export default function App() {
         content: message,
         timestamp: Date.now(),
         attachments: storedAttachments,
-        badges: badges.length > 0 ? badges : undefined,
+        textElements,
         isPending: true,  // Optimistic - will be confirmed by backend
       }
 
@@ -1485,7 +1512,7 @@ export default function App() {
       // Step 6: Send to Claude with processed attachments + stored attachments for persistence
       await window.electronAPI.sendMessage(sessionId, message, processedAttachments, storedAttachments, {
         skillSlugs,
-        badges: badges.length > 0 ? badges : undefined,
+        textElements,
         optimisticMessageId: userMessage.id,
       })
     } catch (error) {
@@ -1503,7 +1530,7 @@ export default function App() {
         ]
       }))
     }
-  }, [sessionOptions, updateSessionById, skills, sources, windowWorkspaceId])
+  }, [sessionOptions, updateSessionById, skills, sources, windowWorkspaceSlug])
 
   /**
    * Unified handler for all session option changes.

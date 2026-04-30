@@ -31,6 +31,8 @@ export type {
   MessageAttachment,
   StoredAttachment,
   ContentBadge,
+  MessageTextElementType,
+  MessageTextElement,
   AnnotationAuthor,
   AnnotationBody,
   AnnotationIntent,

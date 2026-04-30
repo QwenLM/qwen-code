@@ -73,12 +73,13 @@ export function findMentionMatches(
     }
   }
 
-  // Match skill mentions: [skill:slug] or [skill:workspaceId:slug]
-  // The pattern captures the full match and extracts the slug (last component)
-  // Workspace IDs can contain spaces, hyphens, underscores, and dots
-  const skillPattern = new RegExp(`(\\[skill:(?:${WS_ID_CHARS}+:)?([\\w-]+)\\])`, 'g')
+  // Match skill mentions. Prefer exact advertised slug matches so ACP names
+  // that contain ':' are treated as provider data, not desktop hierarchy.
+  const skillPattern = /(\[skill:([^\]]+)\])/g
   while ((match = skillPattern.exec(text)) !== null) {
-    const slug = match[2]
+    const rawSkill = match[2]!.trim()
+    const legacySlug = rawSkill.split(':').pop()?.trim() || rawSkill
+    const slug = availableSkillSlugs.includes(rawSkill) ? rawSkill : legacySlug
     if (availableSkillSlugs.includes(slug)) {
       matches.push({
         type: 'skill',
@@ -247,8 +248,10 @@ export function extractBadges(
     let rawText = match.fullMatch
     if (match.type === 'skill') {
       const skill = skillsBySlug.get(match.id)
-      const pluginName = skill?.source === 'workspace' ? workspaceId : AGENTS_PLUGIN_NAME
-      rawText = `[skill:${pluginName}:${match.id}]`
+      const pluginName = skill?.path === ''
+        ? ''
+        : skill?.source === 'workspace' ? workspaceId : AGENTS_PLUGIN_NAME
+      rawText = pluginName ? `[skill:${pluginName}:${match.id}]` : match.fullMatch
     }
 
     return {

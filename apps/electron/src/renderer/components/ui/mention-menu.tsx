@@ -694,7 +694,9 @@ export function useInlineMention({
       if (item.type === 'skill') {
         // Plugin name depends on which tier the skill came from:
         //   workspace → workspaceId, project/global → ".agents"
-        const pluginName = item.skill?.source === 'workspace' ? workspaceId : AGENTS_PLUGIN_NAME
+        const pluginName = item.skill?.path === ''
+          ? ''
+          : item.skill?.source === 'workspace' ? workspaceId : AGENTS_PLUGIN_NAME
         const qualifiedName = pluginName ? `${pluginName}:${item.id}` : item.id
         mentionText = buildMentionText('skill', qualifiedName)
       } else if (item.type === 'source') {

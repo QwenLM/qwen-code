@@ -50,6 +50,7 @@ import {
 } from '../../shared/route-parser'
 import { routes, type Route, type ViewRoute } from '../../shared/routes'
 import { parsePermissionMode } from '@craft-agent/shared/agent/mode-types'
+import { contentBadgesToTextElements } from '@craft-agent/core/utils'
 import { NAVIGATE_EVENT, type NavigateOptions } from '../lib/navigate'
 import { normalizePanelRouteForReconcile } from './navigation-reconcile'
 import { buildSemanticHistoryKey, canRunInitialRestore } from './navigation-history'
@@ -794,7 +795,11 @@ export function NavigationProvider({
                 parsed.params.input!,
                 undefined,
                 undefined,
-                badges ? { badges } : undefined
+                badges
+                  ? {
+                    textElements: contentBadgesToTextElements(parsed.params.input!, badges),
+                  }
+                  : undefined
               )
             }, 100)
             break

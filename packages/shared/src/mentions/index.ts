@@ -82,12 +82,14 @@ export function parseMentions(
     }
   }
 
-  // Match skill mentions: [skill:slug] or [skill:workspaceId:slug]
-  // The pattern captures the last component (slug) after any number of colons
-  // Workspace IDs can contain spaces, hyphens, underscores, and dots
-  const skillPattern = new RegExp(`\\[skill:(?:${WS_ID_CHARS}+:)?([\\w-]+)\\]`, 'g')
+  // Match skill mentions: [skill:slug] or [skill:workspaceId:slug].
+  // Prefer an exact advertised slug match first so ACP-provided names that
+  // contain ':' can round-trip without desktop inventing a naming rule.
+  const skillPattern = /\[skill:([^\]]+)\]/g
   while ((match = skillPattern.exec(text)) !== null) {
-    const slug = match[1]!
+    const rawSkill = match[1]!.trim()
+    const legacySlug = rawSkill.split(':').pop()?.trim() || rawSkill
+    const slug = availableSkillSlugs.includes(rawSkill) ? rawSkill : legacySlug
     if (availableSkillSlugs.includes(slug)) {
       if (!result.skills.includes(slug)) {
         result.skills.push(slug)

@@ -57,6 +57,7 @@ import { isMac, PATH_SEP, getPathBasename } from '@/lib/platform'
 import { applySmartTypography } from '@/lib/smart-typography'
 import { AttachmentPreview } from '../AttachmentPreview'
 import { ANTHROPIC_MODELS, getModelShortName, getModelDisplayName, getModelContextWindow, type ModelDefinition } from '@config/models'
+import { resolveEffectiveConnectionSlug } from '@config/llm-connections'
 import { useOptionalAppShellContext } from '@/context/AppShellContext'
 import { EditPopover, getEditConfig } from '@/components/ui/EditPopover'
 import { SourceAvatar } from '@/components/ui/source-avatar'
@@ -222,6 +223,8 @@ function ContextUsageIndicator({
 
 /** Platform-specific modifier key for keyboard shortcuts */
 const cmdKey = isMac ? '⌘' : 'Ctrl'
+const EMPTY_AVAILABLE_COMMANDS: AvailableSlashCommand[] = []
+const EMPTY_AVAILABLE_SKILLS: string[] = []
 
 /** Default rotating placeholders are now generated inside FreeFormInput via useMemo + t() */
 
@@ -409,8 +412,8 @@ export function FreeFormInput({
   compactMode = false,
   currentConnection,
   connectionUnavailable = false,
-  availableCommands = [],
-  availableSkills = [],
+  availableCommands = EMPTY_AVAILABLE_COMMANDS,
+  availableSkills = EMPTY_AVAILABLE_SKILLS,
 }: FreeFormInputProps) {
   const { t } = useTranslation()
 
@@ -437,14 +440,43 @@ export function FreeFormInput({
   const qwenConnection = React.useMemo(() => (
     llmConnections.find(c => c.providerType === 'qwen') ?? llmConnections[0]
   ), [llmConnections])
+  const effectiveConnectionSlug = React.useMemo(() => resolveEffectiveConnectionSlug(
+    currentConnection,
+    appShellCtx?.workspaceDefaultLlmConnection,
+    llmConnections,
+  ), [appShellCtx?.workspaceDefaultLlmConnection, currentConnection, llmConnections])
   const currentLlmConnection = React.useMemo(() => {
-    const connectionSlug = currentConnection ?? appShellCtx?.workspaceDefaultLlmConnection
-    if (connectionSlug) {
-      return llmConnections.find(c => c.slug === connectionSlug) ?? null
+    if (effectiveConnectionSlug) {
+      return llmConnections.find(c => c.slug === effectiveConnectionSlug) ?? null
     }
     return qwenConnection ?? null
-  }, [appShellCtx?.workspaceDefaultLlmConnection, currentConnection, llmConnections, qwenConnection])
-  const enableQwenSlashCommands = !connectionUnavailable && currentLlmConnection?.providerType === 'qwen'
+  }, [effectiveConnectionSlug, llmConnections, qwenConnection])
+  const [refreshedAvailableCommands, setRefreshedAvailableCommands] = React.useState<AvailableSlashCommand[]>(EMPTY_AVAILABLE_COMMANDS)
+  const [refreshedAvailableSkills, setRefreshedAvailableSkills] = React.useState<string[]>(EMPTY_AVAILABLE_SKILLS)
+  const effectiveAvailableCommands = availableCommands.length > 0 ? availableCommands : refreshedAvailableCommands
+  const effectiveAvailableSkills = availableSkills.length > 0 ? availableSkills : refreshedAvailableSkills
+  const useQwenAcpSkillMentions = !connectionUnavailable && (
+    currentLlmConnection?.providerType === 'qwen' ||
+    effectiveAvailableSkills.length > 0
+  )
+  const qwenAcpMentionSkills = React.useMemo<LoadedSkill[]>(() => (
+    effectiveAvailableSkills.map(skillName => ({
+      slug: skillName,
+      metadata: {
+        name: skillName,
+        description: '',
+      },
+      content: '',
+      path: '',
+      source: 'project' as const,
+    }))
+  ), [effectiveAvailableSkills])
+  const mentionSkills = useQwenAcpSkillMentions ? qwenAcpMentionSkills : skills
+  const enableQwenSlashCommands = !connectionUnavailable && (
+    currentLlmConnection?.providerType === 'qwen' ||
+    effectiveAvailableCommands.length > 0 ||
+    effectiveAvailableSkills.length > 0
+  )
 
   // Compute available models from Qwen Code. In the real app this list is
   // populated from ACP session/new models.availableModels; playground keeps
@@ -1018,7 +1050,13 @@ export function FreeFormInput({
   const qwenCommandRefreshKeyRef = React.useRef<string | null>(null)
 
   React.useEffect(() => {
-    if (!enableQwenSlashCommands || !sessionId || availableCommands.length > 0) return
+    setRefreshedAvailableCommands(EMPTY_AVAILABLE_COMMANDS)
+    setRefreshedAvailableSkills(EMPTY_AVAILABLE_SKILLS)
+    qwenCommandRefreshKeyRef.current = null
+  }, [currentLlmConnection?.slug, sessionId, workingDirectory])
+
+  React.useEffect(() => {
+    if (!enableQwenSlashCommands || !sessionId || effectiveAvailableCommands.length > 0 || effectiveAvailableSkills.length > 0) return
 
     const refreshKey = `${sessionId}:${currentLlmConnection?.slug ?? ''}:${workingDirectory ?? ''}`
     if (qwenCommandRefreshKeyRef.current === refreshKey) return
@@ -1033,15 +1071,30 @@ export function FreeFormInput({
       workingDirectory,
     })
 
-    api.sessionCommand(sessionId, { type: 'refreshAvailableCommands' })
+    api.sessionCommand(sessionId, {
+      type: 'refreshAvailableCommands',
+      workspaceId,
+      workingDirectory,
+      llmConnection: currentLlmConnection?.slug,
+      model: currentModel,
+      permissionMode,
+      thinkingLevel,
+      enabledSourceSlugs,
+    })
       .then(result => {
         const payload = result as { success?: boolean; availableCommands?: AvailableSlashCommand[]; availableSkills?: string[]; error?: string } | undefined
+        const nextCommands = payload?.availableCommands ?? []
+        const nextSkills = payload?.availableSkills ?? []
+        if (payload?.success && (nextCommands.length > 0 || nextSkills.length > 0)) {
+          setRefreshedAvailableCommands(nextCommands)
+          setRefreshedAvailableSkills(nextSkills)
+        }
         api.debugLog?.('[qwen] ACP slash command refresh result', {
           sessionId,
           success: payload?.success,
-          commandCount: payload?.availableCommands?.length ?? 0,
-          skillCount: payload?.availableSkills?.length ?? 0,
-          commandNames: payload?.availableCommands?.map(command => command.name) ?? [],
+          commandCount: nextCommands.length,
+          skillCount: nextSkills.length,
+          commandNames: nextCommands.map(command => command.name),
           error: payload?.error,
         })
       })
@@ -1049,11 +1102,17 @@ export function FreeFormInput({
         api.debugLog?.('[qwen] Failed to refresh slash commands:', String(error))
       })
   }, [
-    availableCommands.length,
     currentLlmConnection?.slug,
     enableQwenSlashCommands,
+    effectiveAvailableCommands.length,
+    effectiveAvailableSkills.length,
+    enabledSourceSlugs,
+    currentModel,
+    permissionMode,
     sessionId,
+    thinkingLevel,
     workingDirectory,
+    workspaceId,
   ])
 
   // Handle slash command selection (mode/feature commands)
@@ -1089,8 +1148,8 @@ export function FreeFormInput({
     activeCommands,
     recentFolders,
     homeDir,
-    availableCommands,
-    availableSkills,
+    availableCommands: effectiveAvailableCommands,
+    availableSkills: effectiveAvailableSkills,
     enableQwenCommands: enableQwenSlashCommands,
   })
   const richInputSlashCommandNames = React.useMemo(() => {
@@ -1126,7 +1185,7 @@ export function FreeFormInput({
   // Inline mention hook (for skills, sources, and files)
   const inlineMention = useInlineMention({
     inputRef: richInputRef,
-    skills,
+    skills: mentionSkills,
     sources,
     basePath: workingDirectory,
     onSelect: handleMentionSelect,
@@ -1396,7 +1455,7 @@ export function FreeFormInput({
     if (disableSend) return false
 
     // Parse all @mentions (skills, sources, folders)
-    const skillSlugs = skills.map(s => s.slug)
+    const skillSlugs = mentionSkills.map(s => s.slug)
     const sourceSlugs = sources.map(s => s.config.slug)
     const mentions = parseMentions(input, skillSlugs, sourceSlugs)
 
@@ -1427,7 +1486,7 @@ export function FreeFormInput({
     })
 
     return true
-  }, [input, attachments, followUpItems, disabled, disableSend, onInputChange, onSubmit, skills, sources, optimisticSourceSlugs, onSourcesChange, onWorkingDirectoryChange, homeDir])
+  }, [input, attachments, followUpItems, disabled, disableSend, onInputChange, onSubmit, mentionSkills, sources, optimisticSourceSlugs, onSourcesChange, onWorkingDirectoryChange, homeDir])
 
   // Listen for craft:submit-input events (simulate pressing the Send button)
   React.useEffect(() => {
@@ -1875,7 +1934,7 @@ export function FreeFormInput({
           }}
           placeholder={effectivePlaceholder}
           disabled={disabled}
-          skills={skills}
+          skills={mentionSkills}
           sources={sources}
           workspaceId={workspaceSlug}
           slashCommandNames={richInputSlashCommandNames}

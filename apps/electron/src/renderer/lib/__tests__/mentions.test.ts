@@ -29,6 +29,11 @@ describe('parseMentions - skill pattern with workspace IDs', () => {
       expect(result.skills).toEqual(['my_skill'])
     })
 
+    it('parses ACP skill names with colon as exact slugs', () => {
+      const result = parseMentions('[skill:git:commit]', ['git:commit'], [])
+      expect(result.skills).toEqual(['git:commit'])
+    })
+
     it('parses multiple skills', () => {
       const result = parseMentions('[skill:commit] and [skill:review-pr]', availableSkills, [])
       expect(result.skills).toEqual(['commit', 'review-pr'])
@@ -129,6 +134,16 @@ describe('findMentionMatches - skill pattern with workspace IDs', () => {
       type: 'skill',
       id: 'commit',
       fullMatch: '[skill:my.workspace:commit]',
+    })
+  })
+
+  it('finds ACP skill names with colon as exact slugs', () => {
+    const matches = findMentionMatches('[skill:git:commit]', ['git:commit'], [])
+    expect(matches).toHaveLength(1)
+    expect(matches[0]).toMatchObject({
+      type: 'skill',
+      id: 'git:commit',
+      fullMatch: '[skill:git:commit]',
     })
   })
 

@@ -9,7 +9,7 @@
 import type {
   Message,
   TypedError,
-  ContentBadge,
+  MessageTextElement,
   ToolDisplayMeta,
   AnnotationV1,
   WorkspaceKind,
@@ -146,6 +146,16 @@ export interface CreateSessionOptions {
   branchFromSessionId?: string
 }
 
+export interface RefreshAvailableCommandsOptions {
+  workspaceId?: string
+  workingDirectory?: string
+  llmConnection?: string
+  model?: string
+  permissionMode?: PermissionMode
+  thinkingLevel?: ThinkingLevel
+  enabledSourceSlugs?: string[]
+}
+
 export interface RemoteSessionTransferPayload {
   sourceSessionId: string
   name?: string
@@ -223,7 +233,7 @@ export type SessionEvent =
 
 export interface SendMessageOptions {
   skillSlugs?: string[]
-  badges?: ContentBadge[]
+  textElements?: MessageTextElement[]
   optimisticMessageId?: string
 }
 
@@ -252,7 +262,7 @@ export type SessionCommand =
   | { type: 'updateShare' }
   | { type: 'revokeShare' }
   | { type: 'refreshTitle' }
-  | { type: 'refreshAvailableCommands' }
+  | ({ type: 'refreshAvailableCommands' } & RefreshAvailableCommandsOptions)
   | { type: 'setConnection'; connectionSlug: string }
   | { type: 'setPendingPlanExecution'; planPath: string; draftInputSnapshot?: string }
   | { type: 'markCompactionComplete' }

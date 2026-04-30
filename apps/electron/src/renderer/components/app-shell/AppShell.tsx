@@ -152,6 +152,7 @@ import { hasOpenOverlay } from "@/lib/overlay-detection"
 import { getNextPermissionMode } from "@/lib/permission-mode-cycle"
 import { clearSourceIconCaches } from "@/lib/icon-cache"
 import { dispatchFocusInputEvent } from "./input/focus-input-events"
+import { resolveEffectiveConnectionSlug } from "@config/llm-connections"
 
 /**
  * AppShellProps - Minimal props interface for AppShell component
@@ -527,6 +528,8 @@ function AppShellContent({
   const {
     workspaces,
     activeWorkspaceId,
+    llmConnections,
+    workspaceDefaultLlmConnection,
     sessionOptions,
     onSelectWorkspace,
     onRefreshWorkspaces,
@@ -966,15 +969,6 @@ function AppShellContent({
     return cleanup
   }, [activeWorkspaceId])
 
-  // Subscribe to live skill updates (when skills are added/removed dynamically)
-  React.useEffect(() => {
-    const cleanup = window.electronAPI.onSkillsChanged((workspaceId, updatedSkills) => {
-      if (workspaceId !== activeWorkspaceId) return
-      setSkills(updatedSkills || [])
-    })
-    return cleanup
-  }, [activeWorkspaceId])
-
   // Handle session source selection changes
   const handleSessionSourcesChange = React.useCallback(async (sessionId: string, sourceSlugs: string[]) => {
     try {
@@ -1337,17 +1331,46 @@ function AppShellContent({
 
   // Reload skills when active session's workingDirectory changes (for project-level skills)
   // Skills are loaded from: global (~/.agents/skills/), workspace, and project ({workingDirectory}/.agents/skills/)
-  const activeSessionWorkingDirectory = session.selected
-    ? sessionMetaMap.get(session.selected)?.workingDirectory
+  const activeSessionMeta = session.selected
+    ? sessionMetaMap.get(session.selected)
     : undefined
+  const activeSessionWorkingDirectory = activeSessionMeta?.workingDirectory
+  const activeEffectiveConnectionSlug = React.useMemo(() => resolveEffectiveConnectionSlug(
+    activeSessionMeta?.llmConnection,
+    workspaceDefaultLlmConnection,
+    llmConnections,
+  ), [activeSessionMeta?.llmConnection, llmConnections, workspaceDefaultLlmConnection])
+  const activeEffectiveConnection = React.useMemo(
+    () => activeEffectiveConnectionSlug
+      ? llmConnections.find(connection => connection.slug === activeEffectiveConnectionSlug)
+      : undefined,
+    [activeEffectiveConnectionSlug, llmConnections],
+  )
+  const shouldLoadLocalSkills = isSkillsNavigation(navState) || (
+    llmConnections.length > 0 && activeEffectiveConnection?.providerType !== 'qwen'
+  )
+
+  // Subscribe to live skill updates (when skills are added/removed dynamically)
+  React.useEffect(() => {
+    const cleanup = window.electronAPI.onSkillsChanged((workspaceId, updatedSkills) => {
+      if (workspaceId !== activeWorkspaceId || !shouldLoadLocalSkills) return
+      setSkills(updatedSkills || [])
+    })
+    return cleanup
+  }, [activeWorkspaceId, shouldLoadLocalSkills])
+
   React.useEffect(() => {
     if (!activeWorkspaceId) return
+    if (!shouldLoadLocalSkills) {
+      setSkills([])
+      return
+    }
     window.electronAPI.getSkills(activeWorkspaceId, activeSessionWorkingDirectory).then((loaded) => {
       setSkills(loaded || [])
     }).catch(err => {
       console.error('[Chat] Failed to load skills:', err)
     })
-  }, [activeWorkspaceId, activeSessionWorkingDirectory])
+  }, [activeWorkspaceId, activeSessionWorkingDirectory, shouldLoadLocalSkills])
 
   // Filter session metadata by active workspace, but take the display order from
   // workspaceSessionsAtom. sessionMetaMapAtom still carries live event updates.

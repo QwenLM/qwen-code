@@ -18,6 +18,7 @@ import type {
   SessionMetadata as CoreSessionMetadata,
   StoredAttachment as CoreStoredAttachment,
   ContentBadge,
+  MessageTextElement,
   ToolDisplayMeta,
   AnnotationV1,
 } from '@craft-agent/core/types';
@@ -42,6 +43,7 @@ export type {
   CoreSessionMetadata as SessionMetadata,
   CoreStoredAttachment as StoredAttachment,
   ContentBadge,
+  MessageTextElement,
   ToolDisplayMeta,
   AnnotationV1,
 };
@@ -211,6 +213,7 @@ import type {
   DirectoryListingResult,
   RemoteSessionTransferPayload,
   ImportRemoteSessionTransferResult,
+  AvailableSlashCommand,
 } from '@craft-agent/shared/protocol'
 
 export interface ElectronAPI {
@@ -230,7 +233,7 @@ export interface ElectronAPI {
   respondToCredential(sessionId: string, requestId: string, response: CredentialResponse): Promise<boolean>
 
   // Consolidated session command handler
-  sessionCommand(sessionId: string, command: SessionCommand): Promise<void | ShareResult | RefreshTitleResult | { count: number }>
+  sessionCommand(sessionId: string, command: SessionCommand): Promise<void | ShareResult | RefreshTitleResult | { count: number } | { success: boolean; availableCommands?: AvailableSlashCommand[]; availableSkills?: string[]; error?: string }>
 
   // Server info (REMOTE_ELIGIBLE — returns data from whichever server owns the workspace)
   getServerHomeDir(): Promise<string>
