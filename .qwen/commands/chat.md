@@ -22,8 +22,9 @@ description: Chat session manager. /chat [-s|-l|-r|-d|-h] [name] [-y|--force]
 
 ### Language
 
-Read `~/.qwen/settings.json` (Windows: `%USERPROFILE%\.qwen\settings.json`).
-Look for `general.language`. Respond in that language. If not found, match the language the user used in their prompt.
+Run `node -e "console.log(Intl.DateTimeFormat().resolvedOptions().locale)"` to get system locale.
+Use the language code (first 2 chars, e.g., "en", "zh", "ja") to determine response language.
+If locale detection fails, match the language the user used in their prompt.
 
 ### OS Detection (ONLY for `-r`/`--resume`)
 
@@ -60,8 +61,9 @@ Split `{{args}}` by whitespace. First token = flag. Remaining = raw_args.
 
 **For save/resume (`-s`, `-r`):**
 
-1. Name = first token in raw_args
+1. Parse raw_args to extract name: Filter out any flags first, the first remaining token is the name.
 2. If name is missing, empty, or whitespace only → **Show Help immediately, STOP**
+3. If extra non-flag tokens remain after the first name → **Show Help immediately, STOP**
 
 **Common validation:**
 
@@ -75,15 +77,15 @@ Split `{{args}}` by whitespace. First token = flag. Remaining = raw_args.
 
 ## Common Rules
 
-| Rule                  | Value                                                                                                                                                     |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Valid name regex**  | `^[a-zA-Z0-9_.-]+$`                                                                                                                                       |
-| **Max length**        | 128 characters                                                                                                                                            |
-| **Reserved names**    | `.`, `..`, `__proto__`, `constructor`, `prototype`                                                                                                        |
-| **Index path**        | `.qwen/chat-index.json` (project root)                                                                                                                    |
-| **Index format**      | `{"name": "sessionId", ...}`                                                                                                                              |
-| **Session ID source** | Filename (no extension) of `.jsonl` in `~/.qwen/projects/<sanitizeCwd>/chats/`                                                                            |
-| **Project dir**       | `sanitizeCwd(projectRoot)` replaces all non-alphanumeric characters with `-`. On Windows, also lowercase. E.g., `D:\code\qwen-code` → `d--code-qwen-code` |
+| Rule                  | Value                                                                                                                                                              |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Valid name regex**  | `^[a-zA-Z0-9_.-]+$`                                                                                                                                                |
+| **Max length**        | 128 characters                                                                                                                                                     |
+| **Reserved names**    | `.`, `..`, `__proto__`, `constructor`, `prototype`                                                                                                                 |
+| **Index path**        | `.qwen/chat-index.json` (project root)                                                                                                                             |
+| **Index format**      | `{"name": "sessionId", ...}`                                                                                                                                       |
+| **Session ID source** | Filename (no extension) of `.jsonl` in `<runtimeBase>/projects/<sanitizeCwd>/chats/`. runtimeBase priority: `$QWEN_RUNTIME_DIR` > `$QWEN_PROJECTS_DIR` > `~/.qwen` |
+| **Project dir**       | `sanitizeCwd(projectRoot)` replaces all non-alphanumeric characters with `-`. On Windows, also lowercase. E.g., `D:\code\qwen-code` → `d--code-qwen-code`          |
 
 ---
 

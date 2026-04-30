@@ -20,9 +20,10 @@ It does **NOT** delete the actual session file (`~/.qwen/projects/<hash>/chats/<
 
 Same rules as `chat-save.md` and `chat-resume.md`.
 
-### 2. Look Up Session ID
+### 2. Read Index
 
-- Read `.qwen/chat-index.json`
+- Read `.qwen/chat-index.json` (project root, NOT runtime base)
+- **Malformed JSON handling**: If the file contains invalid JSON (e.g., truncated, corrupted), output `"chat-index.json is malformed. Fix it manually before deleting."` and **stop**. Do NOT proceed with deletion on corrupt index.
 - If `{{name}}` not found: display saved sessions list + usage hint, then stop.
 - Why: Users often typo session names; showing available sessions helps them correct the mistake.
 

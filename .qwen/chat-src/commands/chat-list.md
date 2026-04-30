@@ -12,7 +12,9 @@ Users need to see what sessions they've saved before deciding which to resume or
 
 ### 1. Read index
 
-- `.qwen/chat-index.json`. Missing/empty → `"No saved sessions."`
+- `.qwen/chat-index.json` (project root, NOT runtime base). Missing/empty → `"No saved sessions."`
+- **Malformed JSON handling**: If the file contains invalid JSON (e.g., truncated, corrupted), output `"chat-index.json is malformed. Fix it manually before listing."` and **stop**. Do NOT treat as empty.
+- Why: Same protection as save command — corrupt index must not be silently replaced or misread.
 
 ### 2. Display
 

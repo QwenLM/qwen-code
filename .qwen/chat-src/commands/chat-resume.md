@@ -2,7 +2,7 @@
 
 ## What this command does
 
-Looks up a session by its human-readable name, verifies the session file exists, then launches a new Qwen Code terminal window to resume that session.
+Looks up a session by its human-readable name, verifies the session file exists and belongs to the current project, then launches a new Qwen Code terminal window to resume that session.
 
 ## Why this exists
 
@@ -21,27 +21,34 @@ Same rules as `chat-save.md`:
 
 ### 2. Look Up Session ID
 
-- Read `.qwen/chat-index.json` (project root, NOT `~/.qwen/`)
+- Read `.qwen/chat-index.json` (project root, NOT runtime base)
 - Find the value for key `{{name}}`
 - If not found: display the list of saved sessions (run `/chat -l` logic), then show a usage hint.
 - Why: Users often typo session names; showing available sessions helps them correct the mistake.
-- **Important**: The index is stored in the **current project's root directory**, NOT the user's home directory.
+- **Important**: The index is stored in the **current project's root directory**, NOT the runtime base.
 
 ### 3. Validate Loaded ID (Security Critical)
 
 - The ID loaded from index **MUST be validated** before being used in any shell command.
-- **Expected format**: UUID format (32 hex chars with dashes) or its 8-character prefix.
+- **Expected format**: UUID format (`^[a-fA-F0-9-]+$`, allows hyphens for standard UUIDs like `2ea864df-ffed-444e-b472-190a8f83b552` or 8-char prefix).
 - **Shell metacharacter check**: If the ID contains any of `$` `` ` `` `;` `|` `>` `<` `&` `(` `)` or spaces, **REJECT it immediately**:
-  - Output: `"Error: Invalid session ID from index. Possible injection attack detected. Aborted."`
+  - Output: `"Error: Invalid session ID from index. Aborted."`
   - **DO NOT execute any shell command** with this ID.
 - Why: A malicious or corrupt index entry could contain shell commands. This validation prevents command injection attacks.
 
-### 4. Verify Session File Exists
+### 4. Verify Session Belongs to Current Project (Security Critical)
 
-- Check: `~/.qwen/projects/<sanitizeCwd>/chats/<sessionId>.jsonl`
-  - `<sanitizeCwd>` = `sanitizeCwd(projectRoot)`, replaces all non-alphanumeric chars with `-`. On Windows, also lowercase first. E.g., `D:\code\qwen-code` → `d--code-qwen-code`
-- If the file is missing: display saved sessions list + warn that session data may have been deleted.
-- Why: The index could point to a deleted file (e.g., manual cleanup, disk corruption). We verify before attempting to resume to avoid launching a broken session.
+- **Read the first line** of `<runtimeBase>/projects/<sanitizeCwd>/chats/<sessionId>.jsonl`
+- Parse the JSON and verify the `project` field matches the current project directory.
+- If mismatch: Output `"Error: Session belongs to another project. Aborted."` and stop.
+- If file is missing: warn "Session file missing", stop.
+- Why: Sanitized project directory names can collide between different projects. Verifying the actual project field prevents resuming a session from another project that happens to share the same sanitized directory name.
+
+**Runtime base resolution** (in priority order):
+
+- `$QWEN_RUNTIME_DIR` (if set)
+- `$QWEN_PROJECTS_DIR` (if set)
+- `~/.qwen` (default fallback)
 
 ### 5. Shell Command Escaping (Security Critical)
 
@@ -53,53 +60,30 @@ When executing the resume command, the session ID **MUST be properly escaped** t
 | macOS    | In the `osascript` string, escape double quotes in the ID: `"` becomes `\"`. Use single quotes for the outer osascript string.                                             |
 | Linux    | Use single quotes around the ID to prevent all expansion, except for single quotes themselves (which cannot be escaped inside single quotes — use `"'"` concat if needed). |
 
-**Example (Windows)**:
+### 6. Launch New Window with Project Directory (Platform-Specific)
 
-- Original: `qwen --resume abc-123`
-- Escaped: `start pwsh -NoExit -Command "qwen --resume \"abc-123\""`
+**IMPORTANT: You MUST execute a shell command to launch a NEW terminal window with cd to the project directory first. DO NOT read the .jsonl file content.**
 
-**Example (macOS)**:
+The command must change to the project directory before launching qwen, otherwise the new terminal won't have access to the current project's sessions.
 
-- Original: `qwen --resume abc-123`
-- Escaped: `osascript -e 'tell app "Terminal" to do script "qwen --resume \"abc-123\""'`
-
-### 6. Launch New Window (Platform-Specific)
-
-**IMPORTANT: You MUST execute a shell command to launch a NEW terminal window. DO NOT read the .jsonl file content.**
-
-The command to open a new terminal differs by OS. Use the OS detected in Step 1 of `chat.md`:
-
-| OS            | Terminal       | Command                                                                       |
-| ------------- | -------------- | ----------------------------------------------------------------------------- |
-| Windows       | PowerShell     | `start pwsh -NoExit -Command "qwen --resume <sessionId>"`                     |
-| Windows       | CMD (fallback) | `start cmd /k "qwen --resume <sessionId>"`                                    |
-| macOS         | Terminal.app   | `osascript -e 'tell app "Terminal" to do script "qwen --resume <sessionId>"'` |
-| Linux (GNOME) | gnome-terminal | `gnome-terminal -- qwen --resume <sessionId>`                                 |
-| Linux (other) | xterm          | `xterm -e "qwen --resume <sessionId>"`                                        |
+| OS            | Terminal       | Command                                                                                           |
+| ------------- | -------------- | ------------------------------------------------------------------------------------------------- |
+| Windows       | PowerShell     | `start pwsh -NoExit -Command "cd '<projectRoot>'; qwen --resume <escapedId>"`                     |
+| Windows       | CMD (fallback) | `start cmd /k "cd /d <projectRoot> && qwen --resume <escapedId>"`                                 |
+| macOS         | Terminal.app   | `osascript -e 'tell app "Terminal" to do script "cd '<projectRoot>'; qwen --resume <escapedId>"'` |
+| Linux (GNOME) | gnome-terminal | `gnome-terminal -- bash -c "cd '<projectRoot>' && qwen --resume '<escapedId>'"`                   |
+| Linux (other) | xterm          | `xterm -e "cd '<projectRoot>' && qwen --resume '<escapedId>'"`                                    |
 
 **Windows fallback logic**: Try PowerShell first (`start pwsh`). If that fails (e.g., PowerShell not installed or not in PATH), fall back to CMD (`start cmd /k`). Some Windows machines don't have PowerShell available, so CMD fallback ensures compatibility.
 
-**Linux terminal detection**: Don't hardcode `gnome-terminal`. Use `command -v` to check available terminals:
-
-```bash
-if command -v gnome-terminal &> /dev/null; then
-  gnome-terminal -- qwen --resume <sessionId>
-elif command -v xterm &> /dev/null; then
-  xterm -e "qwen --resume <sessionId>"
-elif command -v alacritty &> /dev/null; then
-  alacritty -- qwen --resume <sessionId>
-elif command -v kitty &> /dev/null; then
-  kitty qwen --resume <sessionId>
-else
-  echo "No supported terminal found. Please run manually: qwen --resume <sessionId>"
-fi
-```
+**Linux terminal detection**: Don't hardcode `gnome-terminal`. Use `command -v` to check available terminals in order: gnome-terminal > xterm > alacritty > kitty.
 
 **You MUST run the shell command above using your shell tool. This is the core action of the resume operation.**
 
 - Why `--resume` instead of `--continue`: `--resume` takes a specific session ID; `--continue` resumes the most recent session. We know the exact ID, so `--resume` is precise.
 - Why new window: Preserves the current session context. The user can have multiple sessions open simultaneously.
+- Why cd to project directory: Session storage is project-scoped. Without cd, the new terminal starts in the user's home/default directory where the session cannot be found.
 
 ### 7. Confirm
 
-Output: `Session "{{name}}" is being resumed in a new window. (ID: <sessionId>)`
+Output: `Session "{{name}}" resumed in new window. (ID: <sessionId>)`

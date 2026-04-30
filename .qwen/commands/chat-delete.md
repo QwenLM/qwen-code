@@ -30,7 +30,7 @@ Otherwise, **MUST ask for confirmation:**
 
 ## Step 2: Read Index & Delete
 
-1. Read `.qwen/chat-index.json` (project root, NOT `~/.qwen/`).
+1. Read `.qwen/chat-index.json` (project root, NOT runtime base). **JSON parse error → output `"chat-index.json is malformed. Fix it manually before deleting."` and stop. Do NOT proceed.**
 2. If `{{name}}` NOT found: show list + "Session not in index", stop.
 3. Remove `{{name}}` from index, write back.
 
@@ -43,4 +43,4 @@ Output: `Session "{{name}}" removed from index.` + note: "Session file NOT delet
 - **Safety**: Deletion is irreversible; removing a name reference is low-risk.
 - **Shared reference**: Multiple names can point to the same session. Deleting one name should not destroy data others reference.
 
-**Important**: The index is stored in the **current project's root directory**, NOT the user's home directory.
+**Important**: The index is stored in the **current project's root directory**, NOT the user's home directory or runtime base.

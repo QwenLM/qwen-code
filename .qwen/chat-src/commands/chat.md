@@ -29,9 +29,14 @@ work in practice.
 
 ### Language
 
-Read `~/.qwen/settings.json` (Windows: `%USERPROFILE%\.qwen\settings.json`).
-Look for `general.language`. Respond in that language. If not found, match the
-language the user used in their prompt.
+Run `node -e "console.log(Intl.DateTimeFormat().resolvedOptions().locale)"` to
+get system locale. Use the language code (first 2 chars, e.g., "en", "zh", "ja")
+to determine response language. If locale detection fails, match the language
+the user used in their prompt.
+
+**Why use system locale instead of settings.json?** Reading the full settings file
+could expose sensitive data (API keys, tokens, MCP server configs). System locale
+is a safe, minimal alternative that only reveals language preference.
 
 **Why not hardcode English?** Users worldwide prefer their native language. The AI
 can respond in any language — we just need to tell it which one.
@@ -55,9 +60,28 @@ to the sub-command.
 
 ## Step 2: Parse Arguments
 
-Split `{{args}}` by whitespace. First token = flag. Remaining tokens = name.
+Split `{{args}}` by whitespace. First token = flag. Remaining = raw_args.
 
-## Step 3: Route to Sub-Command
+## Step 3: Validate Arguments (before routing)
+
+### For delete (`-d`):
+
+1. Parse raw_args to extract name: Filter out `-y` and `--force` flags first, the first remaining token is the name.
+2. If name is missing, empty, or whitespace only → **Show Help immediately, STOP**
+3. If extra non-flag tokens remain after the first name → **Show Help immediately, STOP**
+4. If `-y` or `--force` was found → Set `forceDelete = true`
+
+**Why reject extra tokens?** For delete, `/chat -d good-name unexpected` should error, not silently operate on "good-name" while ignoring the typo. This prevents user mistakes from going unnoticed.
+
+### For save/resume (`-s`, `-r`):
+
+1. Parse raw_args to extract name: Filter out any flags first, the first remaining token is the name.
+2. If name is missing, empty, or whitespace only → **Show Help immediately, STOP**
+3. If extra non-flag tokens remain after the first name → **Show Help immediately, STOP**
+
+**Why apply the same rule?** Consistency with delete. Users should know immediately if they made a typo, not have the command silently proceed with the wrong name.
+
+## Step 4: Route to Sub-Command
 
 Based on the parsed flag, read the corresponding file and execute its logic:
 
@@ -73,15 +97,15 @@ Based on the parsed flag, read the corresponding file and execute its logic:
 
 These rules are defined here once and inherited by all sub-commands:
 
-| Rule                  | Value                                                                                                                                                     | Rationale                                                                                                         |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| **Valid name regex**  | `^[a-zA-Z0-9_.-]+$`                                                                                                                                       | Only safe characters; no spaces, no special chars that could break file paths                                     |
-| **Reserved names**    | `.`, `..`, `__proto__`, `constructor`, `prototype`                                                                                                        | `.` and `..` are path traversal risks; `__proto__`/`constructor`/`prototype` cause JavaScript prototype pollution |
-| **Max length**        | 128 characters                                                                                                                                            | Prevents abuse and keeps index file readable                                                                      |
-| **Index path**        | `.qwen/chat-index.json` (project root, NOT user home)                                                                                                     | Project-scoped isolation; each project has its own session namespace                                              |
-| **Index format**      | `{"name": "sessionId", ...}`                                                                                                                              | Simple flat key-value; no nested objects to minimize read/write complexity                                        |
-| **Session ID source** | Filename (no extension) of `.jsonl` in `~/.qwen/projects/<sanitizeCwd>/chats/`                                                                            | The session storage uses JSONL format; the UUID filename IS the session ID                                        |
-| **Project dir**       | `sanitizeCwd(projectRoot)` replaces all non-alphanumeric characters with `-`. On Windows, also lowercase. E.g., `D:\code\qwen-code` → `d--code-qwen-code` | Deterministic mapping from project path to storage directory using path sanitization                              |
+| Rule                  | Value                                                                                                                                                              | Rationale                                                                                                         |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| **Valid name regex**  | `^[a-zA-Z0-9_.-]+$`                                                                                                                                                | Only safe characters; no spaces, no special chars that could break file paths                                     |
+| **Reserved names**    | `.`, `..`, `__proto__`, `constructor`, `prototype`                                                                                                                 | `.` and `..` are path traversal risks; `__proto__`/`constructor`/`prototype` cause JavaScript prototype pollution |
+| **Max length**        | 128 characters                                                                                                                                                     | Prevents abuse and keeps index file readable                                                                      |
+| **Index path**        | `.qwen/chat-index.json` (project root, NOT user home)                                                                                                              | Project-scoped isolation; each project has its own session namespace                                              |
+| **Index format**      | `{"name": "sessionId", ...}`                                                                                                                                       | Simple flat key-value; no nested objects to minimize read/write complexity                                        |
+| **Session ID source** | Filename (no extension) of `.jsonl` in `<runtimeBase>/projects/<sanitizeCwd>/chats/`. runtimeBase priority: `$QWEN_RUNTIME_DIR` > `$QWEN_PROJECTS_DIR` > `~/.qwen` | The session storage uses JSONL format; runtimeBase respects user config for custom storage locations              |
+| **Project dir**       | `sanitizeCwd(projectRoot)` replaces all non-alphanumeric characters with `-`. On Windows, also lowercase. E.g., `D:\code\qwen-code` → `d--code-qwen-code`          | Deterministic mapping from project path to storage directory using path sanitization                              |
 
 **Important**: The index file (`.qwen/chat-index.json`) is stored in the **project root**, NOT in the user's home directory. Session files are stored in the user home (`~/.qwen/projects/<hash>/chats/`). This keeps session names project-scoped.
 

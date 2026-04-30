@@ -74,8 +74,8 @@ let totalProd = 0;
 for (const f of FILES) totalProd += fs.readFileSync(path.join(PROD_DIR, f), 'utf-8').length;
 const tokens = Math.round(totalProd * 0.35);
 console.log(`  Production: ${totalProd} chars ≈ ${tokens} tokens`);
-console.log(`  Note: Budget increased to 11000 to accommodate security rules, error handling specs, and ID validation`);
-assert(totalProd < 11000, 'Total < 11000 chars');
+console.log(`  Note: Budget increased to 12000 to accommodate security rules, error handling specs, ID validation, runtime base resolution, and project ownership verification`);
+assert(totalProd < 12000, 'Total < 12000 chars');
 
 // ── [5] Source logic completeness ──────────────────────────────────
 console.log('\n[5] Source file logic completeness');
