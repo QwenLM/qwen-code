@@ -221,6 +221,7 @@ vi.mock('@qwen-code/webui', () => ({
   EmptyState: () => null,
   ChatHeader: () => null,
   SessionSelector: () => null,
+  stripZeroWidthSpaces: (text: string) => text.replace(/\u200B/g, ''),
 }));
 
 vi.mock('./components/layout/InputForm.js', () => ({
