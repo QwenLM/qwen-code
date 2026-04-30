@@ -1,0 +1,25 @@
+{
+  "name": "Default",
+  "description": "Clean purple-tinted neutral theme",
+  "author": "Craft Agent",
+  "license": "MIT",
+  "supportedModes": ["light", "dark"],
+  "shikiTheme": {
+    "light": "github-light",
+    "dark": "github-dark"
+  },
+  "background": "#faf9fb",
+  "foreground": "#1a1625",
+  "accent": "#8b5cf6",
+  "info": "#d97706",
+  "success": "#16a34a",
+  "destructive": "#dc2626",
+  "dark": {
+    "background": "#1e1d21",
+    "foreground": "#f5f5f7",
+    "accent": "#a78bfa",
+    "info": "#fbbf24",
+    "success": "#22c55e",
+    "destructive": "#ef4444"
+  }
+}

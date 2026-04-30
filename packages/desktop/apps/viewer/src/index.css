@@ -1,0 +1,39 @@
+/**
+ * Craft Agent Viewer - Main stylesheet
+ *
+ * Imports the shared UI theme and adds viewer-specific styles.
+ */
+
+@import "@craft-agent/ui/styles";
+
+/* Scan this app's source files for Tailwind classes */
+@source "../src/**/*.{tsx,ts}";
+
+/* CRITICAL: Also scan packages/ui components for Tailwind classes */
+@source "../../../packages/ui/src/**/*.{tsx,ts}";
+
+/* Viewer-specific overrides */
+
+/* Override background to pure white (cards/buttons pop on the off-white page) */
+:root {
+  --background: white;
+}
+
+.dark {
+  --background: oklch(0.26 0.01 270);
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Drop zone styling */
+.drop-zone {
+  transition: all 0.2s ease;
+}
+
+.drop-zone.active {
+  border-color: var(--accent);
+  background-color: oklch(from var(--accent) l c h / 0.05);
+}

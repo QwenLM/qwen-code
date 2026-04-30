@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Craft Agents — Login</title>
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+  <link rel="icon" type="image/x-icon" href="./favicon.ico" />
+  <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+  <meta name="theme-color" content="#1F1F24" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      color-scheme: light dark;
+      --page-bg: #f8f8fa;
+      --page-fg: #1a1a2e;
+      --card-bg: rgba(255, 255, 255, 0.86);
+      --card-border: rgba(228, 228, 232, 0.9);
+      --card-shadow: 0 32px 96px rgba(41, 25, 63, 0.14), 0 16px 40px rgba(41, 25, 63, 0.08);
+      --subtitle: rgba(26, 26, 46, 0.56);
+      --input-bg: rgba(255, 255, 255, 0.72);
+      --input-border: rgba(212, 212, 216, 0.95);
+      --placeholder: rgba(26, 26, 46, 0.34);
+      --accent: #6d5dfc;
+      --accent-hover: #5a4be0;
+      --ambient-strong: rgba(104, 78, 133, 0.18);
+      --ambient-soft: rgba(104, 78, 133, 0.1);
+      --grain-1: rgba(104, 78, 133, 0.055);
+      --grain-2: rgba(104, 78, 133, 0.03);
+      --error-bg: #fef2f2;
+      --error-border: #fecaca;
+      --error-fg: #b91c1c;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      overflow: hidden;
+      position: relative;
+      isolation: isolate;
+      background: var(--page-bg);
+      color: var(--page-fg);
+      padding: 16px;
+    }
+
+    body::before,
+    body::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+
+    body::before {
+      inset: -18%;
+      background:
+        radial-gradient(circle at 18% 20%, var(--ambient-strong) 0, transparent 34%),
+        radial-gradient(circle at 82% 18%, var(--ambient-soft) 0, transparent 28%),
+        radial-gradient(circle at 76% 76%, rgba(104, 78, 133, 0.16) 0, transparent 34%),
+        radial-gradient(circle at 30% 78%, rgba(104, 78, 133, 0.11) 0, transparent 30%);
+      filter: blur(44px);
+      opacity: 0.95;
+      transform: scale(1.08);
+      animation: drift 24s ease-in-out infinite alternate;
+    }
+
+    body::after {
+      background:
+        radial-gradient(circle at center, rgba(104, 78, 133, 0.06), transparent 58%),
+        repeating-linear-gradient(135deg, var(--grain-1) 0 1px, transparent 1px 7px),
+        repeating-linear-gradient(45deg, var(--grain-2) 0 1px, transparent 1px 11px);
+      opacity: 0.45;
+      mix-blend-mode: multiply;
+    }
+
+    .card {
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      max-width: 28rem;
+      padding: 32px;
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 20px;
+      text-align: center;
+      box-shadow: var(--card-shadow);
+      backdrop-filter: blur(24px) saturate(140%);
+      -webkit-backdrop-filter: blur(24px) saturate(140%);
+    }
+
+    h1 {
+      font-size: 20px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .subtitle {
+      margin: 0 auto 28px;
+      max-width: 20rem;
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--subtitle);
+    }
+
+    label {
+      display: block;
+      text-align: left;
+      font-size: 13px;
+      font-weight: 500;
+      margin-bottom: 6px;
+    }
+
+    input {
+      width: 100%;
+      padding: 10px 12px;
+      font-size: 14px;
+      font-family: 'JetBrains Mono', monospace;
+      border: 1px solid var(--input-border);
+      border-radius: 8px;
+      outline: none;
+      background: var(--input-bg);
+      color: var(--page-fg);
+      transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+    }
+
+    input::placeholder {
+      color: var(--placeholder);
+    }
+
+    input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(109, 93, 252, 0.1);
+    }
+
+    button {
+      width: 100%;
+      margin-top: 20px;
+      padding: 10px;
+      font-size: 14px;
+      font-weight: 500;
+      font-family: 'Inter', sans-serif;
+      color: white;
+      background: linear-gradient(180deg, #7b6dff 0%, var(--accent) 100%);
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: transform 0.15s, filter 0.15s, background 0.15s;
+      box-shadow: 0 10px 24px rgba(109, 93, 252, 0.28);
+    }
+
+    button:hover {
+      background: linear-gradient(180deg, #705fff 0%, var(--accent-hover) 100%);
+      transform: translateY(-1px);
+      filter: brightness(1.02);
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+      filter: none;
+    }
+
+    .error {
+      display: none;
+      margin-top: 16px;
+      padding: 10px 12px;
+      font-size: 13px;
+      background: var(--error-bg);
+      border: 1px solid var(--error-border);
+      border-radius: 8px;
+      color: var(--error-fg);
+    }
+
+    .error.visible { display: block; }
+
+    @keyframes drift {
+      from { transform: scale(1.08) translate3d(-2%, -1%, 0); }
+      to { transform: scale(1.12) translate3d(2%, 1.5%, 0); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      body::before {
+        animation: none;
+      }
+
+      button {
+        transition: background 0.15s;
+      }
+
+      button:hover {
+        transform: none;
+        filter: none;
+      }
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page-bg: #0f0f14;
+        --page-fg: #e0e0e8;
+        --card-bg: rgba(26, 26, 34, 0.82);
+        --card-border: rgba(42, 42, 53, 0.95);
+        --card-shadow: 0 32px 96px rgba(0, 0, 0, 0.42), 0 16px 40px rgba(0, 0, 0, 0.24);
+        --subtitle: rgba(224, 224, 232, 0.64);
+        --input-bg: rgba(15, 15, 20, 0.72);
+        --input-border: rgba(42, 42, 53, 0.95);
+        --placeholder: rgba(224, 224, 232, 0.32);
+        --ambient-strong: rgba(155, 123, 184, 0.22);
+        --ambient-soft: rgba(155, 123, 184, 0.12);
+        --grain-1: rgba(155, 123, 184, 0.06);
+        --grain-2: rgba(155, 123, 184, 0.035);
+        --error-bg: #2d1a1a;
+        --error-border: #5a2020;
+        --error-fg: #f5a0a0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Craft Agents</h1>
+    <p class="subtitle">Enter your server token to continue</p>
+
+    <form id="login-form">
+      <label for="password">Server Token</label>
+      <input
+        id="password"
+        name="password"
+        type="password"
+        placeholder="Enter CRAFT_SERVER_TOKEN"
+        autocomplete="current-password"
+        autofocus
+        required
+      >
+      <button type="submit" id="submit-btn">Sign In</button>
+    </form>
+
+    <div id="error" class="error"></div>
+  </div>
+
+  <script>
+    const form = document.getElementById('login-form');
+    const errorEl = document.getElementById('error');
+    const submitBtn = document.getElementById('submit-btn');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errorEl.classList.remove('visible');
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Signing in...';
+
+      try {
+        const password = document.getElementById('password').value;
+        const res = await fetch('/api/auth', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password }),
+        });
+
+        if (res.ok) {
+          // Cookie is set by the response — redirect to app
+          window.location.href = '/';
+          return;
+        }
+
+        const data = await res.json().catch(() => ({}));
+        errorEl.textContent = data.error || 'Authentication failed';
+        errorEl.classList.add('visible');
+      } catch (err) {
+        errorEl.textContent = 'Network error — is the server running?';
+        errorEl.classList.add('visible');
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Sign In';
+      }
+    });
+  </script>
+</body>
+</html>

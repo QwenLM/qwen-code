@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en" class="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' http://localhost:8097; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https: file: thumbnail:; connect-src 'self' https: ws://localhost:5173 ws://localhost:8097 http://localhost:8097; font-src 'self' https://fonts.gstatic.com;">
+  <title>Design System Playground - Craft Agent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <script>
+    // React DevTools - only in development
+    if (location.protocol === 'file:' || location.hostname === 'localhost') {
+      const s = document.createElement('script');
+      s.src = 'http://localhost:8097';
+      document.head.appendChild(s);
+    }
+  </script>
+  <div id="root"></div>
+  <script type="module" src="./playground.tsx"></script>
+</body>
+</html>

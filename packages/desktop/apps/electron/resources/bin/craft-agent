@@ -1,0 +1,4 @@
+#!/bin/sh
+ENTRY="${CRAFT_COMMANDS_ENTRY:-$CRAFT_CLI_ENTRY}"
+export CRAFT_CLI_JSON_ONLY="${CRAFT_CLI_JSON_ONLY:-1}"
+exec "${CRAFT_BUN:-bun}" run "$ENTRY" "$@"

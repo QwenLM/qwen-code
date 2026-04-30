@@ -1,0 +1,74 @@
+# dependencies (bun install)
+node_modules
+
+# output
+out
+dist
+*.tgz
+.build
+apps/electron/release
+apps/electron/resources/session-mcp-server/
+apps/electron/resources/pi-agent-server/
+
+# code coverage
+coverage
+*.lcov
+
+# logs
+logs
+_.log
+report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
+
+# dotenv environment variable files
+.env
+.env.development.local
+.env.test.local
+.env.production.local
+.env.local
+
+# caches
+.eslintcache
+.cache
+*.tsbuildinfo
+.wrangler
+.mintlify
+
+# OSS sync temp directory
+.oss-sync-temp/
+
+# IntelliJ based IDEs
+.idea
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Finder (MacOS) folder config
+.DS_Store
+
+# Claude Code local settings (user-specific)
+.claude/settings.local.json
+
+# Accidental literal tilde directories (Node.js doesn't expand ~)
+~/
+
+# Lock files from other package managers
+pnpm-lock.yaml
+
+# Craft Agent local data (sessions, credentials, config)
+.craft-agent/
+
+# SSH keys and secrets
+*.pem
+*.key
+sshkey
+id_rsa*
+id_ed25519*
+
+# Credentials files
+credentials.enc
+*.credentials
+
+# act (local GitHub Actions runner)
+.secrets
+.actrc

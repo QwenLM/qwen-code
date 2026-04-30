@@ -1,0 +1,549 @@
+/**
+ * @craft-agent/ui - Shared Tailwind CSS v4 theme
+ *
+ * This file provides the base theme configuration for all Craft Agent UIs.
+ * Import this in your app's main CSS file:
+ *
+ *   @import "@craft-agent/ui/styles";
+ *
+ * The consuming app can then add its own source directive:
+ *
+ *   @source "../**\/*.{tsx,ts,jsx,js}";
+ *
+ * 6-Color System:
+ * - background: Light/dark surface
+ * - foreground: Text and icons
+ * - accent: Brand purple (highlights, Auto mode)
+ * - info: Amber (warnings, Ask mode)
+ * - success: Green (connected, checkmarks)
+ * - destructive: Red (errors, failed)
+ *
+ * Variants:
+ * - /50 = 50% alpha (transparency) - for borders, hovers, overlays
+ * - -50 = 50% mix toward background (solid) - for Explore mode
+ */
+
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/* =============================================================================
+   LIGHT MODE (default)
+============================================================================= */
+
+:root {
+  /* === 6 BASE COLORS === */
+  --background: oklch(0.98 0.003 265);
+  --foreground: oklch(0.185 0.01 270);
+  --foreground-rgb: 38, 36, 42;             /* RGB for shadow borders */
+  --accent: oklch(0.58 0.22 293);           /* purple - brand, Auto mode */
+  --accent-rgb: 104, 78, 133;               /* darkened RGB for shadow-tinted (70% of accent) */
+  --info: oklch(0.75 0.16 70);              /* amber - warnings, Ask mode */
+  --success: oklch(0.55 0.17 145);          /* green - connected, checkmarks */
+  --destructive: oklch(0.58 0.24 28);       /* red - errors, failed */
+  --destructive-rgb: 180, 60, 50;           /* RGB for shadow-tinted */
+  --info-rgb: 180, 120, 40;                 /* RGB for shadow-tinted */
+  --success-rgb: 34, 120, 60;               /* RGB for shadow-tinted */
+
+  /* === TEXT VARIANTS (mixed toward foreground for better contrast) === */
+  --success-text: color-mix(in oklab, var(--success) 50%, var(--foreground));
+  --destructive-text: color-mix(in oklab, var(--destructive) 50%, var(--foreground));
+  --info-text: color-mix(in oklab, var(--info) 50%, var(--foreground));
+
+  /* === SHADOW OPACITY (light mode = subtle, dark mode = stronger) === */
+  --shadow-border-opacity: 0.08;            /* Border ring opacity */
+  --shadow-blur-opacity: 0.06;              /* Blur layers opacity */
+
+  /* === SHADOW VALUES (reusable across utility classes and component overrides) === */
+  --shadow-minimal:
+    rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+    rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+    rgba(var(--foreground-rgb), 0.06) 0px 0px 0px 1px,
+    rgba(0, 0, 0, var(--shadow-blur-opacity)) 0px 1px 1px -0.5px,
+    rgba(0, 0, 0, var(--shadow-blur-opacity)) 0px 3px 3px -1.5px;
+
+  --shadow-minimal-flat:
+    rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+    rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+    rgba(var(--foreground-rgb), 0.06) 0px 0px 0px 1px;
+
+  --shadow-modal-small:
+    rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+    rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+    rgba(var(--foreground-rgb), 0.06) 0px 0px 0px 1px,
+    rgba(0, 0, 0, calc(var(--shadow-blur-opacity) * 0.67)) 0px 1px 1px -0.5px,
+    rgba(0, 0, 0, calc(var(--shadow-blur-opacity) * 0.67)) 0px 3px 3px 0px,
+    rgba(0, 0, 0, calc(var(--shadow-blur-opacity) * 0.33)) 0px 6px 6px 0px,
+    rgba(0, 0, 0, calc(var(--shadow-blur-opacity) * 0.33)) 0px 12px 12px 0px,
+    rgba(0, 0, 0, calc(var(--shadow-blur-opacity) * 0.33)) 0px 24px 24px 0px;
+
+  /* === Z-INDEX SCALE === */
+  --z-base: 0;
+  --z-local: 10;
+  --z-sticky: 20;
+  --z-titlebar: 40;
+  --z-panel: 50;
+  --z-dropdown: 100;
+  --z-tooltip: 150;
+  --z-modal: 200;
+  --z-overlay: 300;
+  --z-fullscreen: 350;
+  --z-floating-backdrop: 390;
+  --z-floating-menu: 400;
+  --z-island-overlay: 390;
+  --z-island: 400;
+  --z-island-popover: 410;
+  --z-splash: 600;
+
+  /* === MIX VARIANTS (solid interpolation toward background) === */
+  --foreground-2: color-mix(in oklch, var(--foreground) 2%, var(--background));
+  --foreground-3: color-mix(in oklch, var(--foreground) 3%, var(--background));
+  --foreground-5: color-mix(in oklch, var(--foreground) 5%, var(--background));
+  --foreground-10: color-mix(in oklch, var(--foreground) 10%, var(--background));
+  --foreground-20: color-mix(in oklch, var(--foreground) 20%, var(--background));
+  --foreground-30: color-mix(in oklch, var(--foreground) 30%, var(--background));
+  --foreground-40: color-mix(in oklch, var(--foreground) 40%, var(--background));
+  --foreground-50: color-mix(in oklch, var(--foreground) 50%, var(--background));
+  --foreground-60: color-mix(in oklch, var(--foreground) 60%, var(--background));
+  --foreground-70: color-mix(in oklch, var(--foreground) 70%, var(--background));
+  --foreground-80: color-mix(in oklch, var(--foreground) 80%, var(--background));
+  --foreground-90: color-mix(in oklch, var(--foreground) 90%, var(--background));
+  --foreground-95: color-mix(in oklch, var(--foreground) 95%, var(--background));
+
+  /* === SHADCN COMPATIBILITY (derived from 6 base colors) === */
+  --secondary: oklch(from var(--foreground) l c h / 0.05);
+  --secondary-foreground: var(--foreground);
+  --muted: oklch(from var(--foreground) l c h / 0.05);
+  --muted-foreground: var(--foreground-50);
+  --card: var(--background);
+  --card-foreground: var(--foreground);
+  --popover: var(--background);
+  --popover-foreground: var(--foreground);
+  --border: oklch(from var(--foreground) l c h / 0.05);
+  --input: oklch(from var(--foreground) l c h / 0.1);
+  --ring: oklch(from var(--foreground) l c h / 0.25);
+  --ring-width: 1px;
+  --ring-offset: 0px;
+
+  /* === COMPONENT TOKENS === */
+  --user-message-bubble: oklch(from var(--foreground) l c h / 0.05);
+
+  /* Markdown list markers */
+  --md-bullets: var(--foreground-50);
+  --md-counters: var(--foreground-50);
+
+  /* Fonts - System fonts for UI, JetBrains Mono for code */
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-serif: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --font-default: var(--font-sans);
+
+  /* Layout */
+  --font-size-base: 15px;
+  --radius: 0rem;
+  --spacing: 0.25rem;
+  --tracking-normal: 0em;
+}
+
+/* =============================================================================
+   DARK MODE
+============================================================================= */
+
+.dark {
+  /* === 6 BASE COLORS === */
+  --background: oklch(0.2 0.005 270);
+  --foreground: oklch(0.92 0.005 270);
+  --foreground-rgb: 227, 226, 229;           /* RGB for shadow borders */
+  --accent: oklch(0.65 0.20 293);            /* brighter purple in dark */
+  --accent-rgb: 118, 92, 147;                /* darkened RGB for shadow-tinted (70% of accent) */
+  --info: oklch(0.70 0.16 70);               /* amber */
+  --success: oklch(0.60 0.17 145);           /* green */
+  --destructive: oklch(0.70 0.19 22);        /* brighter red in dark */
+  --destructive-rgb: 200, 80, 70;            /* RGB for shadow-tinted */
+  --info-rgb: 200, 140, 60;                  /* RGB for shadow-tinted */
+  --success-rgb: 50, 140, 80;                /* RGB for shadow-tinted */
+
+  /* === TEXT VARIANTS (mixed toward foreground for better contrast) === */
+  --success-text: color-mix(in oklab, var(--success) 50%, var(--foreground));
+  --destructive-text: color-mix(in oklab, var(--destructive) 50%, var(--foreground));
+  --info-text: color-mix(in oklab, var(--info) 50%, var(--foreground));
+
+  /* === SHADOW OPACITY (stronger in dark mode) === */
+  --shadow-border-opacity: 0.15;
+  --shadow-blur-opacity: 0.12;
+
+  /* === MIX VARIANTS === */
+  --foreground-2: color-mix(in oklch, var(--foreground) 2%, var(--background));
+  --foreground-3: color-mix(in oklch, var(--foreground) 3%, var(--background));
+  --foreground-5: color-mix(in oklch, var(--foreground) 5%, var(--background));
+  --foreground-10: color-mix(in oklch, var(--foreground) 10%, var(--background));
+  --foreground-20: color-mix(in oklch, var(--foreground) 20%, var(--background));
+  --foreground-30: color-mix(in oklch, var(--foreground) 30%, var(--background));
+  --foreground-40: color-mix(in oklch, var(--foreground) 40%, var(--background));
+  --foreground-50: color-mix(in oklch, var(--foreground) 50%, var(--background));
+  --foreground-60: color-mix(in oklch, var(--foreground) 60%, var(--background));
+  --foreground-70: color-mix(in oklch, var(--foreground) 70%, var(--background));
+  --foreground-80: color-mix(in oklch, var(--foreground) 80%, var(--background));
+  --foreground-90: color-mix(in oklch, var(--foreground) 90%, var(--background));
+  --foreground-95: color-mix(in oklch, var(--foreground) 95%, var(--background));
+
+  /* === SHADCN COMPATIBILITY (derived from 6 base colors) === */
+  --secondary: oklch(from var(--foreground) l c h / 0.05);
+  --secondary-foreground: var(--foreground);
+  --muted: oklch(from var(--foreground) l c h / 0.05);
+  --muted-foreground: var(--foreground-50);
+  --card: var(--background);
+  --card-foreground: var(--foreground);
+  --popover: var(--background);
+  --popover-foreground: var(--foreground);
+  --border: oklch(from var(--foreground) l c h / 0.05);
+  --input: oklch(from var(--foreground) l c h / 0.1);
+  --ring: oklch(from var(--foreground) l c h / 0.25);
+
+  /* === COMPONENT TOKENS === */
+  --user-message-bubble: oklch(from var(--foreground) l c h / 0.05);
+
+  /* Markdown list markers */
+  --md-bullets: var(--foreground-50);
+  --md-counters: var(--foreground-50);
+}
+
+/* Inter font option (requires loading Inter from Google Fonts or locally)
+   For best results, load Inter with optical sizing: family=Inter:opsz,wght@14..32,400;... */
+html[data-font="inter"] {
+  --font-sans: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-default: var(--font-sans);
+  font-optical-sizing: auto;
+  font-feature-settings: "cv01", "cv02", "cv03", "cv04", "case";
+}
+
+/* =============================================================================
+   TAILWIND V4 THEME INTEGRATION
+============================================================================= */
+
+@theme inline {
+  /* === 6 BASE COLORS === */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-accent: var(--accent);
+  --color-info: var(--info);
+  --color-success: var(--success);
+  --color-destructive: var(--destructive);
+
+  /* === MIX VARIANTS (solid interpolation) === */
+  --color-foreground-2: var(--foreground-2);
+  --color-foreground-3: var(--foreground-3);
+  --color-foreground-5: var(--foreground-5);
+  --color-foreground-10: var(--foreground-10);
+  --color-foreground-20: var(--foreground-20);
+  --color-foreground-30: var(--foreground-30);
+  --color-foreground-40: var(--foreground-40);
+  --color-foreground-50: var(--foreground-50);
+  --color-foreground-60: var(--foreground-60);
+  --color-foreground-70: var(--foreground-70);
+  --color-foreground-80: var(--foreground-80);
+  --color-foreground-90: var(--foreground-90);
+  --color-foreground-95: var(--foreground-95);
+
+  /* === LEGACY COMPATIBILITY === */
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-destructive-foreground: var(--background);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-md-bullets: var(--md-bullets);
+  --color-md-counters: var(--md-counters);
+  --color-user-message-bubble: var(--user-message-bubble);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --font-serif: var(--font-serif);
+
+  --shadow-2xs: var(--shadow-2xs);
+  --shadow-xs: var(--shadow-xs);
+  --shadow-sm: var(--shadow-sm);
+  --shadow: var(--shadow);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+  --shadow-xl: var(--shadow-xl);
+  --shadow-2xl: var(--shadow-2xl);
+}
+
+/* =============================================================================
+   BASE STYLES
+============================================================================= */
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    border-color: var(--border);
+  }
+
+  html {
+    font-size: var(--font-size-base);
+  }
+
+  body {
+    font-family: var(--font-default);
+    background: var(--background);
+    color: var(--foreground);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--muted-foreground);
+  }
+
+  /* Focus ring styles */
+  *:focus-visible {
+    outline: none;
+    --tw-ring-offset-width: var(--ring-offset);
+    --tw-ring-width: var(--ring-width);
+    --tw-ring-color: var(--ring);
+  }
+}
+
+/* =============================================================================
+   UTILITY CLASSES
+============================================================================= */
+
+@layer utilities {
+  /* Hide scrollbar but keep scrolling */
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Hide scrollbar until parent .group is hovered */
+  .scrollbar-hover::-webkit-scrollbar {
+    width: 4px;
+  }
+  .scrollbar-hover::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-hover::-webkit-scrollbar-thumb {
+    background: transparent;
+    border-radius: 4px;
+  }
+  .group:hover .scrollbar-hover::-webkit-scrollbar-thumb {
+    background: var(--border);
+  }
+  .group:hover .scrollbar-hover::-webkit-scrollbar-thumb:hover {
+    background: var(--muted-foreground);
+  }
+
+  /* Custom shadow utilities */
+  .shadow-minimal {
+    box-shadow: var(--shadow-minimal);
+  }
+
+  .shadow-middle {
+    box-shadow:
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(var(--foreground-rgb), 0.06) 0px 0px 0px 1px,
+      rgba(0, 0, 0, 0.06) 0px 1px 1px -0.5px,
+      rgba(0, 0, 0, 0.06) 0px 3px 3px -1.5px,
+      rgba(0, 0, 0, 0.06) 0px 6px 6px -3px;
+  }
+
+  .shadow-medium {
+    box-shadow:
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(var(--foreground-rgb), 0.06) 0px 0px 0px 1px,
+      rgba(0, 0, 0, 0.06) 0px 1px 1px -0.5px,
+      rgba(0, 0, 0, 0.06) 0px 3px 3px -1.5px,
+      rgba(0, 0, 0, 0.06) 0px 6px 6px -3px,
+      rgba(0, 0, 0, 0.04) 0px 12px 12px -6px;
+  }
+
+  /* Hero shadow - medium base with larger soft layers for floating effect */
+  .shadow-hero {
+    box-shadow:
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(var(--foreground-rgb), 0.06) 0px 0px 0px 1px,
+      rgba(0, 0, 0, 0.06) 0px 1px 1px -0.5px,
+      rgba(0, 0, 0, 0.06) 0px 3px 3px -1.5px,
+      rgba(0, 0, 0, 0.06) 0px 6px 6px -3px,
+      rgba(0, 0, 0, 0.04) 0px 12px 12px -6px,
+      rgba(0, 0, 0, 0.03) 0px 24px 32px -12px,
+      rgba(0, 0, 0, 0.02) 0px 48px 64px -24px;
+  }
+
+  /* Tinted shadow using CSS variable - use with style={{ '--shadow-color': 'r, g, b' }} */
+  .shadow-tinted {
+    --shadow-color: 0, 0, 0;
+    box-shadow:
+      rgba(var(--shadow-color), 0) 0px 0px 0px 0px,
+      rgba(var(--shadow-color), 0) 0px 0px 0px 0px,
+      rgba(var(--shadow-color), calc(var(--shadow-border-opacity) * 1.5)) 0px 0px 0px 1px,
+      rgba(var(--shadow-color), var(--shadow-border-opacity)) 0px 1px 1px -0.5px,
+      rgba(var(--shadow-color), var(--shadow-blur-opacity)) 0px 3px 3px -1.5px,
+      rgba(var(--shadow-color), calc(var(--shadow-blur-opacity) * 0.67)) 0px 6px 6px -3px;
+  }
+
+  /* Dark mode: outline only, no blur glow, stronger border */
+  .dark .shadow-tinted {
+    box-shadow:
+      rgba(var(--shadow-color), 0) 0px 0px 0px 0px,
+      rgba(var(--shadow-color), 0) 0px 0px 0px 0px,
+      rgba(var(--shadow-color), calc(var(--shadow-border-opacity) * 3)) 0px 0px 0px 1px,
+      rgba(var(--shadow-color), 0) 0px 1px 1px -0.5px,
+      rgba(var(--shadow-color), 0) 0px 3px 3px -1.5px,
+      rgba(var(--shadow-color), 0) 0px 6px 6px -3px;
+  }
+
+  .shadow-strong {
+    box-shadow:
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(var(--foreground-rgb), 0.06) 0px 0px 0px 1px,
+      rgba(0, 0, 0, 0.06) 0px 1px 1px -0.5px,
+      rgba(0, 0, 0, 0.06) 0px 3px 3px -1.5px,
+      rgba(0, 0, 0, 0.06) 0px 6px 6px -3px,
+      rgba(0, 0, 0, 0.04) 0px 12px 12px -6px,
+      rgba(0, 0, 0, 0.04) 0px 24px 24px -12px;
+  }
+
+  .shadow-modal-small {
+    box-shadow: var(--shadow-modal-small);
+  }
+
+  /* Smooth corners (iOS-style superellipse)
+   * Uses CSS continuous corners when supported, falls back to standard border-radius.
+   * The border-radius value should be set on the element using this class.
+   */
+  .smooth-corners {
+    /* Standard property (future CSS spec) */
+    corner-shape: superellipse;
+    /* WebKit prefix for Safari */
+    -webkit-corner-shape: superellipse;
+  }
+
+  /* Unified popover styling */
+  .popover-styled {
+    background: var(--background);
+    color: var(--foreground);
+    border-radius: 8px;
+    border: none;
+    box-shadow:
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(var(--foreground-rgb), 0.06) 0px 0px 0px 1px,
+      rgba(0, 0, 0, 0.04) 0px 1px 1px -0.5px,
+      rgba(0, 0, 0, 0.04) 0px 3px 3px 0px,
+      rgba(0, 0, 0, 0.02) 0px 6px 6px 0px,
+      rgba(0, 0, 0, 0.02) 0px 12px 12px 0px,
+      rgba(0, 0, 0, 0.02) 0px 24px 24px 0px;
+  }
+}
+
+/* =============================================================================
+   SPINNER - SpinKit Grid (3x3)
+
+   A simple grid-based loading spinner that inherits size from font-size
+   and color from currentColor.
+
+   Usage:
+     <div class="spinner">
+       <div class="spinner-cube"></div>
+       <div class="spinner-cube"></div>
+       ...9 cubes total
+     </div>
+============================================================================= */
+
+.spinner {
+  display: inline-grid;
+  grid-template-columns: repeat(3, 1fr);
+  width: 1em;
+  height: 1em;
+  gap: 0.08em;
+}
+
+.spinner-cube {
+  background-color: currentColor;
+  animation: spinner-grid 1.3s infinite ease-in-out;
+  transform: scale3d(0.5, 0.5, 1);
+}
+
+.spinner-cube:nth-child(1) { animation-delay: 0.2s; }
+.spinner-cube:nth-child(2) { animation-delay: 0.3s; }
+.spinner-cube:nth-child(3) { animation-delay: 0.4s; }
+.spinner-cube:nth-child(4) { animation-delay: 0.1s; }
+.spinner-cube:nth-child(5) { animation-delay: 0.2s; }
+.spinner-cube:nth-child(6) { animation-delay: 0.3s; }
+.spinner-cube:nth-child(7) { animation-delay: 0s; }
+.spinner-cube:nth-child(8) { animation-delay: 0.1s; }
+.spinner-cube:nth-child(9) { animation-delay: 0.2s; }
+
+@keyframes spinner-grid {
+  0%, 70%, 100% {
+    transform: scale3d(0.5, 0.5, 1);
+  }
+  35% {
+    transform: scale3d(0, 0, 1);
+  }
+}
+
+/* =============================================================================
+   SHIMMER ANIMATION
+
+   Subtle shimmer effect for optimistic UI states.
+============================================================================= */
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.animate-shimmer {
+  position: relative;
+  overflow: hidden;
+}
+
+.animate-shimmer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    oklch(from var(--foreground) l c h / 0.06) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  pointer-events: none;
+  border-radius: inherit;
+}

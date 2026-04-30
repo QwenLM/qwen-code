@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "paths": {
+      "@/*": ["../electron/src/renderer/*"],
+      "@webui/*": ["./src/*"],
+      "@config/*": ["../../packages/shared/src/config/*"],
+      "@craft-agent/shared": ["../../packages/shared/src/index.ts"],
+      "@craft-agent/shared/*": ["../../packages/shared/src/*"]
+    },
+    "baseUrl": "."
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "../electron/src/renderer/**/*.ts",
+    "../electron/src/renderer/**/*.tsx",
+    "../electron/src/shared/**/*.ts",
+    "../electron/src/transport/**/*.ts",
+    "../../packages/shared/src/**/*.d.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
+}

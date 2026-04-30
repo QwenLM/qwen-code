@@ -1,0 +1,32 @@
+name: Validate Server (Integration)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  validate-server:
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: validate-server (${{ matrix.os }})
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run --validate-server (includes automation conditions pass/fail)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.CRAFT_ANTHROPIC_API_KEY }}
+          STITCH_API_KEY: ${{ secrets.STITCH_API_KEY }}
+        run: bun run apps/cli/src/index.ts --validate-server --no-spinner --timeout 180000 --workspace-dir .github/agents

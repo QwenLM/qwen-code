@@ -1,0 +1,21 @@
+{
+  "name": "Haze",
+  "description": "If you know, you know.",
+  "author": "Craft Agent",
+  "license": "MIT",
+  "mode": "scenic",
+  "backgroundImage": "https://images.pexels.com/photos/764450/pexels-photo-764450.jpeg",
+  "supportedModes": [
+    "dark"
+  ],
+  "shikiTheme": {
+    "dark": "github-dark"
+  },
+  "background": "rgba(0, 0, 0, 0.4)",
+  "foreground": "#f5f5f7",
+  "accent": "#a78bfa",
+  "info": "#fbbf24",
+  "success": "#22c55e",
+  "destructive": "#ef4444",
+  "popoverSolid": "#2a2a2e"
+}
