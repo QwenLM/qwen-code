@@ -935,9 +935,10 @@ export class ShellTool extends BaseDeclarativeTool<
     if (!params.command.trim()) {
       return 'Command cannot be empty.';
     }
+    const strippedCommand = stripShellWrapper(params.command);
     if (
       params.is_background &&
-      hasTopLevelTrailingBackgroundOperator(params.command)
+      hasTopLevelTrailingBackgroundOperator(strippedCommand)
     ) {
       return 'Background shell commands must not end with a bare "&". Remove the trailing "&" and rely on is_background: true instead.';
     }

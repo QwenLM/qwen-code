@@ -426,6 +426,30 @@ describe('ShellTool', () => {
       expect(mockShellExecutionService).not.toHaveBeenCalled();
     });
 
+    it('rejects wrapped bash commands whose stripped payload ends with bare &', async () => {
+      expect(() =>
+        shellTool.build({
+          command: 'bash -c "node server.js &"',
+          is_background: true,
+        }),
+      ).toThrow(
+        'Background shell commands must not end with a bare "&". Remove the trailing "&" and rely on is_background: true instead.',
+      );
+      expect(mockShellExecutionService).not.toHaveBeenCalled();
+    });
+
+    it('rejects wrapped sh commands whose stripped payload ends with bare &', async () => {
+      expect(() =>
+        shellTool.build({
+          command: "sh -c 'npm run dev &'",
+          is_background: true,
+        }),
+      ).toThrow(
+        'Background shell commands must not end with a bare "&". Remove the trailing "&" and rely on is_background: true instead.',
+      );
+      expect(mockShellExecutionService).not.toHaveBeenCalled();
+    });
+
     it('preserves a trailing && (logical AND would be syntactically broken otherwise)', async () => {
       const invocation = shellTool.build({
         command: 'npm run dev &&',
