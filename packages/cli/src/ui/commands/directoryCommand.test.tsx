@@ -63,6 +63,7 @@ describe('directoryCommand', () => {
           merged: {},
           workspace: {
             settings: {},
+            originalSettings: {},
           },
           setValue: vi.fn(),
         },
@@ -123,6 +124,9 @@ describe('directoryCommand', () => {
       mockContext.services.settings.workspace.settings = {
         context: { includeDirectories: [existingPath] },
       };
+      mockContext.services.settings.workspace.originalSettings = {
+        context: { includeDirectories: [existingPath] },
+      };
 
       if (!addCommand?.action) throw new Error('No action');
       await addCommand.action(mockContext, newPath);
@@ -137,6 +141,9 @@ describe('directoryCommand', () => {
     it('should not duplicate existing workspace settings when persisting', async () => {
       const existingPath = path.normalize('/home/user/existing-project');
       mockContext.services.settings.workspace.settings = {
+        context: { includeDirectories: [existingPath] },
+      };
+      mockContext.services.settings.workspace.originalSettings = {
         context: { includeDirectories: [existingPath] },
       };
 
@@ -166,6 +173,52 @@ describe('directoryCommand', () => {
           text: `Successfully added directories:\n- ${skippedPath}`,
         }),
         expect.any(Number),
+      );
+    });
+
+    it('should show already-added directories without an empty success message', async () => {
+      const existingPath = path.normalize('/home/user/project1');
+
+      if (!addCommand?.action) throw new Error('No action');
+      await addCommand.action(mockContext, existingPath);
+
+      expect(mockContext.services.settings.setValue).not.toHaveBeenCalled();
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: `Directories already in workspace:\n- ${existingPath}`,
+        }),
+        expect.any(Number),
+      );
+      expect(mockContext.ui.addItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: 'Successfully added QWEN.md files from the following directories if there are:\n- ',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should preserve env-var-form include directories when persisting', async () => {
+      const originalExistingPath = '$HOME/existing-project';
+      const resolvedExistingPath = path.normalize(
+        '/home/user/existing-project',
+      );
+      const newPath = path.normalize('/home/user/new-project');
+      mockContext.services.settings.workspace.settings = {
+        context: { includeDirectories: [resolvedExistingPath] },
+      };
+      mockContext.services.settings.workspace.originalSettings = {
+        context: { includeDirectories: [originalExistingPath] },
+      };
+
+      if (!addCommand?.action) throw new Error('No action');
+      await addCommand.action(mockContext, newPath);
+
+      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'context.includeDirectories',
+        [originalExistingPath, newPath],
       );
     });
 
