@@ -23,6 +23,7 @@ import {
   useMessageSubmit,
 } from './hooks/useMessageSubmit.js';
 import type { PermissionOption, PermissionToolCall } from '@qwen-code/webui';
+import { stripZeroWidthSpaces } from '@qwen-code/webui';
 import type { TextMessage } from './hooks/message/useMessageHandling.js';
 import type { ToolCallData } from './components/messages/toolcalls/ToolCall.js';
 import { ToolCall } from './components/messages/toolcalls/ToolCall.js';
@@ -872,12 +873,16 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Current text and cursor
-      const text = inputElement.textContent || '';
+      // Current text and cursor — strip U+200B height placeholder so it
+      // does not contaminate the inserted completion text.
+      const rawText = inputElement.textContent || '';
+      const text = stripZeroWidthSpaces(rawText);
       const range = selection.getRangeAt(0);
 
-      // Compute total text offset for contentEditable
-      let cursorPos = text.length;
+      // Compute total text offset for contentEditable.  The DOM offsets
+      // are based on rawText (which may contain U+200B), so we compute the
+      // raw cursor position first and then adjust for stripped characters.
+      let rawCursorPos = rawText.length;
       if (range.startContainer === inputElement) {
         const childIndex = range.startOffset;
         let offset = 0;
@@ -888,7 +893,7 @@ export const App: React.FC = () => {
         ) {
           offset += inputElement.childNodes[i].textContent?.length || 0;
         }
-        cursorPos = offset || text.length;
+        rawCursorPos = offset || rawText.length;
       } else if (range.startContainer.nodeType === Node.TEXT_NODE) {
         const walker = document.createTreeWalker(
           inputElement,
@@ -907,8 +912,14 @@ export const App: React.FC = () => {
           offset += node.textContent?.length || 0;
           node = walker.nextNode();
         }
-        cursorPos = found ? offset : text.length;
+        rawCursorPos = found ? offset : rawText.length;
       }
+      // Adjust cursor to match the stripped text by subtracting
+      // zero-width characters that appeared before the cursor.
+      const zeroWidthBeforeCursor = (
+        rawText.substring(0, rawCursorPos).match(/\u200B/g) || []
+      ).length;
+      const cursorPos = Math.max(0, rawCursorPos - zeroWidthBeforeCursor);
 
       // Replace from trigger to cursor with selected value
       const textBeforeCursor = text.substring(0, cursorPos);
