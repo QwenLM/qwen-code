@@ -251,6 +251,32 @@ describe('errors', () => {
         );
       });
 
+      it('does not reformat or reprint AlreadyReportedError in JSON mode', async () => {
+        const reported = new AlreadyReportedError(
+          '[API Error: 402 Model X is not available for billing.]',
+          42,
+        );
+
+        await expect(handleError(reported, mockConfig)).rejects.toThrow(
+          'process.exit called with code: 42',
+        );
+
+        expect(mockWriteStderrLine).toHaveBeenCalledTimes(1);
+        expect(mockWriteStderrLine).toHaveBeenCalledWith(
+          JSON.stringify(
+            {
+              error: {
+                type: 'AlreadyReportedError',
+                message: '[API Error: 402 Model X is not available for billing.]',
+                code: 42,
+              },
+            },
+            null,
+            2,
+          ),
+        );
+      });
+
       it('should use custom error code when provided', async () => {
         const testError = new Error('Test error');
 

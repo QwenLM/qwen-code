@@ -150,6 +150,22 @@ describe('parseAndFormatApiError', () => {
       expect(parseAndFormatApiError(error)).toBe(formatted);
     });
 
+    it('returns an already-formatted 429 USE_GEMINI message unchanged', () => {
+      const formatted =
+        '[API Error: Rate limit exceeded]\nPlease wait and try again later. To increase your limits, request a quota increase through AI Studio, or switch to another /auth method';
+      expect(parseAndFormatApiError(formatted, AuthType.USE_GEMINI)).toBe(
+        formatted,
+      );
+    });
+
+    it('returns an already-formatted 429 VERTEX message unchanged', () => {
+      const formatted =
+        '[API Error: Rate limit exceeded]\nPlease wait and try again later. To increase your limits, request a quota increase through Vertex, or switch to another /auth method';
+      expect(parseAndFormatApiError(formatted, AuthType.USE_VERTEX_AI)).toBe(
+        formatted,
+      );
+    });
+
     it('still wraps a raw message that merely contains the prefix mid-string', () => {
       // Defensive: the prefix check anchors at the start, so a message that
       // simply mentions the literal "[API Error: " inside a longer sentence

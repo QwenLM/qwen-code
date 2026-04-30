@@ -7,29 +7,30 @@
 import { isApiError, isStructuredError } from './quotaErrorDetection.js';
 import { AuthType } from '../core/contentGenerator.js';
 
-// Free Tier message functions
-const RATE_LIMIT_ERROR_MESSAGE_USE_GEMINI =
-  '\nPlease wait and try again later. To increase your limits, request a quota increase through AI Studio, or switch to another /auth method';
-const RATE_LIMIT_ERROR_MESSAGE_VERTEX =
-  '\nPlease wait and try again later. To increase your limits, request a quota increase through Vertex, or switch to another /auth method';
-const RATE_LIMIT_ERROR_MESSAGE_DEFAULT =
-  '\nPossible quota limitations in place or slow response times detected. Please wait and try again later.';
+const RATE_LIMIT_MESSAGE_BY_AUTH = {
+  [AuthType.USE_GEMINI]:
+    '\nPlease wait and try again later. To increase your limits, request a quota increase through AI Studio, or switch to another /auth method',
+  [AuthType.USE_VERTEX_AI]:
+    '\nPlease wait and try again later. To increase your limits, request a quota increase through Vertex, or switch to another /auth method',
+  default:
+    '\nPossible quota limitations in place or slow response times detected. Please wait and try again later.',
+} as const;
+
+const RATE_LIMIT_SUFFIXES = Object.values(RATE_LIMIT_MESSAGE_BY_AUTH);
 
 function getRateLimitMessage(authType?: AuthType): string {
-  switch (authType) {
-    case AuthType.USE_GEMINI:
-      return RATE_LIMIT_ERROR_MESSAGE_USE_GEMINI;
-    case AuthType.USE_VERTEX_AI:
-      return RATE_LIMIT_ERROR_MESSAGE_VERTEX;
-    default:
-      return RATE_LIMIT_ERROR_MESSAGE_DEFAULT;
+  if (authType === AuthType.USE_GEMINI) {
+    return RATE_LIMIT_MESSAGE_BY_AUTH[AuthType.USE_GEMINI];
   }
+
+  if (authType === AuthType.USE_VERTEX_AI) {
+    return RATE_LIMIT_MESSAGE_BY_AUTH[AuthType.USE_VERTEX_AI];
+  }
+
+  return RATE_LIMIT_MESSAGE_BY_AUTH.default;
 }
 
-// Prefix this function emits when wrapping any error message. Exported so
-// callers (and the function itself) can detect already-formatted strings and
-// skip re-wrapping. See ALREADY_FORMATTED below.
-export const API_ERROR_PREFIX = '[API Error: ';
+const API_ERROR_PREFIX = '[API Error: ';
 
 /**
  * Returns true when `value` already looks like the output of
@@ -55,11 +56,7 @@ function isAlreadyFormatted(value: string): boolean {
     return true;
   }
 
-  return (
-    trimmed.includes(`]${RATE_LIMIT_ERROR_MESSAGE_USE_GEMINI}`) ||
-    trimmed.includes(`]${RATE_LIMIT_ERROR_MESSAGE_VERTEX}`) ||
-    trimmed.includes(`]${RATE_LIMIT_ERROR_MESSAGE_DEFAULT}`)
-  );
+  return RATE_LIMIT_SUFFIXES.some((suffix) => trimmed.includes(`]${suffix}`));
 }
 
 export function parseAndFormatApiError(

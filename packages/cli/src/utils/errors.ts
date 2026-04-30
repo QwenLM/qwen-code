@@ -31,8 +31,6 @@ const debugLogger = createDebugLogger('CLI_ERRORS');
  * yielding "[API Error: [API Error: ...]]" plus a duplicate stderr line.
  */
 export class AlreadyReportedError extends Error {
-  /** Discriminator so tests and other consumers don't need `instanceof`. */
-  readonly isAlreadyReported = true as const;
   /** Exit code to surface — defaults to 1 for generic upstream failures. */
   exitCode: number;
 
@@ -41,13 +39,6 @@ export class AlreadyReportedError extends Error {
     this.name = 'AlreadyReportedError';
     this.exitCode = exitCode;
   }
-}
-
-function isAlreadyReported(error: unknown): error is AlreadyReportedError {
-  return (
-    error instanceof Error &&
-    (error as Partial<AlreadyReportedError>).isAlreadyReported === true
-  );
 }
 
 export function getErrorMessage(error: unknown): string {
@@ -157,7 +148,7 @@ export async function handleError(
   // In TEXT mode this short-circuits straight to a clean re-throw; in JSON
   // mode we still emit the structured payload exactly once so machine
   // consumers don't lose the error.
-  if (isAlreadyReported(error)) {
+  if (error instanceof AlreadyReportedError) {
     if (config.getOutputFormat() === OutputFormat.JSON) {
       const formatter = new JsonFormatter();
       const errorCode = customErrorCode ?? error.exitCode;
