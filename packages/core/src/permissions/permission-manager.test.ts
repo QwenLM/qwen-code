@@ -1021,6 +1021,36 @@ describe('PermissionManager', () => {
       ).toBe('allow');
     });
 
+    it('Monitor(...) allow rule matches wrapped monitor invocations', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Monitor(tail -f *)'],
+        }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: `/bin/bash --noprofile -c 'tail -f /var/log/app.log &'`,
+        }),
+      ).toBe('allow');
+    });
+
+    it('exact Monitor(...) allow rule matches wrapped fallback commands', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Monitor(tail -f /var/log/app.log)'],
+        }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: String.raw`FOO="bar baz" /bin/bash --noprofile -c 'tail -f /var/log/app.log &'`,
+        }),
+      ).toBe('allow');
+    });
+
     it('Monitor(...) deny rule blocks monitor invocations', async () => {
       const pm2 = new PermissionManager(
         makeConfig({

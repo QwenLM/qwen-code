@@ -15,7 +15,10 @@ import type { PathMatchContext } from './rule-parser.js';
 import { extractShellOperations } from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
 import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
-import { detectCommandSubstitution } from '../utils/shell-utils.js';
+import {
+  detectCommandSubstitution,
+  normalizeMonitorCommand,
+} from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type {
   PermissionCheckContext,
@@ -166,6 +169,7 @@ export class PermissionManager {
    * @returns A PermissionDecision indicating how to handle this tool call.
    */
   async evaluate(ctx: PermissionCheckContext): Promise<PermissionDecision> {
+    ctx = this.normalizePermissionContext(ctx);
     const { command, toolName } = ctx;
 
     // For shell commands, split compound commands and evaluate each
@@ -403,6 +407,19 @@ export class PermissionManager {
     return 'ask';
   }
 
+  private normalizePermissionContext(
+    ctx: PermissionCheckContext,
+  ): PermissionCheckContext {
+    if (ctx.toolName !== 'monitor' || ctx.command === undefined) {
+      return ctx;
+    }
+
+    return {
+      ...ctx,
+      command: normalizeMonitorCommand(ctx.command).analysisCommand,
+    };
+  }
+
   // ---------------------------------------------------------------------------
   // Registry-level helper
   // ---------------------------------------------------------------------------
@@ -479,6 +496,7 @@ export class PermissionManager {
    * Useful for providing user-visible feedback about which rule caused a denial.
    */
   findMatchingDenyRule(ctx: PermissionCheckContext): string | undefined {
+    ctx = this.normalizePermissionContext(ctx);
     const { toolName, command, cwd, filePath, domain, specifier } = ctx;
 
     const pathCtx: PathMatchContext | undefined =
@@ -556,6 +574,7 @@ export class PermissionManager {
    * @returns true if at least one rule matches.
    */
   hasRelevantRules(ctx: PermissionCheckContext): boolean {
+    ctx = this.normalizePermissionContext(ctx);
     const { toolName, command, cwd, filePath, domain, specifier } = ctx;
 
     if (SHELL_LIKE_TOOLS.has(ctx.toolName) && command !== undefined) {
@@ -632,6 +651,7 @@ export class PermissionManager {
    * real ask rule matched.
    */
   hasMatchingAskRule(ctx: PermissionCheckContext): boolean {
+    ctx = this.normalizePermissionContext(ctx);
     const { toolName, command, cwd, filePath, domain, specifier } = ctx;
 
     if (SHELL_LIKE_TOOLS.has(ctx.toolName) && command !== undefined) {

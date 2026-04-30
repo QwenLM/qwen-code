@@ -198,6 +198,7 @@ export async function runNonInteractive(
       };
     }
     const localQueue: LocalQueueItem[] = [];
+    const sdkOnlyMonitorQueue: LocalQueueItem[] = [];
     const emitNotificationToSdk = (item: LocalQueueItem) => {
       if (item.sendMessageType !== SendMessageType.Notification) return;
       adapter.emitUserMessage([{ text: item.displayText }]);
@@ -205,11 +206,12 @@ export async function runNonInteractive(
         adapter.emitSystemMessage('task_notification', item.sdkNotification);
       }
     };
-    const flushSdkNotifications = () => {
-      while (localQueue.length > 0) {
-        emitNotificationToSdk(localQueue.shift()!);
+    const flushQueuedNotificationsToSdk = (queue: LocalQueueItem[]) => {
+      while (queue.length > 0) {
+        emitNotificationToSdk(queue.shift()!);
       }
     };
+    let captureMonitorTurnsInLocalQueue = true;
     let oneShotMonitorsFinalized = false;
     const finalizeOneShotMonitors = () => {
       if (
@@ -218,8 +220,9 @@ export async function runNonInteractive(
       )
         return;
       oneShotMonitorsFinalized = true;
+      captureMonitorTurnsInLocalQueue = false;
       config.getMonitorRegistry().abortAll();
-      flushSdkNotifications();
+      flushQueuedNotificationsToSdk(sdkOnlyMonitorQueue);
     };
 
     // EPIPE: don't process.exit here — that bypasses the caller's
@@ -378,7 +381,7 @@ export async function runNonInteractive(
         // originating turn has already completed.
         monitorRegistry.setNotificationCallback(
           (displayText, modelText, meta) => {
-            localQueue.push({
+            const queueItem = {
               displayText,
               modelText,
               sendMessageType: SendMessageType.Notification,
@@ -387,7 +390,13 @@ export async function runNonInteractive(
                 tool_use_id: meta.toolUseId,
                 status: meta.status,
               },
-            });
+            };
+
+            if (captureMonitorTurnsInLocalQueue) {
+              localQueue.push(queueItem);
+            } else {
+              sdkOnlyMonitorQueue.push(queueItem);
+            }
           },
         );
       }
@@ -760,9 +769,14 @@ export async function runNonInteractive(
               // Flush queued terminal notifications before handleCancellationError
               // exits so stream-json consumers always see a task_notification paired
               // with every task_started.
+              flushQueuedNotificationsToSdk(localQueue);
               finalizeOneShotMonitors();
               await handleCancellationError(config);
             }
+            // Once we enter the final holdback loop, monitor events should no
+            // longer extend one-shot runtime. Already-queued events still drain
+            // through the model, but later monitor output is SDK-only.
+            captureMonitorTurnsInLocalQueue = false;
             await drainLocalQueue();
             // Wait for every background task's terminal notification, not
             // just the running ones: cancel() marks status 'cancelled'
@@ -807,6 +821,7 @@ export async function runNonInteractive(
         // Expected when no message was started or already finalized
       }
 
+      flushQueuedNotificationsToSdk(localQueue);
       finalizeOneShotMonitors();
 
       // For JSON and STREAM_JSON modes, compute usage from metrics

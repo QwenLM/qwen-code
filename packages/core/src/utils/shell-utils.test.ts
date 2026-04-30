@@ -13,6 +13,7 @@ import {
   getShellConfiguration,
   isCommandAllowed,
   isCommandNeedsPermission,
+  normalizeMonitorCommand,
   stripTrailingBackgroundAmp,
   stripShellWrapper,
 } from './shell-utils.js';
@@ -526,6 +527,54 @@ describe('stripTrailingBackgroundAmp', () => {
     expect(stripTrailingBackgroundAmp('sleep 5 & echo done')).toBe(
       'sleep 5 & echo done',
     );
+  });
+});
+
+describe('normalizeMonitorCommand', () => {
+  it('unwraps quoted env-prefixed shell wrappers for analysis', () => {
+    expect(
+      normalizeMonitorCommand(
+        `FOO="bar baz" /bin/bash -c 'echo $(cat secret.txt)'`,
+      ),
+    ).toEqual({
+      analysisCommand: 'echo $(cat secret.txt)',
+      spawnCommand: `FOO="bar baz" /bin/bash -c 'echo $(cat secret.txt)'`,
+      strippedTrailingAmp: false,
+    });
+  });
+
+  it('preserves wrapper flags while stripping trailing ampersands', () => {
+    expect(
+      normalizeMonitorCommand(
+        `/bin/bash --noprofile -c 'tail -f /tmp/app.log &'`,
+      ),
+    ).toEqual({
+      analysisCommand: 'tail -f /tmp/app.log',
+      spawnCommand: `/bin/bash --noprofile -c 'tail -f /tmp/app.log'`,
+      strippedTrailingAmp: true,
+    });
+  });
+
+  it('handles escaped whitespace in env-prefixed wrappers', () => {
+    expect(
+      normalizeMonitorCommand(
+        String.raw`FOO=bar\ baz /bin/bash --noprofile -c 'tail -f /tmp/app.log &'`,
+      ),
+    ).toEqual({
+      analysisCommand: 'tail -f /tmp/app.log',
+      spawnCommand: String.raw`FOO=bar\ baz /bin/bash --noprofile -c 'tail -f /tmp/app.log'`,
+      strippedTrailingAmp: true,
+    });
+  });
+
+  it('falls back to the original command when no wrapper is detected', () => {
+    expect(
+      normalizeMonitorCommand(`FOO="bar baz" tail -f /tmp/app.log`),
+    ).toEqual({
+      analysisCommand: `FOO="bar baz" tail -f /tmp/app.log`,
+      spawnCommand: `FOO="bar baz" tail -f /tmp/app.log`,
+      strippedTrailingAmp: false,
+    });
   });
 });
 

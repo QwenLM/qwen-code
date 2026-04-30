@@ -42,4 +42,21 @@ describe('buildPermissionCheckContext', () => {
       cwd: path.resolve('/project', 'subdir'),
     });
   });
+
+  it('canonicalizes wrapped monitor commands for permission matching', () => {
+    expect(
+      buildPermissionCheckContext(
+        'monitor',
+        {
+          command: String.raw`FOO="bar baz" /bin/bash --noprofile -c 'tail -f ./app.log &'`,
+          directory: '/project/subdir',
+        },
+        '/project',
+      ),
+    ).toMatchObject({
+      toolName: 'monitor',
+      command: 'tail -f ./app.log',
+      cwd: '/project/subdir',
+    });
+  });
 });

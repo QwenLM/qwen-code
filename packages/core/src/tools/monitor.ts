@@ -37,8 +37,8 @@ import {
   detectCommandSubstitution,
   getCommandRoot,
   getShellConfiguration,
+  normalizeMonitorCommand as normalizeMonitorShellCommand,
   splitCommands,
-  stripTrailingBackgroundAmp,
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isSubpaths } from '../utils/paths.js';
@@ -59,138 +59,6 @@ const MAX_LINE_LENGTH = 4096;
 // Throttling constants (token bucket)
 const THROTTLE_BURST_SIZE = 5;
 const THROTTLE_REFILL_INTERVAL_MS = 1000; // 1 token per second
-
-function normalizeMonitorCommand(command: string): string {
-  return normalizeMonitorExecutionCommand(command).analysisCommand;
-}
-
-interface ParsedShellWrapper {
-  wrapperPrefix?: string;
-  innerCommand: string;
-  innerQuote: '"' | "'" | '';
-}
-
-interface NormalizedMonitorCommand {
-  analysisCommand: string;
-  spawnCommand: string;
-  strippedTrailingAmp: boolean;
-}
-
-function takeLeadingToken(
-  input: string,
-): { token: string; rest: string } | null {
-  const trimmed = input.trimStart();
-  if (!trimmed) {
-    return null;
-  }
-
-  const firstChar = trimmed[0];
-  if (firstChar === '"' || firstChar === "'") {
-    const closingIndex = trimmed.indexOf(firstChar, 1);
-    if (closingIndex === -1) {
-      return null;
-    }
-
-    return {
-      token: trimmed.slice(0, closingIndex + 1),
-      rest: trimmed.slice(closingIndex + 1),
-    };
-  }
-
-  const match = /^\S+/.exec(trimmed);
-  if (!match) {
-    return null;
-  }
-
-  return {
-    token: match[0],
-    rest: trimmed.slice(match[0].length),
-  };
-}
-
-function stripSymmetricQuotes(command: string): {
-  value: string;
-  quote: '"' | "'" | '';
-} {
-  const trimmed = command.trim();
-  if (
-    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-    (trimmed.startsWith("'") && trimmed.endsWith("'"))
-  ) {
-    return {
-      value: trimmed.substring(1, trimmed.length - 1),
-      quote: trimmed[0] as '"' | "'",
-    };
-  }
-
-  return { value: trimmed, quote: '' };
-}
-
-function isKnownShellWrapperToken(token: string): boolean {
-  const { value } = stripSymmetricQuotes(token);
-  const normalized = value.replace(/\\/g, '/').toLowerCase();
-  const base = normalized.split('/').pop();
-
-  return (
-    base === 'sh' ||
-    base === 'sh.exe' ||
-    base === 'bash' ||
-    base === 'bash.exe' ||
-    base === 'zsh' ||
-    base === 'zsh.exe' ||
-    base === 'cmd' ||
-    base === 'cmd.exe'
-  );
-}
-
-function parseShellWrapper(command: string): ParsedShellWrapper {
-  const trimmed = command.trim();
-  const firstToken = takeLeadingToken(trimmed);
-  if (!firstToken || !isKnownShellWrapperToken(firstToken.token)) {
-    return {
-      innerCommand: trimmed,
-      innerQuote: '',
-    };
-  }
-
-  const rest = firstToken.rest.trimStart();
-  const argMatch = /^(\/c|-c)\s+([\s\S]*)$/.exec(rest);
-  if (!argMatch) {
-    return {
-      innerCommand: trimmed,
-      innerQuote: '',
-    };
-  }
-
-  const { value: innerCommand, quote: innerQuote } = stripSymmetricQuotes(
-    argMatch[2] ?? '',
-  );
-  return {
-    wrapperPrefix: `${firstToken.token} ${argMatch[1]} `,
-    innerCommand,
-    innerQuote,
-  };
-}
-
-function normalizeMonitorExecutionCommand(
-  command: string,
-): NormalizedMonitorCommand {
-  const { wrapperPrefix, innerCommand, innerQuote } =
-    parseShellWrapper(command);
-  const analysisCommand = stripTrailingBackgroundAmp(innerCommand);
-  const strippedTrailingAmp = analysisCommand !== innerCommand;
-  const spawnCommand = wrapperPrefix
-    ? innerQuote
-      ? `${wrapperPrefix}${innerQuote}${analysisCommand}${innerQuote}`
-      : `${wrapperPrefix}${analysisCommand}`
-    : analysisCommand;
-
-  return {
-    analysisCommand,
-    spawnCommand,
-    strippedTrailingAmp,
-  };
-}
 
 export interface MonitorToolParams {
   command: string;
@@ -220,12 +88,12 @@ class MonitorToolInvocation extends BaseToolInvocation<
   getDescription(): string {
     const desc =
       this.params.description ||
-      normalizeMonitorExecutionCommand(this.params.command).spawnCommand;
+      normalizeMonitorShellCommand(this.params.command).spawnCommand;
     return `Monitor: ${desc}`;
   }
 
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    const command = normalizeMonitorExecutionCommand(
+    const command = normalizeMonitorShellCommand(
       this.params.command,
     ).analysisCommand;
 
@@ -248,7 +116,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
   override async getConfirmationDetails(
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
-    const normalized = normalizeMonitorExecutionCommand(this.params.command);
+    const normalized = normalizeMonitorShellCommand(this.params.command);
     const subCommands = splitCommands(normalized.analysisCommand);
     const confirmableSubCommands: string[] = [];
 
@@ -297,7 +165,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       );
     } catch (e) {
       debugLogger.warn('Failed to extract monitor command rules:', e);
-      permissionRules = [`Monitor(${normalized.spawnCommand})`];
+      permissionRules = [`Monitor(${normalized.analysisCommand})`];
     }
 
     return {
@@ -324,7 +192,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       };
     }
 
-    const normalized = normalizeMonitorExecutionCommand(this.params.command);
+    const normalized = normalizeMonitorShellCommand(this.params.command);
     const command = normalized.spawnCommand;
     if (normalized.strippedTrailingAmp) {
       debugLogger.warn(
@@ -638,7 +506,7 @@ export class MonitorTool extends BaseDeclarativeTool<
   ): string | null {
     if (
       typeof params.command !== 'string' ||
-      !normalizeMonitorCommand(params.command)
+      !normalizeMonitorShellCommand(params.command).analysisCommand
     ) {
       return 'Command cannot be empty.';
     }

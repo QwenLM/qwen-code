@@ -368,6 +368,225 @@ export function stripTrailingBackgroundAmp(command: string): string {
   return trimmed.slice(0, -1).trimEnd();
 }
 
+interface ParsedMonitorShellWrapper {
+  wrapperTokens?: string[];
+  innerCommand: string;
+  innerQuote: '"' | "'" | '';
+}
+
+export interface NormalizedMonitorCommand {
+  analysisCommand: string;
+  spawnCommand: string;
+  strippedTrailingAmp: boolean;
+}
+
+function takeLeadingToken(
+  input: string,
+): { token: string; rest: string } | null {
+  const trimmed = input.trimStart();
+  if (!trimmed) {
+    return null;
+  }
+
+  let quote: '"' | "'" | '' = '';
+  let escaped = false;
+  let idx = 0;
+
+  while (idx < trimmed.length) {
+    const char = trimmed[idx];
+    if (!char) {
+      break;
+    }
+
+    if (quote === "'") {
+      if (char === "'") {
+        quote = '';
+      }
+      idx++;
+      continue;
+    }
+
+    if (quote === '"') {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        quote = '';
+      }
+      idx++;
+      continue;
+    }
+
+    if (escaped) {
+      escaped = false;
+      idx++;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = true;
+      idx++;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      idx++;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      break;
+    }
+
+    idx++;
+  }
+
+  if (idx === 0 || quote || escaped) {
+    return null;
+  }
+
+  return {
+    token: trimmed.slice(0, idx),
+    rest: trimmed.slice(idx),
+  };
+}
+
+function stripSymmetricQuotes(command: string): {
+  value: string;
+  quote: '"' | "'" | '';
+} {
+  const trimmed = command.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return {
+      value: trimmed.substring(1, trimmed.length - 1),
+      quote: trimmed[0] as '"' | "'",
+    };
+  }
+
+  return { value: trimmed, quote: '' };
+}
+
+function getNormalizedShellToken(token: string): string {
+  return stripSymmetricQuotes(token).value.replace(/\\/g, '/').toLowerCase();
+}
+
+function isEnvAssignmentToken(token: string): boolean {
+  return ENV_ASSIGNMENT_REGEX.test(stripSymmetricQuotes(token).value);
+}
+
+function getShellWrapperBase(token: string): string | undefined {
+  return getNormalizedShellToken(token).split('/').pop();
+}
+
+function isKnownMonitorWrapperToken(token: string): boolean {
+  const base = getShellWrapperBase(token);
+  return (
+    base === 'sh' ||
+    base === 'sh.exe' ||
+    base === 'bash' ||
+    base === 'bash.exe' ||
+    base === 'zsh' ||
+    base === 'zsh.exe' ||
+    base === 'cmd' ||
+    base === 'cmd.exe'
+  );
+}
+
+function isMonitorCommandMarker(wrapperToken: string, token: string): boolean {
+  const base = getShellWrapperBase(wrapperToken);
+  const normalized = getNormalizedShellToken(token);
+
+  if (base === 'cmd' || base === 'cmd.exe') {
+    return normalized === '/c';
+  }
+
+  return normalized === '-c' || /^-[a-z]*c[a-z]*$/i.test(normalized);
+}
+
+function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
+  const trimmed = command.trim();
+  let rest = trimmed;
+  const leadingEnvTokens: string[] = [];
+
+  while (true) {
+    const token = takeLeadingToken(rest);
+    if (!token || !isEnvAssignmentToken(token.token)) {
+      break;
+    }
+    leadingEnvTokens.push(token.token);
+    rest = token.rest;
+  }
+
+  const wrapperToken = takeLeadingToken(rest);
+  if (!wrapperToken || !isKnownMonitorWrapperToken(wrapperToken.token)) {
+    return {
+      innerCommand: trimmed,
+      innerQuote: '',
+    };
+  }
+
+  rest = wrapperToken.rest;
+  const wrapperTokens = [...leadingEnvTokens, wrapperToken.token];
+
+  while (true) {
+    const token = takeLeadingToken(rest);
+    if (!token) {
+      return {
+        innerCommand: trimmed,
+        innerQuote: '',
+      };
+    }
+
+    if (isMonitorCommandMarker(wrapperToken.token, token.token)) {
+      wrapperTokens.push(token.token);
+      const { value: innerCommand, quote: innerQuote } = stripSymmetricQuotes(
+        token.rest,
+      );
+      return {
+        wrapperTokens,
+        innerCommand,
+        innerQuote,
+      };
+    }
+
+    const normalized = getNormalizedShellToken(token.token);
+    if (!normalized.startsWith('-') && !normalized.startsWith('/')) {
+      return {
+        innerCommand: trimmed,
+        innerQuote: '',
+      };
+    }
+
+    wrapperTokens.push(token.token);
+    rest = token.rest;
+  }
+}
+
+export function normalizeMonitorCommand(
+  command: string,
+): NormalizedMonitorCommand {
+  const { wrapperTokens, innerCommand, innerQuote } =
+    parseMonitorShellWrapper(command);
+  const analysisCommand = stripTrailingBackgroundAmp(innerCommand);
+  const strippedTrailingAmp = analysisCommand !== innerCommand;
+  const spawnCommand = wrapperTokens
+    ? innerQuote
+      ? `${wrapperTokens.join(' ')} ${innerQuote}${analysisCommand}${innerQuote}`
+      : `${wrapperTokens.join(' ')} ${analysisCommand}`
+    : analysisCommand;
+
+  return {
+    analysisCommand,
+    spawnCommand,
+    strippedTrailingAmp,
+  };
+}
+
 /**
  * Detects command substitution patterns in a shell command, following bash quoting rules:
  * - Single quotes ('): Everything literal, no substitution possible
