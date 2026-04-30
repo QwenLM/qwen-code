@@ -235,6 +235,15 @@ describe('Session', () => {
       );
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
+
+    it('rejects rewinds while a cron prompt is mutating history', () => {
+      (session as unknown as { cronProcessing: boolean }).cronProcessing = true;
+
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Cannot rewind while a prompt is running',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
   });
 
   describe('setModel', () => {

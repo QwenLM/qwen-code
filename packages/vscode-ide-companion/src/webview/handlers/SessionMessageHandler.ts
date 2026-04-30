@@ -7,6 +7,7 @@
 import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
+import type { Conversation } from '../../services/conversationStore.js';
 import type { ImageAttachment } from '../../utils/imageSupport.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import {
@@ -225,6 +226,43 @@ export class SessionMessageHandler extends BaseMessageHandler {
    */
   resetStreamContent(): void {
     this.currentStreamContent = '';
+  }
+
+  private async captureConversationSnapshot(
+    conversationId: string | null,
+  ): Promise<Conversation | null> {
+    if (!conversationId) {
+      return null;
+    }
+
+    const conversation =
+      await this.conversationStore.getConversation(conversationId);
+    if (!conversation) {
+      return null;
+    }
+
+    return {
+      ...conversation,
+      messages: conversation.messages.map((message) => ({ ...message })),
+    };
+  }
+
+  private async restoreConversationSnapshot(
+    snapshot: Conversation | null,
+  ): Promise<void> {
+    if (!snapshot) {
+      return;
+    }
+
+    await this.conversationStore.replaceMessages(
+      snapshot.id,
+      snapshot.messages,
+    );
+    this.currentConversationId = snapshot.id;
+    this.sendToWebView({
+      type: 'conversationLoaded',
+      data: snapshot,
+    });
   }
 
   /**
@@ -516,6 +554,9 @@ export class SessionMessageHandler extends BaseMessageHandler {
       return;
     }
 
+    let editRestoreSnapshot: Conversation | null = null;
+    let editMutationApplied = false;
+
     if (editTargetTurnIndex !== undefined) {
       if (!Number.isInteger(editTargetTurnIndex) || editTargetTurnIndex < 0) {
         const errorMsg = 'Invalid message edit target.';
@@ -559,7 +600,19 @@ export class SessionMessageHandler extends BaseMessageHandler {
       }
 
       try {
+        editRestoreSnapshot = await this.captureConversationSnapshot(
+          this.currentConversationId,
+        );
+      } catch (error) {
+        console.warn(
+          '[SessionMessageHandler] Failed to capture edit restore snapshot:',
+          error,
+        );
+      }
+
+      try {
         await this.agentManager.rewindSession(editTargetTurnIndex);
+        editMutationApplied = true;
         await this.conversationStore.truncateFromUserTurn(
           this.currentConversationId,
           editTargetTurnIndex,
@@ -569,6 +622,9 @@ export class SessionMessageHandler extends BaseMessageHandler {
           data: { targetTurnIndex: editTargetTurnIndex },
         });
       } catch (error) {
+        if (editMutationApplied) {
+          await this.restoreConversationSnapshot(editRestoreSnapshot);
+        }
         const errorMsg = this.getErrorMessage(error);
         console.error(
           '[SessionMessageHandler] Failed to rewind session:',
@@ -720,6 +776,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
       }
     } catch (error) {
       console.error('[SessionMessageHandler] Error sending message:', error);
+
+      if (editMutationApplied) {
+        await this.restoreConversationSnapshot(editRestoreSnapshot);
+      }
 
       const err = error as unknown as Error;
       // Safely convert error to string

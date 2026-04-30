@@ -206,7 +206,7 @@ export class Session implements SessionContext {
       );
     }
 
-    if (this.pendingPrompt) {
+    if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
       throw RequestError.invalidParams(
         undefined,
         'Cannot rewind while a prompt is running',

@@ -238,13 +238,18 @@ describe('SessionMessageHandler', () => {
     const conversationStore = {
       createConversation: vi.fn(),
       getConversation: vi.fn().mockResolvedValue({
+        id: 'session-1',
+        title: 'Existing session',
         messages: [
           { role: 'user', content: 'first', timestamp: 1 },
           { role: 'assistant', content: 'first reply', timestamp: 2 },
           { role: 'user', content: 'second', timestamp: 3 },
         ],
+        createdAt: 1,
+        updatedAt: 3,
       }),
       addMessage: vi.fn(),
+      replaceMessages: vi.fn().mockResolvedValue(undefined),
       truncateFromUserTurn: vi.fn().mockResolvedValue(undefined),
     };
     const sendToWebView = vi.fn();
@@ -279,6 +284,70 @@ describe('SessionMessageHandler', () => {
     expect(agentManager.rewindSession.mock.invocationCallOrder[0]).toBeLessThan(
       agentManager.sendMessage.mock.invocationCallOrder[0],
     );
+  });
+
+  it('restores the edited conversation snapshot when replacement send fails', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'edited prompt',
+      displayText: 'edited prompt',
+      savedImageCount: 0,
+      promptImages: [],
+    });
+
+    const originalConversation = {
+      id: 'session-1',
+      title: 'Existing session',
+      messages: [
+        { role: 'user' as const, content: 'first', timestamp: 1 },
+        { role: 'assistant' as const, content: 'first reply', timestamp: 2 },
+        { role: 'user' as const, content: 'second', timestamp: 3 },
+        { role: 'assistant' as const, content: 'second reply', timestamp: 4 },
+      ],
+      createdAt: 1,
+      updatedAt: 4,
+    };
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      rewindSession: vi.fn().mockResolvedValue(undefined),
+      sendMessage: vi.fn().mockRejectedValue(new Error('send failed')),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn().mockResolvedValue(originalConversation),
+      addMessage: vi.fn(),
+      replaceMessages: vi.fn().mockResolvedValue(undefined),
+      truncateFromUserTurn: vi.fn().mockResolvedValue(undefined),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'editMessage',
+      data: {
+        text: 'edited prompt',
+        targetTurnIndex: 1,
+      },
+    });
+
+    expect(conversationStore.replaceMessages).toHaveBeenCalledWith(
+      'session-1',
+      originalConversation.messages,
+    );
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'conversationLoaded',
+      data: originalConversation,
+    });
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'error',
+      data: { message: 'send failed' },
+    });
   });
 
   it('keeps currentConversationId aligned with the archived sessionId when session/load falls back to a new ACP session', async () => {

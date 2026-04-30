@@ -63,6 +63,20 @@ export class ConversationStore {
     }
   }
 
+  async replaceMessages(
+    conversationId: string,
+    messages: ChatMessage[],
+  ): Promise<void> {
+    const conversations = await this.getAllConversations();
+    const conversation = conversations.find((c) => c.id === conversationId);
+
+    if (conversation) {
+      conversation.messages = messages.map((message) => ({ ...message }));
+      conversation.updatedAt = Date.now();
+      await this.context.globalState.update('conversations', conversations);
+    }
+  }
+
   async truncateFromUserTurn(
     conversationId: string,
     targetTurnIndex: number,
