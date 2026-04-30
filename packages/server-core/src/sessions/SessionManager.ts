@@ -1754,6 +1754,10 @@ export class SessionManager implements ISessionManager {
   private async doRefreshExternalSessionsForWorkspace(workspace: Workspace): Promise<void> {
     const workspaceConfig = loadWorkspaceConfig(workspace.rootPath)
     const sessionListCwd = workspaceConfig?.defaults?.workingDirectory || workspace.rootPath
+    const defaultPermissionMode =
+      workspaceConfig?.defaults?.permissionMode
+      ?? loadConfigDefaults().workspaceDefaults.permissionMode
+      ?? 'ask'
     const backendContext = resolveBackendContext({
       workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
     })
@@ -1788,6 +1792,7 @@ export class SessionManager implements ISessionManager {
         info,
         connectionSlug: backendContext.connection.slug,
         model: backendContext.resolvedModel,
+        defaultPermissionMode,
         defaultThinkingLevel: normalizeThinkingLevel(workspaceConfig?.defaults?.thinkingLevel) ?? getDefaultThinkingLevel(),
         loadMessages: agent.loadSessionMessages
           ? (sessionInfo) => agent.loadSessionMessages!(sessionInfo.sessionId, { cwd: sessionInfo.cwd })
@@ -2094,10 +2099,11 @@ export class SessionManager implements ISessionManager {
     info: BackendSessionInfo
     connectionSlug: string
     model: string
+    defaultPermissionMode: PermissionMode
     defaultThinkingLevel: ThinkingLevel
     loadMessages?: (info: BackendSessionInfo) => Promise<Message[] | undefined>
   }): Promise<boolean> {
-    const { workspace, info, connectionSlug, model, defaultThinkingLevel, loadMessages } = args
+    const { workspace, info, connectionSlug, model, defaultPermissionMode, defaultThinkingLevel, loadMessages } = args
     if (!info.sessionId || !info.cwd) return false
     if (this.isExternalSessionDeletePending(workspace.id, info.sessionId)) return false
 
@@ -2151,7 +2157,7 @@ export class SessionManager implements ISessionManager {
       createdAt: timestamp,
       lastUsedAt: Math.max(timestamp, lastInspectedMessage?.timestamp ?? timestamp),
       lastMessageAt: lastInspectedMessage?.timestamp ?? timestamp,
-      permissionMode: 'ask',
+      permissionMode: defaultPermissionMode,
       llmConnection: connectionSlug,
       connectionLocked: true,
       model,
