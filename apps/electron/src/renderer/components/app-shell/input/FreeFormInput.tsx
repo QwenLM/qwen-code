@@ -206,7 +206,7 @@ function ContextUsageIndicator({
         <div className="text-[13px] font-semibold text-muted-foreground">
           {t('chat.contextUsage.title')}
         </div>
-        <div className="mt-1 text-[20px] font-semibold leading-none text-foreground">
+        <div className="mt-1 text-[13px] font-semibold text-foreground">
           {percentLabel}
         </div>
         <div className="mt-3 text-[13px] font-semibold text-foreground">

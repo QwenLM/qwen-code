@@ -303,6 +303,7 @@ export default function App() {
 
   // Splash screen state - tracks when app is fully ready (all data loaded)
   const [sessionsLoaded, setSessionsLoaded] = useState(false)
+  const [projectSessionSnapshotsReady, setProjectSessionSnapshotsReady] = useState(false)
   const [sessionLoadError, setSessionLoadError] = useState<string | null>(null)
   const [splashExiting, setSplashExiting] = useState(false)
   const [splashHidden, setSplashHidden] = useState(false)
@@ -315,7 +316,7 @@ export default function App() {
   const skills = useAtomValue(skillsAtom)
 
   // Compute if app is fully ready (all data loaded)
-  const isFullyReady = appState === 'ready' && sessionsLoaded
+  const isFullyReady = appState === 'ready' && sessionsLoaded && (sessionLoadError || projectSessionSnapshotsReady)
 
   // Trigger splash exit animation when fully ready
   useEffect(() => {
@@ -2048,6 +2049,7 @@ export default function App() {
                   defaultLayout={[20, 32, 48]}
                   menuNewChatTrigger={menuNewChatTrigger}
                   isFocusedMode={isFocusedMode}
+                  onProjectSessionSnapshotsReadyChange={setProjectSessionSnapshotsReady}
                 />
               )}
             </div>
