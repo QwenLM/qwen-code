@@ -83,6 +83,7 @@ describe('project-root workspace storage', () => {
     expect(workspace.rootPath).toStartWith(join(configDir, 'workspaces'))
     expect(existsSync(join(projectDir, 'config.json'))).toBe(false)
     expect(existsSync(join(projectDir, '.claude-plugin', 'plugin.json'))).toBe(false)
+    expect(existsSync(join(workspace.rootPath, 'skills'))).toBe(false)
 
     const workspaceConfig = readJson(join(workspace.rootPath, 'config.json'))
     expect(workspaceConfig.defaults.workingDirectory).toBe(projectDir)
@@ -152,6 +153,7 @@ describe('project-root workspace storage', () => {
     expect(existsSync(join(projectDir, '.claude-plugin', 'plugin.json'))).toBe(false)
 
     const managedRoot = join(configDir, 'workspaces', 'qwen-code')
+    expect(existsSync(join(managedRoot, 'skills'))).toBe(false)
     const workspaceConfig = readJson(join(managedRoot, 'config.json'))
     expect(workspaceConfig.defaults.workingDirectory).toBe(projectDir)
   })

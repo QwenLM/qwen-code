@@ -703,7 +703,6 @@ export class ConfigWatcher {
    */
   private scanSkills(): void {
     if (!existsSync(this.skillsDir)) {
-      mkdirSync(this.skillsDir, { recursive: true });
       return;
     }
 

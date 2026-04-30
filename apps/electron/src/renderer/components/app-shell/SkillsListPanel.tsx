@@ -89,14 +89,14 @@ export function SkillsListPanel({
             skillName={skill.metadata.name}
             onOpenInNewWindow={() => window.electronAPI.openUrl(`craftagents://skills/skill/${skill.slug}?window=focused`)}
             onShowInFinder={() => {
-              if (canRevealLocally) {
+              if (canRevealLocally && skill.path) {
                 void window.electronAPI.showInFolder(`${skill.path}/SKILL.md`)
               }
             }}
-            canShowInFinder={canRevealLocally}
+            canShowInFinder={canRevealLocally && Boolean(skill.path)}
             onDelete={skill.source === 'workspace' ? () => onDeleteSkill(skill.slug) : undefined}
             canDelete={skill.source === 'workspace'}
-            deleteLabel={skill.source === 'workspace' ? t('skillsList.deleteSkill') : t('skillsList.managedByProject')}
+            deleteLabel={skill.source === 'workspace' ? t('skillsList.deleteSkill') : skill.source === 'provider' ? 'Managed by Qwen Code' : t('skillsList.managedByProject')}
             onSendToWorkspace={hasOtherWorkspaces && skill.source === 'workspace' ? () => {
               setSendResourceSlug(skill.slug)
               setSendResourceLabel(skill.metadata.name)

@@ -468,7 +468,7 @@ export function FreeFormInput({
       },
       content: '',
       path: '',
-      source: 'project' as const,
+      source: 'provider' as const,
     }))
   ), [effectiveAvailableSkills])
   const mentionSkills = useQwenAcpSkillMentions ? qwenAcpMentionSkills : skills

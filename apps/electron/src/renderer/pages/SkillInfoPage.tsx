@@ -87,7 +87,7 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
     if (!skill) return
 
     try {
-      if (!canRevealLocally) return
+      if (!canRevealLocally || !skill.path) return
       await window.electronAPI.showInFolder(`${skill.path}/SKILL.md`)
     } catch (err) {
       console.error('Failed to open skill in finder:', err)
@@ -118,6 +118,7 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
   // Get skill name for header
   const skillName = skill?.metadata.name || skillSlug
   const canDeleteSkill = skill?.source === 'workspace'
+  const canEditSkill = Boolean(skill?.path) && skill?.source !== 'provider'
 
   // Format path to show just the skill-relative portion (skills/{slug}/)
   const formatPath = (path: string) => {
@@ -132,7 +133,7 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
   const handleLocationClick = () => {
     if (!skill) return
     // Show the SKILL.md file in Finder (this reveals the enclosing folder with file focused)
-    if (!canRevealLocally) return
+    if (!canRevealLocally || !skill.path) return
     window.electronAPI.showInFolder(`${skill.path}/SKILL.md`)
   }
 
@@ -150,10 +151,10 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
             skillName={skillName}
             onOpenInNewWindow={handleOpenInNewWindow}
             onShowInFinder={handleOpenInFinder}
-            canShowInFinder={canRevealLocally}
+            canShowInFinder={canRevealLocally && Boolean(skill?.path)}
             onDelete={canDeleteSkill ? handleDelete : undefined}
             canDelete={canDeleteSkill}
-            deleteLabel={canDeleteSkill ? t('skillInfo.deleteSkill') : t('skillInfo.managedByProject')}
+            deleteLabel={canDeleteSkill ? t('skillInfo.deleteSkill') : skill?.source === 'provider' ? 'Managed by Qwen Code' : t('skillInfo.managedByProject')}
           />
         }
       />
@@ -170,7 +171,7 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
           {/* Metadata */}
           <Info_Section
             title={t('skillInfo.metadata')}
-            actions={
+            actions={canEditSkill ? (
               // EditPopover for AI-assisted metadata editing (name, description in frontmatter)
               <EditPopover
                 trigger={<EditButton />}
@@ -180,7 +181,7 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
                   filePath: `${skill.path}/SKILL.md`,
                 }}
               />
-            }
+            ) : undefined}
           >
             <Info_Table>
               <Info_Table.Row label={t('common.slug')} value={skill.slug} />
@@ -191,16 +192,19 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
               <Info_Table.Row label={t('common.source')}>
                 {skill.source === 'project' ? t('skillInfo.sourceProject') :
                  skill.source === 'global' ? t('skillInfo.sourceGlobal') :
+                 skill.source === 'provider' ? 'Qwen Code' :
                  t('skillInfo.sourceWorkspace')}
               </Info_Table.Row>
-              <Info_Table.Row label={t('common.location')}>
-                <button
-                  onClick={handleLocationClick}
-                  className="hover:underline cursor-pointer text-left"
-                >
-                  {formatPath(skill.path)}
-                </button>
-              </Info_Table.Row>
+              {skill.path && (
+                <Info_Table.Row label={t('common.location')}>
+                  <button
+                    onClick={handleLocationClick}
+                    className="hover:underline cursor-pointer text-left"
+                  >
+                    {formatPath(skill.path)}
+                  </button>
+                </Info_Table.Row>
+              )}
               {skill.metadata.requiredSources && skill.metadata.requiredSources.length > 0 && (
                 <Info_Table.Row label={t('skillInfo.requiredSources')}>
                   {skill.metadata.requiredSources.join(', ')}
@@ -250,7 +254,7 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
           {/* Instructions */}
           <Info_Section
             title={t('skillInfo.instructions')}
-            actions={
+            actions={canEditSkill ? (
               // EditPopover for AI-assisted editing with "Edit File" as secondary action
               <EditPopover
                 trigger={<EditButton />}
@@ -260,7 +264,7 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
                   filePath: `${skill.path}/SKILL.md`,
                 }}
               />
-            }
+            ) : undefined}
           >
             <Info_Markdown maxHeight={540} fullscreen>
               {skill.content || t('skillInfo.noInstructions')}

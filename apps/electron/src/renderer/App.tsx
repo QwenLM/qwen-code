@@ -104,7 +104,7 @@ function skillsForBadgeExtraction(skills: LoadedSkill[], skillSlugs?: string[]):
       },
       content: '',
       path: '',
-      source: 'project',
+      source: 'provider',
     }))
 
   return syntheticSkills.length > 0 ? [...skills, ...syntheticSkills] : skills
