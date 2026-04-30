@@ -16,6 +16,7 @@ import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
   gh,
   ghApi,
+  ghApiAll,
   currentUser,
   ensureAuthenticated,
 } from './lib/gh.js';
@@ -182,9 +183,11 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   const ciStatus = classifyCi(checkRuns, statuses);
 
   // --- Existing Qwen Code comments --------------------------------------
-  const allComments = (ghApi(
+  // Paginate: PRs can have >30 inline comments and the latest pages carry
+  // the most recent (and most likely to overlap with new findings).
+  const allComments = ghApiAll(
     `repos/${owner}/${repo}/pulls/${prNumber}/comments`,
-  ) as RawComment[] | null) ?? [];
+  ) as RawComment[];
   const qwenComments = allComments.filter((c) =>
     /via Qwen Code \/review/.test(c.body ?? ''),
   );

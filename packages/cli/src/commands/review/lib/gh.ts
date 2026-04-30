@@ -28,6 +28,26 @@ export function ghApi(path: string, jq?: string): unknown {
   return out ? JSON.parse(out) : null;
 }
 
+/**
+ * Run `gh api --paginate <path>` and JSON-parse the merged result.
+ *
+ * Use this for endpoints that return arrays and may have more than 30
+ * (the default `per_page`) entries — PR `/comments`, `/issues/{n}/comments`,
+ * `/reviews`, etc. `gh --paginate` walks every `next` link and concatenates
+ * each page's array into a single top-level array, so a single
+ * `JSON.parse` recovers the full set.
+ *
+ * Returns `[]` for empty responses or non-array payloads (defensive — the
+ * endpoint may legitimately return an object on a 4xx-style 200, e.g. an
+ * error envelope).
+ */
+export function ghApiAll(path: string): unknown[] {
+  const out = gh('api', '--paginate', path);
+  if (!out) return [];
+  const parsed = JSON.parse(out);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
 /** Login of the currently authenticated GitHub user. */
 export function currentUser(): string {
   return gh('api', 'user', '--jq', '.login');

@@ -17,7 +17,7 @@ import type { CommandModule } from 'yargs';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { ensureAuthenticated, gh, ghApi } from './lib/gh.js';
+import { ensureAuthenticated, gh, ghApiAll } from './lib/gh.js';
 
 interface PrMetadata {
   title: string;
@@ -264,18 +264,19 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     ),
   ) as PrMetadata;
 
-  const inline =
-    (ghApi(
-      `repos/${owner}/${repo}/pulls/${prNumber}/comments`,
-    ) as RawComment[] | null) ?? [];
-  const issue =
-    (ghApi(
-      `repos/${owner}/${repo}/issues/${prNumber}/comments`,
-    ) as RawComment[] | null) ?? [];
-  const reviews =
-    (ghApi(
-      `repos/${owner}/${repo}/pulls/${prNumber}/reviews`,
-    ) as RawReview[] | null) ?? [];
+  // Paginate — busy PRs routinely cross the default 30-per-page limit on
+  // each of these endpoints, and the latest entries (which carry the most
+  // recent reviewer summaries / replies) end up on later pages we'd
+  // otherwise miss.
+  const inline = ghApiAll(
+    `repos/${owner}/${repo}/pulls/${prNumber}/comments`,
+  ) as RawComment[];
+  const issue = ghApiAll(
+    `repos/${owner}/${repo}/issues/${prNumber}/comments`,
+  ) as RawComment[];
+  const reviews = ghApiAll(
+    `repos/${owner}/${repo}/pulls/${prNumber}/reviews`,
+  ) as RawReview[];
 
   const md = buildMarkdown(prNumber, ownerRepo, meta, inline, issue, reviews);
 
