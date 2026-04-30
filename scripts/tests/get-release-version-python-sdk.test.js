@@ -38,6 +38,7 @@ function makeResponse({ status = 200, json = {}, statusText = 'OK' } = {}) {
 
 function makeExecSyncMock({
   tags = {},
+  tagError = null,
   releases = {},
   gitHash = 'abc1234',
 } = {}) {
@@ -48,6 +49,9 @@ function makeExecSyncMock({
 
     const tagMatch = command.match(/^git tag -l '(.+)'$/);
     if (tagMatch) {
+      if (tagError) {
+        throw tagError;
+      }
       return Buffer.from(tags[tagMatch[1]] ?? '');
     }
 
@@ -131,6 +135,62 @@ describe('python sdk get-release-version', () => {
       }),
     ).rejects.toThrow(
       'Requested preview release 0.1.1-preview.0 already exists.',
+    );
+  });
+
+  it('fails when an explicit override conflicts with an existing git tag', async () => {
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        tags: {
+          'sdk-python-v0.1.1-preview.0': 'sdk-python-v0.1.1-preview.0',
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(
+      getVersion({
+        type: 'preview',
+        preview_version_override: 'v0.1.1-preview.0',
+      }),
+    ).rejects.toThrow(
+      'Requested preview release 0.1.1-preview.0 already exists.',
+    );
+  });
+
+  it('fails when an explicit override conflicts with an existing GitHub release', async () => {
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        releases: {
+          'sdk-python-v0.1.1-preview.0': 'sdk-python-v0.1.1-preview.0',
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(
+      getVersion({
+        type: 'preview',
+        preview_version_override: 'v0.1.1-preview.0',
+      }),
+    ).rejects.toThrow(
+      'Requested preview release 0.1.1-preview.0 already exists.',
+    );
+  });
+
+  it('fails closed when git tag conflict checks error', async () => {
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        tagError: new Error('git tag failed'),
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'preview' })).rejects.toThrow(
+      'Failed to check git tags for conflicts: git tag failed',
     );
   });
 
@@ -249,6 +309,26 @@ describe('python sdk get-release-version', () => {
     ).resolves.toMatchObject({
       releaseVersion: '0.1.1-preview.2',
       packageVersion: '0.1.1rc2',
+    });
+  });
+
+  it('continues the highest prerelease base for preview releases', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.1.0': [{}],
+            '0.2.0rc0': [{}],
+          },
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'preview' })).resolves.toMatchObject({
+      releaseVersion: '0.2.0-preview.1',
+      packageVersion: '0.2.0rc1',
     });
   });
 

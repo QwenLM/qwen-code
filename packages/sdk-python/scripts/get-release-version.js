@@ -170,14 +170,46 @@ function getLatestPreviewBaseVersion(versions) {
   return toBaseVersion(sortDescending(previewVersions)[0]);
 }
 
-function getNextPatchBaseVersion(versions) {
-  const latestStable = getLatestStableVersion(versions);
-  const baseline = latestStable || getCurrentPackageBaseVersion();
-  const parsed = parseVersion(baseline);
+function getLatestNightlyBaseVersion(versions) {
+  const nightlyVersions = versions.filter(
+    (version) => parseVersion(version)?.stage === 'nightly',
+  );
+
+  if (nightlyVersions.length === 0) {
+    return '';
+  }
+
+  return toBaseVersion(sortDescending(nightlyVersions)[0]);
+}
+
+function incrementPatchVersion(version) {
+  const parsed = parseVersion(version);
   if (!parsed) {
-    throw new Error(`Unsupported baseline version: ${baseline}`);
+    throw new Error(`Unsupported baseline version: ${version}`);
   }
   return `${parsed.major}.${parsed.minor}.${parsed.patch + 1}`;
+}
+
+function getNextPatchBaseVersion(versions) {
+  const stableBaseline = sortDescending([
+    ...versions.filter((version) => parseVersion(version)?.stage === 'stable'),
+    getCurrentPackageBaseVersion(),
+  ])[0];
+  const latestPrereleaseBase = sortDescending(
+    [
+      getLatestPreviewBaseVersion(versions),
+      getLatestNightlyBaseVersion(versions),
+    ].filter(Boolean),
+  )[0];
+
+  if (
+    latestPrereleaseBase &&
+    compareVersions(latestPrereleaseBase, stableBaseline) > 0
+  ) {
+    return latestPrereleaseBase;
+  }
+
+  return incrementPatchVersion(stableBaseline);
 }
 
 function getUtcTimestamp() {
@@ -222,7 +254,7 @@ async function doesVersionExist({ packageVersion, releaseTag }, versions) {
       return true;
     }
   } catch (error) {
-    console.error(`Failed to check git tags: ${error.message}`);
+    throw new Error(`Failed to check git tags for conflicts: ${error.message}`);
   }
 
   try {
