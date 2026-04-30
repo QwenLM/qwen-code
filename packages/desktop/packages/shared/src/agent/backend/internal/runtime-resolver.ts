@@ -38,9 +38,10 @@ function qwenSourceCliCandidates(root: string): string[] {
 }
 
 function resolveQwenCliOverride(): string | undefined {
-  const override = process.env.QWEN_CODE_CLI
-    || process.env.QWEN_CODE_PATH
-    || process.env.QWEN_CODE_ROOT;
+  const override =
+    process.env.QWEN_CODE_CLI ||
+    process.env.QWEN_CODE_PATH ||
+    process.env.QWEN_CODE_ROOT;
   if (!override || !existsSync(override)) return undefined;
   if (isDirectory(override)) {
     return firstExistingPath(qwenSourceCliCandidates(override));
@@ -48,7 +49,11 @@ function resolveQwenCliOverride(): string | undefined {
   return override;
 }
 
-function resolveUpwards(base: string, relativePath: string, maxLevels = 4): string | undefined {
+function resolveUpwards(
+  base: string,
+  relativePath: string,
+  maxLevels = 4,
+): string | undefined {
   let dir = resolve(base);
   for (let i = 0; i <= maxLevels; i++) {
     const candidate = join(dir, relativePath);
@@ -60,18 +65,23 @@ function resolveUpwards(base: string, relativePath: string, maxLevels = 4): stri
   return undefined;
 }
 
-function resolveBundledRuntimePath(hostRuntime: BackendHostRuntimeContext): string | undefined {
+function resolveBundledRuntimePath(
+  hostRuntime: BackendHostRuntimeContext,
+): string | undefined {
   const bunBinary = process.platform === 'win32' ? 'bun.exe' : 'bun';
-  const bunBasePath = process.platform === 'win32'
-    ? (hostRuntime.resourcesPath || hostRuntime.appRootPath)
-    : hostRuntime.appRootPath;
+  const bunBasePath =
+    process.platform === 'win32'
+      ? hostRuntime.resourcesPath || hostRuntime.appRootPath
+      : hostRuntime.appRootPath;
   const bunPath = join(bunBasePath, 'vendor', 'bun', bunBinary);
   if (existsSync(bunPath)) return bunPath;
 
   if (!hostRuntime.isPackaged) {
     try {
       const whichCmd = process.platform === 'win32' ? 'where' : 'which';
-      const systemBun = execFileSync(whichCmd, ['bun'], { encoding: 'utf-8' }).trim();
+      const systemBun = execFileSync(whichCmd, ['bun'], {
+        encoding: 'utf-8',
+      }).trim();
       if (systemBun && existsSync(systemBun)) return systemBun;
     } catch {
       // System runtime not found.
@@ -80,33 +90,103 @@ function resolveBundledRuntimePath(hostRuntime: BackendHostRuntimeContext): stri
   return undefined;
 }
 
-function resolveQwenCliPath(hostRuntime: BackendHostRuntimeContext): string | undefined {
+function resolveNodeRuntimePath(
+  hostRuntime: BackendHostRuntimeContext,
+): string | undefined {
+  if (hostRuntime.nodeRuntimePath && existsSync(hostRuntime.nodeRuntimePath)) {
+    return hostRuntime.nodeRuntimePath;
+  }
+
+  const nodeBinary = process.platform === 'win32' ? 'node.exe' : 'node';
+  const nodeBasePath =
+    process.platform === 'win32'
+      ? hostRuntime.resourcesPath || hostRuntime.appRootPath
+      : hostRuntime.appRootPath;
+  const nodePath =
+    process.platform === 'win32'
+      ? join(nodeBasePath, 'vendor', 'node', nodeBinary)
+      : join(nodeBasePath, 'vendor', 'node', 'bin', nodeBinary);
+  if (existsSync(nodePath)) return nodePath;
+
+  if (!hostRuntime.isPackaged) {
+    try {
+      const whichCmd = process.platform === 'win32' ? 'where' : 'which';
+      const systemNode = execFileSync(whichCmd, ['node'], {
+        encoding: 'utf-8',
+      }).trim();
+      if (systemNode && existsSync(systemNode)) return systemNode;
+    } catch {
+      // System Node runtime not found.
+    }
+  }
+
+  return undefined;
+}
+
+function resolveQwenCliPath(
+  hostRuntime: BackendHostRuntimeContext,
+): string | undefined {
   const envOverride = resolveQwenCliOverride();
   if (envOverride) return envOverride;
 
   const packagedCliRelative = join('vendor', 'qwen-code', 'dist', 'cli.js');
   const packagedRootCliRelative = join('vendor', 'qwen-code', 'cli.js');
-  const packagedIndexRelative = join('vendor', 'qwen-code', 'packages', 'cli', 'dist', 'index.js');
+  const packagedIndexRelative = join(
+    'vendor',
+    'qwen-code',
+    'packages',
+    'cli',
+    'dist',
+    'index.js',
+  );
   const packagedCandidates = [
     join(hostRuntime.appRootPath, packagedCliRelative),
     join(hostRuntime.appRootPath, packagedRootCliRelative),
     join(hostRuntime.appRootPath, packagedIndexRelative),
-    ...(hostRuntime.resourcesPath ? [
-      join(hostRuntime.resourcesPath, 'app', packagedCliRelative),
-      join(hostRuntime.resourcesPath, 'app', packagedRootCliRelative),
-      join(hostRuntime.resourcesPath, 'app', packagedIndexRelative),
-    ] : []),
+    ...(hostRuntime.resourcesPath
+      ? [
+          join(hostRuntime.resourcesPath, 'app', packagedCliRelative),
+          join(hostRuntime.resourcesPath, 'app', packagedRootCliRelative),
+          join(hostRuntime.resourcesPath, 'app', packagedIndexRelative),
+        ]
+      : []),
   ];
 
   if (hostRuntime.isPackaged) {
     return firstExistingPath(packagedCandidates);
   }
 
-  const packageCliRelative = join('node_modules', '@qwen-code', 'qwen-code', 'dist', 'cli.js');
-  const packageRootCliRelative = join('node_modules', '@qwen-code', 'qwen-code', 'cli.js');
-  const packageIndexRelative = join('node_modules', '@qwen-code', 'qwen-code', 'packages', 'cli', 'dist', 'index.js');
+  const packageCliRelative = join(
+    'node_modules',
+    '@qwen-code',
+    'qwen-code',
+    'dist',
+    'cli.js',
+  );
+  const packageRootCliRelative = join(
+    'node_modules',
+    '@qwen-code',
+    'qwen-code',
+    'cli.js',
+  );
+  const packageIndexRelative = join(
+    'node_modules',
+    '@qwen-code',
+    'qwen-code',
+    'packages',
+    'cli',
+    'dist',
+    'index.js',
+  );
   const siblingCliRelative = join('..', 'qwen-code', 'dist', 'cli.js');
-  const siblingIndexRelative = join('..', 'qwen-code', 'packages', 'cli', 'dist', 'index.js');
+  const siblingIndexRelative = join(
+    '..',
+    'qwen-code',
+    'packages',
+    'cli',
+    'dist',
+    'index.js',
+  );
   const localSourceCandidates = [
     ...qwenSourceCliCandidates(join(homedir(), 'Documents', 'qwen-code')),
     ...qwenSourceCliCandidates(join(homedir(), 'qwen-code')),
@@ -128,17 +208,20 @@ function resolveQwenCliPath(hostRuntime: BackendHostRuntimeContext): string | un
   ]);
   if (fromHostRoot) return fromHostRoot;
 
-  const walked = resolveUpwards(hostRuntime.appRootPath, packageCliRelative, 10)
-    ?? resolveUpwards(hostRuntime.appRootPath, packageRootCliRelative, 10)
-    ?? resolveUpwards(hostRuntime.appRootPath, packageIndexRelative, 10)
-    ?? resolveUpwards(hostRuntime.appRootPath, siblingCliRelative, 10)
-    ?? resolveUpwards(hostRuntime.appRootPath, siblingIndexRelative, 10);
+  const walked =
+    resolveUpwards(hostRuntime.appRootPath, packageCliRelative, 10) ??
+    resolveUpwards(hostRuntime.appRootPath, packageRootCliRelative, 10) ??
+    resolveUpwards(hostRuntime.appRootPath, packageIndexRelative, 10) ??
+    resolveUpwards(hostRuntime.appRootPath, siblingCliRelative, 10) ??
+    resolveUpwards(hostRuntime.appRootPath, siblingIndexRelative, 10);
   if (walked) return walked;
 
   if (!hostRuntime.isPackaged) {
     try {
       const whichCmd = process.platform === 'win32' ? 'where' : 'which';
-      const systemQwen = execFileSync(whichCmd, ['qwen'], { encoding: 'utf-8' }).trim();
+      const systemQwen = execFileSync(whichCmd, ['qwen'], {
+        encoding: 'utf-8',
+      }).trim();
       if (systemQwen && existsSync(systemQwen)) return systemQwen;
     } catch {
       // System Qwen CLI not found.
@@ -148,14 +231,23 @@ function resolveQwenCliPath(hostRuntime: BackendHostRuntimeContext): string | un
   return undefined;
 }
 
-function resolveRipgrepPath(hostRuntime: BackendHostRuntimeContext): string | undefined {
-  const packaged = join(hostRuntime.appRootPath, 'vendor', 'ripgrep', process.platform === 'win32' ? 'rg.exe' : 'rg');
+function resolveRipgrepPath(
+  hostRuntime: BackendHostRuntimeContext,
+): string | undefined {
+  const packaged = join(
+    hostRuntime.appRootPath,
+    'vendor',
+    'ripgrep',
+    process.platform === 'win32' ? 'rg.exe' : 'rg',
+  );
   if (hostRuntime.isPackaged && existsSync(packaged)) return packaged;
 
   if (!hostRuntime.isPackaged) {
     try {
       const whichCmd = process.platform === 'win32' ? 'where' : 'which';
-      const systemRg = execFileSync(whichCmd, ['rg'], { encoding: 'utf-8' }).trim();
+      const systemRg = execFileSync(whichCmd, ['rg'], {
+        encoding: 'utf-8',
+      }).trim();
       if (systemRg && existsSync(systemRg)) return systemRg;
     } catch {
       // System ripgrep not found.
@@ -165,17 +257,24 @@ function resolveRipgrepPath(hostRuntime: BackendHostRuntimeContext): string | un
   return undefined;
 }
 
-export function resolveBackendRuntimePaths(hostRuntime: BackendHostRuntimeContext): ResolvedBackendRuntimePaths {
-  const bundledRuntimePath = hostRuntime.nodeRuntimePath || resolveBundledRuntimePath(hostRuntime);
+export function resolveBackendRuntimePaths(
+  hostRuntime: BackendHostRuntimeContext,
+): ResolvedBackendRuntimePaths {
+  const bundledRuntimePath = resolveBundledRuntimePath(hostRuntime);
 
   return {
     qwenCliPath: resolveQwenCliPath(hostRuntime),
-    nodeRuntimePath: hostRuntime.nodeRuntimePath || bundledRuntimePath || process.execPath,
+    nodeRuntimePath:
+      resolveNodeRuntimePath(hostRuntime) ||
+      bundledRuntimePath ||
+      process.execPath,
     bundledRuntimePath,
   };
 }
 
-export function resolveBackendHostTooling(hostRuntime: BackendHostRuntimeContext): ResolvedBackendHostTooling {
+export function resolveBackendHostTooling(
+  hostRuntime: BackendHostRuntimeContext,
+): ResolvedBackendHostTooling {
   return {
     ripgrepPath: resolveRipgrepPath(hostRuntime),
   };
