@@ -66,7 +66,6 @@ interface TranscriptRecovery {
   history: Content[];
   initialPrompt?: string;
   lastStableUuid: string | null;
-  pendingUserMessage?: Content;
   forkBootstrap?: {
     history: Content[];
     taskPrompt: string;
@@ -291,28 +290,9 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
       ? nonSystemStableRecords[0].uuid
       : null;
 
-  const sanitized = [...nonSystemStableRecords];
-  const pendingUserRecords: ChatRecord[] = [];
-  while (sanitized.length > 0) {
-    const last = sanitized[sanitized.length - 1]!;
-    if (last.type !== 'user') break;
-    pendingUserRecords.unshift(last);
-    sanitized.pop();
-  }
-
-  const pendingUserMessage =
-    pendingUserRecords.length > 0
-      ? ({
-          role: 'user',
-          parts: pendingUserRecords.flatMap((record) =>
-            structuredClone(record.message?.parts ?? []),
-          ),
-        } as Content)
-      : undefined;
-
   return {
     history: coalesceAdjacentUserHistory(
-      sanitized
+      nonSystemStableRecords
         .map((record) => record.message)
         .filter((message): message is Content => message !== undefined),
     ),
@@ -321,7 +301,6 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
       stableForBranch.length > 0
         ? stableForBranch[stableForBranch.length - 1]!.uuid
         : null,
-    pendingUserMessage,
     forkBootstrap:
       bootstrapRecord?.systemPayload &&
       (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload).kind ===
@@ -348,7 +327,7 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
               launchPromptRecord!.systemPayload as NotificationRecordPayload
             ).displayText,
             runtimeHistory: coalesceAdjacentUserHistory(
-              sanitized
+              nonSystemStableRecords
                 .filter((record) => record.uuid !== forkLaunchSeedUuid)
                 .map((record) => record.message)
                 .filter((message): message is Content => message !== undefined),
@@ -575,17 +554,6 @@ export class BackgroundAgentResumeService {
       const continuationPrompt =
         promptMessages.join('\n\n').trim() ||
         DEFAULT_BACKGROUND_AGENT_CONTINUATION_MESSAGE;
-      const initialMessagesOverride = recovery.pendingUserMessage
-        ? [
-            {
-              ...structuredClone(recovery.pendingUserMessage),
-              parts: [
-                ...structuredClone(recovery.pendingUserMessage.parts ?? []),
-                { text: `\n${continuationPrompt}` },
-              ],
-            },
-          ]
-        : undefined;
       const writerInitialPrompt = continuationPrompt;
       if (target.isFork && (!resumeHistory || resumeHistory.length === 0)) {
         const reason = LEGACY_FORK_RESUME_BLOCKED_REASON;
@@ -698,9 +666,6 @@ export class BackgroundAgentResumeService {
       const hookSystem = this.config.getHookSystem();
       const contextState = new ContextState();
       contextState.set('task_prompt', continuationPrompt);
-      if (initialMessagesOverride) {
-        contextState.set('initial_messages_override', initialMessagesOverride);
-      }
       const resolvedMode = approvalModeToPermissionMode(resolvedApprovalMode);
       await this.applySubagentStartHook(contextState, {
         agentId: meta.agentId,

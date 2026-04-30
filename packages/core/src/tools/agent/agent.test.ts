@@ -55,6 +55,10 @@ type AgentToolWithProtectedMethods = AgentTool & {
   createInvocation: (params: AgentParams) => AgentToolInvocation;
 };
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 // Mock dependencies
 vi.mock('../../subagents/subagent-manager.js');
 vi.mock('../../agents/runtime/agent-headless.js');
@@ -1551,12 +1555,18 @@ describe('AgentTool', () => {
         agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       await invocation.execute();
+      const expectedTranscriptPrefix = path.join(
+        '/tmp/qwen-test',
+        'subagents',
+        'test-session-id',
+        'agent-monitor-',
+      );
       await vi.waitFor(() => {
         expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenCalledWith(
           expect.stringContaining('monitor-'),
           'monitor',
           expect.stringMatching(
-            /^\/tmp\/qwen-test\/subagents\/test-session-id\/agent-monitor-.*\.jsonl$/,
+            new RegExp(`^${escapeRegExp(expectedTranscriptPrefix)}.*\\.jsonl$`),
           ),
           'Monitor done',
           false,

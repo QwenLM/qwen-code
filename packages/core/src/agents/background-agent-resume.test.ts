@@ -34,7 +34,12 @@ describe('BackgroundAgentResumeService', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(tempDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 50,
+    });
   });
 
   function createService() {
@@ -1111,7 +1116,7 @@ describe('BackgroundAgentResumeService', () => {
     expect(readMetaStatus(metaPath)).toBe('cancelled');
   });
 
-  it('injects pending trailing user text via initial_messages_override', async () => {
+  it('preserves pending trailing user text in history and sends continuation as the new turn', async () => {
     const sessionId = 'session-pending-user';
     const agentId = 'agent-pending-user';
     const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
@@ -1176,12 +1181,8 @@ describe('BackgroundAgentResumeService', () => {
         const override = context.get('initial_messages_override') as
           | Array<{ parts?: Array<{ text?: string }> }>
           | undefined;
-        expect(override).toEqual([
-          {
-            role: 'user',
-            parts: [{ text: 'and another thing' }, { text: '\ncontinue work' }],
-          },
-        ]);
+        expect(override).toBeUndefined();
+        expect(context.get('task_prompt')).toBe('continue work');
       },
     );
     const subagent = {
@@ -1209,6 +1210,7 @@ describe('BackgroundAgentResumeService', () => {
           initialMessages: [
             { role: 'user', parts: [{ text: 'original task' }] },
             { role: 'model', parts: [{ text: 'working' }] },
+            { role: 'user', parts: [{ text: 'and another thing' }] },
           ],
         },
       }),
