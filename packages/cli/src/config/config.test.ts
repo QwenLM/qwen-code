@@ -166,6 +166,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       respectGitIgnore: true,
       respectQwenIgnore: true,
     },
+    normalizeRuleToolName: actualServer.normalizeRuleToolName,
   };
 });
 
@@ -1171,6 +1172,24 @@ describe('Approval mode tool exclusion logic', () => {
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
     expect(excludedTools).not.toContain(ToolNames.MONITOR);
+    expect(excludedTools).toContain(ToolNames.EDIT);
+    expect(excludedTools).toContain(ToolNames.WRITE_FILE);
+  });
+
+  it('should honor monitor aliases in tools.allowed for non-interactive exclusions', async () => {
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        allowed: ['Monitor', 'Shell(git status)'],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
+    expect(excludedTools).not.toContain(ToolNames.SHELL);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });

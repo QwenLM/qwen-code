@@ -942,15 +942,9 @@ export async function loadCliConfig(
   // to preserve the original behaviour where "ShellTool", "Shell", and
   // "run_shell_command" are all accepted as the same tool.
   const isExplicitlyAllowed = (toolName: ToolName): boolean => {
-    const name = toolName as string;
     // 1. Check permissions.allow / allowedTools rules.
     if (
-      mergedAllow.some((rule) => {
-        const openParen = rule.indexOf('(');
-        const ruleName =
-          openParen === -1 ? rule.trim() : rule.substring(0, openParen).trim();
-        return ruleName === name;
-      })
+      mergedAllow.some((rule) => isToolEnabled(toolName, [rule], []))
     ) {
       return true;
     }
