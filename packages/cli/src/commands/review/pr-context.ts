@@ -55,6 +55,27 @@ function snippet(s: string | undefined, max = 240): string {
   return oneLine.length <= max ? oneLine : oneLine.slice(0, max - 1) + '…';
 }
 
+/**
+ * Walk a comment's `in_reply_to_id` chain up to the root. Defends against
+ * cycles (which shouldn't happen on GitHub but cheap to handle).
+ */
+function findRootId(
+  startId: number,
+  byId: Map<number, RawComment>,
+): number {
+  const seen = new Set<number>();
+  let cur = startId;
+  while (true) {
+    if (seen.has(cur)) return cur;
+    seen.add(cur);
+    const c = byId.get(cur);
+    if (!c || c.in_reply_to_id === undefined || c.in_reply_to_id === null) {
+      return cur;
+    }
+    cur = c.in_reply_to_id;
+  }
+}
+
 function buildMarkdown(
   prNumber: string,
   ownerRepo: string,
@@ -62,12 +83,32 @@ function buildMarkdown(
   inline: RawComment[],
   issue: RawComment[],
 ): string {
-  const repliedToIds = new Set<number>();
-  for (const c of [...inline, ...issue]) {
-    if (c.in_reply_to_id) repliedToIds.add(c.in_reply_to_id);
+  // Build a map id → comment, and group replies by root id, so each
+  // already-discussed thread can be rendered with the reviewer's original
+  // concern + the chronological reply chain. This is what tells review
+  // agents that a topic is closed (e.g. "Fixed in abc123" reply means the
+  // reviewer's concern has been addressed and should NOT be re-reported).
+  const byId = new Map<number, RawComment>();
+  for (const c of inline) byId.set(c.id, c);
+
+  const repliesByRoot = new Map<number, RawComment[]>();
+  for (const c of inline) {
+    if (c.in_reply_to_id === undefined || c.in_reply_to_id === null) continue;
+    const rootId = findRootId(c.in_reply_to_id, byId);
+    if (rootId === c.id) continue; // self-reference safety
+    if (!repliesByRoot.has(rootId)) repliesByRoot.set(rootId, []);
+    repliesByRoot.get(rootId)!.push(c);
   }
-  const resolvedInline = inline.filter((c) => repliedToIds.has(c.id));
-  const openInline = inline.filter((c) => !repliedToIds.has(c.id));
+  // Sort replies by id (proxy for chronological — GitHub assigns ids monotonically).
+  for (const replies of repliesByRoot.values()) {
+    replies.sort((a, b) => a.id - b.id);
+  }
+
+  const roots = inline.filter(
+    (c) => c.in_reply_to_id === undefined || c.in_reply_to_id === null,
+  );
+  const repliedRoots = roots.filter((c) => repliesByRoot.has(c.id));
+  const openRoots = roots.filter((c) => !repliesByRoot.has(c.id));
 
   const parts: string[] = [];
 
@@ -94,23 +135,44 @@ function buildMarkdown(
   }
   parts.push('');
 
-  // Already-discussed: any inline comment with a reply, plus issue comments
-  // by humans that look like reviewer feedback.
-  if (resolvedInline.length > 0 || issue.length > 0) {
-    parts.push('## Already discussed in this PR — do NOT re-report');
+  // Already-discussed threads — render the full conversation so review
+  // agents can see whether the original concern was addressed (e.g. a
+  // "Fixed in abc123" reply closes the topic). The previous version listed
+  // only root-comment snippets and forced the LLM driver to manually
+  // summarise each reply chain in agent prompts.
+  if (repliedRoots.length > 0 || issue.length > 0) {
+    parts.push('## Already discussed — do NOT re-report unless the latest reply itself raises a new concern');
     parts.push('');
-    if (resolvedInline.length > 0) {
-      parts.push('**Resolved inline comments (replied to):**');
+    if (repliedRoots.length > 0) {
+      parts.push('### Inline-comment threads with replies');
       parts.push('');
-      for (const c of resolvedInline) {
+      // Sort by file path then line for deterministic output.
+      const sortedRoots = [...repliedRoots].sort((a, b) => {
+        const p = (a.path ?? '').localeCompare(b.path ?? '');
+        if (p !== 0) return p;
+        return (a.line ?? 0) - (b.line ?? 0);
+      });
+      for (const root of sortedRoots) {
+        const replies = repliesByRoot.get(root.id) ?? [];
         parts.push(
-          `- \`${c.path ?? '?'}\`:${c.line ?? '?'} by @${c.user?.login ?? '?'}: ${snippet(c.body)}`,
+          `**\`${root.path ?? '?'}\`:${root.line ?? '?'}** — initiated by @${root.user?.login ?? '?'}`,
         );
+        parts.push('');
+        parts.push(`> ${snippet(root.body)}`);
+        parts.push('');
+        if (replies.length > 0) {
+          parts.push('Replies (chronological):');
+          for (const r of replies) {
+            parts.push(
+              `- **@${r.user?.login ?? '?'}**: ${snippet(r.body)}`,
+            );
+          }
+          parts.push('');
+        }
       }
-      parts.push('');
     }
     if (issue.length > 0) {
-      parts.push('**Issue-level comments:**');
+      parts.push('### Issue-level comments (general PR thread)');
       parts.push('');
       for (const c of issue) {
         parts.push(
@@ -121,10 +183,10 @@ function buildMarkdown(
     }
   }
 
-  if (openInline.length > 0) {
-    parts.push('## Open inline comments (not yet replied to)');
+  if (openRoots.length > 0) {
+    parts.push('## Open inline comments (no replies yet — may still need attention)');
     parts.push('');
-    for (const c of openInline) {
+    for (const c of openRoots) {
       parts.push(
         `- \`${c.path ?? '?'}\`:${c.line ?? '?'} by @${c.user?.login ?? '?'}: ${snippet(c.body)}`,
       );

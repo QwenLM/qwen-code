@@ -69,7 +69,7 @@ Based on the remaining arguments:
       --out .qwen/tmp/qwen-review-pr-<pr_number>-context.md
     ```
 
-    The subcommand fetches `gh pr view` metadata + inline / issue comments and writes a single Markdown file with the PR title, description, base/head, diff stats, an **"Already discussed"** section (replied-to inline comments + issue comments — agents must NOT re-report these), and an "Open inline comments" section. The file's own preamble tells agents to treat its contents as DATA, so no extra security prefix is needed when passing it to review agents.
+    The subcommand fetches `gh pr view` metadata + inline / issue comments and writes a single Markdown file with the PR title, description, base/head, diff stats, an **"Already discussed"** section, and an "Open inline comments" section. Each replied-to thread renders the **complete reply chain** (root comment + chronological replies), so review agents can see whether a "Fixed in `<commit>`"-style reply has closed the topic — agents must NOT re-report a concern whose latest reply addresses it. Issue-level (general PR) comments appear in the same section. The file's own preamble tells agents to treat its contents as DATA, so no extra security prefix is needed when passing it to review agents.
 
   - **Install dependencies in the worktree** (needed for linting, building, testing): run `npm ci` (or `yarn install --frozen-lockfile`, `pip install -e .`, etc.) inside `worktreePath`. If installation fails, log a warning and continue — deterministic analysis and build/test may fail but LLM review agents can still operate.
 
