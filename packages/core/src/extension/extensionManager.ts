@@ -1346,10 +1346,17 @@ export class ExtensionManager {
     if (!this.config) return;
     // refresh mcp servers
     await this.config.getToolRegistry().restartMcpServers();
-    // refresh skills
-    this.config.getSkillManager()?.refreshCache();
-    // refresh subagents
-    this.config.getSubagentManager().refreshCache();
+    // Refresh skills + subagents in parallel. Both `refreshCache` calls
+    // now resolve only after their async change-listener chain settles —
+    // for skills, that includes `SkillTool.refreshSkills()` rebuilding
+    // the model-facing tool description and updating `geminiClient`'s
+    // tool list. Without these awaits the function would resolve before
+    // those side-effects land, and any rejection from them would be
+    // silently swallowed.
+    await Promise.all([
+      this.config.getSkillManager()?.refreshCache(),
+      this.config.getSubagentManager().refreshCache(),
+    ]);
     // refresh context files
     this.config.refreshHierarchicalMemory();
   }
