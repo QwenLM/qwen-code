@@ -355,6 +355,20 @@ export function stripShellWrapper(command: string): string {
 }
 
 /**
+ * Strip a single bare trailing `&` (bash background operator) from a
+ * command string. Returns the input unchanged if the trailing form is
+ * `&&` (logical AND), `\&` (escaped literal `&`), or there is no `&`
+ * at the end at all.
+ */
+export function stripTrailingBackgroundAmp(command: string): string {
+  const trimmed = command.trimEnd();
+  if (!trimmed.endsWith('&')) return command;
+  if (trimmed.endsWith('&&')) return command;
+  if (trimmed.endsWith('\\&')) return command;
+  return trimmed.slice(0, -1).trimEnd();
+}
+
+/**
  * Detects command substitution patterns in a shell command, following bash quoting rules:
  * - Single quotes ('): Everything literal, no substitution possible
  * - Double quotes ("): Command substitution with $() and backticks unless escaped with \

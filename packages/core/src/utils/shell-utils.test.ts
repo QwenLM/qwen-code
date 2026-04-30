@@ -13,6 +13,7 @@ import {
   getShellConfiguration,
   isCommandAllowed,
   isCommandNeedsPermission,
+  stripTrailingBackgroundAmp,
   stripShellWrapper,
 } from './shell-utils.js';
 import type { Config } from '../config/config.js';
@@ -503,6 +504,28 @@ describe('stripShellWrapper', () => {
 
   it('should not strip anything if no wrapper is present', async () => {
     expect(stripShellWrapper('ls -l')).toEqual('ls -l');
+  });
+});
+
+describe('stripTrailingBackgroundAmp', () => {
+  it('strips a single bare trailing ampersand', () => {
+    expect(stripTrailingBackgroundAmp('tail -f app.log &')).toBe(
+      'tail -f app.log',
+    );
+    expect(stripTrailingBackgroundAmp('tail -f app.log &   ')).toBe(
+      'tail -f app.log',
+    );
+  });
+
+  it('does not strip trailing logical-and or escaped ampersands', () => {
+    expect(stripTrailingBackgroundAmp('echo hi &&')).toBe('echo hi &&');
+    expect(stripTrailingBackgroundAmp('echo hi \\&')).toBe('echo hi \\&');
+  });
+
+  it('does not strip non-trailing background operators', () => {
+    expect(stripTrailingBackgroundAmp('sleep 5 & echo done')).toBe(
+      'sleep 5 & echo done',
+    );
   });
 });
 

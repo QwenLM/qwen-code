@@ -38,6 +38,7 @@ import {
   getCommandRoot,
   getCommandRoots,
   splitCommands,
+  stripTrailingBackgroundAmp,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -47,20 +48,6 @@ import {
 } from '../utils/shellAstParser.js';
 
 const debugLogger = createDebugLogger('SHELL');
-
-/**
- * Strip a single bare trailing `&` (bash background operator) from a
- * command string. Returns the input unchanged if the trailing form is
- * `&&` (logical AND), `\&` (escaped literal `&`), or there is no `&`
- * at the end at all. Linear time, no regex backtracking risk.
- */
-function stripTrailingBackgroundAmp(command: string): string {
-  const trimmed = command.trimEnd();
-  if (!trimmed.endsWith('&')) return command;
-  if (trimmed.endsWith('&&')) return command;
-  if (trimmed.endsWith('\\&')) return command;
-  return trimmed.slice(0, -1).trimEnd();
-}
 
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;

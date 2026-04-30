@@ -28,7 +28,14 @@ vi.mock('../utils/shell-utils.js', () => ({
       .split(/\s*&&\s*/)
       .map((part) => part.trim())
       .filter(Boolean),
-  stripShellWrapper: (cmd: string) => cmd,
+  stripTrailingBackgroundAmp: (command: string) => {
+    const trimmed = command.trimEnd();
+    if (!trimmed.endsWith('&')) return command;
+    if (trimmed.endsWith('&&')) return command;
+    if (trimmed.endsWith('\\&')) return command;
+    return trimmed.slice(0, -1).trimEnd();
+  },
+  stripShellWrapper: (cmd: string) => cmd.trim(),
 }));
 
 const mockIsShellCommandReadOnlyAST = vi.hoisted(() => vi.fn());
@@ -159,6 +166,37 @@ describe('MonitorTool', () => {
       expect(details.permissionRules).toEqual(['Monitor(tail -f *)']);
     });
 
+    it('strips a trailing bare ampersand before building confirmation details', async () => {
+      const invocation = createInvocation({
+        command: 'tail -f /tmp/app.log &',
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as ToolCallConfirmationDetails & {
+        command: string;
+        permissionRules?: string[];
+      };
+
+      expect(details.command).toBe('tail -f /tmp/app.log');
+      expect(details.permissionRules).toEqual(['Monitor(tail -f *)']);
+    });
+
+    it('does not strip non-trailing or non-bare ampersands in confirmation details', async () => {
+      const commands = ['sleep 5 & echo done', 'echo hi &&', 'echo hi \\&'];
+
+      for (const command of commands) {
+        const invocation = createInvocation({ command });
+        const details = (await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        )) as ToolCallConfirmationDetails & {
+          command: string;
+        };
+
+        expect(details.command).toBe(command);
+      }
+    });
+
     it('does not consult Bash permission rules for monitor commands', async () => {
       // Monitor should NOT use pm.isCommandAllowed() because that evaluates
       // under 'run_shell_command' context, mixing permission boundaries.
@@ -266,6 +304,11 @@ describe('MonitorTool', () => {
       expect(validate({ command: null })).toBe('Command cannot be empty.');
     });
 
+    it('rejects commands that normalize to empty after stripping trailing &', () => {
+      expect(validate({ command: '&' })).toBe('Command cannot be empty.');
+      expect(validate({ command: '  &  ' })).toBe('Command cannot be empty.');
+    });
+
     it('rejects non-absolute directory', () => {
       expect(
         validate({ command: 'tail -f log', directory: 'relative/path' }),
@@ -334,6 +377,26 @@ describe('MonitorTool', () => {
       expect(result.llmContent).toContain('Monitor started');
       expect(result.llmContent).toContain('mon_');
       expect(result.returnDisplay).toContain('watch app logs');
+    });
+
+    it('strips a trailing bare ampersand before spawning', async () => {
+      const invocation = createInvocation({
+        command: 'tail -f /var/log/app.log &',
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        '/bin/bash',
+        ['-c', 'tail -f /var/log/app.log'],
+        expect.objectContaining({
+          cwd: '/test/dir',
+          detached: true,
+        }),
+      );
+      expect(monitorRegistry.getRunning()[0]?.command).toBe(
+        'tail -f /var/log/app.log',
+      );
     });
 
     it('registers entry in MonitorRegistry', async () => {

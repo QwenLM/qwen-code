@@ -37,6 +37,7 @@ import {
   getCommandRoot,
   getShellConfiguration,
   splitCommands,
+  stripTrailingBackgroundAmp,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -58,6 +59,10 @@ const MAX_LINE_LENGTH = 4096;
 // Throttling constants (token bucket)
 const THROTTLE_BURST_SIZE = 5;
 const THROTTLE_REFILL_INTERVAL_MS = 1000; // 1 token per second
+
+function normalizeMonitorCommand(command: string): string {
+  return stripTrailingBackgroundAmp(stripShellWrapper(command));
+}
 
 export interface MonitorToolParams {
   command: string;
@@ -85,7 +90,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
   }
 
   getDescription(): string {
-    const desc = this.params.description || this.params.command;
+    const desc =
+      this.params.description || normalizeMonitorCommand(this.params.command);
     return `Monitor: ${desc}`;
   }
 
@@ -96,7 +102,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
   override async getConfirmationDetails(
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
-    const command = stripShellWrapper(this.params.command);
+    const command = normalizeMonitorCommand(this.params.command);
     const subCommands = splitCommands(command);
     const confirmableSubCommands: string[] = [];
 
@@ -171,7 +177,13 @@ class MonitorToolInvocation extends BaseToolInvocation<
       };
     }
 
-    const command = this.params.command.trim();
+    const strippedCommand = stripShellWrapper(this.params.command);
+    const command = stripTrailingBackgroundAmp(strippedCommand);
+    if (command !== strippedCommand) {
+      debugLogger.warn(
+        'Stripped trailing & from monitor command — monitor lifecycle handles backgrounding',
+      );
+    }
     const description = this.params.description || command;
     const maxEvents = Math.min(
       this.params.max_events ?? DEFAULT_MAX_EVENTS,
@@ -477,7 +489,10 @@ export class MonitorTool extends BaseDeclarativeTool<
   protected override validateToolParamValues(
     params: MonitorToolParams,
   ): string | null {
-    if (typeof params.command !== 'string' || !params.command.trim()) {
+    if (
+      typeof params.command !== 'string' ||
+      !normalizeMonitorCommand(params.command)
+    ) {
       return 'Command cannot be empty.';
     }
     if (params.max_events !== undefined) {
