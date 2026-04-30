@@ -213,14 +213,16 @@ export class LspServerManager {
       return;
     }
 
-    // Request user confirmation
-    const consent = await this.requestUserConsent(
+    // Check workspace trust before starting the server
+    const trusted = await this.checkWorkspaceTrust(
       name,
       handle.config,
       workspaceTrusted,
     );
-    if (!consent) {
-      debugLogger.info(`User declined to start LSP server ${name}`);
+    if (!trusted) {
+      debugLogger.info(
+        `Workspace trust check failed, not starting LSP server ${name}`,
+      );
       handle.status = 'FAILED';
       return;
     }
@@ -663,9 +665,13 @@ export class LspServerManager {
   }
 
   /**
-   * Request user consent before starting an LSP server.
+   * Check whether the workspace trust level allows starting an LSP server.
+   *
+   * Auto-allows in trusted workspaces. In untrusted workspaces, blocks
+   * servers that require trust (`trustRequired` or global
+   * `requireTrustedWorkspace`), and cautiously allows the rest.
    */
-  private async requestUserConsent(
+  private async checkWorkspaceTrust(
     serverName: string,
     serverConfig: LspServerConfig,
     workspaceTrusted: boolean,
