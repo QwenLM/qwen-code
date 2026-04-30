@@ -333,13 +333,19 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       });
 
       let firstResultResolve: () => void = () => {};
-      const firstResultPromise = new Promise<void>((resolve) => {
+      const firstResultPromise = new Promise<void>((resolve, reject) => {
         firstResultResolve = resolve;
+        setTimeout(() => {
+          reject(new Error('firstResult not received within 30s'));
+        }, 30000);
       });
 
       let secondResultResolve: () => void = () => {};
       const secondResultPromise = new Promise<void>((resolve, reject) => {
         secondResultResolve = resolve;
+        setTimeout(() => {
+          reject(new Error('secondResult not received within 30s'));
+        }, 30000);
       });
 
       async function* createPrompt(): AsyncIterable<SDKUserMessage> {
@@ -410,11 +416,16 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
           }
         };
 
-        loop();
+        const loopPromise = loop();
 
-        await firstResultPromise;
-        await canUseToolCalledPromise;
-        await secondResultPromise;
+        await Promise.race([
+          (async () => {
+            await firstResultPromise;
+            await canUseToolCalledPromise;
+            await secondResultPromise;
+          })(),
+          loopPromise,
+        ]);
 
         const content = await helper.readFile('test.txt');
         expect(content).toBe('original content');
