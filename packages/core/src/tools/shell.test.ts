@@ -1389,6 +1389,11 @@ describe('detectBlockedSleepPattern', () => {
     ).toBeNull();
   });
 
+  it('allows backgrounded sleep (bare &)', () => {
+    expect(detectBlockedSleepPattern('sleep 5 & echo done')).toBeNull();
+    expect(detectBlockedSleepPattern('sleep 10 & wait')).toBeNull();
+  });
+
   it('returns null for empty command', () => {
     expect(detectBlockedSleepPattern('')).toBeNull();
   });

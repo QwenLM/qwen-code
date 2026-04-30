@@ -182,8 +182,17 @@ class MonitorToolInvocation extends BaseToolInvocation<
       MAX_IDLE_TIMEOUT_MS,
     );
 
-    const monitorId = `mon_${randomUUID().slice(0, 8)}`;
+    const monitorId = `mon_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const registry = this.config.getMonitorRegistry();
+
+    // Check concurrent monitor limit before spawning
+    const running = registry.getRunning();
+    if (running.length >= 16) {
+      return {
+        llmContent: `Cannot start monitor: maximum concurrent monitors (16) reached. Stop an existing monitor first.`,
+        returnDisplay: `Monitor rejected: too many concurrent monitors.`,
+      };
+    }
 
     // Independent AbortController — pressing Ctrl+C on the current turn
     // should NOT kill a long-running monitor the user intentionally started.

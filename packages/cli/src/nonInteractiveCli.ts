@@ -821,7 +821,11 @@ export async function runNonInteractive(
       reg.setNotificationCallback(undefined);
       reg.setRegisterCallback(undefined);
       const monReg = config.getMonitorRegistry();
+      // In one-shot (non-Session) runs, abort all running monitors so their
+      // piped stdio refs don't keep the Node event loop alive after the result
+      // is emitted. Session runs manage monitor lifecycle independently.
       if (options.captureMonitorNotifications !== false) {
+        monReg.abortAll();
         monReg.setNotificationCallback(undefined);
       }
       if (options.captureMonitorRegistrations !== false) {

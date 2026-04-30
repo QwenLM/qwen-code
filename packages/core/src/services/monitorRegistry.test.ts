@@ -338,4 +338,23 @@ describe('MonitorRegistry', () => {
       'running',
     ]);
   });
+
+  it('rejects registration when max concurrent monitors reached', () => {
+    for (let i = 0; i < 16; i++) {
+      registry.register(createEntry({ monitorId: `mon-${i}` }));
+    }
+    expect(() =>
+      registry.register(createEntry({ monitorId: 'mon-overflow' })),
+    ).toThrow('maximum concurrent monitors');
+  });
+
+  it('allows registration after completed monitors free up slots', () => {
+    for (let i = 0; i < 16; i++) {
+      registry.register(createEntry({ monitorId: `mon-${i}` }));
+    }
+    registry.complete('mon-0', 0);
+    expect(() =>
+      registry.register(createEntry({ monitorId: 'mon-new' })),
+    ).not.toThrow();
+  });
 });

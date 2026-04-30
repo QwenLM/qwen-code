@@ -21,6 +21,7 @@ const debugLogger = createDebugLogger('MONITOR_REGISTRY');
 
 const MAX_LINE_LENGTH = 2000;
 const MAX_DESCRIPTION_LENGTH = 80;
+const MAX_CONCURRENT_MONITORS = 16;
 
 function escapeXml(text: string): string {
   return text
@@ -69,6 +70,11 @@ export class MonitorRegistry {
   private registerCallback?: MonitorRegisterCallback;
 
   register(entry: MonitorEntry): void {
+    if (this.getRunning().length >= MAX_CONCURRENT_MONITORS) {
+      throw new Error(
+        `Cannot start monitor: maximum concurrent monitors (${MAX_CONCURRENT_MONITORS}) reached. Stop an existing monitor first.`,
+      );
+    }
     this.monitors.set(entry.monitorId, entry);
     debugLogger.info(`Registered monitor: ${entry.monitorId}`);
     this.resetIdleTimer(entry);

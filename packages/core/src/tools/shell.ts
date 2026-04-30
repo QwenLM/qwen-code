@@ -73,9 +73,10 @@ const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
 export function detectBlockedSleepPattern(command: string): string | null {
   const trimmed = command.trim();
   // Match `sleep N` at the very start. Only integer durations >= 2.
-  // After the number: end of string, or a sequential separator (&&, ||, ;, &, newline).
-  // Pipes (|) are NOT matched — those are legitimate pipelines.
-  const m = /^sleep\s+(\d+)(?:\s*$|\s*(&&|\|\||[;&\n])\s*([\s\S]*))$/.exec(
+  // After the number: end of string, or a sequential separator (&&, ||, ;, newline).
+  // Pipes (|) and bare `&` (background operator) are NOT matched — those are
+  // legitimate non-blocking patterns (e.g. `sleep 5 & echo done`).
+  const m = /^sleep\s+(\d+)(?:\s*$|\s*(&&|\|\||[;\n])\s*([\s\S]*))$/.exec(
     trimmed,
   );
   if (!m) return null;
