@@ -631,9 +631,18 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   type AgentLike = {
     initialize: (args: Record<string, unknown>) => Promise<unknown>;
     newSession: (args: Record<string, unknown>) => Promise<unknown>;
+    extMethod: (
+      method: string,
+      args: Record<string, unknown>,
+    ) => Promise<Record<string, unknown>>;
   };
 
   let mockConfig: Config;
+  let lastSessionMock:
+    | {
+        rewindToTurn: ReturnType<typeof vi.fn>;
+      }
+    | undefined;
   let processExitSpy: MockInstance<typeof process.exit>;
   let stdinDestroySpy: MockInstance<typeof process.stdin.destroy>;
   let stdoutDestroySpy: MockInstance<typeof process.stdout.destroy>;
@@ -643,6 +652,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockConnectionState.reset();
+    lastSessionMock = undefined;
     capturedAgentFactory = undefined;
 
     // Override AgentSideConnection mock to capture factory
@@ -751,20 +761,25 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
   async function setupSessionMocks(sessionId: string) {
     const innerConfig = makeInnerConfig();
+    innerConfig.getSessionId = vi.fn().mockReturnValue(sessionId);
     vi.mocked(loadSettings).mockReturnValue(makeSessionSettings());
     vi.mocked(loadCliConfig).mockResolvedValue(
       innerConfig as unknown as Config,
     );
-    vi.mocked(Session).mockImplementation(
-      () =>
-        ({
-          getId: vi.fn().mockReturnValue(sessionId),
-          getConfig: vi.fn().mockReturnValue(innerConfig),
-          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          replayHistory: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
-        }) as unknown as InstanceType<typeof Session>,
-    );
+    vi.mocked(Session).mockImplementation(() => {
+      const sessionMock = {
+        getId: vi.fn().mockReturnValue(sessionId),
+        getConfig: vi.fn().mockReturnValue(innerConfig),
+        sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+        replayHistory: vi.fn().mockResolvedValue(undefined),
+        installRewriter: vi.fn(),
+        rewindToTurn: vi
+          .fn()
+          .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
+      };
+      lastSessionMock = sessionMock;
+      return sessionMock as unknown as InstanceType<typeof Session>;
+    });
     return innerConfig;
   }
 
@@ -805,6 +820,41 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       undefined,
       { Authorization: 'Bearer token123' },
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rewindSession extension method rewinds the active session', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const response = await agent.extMethod('rewindSession', {
+      sessionId,
+      targetTurnIndex: 1,
+      cwd: '/tmp',
+    });
+
+    expect(lastSessionMock?.rewindToTurn).toHaveBeenCalledWith(1);
+    expect(response).toEqual({
+      success: true,
+      targetTurnIndex: 1,
+      apiTruncateIndex: 2,
+    });
 
     mockConnectionState.resolve();
     await agentPromise;

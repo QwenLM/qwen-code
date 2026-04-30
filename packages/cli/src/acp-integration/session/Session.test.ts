@@ -9,6 +9,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Session } from './Session.js';
+import type { Content } from '@google/genai';
 import type { Config, GeminiChat } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, AuthType } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
@@ -56,6 +57,12 @@ describe('Session', () => {
   let currentAuthType: AuthType;
   let switchModelSpy: ReturnType<typeof vi.fn>;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
+  let mockChatRecordingService: {
+    recordUserMessage: ReturnType<typeof vi.fn>;
+    recordUiTelemetryEvent: ReturnType<typeof vi.fn>;
+    recordToolResult: ReturnType<typeof vi.fn>;
+    rewindRecording: ReturnType<typeof vi.fn>;
+  };
   let mockToolRegistry: {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
@@ -74,7 +81,16 @@ describe('Session', () => {
       sendMessageStream: vi.fn(),
       addHistory: vi.fn(),
       getHistory: vi.fn().mockReturnValue([]),
+      truncateHistory: vi.fn(),
+      stripThoughtsFromHistory: vi.fn(),
     } as unknown as GeminiChat;
+
+    mockChatRecordingService = {
+      recordUserMessage: vi.fn(),
+      recordUiTelemetryEvent: vi.fn(),
+      recordToolResult: vi.fn(),
+      rewindRecording: vi.fn(),
+    };
 
     mockToolRegistry = {
       getTool: vi.fn(),
@@ -98,11 +114,9 @@ describe('Session', () => {
       getTelemetryLogPromptsEnabled: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
-      getChatRecordingService: vi.fn().mockReturnValue({
-        recordUserMessage: vi.fn(),
-        recordUiTelemetryEvent: vi.fn(),
-        recordToolResult: vi.fn(),
-      }),
+      getChatRecordingService: vi
+        .fn()
+        .mockReturnValue(mockChatRecordingService),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       // #buildInitialSystemReminders iterates listSubagents() on every
       // session.prompt(). Default to an empty list so tests that don't
@@ -173,6 +187,53 @@ describe('Session', () => {
       });
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(expected);
+    });
+  });
+
+  describe('rewindToTurn', () => {
+    it('truncates model history before the requested user turn and records rewind', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+
+      const result = session.rewindToTurn(1);
+
+      expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+      expect(mockChat.stripThoughtsFromHistory).toHaveBeenCalled();
+      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(1, {
+        truncatedCount: 2,
+      });
+    });
+
+    it('preserves startup context when rewinding to the first user turn', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'startup context' }] },
+        { role: 'model', parts: [{ text: 'Got it. Thanks for the context!' }] },
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+
+      const result = session.rewindToTurn(0);
+
+      expect(result).toEqual({ targetTurnIndex: 0, apiTruncateIndex: 2 });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+    });
+
+    it('rejects unreachable user turns', () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'first' }] },
+      ]);
+
+      expect(() => session.rewindToTurn(2)).toThrow(
+        'Cannot rewind to the requested turn',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
   });
 

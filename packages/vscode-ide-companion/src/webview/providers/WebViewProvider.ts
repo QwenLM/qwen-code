@@ -1782,7 +1782,7 @@ export class WebViewProvider {
     }
     // Reset task timer and notification guard when user sends a new message.
     // Falls through (returns false) so the message is still routed to handlers.
-    if (message.type === 'sendMessage') {
+    if (message.type === 'sendMessage' || message.type === 'editMessage') {
       this.agentStartTime = null;
       this.idleNotificationSent = false;
     }

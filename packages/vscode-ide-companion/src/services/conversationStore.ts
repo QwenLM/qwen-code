@@ -63,6 +63,36 @@ export class ConversationStore {
     }
   }
 
+  async truncateFromUserTurn(
+    conversationId: string,
+    targetTurnIndex: number,
+  ): Promise<void> {
+    const conversations = await this.getAllConversations();
+    const conversation = conversations.find((c) => c.id === conversationId);
+
+    if (!conversation) {
+      return;
+    }
+
+    let userTurnIndex = 0;
+    let truncateAt = conversation.messages.length;
+    for (let i = 0; i < conversation.messages.length; i++) {
+      if (conversation.messages[i]?.role !== 'user') {
+        continue;
+      }
+
+      if (userTurnIndex === targetTurnIndex) {
+        truncateAt = i;
+        break;
+      }
+      userTurnIndex += 1;
+    }
+
+    conversation.messages = conversation.messages.slice(0, truncateAt);
+    conversation.updatedAt = Date.now();
+    await this.context.globalState.update('conversations', conversations);
+  }
+
   async deleteConversation(id: string): Promise<void> {
     const conversations = await this.getAllConversations();
     const filtered = conversations.filter((c) => c.id !== id);

@@ -483,6 +483,19 @@ export class AcpConnection {
     return response;
   }
 
+  async rewindSession(targetTurnIndex: number): Promise<void> {
+    const conn = this.ensureConnection();
+    if (!this.sessionId) {
+      throw new Error('No active ACP session');
+    }
+
+    await conn.extMethod('rewindSession', {
+      sessionId: this.sessionId,
+      targetTurnIndex,
+      cwd: this.workingDir,
+    });
+  }
+
   async loadSession(
     sessionId: string,
     cwdOverride?: string,

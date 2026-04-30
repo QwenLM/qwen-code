@@ -71,6 +71,7 @@ interface UseWebViewMessagesProps {
 
   // Message handling
   messageHandling: {
+    messages: WebViewMessage[];
     setMessages: (
       messages:
         | WebViewMessage[]
@@ -92,6 +93,7 @@ interface UseWebViewMessagesProps {
   // Tool calls
   handleToolCallUpdate: (update: ToolCallUpdate) => void;
   clearToolCalls: () => void;
+  rewindToolCallsToTimestamp?: (cutoffTimestamp: number) => void;
 
   // Plan
   setPlanEntries: (entries: PlanEntry[]) => void;
@@ -211,6 +213,7 @@ export const useWebViewMessages = ({
   messageHandling,
   handleToolCallUpdate,
   clearToolCalls,
+  rewindToolCallsToTimestamp,
   setPlanEntries,
   handlePermissionRequest,
   handleAskUserQuestion,
@@ -248,6 +251,7 @@ export const useWebViewMessages = ({
   // Track the active requestId from the latest streamStart so we can
   // discard stale streamEnd events from cancelled/previous requests.
   const activeRequestIdRef = useRef<string | null>(null);
+  const userTurnCounterRef = useRef(0);
   // Use ref to store callbacks to avoid useEffect dependency issues
   const handlersRef = useRef({
     sessionManagement,
@@ -255,6 +259,7 @@ export const useWebViewMessages = ({
     messageHandling,
     handleToolCallUpdate,
     clearToolCalls,
+    rewindToolCallsToTimestamp,
     setPlanEntries,
     handlePermissionRequest,
     handleAskUserQuestion,
@@ -332,6 +337,7 @@ export const useWebViewMessages = ({
       messageHandling,
       handleToolCallUpdate,
       clearToolCalls,
+      rewindToolCallsToTimestamp,
       setPlanEntries,
       handlePermissionRequest,
       handleAskUserQuestion,
@@ -549,10 +555,22 @@ export const useWebViewMessages = ({
 
         case 'conversationLoaded': {
           const conversation = message.data as Conversation;
+          let nextTurnIndex = 0;
+          const indexedMessages = (
+            conversation.messages as WebViewMessageBase[]
+          ).map((entry) => {
+            if (entry.role !== 'user') {
+              return entry;
+            }
+            const indexed = { ...entry, turnIndex: nextTurnIndex };
+            nextTurnIndex += 1;
+            return indexed;
+          });
+          userTurnCounterRef.current = nextTurnIndex;
           clearInsightState();
           clearImageResolutions();
           handlers.messageHandling.setMessages(
-            materializeMessages(conversation.messages as WebViewMessageBase[]),
+            materializeMessages(indexedMessages),
           );
           break;
         }
@@ -569,7 +587,12 @@ export const useWebViewMessages = ({
               endLine?: number;
             };
           };
-          materializeMessage(msg as WebViewMessageBase).forEach((entry) =>
+          const baseMessage = msg as WebViewMessageBase;
+          if (baseMessage.role === 'user') {
+            baseMessage.turnIndex = userTurnCounterRef.current;
+            userTurnCounterRef.current += 1;
+          }
+          materializeMessage(baseMessage).forEach((entry) =>
             handlers.messageHandling.addMessage(entry),
           );
           // Robustness: if an assistant message arrives outside the normal stream
@@ -596,6 +619,58 @@ export const useWebViewMessages = ({
               }
             }
           }
+          break;
+        }
+
+        case 'conversationRewound': {
+          const targetTurnIndex =
+            typeof message.data?.targetTurnIndex === 'number'
+              ? message.data.targetTurnIndex
+              : -1;
+          if (targetTurnIndex < 0) {
+            break;
+          }
+
+          const currentMessages = handlers.messageHandling.messages;
+          let fallbackUserTurnIndex = 0;
+          let truncateAt = currentMessages.length;
+          let cutoffTimestamp = Date.now();
+
+          for (let i = 0; i < currentMessages.length; i++) {
+            const msg = currentMessages[i];
+            if (msg?.role !== 'user') {
+              continue;
+            }
+            const turnIndex =
+              typeof msg.turnIndex === 'number'
+                ? msg.turnIndex
+                : fallbackUserTurnIndex;
+            fallbackUserTurnIndex = Math.max(
+              fallbackUserTurnIndex,
+              turnIndex + 1,
+            );
+            if (turnIndex === targetTurnIndex) {
+              truncateAt = i;
+              cutoffTimestamp = msg.timestamp;
+              break;
+            }
+          }
+
+          userTurnCounterRef.current = targetTurnIndex;
+          handlers.messageHandling.setMessages(
+            currentMessages.slice(0, truncateAt),
+          );
+          handlers.rewindToolCallsToTimestamp?.(cutoffTimestamp);
+          activeExecToolCallsRef.current.clear();
+          clearInsightState();
+          clearImageResolutions();
+          handlers.setPlanEntries([]);
+          lastPlanSnapshotRef.current = null;
+          handlers.setUsageStats?.(undefined);
+          handlers.handlePermissionRequest(null);
+          handlers.handleAskUserQuestion(null);
+          handlers.messageHandling.clearWaitingForResponse();
+          handlers.messageHandling.clearThinking();
           break;
         }
 

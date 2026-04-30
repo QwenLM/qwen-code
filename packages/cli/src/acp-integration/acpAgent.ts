@@ -493,6 +493,37 @@ class QwenAgent implements Agent {
         );
         return { success };
       }
+      case 'rewindSession': {
+        const sessionId = params['sessionId'] as string;
+        const targetTurnIndex = params['targetTurnIndex'];
+        if (!sessionId || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (
+          !Number.isInteger(targetTurnIndex) ||
+          (targetTurnIndex as number) < 0
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing targetTurnIndex',
+          );
+        }
+        const session = this.sessions.get(sessionId);
+        if (!session) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Session not found for id: ${sessionId}`,
+          );
+        }
+
+        return {
+          success: true,
+          ...session.rewindToTurn(targetTurnIndex as number),
+        };
+      }
       case 'getAccountInfo': {
         const sessionId = params['sessionId'] as string | undefined;
         const session = sessionId ? this.sessions.get(sessionId) : undefined;

@@ -65,6 +65,10 @@ vi.mock('../../services/sessionExportService.js', () => ({
   exportSessionToFile: mockExportSessionToFile,
 }));
 
+vi.mock('@qwen-code/webui', () => ({
+  stripZeroWidthSpaces: (text: string) => text.replace(/\u200B/g, ''),
+}));
+
 import { SessionMessageHandler } from './SessionMessageHandler.js';
 
 describe('SessionMessageHandler', () => {
@@ -215,6 +219,66 @@ describe('SessionMessageHandler', () => {
         uri: 'file:///tmp/clipboard/clipboard-123.png',
       },
     ]);
+  });
+
+  it('rewinds the active ACP session before sending an edited message', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'edited prompt',
+      displayText: 'edited prompt',
+      savedImageCount: 0,
+      promptImages: [],
+    });
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      rewindSession: vi.fn().mockResolvedValue(undefined),
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn().mockResolvedValue({
+        messages: [
+          { role: 'user', content: 'first', timestamp: 1 },
+          { role: 'assistant', content: 'first reply', timestamp: 2 },
+          { role: 'user', content: 'second', timestamp: 3 },
+        ],
+      }),
+      addMessage: vi.fn(),
+      truncateFromUserTurn: vi.fn().mockResolvedValue(undefined),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'editMessage',
+      data: {
+        text: 'edited prompt',
+        targetTurnIndex: 1,
+      },
+    });
+
+    expect(agentManager.rewindSession).toHaveBeenCalledWith(1);
+    expect(conversationStore.truncateFromUserTurn).toHaveBeenCalledWith(
+      'session-1',
+      1,
+    );
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'conversationRewound',
+      data: { targetTurnIndex: 1 },
+    });
+    expect(agentManager.sendMessage).toHaveBeenCalledWith([
+      { type: 'text', text: 'edited prompt' },
+    ]);
+    expect(agentManager.rewindSession.mock.invocationCallOrder[0]).toBeLessThan(
+      agentManager.sendMessage.mock.invocationCallOrder[0],
+    );
   });
 
   it('keeps currentConversationId aligned with the archived sessionId when session/load falls back to a new ACP session', async () => {

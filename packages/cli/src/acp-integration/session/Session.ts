@@ -105,6 +105,7 @@ import {
 } from './rewrite/index.js';
 
 const debugLogger = createDebugLogger('SESSION');
+const STARTUP_CONTEXT_MODEL_ACK = 'Got it. Thanks for the context!';
 
 /**
  * Session represents an active conversation session with the AI model.
@@ -191,6 +192,98 @@ export class Session implements SessionContext {
    */
   async replayHistory(records: ChatRecord[]): Promise<void> {
     await this.historyReplayer.replay(records);
+  }
+
+  rewindToTurn(targetTurnIndex: number): {
+    targetTurnIndex: number;
+    apiTruncateIndex: number;
+  } {
+    if (!Number.isInteger(targetTurnIndex) || targetTurnIndex < 0) {
+      throw RequestError.invalidParams(
+        undefined,
+        'targetTurnIndex must be a non-negative integer',
+      );
+    }
+
+    if (this.pendingPrompt) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Cannot rewind while a prompt is running',
+      );
+    }
+
+    const chat = this.config.getGeminiClient()!.getChat();
+    const apiHistory = chat.getHistory();
+    const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
+      apiHistory,
+      targetTurnIndex,
+    );
+
+    if (apiTruncateIndex < 0) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Cannot rewind to the requested turn. It may have been compressed or does not exist.',
+      );
+    }
+
+    chat.truncateHistory(apiTruncateIndex);
+    chat.stripThoughtsFromHistory();
+
+    this.config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
+      truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex),
+    });
+
+    return { targetTurnIndex, apiTruncateIndex };
+  }
+
+  #computeApiTruncationIndexForUserTurn(
+    apiHistory: Content[],
+    targetTurnIndex: number,
+  ): number {
+    const startIndex = this.#hasStartupContext(apiHistory) ? 2 : 0;
+
+    if (targetTurnIndex === 0) {
+      return startIndex;
+    }
+
+    let realUserPromptCount = 0;
+    for (let i = startIndex; i < apiHistory.length; i++) {
+      if (!this.#isUserTextContent(apiHistory[i]!)) {
+        continue;
+      }
+
+      if (realUserPromptCount === targetTurnIndex) {
+        return i;
+      }
+
+      realUserPromptCount += 1;
+    }
+
+    return -1;
+  }
+
+  #hasStartupContext(apiHistory: Content[]): boolean {
+    if (apiHistory.length < 2) return false;
+    const first = apiHistory[0];
+    const second = apiHistory[1];
+    if (first?.role !== 'user' || second?.role !== 'model') return false;
+    return (
+      second.parts?.some(
+        (part) => 'text' in part && part.text === STARTUP_CONTEXT_MODEL_ACK,
+      ) ?? false
+    );
+  }
+
+  #isUserTextContent(content: Content): boolean {
+    if (content.role !== 'user') return false;
+    if (!content.parts || content.parts.length === 0) return false;
+
+    const hasFunctionResponse = content.parts.some(
+      (part) => 'functionResponse' in part,
+    );
+    if (hasFunctionResponse) return false;
+
+    return content.parts.some((part) => 'text' in part && part.text);
   }
 
   async cancelPendingPrompt(): Promise<void> {

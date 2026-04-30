@@ -106,13 +106,13 @@ export const VSCodePlatformProvider: FC<VSCodePlatformProviderProps> = ({
   }, [vscode]);
 
   // Copy to clipboard handler
-  const copyToClipboard = useCallback(async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch (err) {
-      console.error('Failed to copy to clipboard:', err);
-    }
-  }, []);
+  const copyToClipboard = useCallback(
+    (text: string) => {
+      vscode.postMessage({ type: 'copyToClipboard', data: { text } });
+      return Promise.resolve();
+    },
+    [vscode],
+  );
 
   // Get resource URL handler (for icons and other assets)
   const getResourceUrl = useCallback(

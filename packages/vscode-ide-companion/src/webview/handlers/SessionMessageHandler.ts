@@ -43,6 +43,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
   canHandle(messageType: string): boolean {
     return [
       'sendMessage',
+      'editMessage',
       'newQwenSession',
       'switchQwenSession',
       'getQwenSessions',
@@ -90,6 +91,33 @@ export class SessionMessageHandler extends BaseMessageHandler {
               }
             | undefined,
           data?.attachments as ImageAttachment[] | undefined,
+        );
+        break;
+
+      case 'editMessage':
+        await this.handleSendMessage(
+          (data?.text as string) || '',
+          data?.context as
+            | Array<{
+                type: string;
+                name: string;
+                value: string;
+                startLine?: number;
+                endLine?: number;
+              }>
+            | undefined,
+          data?.fileContext as
+            | {
+                fileName: string;
+                filePath: string;
+                startLine?: number;
+                endLine?: number;
+              }
+            | undefined,
+          data?.attachments as ImageAttachment[] | undefined,
+          typeof data?.targetTurnIndex === 'number'
+            ? data.targetTurnIndex
+            : undefined,
         );
         break;
 
@@ -388,6 +416,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       endLine?: number;
     },
     attachments?: ImageAttachment[],
+    editTargetTurnIndex?: number,
   ): Promise<void> {
     console.log('[SessionMessageHandler] handleSendMessage called with:', text);
     // Guard: do not process empty or whitespace-only messages.
@@ -485,6 +514,73 @@ export class SessionMessageHandler extends BaseMessageHandler {
         data: { message: errorMsg },
       });
       return;
+    }
+
+    if (editTargetTurnIndex !== undefined) {
+      if (!Number.isInteger(editTargetTurnIndex) || editTargetTurnIndex < 0) {
+        const errorMsg = 'Invalid message edit target.';
+        console.error('[SessionMessageHandler]', errorMsg, editTargetTurnIndex);
+        this.sendToWebView({
+          type: 'error',
+          data: { message: errorMsg },
+        });
+        return;
+      }
+
+      if (!this.agentManager.isConnected) {
+        await this.promptAuth(
+          'You need to configure your provider to use Qwen Code.',
+        );
+        return;
+      }
+
+      if (!this.agentManager.currentSessionId) {
+        try {
+          const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+          const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
+          await this.agentManager.createNewSession(workingDir);
+        } catch (createErr) {
+          console.error(
+            '[SessionMessageHandler] Failed to create session before editing message:',
+            createErr,
+          );
+          const errorMsg = this.getErrorMessage(createErr);
+          if (this.shouldPromptAuth(createErr)) {
+            await this.promptAuth(
+              'Your session has expired or is invalid. Please configure your provider to continue using Qwen Code.',
+            );
+            return;
+          }
+          vscode.window.showErrorMessage(
+            `Failed to create session: ${errorMsg}`,
+          );
+          return;
+        }
+      }
+
+      try {
+        await this.agentManager.rewindSession(editTargetTurnIndex);
+        await this.conversationStore.truncateFromUserTurn(
+          this.currentConversationId,
+          editTargetTurnIndex,
+        );
+        this.sendToWebView({
+          type: 'conversationRewound',
+          data: { targetTurnIndex: editTargetTurnIndex },
+        });
+      } catch (error) {
+        const errorMsg = this.getErrorMessage(error);
+        console.error(
+          '[SessionMessageHandler] Failed to rewind session:',
+          error,
+        );
+        vscode.window.showErrorMessage(`Failed to edit message: ${errorMsg}`);
+        this.sendToWebView({
+          type: 'error',
+          data: { message: errorMsg },
+        });
+        return;
+      }
     }
 
     // Check if this is the first message

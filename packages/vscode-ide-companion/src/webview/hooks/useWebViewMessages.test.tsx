@@ -65,6 +65,12 @@ function renderHookHarness(overrides?: {
       addFileReference: vi.fn(),
     },
     messageHandling: {
+      messages: [
+        { role: 'user', content: 'first', timestamp: 100 },
+        { role: 'assistant', content: 'first reply', timestamp: 200 },
+        { role: 'user', content: 'second', timestamp: 300 },
+        { role: 'assistant', content: 'second reply', timestamp: 400 },
+      ],
       setMessages: vi.fn(),
       addMessage: vi.fn(),
       clearMessages: vi.fn(),
@@ -80,6 +86,7 @@ function renderHookHarness(overrides?: {
     },
     handleToolCallUpdate: vi.fn(),
     clearToolCalls: vi.fn(),
+    rewindToolCallsToTimestamp: vi.fn(),
     setPlanEntries: vi.fn(),
     handlePermissionRequest: vi.fn(),
     handleAskUserQuestion: vi.fn(),
@@ -223,6 +230,33 @@ describe('useWebViewMessages', () => {
     });
 
     expect(rendered.clearWaitingForResponse).toHaveBeenCalled();
+  });
+
+  it('drops transcript state from the edited user turn onward', () => {
+    const rendered = renderHookHarness();
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'conversationRewound',
+            data: { targetTurnIndex: 1 },
+          },
+        }),
+      );
+    });
+
+    expect(rendered.handlers.messageHandling.setMessages).toHaveBeenCalledWith([
+      { role: 'user', content: 'first', timestamp: 100 },
+      { role: 'assistant', content: 'first reply', timestamp: 200 },
+    ]);
+    expect(rendered.handlers.rewindToolCallsToTimestamp).toHaveBeenCalledWith(
+      300,
+    );
+    expect(rendered.handlers.setPlanEntries).toHaveBeenCalledWith([]);
+    expect(rendered.setUsageStats).toHaveBeenCalledWith(undefined);
   });
 
   it('clears the generic waiting state when insight progress starts', () => {

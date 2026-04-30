@@ -391,6 +391,10 @@ export class QwenAgentManager {
     await this.connection.sendPrompt(message);
   }
 
+  async rewindSession(targetTurnIndex: number): Promise<void> {
+    await this.connection.rewindSession(targetTurnIndex);
+  }
+
   /**
    * Set approval mode from UI
    */

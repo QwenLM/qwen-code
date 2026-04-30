@@ -19,6 +19,8 @@ interface UseMessageSubmitProps {
   inputFieldRef: React.RefObject<HTMLDivElement | null>;
   isStreaming: boolean;
   isWaitingForResponse: boolean;
+  editTargetTurnIndex?: number | null;
+  onSubmitted?: () => void;
   // When true, do NOT auto-attach the active editor file/selection to context
   skipAutoActiveContext?: boolean;
 
@@ -68,6 +70,8 @@ export const useMessageSubmit = ({
   inputFieldRef,
   isStreaming,
   isWaitingForResponse,
+  editTargetTurnIndex = null,
+  onSubmitted,
   skipAutoActiveContext = false,
   fileContext,
   messageHandling,
@@ -182,12 +186,18 @@ export const useMessageSubmit = ({
       }
 
       vscode.postMessage({
-        type: 'sendMessage',
+        type:
+          typeof editTargetTurnIndex === 'number'
+            ? 'editMessage'
+            : 'sendMessage',
         data: {
           text: textToSend,
           context: context.length > 0 ? context : undefined,
           fileContext: fileContextForMessage,
           attachments: attachedImages.length > 0 ? attachedImages : undefined,
+          ...(typeof editTargetTurnIndex === 'number'
+            ? { targetTurnIndex: editTargetTurnIndex }
+            : {}),
         },
       });
 
@@ -200,6 +210,7 @@ export const useMessageSubmit = ({
       if (clearImages) {
         clearImages();
       }
+      onSubmitted?.();
     },
     [
       inputText,
@@ -213,6 +224,8 @@ export const useMessageSubmit = ({
       skipAutoActiveContext,
       isWaitingForResponse,
       messageHandling,
+      editTargetTurnIndex,
+      onSubmitted,
     ],
   );
 
