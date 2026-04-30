@@ -221,6 +221,8 @@ describe('Session', () => {
         {
           name: 'init',
           description: 'Initialize project context',
+          kind: 'built-in',
+          argumentHint: '[path]',
         },
       ]);
 
@@ -239,9 +241,76 @@ describe('Session', () => {
             {
               name: 'init',
               description: 'Initialize project context',
+              input: { hint: '[path]' },
+            },
+          ],
+        },
+      });
+    });
+
+    it('sets input for built-in commands with subCommands', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'export',
+          description: 'Export conversation history',
+          kind: 'built-in',
+          subCommands: [
+            { name: 'md', description: 'Export as markdown', kind: 'built-in' },
+          ],
+        },
+      ]);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            {
+              name: 'export',
+              description: 'Export conversation history',
+              input: { hint: '' },
+            },
+          ],
+        },
+      });
+    });
+
+    it('attaches available skills to available_commands_update metadata', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'init',
+          description: 'Initialize project context',
+          kind: 'built-in',
+        },
+      ]);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue({
+        listSkills: vi
+          .fn()
+          .mockResolvedValue([
+            { name: 'code-review-expert' },
+            { name: 'verification-pack' },
+          ]),
+      });
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            {
+              name: 'init',
+              description: 'Initialize project context',
               input: null,
             },
           ],
+          _meta: {
+            availableSkills: ['code-review-expert', 'verification-pack'],
+          },
         },
       });
     });

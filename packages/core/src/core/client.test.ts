@@ -347,7 +347,6 @@ describe('Gemini Client (client.ts)', () => {
       getFileService: vi.fn().mockReturnValue(fileService),
       getMaxSessionTurns: vi.fn().mockReturnValue(0),
       getClearContextOnIdle: vi.fn().mockReturnValue({
-        thinkingThresholdMinutes: 5,
         toolResultsThresholdMinutes: 60,
         toolResultsNumToKeep: 5,
       }),
@@ -472,72 +471,8 @@ describe('Gemini Client (client.ts)', () => {
       mockChat = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
-    });
-
-    it('should not strip thoughts on active session (< 5min idle)', async () => {
-      // Simulate a recent API completion (2 minutes ago — within default 5 min threshold)
-      client['lastApiCompletionTimestamp'] = Date.now() - 2 * 60 * 1000;
-      client['thinkingClearLatched'] = false;
-
-      const gen = client.sendMessageStream(
-        [{ text: 'Hello' }],
-        new AbortController().signal,
-        'prompt-1',
-        { type: SendMessageType.UserQuery },
-      );
-      for await (const _ of gen) {
-        /* drain */
-      }
-
-      expect(
-        mockChat.stripThoughtsFromHistoryKeepRecent,
-      ).not.toHaveBeenCalled();
-    });
-
-    it('should latch and strip thoughts after > 5min idle', async () => {
-      // Simulate an old API completion (10 minutes ago — exceeds default 5 min threshold)
-      client['lastApiCompletionTimestamp'] = Date.now() - 10 * 60 * 1000;
-      client['thinkingClearLatched'] = false;
-
-      const gen = client.sendMessageStream(
-        [{ text: 'Hello' }],
-        new AbortController().signal,
-        'prompt-2',
-        { type: SendMessageType.UserQuery },
-      );
-      for await (const _ of gen) {
-        /* drain */
-      }
-
-      expect(client['thinkingClearLatched']).toBe(true);
-      expect(mockChat.stripThoughtsFromHistoryKeepRecent).toHaveBeenCalledWith(
-        1,
-      );
-    });
-
-    it('should keep stripping once latched even if idle < 5min', async () => {
-      // Pre-set latch with a recent timestamp (2 minutes ago — within threshold)
-      client['lastApiCompletionTimestamp'] = Date.now() - 2 * 60 * 1000;
-      client['thinkingClearLatched'] = true;
-
-      const gen = client.sendMessageStream(
-        [{ text: 'Hello' }],
-        new AbortController().signal,
-        'prompt-3',
-        { type: SendMessageType.UserQuery },
-      );
-      for await (const _ of gen) {
-        /* drain */
-      }
-
-      expect(client['thinkingClearLatched']).toBe(true);
-      expect(mockChat.stripThoughtsFromHistoryKeepRecent).toHaveBeenCalledWith(
-        1,
-      );
     });
 
     it('should update lastApiCompletionTimestamp after API call', async () => {
@@ -559,13 +494,11 @@ describe('Gemini Client (client.ts)', () => {
       );
     });
 
-    it('should reset latch and timestamp on resetChat', async () => {
+    it('should reset lastApiCompletionTimestamp on resetChat', async () => {
       client['lastApiCompletionTimestamp'] = Date.now();
-      client['thinkingClearLatched'] = true;
 
       await client.resetChat();
 
-      expect(client['thinkingClearLatched']).toBe(false);
       expect(client['lastApiCompletionTimestamp']).toBeNull();
     });
   });
@@ -578,8 +511,6 @@ describe('Gemini Client (client.ts)', () => {
         getHistory: mockGetHistory,
         addHistory: vi.fn(),
         setHistory: vi.fn(),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       } as unknown as GeminiChat;
     });
 
@@ -600,8 +531,6 @@ describe('Gemini Client (client.ts)', () => {
       const mockOriginalChat: Partial<GeminiChat> = {
         getHistory: vi.fn((_curated?: boolean) => chatHistory),
         setHistory: vi.fn(),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockOriginalChat as GeminiChat;
 
@@ -1293,8 +1222,6 @@ describe('Gemini Client (client.ts)', () => {
       const mockChat = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       } as unknown as GeminiChat;
       client['chat'] = mockChat;
 
@@ -1349,8 +1276,6 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1406,8 +1331,6 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1466,7 +1389,6 @@ hello
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1529,7 +1451,6 @@ hello
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1585,7 +1506,6 @@ hello
           { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
           { role: 'model', parts: [{ text: 'Done' }] },
         ]),
-        stripThoughtsFromHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1649,8 +1569,6 @@ hello
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1689,8 +1607,6 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1735,8 +1651,6 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1824,8 +1738,6 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1882,8 +1794,6 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1964,8 +1874,6 @@ Other open files:
             .mockReturnValue([
               { role: 'user', parts: [{ text: 'previous message' }] },
             ]),
-          stripThoughtsFromHistory: vi.fn(),
-          stripThoughtsFromHistoryKeepRecent: vi.fn(),
         };
         client['chat'] = mockChat as GeminiChat;
       });
@@ -2218,8 +2126,6 @@ Other open files:
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]), // Default empty history
           setHistory: vi.fn(),
-          stripThoughtsFromHistory: vi.fn(),
-          stripThoughtsFromHistoryKeepRecent: vi.fn(),
         };
         client['chat'] = mockChat as GeminiChat;
 
@@ -2558,8 +2464,6 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2596,8 +2500,6 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2637,8 +2539,6 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2662,8 +2562,6 @@ Other open files:
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
           setHistory: vi.fn(),
-          stripThoughtsFromHistory: vi.fn(),
-          stripThoughtsFromHistoryKeepRecent: vi.fn(),
           stripOrphanedUserEntriesFromHistory: vi.fn(),
         };
         client['chat'] = mockChat as GeminiChat;
@@ -2695,8 +2593,6 @@ Other open files:
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
           setHistory: vi.fn(),
-          stripThoughtsFromHistory: vi.fn(),
-          stripThoughtsFromHistoryKeepRecent: vi.fn(),
           stripOrphanedUserEntriesFromHistory: vi.fn(),
         };
         client['chat'] = mockChat as GeminiChat;
@@ -2740,8 +2636,6 @@ Other open files:
         mockChat = {
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
-          stripThoughtsFromHistory: vi.fn(),
-          stripThoughtsFromHistoryKeepRecent: vi.fn(),
         };
         client['chat'] = mockChat as GeminiChat;
       });

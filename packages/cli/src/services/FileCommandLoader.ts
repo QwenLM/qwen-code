@@ -355,6 +355,7 @@ export class FileCommandLoader implements ICommandLoader {
           ? validDef.frontmatter.description
           : undefined,
       whenToUse: validDef.frontmatter?.when_to_use,
+      argumentHint: validDef.frontmatter?.['argument-hint'],
       disableModelInvocation:
         validDef.frontmatter?.['disable-model-invocation'],
     };

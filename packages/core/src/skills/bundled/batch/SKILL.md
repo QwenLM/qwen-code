@@ -1,6 +1,7 @@
 ---
 name: batch
 description: Execute batch operations on multiple files in parallel. Automatically discovers files, splits into chunks, and processes with parallel worker agents. Use `/batch` followed by operation and file pattern.
+argument-hint: '<operation> <file-pattern>'
 allowedTools:
   - task
   - glob

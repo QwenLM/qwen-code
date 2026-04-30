@@ -29,9 +29,49 @@ const FILE_PATH_REGEX =
 const FILE_PATH_WITH_LINES_REGEX =
   /(?:[a-zA-Z]:)?[/\\](?:[\w\-. ]+[/\\])+[\w\-. ]+\.(tsx?|jsx?|css|scss|json|md|py|java|go|rs|c|cpp|h|hpp|sh|yaml|yml|toml|xml|html|vue|svelte)#(\d+)(?:-(\d+))?/gi;
 
-// Known file extensions for validation
+// Known file extensions for validation of explicit markdown links
 const KNOWN_FILE_EXTENSIONS =
   /\.(tsx?|jsx?|css|scss|json|md|py|java|go|rs|c|cpp|h|hpp|sh|ya?ml|toml|xml|html|vue|svelte)$/i;
+
+const safeDecodePath = (value: string): string => {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+};
+
+const normalizeExplicitFileLink = (raw: string): string => {
+  const decoded = safeDecodePath(raw).replace(/\\/g, '/');
+
+  // file:// URIs (e.g. from vscode.Uri.file().toString()) encode special
+  // characters like # as %23 in the path component. After decoding the
+  // full URI we can strip the scheme and return the filesystem path
+  // directly — no fragment splitting needed, because any # in the
+  // decoded result is a literal filename character, not an anchor.
+  if (/^file:\/\//i.test(decoded)) {
+    let filePath = decoded.replace(/^file:\/\/\//i, '');
+    // On Unix the path should start with /
+    if (!/^[a-zA-Z]:/.test(filePath) && !filePath.startsWith('/')) {
+      filePath = '/' + filePath;
+    }
+    return filePath;
+  }
+
+  const hashIndex = decoded.indexOf('#');
+  if (hashIndex < 0) {
+    return decoded;
+  }
+
+  const base = decoded.slice(0, hashIndex);
+  const fragment = decoded.slice(hashIndex + 1);
+  const lineMatch = fragment.match(/^L?(\d+)(?:-\d+)?$/i);
+  if (lineMatch) {
+    return `${base}:${parseInt(lineMatch[1], 10)}`;
+  }
+
+  return base;
+};
 
 /**
  * Escape HTML characters for security
@@ -98,7 +138,6 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
       'gi',
     );
 
-    // Convert a "path#fragment" into VS Code friendly "path:line"
     const normalizePathAndLine = (
       raw: string,
     ): { displayText: string; dataPath: string } => {
@@ -293,14 +332,12 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
   // Event delegation: intercept clicks on generated file-path links
   const handleContainerClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement, MouseEvent>) => {
-      if (!enableFileLinks) {
-        return;
-      }
       const target = e.target as HTMLElement | null;
       if (!target) {
         return;
       }
 
+      // Check for file-path-link (created by processFilePaths when enableFileLinks=true)
       const anchor = (target.closest &&
         target.closest('a.file-path-link')) as HTMLAnchorElement | null;
       if (anchor) {
@@ -314,6 +351,11 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
         return;
       }
 
+      // Handle explicit markdown links (file:// URIs and normal file-path hrefs).
+      // file:// URIs come from trusted system-generated content (e.g. /export).
+      // Normal file-path links (absolute or with known extensions) are also
+      // supported so that intentional markdown links remain clickable even
+      // when enableFileLinks is false.
       const anyAnchor = (target.closest &&
         target.closest('a')) as HTMLAnchorElement | null;
       if (!anyAnchor) {
@@ -321,28 +363,39 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
       }
 
       const href = anyAnchor.getAttribute('href') || '';
-      if (!/^https?:\/\//i.test(href)) {
+
+      // Handle file:// URI links (e.g. from /export success messages).
+      if (/^file:\/\//i.test(href) && onFileClick) {
+        const candidate = normalizeExplicitFileLink(href);
+        e.preventDefault();
+        e.stopPropagation();
+        onFileClick(candidate);
         return;
       }
-      try {
-        const url = new URL(href);
-        const host = url.hostname || '';
-        const path = url.pathname || '';
-        const noPath = path === '' || path === '/';
 
-        // Only treat as file if host has a known file extension
-        if (noPath && KNOWN_FILE_EXTENSIONS.test(host)) {
-          const text = (anyAnchor.textContent || '').trim();
-          const candidate = KNOWN_FILE_EXTENSIONS.test(text) ? text : host;
-          e.preventDefault();
-          e.stopPropagation();
-          onFileClick?.(candidate);
-        }
-      } catch {
-        // ignore
+      // Skip external links — let browser handle them normally
+      if (/^(https?|mailto|ftp|data):/i.test(href)) {
+        return;
+      }
+
+      // Handle explicit markdown file-path links (e.g. [filename](/path/to/file))
+      // even when enableFileLinks=false, so intentional links like Export Session
+      // output remain clickable.
+      const text = (anyAnchor.textContent || '').trim();
+      const candidate = normalizeExplicitFileLink(href || text);
+
+      const isAbsolutePath = /^(?:[a-zA-Z]:[/\\]|[/\\])/i.test(candidate);
+      const isRelativeFile =
+        !isAbsolutePath &&
+        KNOWN_FILE_EXTENSIONS.test(candidate.replace(/:\d+(?::\d+)?$/, ''));
+
+      if ((isAbsolutePath || isRelativeFile) && onFileClick) {
+        e.preventDefault();
+        e.stopPropagation();
+        onFileClick(candidate);
       }
     },
-    [enableFileLinks, onFileClick],
+    [onFileClick],
   );
 
   return (

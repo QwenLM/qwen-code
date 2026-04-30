@@ -58,6 +58,19 @@ describe('SkillCommandLoader', () => {
     expect(mockSkillManager.listSkills).not.toHaveBeenCalled();
   });
 
+  it('should propagate argumentHint from skills to slash commands', async () => {
+    const skill = makeSkill({ argumentHint: '[topic]' });
+    mockSkillManager.listSkills.mockImplementation(
+      ({ level }: { level: string }) =>
+        Promise.resolve(level === 'user' ? [skill] : []),
+    );
+
+    const loader = new SkillCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands[0]?.argumentHint).toBe('[topic]');
+  });
+
   it('should query user, project, and extension levels', async () => {
     const loader = new SkillCommandLoader(mockConfig);
     await loader.loadCommands(signal);

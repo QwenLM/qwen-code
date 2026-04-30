@@ -49,15 +49,40 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
       expect(result).toBe(true);
     });
 
-    it('returns false for non deepseek baseUrl', () => {
+    it('returns false when neither baseUrl nor model match deepseek', () => {
       const config = {
         ...mockContentGeneratorConfig,
         baseUrl: 'https://api.example.com/v1',
+        model: 'gpt-4o',
       } as ContentGeneratorConfig;
 
       const result =
         DeepSeekOpenAICompatibleProvider.isDeepSeekProvider(config);
       expect(result).toBe(false);
+    });
+
+    it('returns true for deepseek model on a non-deepseek baseUrl (e.g. sglang) — issue #3613', () => {
+      const config = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://my-sglang.example.com:8000/v1',
+        model: 'deepseek-v4-pro',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DeepSeekOpenAICompatibleProvider.isDeepSeekProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('matches model name case-insensitively', () => {
+      const config = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://my-vllm.example.com/v1',
+        model: 'DeepSeek-R1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DeepSeekOpenAICompatibleProvider.isDeepSeekProvider(config);
+      expect(result).toBe(true);
     });
   });
 
@@ -152,6 +177,89 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
         role: 'user',
         content: 'Hello \n\n[Unsupported content type: image_url]',
       });
+    });
+
+    // https://github.com/QwenLM/qwen-code/issues/3695 — DeepSeek's thinking
+    // mode rejects subsequent requests when any prior assistant turn omits
+    // reasoning_content, even if the model itself returned no reasoning text.
+    // The provider must always send the field.
+    it('injects empty reasoning_content on tool-calling assistant turns missing it', () => {
+      const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'deepseek-v4-flash',
+        messages: [
+          { role: 'user', content: 'list markdown files' },
+          {
+            role: 'assistant',
+            content: null,
+            tool_calls: [
+              {
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'glob', arguments: '{"pattern":"**/*.md"}' },
+              },
+            ],
+          },
+          {
+            role: 'tool',
+            tool_call_id: 'call_1',
+            content: 'Found 2 matching file(s)',
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(originalRequest, userPromptId);
+
+      const assistant = result.messages?.[1] as {
+        role: string;
+        reasoning_content?: string;
+      };
+      expect(assistant.role).toBe('assistant');
+      expect(assistant.reasoning_content).toBe('');
+    });
+
+    it('preserves existing reasoning_content on tool-calling assistant turns', () => {
+      const originalRequest = {
+        model: 'deepseek-v4-flash',
+        messages: [
+          { role: 'user' as const, content: 'list markdown files' },
+          {
+            role: 'assistant' as const,
+            content: null,
+            reasoning_content: 'Let me glob first.',
+            tool_calls: [
+              {
+                id: 'call_1',
+                type: 'function' as const,
+                function: { name: 'glob', arguments: '{"pattern":"**/*.md"}' },
+              },
+            ],
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(originalRequest, userPromptId);
+
+      const assistant = result.messages?.[1] as {
+        reasoning_content?: string;
+      };
+      expect(assistant.reasoning_content).toBe('Let me glob first.');
+    });
+
+    it('injects empty reasoning_content on assistant turns without tool_calls', () => {
+      const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'deepseek-v4-flash',
+        messages: [
+          { role: 'user', content: 'hi' },
+          { role: 'assistant', content: 'hello' },
+        ],
+      };
+
+      const result = provider.buildRequest(originalRequest, userPromptId);
+
+      const assistant = result.messages?.[1] as {
+        reasoning_content?: string;
+      };
+      expect(assistant.reasoning_content).toBe('');
     });
   });
 

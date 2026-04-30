@@ -61,6 +61,7 @@ import { PermissionManager } from '../permissions/permission-manager.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
+import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -203,8 +204,6 @@ export interface ChatCompressionSettings {
  * Threshold values of -1 mean "never clear" (disabled).
  */
 export interface ClearContextOnIdleSettings {
-  /** Minutes idle before clearing old thinking blocks. Default 5. Use -1 to disable. */
-  thinkingThresholdMinutes?: number;
   /** Minutes idle before clearing old tool results. Default 60. Use -1 to disable. */
   toolResultsThresholdMinutes?: number;
   /** Number of most-recent tool results to preserve. Default 5. */
@@ -409,6 +408,7 @@ export interface ConfigParameters {
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
+  emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
   allowedMcpServers?: string[];
@@ -570,6 +570,7 @@ export class Config {
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
   private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
+  private readonly backgroundShellRegistry = new BackgroundShellRegistry();
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
@@ -657,6 +658,7 @@ export class Config {
   private readonly cliVersion?: string;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = false;
+  private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly importFormat: 'tree' | 'flat';
@@ -708,6 +710,7 @@ export class Config {
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
   private readonly memoryManager: MemoryManager;
+  private readonly modelChangeListeners = new Set<(model: string) => void>();
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
@@ -790,8 +793,6 @@ export class Config {
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
     this.clearContextOnIdle = {
-      thinkingThresholdMinutes:
-        params.clearContextOnIdle?.thinkingThresholdMinutes ?? 5,
       toolResultsThresholdMinutes:
         params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
       toolResultsNumToKeep:
@@ -801,6 +802,7 @@ export class Config {
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
     this.cronEnabled = params.cronEnabled ?? false;
+    this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
     this.noBrowser = params.noBrowser ?? false;
@@ -1398,6 +1400,20 @@ export class Config {
     return this.contentGeneratorConfig?.model || this.modelsConfig.getModel();
   }
 
+  onModelChange(listener: (model: string) => void): () => void {
+    this.modelChangeListeners.add(listener);
+    return () => {
+      this.modelChangeListeners.delete(listener);
+    };
+  }
+
+  private notifyModelChangeListeners(): void {
+    const model = this.getModel();
+    for (const listener of this.modelChangeListeners) {
+      listener(model);
+    }
+  }
+
   /**
    * Returns the fast model if one is configured and valid for the current auth type,
    * otherwise returns undefined. Background agents (memory extraction, dream, /btw)
@@ -1434,6 +1450,7 @@ export class Config {
     if (this.contentGeneratorConfig) {
       this.contentGeneratorConfig.model = newModel;
     }
+    this.notifyModelChangeListeners();
   }
 
   /**
@@ -1448,11 +1465,9 @@ export class Config {
       return;
     }
 
-    // Strip thinking blocks from conversation history on model switch.
-    // reasoning_content is a non-standard field that causes strict
-    // OpenAI-compatible providers to reject requests with 422 errors
-    // when thought parts from a previous model leak into the payload (#3304).
-    this.geminiClient.stripThoughtsFromHistory();
+    // Keep full history (including thought parts) on model switch.
+    // Some OpenAI-compatible reasoning models (e.g. DeepSeek) require
+    // reasoning_content to be preserved across turns.
 
     // Hot update path: only supported for qwen-oauth.
     // For other auth types we always refresh to recreate the ContentGenerator.
@@ -1479,6 +1494,7 @@ export class Config {
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
       this.contentGeneratorConfig.enableCacheControl =
         config.enableCacheControl;
+      this.contentGeneratorConfig.splitToolMedia = config.splitToolMedia;
 
       if ('model' in sources) {
         this.contentGeneratorConfigSources['model'] = sources['model'];
@@ -1494,6 +1510,10 @@ export class Config {
       if ('contextWindowSize' in sources) {
         this.contentGeneratorConfigSources['contextWindowSize'] =
           sources['contextWindowSize'];
+      }
+      if ('splitToolMedia' in sources) {
+        this.contentGeneratorConfigSources['splitToolMedia'] =
+          sources['splitToolMedia'];
       }
       return;
     }
@@ -1552,6 +1572,7 @@ export class Config {
     options?: { requireCachedCredentials?: boolean },
   ): Promise<void> {
     await this.modelsConfig.switchModel(authType, modelId, options);
+    this.notifyModelChangeListeners();
   }
 
   getMaxSessionTurns(): number {
@@ -1616,9 +1637,11 @@ export class Config {
       return;
     }
     try {
-      // Finalize the current session's metadata before cleanup.
+      // Finalize the current session's metadata before cleanup, then drain
+      // the async write queue so no records are lost on exit.
       try {
         this.chatRecordingService?.finalize();
+        await this.chatRecordingService?.flush();
       } catch {
         // Best-effort — don't block shutdown
       }
@@ -1630,6 +1653,7 @@ export class Config {
       }
 
       this.backgroundTaskRegistry.abortAll();
+      this.backgroundShellRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
     } catch (error) {
@@ -2014,6 +2038,22 @@ export class Config {
     // Cron is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_CRON'] === '1') return true;
     return this.cronEnabled;
+  }
+
+  /**
+   * Whether the turn loop should fire a fast-model call after each tool batch
+   * to emit a `tool_use_summary` message. Mirrors Claude Code's
+   * `CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES` gate, but defaults to on so the
+   * compact-mode UI benefits without configuration.
+   *
+   * Env overrides (either direction): `QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0`
+   * to force off, `=1` to force on.
+   */
+  getEmitToolUseSummaries(): boolean {
+    const env = process.env['QWEN_CODE_EMIT_TOOL_USE_SUMMARIES'];
+    if (env === '0' || env === 'false') return false;
+    if (env === '1' || env === 'true') return true;
+    return this.emitToolUseSummaries;
   }
 
   getEnableRecursiveFileSearch(): boolean {
@@ -2493,6 +2533,10 @@ export class Config {
     return this.backgroundTaskRegistry;
   }
 
+  getBackgroundShellRegistry(): BackgroundShellRegistry {
+    return this.backgroundShellRegistry;
+  }
+
   /**
    * Whether interactive permission prompts should be auto-denied.
    * True for background agents that have no UI to show prompts.
@@ -2626,6 +2670,14 @@ export class Config {
     await registerLazy(ToolNames.AGENT, async () => {
       const { AgentTool } = await import('../tools/agent/agent.js');
       return new AgentTool(this);
+    });
+    await registerLazy(ToolNames.TASK_STOP, async () => {
+      const { TaskStopTool } = await import('../tools/task-stop.js');
+      return new TaskStopTool(this);
+    });
+    await registerLazy(ToolNames.SEND_MESSAGE, async () => {
+      const { SendMessageTool } = await import('../tools/send-message.js');
+      return new SendMessageTool(this);
     });
     await registerLazy(ToolNames.SKILL, async () => {
       const { SkillTool } = await import('../tools/skill.js');

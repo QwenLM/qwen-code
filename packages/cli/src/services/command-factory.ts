@@ -37,6 +37,7 @@ import { AtFileProcessor } from './prompt-processors/atFileProcessor.js';
 export interface CommandDefinition {
   prompt: string;
   description?: string;
+  argumentHint?: string;
   whenToUse?: string;
   disableModelInvocation?: boolean;
 }
@@ -121,6 +122,7 @@ export function createSlashCommandFromDefinition(
     modelInvocable: definition.disableModelInvocation
       ? false
       : !extensionName || !!(definition.description || definition.whenToUse),
+    argumentHint: definition.argumentHint,
     whenToUse: definition.whenToUse,
     action: async (
       context: CommandContext,

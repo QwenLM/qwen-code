@@ -37,7 +37,7 @@ interface ExtendedCompletionUsage extends OpenAI.CompletionUsage {
   cached_tokens?: number;
 }
 
-interface ExtendedChatCompletionAssistantMessageParam
+export interface ExtendedChatCompletionAssistantMessageParam
   extends OpenAI.Chat.ChatCompletionAssistantMessageParam {
   reasoning_content?: string | null;
 }
@@ -400,6 +400,14 @@ function processContent(
   const reasoningParts: string[] = [];
   const toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = [];
   let toolCallIndex = 0;
+  // When `splitToolMedia` is enabled, media stripped from tool messages is
+  // accumulated here and emitted as a single follow-up user message after
+  // ALL tool messages in this group have been pushed. OpenAI Chat
+  // Completions requires every `role: "tool"` response for a given assistant
+  // turn to appear contiguously before any non-tool message; emitting the
+  // user message inline (after each tool message) would interleave and
+  // break that contract when multiple parallel tool calls return media.
+  const accumulatedSplitMedia: OpenAIContentPart[] = [];
 
   for (const part of parts) {
     if (typeof part === 'string') {
@@ -441,9 +449,63 @@ function processContent(
         requestContext,
       );
       if (toolMessage) {
+        // Opt-in only (ContentGeneratorConfig.splitToolMedia). OpenAI spec
+        // only permits string / text-part content on `role: "tool"` messages.
+        // Strict OpenAI-compatible servers (e.g. LM Studio) reject tool
+        // messages containing image_url / input_audio / video_url / file
+        // parts with HTTP 400 "Invalid 'messages' in payload". When the flag
+        // is set, strip non-text media from this tool message and accumulate
+        // it; the combined media is emitted as a single follow-up user
+        // message after the parts loop completes — preserving the
+        // "all tool responses contiguous" requirement for parallel tool
+        // calls. Default (flag false) preserves prior behavior: media is
+        // embedded in the tool message and permissive providers continue
+        // to receive it that way. See #3616.
+        if (
+          requestContext.splitToolMedia &&
+          Array.isArray(toolMessage.content)
+        ) {
+          const mediaParts: OpenAIContentPart[] = [];
+          const textParts: OpenAI.Chat.ChatCompletionContentPartText[] = [];
+          for (const cp of toolMessage.content as OpenAIContentPart[]) {
+            if (
+              cp &&
+              (cp.type === 'image_url' ||
+                cp.type === 'input_audio' ||
+                cp.type === 'video_url' ||
+                cp.type === 'file')
+            ) {
+              mediaParts.push(cp);
+            } else if (cp && cp.type === 'text') {
+              textParts.push(cp);
+            }
+          }
+          if (mediaParts.length > 0) {
+            const textOnly = textParts.map((p) => p.text).join('\n');
+            toolMessage.content =
+              textOnly || '[media attached in following user message]';
+            accumulatedSplitMedia.push(...mediaParts);
+          }
+        }
         messages.push(toolMessage);
       }
     }
+  }
+
+  // Emit one combined user message containing all media stripped from the
+  // tool messages in this group. Runs after the parts loop so all tool
+  // messages remain contiguous (OpenAI requirement for parallel tool calls).
+  if (accumulatedSplitMedia.length > 0) {
+    messages.push({
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: '(attached media from previous tool call)',
+        },
+        ...accumulatedSplitMedia,
+      ] as unknown as OpenAI.Chat.ChatCompletionContentPartText[],
+    });
   }
 
   if (role === 'assistant') {

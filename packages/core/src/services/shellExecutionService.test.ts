@@ -33,6 +33,26 @@ const mockIsBinary = vi.hoisted(() => vi.fn());
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockGetPty = vi.hoisted(() => vi.fn());
 const mockSerializeTerminalToObject = vi.hoisted(() => vi.fn());
+const mockSerializeTerminalToText = vi.hoisted(() =>
+  vi.fn((terminal: pkg.Terminal): string => {
+    const buffer = terminal.buffer.active;
+    const lines: string[] = [];
+
+    for (let i = 0; i < buffer.length; i++) {
+      const line = buffer.getLine(i);
+      const lineContent = line ? line.translateToString(true) : '';
+
+      if (line?.isWrapped && lines.length > 0) {
+        lines[lines.length - 1] += lineContent;
+        continue;
+      }
+
+      lines.push(lineContent);
+    }
+
+    return lines.join('\n').trimEnd();
+  }),
+);
 const mockGetShellConfiguration = vi.hoisted(() =>
   vi.fn().mockReturnValue({
     executable: 'bash',
@@ -74,6 +94,7 @@ vi.mock('../utils/getPty.js', () => ({
 }));
 vi.mock('../utils/terminalSerializer.js', () => ({
   serializeTerminalToObject: mockSerializeTerminalToObject,
+  serializeTerminalToText: mockSerializeTerminalToText,
 }));
 vi.mock('../utils/shell-utils.js', () => ({
   getShellConfiguration: mockGetShellConfiguration,
@@ -122,6 +143,17 @@ const createExpectedAnsiOutput = (text: string | string[]): AnsiOutput => {
   return expected;
 };
 
+const createAnsiToken = (text: string) => ({
+  text,
+  bold: false,
+  italic: false,
+  underline: false,
+  dim: false,
+  inverse: false,
+  fg: '',
+  bg: '',
+});
+
 const setupConflictingPathEnv = () => {
   process.env = {
     ...originalProcessEnv,
@@ -133,6 +165,21 @@ const setupConflictingPathEnv = () => {
 const expectNormalizedWindowsPathEnv = (env: NodeJS.ProcessEnv) => {
   expect(env['PATH']).toBe(EXPECTED_MERGED_WINDOWS_PATH);
   expect(env['Path']).toBeUndefined();
+};
+
+const waitForDataEventCount = async (
+  onOutputEventMock: Mock<(event: ShellOutputEvent) => void>,
+  expectedCount: number,
+) => {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const dataEvents = onOutputEventMock.mock.calls.filter(
+      ([event]) => event.type === 'data',
+    );
+    if (dataEvents.length >= expectedCount) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
 };
 
 describe('ShellExecutionService', () => {
@@ -363,6 +410,23 @@ describe('ShellExecutionService', () => {
       });
 
       expect(result.output).toBe('Compressing objects: 100% (7/7), done.');
+    });
+
+    it('should not persist narrow terminal soft wraps as transcript newlines', async () => {
+      const { result } = await simulateExecution(
+        'narrow-output',
+        (pty) => {
+          pty.onData.mock.calls[0][0]('abcdefghijklmnopqrstuvwxyz\nshort\n');
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+        },
+        {
+          ...shellExecutionConfig,
+          terminalWidth: 8,
+          terminalHeight: 4,
+        },
+      );
+
+      expect(result.output).toBe('abcdefghijklmnopqrstuvwxyz\nshort');
     });
   });
 
@@ -709,6 +773,59 @@ describe('ShellExecutionService', () => {
       );
     });
 
+    it('does not re-emit live output when only soft-wrap segmentation changes', async () => {
+      const coloredShellExecutionConfig = {
+        ...shellExecutionConfig,
+        showColor: true,
+        disableDynamicLineTrimming: true,
+      };
+      const firstWrappedOutput = [
+        [createAnsiToken('abcd')],
+        [createAnsiToken('efgh')],
+      ];
+      const rewrappedOutput = [
+        [createAnsiToken('ab')],
+        [createAnsiToken('cdef')],
+        [createAnsiToken('gh')],
+      ];
+      const logicalOutput = [[createAnsiToken('abcdefgh')]];
+      let rawRenderCount = 0;
+
+      mockSerializeTerminalToObject.mockImplementation(
+        (
+          _terminal,
+          _scrollOffset,
+          options?: { unwrapWrappedLines?: boolean },
+        ) => {
+          if (options?.unwrapWrappedLines) {
+            return logicalOutput;
+          }
+
+          rawRenderCount += 1;
+          return rawRenderCount === 1 ? firstWrappedOutput : rewrappedOutput;
+        },
+      );
+
+      await simulateExecution(
+        'narrow-output',
+        (pty) => {
+          pty.onData.mock.calls[0][0]('abcdefgh');
+          pty.onData.mock.calls[0][0]('\r');
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+        },
+        coloredShellExecutionConfig,
+      );
+
+      const dataEvents = onOutputEventMock.mock.calls.filter(
+        ([event]) => event.type === 'data',
+      );
+      expect(dataEvents).toHaveLength(1);
+      expect(dataEvents[0][0]).toEqual({
+        type: 'data',
+        chunk: firstWrappedOutput,
+      });
+    });
+
     it('should call onOutputEvent with AnsiOutput when showColor is false', async () => {
       await simulateExecution(
         'ls --color=auto',
@@ -731,6 +848,47 @@ describe('ShellExecutionService', () => {
           chunk: expected,
         }),
       );
+    });
+
+    it('does not re-emit default plain live output when only soft-wrap segmentation changes', async () => {
+      const abortController = new AbortController();
+      const handle = await ShellExecutionService.execute(
+        'narrow-output',
+        '/test/dir',
+        onOutputEventMock,
+        abortController.signal,
+        true,
+        {
+          ...shellExecutionConfig,
+          terminalWidth: 4,
+          terminalHeight: 4,
+          showColor: false,
+          disableDynamicLineTrimming: false,
+        },
+      );
+
+      await new Promise((resolve) => process.nextTick(resolve));
+      mockPtyProcess.onData.mock.calls[0][0]('abcdefgh');
+      await waitForDataEventCount(onOutputEventMock, 1);
+
+      ShellExecutionService.resizePty(handle.pid!, 2, 4);
+      mockPtyProcess.onData.mock.calls[0][0]('\r');
+      mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      await handle.result;
+
+      const dataEvents = onOutputEventMock.mock.calls.filter(
+        ([event]) => event.type === 'data',
+      );
+      expect(dataEvents).toHaveLength(1);
+      const firstDataEvent = dataEvents[0][0];
+      if (firstDataEvent.type !== 'data') {
+        throw new Error('Expected a shell data event.');
+      }
+      const chunk = firstDataEvent.chunk as AnsiOutput;
+      expect(chunk.map((line) => line[0]?.text).filter(Boolean)).toEqual([
+        'abcd',
+        'efgh',
+      ]);
     });
 
     it('should handle multi-line output correctly when showColor is false', async () => {

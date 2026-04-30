@@ -47,6 +47,10 @@ import {
   useAgentViewState,
   useAgentViewActions,
 } from '../contexts/AgentViewContext.js';
+import {
+  useBackgroundTaskViewState,
+  useBackgroundTaskViewActions,
+} from '../contexts/BackgroundTaskViewContext.js';
 import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
 import { BaseTextInput } from './BaseTextInput.js';
 import type { RenderLineOptions } from './BaseTextInput.js';
@@ -124,7 +128,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const { pasteWorkaround } = useKeypressContext();
   const { agents, agentTabBarFocused } = useAgentViewState();
   const { setAgentTabBarFocused } = useAgentViewActions();
+  const {
+    entries: bgEntries,
+    dialogOpen: bgDialogOpen,
+    pillFocused: bgPillFocused,
+  } = useBackgroundTaskViewState();
+  const { setPillFocused: setBgPillFocused } = useBackgroundTaskViewActions();
   const hasAgents = agents.size > 0;
+  // Includes terminal entries — the pill stays open so users can reopen
+  // the dialog to inspect final state after the last agent finishes.
+  const hasBgAgents = bgEntries.length > 0;
   const [justNavigatedHistory, setJustNavigatedHistory] = useState(false);
   const [escPressCount, setEscPressCount] = useState(0);
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
@@ -194,6 +207,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const midInputGhostTextRef = useRef<{
     text: string;
     insertPosition: number;
+    acceptText?: string;
+    showCursorBeforeText?: boolean;
   } | null>(null);
   midInputGhostTextRef.current = completion.midInputGhostText;
 
@@ -443,12 +458,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const handleInput = useCallback(
     (key: Key): boolean => {
-      // When the tab bar has focus, block all non-printable keys so arrow
-      // keys and shortcuts don't interfere. Printable characters fall
-      // through to BaseTextInput's default handler so the first keystroke
-      // appears in the input immediately (the tab bar handler releases
-      // focus on the same event).
-      if (agentTabBarFocused) {
+      // When the Arena tab bar or background pill has focus, block
+      // non-printable keys so arrow keys and shortcuts don't interfere.
+      // Printable characters fall through to BaseTextInput's default
+      // handler so the first keystroke appears in the input immediately
+      // (each surface's own handler releases focus on the same event).
+      if (agentTabBarFocused || bgPillFocused) {
         if (
           key.sequence &&
           key.sequence.length === 1 &&
@@ -458,6 +473,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           return false; // let BaseTextInput type the character
         }
         return true; // consume non-printable keys
+      }
+
+      // When the Background tasks dialog is open, swallow every key so
+      // nothing reaches the composer buffer — the dialog's own keypress
+      // handler owns selection, open/close, and stop actions. Unlike
+      // the tab bar we do NOT let printable chars type through, because
+      // the dialog doesn't auto-close on printable input and users
+      // would leak text into the hidden composer.
+      if (bgDialogOpen) {
+        return true;
       }
 
       // TODO(jacobr): this special case is likely not needed anymore.
@@ -827,9 +852,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !key.paste &&
         !key.shift &&
         !completion.showSuggestions &&
-        midInputGhostTextRef.current
+        midInputGhostTextRef.current?.acceptText
       ) {
-        buffer.insert(midInputGhostTextRef.current.text);
+        buffer.insert(midInputGhostTextRef.current.acceptText);
         return true;
       }
 
@@ -927,8 +952,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           if (inputHistory.navigateDown()) {
             return true;
           }
+          // Focus order on Down from an empty composer:
+          // team tab bar (if any Arena agents) → Background tasks pill
+          // (if any bg agents) → otherwise stay put. The pill itself
+          // opens the dialog on Enter; the tab bar re-routes Down into
+          // the pill once it has focus, so both surfaces remain reachable
+          // in sequence.
           if (hasAgents) {
             setAgentTabBarFocused(true);
+            return true;
+          }
+          if (hasBgAgents) {
+            setBgPillFocused(true);
             return true;
           }
           return true;
@@ -1094,8 +1129,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       parsePlaceholder,
       freePlaceholderId,
       agentTabBarFocused,
+      bgDialogOpen,
+      bgPillFocused,
       hasAgents,
+      hasBgAgents,
       setAgentTabBarFocused,
+      setBgPillFocused,
       followup,
       onPromptSuggestionDismiss,
     ],
@@ -1169,18 +1208,29 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // Check for mid-input ghost text (only renders when cursor is at end of input)
         const ghostText = midInputGhostTextRef.current;
         if (ghostText && showCursorOpt && ghostText.text.length > 0) {
-          // First ghost char: inverted (as cursor). Rest: dimmed gray.
-          const firstChar = ghostText.text[0]!;
-          const rest = ghostText.text.slice(firstChar.length);
-          renderedLine.push(
-            <Text key="ghost-cursor">{chalk.inverse(firstChar)}</Text>,
-          );
-          if (rest.length > 0) {
+          if (ghostText.showCursorBeforeText) {
+            renderedLine.push(
+              <Text key="ghost-cursor">{chalk.inverse(' ')}</Text>,
+            );
             renderedLine.push(
               <Text key="ghost-rest" color={theme.text.secondary}>
-                {rest}
+                {ghostText.text}
               </Text>,
             );
+          } else {
+            // First ghost char: inverted (as cursor). Rest: dimmed gray.
+            const firstChar = ghostText.text[0]!;
+            const rest = ghostText.text.slice(firstChar.length);
+            renderedLine.push(
+              <Text key="ghost-cursor">{chalk.inverse(firstChar)}</Text>,
+            );
+            if (rest.length > 0) {
+              renderedLine.push(
+                <Text key="ghost-rest" color={theme.text.secondary}>
+                  {rest}
+                </Text>,
+              );
+            }
           }
           renderedLine.push(<Text key="ghost-zwsp">{`\u200B`}</Text>);
         } else {

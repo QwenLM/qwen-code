@@ -68,7 +68,7 @@ async function flushMicrotasks(): Promise<void> {
 
 function findCustomTitleRecord(): ChatRecord | undefined {
   return vi
-    .mocked(jsonl.writeLineSync)
+    .mocked(jsonl.writeLine)
     .mock.calls.map((c) => c[1] as ChatRecord)
     .find((r) => r.type === 'system' && r.subtype === 'custom_title');
 }
@@ -133,6 +133,10 @@ describe('ChatRecordingService - auto-title trigger', () => {
     vi.spyOn(fs, 'existsSync').mockReturnValue(false);
 
     chatRecordingService = new ChatRecordingService(mockConfig);
+
+    // writeLine is async; mockResolvedValue lets the writeChain settle when
+    // tests await flushMicrotasks() / chatRecordingService.flush().
+    vi.mocked(jsonl.writeLine).mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -174,7 +178,8 @@ describe('ChatRecordingService - auto-title trigger', () => {
 
   it('does not overwrite a manual title', async () => {
     chatRecordingService.recordCustomTitle('chose-this-myself', 'manual');
-    vi.mocked(jsonl.writeLineSync).mockClear();
+    await chatRecordingService.flush();
+    vi.mocked(jsonl.writeLine).mockClear();
 
     chatRecordingService.recordAssistantTurn({
       model: 'qwen-plus',
@@ -326,10 +331,13 @@ describe('ChatRecordingService - auto-title trigger', () => {
     expect(svc.getCurrentCustomTitle()).toBe('Auto-generated title');
     expect(svc.getCurrentTitleSource()).toBe('auto');
 
-    // finalize() was called by the constructor — the re-appended record
-    // must carry titleSource: 'auto', not 'manual'.
+    // finalize() was called by the constructor — drain the queued async
+    // write before inspecting the mock.
+    await svc.flush();
+
+    // The re-appended record must carry titleSource: 'auto', not 'manual'.
     const finalizeRecord = vi
-      .mocked(jsonl.writeLineSync)
+      .mocked(jsonl.writeLine)
       .mock.calls.map((c) => c[1] as ChatRecord)
       .find((r) => r.type === 'system' && r.subtype === 'custom_title');
     expect(finalizeRecord?.systemPayload).toEqual({
@@ -362,9 +370,10 @@ describe('ChatRecordingService - auto-title trigger', () => {
 
     expect(svc.getCurrentCustomTitle()).toBe('User chose this');
     expect(svc.getCurrentTitleSource()).toBe('manual');
+    await svc.flush();
 
     const finalizeRecord = vi
-      .mocked(jsonl.writeLineSync)
+      .mocked(jsonl.writeLine)
       .mock.calls.map((c) => c[1] as ChatRecord)
       .find((r) => r.type === 'system' && r.subtype === 'custom_title');
     expect(finalizeRecord?.systemPayload).toEqual({
@@ -395,9 +404,10 @@ describe('ChatRecordingService - auto-title trigger', () => {
     // Must stay undefined so the JSONL isn't upgraded to a misleading
     // `titleSource: 'manual'` we can't actually verify.
     expect(svc.getCurrentTitleSource()).toBeUndefined();
+    await svc.flush();
 
     const finalizeRecord = vi
-      .mocked(jsonl.writeLineSync)
+      .mocked(jsonl.writeLine)
       .mock.calls.map((c) => c[1] as ChatRecord)
       .find((r) => r.type === 'system' && r.subtype === 'custom_title');
     // Payload must NOT contain a titleSource field when source is unknown.
@@ -494,7 +504,8 @@ describe('ChatRecordingService - auto-title trigger', () => {
 
     // User renames while the title LLM call is still pending.
     chatRecordingService.recordCustomTitle('user-chosen', 'manual');
-    vi.mocked(jsonl.writeLineSync).mockClear();
+    await chatRecordingService.flush();
+    vi.mocked(jsonl.writeLine).mockClear();
 
     // Now the LLM call returns a title.
     resolveLlm({ ok: true, title: 'Auto Title', modelUsed: 'qwen-turbo' });

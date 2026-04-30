@@ -168,7 +168,6 @@ vi.mock('../core/client.js', () => ({
   GeminiClient: vi.fn().mockImplementation(() => ({
     initialize: vi.fn().mockResolvedValue(undefined),
     isInitialized: vi.fn().mockReturnValue(true),
-    stripThoughtsFromHistory: vi.fn(),
     setTools: vi.fn(),
   })),
 }));
@@ -477,10 +476,6 @@ describe('Server Config (config.ts)', () => {
       await config.refreshAuth(AuthType.USE_VERTEX_AI);
 
       await config.refreshAuth(AuthType.USE_GEMINI);
-
-      expect(
-        config.getGeminiClient().stripThoughtsFromHistory,
-      ).not.toHaveBeenCalledWith();
     });
   });
 
@@ -531,7 +526,7 @@ describe('Server Config (config.ts)', () => {
       expect(vi.mocked(createContentGenerator)).toHaveBeenCalledTimes(1);
     });
 
-    it('should strip thoughts from history on model switch (#3304)', async () => {
+    it('should preserve thoughts from history on model switch', async () => {
       const config = new Config(baseParams);
 
       const mockContentConfig: ContentGeneratorConfig = {
@@ -562,12 +557,48 @@ describe('Server Config (config.ts)', () => {
 
       await config.refreshAuth(AuthType.QWEN_OAUTH);
 
-      const stripSpy = config.getGeminiClient().stripThoughtsFromHistory;
-      vi.mocked(stripSpy).mockClear();
+      await config.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
+    });
+
+    it('should notify model change listeners after switchModel', async () => {
+      const config = new Config(baseParams);
+
+      const mockContentConfig: ContentGeneratorConfig = {
+        authType: AuthType.QWEN_OAUTH,
+        model: 'coder-model',
+        apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+        baseUrl: DEFAULT_DASHSCOPE_BASE_URL,
+        timeout: 60000,
+        maxRetries: 3,
+      } as ContentGeneratorConfig;
+
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+        (_config, authType, generationConfig) => ({
+          config: {
+            ...mockContentConfig,
+            authType,
+            model: generationConfig?.model ?? mockContentConfig.model,
+          } as ContentGeneratorConfig,
+          sources: {},
+        }),
+      );
+      vi.mocked(createContentGenerator).mockResolvedValue({
+        generateContent: vi.fn(),
+        generateContentStream: vi.fn(),
+        countTokens: vi.fn(),
+        embedContent: vi.fn(),
+      } as unknown as ContentGenerator);
+
+      await config.refreshAuth(AuthType.QWEN_OAUTH);
+
+      const listener = vi.fn();
+      const unsubscribe = config.onModelChange(listener);
 
       await config.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
 
-      expect(stripSpy).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith('coder-model');
+
+      unsubscribe();
     });
   });
 

@@ -13,6 +13,7 @@ import { type UIState, UIStateContext } from '../contexts/UIStateContext.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { VimModeProvider } from '../contexts/VimModeContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
+import { KeypressProvider } from '../contexts/KeypressContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
 vi.mock('../hooks/useTerminalSize.js');
@@ -97,11 +98,13 @@ const renderWithWidth = (width: number, uiState: UIState) => {
   return render(
     <SettingsContext.Provider value={mockSettings}>
       <ConfigContext.Provider value={createMockConfig() as never}>
-        <VimModeProvider settings={mockSettings}>
-          <UIStateContext.Provider value={uiState}>
-            <Footer />
-          </UIStateContext.Provider>
-        </VimModeProvider>
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <VimModeProvider settings={mockSettings}>
+            <UIStateContext.Provider value={uiState}>
+              <Footer />
+            </UIStateContext.Provider>
+          </VimModeProvider>
+        </KeypressProvider>
       </ConfigContext.Provider>
     </SettingsContext.Provider>,
   );

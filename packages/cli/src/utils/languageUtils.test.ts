@@ -22,6 +22,7 @@ vi.mock('../i18n/index.js', () => ({
   getLanguageNameFromLocale: vi.fn((locale: string) => {
     const map: Record<string, string> = {
       en: 'English',
+      'zh-tw': 'Traditional Chinese',
       zh: 'Chinese',
       ru: 'Russian',
       de: 'German',
@@ -30,7 +31,7 @@ vi.mock('../i18n/index.js', () => ({
       fr: 'French',
       es: 'Spanish',
     };
-    return map[locale] || 'English';
+    return map[locale.toLowerCase()] || 'English';
   }),
 }));
 
@@ -121,6 +122,12 @@ describe('languageUtils', () => {
     it('should be case insensitive for locale codes', () => {
       expect(normalizeOutputLanguage('ZH')).toBe('Chinese');
       expect(normalizeOutputLanguage('Ru')).toBe('Russian');
+    });
+
+    it('should convert "zh-TW" (mixed case) to "Traditional Chinese"', () => {
+      expect(normalizeOutputLanguage('zh-TW')).toBe('Traditional Chinese');
+      expect(normalizeOutputLanguage('zh-tw')).toBe('Traditional Chinese');
+      expect(normalizeOutputLanguage('ZH-TW')).toBe('Traditional Chinese');
     });
 
     it('should preserve explicit language names as-is', () => {

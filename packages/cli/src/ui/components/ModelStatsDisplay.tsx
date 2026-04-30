@@ -89,7 +89,6 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
   const hasThoughts = entries.some(
     ({ metrics }) => metrics.tokens.thoughts > 0,
   );
-  const hasTool = entries.some(({ metrics }) => metrics.tokens.tool > 0);
   const hasCached = entries.some(({ metrics }) => metrics.tokens.cached > 0);
 
   return (
@@ -197,13 +196,6 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
           title={t('Thoughts')}
           isSubtle
           values={getModelValues((m) => m.tokens.thoughts.toLocaleString())}
-        />
-      )}
-      {hasTool && (
-        <StatRow
-          title={t('Tool')}
-          isSubtle
-          values={getModelValues((m) => m.tokens.tool.toLocaleString())}
         />
       )}
       <StatRow

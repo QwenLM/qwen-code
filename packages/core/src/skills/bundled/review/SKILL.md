@@ -1,6 +1,7 @@
 ---
 name: review
 description: Review changed code for correctness, security, code quality, and performance. Use when the user asks to review code changes, a PR, or specific files. Invoke with `/review`, `/review <pr-number>`, `/review <file-path>`, or `/review <pr-number> --comment` to post inline comments on the PR.
+argument-hint: '[pr-number|file-path] [--comment]'
 allowedTools:
   - task
   - run_shell_command
@@ -17,7 +18,7 @@ You are an expert code reviewer. Your job is to review code changes and provide 
 
 **Critical rules (most commonly violated — read these first):**
 
-1. **Match the language of the PR.** If the PR is in English, ALL your output (terminal + PR comments) MUST be in English. If in Chinese, use Chinese. Do NOT switch languages.
+1. **Match the language of the PR.** If the PR is in English, ALL your output (terminal + PR comments) MUST be in English. If in Chinese, use Chinese. Do NOT switch languages. For **local reviews** (no PR), if the system prompt includes an output language preference, use that language; otherwise follow the user's input language.
 2. **Step 9: use Create Review API** with `comments` array for inline comments. Do NOT use `gh api .../pulls/.../comments` to post individual comments. See Step 9 for the JSON format.
 
 **Design philosophy: Silence is better than noise.** Every comment you make should be worth the reader's time. If you're unsure whether something is a problem, DO NOT MENTION IT. Low-quality feedback causes "cry wolf" fatigue — developers stop reading all AI comments and miss real issues.
@@ -528,4 +529,4 @@ These criteria apply to both Step 4 (review agents) and Step 5 (verification age
 - Flag any exposed secrets, credentials, API keys, or tokens in the diff as **Critical**.
 - Silence is better than noise. If you have nothing important to say, say nothing.
 - **Do NOT use `#N` notation** (e.g., `#1`, `#2`) in PR comments or summaries — GitHub auto-links these to issues/PRs. Use `(1)`, `[1]`, or descriptive references instead.
-- **Match the language of the PR.** Write review comments, findings, and summaries in the same language as the PR title/description/code comments. If the PR is in English, write in English. If in Chinese, write in Chinese. Do NOT switch languages.
+- **Match the language of the PR.** Write review comments, findings, and summaries in the same language as the PR title/description/code comments. If the PR is in English, write in English. If in Chinese, write in Chinese. Do NOT switch languages. For **local reviews** (no PR), respect the user's output language preference if set; otherwise follow the user's input language.
