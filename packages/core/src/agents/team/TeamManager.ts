@@ -492,6 +492,17 @@ export class TeamManager {
   }
 
   /**
+   * Force a one-shot inbox drain. Used by callers that need to
+   * synchronously flush any messages a teammate wrote between
+   * the last 500ms poll and a decision to exit (otherwise the
+   * final teammate message can be lost when the teammate writes
+   * to disk and immediately goes IDLE).
+   */
+  async drainLeaderInbox(): Promise<void> {
+    await this.pollLeaderInbox();
+  }
+
+  /**
    * Check for new leader inbox messages and deliver them.
    */
   private async pollLeaderInbox(): Promise<void> {

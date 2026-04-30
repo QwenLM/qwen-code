@@ -2259,9 +2259,13 @@ export const useGeminiStream = (
   }, [config]);
 
   // When idle, drain the unified queue one item at a time.
+  // Skip when another submission is in flight (e.g. the teammate
+  // drain effect won this render) — the queue stays intact and
+  // the effect will re-fire when streamingState returns to Idle.
   useEffect(() => {
     if (
       streamingState === StreamingState.Idle &&
+      !isSubmittingQueryRef.current &&
       notificationQueueRef.current.length > 0
     ) {
       const item = notificationQueueRef.current.shift()!;
@@ -2319,10 +2323,16 @@ export const useGeminiStream = (
     };
   }, [config]);
 
-  // When idle, drain teammate messages one at a time
+  // When idle, drain teammate messages one batch at a time.
+  // Skip when another submission is in flight (e.g. the
+  // notification effect won this render and called submitQuery
+  // synchronously, flipping isSubmittingQueryRef). Without this
+  // guard the splice would drain the queue and submitQuery
+  // would early-return, permanently losing those messages.
   useEffect(() => {
     if (
       streamingState === StreamingState.Idle &&
+      !isSubmittingQueryRef.current &&
       teammateQueueRef.current.length > 0
     ) {
       const batch = teammateQueueRef.current.splice(0);

@@ -618,6 +618,14 @@ export async function runNonInteractive(
             await handleCancellationError(config);
           }
 
+          // Force one final inbox drain before deciding to exit.
+          // A teammate may have written its final send_message
+          // and gone IDLE between the last 500ms poll and now —
+          // without this, that message is lost.
+          if (teamManager) {
+            await teamManager.drainLeaderInbox();
+          }
+
           // Also drain any final teammate messages.
           if (pendingTeammateMessages.length > 0) {
             continue;

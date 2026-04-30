@@ -177,14 +177,16 @@ export function findMemberById(
 }
 
 /**
- * Find a member by name (case-insensitive).
+ * Find a member by name. Stored member names are already sanitized
+ * (see {@link sanitizeName}), so the lookup name is sanitized too —
+ * `"QA Tester"` matches the stored `"qa-tester"`.
  */
 export function findMemberByName(
   members: readonly TeamMember[],
   name: string,
 ): TeamMember | undefined {
-  const lower = name.toLowerCase();
-  return members.find((m) => m.name.toLowerCase() === lower);
+  const sanitized = sanitizeName(name);
+  return members.find((m) => m.name === sanitized);
 }
 
 // ─── File I/O ───────────────────────────────────────────────

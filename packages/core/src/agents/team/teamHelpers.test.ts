@@ -218,6 +218,15 @@ describe('findMemberByName', () => {
     );
   });
 
+  it('finds member when lookup uses unsanitized human name', () => {
+    // Stored names are sanitized (e.g. spawning "QA Tester" stores
+    // "qa-tester"). Lookups should match the sanitized form too.
+    const members = [makeMember({ name: 'qa-tester' })];
+    expect(findMemberByName(members, 'QA Tester')?.agentId).toBe(
+      'qa-tester@test-team',
+    );
+  });
+
   it('returns undefined for unknown name', () => {
     expect(findMemberByName([], 'nope')).toBeUndefined();
   });
