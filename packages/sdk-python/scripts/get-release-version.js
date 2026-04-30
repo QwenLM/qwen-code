@@ -346,6 +346,9 @@ async function getVersion(options = {}) {
   const args = { ...getArgs(), ...options };
   const type = args.type || 'nightly';
   const versions = await getAllVersionsFromPyPI();
+  const hasManualOverride =
+    (type === 'preview' && Boolean(args.preview_version_override)) ||
+    (type === 'stable' && Boolean(args.stable_version_override));
 
   let versionData;
   switch (type) {
@@ -362,15 +365,25 @@ async function getVersion(options = {}) {
       throw new Error(`Unknown release type: ${type}`);
   }
 
-  while (
-    await doesVersionExist(
+  while (true) {
+    const versionExists = await doesVersionExist(
       {
         packageVersion: versionData.packageVersion,
         releaseTag: `v${versionData.releaseVersion}`,
       },
       versions,
-    )
-  ) {
+    );
+
+    if (!versionExists) {
+      break;
+    }
+
+    if (hasManualOverride) {
+      throw new Error(
+        `Requested ${type} release ${versionData.releaseVersion} already exists.`,
+      );
+    }
+
     versionData = bumpVersion(versionData, type);
   }
 

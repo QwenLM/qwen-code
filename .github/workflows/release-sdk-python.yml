@@ -65,6 +65,11 @@ jobs:
           DRY_RUN_INPUT: '${{ github.event.inputs.dry_run }}'
         id: 'vars'
         run: |
+          if [[ "${CREATE_NIGHTLY_RELEASE}" == "true" && "${CREATE_PREVIEW_RELEASE}" == "true" ]]; then
+            echo "create_nightly_release and create_preview_release cannot both be true" >&2
+            exit 1
+          fi
+
           is_nightly="false"
           if [[ "${CREATE_NIGHTLY_RELEASE}" == "true" ]]; then
             is_nightly="true"
@@ -203,7 +208,6 @@ jobs:
         uses: 'pypa/gh-action-pypi-publish@release/v1'
         with:
           packages-dir: 'packages/sdk-python/dist'
-          skip-existing: true
 
       - name: 'Show publish artifacts for dry-run'
         if: |-
