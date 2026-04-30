@@ -17,6 +17,7 @@ describe('directoryCommand', () => {
   let mockContext: CommandContext;
   let mockConfig: Config;
   let mockWorkspaceContext: WorkspaceContext;
+  let mockWorkspaceDirectories: string[];
   const addCommand = directoryCommand.subCommands?.find(
     (c) => c.name === 'add',
   );
@@ -25,14 +26,18 @@ describe('directoryCommand', () => {
   );
 
   beforeEach(() => {
+    mockWorkspaceDirectories = [
+      path.normalize('/home/user/project1'),
+      path.normalize('/home/user/project2'),
+    ];
     mockWorkspaceContext = {
-      addDirectory: vi.fn(),
-      getDirectories: vi
-        .fn()
-        .mockReturnValue([
-          path.normalize('/home/user/project1'),
-          path.normalize('/home/user/project2'),
-        ]),
+      addDirectory: vi.fn((directory: string) => {
+        const normalizedDirectory = path.normalize(directory);
+        if (!mockWorkspaceDirectories.includes(normalizedDirectory)) {
+          mockWorkspaceDirectories.push(normalizedDirectory);
+        }
+      }),
+      getDirectories: vi.fn(() => [...mockWorkspaceDirectories]),
     } as unknown as WorkspaceContext;
 
     mockConfig = {
@@ -145,6 +150,49 @@ describe('directoryCommand', () => {
       );
     });
 
+    it('should not persist directories skipped by the workspace context', async () => {
+      const skippedPath = path.normalize('/home/user/missing-project');
+      vi.mocked(mockWorkspaceContext.addDirectory).mockImplementation(
+        () => undefined,
+      );
+
+      if (!addCommand?.action) throw new Error('No action');
+      await addCommand.action(mockContext, skippedPath);
+
+      expect(mockContext.services.settings.setValue).not.toHaveBeenCalled();
+      expect(mockContext.ui.addItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: `Successfully added directories:\n- ${skippedPath}`,
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should persist the directory path accepted by the workspace context', async () => {
+      const inputPath = 'linked-project';
+      const acceptedPath = path.normalize('/home/user/real-project');
+      vi.mocked(mockWorkspaceContext.addDirectory).mockImplementation(() => {
+        mockWorkspaceDirectories.push(acceptedPath);
+      });
+
+      if (!addCommand?.action) throw new Error('No action');
+      await addCommand.action(mockContext, inputPath);
+
+      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'context.includeDirectories',
+        [acceptedPath],
+      );
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: `Successfully added directories:\n- ${acceptedPath}`,
+        }),
+        expect.any(Number),
+      );
+    });
+
     it('should call addDirectory for each path and show a success message for multiple paths', async () => {
       const newPath1 = path.normalize('/home/user/new-project1');
       const newPath2 = path.normalize('/home/user/new-project2');
@@ -186,6 +234,9 @@ describe('directoryCommand', () => {
         (p: string) => {
           if (p === invalidPath) {
             throw error;
+          }
+          if (!mockWorkspaceDirectories.includes(p)) {
+            mockWorkspaceDirectories.push(p);
           }
         },
       );

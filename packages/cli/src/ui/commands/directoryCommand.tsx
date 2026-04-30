@@ -138,9 +138,15 @@ export const directoryCommand: SlashCommand = {
 
         for (const pathToAdd of pathsToAdd) {
           const directory = expandHomeDir(pathToAdd.trim());
+          const directoriesBeforeAdd = new Set(
+            workspaceContext.getDirectories(),
+          );
           try {
             workspaceContext.addDirectory(directory);
-            added.push(directory);
+            const acceptedDirectories = workspaceContext
+              .getDirectories()
+              .filter((dir) => !directoriesBeforeAdd.has(dir));
+            added.push(...acceptedDirectories);
           } catch (e) {
             const error = e as Error;
             errors.push(
