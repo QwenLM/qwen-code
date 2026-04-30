@@ -39,6 +39,7 @@ import type {
   InputModalities,
 } from '../contentGenerator.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
+import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCaptureContext.js';
 import type { RequestContext } from '../openaiContentGenerator/types.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
 import {
@@ -161,11 +162,13 @@ export class LoggingContentGenerator implements ContentGenerator {
         userPromptId,
       );
     }
-    const openaiRequest = isInternal
-      ? undefined
-      : await this.buildOpenAIRequestForLogging(req);
+
+    const session = this.startCaptureSession(isInternal);
+
     try {
-      const response = await this.wrapped.generateContent(req, userPromptId);
+      const response = await session.wrap(() =>
+        this.wrapped.generateContent(req, userPromptId),
+      );
       const durationMs = Date.now() - startTime;
       this._logApiResponse(
         response.responseId ?? '',
@@ -175,14 +178,18 @@ export class LoggingContentGenerator implements ContentGenerator {
         response.usageMetadata,
       );
       if (!isInternal) {
-        await this.logOpenAIInteraction(openaiRequest, response);
+        await this.logOpenAIInteraction(await session.resolve(req), response);
       }
       return response;
     } catch (error) {
       const durationMs = Date.now() - startTime;
       this._logApiError('', durationMs, error, req.model, userPromptId);
       if (!isInternal) {
-        await this.logOpenAIInteraction(openaiRequest, undefined, error);
+        await this.logOpenAIInteraction(
+          await session.resolve(req),
+          undefined,
+          error,
+        );
       }
       throw error;
     }
@@ -201,18 +208,23 @@ export class LoggingContentGenerator implements ContentGenerator {
         userPromptId,
       );
     }
-    const openaiRequest = isInternal
-      ? undefined
-      : await this.buildOpenAIRequestForLogging(req);
+
+    const session = this.startCaptureSession(isInternal);
 
     let stream: AsyncGenerator<GenerateContentResponse>;
     try {
-      stream = await this.wrapped.generateContentStream(req, userPromptId);
+      stream = await session.wrap(() =>
+        this.wrapped.generateContentStream(req, userPromptId),
+      );
     } catch (error) {
       const durationMs = Date.now() - startTime;
       this._logApiError('', durationMs, error, req.model, userPromptId);
       if (!isInternal) {
-        await this.logOpenAIInteraction(openaiRequest, undefined, error);
+        await this.logOpenAIInteraction(
+          await session.resolve(req),
+          undefined,
+          error,
+        );
       }
       throw error;
     }
@@ -222,8 +234,28 @@ export class LoggingContentGenerator implements ContentGenerator {
       startTime,
       userPromptId,
       req.model,
-      openaiRequest,
+      isInternal ? undefined : await session.resolve(req),
     );
+  }
+
+  private startCaptureSession(isInternal: boolean): {
+    wrap: <T>(fn: () => Promise<T>) => Promise<T>;
+    resolve: (
+      req: GenerateContentParameters,
+    ) => Promise<OpenAI.Chat.ChatCompletionCreateParams | undefined>;
+  } {
+    let captured: OpenAI.Chat.ChatCompletionCreateParams | undefined;
+    const skipCapture = isInternal || !this.openaiLogger;
+    return {
+      wrap: <T>(fn: () => Promise<T>): Promise<T> =>
+        skipCapture
+          ? fn()
+          : openaiRequestCaptureContext.run((built) => {
+              captured = built;
+            }, fn),
+      resolve: async (req) =>
+        captured ?? (await this.buildOpenAIRequestForLogging(req)),
+    };
   }
 
   private async *loggingStreamWrapper(
