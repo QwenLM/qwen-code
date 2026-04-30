@@ -4421,6 +4421,38 @@ describe('extractToolFilePaths', () => {
     ).toEqual(['/tmp/external', '/tmp/external/**/*.ts']);
   });
 
+  it('preserves `..` in glob.pattern instead of normalizing it away', () => {
+    // Regression: `path.join('src', '../*.ts')` collapses to `*.ts`,
+    // losing the information that the glob escaped its `path` root and
+    // searched files at the parent level. Plain string concat keeps the
+    // selector verbatim so the registry can match against it as-is.
+    expect(
+      extractToolFilePaths('glob', { path: 'src', pattern: '../*.ts' }),
+    ).toEqual(['src', 'src/../*.ts']);
+  });
+
+  it('uses forward slashes regardless of host OS', () => {
+    // Regression: `path.join` is OS-aware — on Windows it emits
+    // backslashes and silently diverges from the forward-slash form
+    // the registry matches against. Plain concat with a literal `/`
+    // keeps the candidate cross-platform consistent.
+    expect(
+      extractToolFilePaths('glob', { path: 'src', pattern: '**/*.ts' }),
+    ).toEqual(['src', 'src/**/*.ts']);
+  });
+
+  it('trims a trailing slash on glob.path before concatenating', () => {
+    // Authors sometimes write `path: 'src/'`; we want one separator,
+    // not `src//pattern`.
+    expect(
+      extractToolFilePaths('glob', { path: 'src/', pattern: '**/*.ts' }),
+    ).toEqual(['src/', 'src/**/*.ts']);
+    // Same with a Windows-style trailing backslash.
+    expect(
+      extractToolFilePaths('glob', { path: 'src\\', pattern: '**/*.ts' }),
+    ).toEqual(['src\\', 'src/**/*.ts']);
+  });
+
   it('does not extract pattern for non-glob tools', () => {
     // Grep's `pattern` is a regex, not a path glob; treating it as a
     // path would false-match. Pattern is only path-shaped for `glob`.

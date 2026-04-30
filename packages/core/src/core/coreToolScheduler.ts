@@ -47,7 +47,6 @@ import type {
   Part,
   PartListUnion,
 } from '@google/genai';
-import * as path from 'node:path';
 import { ToolNames } from '../tools/tool-names.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
@@ -253,15 +252,21 @@ export function extractToolFilePaths(
     // call actually searches `<path>/<pattern>` — so a skill keyed on
     // `paths: ['src/**/*.ts']` would not activate from
     // `glob({ path: 'src', pattern: '**/*.ts' })` because the candidate
-    // was just `**/*.ts`. Joining matches what the tool really touched.
-    // (Don't add `pattern` for grep_search even though it also has a
-    // `pattern` field — grep's pattern is a regex, not a path glob,
-    // and would false-match.)
+    // was just `**/*.ts`. Concat (rather than `path.join`) for two
+    // reasons: (1) `path.join` is OS-aware, so on Windows the result
+    // contains backslashes and silently diverges from the forward-slash
+    // form the registry matches against; (2) `path.join` normalizes
+    // `..` segments — `path.join('src', '../foo')` collapses to `foo`,
+    // losing information about the directory the glob actually
+    // escaped from. Trim trailing separators on `pathField` to avoid
+    // `src//pattern`. Don't add `pattern` for grep_search even though
+    // it also has a `pattern` field — grep's pattern is a regex, not
+    // a path glob, and would false-match.
     const pathField = obj['path'];
     const patternField = obj['pattern'];
     if (typeof patternField === 'string' && patternField.length > 0) {
       if (typeof pathField === 'string' && pathField.length > 0) {
-        push(path.join(pathField, patternField));
+        push(`${pathField.replace(/[\\/]+$/, '')}/${patternField}`);
       } else {
         push(patternField);
       }
