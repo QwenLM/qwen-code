@@ -135,8 +135,11 @@ function WorkspaceHeader({
         <CrossfadeAvatar
           src={iconUrl}
           alt={workspace.name}
-          className="h-4 w-4 rounded-[4px] ring-1 ring-border/40"
-          fallbackClassName="bg-muted text-muted-foreground text-[10px] rounded-[4px]"
+          className={cn(
+            "h-4 w-4",
+            iconUrl && "rounded-[4px] ring-1 ring-border/40",
+          )}
+          fallbackClassName="text-muted-foreground text-[10px]"
           fallback={<Folder className="h-3.5 w-3.5 text-muted-foreground" />}
         />
         <FadingText className="min-w-0 flex-1 text-[13px] font-medium" fadeWidth={32}>
@@ -229,8 +232,11 @@ function WorkspaceDragOverlay({
         <CrossfadeAvatar
           src={iconUrl}
           alt={workspace.name}
-          className="h-4 w-4 rounded-[4px] ring-1 ring-border/40"
-          fallbackClassName="bg-muted text-muted-foreground text-[10px] rounded-[4px]"
+          className={cn(
+            "h-4 w-4",
+            iconUrl && "rounded-[4px] ring-1 ring-border/40",
+          )}
+          fallbackClassName="text-muted-foreground text-[10px]"
           fallback={<Folder className="h-3.5 w-3.5 text-muted-foreground" />}
         />
         <FadingText className="min-w-0 flex-1 text-[13px] font-medium" fadeWidth={32}>

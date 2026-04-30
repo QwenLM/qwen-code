@@ -553,6 +553,7 @@ function AppShellContent({
   const [isSidebarAndNavigatorHidden, setIsSidebarAndNavigatorHidden] = React.useState(() => {
     return isFocusedMode || storage.get(storage.KEYS.focusModeEnabled, false)
   })
+  const [collapseSessionNavigatorForProjectDraft, setCollapseSessionNavigatorForProjectDraft] = React.useState(false)
 
   // Auto-compact mode: shell width below mobile threshold hides sidebar/navigator
   // and switches to single-panel mode. Works in both webui (narrow viewport) and
@@ -627,12 +628,26 @@ function AppShellContent({
   }, [navState])
 
   const sessionFilter = sessionsContext?.filter ?? null
-  const isSessionNavigatorCollapsed = !isAutoCompact && isSessionsNavigation(navState) && !!sessionsContext?.sessionId
+  const shouldCollapseProjectDraftNavigator =
+    collapseSessionNavigatorForProjectDraft &&
+    isSessionsNavigation(navState) &&
+    !sessionsContext?.sessionId
+  const isSessionNavigatorCollapsed =
+    !isAutoCompact &&
+    isSessionsNavigation(navState) &&
+    (!!sessionsContext?.sessionId || shouldCollapseProjectDraftNavigator)
   const effectiveNavigatorWidth = isAutoCompact
     ? sessionListWidth
     : (effectiveSidebarAndNavigatorHidden || isSessionNavigatorCollapsed ? 0 : sessionListWidth)
   const isNavigatorResizeAvailable = !effectiveSidebarAndNavigatorHidden && effectiveNavigatorWidth > 0
   const isSidebarResizeAvailable = !effectiveSidebarAndNavigatorHidden && isSidebarVisible
+
+  useEffect(() => {
+    if (!collapseSessionNavigatorForProjectDraft) return
+    if (!isSessionsNavigation(navState) || sessionsContext?.sessionId) {
+      setCollapseSessionNavigatorForProjectDraft(false)
+    }
+  }, [collapseSessionNavigatorForProjectDraft, navState, sessionsContext?.sessionId])
 
   // Derive source filter from navigation state (only when in sources navigator)
   const sourceFilter: SourceFilter | null = isSourcesNavigation(navState) ? navState.filter ?? null : null
@@ -1715,28 +1730,34 @@ function AppShellContent({
   }, [collapsedItems, activeWorkspaceId])
 
   const handleAllSessionsClick = useCallback(() => {
+    setCollapseSessionNavigatorForProjectDraft(false)
     navigate(routes.view.allSessions())
   }, [])
 
   const handleFlaggedClick = useCallback(() => {
+    setCollapseSessionNavigatorForProjectDraft(false)
     navigate(routes.view.flagged())
   }, [])
 
   const handleArchivedClick = useCallback(() => {
+    setCollapseSessionNavigatorForProjectDraft(false)
     navigate(routes.view.archived())
   }, [])
 
   // Handler for individual todo state views
   const handleSessionStatusClick = useCallback((stateId: SessionStatusId) => {
+    setCollapseSessionNavigatorForProjectDraft(false)
     navigate(routes.view.state(stateId))
   }, [])
 
   // Handler for label filter views (hierarchical — includes descendant labels)
   const handleLabelClick = useCallback((labelId: string) => {
+    setCollapseSessionNavigatorForProjectDraft(false)
     navigate(routes.view.label(labelId))
   }, [])
 
   const handleViewClick = useCallback((viewId: string) => {
+    setCollapseSessionNavigatorForProjectDraft(false)
     navigate(routes.view.view(viewId))
   }, [])
 
@@ -1936,6 +1957,8 @@ function AppShellContent({
   const handleNewChat = useCallback((newPanel: boolean = false) => {
     if (!activeWorkspace) return
 
+    setCollapseSessionNavigatorForProjectDraft(false)
+
     // Exit search mode and switch to All Sessions
     setSearchActive(false)
     setSearchQuery('')
@@ -1955,6 +1978,7 @@ function AppShellContent({
     setSearchQuery('')
 
     const createSessionInCurrentWorkspace = () => {
+      setCollapseSessionNavigatorForProjectDraft(true)
       navigate(routes.action.newSession())
       setTimeout(() => focusZone('chat', { intent: 'programmatic' }), 50)
     }
@@ -1969,6 +1993,7 @@ function AppShellContent({
   }, [activeWorkspaceId, focusZone, onSelectWorkspace])
 
   const handleSelectProjectSession = useCallback(async (workspaceId: string, sessionId: string) => {
+    setCollapseSessionNavigatorForProjectDraft(false)
     setSearchActive(false)
     setSearchQuery('')
 
