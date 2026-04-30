@@ -32,6 +32,32 @@ export interface ChatPageProps {
   sessionId: string
 }
 
+function getConnectionModelIds(
+  connection: { models?: Array<string | { id: string }> } | null | undefined,
+): string[] {
+  return (connection?.models ?? [])
+    .map(model => typeof model === 'string' ? model : model.id)
+    .filter(Boolean)
+}
+
+function resolveDisplayModel(
+  sessionModel: string | undefined,
+  connection: { providerType?: string; defaultModel?: string; models?: Array<string | { id: string }> } | null | undefined,
+): string {
+  const modelIds = getConnectionModelIds(connection)
+  if (sessionModel) {
+    if (connection?.providerType !== 'qwen' || modelIds.length === 0 || modelIds.includes(sessionModel)) {
+      return sessionModel
+    }
+  }
+
+  if (connection?.defaultModel && (modelIds.length === 0 || modelIds.includes(connection.defaultModel))) {
+    return connection.defaultModel
+  }
+
+  return modelIds[0] ?? ''
+}
+
 const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   const { t } = useTranslation()
   // Diagnostic: mark when component runs
@@ -275,8 +301,6 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
 
   // Effective model for this session (session-specific or global fallback)
   const effectiveModel = React.useMemo(() => {
-    if (session?.model) return session.model
-
     // When connection is unavailable, don't resolve through a different connection
     if (connectionUnavailable) return session?.model ?? ''
 
@@ -285,7 +309,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     )
     const connection = connectionSlug ? llmConnections.find(c => c.slug === connectionSlug) : null
 
-    return connection?.defaultModel ?? ''
+    return resolveDisplayModel(session?.model, connection)
   }, [session?.id, session?.model, session?.llmConnection, workspaceDefaultLlmConnection, llmConnections, connectionUnavailable])
 
   // Working directory for this session

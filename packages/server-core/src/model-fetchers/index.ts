@@ -136,16 +136,20 @@ class ModelRefreshService {
       return
     }
 
-    // Preserve user's defaultModel if still valid
+    // Preserve user's defaultModel if still valid. Qwen is provider-owned via
+    // ACP, so its default is the ACP-reported currentModelId.
     const currentDefault = connection.defaultModel
     const stillValid = currentDefault && newModels.some(m => m.id === currentDefault)
-    const newDefault = stillValid
+    const serverDefaultValid = serverDefault && newModels.some(m => m.id === serverDefault)
+    const newDefault = connection.providerType === 'qwen'
+      ? serverDefaultValid ? serverDefault : newModels[0]?.id
+      : stillValid
       ? currentDefault
       : serverDefault ?? newModels[0]?.id
 
     updateLlmConnection(slug, {
       models: newModels,
-      ...(newDefault && !stillValid ? { defaultModel: newDefault } : {}),
+      ...(newDefault && (connection.providerType === 'qwen' || !stillValid) ? { defaultModel: newDefault } : {}),
     })
   }
 

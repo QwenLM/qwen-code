@@ -672,8 +672,21 @@ export function resolveModelForProvider(
   }
 
   switch (provider) {
-    case 'pi':
     case 'qwen':
+      if (connection?.models?.length) {
+        const modelIds = connection.models
+          .map(model => typeof model === 'string' ? model : model.id)
+          .filter(Boolean);
+        const defaultModel = connection.defaultModel && modelIds.includes(connection.defaultModel)
+          ? connection.defaultModel
+          : undefined;
+        return (managedModel && modelIds.includes(managedModel) ? managedModel : undefined)
+          || defaultModel
+          || modelIds[0]
+          || '';
+      }
+      return managedModel || connection?.defaultModel || '';
+    case 'pi':
       return managedModel || connection?.defaultModel || '';
     default:
       return managedModel || connection?.defaultModel || DEFAULT_MODEL;

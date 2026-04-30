@@ -617,6 +617,8 @@ export default function App() {
 
   const DRAFT_SAVE_DEBOUNCE_MS = 500
   const qwenModelRefreshInFlightRef = useRef<Promise<void> | null>(null)
+  const qwenModelRefreshAttemptedRef = useRef<Set<string>>(new Set())
+  const qwenModelRefreshCompletedRef = useRef<Set<string>>(new Set())
 
   const resolveDefaultConnectionSlug = useCallback((connections: LlmConnectionWithStatus[]) => {
     return connections.find(c => c.isDefault)?.slug ?? connections[0]?.slug
@@ -625,7 +627,12 @@ export default function App() {
   // Refresh LLM connections from config (called on workspace change and after connection updates)
   const refreshLlmConnections = useCallback(async () => {
     const connections = await window.electronAPI.listLlmConnectionsWithStatus()
-    setLlmConnections(connections)
+    const visibleConnections = connections.map(connection => (
+      connection.providerType === 'qwen' && !qwenModelRefreshCompletedRef.current.has(connection.slug)
+        ? { ...connection, models: [], defaultModel: '' }
+        : connection
+    ))
+    setLlmConnections(visibleConnections)
     setDefaultLlmConnectionSlug(resolveDefaultConnectionSlug(connections))
     // Also refresh workspace default
     if (windowWorkspaceId) {
@@ -633,18 +640,21 @@ export default function App() {
       setWorkspaceDefaultLlmConnection(settings?.defaultLlmConnection)
     }
 
-    const qwenConnectionWithoutModels = connections.find(connection =>
-      connection.providerType === 'qwen' && (!connection.models || connection.models.length === 0)
+    const qwenConnectionToRefresh = connections.find(connection =>
+      connection.providerType === 'qwen' && !qwenModelRefreshAttemptedRef.current.has(connection.slug)
     )
-    if (qwenConnectionWithoutModels && !qwenModelRefreshInFlightRef.current) {
+    if (qwenConnectionToRefresh && !qwenModelRefreshInFlightRef.current) {
+      qwenModelRefreshAttemptedRef.current.add(qwenConnectionToRefresh.slug)
       qwenModelRefreshInFlightRef.current = (async () => {
         try {
-          const result = await window.electronAPI.refreshLlmConnectionModels(qwenConnectionWithoutModels.slug)
+          const result = await window.electronAPI.refreshLlmConnectionModels(qwenConnectionToRefresh.slug)
           if (!result.success) {
             console.warn('[App] Qwen model refresh failed:', result.error)
+            qwenModelRefreshAttemptedRef.current.delete(qwenConnectionToRefresh.slug)
             return
           }
 
+          qwenModelRefreshCompletedRef.current.add(qwenConnectionToRefresh.slug)
           const refreshedConnections = await window.electronAPI.listLlmConnectionsWithStatus()
           setLlmConnections(refreshedConnections)
           setDefaultLlmConnectionSlug(resolveDefaultConnectionSlug(refreshedConnections))

@@ -22,6 +22,7 @@ import {
   providerTypeToAgentProvider,
   resolveSetupTestConnectionHint,
   resolveBackendContext,
+  resolveModelForProvider,
   createBackendFromConnection,
   testBackendConnection,
   validateStoredBackendConnection,
@@ -397,5 +398,42 @@ describe('ClaudeAgent model switching', () => {
     agent.setModel('claude-sonnet-4-6');
 
     expect(agent.getModel()).toBe('claude-sonnet-4-6');
+  });
+});
+
+describe('Qwen model resolution', () => {
+  const qwenConnection: LlmConnection = {
+    slug: 'qwen-code',
+    name: 'Qwen Code',
+    providerType: 'qwen',
+    authType: 'none',
+    createdAt: 0,
+    defaultModel: 'glm-5.1(dashscope)',
+    models: [
+      { id: 'glm-5.1(dashscope)', name: 'GLM 5.1 DashScope', shortName: 'GLM 5.1', description: '', provider: 'qwen', contextWindow: 1_000_000 },
+      { id: 'qwen3-coder-plus', name: 'Qwen3 Coder Plus', shortName: 'Qwen Plus', description: '', provider: 'qwen', contextWindow: 1_000_000 },
+    ],
+  };
+
+  it('uses a selected Qwen model only when ACP reported it as available', () => {
+    expect(resolveModelForProvider('qwen', 'qwen3-coder-plus', qwenConnection)).toBe('qwen3-coder-plus');
+  });
+
+  it('uses the ACP-reported Qwen default instead of the first listed model', () => {
+    expect(resolveModelForProvider('qwen', undefined, {
+      ...qwenConnection,
+      defaultModel: 'qwen3-coder-plus',
+    })).toBe('qwen3-coder-plus');
+  });
+
+  it('falls back to the ACP model list instead of a stale session model', () => {
+    expect(resolveModelForProvider('qwen', 'glm-5.1(openai)', qwenConnection)).toBe('glm-5.1(dashscope)');
+  });
+
+  it('does not use a stale Qwen default that ACP did not report as available', () => {
+    expect(resolveModelForProvider('qwen', undefined, {
+      ...qwenConnection,
+      defaultModel: 'glm-5.1(openai)',
+    })).toBe('glm-5.1(dashscope)');
   });
 });

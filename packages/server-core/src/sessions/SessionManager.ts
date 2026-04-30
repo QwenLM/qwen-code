@@ -14,6 +14,7 @@ import {
   createBackendFromResolvedContext,
   cleanupSourceRuntimeArtifacts,
   providerTypeToAgentProvider,
+  resolveModelForProvider,
   type AgentBackend,
   type BackendSessionInfo,
   type BackendHostRuntimeContext,
@@ -1525,10 +1526,8 @@ export class SessionManager implements ISessionManager {
     const sameModels = currentModelIds.length === nextModelIds.length
       && currentModelIds.every((id, index) => id === nextModelIds[index])
 
-    const currentDefault = connection.defaultModel
-    const defaultStillValid = !!currentDefault && nextModelIds.includes(currentDefault)
     const reportedDefault = currentModelId && nextModelIds.includes(currentModelId) ? currentModelId : undefined
-    const nextDefault = defaultStillValid ? currentDefault : (reportedDefault ?? nextModelIds[0])
+    const nextDefault = reportedDefault ?? nextModelIds[0]
     const sameDefault = (connection.defaultModel ?? '') === (nextDefault ?? '')
 
     if (sameModels && sameDefault) return
@@ -5237,13 +5236,21 @@ export class SessionManager implements ISessionManager {
     sessionLog.info(`[updateSessionModel] sessionId=${sessionId}, model=${model}, connection=${connection}`)
     const managed = this.sessions.get(sessionId)
     if (managed) {
-      managed.model = model ?? undefined
+      const wsConfig = loadWorkspaceConfig(managed.workspace.rootPath)
+      const nextConnectionSlug = connection && !managed.connectionLocked ? connection : managed.llmConnection
+      const sessionConn = resolveSessionConnection(nextConnectionSlug, wsConfig?.defaults?.defaultLlmConnection)
+      const provider = sessionConn ? providerTypeToAgentProvider(sessionConn.providerType) : 'anthropic'
+      const resolveModel = (candidate: string | undefined) =>
+        resolveModelForProvider(provider, candidate, sessionConn)
+      const persistedModel = model === null ? undefined : (resolveModel(model) || undefined)
+
+      managed.model = persistedModel
       // Also update connection if provided and not already locked
       if (connection && !managed.connectionLocked) {
         managed.llmConnection = connection
       }
       // Persist to disk (include connection if it was updated)
-      const updates: { model?: string; llmConnection?: string } = { model: model ?? undefined }
+      const updates: { model?: string; llmConnection?: string } = { model: persistedModel }
       if (connection && !managed.connectionLocked) {
         updates.llmConnection = connection
       }
@@ -5251,17 +5258,15 @@ export class SessionManager implements ISessionManager {
       // Update agent model if it already exists (takes effect on next query)
       if (managed.agent) {
         // Fallback chain: session model > workspace default > connection default
-        const wsConfig = loadWorkspaceConfig(managed.workspace.rootPath)
-        const sessionConn = resolveSessionConnection(managed.llmConnection, wsConfig?.defaults?.defaultLlmConnection)
-        const effectiveModel = model ?? wsConfig?.defaults?.model ?? sessionConn?.defaultModel!
+        const effectiveModel = resolveModel(persistedModel ?? wsConfig?.defaults?.model ?? sessionConn?.defaultModel)
         sessionLog.info(`[updateSessionModel] Calling agent.setModel(${effectiveModel}) [agent exists=${!!managed.agent}, connectionLocked=${managed.connectionLocked}]`)
-        managed.agent.setModel(effectiveModel)
+        if (effectiveModel) managed.agent.setModel(effectiveModel)
       } else {
         sessionLog.info(`[updateSessionModel] No agent yet, model will apply on next agent creation`)
       }
       // Notify renderer of the model change
-      this.sendEvent({ type: 'session_model_changed', sessionId, model }, managed.workspace.id)
-      sessionLog.info(`Session ${sessionId} model updated to: ${model ?? '(global config)'}`)
+      this.sendEvent({ type: 'session_model_changed', sessionId, model: persistedModel ?? null }, managed.workspace.id)
+      sessionLog.info(`Session ${sessionId} model updated to: ${persistedModel ?? '(global config)'}`)
     }
   }
 

@@ -598,6 +598,8 @@ export class QwenAgent extends BaseAgent {
   private pendingAvailableCommandsUpdates = new Map<string, JsonRecord>();
   private latestAvailableCommandsSnapshot: AvailableCommandsSnapshot | null = null;
   private availableCommandsWaiters: Array<(snapshot: AvailableCommandsSnapshot | null) => void> = [];
+  private availableModelIds: Set<string> | null = null;
+  private firstAvailableModelId: string | undefined;
 
   private sourceMcpServers: Record<string, SdkMcpServerConfig> = {};
   private currentTurnId: string | undefined;
@@ -835,6 +837,10 @@ export class QwenAgent extends BaseAgent {
   }
 
   override setModel(model: string): void {
+    if (!this.isKnownAvailableModel(model)) {
+      this.debug(`Ignoring Qwen model switch for unavailable model: ${model}`);
+      return;
+    }
     super.setModel(model);
     void this.forwardModel(model);
   }
@@ -1119,9 +1125,6 @@ export class QwenAgent extends BaseAgent {
 
   private buildSpawnCommand(qwenCliPath: string, nodePath: string): { command: string; args: string[] } {
     const args = ['--acp', '--channel=ACP'];
-    if (this._model) {
-      args.push('--model', this._model);
-    }
 
     if (qwenCliPath.endsWith('.js')) {
       return { command: nodePath, args: [qwenCliPath, ...args] };
@@ -1315,14 +1318,23 @@ export class QwenAgent extends BaseAgent {
       ? modelState.availableModels.map(toQwenModelDefinition).filter((model): model is ModelDefinition => !!model)
       : [];
     const currentModelId = asString(modelState.currentModelId);
+    this.availableModelIds = new Set(availableModels.map(model => model.id));
+    this.firstAvailableModelId = availableModels[0]?.id;
+    const selectableCurrentModelId = currentModelId && this.availableModelIds.has(currentModelId)
+      ? currentModelId
+      : undefined;
 
-    if (!this._model && currentModelId) {
-      super.setModel(currentModelId);
+    if ((!this._model || !this.isKnownAvailableModel(this._model)) && (selectableCurrentModelId || this.firstAvailableModelId)) {
+      super.setModel(selectableCurrentModelId || this.firstAvailableModelId || '');
     }
 
     if (availableModels.length > 0) {
       this.config.onAvailableModelsUpdate?.(availableModels, currentModelId);
     }
+  }
+
+  private isKnownAvailableModel(model: string): boolean {
+    return !this.availableModelIds || this.availableModelIds.size === 0 || this.availableModelIds.has(model);
   }
 
   private recordSessionModes(result: JsonRecord): void {
@@ -1339,6 +1351,10 @@ export class QwenAgent extends BaseAgent {
 
   private async forwardModel(model: string, sessionId = this.qwenSessionId): Promise<void> {
     if (!model || !sessionId) return;
+    if (!this.isKnownAvailableModel(model)) {
+      this.debug(`Skipping Qwen model forward for unavailable model: ${model}`);
+      return;
+    }
 
     try {
       await this.callAcp('session/set_model', (connection) => connection.unstable_setSessionModel({
