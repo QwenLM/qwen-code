@@ -91,6 +91,8 @@ interface SessionListProps {
   hasPendingPrompt?: (sessionId: string) => boolean
   /** DOM-verified match info for the active session (from ChatDisplay) */
   activeChatMatchInfo?: { sessionId: string | null; count: number; isHighlighting?: boolean }
+  /** Shows a lightweight loading state while the session metadata list is refreshing. */
+  isLoading?: boolean
 }
 
 // Re-export SessionStatusId for use by parent components
@@ -141,6 +143,7 @@ export function SessionList({
   onNavigateToSession,
   hasPendingPrompt,
   activeChatMatchInfo,
+  isLoading = false,
 }: SessionListProps) {
   const { t, i18n } = useTranslation()
   const setSendToWorkspace = useSetAtom(sendToWorkspaceAtom)
@@ -611,6 +614,17 @@ export function SessionList({
   // --- Empty state (non-search) — render before EntityList ---
   // Don't show empty state when there are collapsed groups with content
   if (flatRows.length === 0 && (rowData.groups?.length ?? 0) === 0 && !searchActive) {
+    if (isLoading) {
+      return (
+        <div className="flex h-full items-center justify-center px-4">
+          <div className="flex items-center gap-2 rounded-[8px] px-3 py-2 text-sm font-medium text-muted-foreground">
+            <Spinner className="text-muted-foreground" />
+            <span>{t("common.loading")}</span>
+          </div>
+        </div>
+      )
+    }
+
     if (currentFilter?.kind === 'archived') {
       return (
         <EntityListEmptyScreen
@@ -710,7 +724,7 @@ export function SessionList({
           ) : undefined
         }
         footer={
-          hasMore ? (
+          hasMore || (isLoading && !searchActive) ? (
             <div className="flex justify-center py-4">
               <Spinner className="text-muted-foreground" />
             </div>

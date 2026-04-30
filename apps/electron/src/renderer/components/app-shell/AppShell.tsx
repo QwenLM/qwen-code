@@ -173,6 +173,8 @@ interface AppShellProps {
   menuNewChatTrigger?: number
   /** Focused mode - hides sidebars, shows only the chat content */
   isFocusedMode?: boolean
+  /** True while the active workspace session list is refreshing. */
+  isSessionListLoading?: boolean
   /** Reports when the project tree's cross-workspace session snapshots are ready. */
   onProjectSessionSnapshotsReadyChange?: (ready: boolean) => void
 }
@@ -516,6 +518,7 @@ function AppShellContent({
   defaultCollapsed = false,
   menuNewChatTrigger,
   isFocusedMode = false,
+  isSessionListLoading = false,
   onProjectSessionSnapshotsReadyChange,
 }: AppShellProps) {
   // Destructure commonly used values from context
@@ -1366,6 +1369,7 @@ function AppShellContent({
   }, [sessionMetaMap, workspaceSessions, activeWorkspaceId, remoteWorkspaceId])
 
   const [workspaceSessionSnapshotRefreshTick, setWorkspaceSessionSnapshotRefreshTick] = useState(0)
+  const [workspaceSessionSnapshotLoadingIds, setWorkspaceSessionSnapshotLoadingIds] = useState<Set<string>>(new Set())
   const workspaceSessionSnapshotRetryAttemptsRef = useRef<Map<string, number>>(new Map())
   const workspaceSessionSnapshotRetryTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
@@ -1411,13 +1415,16 @@ function AppShellContent({
     const loadWorkspaceSessionSnapshots = async () => {
       const snapshotWorkspaces = workspaces.filter(workspace => workspace.id !== activeWorkspaceId)
       if (snapshotWorkspaces.length === 0) {
+        setWorkspaceSessionSnapshotLoadingIds(new Set())
         onProjectSessionSnapshotsReadyChange?.(true)
         return
       }
 
       onProjectSessionSnapshotsReadyChange?.(false)
+      setWorkspaceSessionSnapshotLoadingIds(new Set(snapshotWorkspaces.map(workspace => workspace.id)))
       const previousCache = workspaceSessionMetaCacheRef.current
       let hasPendingRetry = false
+      const pendingRetryWorkspaceIds = new Set<string>()
       const entries = await Promise.all(workspaces.map(async (workspace) => {
         if (workspace.id === activeWorkspaceId) {
           return [workspace.id, previousCache.get(workspace.id) ?? []] as const
@@ -1439,13 +1446,20 @@ function AppShellContent({
 
           const willRetry = scheduleWorkspaceSessionSnapshotRetry(workspace.id)
           hasPendingRetry = hasPendingRetry || willRetry
+          if (willRetry && previous.length === 0) {
+            pendingRetryWorkspaceIds.add(workspace.id)
+          }
           if (willRetry && previous.length > 0) {
             return [workspace.id, previous] as const
           }
           return [workspace.id, sessions] as const
         } catch (error) {
           console.error(`[AppShell] Failed to load sessions for workspace ${workspace.id}:`, error)
-          hasPendingRetry = scheduleWorkspaceSessionSnapshotRetry(workspace.id) || hasPendingRetry
+          const willRetry = scheduleWorkspaceSessionSnapshotRetry(workspace.id)
+          hasPendingRetry = willRetry || hasPendingRetry
+          if (willRetry && previous.length === 0) {
+            pendingRetryWorkspaceIds.add(workspace.id)
+          }
           return [workspace.id, previous] as const
         }
       }))
@@ -1463,6 +1477,7 @@ function AppShellContent({
           }
           return changed ? next : prev
         })
+        setWorkspaceSessionSnapshotLoadingIds(pendingRetryWorkspaceIds)
         onProjectSessionSnapshotsReadyChange?.(!hasPendingRetry)
       }
     }
@@ -1489,6 +1504,14 @@ function AppShellContent({
     }
     return next
   }, [workspaceSessionMetaCache, activeWorkspaceId, workspaceSessionMetas])
+
+  const projectTreeLoadingWorkspaceSessionIds = useMemo(() => {
+    const next = new Set(workspaceSessionSnapshotLoadingIds)
+    if (activeWorkspaceId && isSessionListLoading) {
+      next.add(activeWorkspaceId)
+    }
+    return next
+  }, [activeWorkspaceId, isSessionListLoading, workspaceSessionSnapshotLoadingIds])
 
   // Active sessions exclude archived - use this for all counts and filters except archived view
   const activeSessionMetas = useMemo(() => {
@@ -2536,6 +2559,7 @@ function AppShellContent({
                   activeWorkspaceId={activeWorkspaceId}
                   selectedSessionId={effectiveSessionId}
                   workspaceSessions={projectTreeWorkspaceSessions}
+                  loadingWorkspaceSessionIds={projectTreeLoadingWorkspaceSessionIds}
                   workspaceUnreadMap={workspaceUnreadMap}
                   onSelectWorkspace={onSelectWorkspace}
                   onSelectSession={handleSelectProjectSession}
@@ -3292,6 +3316,7 @@ function AppShellContent({
                   onNavigateToSession={panelCount > 1 ? navigateToSessionInPanel : undefined}
                   hasPendingPrompt={hasPendingPrompt}
                   activeChatMatchInfo={chatMatchInfo}
+                  isLoading={isSessionListLoading}
                 />
               </>
             )}

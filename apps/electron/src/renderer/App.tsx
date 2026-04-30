@@ -201,6 +201,29 @@ function SessionLoadErrorScreen({
   )
 }
 
+function getRequestedSessionIdsFromLocation(): Set<string> {
+  const params = new URLSearchParams(window.location.search)
+  const requestedSessionIds = new Set<string>()
+
+  const addRoute = (rawRoute: string | null | undefined) => {
+    if (!rawRoute) return
+
+    const colonIndex = rawRoute.lastIndexOf(':')
+    const route = colonIndex > 0 ? rawRoute.slice(0, colonIndex) : rawRoute
+    const segments = route.split('/').filter(Boolean)
+    const sessionIndex = segments.indexOf('session')
+    const sessionId = sessionIndex >= 0 ? segments[sessionIndex + 1] : undefined
+    if (sessionId) {
+      requestedSessionIds.add(sessionId)
+    }
+  }
+
+  addRoute(params.get('route'))
+  params.get('panels')?.split(',').forEach(addRoute)
+
+  return requestedSessionIds
+}
+
 export default function App() {
   const { t } = useTranslation()
 
@@ -242,6 +265,7 @@ export default function App() {
   }, [updateSessionDirect])
 
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  const workspacesRef = useRef<Workspace[]>(workspaces)
   // Window's workspace ID — shared atom so Root/ThemeProvider stays in sync on switch
   const [windowWorkspaceId, setWindowWorkspaceId] = useAtom(windowWorkspaceIdAtom)
   const windowWorkspaceIdRef = useRef<string | null>(windowWorkspaceId)
@@ -253,6 +277,10 @@ export default function App() {
   useEffect(() => {
     windowWorkspaceIdRef.current = windowWorkspaceId
   }, [windowWorkspaceId])
+
+  useEffect(() => {
+    workspacesRef.current = workspaces
+  }, [workspaces])
 
   const consumePendingWorkspaceSwitchRoute = useCallback((workspaceId: string): ViewRoute | null => {
     const pending = pendingWorkspaceSwitchRouteRef.current
@@ -319,6 +347,8 @@ export default function App() {
 
   // Splash screen state - tracks when app is fully ready (all data loaded)
   const [sessionsLoaded, setSessionsLoaded] = useState(false)
+  const [sessionListInitialSnapshotReady, setSessionListInitialSnapshotReady] = useState(false)
+  const [sessionListLoading, setSessionListLoading] = useState(false)
   const [projectSessionSnapshotsReady, setProjectSessionSnapshotsReady] = useState(false)
   const [sessionLoadError, setSessionLoadError] = useState<string | null>(null)
   const [splashExiting, setSplashExiting] = useState(false)
@@ -332,7 +362,7 @@ export default function App() {
   const skills = useAtomValue(skillsAtom)
 
   // Compute if app is fully ready (all data loaded)
-  const isFullyReady = appState === 'ready' && sessionsLoaded && (sessionLoadError || projectSessionSnapshotsReady)
+  const isFullyReady = appState === 'ready' && (sessionsLoaded || sessionListInitialSnapshotReady) && (sessionLoadError || projectSessionSnapshotsReady)
 
   // Trigger splash exit animation when fully ready
   useEffect(() => {
@@ -504,13 +534,72 @@ export default function App() {
     )
   }, [reconcilePermissionModeState])
 
+  const applyFastLocalSessionSnapshot = useCallback(async (
+    workspaceId: string | null,
+    requestSeq: number,
+  ): Promise<void> => {
+    if (!workspaceId) return
+
+    let knownWorkspaces = workspacesRef.current
+    if (knownWorkspaces.length === 0) {
+      try {
+        knownWorkspaces = await window.electronAPI.getWorkspaces()
+        if (requestSeq !== sessionListRequestSeqRef.current || workspaceId !== windowWorkspaceIdRef.current) {
+          return
+        }
+        workspacesRef.current = knownWorkspaces
+        setWorkspaces(knownWorkspaces)
+      } catch (error) {
+        console.warn('[App] Failed to load workspaces for fast session snapshot:', error)
+        return
+      }
+    }
+
+    const targetWorkspace = knownWorkspaces.find(workspace => workspace.id === workspaceId)
+    if (!targetWorkspace || targetWorkspace.remoteServer) return
+
+    try {
+      const fastSessions = await window.electronAPI.getSessionsForWorkspace(workspaceId, { refreshExternal: false })
+      if (requestSeq !== sessionListRequestSeqRef.current || workspaceId !== windowWorkspaceIdRef.current) {
+        return
+      }
+
+      applyLoadedSessions(fastSessions, workspaceId, undefined)
+      setSessionListInitialSnapshotReady(true)
+
+      const requestedSessionIds = getRequestedSessionIdsFromLocation()
+      const canRestoreNavigationFromSnapshot = requestedSessionIds.size === 0
+        || fastSessions.some(session => requestedSessionIds.has(session.id))
+      if (fastSessions.length > 0 && canRestoreNavigationFromSnapshot) {
+        setSessionsLoaded(true)
+      }
+    } catch (error) {
+      console.warn(`[App] Failed to load fast session snapshot for workspace ${workspaceId}:`, error)
+    }
+  }, [applyLoadedSessions])
+
   const loadSessionsFromServer = useCallback(async () => {
     const requestWorkspaceId = windowWorkspaceIdRef.current
     const requestSeq = ++sessionListRequestSeqRef.current
     setSessionLoadError(null)
+    setSessionListLoading(true)
+
+    const fullSessionsPromise: Promise<
+      | { ok: true; sessions: Session[] }
+      | { ok: false; error: unknown }
+    > = window.electronAPI.getSessions().then(
+      (sessions) => ({ ok: true as const, sessions }),
+      (error) => ({ ok: false as const, error }),
+    )
 
     try {
-      const loadedSessions = await window.electronAPI.getSessions()
+      await applyFastLocalSessionSnapshot(requestWorkspaceId, requestSeq)
+
+      const fullSessionsResult = await fullSessionsPromise
+      if (!fullSessionsResult.ok) {
+        throw fullSessionsResult.error
+      }
+      const loadedSessions = fullSessionsResult.sessions
 
       if (requestSeq !== sessionListRequestSeqRef.current || requestWorkspaceId !== windowWorkspaceIdRef.current) {
         console.info('[App] Ignoring stale session list response', {
@@ -521,17 +610,10 @@ export default function App() {
       }
 
       applyLoadedSessions(loadedSessions, requestWorkspaceId, windowRemoteWorkspaceId)
-      await reconcileLoadedSessionPermissionModes(loadedSessions)
-
-      if (requestSeq !== sessionListRequestSeqRef.current || requestWorkspaceId !== windowWorkspaceIdRef.current) {
-        console.info('[App] Ignoring stale session list post-reconcile', {
-          requestWorkspaceId,
-          currentWorkspaceId: windowWorkspaceIdRef.current,
-        })
-        return
-      }
-
+      setSessionListInitialSnapshotReady(true)
       setSessionsLoaded(true)
+      setSessionListLoading(false)
+      void reconcileLoadedSessionPermissionModes(loadedSessions)
 
       if (initialSessionId && windowWorkspaceId) {
         const session = loadedSessions.find(s => s.id === initialSessionId)
@@ -553,15 +635,21 @@ export default function App() {
 
       if (shouldTreatSessionLoadFailureAsTransportFallback(transportState)) {
         console.error('[App] Treating session load failure as transport fallback:', transportState)
+        setSessionListInitialSnapshotReady(true)
         setSessionsLoaded(true)
         setSessionLoadError(null)
         return
       }
 
       setSessionLoadError(formatSessionLoadFailure(err))
+      setSessionListInitialSnapshotReady(true)
       setSessionsLoaded(true)
+    } finally {
+      if (requestSeq === sessionListRequestSeqRef.current && requestWorkspaceId === windowWorkspaceIdRef.current) {
+        setSessionListLoading(false)
+      }
     }
-  }, [applyLoadedSessions, initialSessionId, reconcileLoadedSessionPermissionModes, windowRemoteWorkspaceId, windowWorkspaceId])
+  }, [applyFastLocalSessionSnapshot, applyLoadedSessions, initialSessionId, reconcileLoadedSessionPermissionModes, windowRemoteWorkspaceId, windowWorkspaceId])
 
   const refreshSessionListMetadataFromServer = useCallback(async (): Promise<Map<string, SessionMeta> | null> => {
     const requestWorkspaceId = windowWorkspaceIdRef.current
@@ -1765,13 +1853,14 @@ export default function App() {
       ? { workspaceId, route: options.route }
       : null
 
+    setSessionLoadError(null)
+    setSessionListLoading(true)
+
     const switchSeq = ++workspaceSwitchSeqRef.current
     const requestSeq = ++sessionListRequestSeqRef.current
 
     const runSwitch = async () => {
       if (switchSeq !== workspaceSwitchSeqRef.current) return
-
-      setSessionLoadError(null)
 
       const targetWorkspace = workspaces.find(w => w.id === workspaceId)
       let loadedSessions: Session[] | null = null
@@ -1848,6 +1937,12 @@ export default function App() {
     const nextSwitch = workspaceSwitchChainRef.current
       .catch(() => {})
       .then(runSwitch)
+      .catch((error) => {
+        if (switchSeq === workspaceSwitchSeqRef.current) {
+          setSessionListLoading(false)
+        }
+        console.error(`[App] Failed to switch workspace to ${workspaceId}:`, error)
+      })
 
     workspaceSwitchChainRef.current = nextSwitch.catch(() => {})
     return nextSwitch
@@ -2125,6 +2220,7 @@ export default function App() {
                   defaultLayout={[20, 32, 48]}
                   menuNewChatTrigger={menuNewChatTrigger}
                   isFocusedMode={isFocusedMode}
+                  isSessionListLoading={sessionListLoading}
                   onProjectSessionSnapshotsReadyChange={setProjectSessionSnapshotsReady}
                 />
               )}

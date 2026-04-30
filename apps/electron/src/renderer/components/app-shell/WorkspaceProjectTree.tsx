@@ -40,6 +40,7 @@ interface WorkspaceProjectTreeProps {
   activeWorkspaceId: string | null
   selectedSessionId?: string | null
   workspaceSessions: Map<string, SessionMeta[]>
+  loadingWorkspaceSessionIds?: Set<string>
   workspaceUnreadMap?: Record<string, boolean>
   onSelectWorkspace: (workspaceId: string, openInNewWindow?: boolean, options?: { route?: ViewRoute }) => void | Promise<void>
   onSelectSession: (workspaceId: string, sessionId: string) => void | Promise<void>
@@ -357,6 +358,7 @@ export function WorkspaceProjectTree({
   activeWorkspaceId,
   selectedSessionId,
   workspaceSessions,
+  loadingWorkspaceSessionIds,
   workspaceUnreadMap,
   onSelectWorkspace,
   onSelectSession,
@@ -674,6 +676,7 @@ export function WorkspaceProjectTree({
     const isSessionListExpanded = expandedWorkspaceSessionIds.has(workspace.id)
     const sessions = [...(workspaceSessions.get(workspace.id) ?? [])]
       .filter(session => !session.hidden && !session.isArchived)
+    const isLoadingSessions = loadingWorkspaceSessionIds?.has(workspace.id) ?? false
     const visibleSessions = isSessionListExpanded ? sessions : sessions.slice(0, PROJECT_SESSION_PREVIEW_LIMIT)
     const canToggleSessionList = sessions.length > PROJECT_SESSION_PREVIEW_LIMIT
     const sessionListToggleLabel = isSessionListExpanded
@@ -729,6 +732,14 @@ export function WorkspaceProjectTree({
                 <span className="truncate">{sessionListToggleLabel}</span>
               </button>
             )}
+          </div>
+        ) : !isSorting && !isCollapsed && isLoadingSessions ? (
+          <div
+            className="ml-7 mr-3 flex h-8 items-center gap-2 rounded-[6px] px-2 text-[12px] font-medium text-muted-foreground/70"
+            data-no-dnd="true"
+          >
+            <Spinner className="text-muted-foreground" />
+            <span className="truncate">{t("common.loading")}</span>
           </div>
         ) : !isSorting && !isCollapsed ? (
           <div
