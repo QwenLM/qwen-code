@@ -4,6 +4,7 @@ import { RPC_CHANNELS, type SkillFile } from '@craft-agent/shared/protocol'
 import { getWorkspaceByNameOrId } from '@craft-agent/shared/config'
 import type { RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
+import type { LoadedSkill } from '@craft-agent/shared/skills/types'
 
 export const HANDLED_CHANNELS = [
   RPC_CHANNELS.skills.GET,
@@ -12,6 +13,31 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.skills.OPEN_EDITOR,
   RPC_CHANNELS.skills.OPEN_FINDER,
 ] as const
+
+function providerSkillFromName(name: string): LoadedSkill {
+  return {
+    slug: name,
+    metadata: {
+      name,
+      description: 'Qwen Code skill',
+    },
+    content: '',
+    path: '',
+    source: 'provider',
+  }
+}
+
+async function shouldLoadSkillsFromQwenAcp(workspaceRootPath: string): Promise<boolean> {
+  const { loadWorkspaceConfig } = await import('@craft-agent/shared/workspaces')
+  const { getDefaultLlmConnection, getLlmConnection, QWEN_CODE_CONNECTION_SLUG } = await import('@craft-agent/shared/config')
+
+  const workspaceConfig = loadWorkspaceConfig(workspaceRootPath)
+  const connectionSlug = workspaceConfig?.defaults?.defaultLlmConnection ?? getDefaultLlmConnection() ?? undefined
+  if (!connectionSlug) return false
+
+  const connection = getLlmConnection(connectionSlug)
+  return connectionSlug === QWEN_CODE_CONNECTION_SLUG || connection?.providerType === 'qwen'
+}
 
 export function registerSkillsHandlers(server: RpcServer, deps: HandlerDeps): void {
   // Get all skills for a workspace (and optionally project-level skills from workingDirectory)
@@ -27,6 +53,22 @@ export function registerSkillsHandlers(server: RpcServer, deps: HandlerDeps): vo
     const effectiveWorkingDir = workingDirectory && existsSync(workingDirectory)
       ? workingDirectory
       : undefined
+
+    if (await shouldLoadSkillsFromQwenAcp(workspace.rootPath)) {
+      const result = await deps.sessionManager.refreshAvailableCommands(`skills-discovery:${workspaceId}`, {
+        workspaceId,
+        workingDirectory: effectiveWorkingDir,
+      })
+      if (!result.success) {
+        deps.platform.logger?.warn(`SKILLS_GET: Qwen ACP skill discovery failed for ${workspaceId}: ${result.error ?? 'unknown error'}`)
+        return []
+      }
+
+      const skills = (result.availableSkills ?? []).map(providerSkillFromName)
+      deps.platform.logger?.info(`SKILLS_GET: Loaded ${skills.length} skills from Qwen ACP for ${workspaceId}`)
+      return skills
+    }
+
     const { loadAllSkills } = await import('@craft-agent/shared/skills')
     const skills = loadAllSkills(workspace.rootPath, effectiveWorkingDir)
     deps.platform.logger?.info(`SKILLS_GET: Loaded ${skills.length} skills from ${workspace.rootPath}`)

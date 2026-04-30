@@ -1346,22 +1346,23 @@ function AppShellContent({
       : undefined,
     [activeEffectiveConnectionSlug, llmConnections],
   )
-  const shouldLoadLocalSkills = isSkillsNavigation(navState) || (
-    llmConnections.length > 0 && activeEffectiveConnection?.providerType !== 'qwen'
+  const shouldUseQwenAcpSkills = activeEffectiveConnection?.providerType === 'qwen'
+  const shouldLoadSkills = isSkillsNavigation(navState) || (
+    llmConnections.length > 0 && !shouldUseQwenAcpSkills
   )
 
   // Subscribe to live skill updates (when skills are added/removed dynamically)
   React.useEffect(() => {
     const cleanup = window.electronAPI.onSkillsChanged((workspaceId, updatedSkills) => {
-      if (workspaceId !== activeWorkspaceId || !shouldLoadLocalSkills) return
+      if (workspaceId !== activeWorkspaceId || !shouldLoadSkills || shouldUseQwenAcpSkills) return
       setSkills(updatedSkills || [])
     })
     return cleanup
-  }, [activeWorkspaceId, shouldLoadLocalSkills])
+  }, [activeWorkspaceId, shouldLoadSkills, shouldUseQwenAcpSkills])
 
   React.useEffect(() => {
     if (!activeWorkspaceId) return
-    if (!shouldLoadLocalSkills) {
+    if (!shouldLoadSkills) {
       setSkills([])
       return
     }
@@ -1370,7 +1371,7 @@ function AppShellContent({
     }).catch(err => {
       console.error('[Chat] Failed to load skills:', err)
     })
-  }, [activeWorkspaceId, activeSessionWorkingDirectory, shouldLoadLocalSkills])
+  }, [activeWorkspaceId, activeSessionWorkingDirectory, shouldLoadSkills])
 
   // Filter session metadata by active workspace, but take the display order from
   // workspaceSessionsAtom. sessionMetaMapAtom still carries live event updates.

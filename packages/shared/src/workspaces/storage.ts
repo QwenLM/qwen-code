@@ -205,12 +205,6 @@ export function loadWorkspace(rootPath: string): LoadedWorkspace | null {
   if (isManagedWorkspacePath(rootPath)) {
     // Ensure plugin manifest exists (migration for existing managed workspaces)
     ensurePluginManifest(rootPath, config.name);
-
-    // Ensure skills directory exists (migration for existing managed workspaces)
-    const skillsPath = getWorkspaceSkillsPath(rootPath);
-    if (!existsSync(skillsPath)) {
-      mkdirSync(skillsPath, { recursive: true });
-    }
   }
 
   return {
@@ -334,7 +328,6 @@ export function createWorkspaceAtPath(
   mkdirSync(rootPath, { recursive: true });
   mkdirSync(getWorkspaceSourcesPath(rootPath), { recursive: true });
   mkdirSync(getWorkspaceSessionsPath(rootPath), { recursive: true });
-  mkdirSync(getWorkspaceSkillsPath(rootPath), { recursive: true });
 
   // Save config
   saveWorkspaceConfig(rootPath, config);

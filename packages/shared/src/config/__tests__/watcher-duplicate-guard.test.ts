@@ -6,7 +6,10 @@
  * event loop on Linux due to duplicate recursive fs.watch calls.
  */
 import { describe, it, expect, beforeEach } from 'bun:test';
-import { _getActiveWatchers } from '../watcher.ts';
+import { existsSync, mkdtempSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { ConfigWatcher, _getActiveWatchers } from '../watcher.ts';
 
 describe('ConfigWatcher duplicate guard', () => {
   beforeEach(() => {
@@ -28,5 +31,14 @@ describe('ConfigWatcher duplicate guard', () => {
     // Note: we can't guarantee emptiness if other tests start watchers,
     // but we can verify the type and that the getter works.
     expect(typeof watchers.size).toBe('number');
+  });
+
+  it('does not create a skills directory during initial scan', () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), 'craft-watcher-no-skills-'));
+    const watcher = new ConfigWatcher(workspaceRoot, {});
+
+    (watcher as unknown as { scanSkills: () => void }).scanSkills();
+
+    expect(existsSync(join(workspaceRoot, 'skills'))).toBe(false);
   });
 });
