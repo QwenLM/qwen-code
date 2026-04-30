@@ -51,6 +51,213 @@ const debugLogger = createDebugLogger('SHELL');
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
 
+function trimTrailingShellComment(command: string): string {
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let inBacktick = false;
+  let escapeNext = false;
+  let commandSubstitutionDepth = 0;
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+
+    if (inSingleQuote) {
+      if (ch === "'") inSingleQuote = false;
+      continue;
+    }
+
+    if (inBacktick) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (ch === '`') inBacktick = false;
+      continue;
+    }
+
+    if (inDoubleQuote) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (ch === '"') {
+        inDoubleQuote = false;
+        continue;
+      }
+      if (ch === '$' && command[i + 1] === '(') {
+        commandSubstitutionDepth++;
+        i++;
+        continue;
+      }
+      if (ch === ')' && commandSubstitutionDepth > 0) {
+        commandSubstitutionDepth--;
+      }
+      continue;
+    }
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escapeNext = true;
+      continue;
+    }
+    if (ch === "'") {
+      inSingleQuote = true;
+      continue;
+    }
+    if (ch === '"') {
+      inDoubleQuote = true;
+      continue;
+    }
+    if (ch === '`') {
+      inBacktick = true;
+      continue;
+    }
+    if (ch === '$' && command[i + 1] === '(') {
+      commandSubstitutionDepth++;
+      i++;
+      continue;
+    }
+    if (ch === ')' && commandSubstitutionDepth > 0) {
+      commandSubstitutionDepth--;
+      continue;
+    }
+    if (
+      ch === '#' &&
+      commandSubstitutionDepth === 0 &&
+      (i === 0 || /\s/.test(command[i - 1]!))
+    ) {
+      return command.slice(0, i);
+    }
+  }
+
+  return command;
+}
+
+function hasTopLevelTrailingBackgroundOperator(command: string): boolean {
+  const commentTrimmed = trimTrailingShellComment(command);
+  const trimmed = commentTrimmed.trimEnd();
+  if (!trimmed.endsWith('&')) return false;
+
+  const trailingAmpIndex = trimmed.length - 1;
+  const previousNonWhitespaceIndex = (() => {
+    for (let i = trailingAmpIndex - 1; i >= 0; i--) {
+      if (!/\s/.test(trimmed[i]!)) return i;
+    }
+    return -1;
+  })();
+
+  if (previousNonWhitespaceIndex >= 0) {
+    const previous = trimmed[previousNonWhitespaceIndex]!;
+    if (previous === '&' || previous === '|' || previous === '\\') {
+      return false;
+    }
+  }
+
+  let backslashCount = 0;
+  for (let i = trailingAmpIndex - 1; i >= 0 && trimmed[i] === '\\'; i--) {
+    backslashCount++;
+  }
+  if (backslashCount % 2 === 1) return false;
+
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let inBacktick = false;
+  let escapeNext = false;
+  let commandSubstitutionDepth = 0;
+
+  for (let i = 0; i <= trailingAmpIndex; i++) {
+    const ch = trimmed[i]!;
+
+    if (inSingleQuote) {
+      if (ch === "'") inSingleQuote = false;
+      continue;
+    }
+
+    if (inBacktick) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (ch === '`') inBacktick = false;
+      continue;
+    }
+
+    if (inDoubleQuote) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (ch === '"') {
+        inDoubleQuote = false;
+        continue;
+      }
+      if (ch === '$' && trimmed[i + 1] === '(') {
+        commandSubstitutionDepth++;
+        i++;
+        continue;
+      }
+      if (ch === ')' && commandSubstitutionDepth > 0) {
+        commandSubstitutionDepth--;
+      }
+      continue;
+    }
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escapeNext = true;
+      continue;
+    }
+    if (ch === "'") {
+      inSingleQuote = true;
+      continue;
+    }
+    if (ch === '"') {
+      inDoubleQuote = true;
+      continue;
+    }
+    if (ch === '`') {
+      inBacktick = true;
+      continue;
+    }
+    if (ch === '$' && trimmed[i + 1] === '(') {
+      commandSubstitutionDepth++;
+      i++;
+      continue;
+    }
+    if (ch === ')' && commandSubstitutionDepth > 0) {
+      commandSubstitutionDepth--;
+      continue;
+    }
+    if (i === trailingAmpIndex) {
+      return commandSubstitutionDepth === 0;
+    }
+  }
+
+  return false;
+}
+
 export interface ShellToolParams {
   command: string;
   is_background: boolean;
@@ -727,6 +934,12 @@ export class ShellTool extends BaseDeclarativeTool<
     // This method only performs pure parameter validation.
     if (!params.command.trim()) {
       return 'Command cannot be empty.';
+    }
+    if (
+      params.is_background &&
+      hasTopLevelTrailingBackgroundOperator(params.command)
+    ) {
+      return 'Background shell commands must not end with a bare "&". Remove the trailing "&" and rely on is_background: true instead.';
     }
     if (getCommandRoots(params.command).length === 0) {
       return 'Could not identify command root to obtain permission from user.';

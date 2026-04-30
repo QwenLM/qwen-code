@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { BackgroundTaskRegistry } from './background-tasks.js';
+import * as transcript from './agent-transcript.js';
 
 describe('BackgroundTaskRegistry', () => {
   let registry: BackgroundTaskRegistry;
@@ -100,6 +101,34 @@ describe('BackgroundTaskRegistry', () => {
     expect(registry.get('test-1')!.status).toBe('cancelled');
     expect(abortController.signal.aborted).toBe(true);
     expect(callback).not.toHaveBeenCalled();
+  });
+
+  it('persists explicit cancellations as cancelled sidecar state', () => {
+    const patchSpy = vi
+      .spyOn(transcript, 'patchAgentMeta')
+      .mockImplementation(() => undefined);
+    try {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        metaPath: '/tmp/test-1.meta.json',
+      });
+
+      registry.cancel('test-1');
+
+      expect(patchSpy).toHaveBeenCalledWith(
+        '/tmp/test-1.meta.json',
+        expect.objectContaining({
+          status: 'cancelled',
+          lastError: undefined,
+        }),
+      );
+    } finally {
+      patchSpy.mockRestore();
+    }
   });
 
   it('emits a fallback cancelled notification after the grace period when the natural handler never runs', () => {
@@ -314,6 +343,34 @@ describe('BackgroundTaskRegistry', () => {
     // finalizeCancellationIfPending emits one cancelled notification per
     // agent to keep the SDK contract intact.
     expect(callback).toHaveBeenCalledTimes(2);
+  });
+
+  it('persists shutdown interruption as running sidecar state', () => {
+    const patchSpy = vi
+      .spyOn(transcript, 'patchAgentMeta')
+      .mockImplementation(() => undefined);
+    try {
+      registry.register({
+        agentId: 'a',
+        description: 'agent a',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        metaPath: '/tmp/a.meta.json',
+      });
+
+      registry.abortAll();
+
+      expect(patchSpy).toHaveBeenCalledWith(
+        '/tmp/a.meta.json',
+        expect.objectContaining({
+          status: 'running',
+          lastError: undefined,
+        }),
+      );
+    } finally {
+      patchSpy.mockRestore();
+    }
   });
 
   it('hasUnfinalizedTasks reports cancelled-but-not-notified entries', () => {

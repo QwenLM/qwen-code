@@ -414,21 +414,16 @@ describe('ShellTool', () => {
       expect(registry.complete).not.toHaveBeenCalled();
     });
 
-    it('preserves a bare trailing & and lets the shell own its semantics', async () => {
-      const invocation = shellTool.build({
-        command: 'node server.js &',
-        is_background: true,
-      });
-      await invocation.execute(mockAbortSignal);
-      expect(mockShellExecutionService).toHaveBeenCalledWith(
-        'node server.js &',
-        '/test/dir',
-        expect.any(Function),
-        expect.any(AbortSignal),
-        false,
-        {},
-        { streamStdout: true },
+    it('rejects a bare trailing & in managed background mode', async () => {
+      expect(() =>
+        shellTool.build({
+          command: 'node server.js &',
+          is_background: true,
+        }),
+      ).toThrow(
+        'Background shell commands must not end with a bare "&". Remove the trailing "&" and rely on is_background: true instead.',
       );
+      expect(mockShellExecutionService).not.toHaveBeenCalled();
     });
 
     it('preserves a trailing && (logical AND would be syntactically broken otherwise)', async () => {

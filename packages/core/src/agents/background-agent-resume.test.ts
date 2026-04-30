@@ -1037,6 +1037,80 @@ describe('BackgroundAgentResumeService', () => {
     expect(readMetaStatus(metaPath)).toBe('running');
   });
 
+  it('keeps explicit cancellation persisted after a resumed task stops', async () => {
+    const sessionId = 'session-resume-cancelled';
+    const agentId = 'agent-resume-cancelled';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume then cancel',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume then cancel' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume then cancel',
+      subagentType: 'researcher',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume then cancel',
+      outputFile,
+      metaPath,
+    });
+
+    let releaseExecute: (() => void) | undefined;
+    const execute = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseExecute = resolve;
+        }),
+    );
+    const subagent = {
+      execute,
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.CANCELLED,
+      getFinalText: () => '',
+    };
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+    expect(resumed).toBeDefined();
+    registry.cancel(agentId);
+    releaseExecute?.();
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('cancelled');
+    });
+    expect(readMetaStatus(metaPath)).toBe('cancelled');
+  });
+
   it('injects pending trailing user text via initial_messages_override', async () => {
     const sessionId = 'session-pending-user';
     const agentId = 'agent-pending-user';

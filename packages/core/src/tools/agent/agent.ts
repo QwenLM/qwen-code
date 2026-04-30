@@ -68,10 +68,10 @@ import { getGitBranch } from '../../utils/gitUtils.js';
 
 function persistBackgroundCancellation(
   metaPath: string,
-  abortedBySignal: boolean,
+  persistedStatus: 'running' | 'cancelled',
 ): void {
   patchAgentMeta(metaPath, {
-    status: abortedBySignal ? 'running' : 'cancelled',
+    status: persistedStatus,
     lastUpdatedAt: new Date().toISOString(),
     lastError: undefined,
   });
@@ -1261,7 +1261,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               );
               persistBackgroundCancellation(
                 metaPath,
-                bgAbortController.signal.aborted,
+                registry.get(hookOpts.agentId)?.persistedCancellationStatus ??
+                  'cancelled',
               );
             } else {
               registry.fail(
@@ -1292,7 +1293,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               );
               persistBackgroundCancellation(
                 metaPath,
-                bgAbortController.signal.aborted,
+                registry.get(hookOpts.agentId)?.persistedCancellationStatus ??
+                  'cancelled',
               );
             } else {
               registry.fail(hookOpts.agentId, errorMsg, getCompletionStats());

@@ -13,6 +13,7 @@
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { patchAgentMeta } from './agent-transcript.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_TASKS');
 
@@ -144,6 +145,19 @@ export interface BackgroundTaskEntry {
    * fires the notification with the real partial/final result).
    */
   notified?: boolean;
+  /**
+   * Persisted sidecar status to write when the current cancellation settles.
+   * Explicit user cancellation uses `cancelled`; shutdown interruption keeps
+   * `running` so `/resume` can recover the work later.
+   */
+  persistedCancellationStatus?: Extract<
+    BackgroundTaskStatus,
+    'running' | 'cancelled'
+  >;
+}
+
+interface CancelOptions {
+  persistedStatus?: Extract<BackgroundTaskStatus, 'running' | 'cancelled'>;
 }
 
 export interface NotificationMeta {
@@ -251,13 +265,22 @@ export class BackgroundTaskRegistry {
   // case where a tool ignores AbortSignal and bgBody never settles — the
   // timeout lands on finalizeCancellationIfPending(), which is a no-op
   // once the natural handler has already emitted.
-  cancel(agentId: string): void {
+  cancel(agentId: string, options: CancelOptions = {}): void {
     const entry = this.agents.get(agentId);
     if (!entry || entry.status !== 'running') return;
+    const persistedStatus = options.persistedStatus ?? 'cancelled';
 
     entry.abortController.abort();
     entry.status = 'cancelled';
     entry.endTime = Date.now();
+    entry.persistedCancellationStatus = persistedStatus;
+    if (entry.metaPath) {
+      patchAgentMeta(entry.metaPath, {
+        status: persistedStatus,
+        lastUpdatedAt: new Date().toISOString(),
+        lastError: undefined,
+      });
+    }
     debugLogger.info(`Background agent cancelled: ${agentId}`);
     this.emitStatusChange(entry);
 
@@ -420,7 +443,7 @@ export class BackgroundTaskRegistry {
 
   abortAll(): void {
     for (const entry of Array.from(this.agents.values())) {
-      this.cancel(entry.agentId);
+      this.cancel(entry.agentId, { persistedStatus: 'running' });
       // Shutdown path: no natural handler will run, so emit the cancelled
       // notification here to honour the one-notification-per-agent contract.
       this.finalizeCancellationIfPending(entry.agentId);

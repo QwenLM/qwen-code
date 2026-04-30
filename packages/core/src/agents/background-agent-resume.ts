@@ -152,10 +152,10 @@ function createApprovalModeOverride(
 
 function persistBackgroundCancellation(
   metaPath: string,
-  abortedBySignal: boolean,
+  persistedStatus: 'running' | 'cancelled',
 ): void {
   patchAgentMeta(metaPath, {
-    status: abortedBySignal ? 'running' : 'cancelled',
+    status: persistedStatus,
     lastUpdatedAt: new Date().toISOString(),
     lastError: undefined,
   });
@@ -760,7 +760,8 @@ export class BackgroundAgentResumeService {
             registry.finalizeCancelled(meta.agentId, finalText, stats);
             persistBackgroundCancellation(
               metaPath,
-              bgAbortController.signal.aborted,
+              registry.get(meta.agentId)?.persistedCancellationStatus ??
+                'cancelled',
             );
           } else {
             const failureText =
@@ -786,7 +787,8 @@ export class BackgroundAgentResumeService {
             );
             persistBackgroundCancellation(
               metaPath,
-              bgAbortController.signal.aborted,
+              registry.get(meta.agentId)?.persistedCancellationStatus ??
+                'cancelled',
             );
           } else {
             registry.fail(
