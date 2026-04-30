@@ -44,8 +44,23 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
 
 // ─── Path helpers ───────────────────────────────────────────
 
+/**
+ * Validate a task ID. Task IDs are auto-generated as positive
+ * integers by `createTask`; rejecting anything else prevents
+ * model-supplied IDs from escaping the tasks directory via
+ * `../` segments or absolute paths.
+ */
+function assertValidTaskId(taskId: string): void {
+  if (!/^[1-9]\d*$/.test(taskId)) {
+    throw new Error(
+      `Invalid task ID "${taskId}". Task IDs must be positive integers.`,
+    );
+  }
+}
+
 /** Path to a single task file. */
 export function getTaskPath(teamName: string, taskId: string): string {
+  assertValidTaskId(taskId);
   return path.join(getTasksDir(teamName), `${taskId}.json`);
 }
 

@@ -645,13 +645,14 @@ export class GeminiClient {
         ?.recordNotification(request, options?.notificationDisplayText);
     }
 
-    // Notifications start a fresh Turn with a new prompt_id, so the loop
+    // Fresh-turn entrypoints all advance prompt_id, so the loop
     // detector must reset — otherwise a prior turn's count can trip
-    // LoopDetected early on the notification turn.
+    // LoopDetected early on the new turn.
     if (
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron ||
-      messageType === SendMessageType.Notification
+      messageType === SendMessageType.Notification ||
+      messageType === SendMessageType.Teammate
     ) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;

@@ -443,15 +443,21 @@ export class TeamManager {
   }
 
   /**
-   * Read all messages sent to the leader by teammates.
-   * Returns the messages and marks them as read.
+   * Read messages sent to the leader by teammates that have not yet
+   * been consumed by polling or a prior call. Advances the inbox
+   * offset so the same messages aren't redelivered later — task_list
+   * and pollLeaderInbox share `lastInboxOffset` as the high-water
+   * mark of "already surfaced to the leader".
    */
   async getLeaderMessages(): Promise<
     Array<{ from: string; text: string; timestamp: string }>
   > {
     try {
-      const messages = await readInbox(this.teamFile.name, LEADER_NAME);
-      return messages.map((m) => ({
+      const inbox = await readInbox(this.teamFile.name, LEADER_NAME);
+      if (inbox.length <= this.lastInboxOffset) return [];
+      const newMessages = inbox.slice(this.lastInboxOffset);
+      this.lastInboxOffset = inbox.length;
+      return newMessages.map((m) => ({
         from: m.from,
         text: m.text,
         timestamp: m.timestamp,

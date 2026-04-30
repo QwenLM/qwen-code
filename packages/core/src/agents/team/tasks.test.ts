@@ -111,6 +111,27 @@ describe('tasks', () => {
     it('returns undefined for nonexistent task', async () => {
       expect(await getTask('team', '999')).toBeUndefined();
     });
+
+    it('rejects non-numeric task IDs to prevent path traversal', async () => {
+      await expect(getTask('team', '../../etc/passwd')).rejects.toThrow(
+        'Invalid task ID',
+      );
+      await expect(getTask('team', '../../settings')).rejects.toThrow(
+        'Invalid task ID',
+      );
+      await expect(getTask('team', 'abc')).rejects.toThrow('Invalid task ID');
+      await expect(getTask('team', '')).rejects.toThrow('Invalid task ID');
+      await expect(getTask('team', '0')).rejects.toThrow('Invalid task ID');
+    });
+
+    it('rejects non-numeric task IDs from updateTask and deleteTask', async () => {
+      await expect(
+        updateTask('team', '../../oops', { status: 'completed' }),
+      ).rejects.toThrow('Invalid task ID');
+      await expect(deleteTask('team', '../../oops')).rejects.toThrow(
+        'Invalid task ID',
+      );
+    });
   });
 
   // ─── updateTask ────────────────────────────────────────────

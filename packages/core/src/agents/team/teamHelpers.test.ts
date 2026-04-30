@@ -136,6 +136,24 @@ describe('generateUniqueTeammateName', () => {
     const members = [makeMember({ name: 'worker' })];
     expect(generateUniqueTeammateName('Designer', members)).toBe('designer');
   });
+
+  it('rejects names that sanitize to empty string', () => {
+    expect(() => generateUniqueTeammateName('@@@', [])).toThrow(
+      'sanitizes to an empty string',
+    );
+    expect(() => generateUniqueTeammateName('', [])).toThrow(
+      'sanitizes to an empty string',
+    );
+  });
+
+  it('rejects the reserved leader name', () => {
+    expect(() => generateUniqueTeammateName('leader', [])).toThrow(
+      'reserved for the team leader',
+    );
+    expect(() => generateUniqueTeammateName('LEADER', [])).toThrow(
+      'reserved for the team leader',
+    );
+  });
 });
 
 describe('assignTeammateColor', () => {

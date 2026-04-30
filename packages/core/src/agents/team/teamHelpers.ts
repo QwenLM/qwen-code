@@ -24,6 +24,7 @@ import {
   TEAMMATE_COLORS,
   INBOXES_DIR,
   TASKS_DIR,
+  LEADER_NAME,
 } from './types.js';
 
 // ─── Path helpers ───────────────────────────────────────────
@@ -101,8 +102,25 @@ export function generateUniqueTeammateName(
   existingMembers: readonly TeamMember[],
 ): string {
   const sanitized = sanitizeName(baseName);
-  const existingNames = new Set(existingMembers.map((m) => m.name));
 
+  // Empty names are unaddressable (send_message treats blank "to"
+  // as missing), and "leader" is reserved for the leader inbox in
+  // TeamManager.sendMessage — a teammate with that name would be
+  // shadowed and unreachable.
+  if (!sanitized) {
+    throw new Error(
+      `Teammate name "${baseName}" sanitizes to an empty string. ` +
+        `Choose a name with at least one alphanumeric character.`,
+    );
+  }
+  if (sanitized === LEADER_NAME) {
+    throw new Error(
+      `"${LEADER_NAME}" is reserved for the team leader. ` +
+        `Choose a different teammate name.`,
+    );
+  }
+
+  const existingNames = new Set(existingMembers.map((m) => m.name));
   if (existingNames.has(sanitized)) {
     throw new Error(
       `A teammate named "${sanitized}" already exists in this team. ` +
