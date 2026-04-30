@@ -180,6 +180,30 @@ export type CompletedToolCall =
   | ErroredToolCall;
 
 /**
+ * Closed allowlist of tool names whose inputs name actual filesystem
+ * paths under the project root. Restricting `extractToolFilePaths` to
+ * this set prevents MCP tools (where `Record<string, unknown>` input
+ * conventions reuse `path` / `paths` for HTTP routes, JSON keys, search
+ * queries, etc.) from feeding non-filesystem strings into
+ * ConditionalRulesRegistry / SkillActivationRegistry — which would
+ * resolve them under projectRoot, normalize, and false-match against
+ * skill globs (e.g. `paths: ['**']` would activate on every MCP call).
+ *
+ * Custom FS tools added later need to opt in here. A future enhancement
+ * could replace this with a per-tool `pathFields?: string[]` annotation
+ * on tool declarations; the allowlist is the minimum-surface fix.
+ */
+const FS_PATH_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
+  ToolNames.READ_FILE,
+  ToolNames.EDIT,
+  ToolNames.WRITE_FILE,
+  ToolNames.GREP,
+  ToolNames.GLOB,
+  ToolNames.LS,
+  ToolNames.LSP,
+]);
+
+/**
  * Pull the filesystem path-bearing fields out of a tool's input. Different
  * core tools name these differently:
  *  - `file_path` — read-file, edit, write-file
@@ -189,8 +213,15 @@ export type CompletedToolCall =
  * Used by ConditionalRulesRegistry / SkillActivationRegistry hooks to
  * route every path the tool just touched through the same activation
  * pipeline. Returns input order, with empty / non-string entries dropped.
+ *
+ * Returns `[]` for tool names outside `FS_PATH_TOOL_NAMES` — see that
+ * set's docstring for why this is gated rather than universal.
  */
-export function extractToolFilePaths(toolInput: unknown): string[] {
+export function extractToolFilePaths(
+  toolName: string,
+  toolInput: unknown,
+): string[] {
+  if (!FS_PATH_TOOL_NAMES.has(toolName)) return [];
   if (!toolInput || typeof toolInput !== 'object') return [];
   const out: string[] = [];
   const push = (v: unknown): void => {
@@ -1730,15 +1761,18 @@ export class CoreToolScheduler {
 
         // Collect filesystem paths the tool just touched. Different tools
         // use different parameter names: `file_path` (read/edit/write),
-        // `path` (ls, ripGrep), `filePath` (grep, lsp), and `paths`
+        // `path` (ls, glob), `filePath` (grep, lsp), and `paths`
         // (ripGrep array form). Conditional rules and skill activation
-        // both key off the same path set, so inspect the union.
-        const candidatePaths = extractToolFilePaths(toolInput);
+        // both key off the same path set, so inspect the union — and
+        // gate the inspection on a tool-name allowlist (see
+        // FS_PATH_TOOL_NAMES) so MCP / non-FS tools that reuse those
+        // parameter names with different semantics never enter the
+        // activation pipeline.
+        const candidatePaths = extractToolFilePaths(toolName, toolInput);
 
         if (candidatePaths.length > 0) {
           const rulesRegistry = this.config.getConditionalRulesRegistry();
           const skillManager = this.config.getSkillManager();
-          const seenSkillActivations = new Set<string>();
 
           for (const candidatePath of candidatePaths) {
             // Inject conditional rules at most once per session per rule
@@ -1750,27 +1784,21 @@ export class CoreToolScheduler {
                 `<system-reminder>\n${rulesCtx}\n</system-reminder>`,
               );
             }
-
-            // Activate any conditional skills (skills with `paths:`
-            // frontmatter) whose globs match this file. The await is
-            // load-bearing: matchAndActivateByPath only resolves after
-            // SkillTool's refresh listener has updated the model-facing
-            // tool description, so the system-reminder we append below
-            // never lands in a turn where <available_skills> is still
-            // stale.
-            const activatedSkills =
-              await skillManager?.matchAndActivateByPath(candidatePath);
-            if (activatedSkills) {
-              for (const name of activatedSkills)
-                seenSkillActivations.add(name);
-            }
           }
 
-          // Coalesce all activations from this tool call into one
-          // system-reminder so the model gets a single, deduplicated
-          // announcement even when multiple paths matched the same skill.
-          if (seenSkillActivations.size > 0) {
-            const names = Array.from(seenSkillActivations).join(', ');
+          // Skill activation runs in a single batch over all candidate
+          // paths so `notifyChangeListeners` (and therefore
+          // `SkillTool.refreshSkills` / `geminiClient.setTools()`) fires
+          // exactly once for this tool call, regardless of how many
+          // paths produced new activations. The await is load-bearing:
+          // matchAndActivateByPaths only resolves after the listener
+          // chain settles, so the system-reminder we append below
+          // never lands in a turn where <available_skills> is still
+          // stale.
+          const activatedSkills =
+            await skillManager?.matchAndActivateByPaths(candidatePaths);
+          if (activatedSkills && activatedSkills.length > 0) {
+            const names = activatedSkills.join(', ');
             content = appendAdditionalContext(
               content,
               `<system-reminder>\nThe following skill(s) are now available via the Skill tool based on the file you just accessed: ${names}. Use them if relevant to the task.\n</system-reminder>`,

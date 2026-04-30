@@ -1037,6 +1037,62 @@ Body.
       expect(manager.getActivatedSkillNames().size).toBe(0);
     });
 
+    it('matchAndActivateByPaths fires listeners exactly once across multiple paths', async () => {
+      // Regression for /review: when a single tool call yields multiple
+      // candidate paths (e.g. ripGrep `paths: [a, b, c]`), the per-path
+      // listener fire was triggering N successive SkillTool.refreshSkills /
+      // geminiClient.setTools() round-trips. The batch API should fire
+      // listeners once with the union of activations.
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'tsx-helper',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: tsx-helper
+description: React skill
+paths:
+  - "src/**/*.tsx"
+---
+
+Body.
+`);
+      await manager.refreshCache();
+
+      const listener = vi.fn();
+      manager.addChangeListener(listener);
+      const baselineCalls = listener.mock.calls.length;
+
+      const newly = await manager.matchAndActivateByPaths([
+        '/test/project/src/A.tsx',
+        '/test/project/src/B.tsx',
+        '/test/project/src/C.tsx',
+      ]);
+      expect(newly).toEqual(['tsx-helper']);
+      // One listener call total, not three.
+      expect(listener.mock.calls.length - baselineCalls).toBe(1);
+    });
+
+    it('matchAndActivateByPaths returns empty (no listener) when no path matches', async () => {
+      await loadConditionalFixture();
+
+      const listener = vi.fn();
+      manager.addChangeListener(listener);
+      const baselineCalls = listener.mock.calls.length;
+
+      const newly = await manager.matchAndActivateByPaths([
+        '/test/project/lib/a.ts',
+        '/test/project/lib/b.ts',
+      ]);
+      expect(newly).toEqual([]);
+      // No new activations means the listener stays silent.
+      expect(listener.mock.calls.length).toBe(baselineCalls);
+    });
+
     it('does not activate a visible skill from a shadowed copy paths', async () => {
       // Regression for ultrareview bug_001: cross-level skills with the
       // same name but different `paths:` globs. listSkills() dedupes by

@@ -18,6 +18,9 @@
 import * as path from 'node:path';
 import picomatch from 'picomatch';
 import type { SkillConfig } from './types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('SKILL_ACTIVATION');
 
 interface CompiledSkill {
   readonly skill: SkillConfig;
@@ -94,9 +97,13 @@ export class SkillActivationRegistry {
       rawRelativePath.startsWith('../') ||
       path.isAbsolute(rawRelativePath)
     ) {
+      debugLogger.debug(
+        `Skipping ${filePath}: outside project root (relative=${rawRelativePath})`,
+      );
       return [];
     }
     const relativePath = rawRelativePath.replace(/\\/g, '/');
+    debugLogger.debug(`matchAndConsume ${filePath} → relative=${relativePath}`);
 
     const newlyActivated: string[] = [];
     for (const { skill, matchers } of this.compiled) {
@@ -104,6 +111,9 @@ export class SkillActivationRegistry {
       if (matchers.some((m) => m(relativePath))) {
         this.activated.add(skill.name);
         newlyActivated.push(skill.name);
+        debugLogger.info(
+          `Activated skill "${skill.name}" via path "${relativePath}"`,
+        );
       }
     }
     return newlyActivated;

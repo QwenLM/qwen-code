@@ -4315,38 +4315,46 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 });
 
 describe('extractToolFilePaths', () => {
+  // 'read_file' is the canonical FS tool name and is on the allowlist;
+  // most cases below use it so the field-extraction logic itself runs.
+  const FS_TOOL = 'read_file';
+
   it('returns empty for non-object inputs', () => {
-    expect(extractToolFilePaths(undefined)).toEqual([]);
-    expect(extractToolFilePaths(null)).toEqual([]);
-    expect(extractToolFilePaths('string')).toEqual([]);
-    expect(extractToolFilePaths(42)).toEqual([]);
+    expect(extractToolFilePaths(FS_TOOL, undefined)).toEqual([]);
+    expect(extractToolFilePaths(FS_TOOL, null)).toEqual([]);
+    expect(extractToolFilePaths(FS_TOOL, 'string')).toEqual([]);
+    expect(extractToolFilePaths(FS_TOOL, 42)).toEqual([]);
   });
 
   it('extracts file_path (read-file / edit / write-file convention)', () => {
-    expect(extractToolFilePaths({ file_path: '/proj/a.ts' })).toEqual([
+    expect(extractToolFilePaths(FS_TOOL, { file_path: '/proj/a.ts' })).toEqual([
       '/proj/a.ts',
     ]);
   });
 
   it('extracts filePath (grep / lsp camelCase convention)', () => {
-    expect(extractToolFilePaths({ filePath: '/proj/b.ts' })).toEqual([
-      '/proj/b.ts',
-    ]);
+    expect(
+      extractToolFilePaths('grep_search', { filePath: '/proj/b.ts' }),
+    ).toEqual(['/proj/b.ts']);
   });
 
-  it('extracts path (ls / ripGrep convention)', () => {
-    expect(extractToolFilePaths({ path: '/proj/dir' })).toEqual(['/proj/dir']);
+  it('extracts path (ls / glob convention)', () => {
+    expect(
+      extractToolFilePaths('list_directory', { path: '/proj/dir' }),
+    ).toEqual(['/proj/dir']);
   });
 
   it('extracts paths array (ripGrep multi-path convention)', () => {
     expect(
-      extractToolFilePaths({ paths: ['/proj/a.ts', '/proj/b.ts'] }),
+      extractToolFilePaths('grep_search', {
+        paths: ['/proj/a.ts', '/proj/b.ts'],
+      }),
     ).toEqual(['/proj/a.ts', '/proj/b.ts']);
   });
 
   it('combines all field variants in input order', () => {
     expect(
-      extractToolFilePaths({
+      extractToolFilePaths(FS_TOOL, {
         file_path: '/a',
         filePath: '/b',
         path: '/c',
@@ -4357,7 +4365,7 @@ describe('extractToolFilePaths', () => {
 
   it('drops empty strings and non-string entries', () => {
     expect(
-      extractToolFilePaths({
+      extractToolFilePaths(FS_TOOL, {
         file_path: '',
         filePath: undefined,
         path: 42,
@@ -4368,10 +4376,27 @@ describe('extractToolFilePaths', () => {
 
   it('ignores fields with the right name but the wrong shape', () => {
     expect(
-      extractToolFilePaths({
+      extractToolFilePaths(FS_TOOL, {
         file_path: { not: 'a string' },
         paths: 'not-an-array',
       }),
     ).toEqual([]);
+  });
+
+  it('returns empty for tool names outside the FS allowlist', () => {
+    // Regression: MCP tools and other non-FS tools that happen to use
+    // `path` / `paths` for non-filesystem semantics (e.g. URL routes,
+    // JSON keys) must not feed those values into the activation pipeline.
+    expect(
+      extractToolFilePaths('mcp_some_tool', {
+        path: 'https://api.example.com/users/123',
+      }),
+    ).toEqual([]);
+    expect(
+      extractToolFilePaths('web_fetch', {
+        paths: ['https://x.example.com', 'a.com/b'],
+      }),
+    ).toEqual([]);
+    expect(extractToolFilePaths('skill', { skill: 'review' })).toEqual([]);
   });
 });

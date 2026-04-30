@@ -24,6 +24,7 @@ import {
   SkillErrorCode,
   parseModelField,
   parsePathsField,
+  validateSkillName,
 } from './types.js';
 import type { Config } from '../config/config.js';
 import { validateConfig } from './skill-load.js';
@@ -288,7 +289,12 @@ export class SkillManager {
 
     const levels: SkillLevel[] = ['project', 'user', 'extension', 'bundled'];
 
-    const loaded = await Promise.all(
+    // Use allSettled so an unrecoverable error at one level (e.g. a hung
+    // FS, a permission denial, an OS-level enoent on a removed config dir)
+    // does not nuke the other three. Each level's own internal loop is
+    // already error-isolated per skill — this guard catches errors that
+    // bubble up to the level boundary.
+    const settled = await Promise.allSettled(
       levels.map(async (level) => {
         const levelSkills = await this.listSkillsAtLevel(level);
         debugLogger.debug(`Loaded ${levelSkills.length} ${level} level skills`);
@@ -297,9 +303,18 @@ export class SkillManager {
     );
 
     let totalSkills = 0;
-    for (const [level, levelSkills] of loaded) {
-      skillsCache.set(level, levelSkills);
-      totalSkills += levelSkills.length;
+    for (let i = 0; i < settled.length; i++) {
+      const result = settled[i];
+      if (result.status === 'fulfilled') {
+        const [level, levelSkills] = result.value;
+        skillsCache.set(level, levelSkills);
+        totalSkills += levelSkills.length;
+      } else {
+        debugLogger.warn(
+          `Failed to load ${levels[i]} level skills:`,
+          result.reason,
+        );
+      }
     }
 
     this.skillsCache = skillsCache;
@@ -361,14 +376,40 @@ export class SkillManager {
    * `SkillTool.refreshSkills` updating the model-facing tool description)
    * have applied the new state. Callers can therefore announce the
    * activation in the same turn without racing against a stale tool list.
+   *
+   * The activation registry reference is captured at call entry; if a
+   * concurrent `refreshCache` rebuilds the registry mid-call, this
+   * invocation finishes against the registry it started with, so a
+   * returned name is consistent with the listener state that's about to
+   * be observed.
    */
   async matchAndActivateByPath(filePath: string): Promise<string[]> {
-    if (!this.activationRegistry) return [];
-    const newly = this.activationRegistry.matchAndConsume(filePath);
-    if (newly.length > 0) {
+    return this.matchAndActivateByPaths([filePath]);
+  }
+
+  /**
+   * Batch variant of {@link matchAndActivateByPath}: activate skills for
+   * an array of file paths and fire change listeners exactly once across
+   * all of them. Used by `coreToolScheduler` so a single tool call that
+   * names N paths (e.g. ripGrep with multiple `paths:` entries) does not
+   * trigger N successive `SkillTool.refreshSkills` /
+   * `geminiClient.setTools()` round-trips.
+   */
+  async matchAndActivateByPaths(
+    filePaths: readonly string[],
+  ): Promise<string[]> {
+    const registry = this.activationRegistry;
+    if (!registry || filePaths.length === 0) return [];
+    const newlyAcrossPaths = new Set<string>();
+    for (const filePath of filePaths) {
+      for (const name of registry.matchAndConsume(filePath)) {
+        newlyAcrossPaths.add(name);
+      }
+    }
+    if (newlyAcrossPaths.size > 0) {
       await this.notifyChangeListeners();
     }
-    return newly;
+    return Array.from(newlyAcrossPaths);
   }
 
   /** Names of all conditional skills activated so far (read-only snapshot). */
@@ -504,6 +545,10 @@ export class SkillManager {
 
       // Convert to strings
       const name = String(nameRaw);
+      // Reject unsafe names early — the value flows into the SkillTool
+      // description, schema enums, and the path-activation
+      // <system-reminder>, all of which the model treats as trusted text.
+      validateSkillName(name);
       const description = String(descriptionRaw);
 
       // Extract optional fields

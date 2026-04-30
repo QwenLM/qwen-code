@@ -142,15 +142,21 @@ export function parseModelField(
 
 /**
  * Parse the `paths` field from skill frontmatter into normalized glob
- * patterns. Returns `undefined` when the field is omitted, an empty array,
- * or contains only blank entries — those cases mean "no path gating, treat
- * as unconditional". Throws when `paths` is present but not an array.
+ * patterns. Returns `undefined` when the field is omitted, explicitly
+ * `null` (YAML `paths:` with no value), an empty array, or contains only
+ * blank entries — those cases all mean "no path gating, treat as
+ * unconditional". Throws only when `paths` is present with a clearly
+ * wrong shape (e.g. a scalar string or an object).
  */
 export function parsePathsField(
   frontmatter: Record<string, unknown>,
 ): string[] | undefined {
   const raw = frontmatter['paths'];
-  if (raw === undefined) {
+  // YAML `paths:` with no value parses to `null`. Accept it the same way
+  // we accept omission, matching the leniency of `argumentHint` and
+  // `whenToUse`. Without this branch the whole skill is dropped via a
+  // parse error rather than gracefully falling back to unconditional.
+  if (raw === undefined || raw === null) {
     return undefined;
   }
   if (!Array.isArray(raw)) {
@@ -158,6 +164,29 @@ export function parsePathsField(
   }
   const cleaned = raw.map((p) => String(p).trim()).filter((p) => p.length > 0);
   return cleaned.length > 0 ? cleaned : undefined;
+}
+
+/**
+ * Strict allowed-character set for skill names. Names flow into multiple
+ * trust-relevant sinks: the `<available_skills>` description (consumed by
+ * the model), the `<system-reminder>` emitted on path activation, the
+ * SkillTool schema's enum, and various UI listings. Rejecting structurally
+ * unsafe names at parse time is more reliable than escaping at every sink.
+ */
+export const SKILL_NAME_PATTERN = /^[a-zA-Z0-9_:.-]+$/;
+
+/**
+ * Validate that a skill `name` is safe to embed into prompts and reminders
+ * verbatim. Throws with a descriptive message if not — the surrounding
+ * parser converts this into a `parseErrors` entry and skips the skill,
+ * matching the existing "missing field" / "wrong type" error behavior.
+ */
+export function validateSkillName(name: string): void {
+  if (!SKILL_NAME_PATTERN.test(name)) {
+    throw new Error(
+      `"name" must match ${SKILL_NAME_PATTERN} (letters, digits, _, :, ., -); got "${name}"`,
+    );
+  }
 }
 
 /**

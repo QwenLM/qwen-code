@@ -3,6 +3,7 @@ import {
   type SkillValidationResult,
   parseModelField,
   parsePathsField,
+  validateSkillName,
 } from './types.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -99,6 +100,10 @@ export function parseSkillContent(
 
   // Convert to strings
   const name = String(nameRaw);
+  // Reject unsafe names early — the value flows into the SkillTool
+  // description, schema enums, and the path-activation
+  // <system-reminder>, all of which the model treats as trusted text.
+  validateSkillName(name);
   const description = String(descriptionRaw);
 
   // Extract optional fields

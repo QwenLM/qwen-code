@@ -109,10 +109,13 @@ vi.mock('../../skills/skill-manager.js', () => {
   // CoreToolScheduler.executeSingleToolCall whenever a tool's input names a
   // filesystem path). The unit tests in this file do not exercise
   // activation, but the hook fires unconditionally so the mock must expose
-  // the method or the scheduler crashes on every tool call.
+  // the methods or the scheduler crashes on every tool call.
   SkillManagerMock.prototype.matchAndActivateByPath = vi
     .fn()
-    .mockReturnValue([]);
+    .mockResolvedValue([]);
+  SkillManagerMock.prototype.matchAndActivateByPaths = vi
+    .fn()
+    .mockResolvedValue([]);
   return { SkillManager: SkillManagerMock };
 });
 
