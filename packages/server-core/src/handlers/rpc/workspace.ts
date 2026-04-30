@@ -43,7 +43,7 @@ export function registerWorkspaceCoreHandlers(server: RpcServer, deps: HandlerDe
     return sessionManager.getWorkspaces()
   })
 
-  // Create a new workspace at a folder path (Obsidian-style: folder IS the workspace)
+  // Create/open a project workspace. App-owned metadata may be relocated to managed storage.
   server.handle(RPC_CHANNELS.workspaces.CREATE, async (_ctx, folderPath: string, name: string, remoteServer?: { url: string; token: string; remoteWorkspaceId: string }) => {
     const rootPath = folderPath.trim()
     const validation = isValidWorkspaceRootPath(rootPath)
@@ -54,7 +54,7 @@ export function registerWorkspaceCoreHandlers(server: RpcServer, deps: HandlerDe
     const workspace = addWorkspace({ name, rootPath, ...(remoteServer && { remoteServer }) })
     // Make it active
     setActiveWorkspace(workspace.id)
-    deps.platform.logger.info(`Created workspace "${name}" at ${rootPath}${remoteServer ? ` (remote: ${remoteServer.url})` : ''}`)
+    deps.platform.logger.info(`Created workspace "${name}" at ${workspace.rootPath}${remoteServer ? ` (remote: ${remoteServer.url})` : ''}`)
     return workspace
   })
 

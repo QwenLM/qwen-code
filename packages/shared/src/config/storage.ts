@@ -296,7 +296,12 @@ function migrateExternalProjectWorkspace(
 
   if (!shouldMoveToManagedStorage) return false;
 
-  const projectRoot = isExistingDirectory(workspace.rootPath) ? workspace.rootPath : undefined;
+  let projectRoot = isExistingDirectory(workspace.rootPath) ? workspace.rootPath : undefined;
+  if (!projectRoot && forceProjectWorkingDirectory && !isValidWorkspace(workspace.rootPath)) {
+    mkdirSync(workspace.rootPath, { recursive: true });
+    projectRoot = workspace.rootPath;
+  }
+
   const existingWorkspaceConfig = loadWorkspaceConfig(workspace.rootPath);
   const managedRootPath = allocateManagedWorkspacePath(workspace, reservedPaths);
   const defaults = {
@@ -987,7 +992,11 @@ export function addWorkspace(workspace: Omit<Workspace, 'id' | 'createdAt' | 'sl
 
   const reservedPaths = new Set(config.workspaces.map(w => resolve(w.rootPath)));
 
-  if (looksLikeUserProjectDirectory(newWorkspace.rootPath)) {
+  const shouldStoreInManagedWorkspace =
+    !isManagedWorkspacePath(newWorkspace.rootPath) &&
+    (!isValidWorkspace(newWorkspace.rootPath) || looksLikeUserProjectDirectory(newWorkspace.rootPath));
+
+  if (shouldStoreInManagedWorkspace) {
     migrateExternalProjectWorkspace(newWorkspace, reservedPaths, true);
   } else if (!isValidWorkspace(newWorkspace.rootPath)) {
     createWorkspaceAtPath(newWorkspace.rootPath, newWorkspace.name, undefined, {

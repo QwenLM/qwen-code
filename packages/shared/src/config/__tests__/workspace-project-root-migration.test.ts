@@ -88,6 +88,36 @@ describe('project-root workspace storage', () => {
     expect(workspaceConfig.defaults.workingDirectory).toBe(projectDir)
   })
 
+  it('stores newly-created external project folders under managed config storage', () => {
+    const configDir = setupConfigDir()
+    const parentDir = join(tmpdir(), `craft-new-project-parent-${crypto.randomUUID()}`)
+    const projectDir = join(parentDir, 'fresh-project')
+    mkdirSync(parentDir, { recursive: true })
+
+    writeFileSync(
+      join(configDir, 'config.json'),
+      JSON.stringify({ workspaces: [], activeWorkspaceId: null, activeSessionId: null }, null, 2),
+      'utf-8',
+    )
+
+    const output = runEval(
+      configDir,
+      `const ws = addWorkspace({ name: 'fresh-project', rootPath: ${JSON.stringify(projectDir)} }); console.log(JSON.stringify(ws));`,
+    )
+    const workspace = JSON.parse(output)
+
+    expect(existsSync(projectDir)).toBe(true)
+    expect(workspace.rootPath).toStartWith(join(configDir, 'workspaces'))
+    expect(existsSync(join(projectDir, 'config.json'))).toBe(false)
+    expect(existsSync(join(projectDir, 'sessions'))).toBe(false)
+    expect(existsSync(join(projectDir, 'sources'))).toBe(false)
+    expect(existsSync(join(projectDir, 'skills'))).toBe(false)
+    expect(existsSync(join(projectDir, '.claude-plugin', 'plugin.json'))).toBe(false)
+
+    const workspaceConfig = readJson(join(workspace.rootPath, 'config.json'))
+    expect(workspaceConfig.defaults.workingDirectory).toBe(projectDir)
+  })
+
   it('migrates legacy external project workspaces without writing more project files', () => {
     const configDir = setupConfigDir()
     const projectDir = setupProjectDir()
