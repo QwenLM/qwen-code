@@ -7,6 +7,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Plus } from 'lucide-react'
 import { Spinner } from '@craft-agent/ui'
+import { getWorkspaceDisplayName, getWorkspaceInitial } from '@/utils/workspace'
 import type { WorkspaceInfo } from '../../../shared/types'
 import {
   AddWorkspaceContainer,
@@ -77,21 +78,24 @@ export function WorkspacePicker({ onSelectWorkspace }: WorkspacePickerProps) {
         {/* Workspace list */}
         {workspaces.length > 0 && (
           <div className="mt-5 w-full space-y-1.5">
-            {workspaces.map(ws => (
-              <button
-                key={ws.id}
-                onClick={() => onSelectWorkspace(ws.id)}
-                className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition-colors hover:bg-foreground/5"
-              >
-                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent/15 text-accent text-xs font-semibold uppercase">
-                  {ws.name.charAt(0)}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="truncate font-medium">{ws.name}</div>
-                  <div className="truncate text-xs text-muted-foreground">{ws.slug}</div>
-                </div>
-              </button>
-            ))}
+            {workspaces.map(ws => {
+              const displayName = getWorkspaceDisplayName(ws, t)
+              return (
+                <button
+                  key={ws.id}
+                  onClick={() => onSelectWorkspace(ws.id)}
+                  className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition-colors hover:bg-foreground/5"
+                >
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent/15 text-accent text-xs font-semibold uppercase">
+                    {getWorkspaceInitial(ws, t)}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-medium">{displayName}</div>
+                    <div className="truncate text-xs text-muted-foreground">{ws.slug}</div>
+                  </div>
+                </button>
+              )
+            })}
           </div>
         )}
 

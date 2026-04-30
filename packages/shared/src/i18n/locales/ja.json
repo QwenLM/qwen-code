@@ -1283,6 +1283,8 @@
   "webui.logOut": "ログアウト",
   "workspace.addWorkspace": "Workspaceを追加…",
   "workspace.addWorkspaceDesc": "アイデアと実現するツールが出会う場所。",
+  "workspace.conversations": "チャット",
+  "workspace.defaultConversation": "チャット",
   "workspace.pinWorkspace": "プロジェクトを固定",
   "workspace.unpinWorkspace": "プロジェクトの固定を解除",
   "workspace.chooseExistingFolder": "既存のフォルダを選択",

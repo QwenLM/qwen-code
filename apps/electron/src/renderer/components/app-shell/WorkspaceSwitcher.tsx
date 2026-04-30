@@ -7,6 +7,7 @@ import { useSetAtom } from "jotai"
 import { toast } from "sonner"
 
 import { cn } from "@/lib/utils"
+import { getWorkspaceDisplayName, getWorkspaceInitial, isProtectedWorkspace } from "@/utils/workspace"
 import { fullscreenOverlayOpenAtom } from "@/atoms/overlay"
 import {
   DropdownMenu,
@@ -57,6 +58,7 @@ export function WorkspaceSwitcher({
   const [reconnectTarget, setReconnectTarget] = useState<Workspace | null>(null)
   const setFullscreenOverlayOpen = useSetAtom(fullscreenOverlayOpenAtom)
   const selectedWorkspace = workspaces.find(w => w.id === activeWorkspaceId)
+  const selectedWorkspaceName = getWorkspaceDisplayName(selectedWorkspace, t)
   const workspaceIconMap = useWorkspaceIcons(workspaces)
   const connectionState = useTransportConnectionState()
   const isRemote = connectionState?.mode === 'remote'
@@ -142,6 +144,7 @@ export function WorkspaceSwitcher({
       toast.error(t('toast.cannotRemoveActiveWorkspace'))
       return
     }
+    if (isProtectedWorkspace(workspace)) return
     const removed = await window.electronAPI.removeWorkspace(workspace.id)
     if (removed) {
       toast.success(t('toast.removedWorkspace', { name: workspace.name }))
@@ -194,12 +197,12 @@ export function WorkspaceSwitcher({
             >
               <CrossfadeAvatar
                 src={selectedWorkspace ? workspaceIconMap.get(selectedWorkspace.id) : undefined}
-                alt={selectedWorkspace?.name}
+                alt={selectedWorkspaceName}
                 className="h-4 w-4 mr-1.5 rounded-full ring-1 ring-border/50"
                 fallbackClassName="bg-muted text-[10px] rounded-full"
-                fallback={selectedWorkspace?.name?.charAt(0) || 'W'}
+                fallback={getWorkspaceInitial(selectedWorkspace, t)}
               />
-              <span className="truncate min-w-0 flex-1 text-left">{selectedWorkspace?.name || 'Workspace'}</span>
+              <span className="truncate min-w-0 flex-1 text-left">{selectedWorkspaceName}</span>
               {selectedWorkspace?.remoteServer && (
                 isRemoteDisconnected(selectedWorkspace.id)
                   ? <CloudOff className="h-3 w-3 text-destructive shrink-0" />
@@ -220,15 +223,15 @@ export function WorkspaceSwitcher({
             >
               <CrossfadeAvatar
                 src={selectedWorkspace ? workspaceIconMap.get(selectedWorkspace.id) : undefined}
-                alt={selectedWorkspace?.name}
+                alt={selectedWorkspaceName}
                 className="h-4 w-4 rounded-full ring-1 ring-border/50"
                 fallbackClassName="bg-foreground text-background text-[10px] rounded-full"
-                fallback={selectedWorkspace?.name?.charAt(0) || 'W'}
+                fallback={getWorkspaceInitial(selectedWorkspace, t)}
               />
               {!isCollapsed && (
                 <>
                   <FadingText className="ml-1 font-sans min-w-0 text-sm" fadeWidth={36}>
-                    {selectedWorkspace?.name || 'Select workspace'}
+                    {selectedWorkspaceName}
                   </FadingText>
                   {selectedWorkspace?.remoteServer && (
                     isRemoteDisconnected(selectedWorkspace.id)
@@ -249,6 +252,8 @@ export function WorkspaceSwitcher({
         >
           {workspaces.map((workspace) => {
             const disconnected = isRemoteDisconnected(workspace.id)
+            const displayName = getWorkspaceDisplayName(workspace, t)
+            const protectedWorkspace = isProtectedWorkspace(workspace)
             return (
               <StyledDropdownMenuItem
                 key={workspace.id}
@@ -272,12 +277,12 @@ export function WorkspaceSwitcher({
                 <div className="flex items-center gap-3 font-sans min-w-0 flex-1">
                   <CrossfadeAvatar
                     src={workspaceIconMap.get(workspace.id)}
-                    alt={workspace.name}
+                    alt={displayName}
                     className="h-5 w-5 rounded-full ring-1 ring-border/50"
                     fallbackClassName="bg-muted text-xs rounded-full"
-                    fallback={workspace.name.charAt(0)}
+                    fallback={getWorkspaceInitial(workspace, t)}
                   />
-                  <span className="truncate">{workspace.name}</span>
+                  <span className="truncate">{displayName}</span>
                   {workspace.remoteServer && (
                     disconnected
                       ? <span title={getDisconnectTooltip(workspace.id)} className="shrink-0"><CloudOff className="h-3.5 w-3.5 text-destructive" /></span>
@@ -287,7 +292,7 @@ export function WorkspaceSwitcher({
                 </div>
                 <div className="flex items-center gap-1">
                   {/* Action buttons - only visible on hover for non-active workspaces */}
-                  {activeWorkspaceId !== workspace.id && (
+                  {activeWorkspaceId !== workspace.id && !protectedWorkspace && (
                     <button
                       className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-destructive/20 hover:text-destructive transition-opacity"
                       onClick={(e) => {

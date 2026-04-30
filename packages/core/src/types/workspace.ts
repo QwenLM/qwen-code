@@ -8,6 +8,8 @@
  */
 export type McpAuthType = 'workspace_oauth' | 'workspace_bearer' | 'public';
 
+export type WorkspaceKind = 'project' | 'conversation';
+
 /**
  * Configuration for a remote Craft Agent Server.
  * When set on a workspace, handler calls are proxied over WebSocket.
@@ -26,6 +28,8 @@ export interface WorkspaceInfo {
   id: string;
   name: string;
   slug: string;              // Server-computed from rootPath basename
+  kind?: WorkspaceKind;       // Defaults to 'project' when omitted
+  isProtected?: boolean;      // System-managed entries cannot be renamed/removed
   lastAccessedAt?: number;
   pinned?: boolean;
   iconUrl?: string;

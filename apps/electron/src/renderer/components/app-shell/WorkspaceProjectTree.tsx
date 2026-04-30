@@ -29,6 +29,7 @@ import { SquarePenRounded } from "../icons/SquarePenRounded"
 import { useSessionActions } from "@/hooks/useSessionActions"
 import { useWorkspaceIcons } from "@/hooks/useWorkspaceIcon"
 import { getSessionTitle, hasUnreadMeta, shortTimeLocale } from "@/utils/session"
+import { getWorkspaceDisplayName, isConversationWorkspace, isProtectedWorkspace } from "@/utils/workspace"
 import { Spinner, Tooltip, TooltipContent, TooltipTrigger } from "@craft-agent/ui"
 import type { LabelConfig } from "@craft-agent/shared/labels"
 import type { SessionStatus, SessionStatusId } from "@/config/session-status-config"
@@ -78,11 +79,14 @@ const PROJECT_SESSION_PREVIEW_LIMIT = 5
 
 function WorkspaceHeader({
   workspace,
+  displayName,
   isActive,
   hasUnread,
   iconUrl,
   isCollapsed,
+  isConversation,
   isPinned,
+  isProtected,
   newSessionLabel,
   openInNewWindowLabel,
   renameLabel,
@@ -97,11 +101,14 @@ function WorkspaceHeader({
   onRemove,
 }: {
   workspace: Workspace
+  displayName: string
   isActive: boolean
   hasUnread?: boolean
   iconUrl?: string
   isCollapsed: boolean
+  isConversation: boolean
   isPinned: boolean
+  isProtected: boolean
   newSessionLabel: string
   openInNewWindowLabel: string
   renameLabel: string
@@ -126,6 +133,7 @@ function WorkspaceHeader({
           "hover:bg-sidebar-hover data-[state=open]:bg-sidebar-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
           isActive && "text-foreground",
           !isActive && "text-foreground/62",
+          isProtected && "cursor-pointer active:cursor-pointer",
         )}
       >
         {isCollapsed ? (
@@ -135,18 +143,20 @@ function WorkspaceHeader({
         )}
         <CrossfadeAvatar
           src={iconUrl}
-          alt={workspace.name}
+          alt={displayName}
           className={cn(
             "h-4 w-4",
             iconUrl && "rounded-[4px] ring-1 ring-border/40",
           )}
           fallbackClassName="text-muted-foreground text-[10px]"
-          fallback={<Folder className="h-3.5 w-3.5 text-muted-foreground" />}
+          fallback={isConversation
+            ? <MessageSquare className="h-3.5 w-3.5 text-muted-foreground" />
+            : <Folder className="h-3.5 w-3.5 text-muted-foreground" />}
         />
         <FadingText className="min-w-0 flex-1 text-[13px] font-medium" fadeWidth={32}>
-          {workspace.name}
+          {displayName}
         </FadingText>
-        {isPinned && <Pin className="h-3 w-3 shrink-0 text-muted-foreground/70" />}
+        {isPinned && !isProtected && <Pin className="h-3 w-3 shrink-0 text-muted-foreground/70" />}
         {workspace.remoteServer && <Cloud className="h-3 w-3 shrink-0 text-muted-foreground/70" />}
         {hasUnread && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />}
       </button>
@@ -185,24 +195,32 @@ function WorkspaceHeader({
         {header}
       </ContextMenuTrigger>
       <StyledContextMenuContent minWidth="min-w-48">
-        <StyledContextMenuItem onClick={onRename}>
-          <Pencil className="h-3.5 w-3.5" />
-          <span className="flex-1">{renameLabel}</span>
-        </StyledContextMenuItem>
-        <StyledContextMenuItem onClick={onTogglePinned}>
-          {isPinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
-          <span className="flex-1">{isPinned ? unpinLabel : pinLabel}</span>
-        </StyledContextMenuItem>
-        <StyledContextMenuSeparator />
+        {!isProtected && (
+          <>
+            <StyledContextMenuItem onClick={onRename}>
+              <Pencil className="h-3.5 w-3.5" />
+              <span className="flex-1">{renameLabel}</span>
+            </StyledContextMenuItem>
+            <StyledContextMenuItem onClick={onTogglePinned}>
+              {isPinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
+              <span className="flex-1">{isPinned ? unpinLabel : pinLabel}</span>
+            </StyledContextMenuItem>
+            <StyledContextMenuSeparator />
+          </>
+        )}
         <StyledContextMenuItem onClick={onOpenInNewWindow}>
           <ExternalLink className="h-3.5 w-3.5" />
           <span className="flex-1">{openInNewWindowLabel}</span>
         </StyledContextMenuItem>
-        <StyledContextMenuSeparator />
-        <StyledContextMenuItem onClick={onRemove} variant="destructive">
-          <Trash2 className="h-3.5 w-3.5" />
-          <span className="flex-1">{removeLabel}</span>
-        </StyledContextMenuItem>
+        {!isProtected && (
+          <>
+            <StyledContextMenuSeparator />
+            <StyledContextMenuItem onClick={onRemove} variant="destructive">
+              <Trash2 className="h-3.5 w-3.5" />
+              <span className="flex-1">{removeLabel}</span>
+            </StyledContextMenuItem>
+          </>
+        )}
       </StyledContextMenuContent>
     </ContextMenu>
   )
@@ -210,12 +228,14 @@ function WorkspaceHeader({
 
 function WorkspaceDragOverlay({
   workspace,
+  displayName,
   isActive,
   hasUnread,
   iconUrl,
   isPinned,
 }: {
   workspace: Workspace
+  displayName: string
   isActive: boolean
   hasUnread?: boolean
   iconUrl?: string
@@ -232,7 +252,7 @@ function WorkspaceDragOverlay({
         <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />
         <CrossfadeAvatar
           src={iconUrl}
-          alt={workspace.name}
+          alt={displayName}
           className={cn(
             "h-4 w-4",
             iconUrl && "rounded-[4px] ring-1 ring-border/40",
@@ -241,7 +261,7 @@ function WorkspaceDragOverlay({
           fallback={<Folder className="h-3.5 w-3.5 text-muted-foreground" />}
         />
         <FadingText className="min-w-0 flex-1 text-[13px] font-medium" fadeWidth={32}>
-          {workspace.name}
+          {displayName}
         </FadingText>
         {isPinned && <Pin className="h-3 w-3 shrink-0 text-muted-foreground/70" />}
         {workspace.remoteServer && <Cloud className="h-3 w-3 shrink-0 text-muted-foreground/70" />}
@@ -393,13 +413,18 @@ export function WorkspaceProjectTree({
       .map(({ workspace }) => workspace)
   }, [optimisticWorkspaceOrder, workspaces])
   const pinnedWorkspaces = React.useMemo(
-    () => orderedWorkspaces.filter(workspace => Boolean(workspace.pinned)),
+    () => orderedWorkspaces.filter(workspace => !isConversationWorkspace(workspace) && Boolean(workspace.pinned)),
     [orderedWorkspaces],
   )
   const unpinnedWorkspaces = React.useMemo(
-    () => orderedWorkspaces.filter(workspace => !workspace.pinned),
+    () => orderedWorkspaces.filter(workspace => !isConversationWorkspace(workspace) && !workspace.pinned),
     [orderedWorkspaces],
   )
+  const conversationWorkspaces = React.useMemo(
+    () => orderedWorkspaces.filter(isConversationWorkspace),
+    [orderedWorkspaces],
+  )
+  const hasProjectWorkspaces = pinnedWorkspaces.length > 0 || unpinnedWorkspaces.length > 0
   const {
     handleFlagWithToast,
     handleUnflagWithToast,
@@ -458,6 +483,7 @@ export function WorkspaceProjectTree({
   }, [onRenameSession, renameName, renameSessionId])
 
   const handleWorkspaceRenameClick = React.useCallback((workspace: Workspace) => {
+    if (isProtectedWorkspace(workspace)) return
     setRenameWorkspaceId(workspace.id)
     setRenameWorkspaceName(workspace.name)
     requestAnimationFrame(() => {
@@ -493,6 +519,7 @@ export function WorkspaceProjectTree({
   }, [onWorkspaceChanged, renameWorkspaceId, renameWorkspaceName, t])
 
   const handleToggleWorkspacePinned = React.useCallback(async (workspace: Workspace) => {
+    if (isProtectedWorkspace(workspace)) return
     const pinned = !workspace.pinned
     try {
       const saved = await window.electronAPI.setWorkspacePinned(workspace.id, pinned)
@@ -511,6 +538,7 @@ export function WorkspaceProjectTree({
   }, [onWorkspaceChanged, t])
 
   const handleRemoveWorkspace = React.useCallback(async (workspace: Workspace) => {
+    if (isProtectedWorkspace(workspace)) return
     if (workspaces.length <= 1) {
       toast.error(t("toast.cannotRemoveOnlyWorkspace"))
       return
@@ -639,6 +667,9 @@ export function WorkspaceProjectTree({
   ])
 
   const renderWorkspaceSection = (workspace: Workspace, isSorting: boolean) => {
+    const displayName = getWorkspaceDisplayName(workspace, t)
+    const protectedWorkspace = isProtectedWorkspace(workspace)
+    const conversationWorkspace = isConversationWorkspace(workspace)
     const isCollapsed = collapsedWorkspaceIds.has(workspace.id)
     const isSessionListExpanded = expandedWorkspaceSessionIds.has(workspace.id)
     const sessions = [...(workspaceSessions.get(workspace.id) ?? [])]
@@ -650,14 +681,17 @@ export function WorkspaceProjectTree({
       : t("sidebar.expandDisplay")
 
     return (
-      <section key={workspace.id} aria-label={workspace.name}>
+      <section key={workspace.id} aria-label={displayName}>
         <WorkspaceHeader
           workspace={workspace}
+          displayName={displayName}
           isActive={workspace.id === activeWorkspaceId}
           hasUnread={workspaceUnreadMap?.[workspace.id]}
           iconUrl={workspaceIconMap.get(workspace.id)}
           isCollapsed={isCollapsed || isSorting}
+          isConversation={conversationWorkspace}
           isPinned={Boolean(workspace.pinned)}
+          isProtected={protectedWorkspace}
           newSessionLabel={t("session.newSession")}
           openInNewWindowLabel={t("sidebarMenu.openInNewWindow")}
           renameLabel={t("common.rename")}
@@ -711,6 +745,7 @@ export function WorkspaceProjectTree({
   const renderWorkspaceOverlay = (workspace: Workspace) => (
     <WorkspaceDragOverlay
       workspace={workspace}
+      displayName={getWorkspaceDisplayName(workspace, t)}
       isActive={workspace.id === activeWorkspaceId}
       hasUnread={workspaceUnreadMap?.[workspace.id]}
       iconUrl={workspaceIconMap.get(workspace.id)}
@@ -743,28 +778,33 @@ export function WorkspaceProjectTree({
         )}
       </AnimatePresence>
 
-      <div className="flex shrink-0 items-center justify-between px-3 pb-2 pt-1">
-        <span className="text-[12px] font-semibold text-muted-foreground">
-          {t("sidebar.projects", "Projects")}
-        </span>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              onClick={handleNewWorkspace}
-              className="flex h-7 w-7 items-center justify-center rounded-[8px] text-muted-foreground transition-colors hover:bg-foreground/5 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              aria-label={t("workspace.addWorkspace")}
-            >
-              <FolderPlus className="h-4 w-4" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="right">{t("workspace.addWorkspace")}</TooltipContent>
-        </Tooltip>
-      </div>
-
       <div className="min-h-0 flex-1 overflow-y-auto pb-3 mask-fade-bottom">
+        <div className="flex shrink-0 items-center justify-between px-3 pb-2 pt-1">
+          <span className="text-[12px] font-semibold text-muted-foreground">
+            {t("sidebar.projects", "Projects")}
+          </span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={handleNewWorkspace}
+                className="flex h-7 w-7 items-center justify-center rounded-[8px] text-muted-foreground transition-colors hover:bg-foreground/5 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                aria-label={t("workspace.addWorkspace")}
+              >
+                <FolderPlus className="h-4 w-4" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right">{t("workspace.addWorkspace")}</TooltipContent>
+          </Tooltip>
+        </div>
         {renderWorkspaceGroup(pinnedWorkspaces, "pinned")}
         {renderWorkspaceGroup(unpinnedWorkspaces, "unpinned")}
+
+        {conversationWorkspaces.length > 0 && (
+          <div className={cn(hasProjectWorkspaces && "pt-3")}>
+            {conversationWorkspaces.map((workspace) => renderWorkspaceSection(workspace, false))}
+          </div>
+        )}
       </div>
       <RenameDialog
         open={renameDialogOpen}

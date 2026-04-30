@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'path'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
-import { getPreferencesPath, getSessionDraft, setSessionDraft, deleteSessionDraft, getAllSessionDrafts, getWorkspaceByNameOrId, getDefaultThinkingLevel, setDefaultThinkingLevel } from '@craft-agent/shared/config'
+import { getPreferencesPath, getSessionDraft, setSessionDraft, deleteSessionDraft, getAllSessionDrafts, getWorkspaceByNameOrId, getDefaultThinkingLevel, setDefaultThinkingLevel, isProtectedWorkspace } from '@craft-agent/shared/config'
 import { isValidThinkingLevel, normalizeThinkingLevel, THINKING_LEVEL_IDS } from '@craft-agent/shared/agent/thinking-levels'
 
 const VALID_THINKING_LEVELS_LIST = THINKING_LEVEL_IDS.map(id => `'${id}'`).join(', ')
@@ -106,6 +106,8 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
 
     return {
       name: config?.name,
+      kind: config?.kind ?? workspace.kind,
+      isProtected: config?.isProtected ?? workspace.isProtected,
       pinned: config?.pinned ?? false,
       model: config?.defaults?.model,
       permissionMode: config?.defaults?.permissionMode,
@@ -129,6 +131,10 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
     const validKeys = ['name', 'pinned', 'model', 'enabledSourceSlugs', 'permissionMode', 'cyclablePermissionModes', 'thinkingLevel', 'workingDirectory', 'localMcpEnabled', 'defaultLlmConnection']
     if (!validKeys.includes(key)) {
       throw new Error(`Invalid workspace setting key: ${key}. Valid keys: ${validKeys.join(', ')}`)
+    }
+
+    if (isProtectedWorkspace(workspace) && ['name', 'pinned', 'workingDirectory'].includes(key)) {
+      throw new Error('This conversation workspace is managed by Qwen and cannot be renamed, pinned, or moved.')
     }
 
     // Validate defaultLlmConnection exists before saving

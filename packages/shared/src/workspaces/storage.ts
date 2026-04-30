@@ -295,7 +295,8 @@ export function generateUniqueWorkspacePath(name: string, baseDir: string): stri
 export function createWorkspaceAtPath(
   rootPath: string,
   name: string,
-  defaults?: WorkspaceConfig['defaults']
+  defaults?: WorkspaceConfig['defaults'],
+  metadata?: Pick<WorkspaceConfig, 'kind' | 'isProtected'>
 ): WorkspaceConfig {
   const now = Date.now();
   const slug = generateSlug(name);
@@ -321,6 +322,8 @@ export function createWorkspaceAtPath(
     id: `ws_${randomUUID().slice(0, 8)}`,
     name,
     slug,
+    ...(metadata?.kind ? { kind: metadata.kind } : {}),
+    ...(metadata?.isProtected !== undefined ? { isProtected: metadata.isProtected } : {}),
     defaults: workspaceDefaults,
     localMcpServers: globalDefaults.workspaceDefaults.localMcpServers,
     createdAt: now,

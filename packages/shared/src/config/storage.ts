@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync } from 'fs';
 import { join, dirname, basename, resolve, relative, isAbsolute } from 'path';
+import { homedir } from 'os';
 import { getCredentialManager } from '../credentials/index.ts';
 import { getOrCreateLatestSession, type SessionConfig } from '../sessions/index.ts';
 import {
@@ -97,6 +98,10 @@ export interface StoredConfig {
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
 const CONFIG_DEFAULTS_FILE = join(CONFIG_DIR, 'config-defaults.json');
 const WORKSPACES_DIR = join(CONFIG_DIR, 'workspaces');
+
+export const DEFAULT_CONVERSATION_WORKSPACE_NAME = 'Qwen';
+export const DEFAULT_CONVERSATION_WORKSPACE_KIND = 'conversation' as const;
+export const DEFAULT_CONVERSATION_WORKSPACE_PATH_ENV = 'QWEN_DEFAULT_WORKSPACE_DIR';
 
 // Track if config-defaults have been synced this session (prevents re-sync on hot reload)
 let configDefaultsSynced = false;
@@ -276,7 +281,10 @@ function migrateExternalProjectWorkspace(
 ): boolean {
   if (isManagedWorkspacePath(workspace.rootPath)) {
     if (!isValidWorkspace(workspace.rootPath)) {
-      createWorkspaceAtPath(workspace.rootPath, workspace.name);
+      createWorkspaceAtPath(workspace.rootPath, workspace.name, undefined, {
+        ...(workspace.kind ? { kind: workspace.kind } : {}),
+        ...(workspace.isProtected !== undefined ? { isProtected: workspace.isProtected } : {}),
+      });
     }
     return false;
   }
@@ -296,7 +304,10 @@ function migrateExternalProjectWorkspace(
     ...(projectRoot ? { workingDirectory: projectRoot } : {}),
   };
 
-  createWorkspaceAtPath(managedRootPath, workspace.name, defaults);
+  createWorkspaceAtPath(managedRootPath, workspace.name, defaults, {
+    ...(workspace.kind ? { kind: workspace.kind } : {}),
+    ...(workspace.isProtected !== undefined ? { isProtected: workspace.isProtected } : {}),
+  });
 
   if (existingWorkspaceConfig) {
     saveWorkspaceConfig(managedRootPath, {
@@ -338,9 +349,9 @@ export function loadStoredConfig(): StoredConfig | null {
       config.activeWorkspaceId = config.workspaces[0]?.id || null;
     }
 
-    // Keep Craft's own workspace state in managed storage. Existing project
+    // Keep app-owned workspace state in managed storage. Existing project
     // directories are treated as a session default working directory, not as
-    // the place where Craft should scaffold config/status/label files.
+    // the place where the app should scaffold config/status/label files.
     const reservedPaths = new Set(config.workspaces.map(w => resolve(w.rootPath)));
     let migratedWorkspacePaths = false;
     for (const workspace of config.workspaces) {
@@ -680,6 +691,78 @@ export function generateWorkspaceId(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
+export function isProtectedWorkspace(
+  workspace: Pick<Workspace, 'kind' | 'isProtected'> | { kind?: string; isProtected?: boolean } | null | undefined,
+): boolean {
+  return workspace?.isProtected === true || workspace?.kind === DEFAULT_CONVERSATION_WORKSPACE_KIND;
+}
+
+function isProtectedStoredWorkspace(workspace: Workspace): boolean {
+  if (isProtectedWorkspace(workspace)) return true;
+  return isProtectedWorkspace(loadWorkspaceConfig(workspace.rootPath));
+}
+
+export function getDefaultConversationWorkspacePath(): string {
+  return process.env[DEFAULT_CONVERSATION_WORKSPACE_PATH_ENV] || join(homedir(), 'Documents', DEFAULT_CONVERSATION_WORKSPACE_NAME);
+}
+
+export function ensureDefaultConversationWorkspace(): Workspace {
+  let config = loadStoredConfig();
+  if (!config) {
+    config = { workspaces: [], activeWorkspaceId: null, activeSessionId: null };
+  }
+
+  const existing = config.workspaces.find(isProtectedStoredWorkspace);
+  if (existing) {
+    if (!config.activeWorkspaceId) {
+      config.activeWorkspaceId = existing.id;
+      saveConfig(config);
+    }
+    return getWorkspaces().find(w => w.id === existing.id) || existing;
+  }
+
+  const rootPath = getDefaultConversationWorkspacePath();
+  const now = Date.now();
+  const existingConfig = loadWorkspaceConfig(rootPath);
+
+  if (!existingConfig) {
+    createWorkspaceAtPath(
+      rootPath,
+      DEFAULT_CONVERSATION_WORKSPACE_NAME,
+      { workingDirectory: rootPath },
+      { kind: DEFAULT_CONVERSATION_WORKSPACE_KIND, isProtected: true },
+    );
+  } else {
+    saveWorkspaceConfig(rootPath, {
+      ...existingConfig,
+      name: existingConfig.name || DEFAULT_CONVERSATION_WORKSPACE_NAME,
+      slug: existingConfig.slug || generateSlug(DEFAULT_CONVERSATION_WORKSPACE_NAME),
+      kind: DEFAULT_CONVERSATION_WORKSPACE_KIND,
+      isProtected: true,
+      defaults: {
+        ...existingConfig.defaults,
+        workingDirectory: existingConfig.defaults?.workingDirectory || rootPath,
+      },
+    });
+  }
+
+  const workspace: Workspace = {
+    id: generateWorkspaceId(),
+    name: DEFAULT_CONVERSATION_WORKSPACE_NAME,
+    slug: extractWorkspaceSlugFromPath(rootPath, DEFAULT_CONVERSATION_WORKSPACE_NAME.toLowerCase()),
+    rootPath,
+    kind: DEFAULT_CONVERSATION_WORKSPACE_KIND,
+    isProtected: true,
+    createdAt: existingConfig?.createdAt || now,
+  };
+
+  config.workspaces.push(workspace);
+  config.activeWorkspaceId = workspace.id;
+  saveConfig(config);
+
+  return getWorkspaces().find(w => w.id === workspace.id) || workspace;
+}
+
 /**
  * Find workspace icon file at workspace_root/icon.*
  * Returns absolute path to icon file if found, null otherwise
@@ -716,7 +799,15 @@ export function getWorkspaces(): Workspace[] {
     }
 
     const slug = extractWorkspaceSlugFromPath(w.rootPath, w.id);
-    return { ...w, name, slug, iconUrl, pinned: wsConfig?.pinned ?? w.pinned };
+    return {
+      ...w,
+      name,
+      slug,
+      iconUrl,
+      kind: wsConfig?.kind ?? w.kind,
+      isProtected: wsConfig?.isProtected ?? w.isProtected,
+      pinned: wsConfig?.pinned ?? w.pinned,
+    };
   });
 }
 
@@ -724,7 +815,9 @@ export function reorderWorkspaces(orderedIds: string[]): boolean {
   const config = loadStoredConfig();
   if (!config) return false;
 
-  const workspaceById = new Map(config.workspaces.map(workspace => [workspace.id, workspace]));
+  const protectedWorkspaces = config.workspaces.filter(isProtectedStoredWorkspace);
+  const movableWorkspaces = config.workspaces.filter(workspace => !isProtectedStoredWorkspace(workspace));
+  const workspaceById = new Map(movableWorkspaces.map(workspace => [workspace.id, workspace]));
   const seen = new Set<string>();
   const reordered: Workspace[] = [];
 
@@ -735,20 +828,21 @@ export function reorderWorkspaces(orderedIds: string[]): boolean {
     seen.add(id);
   }
 
-  if (reordered.length === 0 && config.workspaces.length > 0) {
+  if (reordered.length === 0 && movableWorkspaces.length > 0) {
     return false;
   }
 
-  for (const workspace of config.workspaces) {
+  for (const workspace of movableWorkspaces) {
     if (!seen.has(workspace.id)) {
       reordered.push(workspace);
     }
   }
 
-  const changed = reordered.some((workspace, index) => workspace.id !== config.workspaces[index]?.id);
+  const nextWorkspaces = [...protectedWorkspaces, ...reordered];
+  const changed = nextWorkspaces.some((workspace, index) => workspace.id !== config.workspaces[index]?.id);
   if (!changed) return true;
 
-  config.workspaces = reordered;
+  config.workspaces = nextWorkspaces;
   saveConfig(config);
   return true;
 }
@@ -896,7 +990,10 @@ export function addWorkspace(workspace: Omit<Workspace, 'id' | 'createdAt' | 'sl
   if (looksLikeUserProjectDirectory(newWorkspace.rootPath)) {
     migrateExternalProjectWorkspace(newWorkspace, reservedPaths, true);
   } else if (!isValidWorkspace(newWorkspace.rootPath)) {
-    createWorkspaceAtPath(newWorkspace.rootPath, newWorkspace.name);
+    createWorkspaceAtPath(newWorkspace.rootPath, newWorkspace.name, undefined, {
+      ...(newWorkspace.kind ? { kind: newWorkspace.kind } : {}),
+      ...(newWorkspace.isProtected !== undefined ? { isProtected: newWorkspace.isProtected } : {}),
+    });
   }
 
   config.workspaces.push(newWorkspace);
@@ -935,6 +1032,8 @@ export function syncWorkspaces(): void {
       name: wsConfig.name,
       slug: extractWorkspaceSlugFromPath(rootPath, ''),
       rootPath,
+      kind: wsConfig.kind,
+      isProtected: wsConfig.isProtected,
       pinned: wsConfig.pinned,
       createdAt: wsConfig.createdAt || Date.now(),
     };
@@ -958,6 +1057,11 @@ export async function removeWorkspace(workspaceId: string): Promise<boolean> {
 
   const index = config.workspaces.findIndex(w => w.id === workspaceId);
   if (index === -1) return false;
+
+  const workspace = config.workspaces[index]!;
+  if (isProtectedStoredWorkspace(workspace)) {
+    return false;
+  }
 
   config.workspaces.splice(index, 1);
 

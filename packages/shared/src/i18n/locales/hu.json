@@ -1283,6 +1283,8 @@
   "webui.logOut": "Kijelentkezés",
   "workspace.addWorkspace": "Munkaterület hozzáadása…",
   "workspace.addWorkspaceDesc": "Ahol az ötleteid találkoznak a megvalósításhoz szükséges eszközökkel.",
+  "workspace.conversations": "Csevegések",
+  "workspace.defaultConversation": "Csevegések",
   "workspace.pinWorkspace": "Projekt rögzítése",
   "workspace.unpinWorkspace": "Projekt rögzítésének feloldása",
   "workspace.chooseExistingFolder": "Meglévő mappa kiválasztása",
