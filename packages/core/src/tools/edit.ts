@@ -152,6 +152,31 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     let useBOM = false;
     let detectedEncoding = 'utf-8';
     let detectedLineEnding: LineEnding = 'lf';
+    // Prior-read enforcement runs before any content is read so that
+    // the read pipeline below (and the content-derived error codes
+    // it can produce — NO_OCCURRENCE_FOUND, EXPECTED_OCCURRENCE_MISMATCH,
+    // NO_CHANGE) cannot be used as a read-less content oracle on a
+    // file the model has never legitimately Read. New-file creation
+    // is exempt because there are no current bytes to read first.
+    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+      const decision = await this.checkPriorRead(params.file_path);
+      if (!decision.ok) {
+        return {
+          currentContent: null,
+          newContent: '',
+          occurrences: 0,
+          error: {
+            display: decision.displayMessage,
+            raw: decision.rawMessage,
+            type: decision.type,
+          },
+          isNewFile: false,
+          encoding: 'utf-8',
+          bom: false,
+          lineEnding: 'lf',
+        };
+      }
+    }
     if (fileExists) {
       try {
         const fileInfo = await this.config
@@ -387,20 +412,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       };
     }
 
-    // Prior-read enforcement: refuse to edit a pre-existing file the
-    // model has not read in this session, or whose on-disk fingerprint
-    // has drifted since the last read. The intent is to stop the model
-    // from "imagining" an old_string for a file it never actually saw.
-    // New file creation is exempt (no prior content for the model to
-    // know about); the cache-disabled escape hatch also bypasses this
-    // check, see `Config.fileReadCacheDisabled`.
-    if (!editData.isNewFile && !this.config.getFileReadCacheDisabled()) {
-      const enforcement = await this.requirePriorRead();
-      if (enforcement) {
-        return enforcement;
-      }
-    }
-
     try {
       this.ensureParentDirectoriesExist(this.params.file_path);
 
@@ -544,54 +555,71 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
   }
 
   /**
-   * Block the edit unless the file has been read in this session and
-   * its on-disk fingerprint still matches the recorded one. Returns
-   * a populated `ToolResult` when the edit must be rejected, or
-   * `undefined` when the edit is cleared to proceed.
+   * Test whether the edit is cleared to proceed against an existing
+   * file based on the session FileReadCache. Returns a structured
+   * decision so the caller can route it into the right shape — a
+   * `CalculatedEdit.error` from `calculateEdit`, or a thrown error
+   * from `getConfirmationDetails`.
    *
-   * Stat failures here (file deleted between fileExists check and
-   * now, EACCES, etc.) are intentionally non-blocking: the existing
-   * write path will surface a richer error. Returning a synthetic
-   * "you must read first" message in that case would be misleading.
+   * Approval requires more than `state === 'fresh'`: the recorded
+   * read must also have been (a) stamped with `lastReadAt`,
+   * (b) `lastReadWasFull` (no offset / limit / pages), and
+   * (c) `lastReadCacheable` (i.e. plain text, not binary / image /
+   * audio / video / PDF / notebook). Otherwise the model has only
+   * seen a slice or a structured proxy of the file, not the bytes
+   * a prospective edit would mutate.
+   *
+   * Stat failures here are intentionally non-blocking: the existing
+   * write path surfaces a richer error.
    */
-  private async requirePriorRead(): Promise<ToolResult | undefined> {
+  private async checkPriorRead(filePath: string): Promise<
+    | { ok: true }
+    | {
+        ok: false;
+        type: ToolErrorType;
+        rawMessage: string;
+        displayMessage: string;
+      }
+  > {
     let stats: fs.Stats;
     try {
-      stats = await fs.promises.stat(this.params.file_path);
+      stats = await fs.promises.stat(filePath);
     } catch {
-      return undefined;
+      return { ok: true };
     }
     const status = this.config.getFileReadCache().check(stats);
-    if (status.state === 'fresh') {
-      return undefined;
+    if (
+      status.state === 'fresh' &&
+      status.entry.lastReadAt !== undefined &&
+      status.entry.lastReadWasFull &&
+      status.entry.lastReadCacheable
+    ) {
+      return { ok: true };
     }
-    if (status.state === 'unknown') {
-      const msg =
-        `File ${this.params.file_path} has not been read in this session. ` +
-        `Use the ${ReadFileTool.Name} tool first to verify the current ` +
-        `content before editing.`;
+    if (status.state === 'stale') {
+      const raw =
+        `File ${filePath} has been modified since you last read it ` +
+        `(mtime or size changed). Re-read it with the ${ReadFileTool.Name} ` +
+        `tool before editing to ensure your changes are based on current ` +
+        `content.`;
       return {
-        llmContent: msg,
-        returnDisplay: `Error: ${ReadFileTool.Name} required before editing this file.`,
-        error: {
-          message: msg,
-          type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
-        },
+        ok: false,
+        type: ToolErrorType.FILE_CHANGED_SINCE_READ,
+        rawMessage: raw,
+        displayMessage: `file changed since last read; re-run ${ReadFileTool.Name} first.`,
       };
     }
-    // status.state === 'stale'
-    const msg =
-      `File ${this.params.file_path} has been modified since you last ` +
-      `read it (mtime or size changed). Re-read it with the ` +
-      `${ReadFileTool.Name} tool before editing to ensure your changes ` +
-      `are based on current content.`;
+    // unknown OR fresh-but-partial / non-cacheable: require a fresh
+    // full text read.
+    const raw =
+      `File ${filePath} has not been fully read in this session. ` +
+      `Use the ${ReadFileTool.Name} tool first (without offset / limit ` +
+      `/ pages) to load the entire current text content before editing.`;
     return {
-      llmContent: msg,
-      returnDisplay: `Error: file changed since last read; re-run ${ReadFileTool.Name} first.`,
-      error: {
-        message: msg,
-        type: ToolErrorType.FILE_CHANGED_SINCE_READ,
-      },
+      ok: false,
+      type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
+      rawMessage: raw,
+      displayMessage: `${ReadFileTool.Name} required before editing this file.`,
     };
   }
 }

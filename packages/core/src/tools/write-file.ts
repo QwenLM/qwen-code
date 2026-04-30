@@ -120,6 +120,17 @@ class WriteFileToolInvocation extends BaseToolInvocation<
   ): Promise<ToolCallConfirmationDetails> {
     let originalContent = '';
     const fileExists = await isFilefileExists(this.params.file_path);
+    // Run prior-read enforcement *before* we read the file to render
+    // a confirmation diff. Otherwise the user could approve a diff
+    // computed from current bytes that the model has never received,
+    // and the subsequent execute() would still reject the call —
+    // confusing UX for any approve flow.
+    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+      const decision = await this.checkPriorRead(this.params.file_path);
+      if (!decision.ok) {
+        throw new Error(decision.rawMessage);
+      }
+    }
     if (fileExists) {
       try {
         const { content } = await this.config
@@ -215,15 +226,23 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     }
 
     // Prior-read enforcement: refuse to overwrite a pre-existing file
-    // the model has not read in this session, or whose on-disk
-    // fingerprint has drifted since the last read. The intent is to
-    // stop the model from blindly clobbering files it has not seen.
-    // New file creation is exempt; the cache-disabled escape hatch
-    // also bypasses this check.
+    // the model has not legitimately read in this session, or whose
+    // on-disk fingerprint has drifted since the last read. The intent
+    // is to stop the model from blindly clobbering files it has not
+    // seen — and to refuse mutations based on partial reads (offset /
+    // limit / pages) or non-text reads where the model never saw the
+    // bytes a write would replace.
     if (fileExists && !this.config.getFileReadCacheDisabled()) {
-      const enforcement = await this.requirePriorRead(file_path);
-      if (enforcement) {
-        return enforcement;
+      const decision = await this.checkPriorRead(file_path);
+      if (!decision.ok) {
+        return {
+          llmContent: decision.rawMessage,
+          returnDisplay: `Error: ${decision.displayMessage}`,
+          error: {
+            message: decision.rawMessage,
+            type: decision.type,
+          },
+        };
       }
     }
 
@@ -379,55 +398,63 @@ class WriteFileToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Block the write unless the file has been read in this session and
-   * its on-disk fingerprint still matches the recorded one. Returns a
-   * populated `ToolResult` when the write must be rejected, or
-   * `undefined` when the write is cleared to proceed.
+   * Test whether the write is cleared to proceed against an existing
+   * file based on the session FileReadCache. Returns a structured
+   * decision so the caller can route it into the right shape — a
+   * thrown error from `getConfirmationDetails` (so the diff is never
+   * shown) or a `ToolResult` from `execute`.
    *
-   * Stat failures here are intentionally non-blocking — the existing
-   * write path will surface a richer error.
+   * Approval requires more than `state === 'fresh'`: the recorded
+   * read must also be a full text read with `lastReadAt`,
+   * `lastReadWasFull`, and `lastReadCacheable`. A partial / ranged
+   * / binary read is not enough — the model has not seen the bytes
+   * an overwrite would clobber.
    */
-  private async requirePriorRead(
-    filePath: string,
-  ): Promise<ToolResult | undefined> {
+  private async checkPriorRead(filePath: string): Promise<
+    | { ok: true }
+    | {
+        ok: false;
+        type: ToolErrorType;
+        rawMessage: string;
+        displayMessage: string;
+      }
+  > {
     let stats: fs.Stats;
     try {
       stats = await fs.promises.stat(filePath);
     } catch {
-      return undefined;
+      return { ok: true };
     }
     const status = this.config.getFileReadCache().check(stats);
-    if (status.state === 'fresh') {
-      return undefined;
+    if (
+      status.state === 'fresh' &&
+      status.entry.lastReadAt !== undefined &&
+      status.entry.lastReadWasFull &&
+      status.entry.lastReadCacheable
+    ) {
+      return { ok: true };
     }
-    if (status.state === 'unknown') {
-      const msg =
-        `File ${filePath} has not been read in this session. ` +
-        `Use the read_file tool first to verify the current content ` +
+    if (status.state === 'stale') {
+      const raw =
+        `File ${filePath} has been modified since you last read it ` +
+        `(mtime or size changed). Re-read it with the read_file tool ` +
         `before overwriting it.`;
       return {
-        llmContent: msg,
-        returnDisplay:
-          'Error: read_file required before overwriting this file.',
-        error: {
-          message: msg,
-          type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
-        },
+        ok: false,
+        type: ToolErrorType.FILE_CHANGED_SINCE_READ,
+        rawMessage: raw,
+        displayMessage: 'file changed since last read; re-run read_file first.',
       };
     }
-    // status.state === 'stale'
-    const msg =
-      `File ${filePath} has been modified since you last read it ` +
-      `(mtime or size changed). Re-read it with the read_file tool ` +
-      `before overwriting it.`;
+    const raw =
+      `File ${filePath} has not been fully read in this session. ` +
+      `Use the read_file tool first (without offset / limit / pages) ` +
+      `to load the entire current text content before overwriting it.`;
     return {
-      llmContent: msg,
-      returnDisplay:
-        'Error: file changed since last read; re-run read_file first.',
-      error: {
-        message: msg,
-        type: ToolErrorType.FILE_CHANGED_SINCE_READ,
-      },
+      ok: false,
+      type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
+      rawMessage: raw,
+      displayMessage: 'read_file required before overwriting this file.',
     };
   }
 }

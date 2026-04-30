@@ -215,6 +215,7 @@ describe('WriteFileTool', () => {
       const filePath = path.join(rootDir, 'confirm_error_file.txt');
       const params = { file_path: filePath, content: 'test content' };
       fs.writeFileSync(filePath, 'original', { mode: 0o000 });
+      seedPriorRead(filePath);
 
       const readError = new Error('Simulated read error for confirmation');
       vi.spyOn(fsService, 'readTextFile').mockImplementationOnce(() =>
@@ -259,6 +260,7 @@ describe('WriteFileTool', () => {
       const originalContent = 'Original content for confirmation.';
       const proposedContent = 'Proposed replacement for confirmation.';
       fs.writeFileSync(filePath, originalContent, 'utf8');
+      seedPriorRead(filePath);
 
       const params = { file_path: filePath, content: proposedContent };
       const invocation = tool.build(params);
@@ -286,6 +288,7 @@ describe('WriteFileTool', () => {
       const filePath = path.join(rootDir, 'execute_error_file.txt');
       const params = { file_path: filePath, content: 'test content' };
       fs.writeFileSync(filePath, 'original', { mode: 0o000 });
+      seedPriorRead(filePath);
 
       vi.spyOn(fsService, 'readTextFile').mockImplementationOnce(() => {
         const readError = new Error('Simulated read error for execute');
@@ -787,10 +790,59 @@ describe('WriteFileTool', () => {
 
       expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
       expect(result.error?.message).toMatch(
-        /has not been read in this session/,
+        /has not been fully read in this session/,
       );
       // File must remain at its pre-call content.
       expect(fs.readFileSync(filePath, 'utf-8')).toBe('untouched bytes');
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('rejects a write when the previous read was ranged (offset/limit)', async () => {
+      const filePath = path.join(rootDir, 'enforce-ranged.txt');
+      fs.writeFileSync(filePath, 'unchanged', 'utf-8');
+      const stats = fs.statSync(filePath);
+      fileReadCache.recordRead(filePath, stats, {
+        full: false,
+        cacheable: true,
+      });
+
+      const result = await tool
+        .build({ file_path: filePath, content: 'clobber' })
+        .execute(abortSignal);
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('unchanged');
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('rejects a write when the previous read was non-cacheable', async () => {
+      const filePath = path.join(rootDir, 'enforce-noncacheable.txt');
+      fs.writeFileSync(filePath, 'pretend binary', 'utf-8');
+      const stats = fs.statSync(filePath);
+      fileReadCache.recordRead(filePath, stats, {
+        full: true,
+        cacheable: false,
+      });
+
+      const result = await tool
+        .build({ file_path: filePath, content: 'clobber' })
+        .execute(abortSignal);
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('rejects confirmation requests on an unread existing file before showing a diff', async () => {
+      const filePath = path.join(rootDir, 'enforce-confirm.txt');
+      fs.writeFileSync(filePath, 'unread current bytes', 'utf-8');
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'replacement content',
+      });
+      await expect(
+        invocation.getConfirmationDetails(abortSignal),
+      ).rejects.toThrow(/has not been fully read in this session/);
 
       fs.unlinkSync(filePath);
     });
