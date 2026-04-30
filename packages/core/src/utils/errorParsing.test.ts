@@ -130,10 +130,23 @@ describe('parseAndFormatApiError', () => {
       expect(parseAndFormatApiError(formatted)).toBe(formatted);
     });
 
+    it('returns an already-formatted 429 plain string with quota guidance unchanged', () => {
+      const formatted =
+        '[API Error: Rate limit exceeded (Status: RESOURCE_EXHAUSTED)]\nPossible quota limitations in place or slow response times detected. Please wait and try again later.';
+      expect(parseAndFormatApiError(formatted)).toBe(formatted);
+    });
+
     it('returns an already-formatted StructuredError.message unchanged', () => {
       const formatted =
         '[API Error: 402 Model X is not available for billing.]';
       const error: StructuredError = { message: formatted, status: 402 };
+      expect(parseAndFormatApiError(error)).toBe(formatted);
+    });
+
+    it('returns an already-formatted 429 StructuredError.message with quota guidance unchanged', () => {
+      const formatted =
+        '[API Error: Rate limit exceeded]\nPossible quota limitations in place or slow response times detected. Please wait and try again later.';
+      const error: StructuredError = { message: formatted, status: 429 };
       expect(parseAndFormatApiError(error)).toBe(formatted);
     });
 

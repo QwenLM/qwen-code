@@ -776,9 +776,7 @@ export async function runNonInteractive(
       // entirely in that case so we don't emit a phantom blank line.
       // JSON / STREAM_JSON modes still emit normally; the adapter is the
       // primary output channel there, not a duplicate of stderr.
-      const isAlreadyReportedError =
-        error instanceof Error &&
-        (error as { isAlreadyReported?: boolean }).isAlreadyReported === true;
+      const isAlreadyReportedError = error instanceof AlreadyReportedError;
       const skipAdapterEmit =
         outputFormat === OutputFormat.TEXT && isAlreadyReportedError;
 

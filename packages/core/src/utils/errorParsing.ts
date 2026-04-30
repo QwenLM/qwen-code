@@ -33,20 +33,33 @@ export const API_ERROR_PREFIX = '[API Error: ';
 
 /**
  * Returns true when `value` already looks like the output of
- * parseAndFormatApiError (i.e. starts with "[API Error: " and ends with "]").
+ * parseAndFormatApiError.
+ *
+ * Accepts:
+ * 1) base format: "[API Error: ...]"
+ * 2) 429 format: "[API Error: ...]" followed by one of the known quota
+ *    guidance suffixes.
  *
  * Used as an idempotency guard: when an upstream caller has already passed an
  * Error through parseAndFormatApiError, stuffed the formatted string into
  * Error.message, and the message reaches us a second time, we should return it
- * unchanged rather than producing "[API Error: [API Error: ...]]". The
- * non-interactive runner is the main offender: the stream-error handler
- * formats and prints, then throws an Error whose .message is the formatted
- * string, which the top-level handleError catches and tries to format again.
+ * unchanged rather than producing "[API Error: [API Error: ...]]".
  */
 function isAlreadyFormatted(value: string): boolean {
-  // Trailing ']' check guards against false positives where a raw upstream
-  // message just happens to start with the prefix mid-string.
-  return value.startsWith(API_ERROR_PREFIX) && value.trimEnd().endsWith(']');
+  const trimmed = value.trimEnd();
+  if (!trimmed.startsWith(API_ERROR_PREFIX)) {
+    return false;
+  }
+
+  if (trimmed.endsWith(']')) {
+    return true;
+  }
+
+  return (
+    trimmed.includes(`]${RATE_LIMIT_ERROR_MESSAGE_USE_GEMINI}`) ||
+    trimmed.includes(`]${RATE_LIMIT_ERROR_MESSAGE_VERTEX}`) ||
+    trimmed.includes(`]${RATE_LIMIT_ERROR_MESSAGE_DEFAULT}`)
+  );
 }
 
 export function parseAndFormatApiError(
