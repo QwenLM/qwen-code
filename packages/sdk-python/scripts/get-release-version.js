@@ -227,7 +227,7 @@ async function doesVersionExist({ packageVersion, releaseTag }, versions) {
 
   try {
     const output = execSync(
-      `gh release view "${fullTag}" --json tagName --jq .tagName 2>/dev/null`,
+      `gh release view "${fullTag}" --json tagName --jq .tagName`,
     )
       .toString()
       .trim();
@@ -236,13 +236,15 @@ async function doesVersionExist({ packageVersion, releaseTag }, versions) {
       return true;
     }
   } catch (error) {
+    const stderr = error.stderr?.toString() ?? '';
+    const stdout = error.stdout?.toString() ?? '';
+    const combinedMessage = `${error.message}\n${stderr}\n${stdout}`;
     const isExpectedNotFound =
-      error.message.includes('release not found') ||
-      error.message.includes('Not Found') ||
-      error.message.includes('not found') ||
-      error.status === 1;
+      combinedMessage.includes('release not found') ||
+      combinedMessage.includes('Not Found') ||
+      combinedMessage.includes('not found');
     if (!isExpectedNotFound) {
-      console.error(
+      throw new Error(
         `Failed to check GitHub releases for conflicts: ${error.message}`,
       );
     }
@@ -298,11 +300,28 @@ function getStableVersion(args, versions) {
   }
 
   const previewBase = getLatestPreviewBaseVersion(versions);
-  const releaseVersion = previewBase || getCurrentPackageBaseVersion();
+  const latestStable = getLatestStableVersion(versions);
+
+  if (previewBase) {
+    if (latestStable && compareVersions(previewBase, latestStable) < 0) {
+      throw new Error(
+        `Latest preview base ${previewBase} is not newer than latest stable ${latestStable}. Provide stable_version_override to continue.`,
+      );
+    }
+    return {
+      releaseVersion: previewBase,
+      packageVersion: previewBase,
+      publishChannel: 'latest',
+      source: 'preview',
+    };
+  }
+
+  const releaseVersion = getCurrentPackageBaseVersion();
   return {
     releaseVersion,
     packageVersion: releaseVersion,
     publishChannel: 'latest',
+    source: 'current',
   };
 }
 
@@ -384,16 +403,23 @@ async function getVersion(options = {}) {
       );
     }
 
+    if (type === 'stable' && versionData.source === 'preview') {
+      throw new Error(
+        `Stable release ${versionData.releaseVersion} derived from the latest preview already exists.`,
+      );
+    }
+
     versionData = bumpVersion(versionData, type);
   }
 
-  const latestStableVersion = getLatestStableVersion(versions);
+  const previousVersion =
+    type === 'stable' ? getLatestStableVersion(versions) : '';
 
   return {
     releaseTag: `v${versionData.releaseVersion}`,
     releaseVersion: versionData.releaseVersion,
     packageVersion: versionData.packageVersion,
-    previousReleaseTag: latestStableVersion ? `v${latestStableVersion}` : '',
+    previousReleaseTag: previousVersion ? `v${previousVersion}` : '',
     publishChannel: versionData.publishChannel,
   };
 }

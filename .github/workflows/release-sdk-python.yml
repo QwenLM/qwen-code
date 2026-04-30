@@ -52,6 +52,35 @@ jobs:
       pull-requests: 'write'
 
     steps:
+      - name: 'Validate release inputs'
+        env:
+          CREATE_NIGHTLY_RELEASE: '${{ github.event.inputs.create_nightly_release }}'
+          CREATE_PREVIEW_RELEASE: '${{ github.event.inputs.create_preview_release }}'
+          DRY_RUN_INPUT: '${{ github.event.inputs.dry_run }}'
+          FORCE_SKIP_TESTS: '${{ github.event.inputs.force_skip_tests }}'
+          REQUESTED_REF: '${{ github.event.inputs.ref || github.sha }}'
+        run: |
+          if [[ "${CREATE_NIGHTLY_RELEASE}" == "true" && "${CREATE_PREVIEW_RELEASE}" == "true" ]]; then
+            echo "create_nightly_release and create_preview_release cannot both be true" >&2
+            exit 1
+          fi
+
+          if [[ "${DRY_RUN_INPUT}" != "true" ]]; then
+            if [[ "${FORCE_SKIP_TESTS}" == "true" ]]; then
+              echo "force_skip_tests cannot be used when dry_run is false" >&2
+              exit 1
+            fi
+
+            case "${REQUESTED_REF}" in
+              main|refs/heads/main)
+                ;;
+              *)
+                echo "Production publishes must use the protected main ref." >&2
+                exit 1
+                ;;
+            esac
+          fi
+
       - name: 'Checkout'
         uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
         with:
@@ -65,11 +94,6 @@ jobs:
           DRY_RUN_INPUT: '${{ github.event.inputs.dry_run }}'
         id: 'vars'
         run: |
-          if [[ "${CREATE_NIGHTLY_RELEASE}" == "true" && "${CREATE_PREVIEW_RELEASE}" == "true" ]]; then
-            echo "create_nightly_release and create_preview_release cannot both be true" >&2
-            exit 1
-          fi
-
           is_nightly="false"
           if [[ "${CREATE_NIGHTLY_RELEASE}" == "true" ]]; then
             is_nightly="true"
@@ -153,6 +177,7 @@ jobs:
           echo "Previous Release:   ${PREVIOUS_RELEASE_TAG}"
           echo "========================================"
         env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           IS_NIGHTLY: '${{ steps.vars.outputs.is_nightly }}'
           IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
           MANUAL_VERSION: '${{ inputs.version }}'
@@ -196,25 +221,6 @@ jobs:
         run: |
           python packages/sdk-python/scripts/smoke_real.py --qwen "${GITHUB_WORKSPACE}/dist/cli.js" --cwd "${GITHUB_WORKSPACE}" --json-only
 
-      - name: 'Build Python package'
-        working-directory: 'packages/sdk-python'
-        run: |
-          rm -rf dist
-          python -m build
-
-      - name: 'Publish qwen-code-sdk to PyPI'
-        if: |-
-          ${{ steps.vars.outputs.is_dry_run == 'false' }}
-        uses: 'pypa/gh-action-pypi-publish@release/v1'
-        with:
-          packages-dir: 'packages/sdk-python/dist'
-
-      - name: 'Show publish artifacts for dry-run'
-        if: |-
-          ${{ steps.vars.outputs.is_dry_run == 'true' }}
-        run: |
-          ls -la packages/sdk-python/dist
-
       - name: 'Configure Git User'
         run: |
           git config user.name "github-actions[bot]"
@@ -245,6 +251,25 @@ jobs:
             git commit -m "chore(release): sdk-python ${RELEASE_TAG}"
           fi
           git push --set-upstream origin "${BRANCH_NAME}" --follow-tags
+
+      - name: 'Build Python package'
+        working-directory: 'packages/sdk-python'
+        run: |
+          rm -rf dist
+          python -m build
+
+      - name: 'Publish qwen-code-sdk to PyPI'
+        if: |-
+          ${{ steps.vars.outputs.is_dry_run == 'false' }}
+        uses: 'pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b' # ratchet:pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: 'packages/sdk-python/dist'
+
+      - name: 'Show publish artifacts for dry-run'
+        if: |-
+          ${{ steps.vars.outputs.is_dry_run == 'true' }}
+        run: |
+          ls -la packages/sdk-python/dist
 
       - name: 'Create GitHub release and tag'
         if: |-
@@ -278,8 +303,12 @@ jobs:
             echo ""
           } > "${NOTES_FILE}"
 
-          PREVIOUS_NOTES=$(gh release view "sdk-python-${PREVIOUS_RELEASE_TAG}" --json body -q '.body' 2>/dev/null || echo 'See commit history for changes.')
-          printf '%s\n' "${PREVIOUS_NOTES}" >> "${NOTES_FILE}"
+          if [[ -n "${PREVIOUS_RELEASE_TAG}" ]]; then
+            PREVIOUS_NOTES=$(gh release view "sdk-python-${PREVIOUS_RELEASE_TAG}" --json body -q '.body' 2>/dev/null || echo 'See commit history for changes.')
+            printf '%s\n' "${PREVIOUS_NOTES}" >> "${NOTES_FILE}"
+          else
+            echo "See commit history for changes." >> "${NOTES_FILE}"
+          fi
 
           gh release create "sdk-python-${RELEASE_TAG}" \
             --target "${TARGET}" \
