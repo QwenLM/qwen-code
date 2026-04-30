@@ -214,6 +214,19 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       }
     }
 
+    // Prior-read enforcement: refuse to overwrite a pre-existing file
+    // the model has not read in this session, or whose on-disk
+    // fingerprint has drifted since the last read. The intent is to
+    // stop the model from blindly clobbering files it has not seen.
+    // New file creation is exempt; the cache-disabled escape hatch
+    // also bypasses this check.
+    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+      const enforcement = await this.requirePriorRead(file_path);
+      if (enforcement) {
+        return enforcement;
+      }
+    }
+
     if (!fileExists) {
       fs.mkdirSync(dirName, { recursive: true });
       const userEncoding = this.config.getDefaultFileEncoding();
@@ -363,6 +376,59 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         },
       };
     }
+  }
+
+  /**
+   * Block the write unless the file has been read in this session and
+   * its on-disk fingerprint still matches the recorded one. Returns a
+   * populated `ToolResult` when the write must be rejected, or
+   * `undefined` when the write is cleared to proceed.
+   *
+   * Stat failures here are intentionally non-blocking — the existing
+   * write path will surface a richer error.
+   */
+  private async requirePriorRead(
+    filePath: string,
+  ): Promise<ToolResult | undefined> {
+    let stats: fs.Stats;
+    try {
+      stats = await fs.promises.stat(filePath);
+    } catch {
+      return undefined;
+    }
+    const status = this.config.getFileReadCache().check(stats);
+    if (status.state === 'fresh') {
+      return undefined;
+    }
+    if (status.state === 'unknown') {
+      const msg =
+        `File ${filePath} has not been read in this session. ` +
+        `Use the read_file tool first to verify the current content ` +
+        `before overwriting it.`;
+      return {
+        llmContent: msg,
+        returnDisplay:
+          'Error: read_file required before overwriting this file.',
+        error: {
+          message: msg,
+          type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
+        },
+      };
+    }
+    // status.state === 'stale'
+    const msg =
+      `File ${filePath} has been modified since you last read it ` +
+      `(mtime or size changed). Re-read it with the read_file tool ` +
+      `before overwriting it.`;
+    return {
+      llmContent: msg,
+      returnDisplay:
+        'Error: file changed since last read; re-run read_file first.',
+      error: {
+        message: msg,
+        type: ToolErrorType.FILE_CHANGED_SINCE_READ,
+      },
+    };
   }
 }
 

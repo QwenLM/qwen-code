@@ -70,6 +70,7 @@ const mockConfigInternal = {
     }) as unknown as ToolRegistry,
   getDefaultFileEncoding: () => 'utf-8',
   getFileReadCache: () => fileReadCache,
+  getFileReadCacheDisabled: () => false,
 };
 const mockConfig = mockConfigInternal as unknown as Config;
 
@@ -122,6 +123,19 @@ describe('WriteFileTool', () => {
     }
     vi.clearAllMocks();
   });
+
+  /**
+   * Simulate the model having read `filePath` earlier in the session,
+   * so the WriteFileTool's prior-read enforcement does not reject the
+   * subsequent overwrite. New-file creation paths do not need this.
+   */
+  function seedPriorRead(filePath: string) {
+    const stats = fs.statSync(filePath);
+    fileReadCache.recordRead(filePath, stats, {
+      full: true,
+      cacheable: true,
+    });
+  }
 
   describe('build', () => {
     it('should return an invocation for a valid absolute path within root', () => {
@@ -328,6 +342,7 @@ describe('WriteFileTool', () => {
       const initialContent = 'Initial content for execute.';
       const proposedContent = 'Proposed overwrite for execute.';
       fs.writeFileSync(filePath, initialContent, 'utf8');
+      seedPriorRead(filePath);
 
       const params = { file_path: filePath, content: proposedContent };
       const invocation = tool.build(params);
@@ -609,6 +624,7 @@ describe('WriteFileTool', () => {
           Buffer.from(originalContent, 'utf-8'),
         ]),
       );
+      seedPriorRead(filePath);
 
       // Spy on writeTextFile to verify BOM option
       const writeSpy = vi.spyOn(fsService, 'writeTextFile');
@@ -637,6 +653,7 @@ describe('WriteFileTool', () => {
 
       // Create file without BOM
       fs.writeFileSync(filePath, originalContent, 'utf-8');
+      seedPriorRead(filePath);
 
       // Spy on writeTextFile to verify BOM option
       const writeSpy = vi.spyOn(fsService, 'writeTextFile');
@@ -746,6 +763,78 @@ describe('WriteFileTool', () => {
       }
 
       if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    });
+  });
+
+  describe('prior-read enforcement', () => {
+    const abortSignal = new AbortController().signal;
+
+    it('rejects a write that would overwrite an unread existing file', async () => {
+      const filePath = path.join(rootDir, 'enforce-overwrite.txt');
+      fs.writeFileSync(filePath, 'untouched bytes', 'utf-8');
+      // No seedPriorRead — model has not Read this file in the session.
+
+      const params = { file_path: filePath, content: 'clobber attempt' };
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+      expect(result.error?.message).toMatch(
+        /has not been read in this session/,
+      );
+      // File must remain at its pre-call content.
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('untouched bytes');
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('rejects a write when the file has been modified since the last read', async () => {
+      const filePath = path.join(rootDir, 'enforce-stale.txt');
+      fs.writeFileSync(filePath, 'one', 'utf-8');
+      seedPriorRead(filePath);
+      fs.writeFileSync(filePath, 'two with more bytes', 'utf-8');
+      const future = new Date(Date.now() + 60_000);
+      fs.utimesSync(filePath, future, future);
+
+      const params = {
+        file_path: filePath,
+        content: 'clobber the stale file',
+      };
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+      expect(result.error?.message).toMatch(/has been modified since/);
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('two with more bytes');
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('exempts new-file creation from prior-read enforcement', async () => {
+      const filePath = path.join(rootDir, 'enforce-new.txt');
+      // File does not exist; model has nothing to read first.
+      const params = { file_path: filePath, content: 'fresh content' };
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('fresh content');
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('bypasses enforcement entirely when fileReadCacheDisabled is true', async () => {
+      const filePath = path.join(rootDir, 'enforce-bypass.txt');
+      fs.writeFileSync(filePath, 'untouched', 'utf-8');
+      const original = mockConfigInternal.getFileReadCacheDisabled;
+      mockConfigInternal.getFileReadCacheDisabled = () => true;
+
+      try {
+        const params = { file_path: filePath, content: 'clobbered' };
+        const result = await tool.build(params).execute(abortSignal);
+        expect(result.error).toBeUndefined();
+        expect(fs.readFileSync(filePath, 'utf-8')).toBe('clobbered');
+      } finally {
+        mockConfigInternal.getFileReadCacheDisabled = original;
         fs.unlinkSync(filePath);
       }
     });

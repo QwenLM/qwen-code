@@ -36,6 +36,17 @@ export enum ToolErrorType {
   EDIT_EXPECTED_OCCURRENCE_MISMATCH = 'edit_expected_occurrence_mismatch',
   EDIT_NO_CHANGE = 'edit_no_change',
   EDIT_NO_CHANGE_LLM_JUDGEMENT = 'edit_no_change_llm_judgement',
+  // Returned when Edit / WriteFile is asked to mutate a file the model
+  // has not (yet) read this session via ReadFile. The session-scoped
+  // FileReadCache is the source of truth — see read-file.ts and the
+  // related FileReadCache service.
+  EDIT_REQUIRES_PRIOR_READ = 'edit_requires_prior_read',
+  // Returned when Edit / WriteFile is asked to mutate a file the model
+  // *has* read this session, but the on-disk bytes have changed since
+  // (mtime or size differs from the recorded fingerprint). The model
+  // is expected to re-read with ReadFile to refresh its mental model
+  // before retrying the edit.
+  FILE_CHANGED_SINCE_READ = 'file_changed_since_read',
 
   // Glob-specific Errors
   GLOB_EXECUTION_ERROR = 'glob_execution_error',

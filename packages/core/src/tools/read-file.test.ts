@@ -709,6 +709,42 @@ describe('ReadFileTool', () => {
         expect(second.llmContent).toMatch(/Cannot display content of binary/);
       });
 
+      it('records an auto-memory read in the cache so a follow-up Edit can pass enforcement', async () => {
+        // Auto-memory files skip the file_unchanged fast-path (they
+        // own a per-read freshness `<system-reminder>` that must be
+        // re-emitted) but they MUST still be recorded in the cache
+        // — otherwise the prior-read enforcement on Edit / WriteFile
+        // would refuse to mutate a file the model legitimately just
+        // read. Put a file under .qwen/<auto-memory>/ via
+        // QWEN_CODE_MEMORY_LOCAL=1 and assert recordRead happened.
+        const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+        process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+        try {
+          const { getAutoMemoryRoot, clearAutoMemoryRootCache } = await import(
+            '../memory/paths.js'
+          );
+          clearAutoMemoryRootCache();
+          const memRoot = getAutoMemoryRoot(tempRootDir);
+          await fsp.mkdir(memRoot, { recursive: true });
+          const memFile = path.join(memRoot, 'AGENTS.md');
+          await fsp.writeFile(memFile, '# memory', 'utf-8');
+
+          const result = await read({ file_path: memFile });
+          // Slow path returned the actual content (not a placeholder).
+          expect(typeof result.llmContent).toBe('string');
+          expect(result.llmContent).not.toMatch(/unchanged since/);
+          // The cache must contain the auto-memory file's entry so a
+          // subsequent EditTool / WriteFileTool call sees `fresh`.
+          expect(fileReadCache.check(fs.statSync(memFile)).state).toBe('fresh');
+        } finally {
+          if (previousLocal === undefined) {
+            delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+          } else {
+            process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
+          }
+        }
+      });
+
       it('does not return the placeholder for image files', async () => {
         const imagePath = path.join(tempRootDir, 'pic.png');
         const pngHeader = Buffer.from([

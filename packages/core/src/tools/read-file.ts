@@ -147,7 +147,14 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     // transcript transformation). When disabled we bypass both the
     // fast-path lookup and the post-read record so behaviour matches
     // the pre-cache implementation byte-for-byte.
-    const cacheEnabled = !this.config.getFileReadCacheDisabled() && !isAutoMem;
+    //
+    // Auto-memory files are *recorded* in the cache (so prior-read
+    // enforcement on Edit / WriteFile recognises them as read) but
+    // never serve the file_unchanged placeholder — those files own a
+    // per-read freshness `<system-reminder>` that must be re-emitted
+    // on every read.
+    const cacheEnabled = !this.config.getFileReadCacheDisabled();
+    const useFastPath = cacheEnabled && !isAutoMem;
     const cache = this.config.getFileReadCache();
     // A "full" Read consumes the whole file: no offset, no limit, no PDF
     // page range. Only full Reads are eligible for the file_unchanged
@@ -172,7 +179,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       });
     }
 
-    if (cacheEnabled && stats && isFullRead) {
+    if (useFastPath && stats && isFullRead) {
       const status = cache.check(stats);
       if (
         status.state === 'fresh' &&

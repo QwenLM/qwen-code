@@ -387,6 +387,20 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       };
     }
 
+    // Prior-read enforcement: refuse to edit a pre-existing file the
+    // model has not read in this session, or whose on-disk fingerprint
+    // has drifted since the last read. The intent is to stop the model
+    // from "imagining" an old_string for a file it never actually saw.
+    // New file creation is exempt (no prior content for the model to
+    // know about); the cache-disabled escape hatch also bypasses this
+    // check, see `Config.fileReadCacheDisabled`.
+    if (!editData.isNewFile && !this.config.getFileReadCacheDisabled()) {
+      const enforcement = await this.requirePriorRead();
+      if (enforcement) {
+        return enforcement;
+      }
+    }
+
     try {
       this.ensureParentDirectoriesExist(this.params.file_path);
 
@@ -527,6 +541,58 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     if (!fs.existsSync(dirName)) {
       fs.mkdirSync(dirName, { recursive: true });
     }
+  }
+
+  /**
+   * Block the edit unless the file has been read in this session and
+   * its on-disk fingerprint still matches the recorded one. Returns
+   * a populated `ToolResult` when the edit must be rejected, or
+   * `undefined` when the edit is cleared to proceed.
+   *
+   * Stat failures here (file deleted between fileExists check and
+   * now, EACCES, etc.) are intentionally non-blocking: the existing
+   * write path will surface a richer error. Returning a synthetic
+   * "you must read first" message in that case would be misleading.
+   */
+  private async requirePriorRead(): Promise<ToolResult | undefined> {
+    let stats: fs.Stats;
+    try {
+      stats = await fs.promises.stat(this.params.file_path);
+    } catch {
+      return undefined;
+    }
+    const status = this.config.getFileReadCache().check(stats);
+    if (status.state === 'fresh') {
+      return undefined;
+    }
+    if (status.state === 'unknown') {
+      const msg =
+        `File ${this.params.file_path} has not been read in this session. ` +
+        `Use the ${ReadFileTool.Name} tool first to verify the current ` +
+        `content before editing.`;
+      return {
+        llmContent: msg,
+        returnDisplay: `Error: ${ReadFileTool.Name} required before editing this file.`,
+        error: {
+          message: msg,
+          type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
+        },
+      };
+    }
+    // status.state === 'stale'
+    const msg =
+      `File ${this.params.file_path} has been modified since you last ` +
+      `read it (mtime or size changed). Re-read it with the ` +
+      `${ReadFileTool.Name} tool before editing to ensure your changes ` +
+      `are based on current content.`;
+    return {
+      llmContent: msg,
+      returnDisplay: `Error: file changed since last read; re-run ${ReadFileTool.Name} first.`,
+      error: {
+        message: msg,
+        type: ToolErrorType.FILE_CHANGED_SINCE_READ,
+      },
+    };
   }
 }
 
