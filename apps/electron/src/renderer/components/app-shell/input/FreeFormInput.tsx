@@ -487,6 +487,8 @@ export function FreeFormInput({
   }, [availableModels, contextStatus?.contextWindow, currentLlmConnection?.models, currentModel])
 
   const contextUsageIndicator = React.useMemo(() => {
+    if (isEmptySession) return null
+
     const usedTokens = Math.max(0, contextStatus?.inputTokens ?? 0)
     if (!currentModelContextWindow && usedTokens === 0) return null
 
@@ -505,6 +507,7 @@ export function FreeFormInput({
     contextStatus?.inputTokensDisplay,
     contextStatus?.contextWindowDisplay,
     currentModelContextWindow,
+    isEmptySession,
   ])
 
   // Access sessionStatuses and onSessionStatusChange from context for the # menu state picker
