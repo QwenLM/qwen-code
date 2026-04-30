@@ -62,7 +62,7 @@ export type BackgroundShellRegisterCallback = (
  * subscribe to both registries.
  */
 export type BackgroundShellStatusChangeCallback = (
-  entry: BackgroundShellEntry,
+  entry?: BackgroundShellEntry,
 ) => void;
 
 export class BackgroundShellRegistry {
@@ -117,6 +117,13 @@ export class BackgroundShellRegistry {
     return [...this.entries.values()];
   }
 
+  hasRunningEntries(): boolean {
+    for (const entry of this.entries.values()) {
+      if (entry.status === 'running') return true;
+    }
+    return false;
+  }
+
   complete(shellId: string, exitCode: number, endTime: number): void {
     const entry = this.entries.get(shellId);
     if (!entry || entry.status !== 'running') return;
@@ -156,7 +163,7 @@ export class BackgroundShellRegistry {
     }
   }
 
-  private fireStatusChange(entry: BackgroundShellEntry): void {
+  private fireStatusChange(entry?: BackgroundShellEntry): void {
     if (!this.statusChangeCallback) return;
     try {
       this.statusChangeCallback(entry);
@@ -186,6 +193,21 @@ export class BackgroundShellRegistry {
     const entry = this.entries.get(shellId);
     if (!entry || entry.status !== 'running') return;
     entry.abortController.abort();
+  }
+
+  /**
+   * Drops every in-memory entry without touching spawned processes.
+   *
+   * Callers must only use this after verifying that no running managed shell
+   * from the current session still exists.
+   */
+  reset(): void {
+    const firstEntry = this.entries.values().next().value as
+      | BackgroundShellEntry
+      | undefined;
+    if (!firstEntry) return;
+    this.entries.clear();
+    this.fireStatusChange(firstEntry);
   }
 
   /**

@@ -2216,6 +2216,15 @@ export const useGeminiStream = (
     }>
   >([]);
   const [notificationTrigger, setNotificationTrigger] = useState(0);
+  const notificationQueueSessionIdRef = useRef(sessionStates.sessionId);
+
+  useEffect(() => {
+    if (notificationQueueSessionIdRef.current === sessionStates.sessionId) {
+      return;
+    }
+    notificationQueueSessionIdRef.current = sessionStates.sessionId;
+    notificationQueueRef.current = [];
+  }, [sessionStates.sessionId]);
 
   // Start the cron scheduler on mount, stop on unmount.
   // Cron fires enqueue onto the shared notification queue.

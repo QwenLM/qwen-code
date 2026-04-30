@@ -42,6 +42,24 @@ export interface UseResumeCommandResult {
   handleResume: (sessionId: string) => Promise<void>;
 }
 
+const BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE =
+  "Stop the current session's running background tasks before resuming another session.";
+
+function hasBlockingBackgroundWork(config: Config): boolean {
+  return (
+    config.getBackgroundTaskRegistry().hasUnfinalizedTasks() ||
+    config
+      .getBackgroundShellRegistry()
+      .getAll()
+      .some((entry) => entry.status === 'running')
+  );
+}
+
+function resetBackgroundStateForSessionSwitch(config: Config): void {
+  (config.getBackgroundTaskRegistry() as unknown as { reset(): void }).reset();
+  (config.getBackgroundShellRegistry() as unknown as { reset(): void }).reset();
+}
+
 export function useResumeCommand(
   options?: UseResumeCommandOptions,
 ): UseResumeCommandResult {
@@ -74,6 +92,18 @@ export function useResumeCommand(
         return;
       }
 
+      if (hasBlockingBackgroundWork(config)) {
+        closeResumeDialog();
+        addItem?.(
+          {
+            type: MessageType.ERROR,
+            text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+          } as Omit<HistoryItem, 'id'>,
+          Date.now(),
+        );
+        return;
+      }
+
       // Close dialog immediately to prevent input capture during async operations.
       closeResumeDialog();
 
@@ -98,6 +128,7 @@ export function useResumeCommand(
       loadHistory?.(uiHistoryItems);
 
       // Update session history core.
+      resetBackgroundStateForSessionSwitch(config);
       config.startNewSession(sessionId, sessionData);
       // Rebuild turn boundary tracking so rewind works within resumed sessions.
       config
@@ -155,3 +186,5 @@ export function useResumeCommand(
     handleResume,
   };
 }
+
+export { BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE };

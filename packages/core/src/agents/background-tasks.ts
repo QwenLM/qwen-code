@@ -182,7 +182,7 @@ export type BackgroundRegisterCallback = (entry: BackgroundTaskEntry) => void;
  * on every tool call a background agent makes.
  */
 export type BackgroundStatusChangeCallback = (
-  entry: BackgroundTaskEntry,
+  entry?: BackgroundTaskEntry,
 ) => void;
 
 /** Fires on `appendActivity` — scoped to detail-view consumers. */
@@ -391,6 +391,23 @@ export class BackgroundTaskRegistry {
   }
 
   /**
+   * Drops every in-memory entry without touching sidecar state.
+   *
+   * Used only when switching to a different session after the caller has
+   * already established that no live work from the current session is still
+   * running. Paused/interrupted entries remain recoverable from disk because
+   * their sidecars keep the persisted status.
+   */
+  reset(): void {
+    const firstEntry = this.agents.values().next().value as
+      | BackgroundTaskEntry
+      | undefined;
+    if (!firstEntry) return;
+    this.agents.clear();
+    this.emitStatusChange(firstEntry);
+  }
+
+  /**
    * Enqueue a message for delivery to a running background agent.
    * The agent drains this queue between tool rounds.
    */
@@ -521,7 +538,7 @@ export class BackgroundTaskRegistry {
     }
   }
 
-  private emitStatusChange(entry: BackgroundTaskEntry): void {
+  private emitStatusChange(entry?: BackgroundTaskEntry): void {
     if (!this.statusChangeCallback) return;
     try {
       this.statusChangeCallback(entry);

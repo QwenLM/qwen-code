@@ -590,7 +590,9 @@ describe('BackgroundTaskRegistry', () => {
   it('statusChange callback fires on register and every state transition', () => {
     const seen: Array<{ id: string; status: string }> = [];
     registry.setStatusChangeCallback((entry) => {
-      seen.push({ id: entry.agentId, status: entry.status });
+      if (entry) {
+        seen.push({ id: entry.agentId, status: entry.status });
+      }
     });
 
     registry.register({
@@ -818,6 +820,29 @@ describe('BackgroundTaskRegistry', () => {
 
     it('returns empty array for non-existent agent', () => {
       expect(registry.drainMessages('nope')).toEqual([]);
+    });
+  });
+
+  describe('session switch helpers', () => {
+    it('reset clears tracked entries without touching persisted sidecars', () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+      registry.register({
+        agentId: 'test-2',
+        description: 'paused agent',
+        status: 'paused',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      registry.reset();
+
+      expect(registry.getAll()).toEqual([]);
     });
   });
 
