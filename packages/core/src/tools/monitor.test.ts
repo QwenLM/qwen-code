@@ -574,6 +574,35 @@ describe('MonitorTool', () => {
       }
     });
 
+    it('preserves the original spawn error when startup fails synchronously', async () => {
+      const invocation = createInvocation({
+        command: 'tail -f log',
+      });
+      const registerCallback = vi.fn();
+      monitorRegistry.setRegisterCallback(registerCallback);
+      mockSpawn.mockImplementation(() => {
+        throw new Error('spawn failed');
+      });
+      const registerSpy = vi
+        .spyOn(monitorRegistry, 'register')
+        .mockImplementation(() => {
+          throw new Error('limit reached');
+        });
+
+      try {
+        const result = await invocation.execute(new AbortController().signal);
+
+        expect(result.llmContent).toContain('Monitor failed to start');
+        expect(result.llmContent).toContain('spawn failed');
+        expect(result.returnDisplay).toContain('spawn failed');
+        expect(registerSpy).not.toHaveBeenCalled();
+        expect(registerCallback).not.toHaveBeenCalled();
+        expect(monitorRegistry.getAll()).toHaveLength(0);
+      } finally {
+        registerSpy.mockRestore();
+      }
+    });
+
     it('emits events on stdout lines', async () => {
       const callback = vi.fn();
       monitorRegistry.setNotificationCallback(callback);

@@ -255,8 +255,6 @@ class MonitorToolInvocation extends BaseToolInvocation<
         },
       });
     } catch (err) {
-      registry.register(entry);
-      registry.fail(monitorId, getErrorMessage(err));
       return {
         llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
