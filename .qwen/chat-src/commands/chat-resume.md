@@ -27,13 +27,43 @@ Same rules as `chat-save.md`:
 - Why: Users often typo session names; showing available sessions helps them correct the mistake.
 - **Important**: The index is stored in the **current project's root directory**, NOT the user's home directory.
 
-### 3. Verify Session File Exists
+### 3. Validate Loaded ID (Security Critical)
 
-- Check: `~/.qwen/projects/<hash>/chats/<sessionId>.jsonl`
+- The ID loaded from index **MUST be validated** before being used in any shell command.
+- **Expected format**: UUID format (32 hex chars with dashes) or its 8-character prefix.
+- **Shell metacharacter check**: If the ID contains any of `$` `` ` `` `;` `|` `>` `<` `&` `(` `)` or spaces, **REJECT it immediately**:
+  - Output: `"Error: Invalid session ID from index. Possible injection attack detected. Aborted."`
+  - **DO NOT execute any shell command** with this ID.
+- Why: A malicious or corrupt index entry could contain shell commands. This validation prevents command injection attacks.
+
+### 4. Verify Session File Exists
+
+- Check: `~/.qwen/projects/<sanitizeCwd>/chats/<sessionId>.jsonl`
+  - `<sanitizeCwd>` = `sanitizeCwd(projectRoot)`, replaces all non-alphanumeric chars with `-`. On Windows, also lowercase first. E.g., `D:\code\qwen-code` → `d--code-qwen-code`
 - If the file is missing: display saved sessions list + warn that session data may have been deleted.
 - Why: The index could point to a deleted file (e.g., manual cleanup, disk corruption). We verify before attempting to resume to avoid launching a broken session.
 
-### 4. Launch New Window (Platform-Specific)
+### 5. Shell Command Escaping (Security Critical)
+
+When executing the resume command, the session ID **MUST be properly escaped** to prevent shell injection:
+
+| Platform | Escaping Method                                                                                                                                                            |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows  | In the `-Command` argument, escape double quotes in the ID: `"` becomes `\"`. Wrap the whole command in outer double quotes.                                               |
+| macOS    | In the `osascript` string, escape double quotes in the ID: `"` becomes `\"`. Use single quotes for the outer osascript string.                                             |
+| Linux    | Use single quotes around the ID to prevent all expansion, except for single quotes themselves (which cannot be escaped inside single quotes — use `"'"` concat if needed). |
+
+**Example (Windows)**:
+
+- Original: `qwen --resume abc-123`
+- Escaped: `start pwsh -NoExit -Command "qwen --resume \"abc-123\""`
+
+**Example (macOS)**:
+
+- Original: `qwen --resume abc-123`
+- Escaped: `osascript -e 'tell app "Terminal" to do script "qwen --resume \"abc-123\""'`
+
+### 6. Launch New Window (Platform-Specific)
 
 **IMPORTANT: You MUST execute a shell command to launch a NEW terminal window. DO NOT read the .jsonl file content.**
 
@@ -70,6 +100,6 @@ fi
 - Why `--resume` instead of `--continue`: `--resume` takes a specific session ID; `--continue` resumes the most recent session. We know the exact ID, so `--resume` is precise.
 - Why new window: Preserves the current session context. The user can have multiple sessions open simultaneously.
 
-### 5. Confirm
+### 7. Confirm
 
 Output: `Session "{{name}}" is being resumed in a new window. (ID: <sessionId>)`

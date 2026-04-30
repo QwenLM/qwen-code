@@ -40,8 +40,8 @@ meaningful names. This command creates the mapping so users can later resume wit
 
 ### 4. Find the Current Session ID
 
-- **Method**: Find the most recently modified `.jsonl` file in `~/.qwen/projects/<hash>/chats/`. The filename (without `.jsonl` extension) IS the session UUID.
-  - `<hash>` = SHA-256 of the full project root path (normalized to lowercase on Windows).
+- **Method**: Find the most recently modified `.jsonl` file in `~/.qwen/projects/<sanitizeCwd>/chats/`. The filename (without `.jsonl` extension) IS the session UUID.
+  - `<sanitizeCwd>` = `sanitizeCwd(projectRoot)`, which replaces all non-alphanumeric characters with `-`. On Windows, also lowercase the path first. E.g., `D:\code\qwen-code` → `d--code-qwen-code`
 - ⚠️ **IMPORTANT**: If you think the wrong session might be saved, **resume the target session first**, then run `/chat -s`. This ensures you save the intended conversation.
 - If no `.jsonl` file is found: output `"No session found. Start a conversation first."` and stop.
 - **Why this method?**: File-based custom commands cannot access the active chat UUID directly. Using mtime is the only available approach. The explicit warning helps users correct mistakes.

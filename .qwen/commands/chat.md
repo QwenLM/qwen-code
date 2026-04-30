@@ -120,5 +120,3 @@ Examples:
   /chat -d my-session
   /chat -d my-session -y  # Delete without confirmation
 ```
-
-(End of file - 109 lines)
