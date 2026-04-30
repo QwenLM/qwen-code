@@ -630,6 +630,8 @@ async function loadSessionMessages(
             : existingSession.isProcessing && existingSession.messages.length > 0
               ? existingSession.messages
               : loadedSession.messages,
+          availableCommands: loadedSession.availableCommands ?? existingSession.availableCommands,
+          availableSkills: loadedSession.availableSkills ?? existingSession.availableSkills,
           tokenUsage: loadedSession.tokenUsage ?? existingSession.tokenUsage,
           sessionFolderPath: loadedSession.sessionFolderPath ?? existingSession.sessionFolderPath,
         }

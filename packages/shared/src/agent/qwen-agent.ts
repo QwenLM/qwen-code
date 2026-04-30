@@ -33,6 +33,8 @@ import { getSystemPrompt } from '../prompts/system.ts';
 import { BaseAgent } from './base-agent.ts';
 import type {
   BackendConfig,
+  BackendSessionMessagesResult,
+  AvailableCommandsSnapshot,
   BackendSessionListOptions,
   BackendSessionListResult,
   ChatOptions,
@@ -174,6 +176,12 @@ function toAvailableSkills(value: unknown): string[] | undefined {
   }
 
   return skills.length > 0 ? skills : undefined;
+}
+
+function formatDebugNames(values: string[] | undefined, max = 40): string {
+  if (!values || values.length === 0) return 'none';
+  const visible = values.slice(0, max).join(', ');
+  return values.length > max ? `${visible}, ... +${values.length - max} more` : visible;
 }
 
 function parseQwenTimestamp(value: unknown): number | undefined {
@@ -587,6 +595,9 @@ export class QwenAgent extends BaseAgent {
   private miniCollectors = new Map<string, MiniCollector>();
   private historyCollectors = new Map<string, HistoryCollector>();
   private suppressedSessionUpdates = new Set<string>();
+  private pendingAvailableCommandsUpdates = new Map<string, JsonRecord>();
+  private latestAvailableCommandsSnapshot: AvailableCommandsSnapshot | null = null;
+  private availableCommandsWaiters: Array<(snapshot: AvailableCommandsSnapshot | null) => void> = [];
 
   private sourceMcpServers: Record<string, SdkMcpServerConfig> = {};
   private currentTurnId: string | undefined;
@@ -631,6 +642,9 @@ export class QwenAgent extends BaseAgent {
     super.clearHistory();
     this.qwenSessionId = null;
     this.persistedQwenSessionId = null;
+    this.pendingAvailableCommandsUpdates.clear();
+    this.latestAvailableCommandsSnapshot = null;
+    this.resolveAvailableCommandsWaiters(null);
     this.config.onSdkSessionIdCleared?.();
   }
 
@@ -639,6 +653,9 @@ export class QwenAgent extends BaseAgent {
     if (this.qwenSessionId) {
       this.qwenSessionId = null;
       this.persistedQwenSessionId = null;
+      this.pendingAvailableCommandsUpdates.clear();
+      this.latestAvailableCommandsSnapshot = null;
+      this.resolveAvailableCommandsWaiters(null);
       this.config.onSdkSessionIdCleared?.();
       this.debug('Qwen ACP session cleared after working directory change');
     }
@@ -886,7 +903,7 @@ export class QwenAgent extends BaseAgent {
     return result.success !== false;
   }
 
-  async loadSessionMessages(sessionId: string, options: { cwd?: string } = {}): Promise<Message[]> {
+  async loadSessionMessages(sessionId: string, options: { cwd?: string } = {}): Promise<BackendSessionMessagesResult> {
     const cwd = options.cwd || this.resolvedCwd();
     await this.ensureProcess();
 
@@ -901,10 +918,50 @@ export class QwenAgent extends BaseAgent {
       }), 60_000);
 
       const messages = this.buildHistoryMessages(sessionId, collector.updates, cwd);
-      return this.mergeSlashCommandInvocationMessages(sessionId, messages, cwd);
+      const availableCommandsSnapshot = this.extractAvailableCommandsSnapshot(collector.updates);
+      const mergedMessages = this.mergeSlashCommandInvocationMessages(sessionId, messages, cwd);
+      return {
+        messages: mergedMessages,
+        ...(availableCommandsSnapshot ?? {}),
+      };
     } finally {
       this.historyCollectors.delete(sessionId);
     }
+  }
+
+  async refreshAvailableCommands(): Promise<AvailableCommandsSnapshot | null> {
+    this.debug(`Qwen slash command refresh requested (session=${this.qwenSessionId ?? this.persistedQwenSessionId ?? 'none'}, cwd=${this.resolvedCwd()})`);
+    const hadLiveSessionBeforeRefresh = !!this.qwenSessionId;
+    await this.ensureProcess();
+    await this.ensureQwenSession();
+
+    if (this.latestAvailableCommandsSnapshot) {
+      this.debug(
+        `Qwen slash command refresh using latest snapshot: commands=${this.latestAvailableCommandsSnapshot.availableCommands.length} ` +
+        `skills=${this.latestAvailableCommandsSnapshot.availableSkills?.length ?? 0} ` +
+        `names=${formatDebugNames(this.latestAvailableCommandsSnapshot.availableCommands.map(command => command.name))}`,
+      );
+      return this.latestAvailableCommandsSnapshot;
+    }
+
+    if (hadLiveSessionBeforeRefresh) {
+      const reloadedSnapshot = await this.reloadCurrentSessionForAvailableCommands();
+      if (reloadedSnapshot) {
+        this.debug(
+          `Qwen slash command refresh reused current session after reload: commands=${reloadedSnapshot.availableCommands.length} ` +
+          `skills=${reloadedSnapshot.availableSkills?.length ?? 0} ` +
+          `names=${formatDebugNames(reloadedSnapshot.availableCommands.map(command => command.name))}`,
+        );
+        return reloadedSnapshot;
+      }
+    }
+
+    this.debug('Qwen slash command refresh waiting for available_commands_update');
+    const snapshot = await this.waitForAvailableCommandsSnapshot();
+    this.debug(snapshot
+      ? `Qwen slash command refresh received after wait: commands=${snapshot.availableCommands.length} skills=${snapshot.availableSkills?.length ?? 0} names=${formatDebugNames(snapshot.availableCommands.map(command => command.name))}`
+      : 'Qwen slash command refresh timed out waiting for available_commands_update');
+    return snapshot;
   }
 
   async queryLlm(request: LLMQueryRequest): Promise<LLMQueryResult> {
@@ -1160,7 +1217,9 @@ export class QwenAgent extends BaseAgent {
 
   private async ensureQwenSession(): Promise<void> {
     if (this.qwenSessionId) {
+      this.debug(`Qwen ACP session reuse: using live session ${this.qwenSessionId}`);
       await this.applySessionSettings(this.qwenSessionId);
+      this.flushPendingAvailableCommandsUpdate(this.qwenSessionId);
       return;
     }
 
@@ -1169,6 +1228,7 @@ export class QwenAgent extends BaseAgent {
     const existingSessionId = this.persistedQwenSessionId ?? this.config.session?.sdkSessionId;
 
     if (existingSessionId) {
+      this.debug(`Qwen ACP session reuse: loading persisted session ${existingSessionId}`);
       this.suppressedSessionUpdates.add(existingSessionId);
       try {
         const result = toRecord(await this.callAcp('session/load', (connection) => connection.loadSession({
@@ -1182,12 +1242,14 @@ export class QwenAgent extends BaseAgent {
         this.recordSessionModes(result);
         this.config.onSdkSessionIdUpdate?.(existingSessionId);
         await this.applySessionSettings(existingSessionId);
+        this.flushPendingAvailableCommandsUpdate(existingSessionId);
         return;
       } finally {
         this.suppressedSessionUpdates.delete(existingSessionId);
       }
     }
 
+    this.debug('Qwen ACP session reuse: no existing session id, creating a new ACP session');
     const result = toRecord(await this.callAcp('session/new', (connection) => connection.newSession({
       cwd,
       mcpServers,
@@ -1204,6 +1266,34 @@ export class QwenAgent extends BaseAgent {
     this.recordSessionModes(result);
     this.config.onSdkSessionIdUpdate?.(sessionId);
     await this.applySessionSettings(sessionId);
+    this.flushPendingAvailableCommandsUpdate(sessionId);
+  }
+
+  private async reloadCurrentSessionForAvailableCommands(): Promise<AvailableCommandsSnapshot | null> {
+    const sessionId = this.qwenSessionId;
+    if (!sessionId) return null;
+
+    if (this._isProcessing) {
+      this.debug(`Qwen slash command refresh did not reload session ${sessionId} because a prompt is active`);
+      return null;
+    }
+
+    this.debug(`Qwen slash command refresh reloading existing ACP session ${sessionId} to request available_commands_update`);
+    this.suppressedSessionUpdates.add(sessionId);
+    try {
+      const result = toRecord(await this.callAcp('session/load', (connection) => connection.loadSession({
+        sessionId,
+        cwd: this.resolvedCwd(),
+        mcpServers: this.buildAcpMcpServers(),
+      }), 60_000));
+      this.recordSessionModels(result);
+      this.recordSessionModes(result);
+      await this.applySessionSettings(sessionId);
+    } finally {
+      this.suppressedSessionUpdates.delete(sessionId);
+      this.flushPendingAvailableCommandsUpdate(sessionId);
+    }
+    return this.latestAvailableCommandsSnapshot;
   }
 
   private async createEphemeralSession(): Promise<string> {
@@ -1460,6 +1550,11 @@ export class QwenAgent extends BaseAgent {
       return;
     }
 
+    if (update.sessionUpdate === 'available_commands_update') {
+      this.handleOrStoreAvailableCommandsUpdate(sessionId, update);
+      return;
+    }
+
     if (this.suppressedSessionUpdates.has(sessionId)) return;
     if (sessionId !== this.qwenSessionId || !this._isProcessing) return;
 
@@ -1482,9 +1577,6 @@ export class QwenAgent extends BaseAgent {
         break;
       case 'current_mode_update':
         this.handleModeUpdate(update);
-        break;
-      case 'available_commands_update':
-        this.handleAvailableCommandsUpdate(update);
         break;
       default:
         break;
@@ -1879,20 +1971,121 @@ export class QwenAgent extends BaseAgent {
     this.onPermissionModeChange?.(mode);
   }
 
-  private handleAvailableCommandsUpdate(update: JsonRecord): void {
+  private parseAvailableCommandsUpdate(update: JsonRecord): AvailableCommandsSnapshot | null {
     const availableCommands = toAvailableSlashCommands(update.availableCommands);
     const meta = toRecord(update._meta);
     const availableSkills = toAvailableSkills(meta.availableSkills);
 
     if (availableCommands.length === 0 && (!availableSkills || availableSkills.length === 0)) {
+      return null;
+    }
+
+    return { availableCommands, availableSkills };
+  }
+
+  private extractAvailableCommandsSnapshot(updates: JsonRecord[]): AvailableCommandsSnapshot | null {
+    let latest: AvailableCommandsSnapshot | null = null;
+    for (const update of updates) {
+      if (update.sessionUpdate !== 'available_commands_update') continue;
+      const snapshot = this.parseAvailableCommandsUpdate(update);
+      if (snapshot) latest = snapshot;
+    }
+
+    if (latest) {
+      this.latestAvailableCommandsSnapshot = latest;
+      this.resolveAvailableCommandsWaiters(latest);
+      this.debug(
+        `Qwen loadSessionMessages captured available commands: commands=${latest.availableCommands.length} ` +
+        `skills=${latest.availableSkills?.length ?? 0} ` +
+        `names=${formatDebugNames(latest.availableCommands.map(command => command.name))} ` +
+        `skillNames=${formatDebugNames(latest.availableSkills)}`,
+      );
+    }
+
+    return latest;
+  }
+
+  private handleAvailableCommandsUpdate(update: JsonRecord): void {
+    const snapshot = this.parseAvailableCommandsUpdate(update);
+
+    if (!snapshot) {
+      this.debug('Qwen available_commands_update ignored because it contained no commands or skills');
       return;
     }
 
+    this.debug(
+      `Qwen available_commands_update parsed: commands=${snapshot.availableCommands.length} ` +
+      `skills=${snapshot.availableSkills?.length ?? 0} ` +
+      `names=${formatDebugNames(snapshot.availableCommands.map(command => command.name))} ` +
+      `skillNames=${formatDebugNames(snapshot.availableSkills)}`,
+    );
+
+    this.latestAvailableCommandsSnapshot = snapshot;
+    this.resolveAvailableCommandsWaiters(snapshot);
+
     this.eventQueue.enqueue({
       type: 'available_commands_update',
-      availableCommands,
-      availableSkills,
+      availableCommands: snapshot.availableCommands,
+      availableSkills: snapshot.availableSkills,
     });
+  }
+
+  private handleOrStoreAvailableCommandsUpdate(sessionId: string, update: JsonRecord): void {
+    if (
+      sessionId === this.qwenSessionId
+      && !this.suppressedSessionUpdates.has(sessionId)
+    ) {
+      this.debug(`Qwen available_commands_update received for active session ${sessionId}`);
+      this.handleAvailableCommandsUpdate(update);
+      return;
+    }
+
+    this.debug(
+      `Qwen available_commands_update buffered: updateSession=${sessionId} ` +
+      `currentSession=${this.qwenSessionId ?? 'none'} ` +
+      `suppressed=${this.suppressedSessionUpdates.has(sessionId)}`,
+    );
+    this.pendingAvailableCommandsUpdates.set(sessionId, update);
+  }
+
+  private flushPendingAvailableCommandsUpdate(sessionId: string): void {
+    const update = this.pendingAvailableCommandsUpdates.get(sessionId);
+    if (!update) return;
+    this.pendingAvailableCommandsUpdates.delete(sessionId);
+    this.debug(`Qwen available_commands_update flushing buffered update for session ${sessionId}`);
+    this.handleAvailableCommandsUpdate(update);
+  }
+
+  private waitForAvailableCommandsSnapshot(timeoutMs = 2_000): Promise<AvailableCommandsSnapshot | null> {
+    if (this.latestAvailableCommandsSnapshot) {
+      return Promise.resolve(this.latestAvailableCommandsSnapshot);
+    }
+
+    return new Promise(resolve => {
+      let settled = false;
+      const waiter = (snapshot: AvailableCommandsSnapshot | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        this.availableCommandsWaiters = this.availableCommandsWaiters.filter(item => item !== waiter);
+        resolve(snapshot);
+      };
+      const timeout = setTimeout(() => {
+        this.debug(`Qwen slash command refresh wait timed out after ${timeoutMs}ms`);
+        waiter(null);
+      }, timeoutMs);
+      this.availableCommandsWaiters.push(waiter);
+    });
+  }
+
+  private resolveAvailableCommandsWaiters(snapshot: AvailableCommandsSnapshot | null): void {
+    const waiters = this.availableCommandsWaiters.splice(0);
+    if (waiters.length > 0) {
+      this.debug(`Qwen resolving ${waiters.length} slash command refresh waiter(s)`);
+    }
+    for (const resolve of waiters) {
+      resolve(snapshot);
+    }
   }
 
   private formatToolResult(update: JsonRecord): string {

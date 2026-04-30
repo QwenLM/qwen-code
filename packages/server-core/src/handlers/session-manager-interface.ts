@@ -14,6 +14,7 @@ import type { AuthResult } from '@craft-agent/shared/agent'
 import type {
   Session,
   SessionStatus,
+  AvailableSlashCommand,
   CreateSessionOptions,
   FileAttachment,
   SendMessageOptions,
@@ -188,6 +189,7 @@ export interface ISessionManager {
 
   getSessionPath(sessionId: string): string | null
   refreshTitle(sessionId: string): Promise<{ success: boolean; title?: string; error?: string }>
+  refreshAvailableCommands(sessionId: string): Promise<{ success: boolean; availableCommands?: AvailableSlashCommand[]; availableSkills?: string[]; error?: string }>
   refreshBadge(): void
   getUnreadSummary(): UnreadSummary
 

@@ -586,11 +586,19 @@ describe('Qwen native history loading', () => {
           loadCalls += 1
           expect(requestedSessionId).toBe(sessionId)
           expect(options?.cwd).toBe(workspaceRoot)
-          return nativeMessages
+          return {
+            messages: nativeMessages,
+            availableCommands: [{ name: 'project:fix', description: 'Run project fix' }],
+            availableSkills: ['commit'],
+          }
         },
         destroy: () => {},
         dispose: () => {},
       } as unknown as AgentBackend),
+    })
+    const events: unknown[] = []
+    manager.setEventSink((_channel, _target, event) => {
+      events.push(event)
     })
 
     const workspace = {
@@ -678,11 +686,19 @@ describe('Qwen native history loading', () => {
           loadCalls += 1
           expect(requestedSessionId).toBe(sessionId)
           expect(options?.cwd).toBe(workspaceRoot)
-          return nativeMessages
+          return {
+            messages: nativeMessages,
+            availableCommands: [{ name: 'project:fix', description: 'Run project fix' }],
+            availableSkills: ['commit'],
+          }
         },
         destroy: () => {},
         dispose: () => {},
       } as unknown as AgentBackend),
+    })
+    const events: unknown[] = []
+    manager.setEventSink((_channel, _target, event) => {
+      events.push(event)
     })
 
     const workspace = {
@@ -718,6 +734,14 @@ describe('Qwen native history loading', () => {
       ['tool', 'Running Bash...', 'Bash'],
       ['assistant', 'PR 已创建：https://github.com/QwenLM/qwen-code/pull/3593', ''],
     ])
+    expect(session?.availableCommands).toEqual([{ name: 'project:fix', description: 'Run project fix' }])
+    expect(session?.availableSkills).toEqual(['commit'])
+    expect(events).toContainEqual({
+      type: 'available_commands_update',
+      sessionId,
+      availableCommands: [{ name: 'project:fix', description: 'Run project fix' }],
+      availableSkills: ['commit'],
+    })
     expect(loadSession(workspaceRoot, sessionId)?.messages).toHaveLength(0)
   })
 

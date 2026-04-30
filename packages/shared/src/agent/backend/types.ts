@@ -12,7 +12,7 @@
  * - AsyncGenerator for streaming: Consistent with existing CraftAgent API
  */
 
-import type { AgentEvent, Message } from '@craft-agent/core/types';
+import type { AgentEvent, AvailableSlashCommand, Message } from '@craft-agent/core/types';
 import type { FileAttachment } from '../../utils/files.ts';
 import type { ThinkingLevel } from '../thinking-levels.ts';
 import type { PermissionMode } from '../mode-manager.ts';
@@ -108,6 +108,15 @@ export interface PostInitResult {
   authWarning?: string;
   /** Severity level for the warning */
   authWarningLevel?: 'error' | 'warning' | 'info';
+}
+
+export interface AvailableCommandsSnapshot {
+  availableCommands: AvailableSlashCommand[];
+  availableSkills?: string[];
+}
+
+export interface BackendSessionMessagesResult extends Partial<AvailableCommandsSnapshot> {
+  messages: Message[];
 }
 
 /**
@@ -412,7 +421,10 @@ export interface AgentBackend {
   renameBackendSession?(sessionId: string, title: string, options?: { cwd?: string }): Promise<boolean>;
 
   /** Load provider-native transcript messages when supported. */
-  loadSessionMessages?(sessionId: string, options?: { cwd?: string }): Promise<Message[]>;
+  loadSessionMessages?(sessionId: string, options?: { cwd?: string }): Promise<Message[] | BackendSessionMessagesResult>;
+
+  /** Refresh provider-advertised slash commands when supported. */
+  refreshAvailableCommands?(): Promise<AvailableCommandsSnapshot | null>;
 
   /**
    * Clean up resources (MCP connections, watchers, etc.)

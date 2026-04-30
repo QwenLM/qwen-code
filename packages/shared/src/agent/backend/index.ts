@@ -46,6 +46,8 @@ export type {
   SdkMcpServerConfig,
   LlmAuthType,
   LlmProviderType,
+  AvailableCommandsSnapshot,
+  BackendSessionMessagesResult,
   PostInitResult,
 } from './types.ts';
 

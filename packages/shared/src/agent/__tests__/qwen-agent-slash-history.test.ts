@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { Message } from '@craft-agent/core/types';
+import type { AgentEvent, Message } from '@craft-agent/core/types';
 import { QwenAgent } from '../qwen-agent.ts';
 import type { BackendConfig } from '../backend/types.ts';
 
@@ -24,6 +24,24 @@ type QwenPromptBlock = {
 
 type QwenPromptInternals = {
   buildPromptBlocks: (message: string) => QwenPromptBlock[];
+};
+
+type QwenAvailableCommandsInternals = {
+  qwenSessionId: string | null;
+  _isProcessing: boolean;
+  suppressedSessionUpdates: Set<string>;
+  eventQueue: {
+    hasPending: boolean;
+    drain: () => AsyncGenerator<AgentEvent>;
+  };
+  ensureProcess: () => Promise<void>;
+  callAcp: <T>(
+    method: string,
+    execute: (connection: { loadSession: (params: unknown) => Promise<unknown> }) => Promise<T>,
+    timeoutMs?: number,
+  ) => Promise<T>;
+  handleSessionUpdate: (params: unknown) => void;
+  flushPendingAvailableCommandsUpdate: (sessionId: string) => void;
 };
 
 const originalRuntimeDir = process.env.QWEN_RUNTIME_DIR;
@@ -58,6 +76,14 @@ function writeQwenTranscript(runtimeRoot: string, cwd: string, sessionId: string
     join(transcriptDir, `${sessionId}.jsonl`),
     records.map(record => JSON.stringify(record)).join('\n') + '\n',
   );
+}
+
+async function readNextQueuedEvent(agent: QwenAgent): Promise<AgentEvent | undefined> {
+  const queue = (agent as unknown as QwenAvailableCommandsInternals).eventQueue;
+  const iterator = queue.drain();
+  const next = await iterator.next();
+  await iterator.return?.(undefined);
+  return next.value;
 }
 
 describe('QwenAgent slash command history', () => {
@@ -340,5 +366,151 @@ describe('QwenAgent slash command history', () => {
 
     const resourceBlock = blocks.find(block => block.type === 'resource');
     expect(resourceBlock).toBeUndefined();
+  });
+
+  it('buffers ACP available command updates until the Qwen session id is recorded', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals._isProcessing = true;
+
+    internals.handleSessionUpdate({
+      sessionId: 'qwen-session',
+      update: {
+        sessionUpdate: 'available_commands_update',
+        availableCommands: [
+          { name: 'review', description: 'Review code' },
+          { name: 'git:commit', description: 'Commit changes' },
+        ],
+        _meta: { availableSkills: ['commit'] },
+      },
+    });
+
+    expect(internals.eventQueue.hasPending).toBe(false);
+
+    internals.qwenSessionId = 'qwen-session';
+    internals.flushPendingAvailableCommandsUpdate('qwen-session');
+
+    const event = await readNextQueuedEvent(agent);
+    agent.destroy();
+
+    expect(event).toEqual({
+      type: 'available_commands_update',
+      availableCommands: [
+        { name: 'review', description: 'Review code' },
+        { name: 'git:commit', description: 'Commit changes' },
+      ],
+      availableSkills: ['commit'],
+    });
+  });
+
+  it('preserves ACP available command updates emitted during suppressed session load', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.qwenSessionId = 'qwen-session';
+    internals._isProcessing = true;
+    internals.suppressedSessionUpdates.add('qwen-session');
+
+    internals.handleSessionUpdate({
+      sessionId: 'qwen-session',
+      update: {
+        sessionUpdate: 'available_commands_update',
+        availableCommands: [{ name: 'project:fix', description: 'Run project fix' }],
+      },
+    });
+
+    expect(internals.eventQueue.hasPending).toBe(false);
+
+    internals.suppressedSessionUpdates.delete('qwen-session');
+    internals.flushPendingAvailableCommandsUpdate('qwen-session');
+
+    const event = await readNextQueuedEvent(agent);
+    agent.destroy();
+
+    expect(event).toEqual({
+      type: 'available_commands_update',
+      availableCommands: [{ name: 'project:fix', description: 'Run project fix' }],
+      availableSkills: undefined,
+    });
+  });
+
+  it('refreshes available commands by reloading the existing ACP session id', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    const calledMethods: string[] = [];
+    internals.qwenSessionId = 'qwen-session';
+    internals.ensureProcess = async () => {};
+    internals.callAcp = async (method, execute) => {
+      calledMethods.push(method);
+      if (method === 'session/load') {
+        internals.handleSessionUpdate({
+          sessionId: 'qwen-session',
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [{ name: 'project:fix', description: 'Run project fix' }],
+          },
+        });
+      }
+      return execute({
+        loadSession: async () => ({ models: {}, modes: {} }),
+      });
+    };
+
+    const snapshot = await agent.refreshAvailableCommands();
+    agent.destroy();
+
+    expect(calledMethods).toEqual(['session/load']);
+    expect(snapshot?.availableCommands).toEqual([
+      { name: 'project:fix', description: 'Run project fix' },
+    ]);
+  });
+
+  it('returns available commands captured while loading Qwen history', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.ensureProcess = async () => {};
+    internals.callAcp = async (_method, execute) => {
+      internals.handleSessionUpdate({
+        sessionId: 'qwen-session',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [{ name: 'project:fix', description: 'Run project fix' }],
+          _meta: { availableSkills: ['commit'] },
+        },
+      });
+      internals.handleSessionUpdate({
+        sessionId: 'qwen-session',
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'hello' },
+          _meta: { timestamp: 1_000 },
+        },
+      });
+      return execute({
+        loadSession: async () => ({ models: {}, modes: {} }),
+      });
+    };
+
+    const result = await agent.loadSessionMessages('qwen-session', { cwd });
+    agent.destroy();
+
+    expect(result.availableCommands).toEqual([
+      { name: 'project:fix', description: 'Run project fix' },
+    ]);
+    expect(result.availableSkills).toEqual(['commit']);
+    expect(result.messages.map(message => [message.role, message.content])).toEqual([
+      ['user', 'hello'],
+    ]);
   });
 });

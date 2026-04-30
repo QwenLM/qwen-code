@@ -8,6 +8,7 @@ export interface SlashCommandMatch {
 }
 
 const UNSUPPORTED_SLASH_BADGE_NAMES = new Set(['model', 'skills'])
+const SLASH_COMMAND_NAME_PATTERN = '[A-Za-z][\\w-]*(?::[\\w-]+)*'
 
 function normalizeSlashCommandName(value: string): string {
   return value.trim().replace(/^\/+/, '').toLowerCase()
@@ -40,8 +41,8 @@ export function findSlashCommandMatches(
 
   const matches: SlashCommandMatch[] = []
   const pattern = normalizedNames
-    ? /(^|\s)(\/([A-Za-z][\w-]*))(?=\s|$)/g
-    : /^(\/([A-Za-z][\w-]*))(?=\s|$)/g
+    ? new RegExp(`(^|\\s)(\\/(${SLASH_COMMAND_NAME_PATTERN}))(?=\\s|$)`, 'g')
+    : new RegExp(`^(\\/(${SLASH_COMMAND_NAME_PATTERN}))(?=\\s|$)`, 'g')
 
   let match: RegExpExecArray | null
   while ((match = pattern.exec(text)) !== null) {

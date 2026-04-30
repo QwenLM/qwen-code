@@ -1012,6 +1012,46 @@ export function FreeFormInput({
     if (PERMISSION_MODE_ORDER.includes(permissionMode)) active.push(permissionMode)
     return active
   }, [permissionMode])
+  const qwenCommandRefreshKeyRef = React.useRef<string | null>(null)
+
+  React.useEffect(() => {
+    if (!enableQwenSlashCommands || !sessionId || availableCommands.length > 0) return
+
+    const refreshKey = `${sessionId}:${currentLlmConnection?.slug ?? ''}:${workingDirectory ?? ''}`
+    if (qwenCommandRefreshKeyRef.current === refreshKey) return
+    qwenCommandRefreshKeyRef.current = refreshKey
+
+    const api = window.electronAPI
+    if (!api?.sessionCommand) return
+
+    api.debugLog?.('[qwen] Requesting ACP slash command refresh', {
+      sessionId,
+      connection: currentLlmConnection?.slug,
+      workingDirectory,
+    })
+
+    api.sessionCommand(sessionId, { type: 'refreshAvailableCommands' })
+      .then(result => {
+        const payload = result as { success?: boolean; availableCommands?: AvailableSlashCommand[]; availableSkills?: string[]; error?: string } | undefined
+        api.debugLog?.('[qwen] ACP slash command refresh result', {
+          sessionId,
+          success: payload?.success,
+          commandCount: payload?.availableCommands?.length ?? 0,
+          skillCount: payload?.availableSkills?.length ?? 0,
+          commandNames: payload?.availableCommands?.map(command => command.name) ?? [],
+          error: payload?.error,
+        })
+      })
+      .catch(error => {
+        api.debugLog?.('[qwen] Failed to refresh slash commands:', String(error))
+      })
+  }, [
+    availableCommands.length,
+    currentLlmConnection?.slug,
+    enableQwenSlashCommands,
+    sessionId,
+    workingDirectory,
+  ])
 
   // Handle slash command selection (mode/feature commands)
   const handleSlashCommand = React.useCallback((commandId: SlashCommandId) => {

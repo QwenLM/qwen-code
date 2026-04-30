@@ -16,6 +16,15 @@ describe('findSlashCommandMatches', () => {
     expect(findSlashCommandMatches('/unknown ', ['status'])).toEqual([])
   })
 
+  it('matches namespaced Qwen custom commands', () => {
+    expect(findSlashCommandMatches('/git:commit ', ['git:commit'])).toEqual([
+      { type: 'command', id: 'git:commit', fullMatch: '/git:commit', startIndex: 0 },
+    ])
+    expect(findSlashCommandMatches('run /project:fix now', ['project:fix'])).toEqual([
+      { type: 'command', id: 'project:fix', fullMatch: '/project:fix', startIndex: 4 },
+    ])
+  })
+
   it('hides unsupported Qwen commands', () => {
     expect(findSlashCommandMatches('/model ', ['model'])).toEqual([])
     expect(findSlashCommandMatches('/skills ', ['skills'])).toEqual([])

@@ -17,6 +17,8 @@ import {
   type AgentBackend,
   type BackendSessionInfo,
   type BackendHostRuntimeContext,
+  type AvailableCommandsSnapshot,
+  type BackendSessionMessagesResult,
   type PostInitResult,
 } from '@craft-agent/shared/agent/backend'
 import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars, updateLlmConnection, QWEN_CODE_CONNECTION_SLUG, type ModelDefinition } from '@craft-agent/shared/config'
@@ -971,6 +973,13 @@ interface SessionManagerOptions {
 }
 
 type ExternalMessageLoadResult = 'loaded' | 'empty' | 'unavailable' | 'failed'
+type BackendSessionMessagesPayload = Message[] | BackendSessionMessagesResult
+
+function normalizeBackendSessionMessages(payload: BackendSessionMessagesPayload | undefined): BackendSessionMessagesResult | undefined {
+  if (!payload) return undefined
+  if (Array.isArray(payload)) return { messages: payload }
+  return payload
+}
 
 /**
  * Resolve supportsBranching for a managed session.
@@ -2045,11 +2054,11 @@ export class SessionManager implements ISessionManager {
 
   private async loadExternalListedMessages(
     info: BackendSessionInfo,
-    loadMessages?: (info: BackendSessionInfo) => Promise<Message[] | undefined>,
-  ): Promise<Message[] | undefined> {
+    loadMessages?: (info: BackendSessionInfo) => Promise<BackendSessionMessagesPayload | undefined>,
+  ): Promise<BackendSessionMessagesResult | undefined> {
     if (!loadMessages) return undefined
     try {
-      return await loadMessages(info)
+      return normalizeBackendSessionMessages(await loadMessages(info))
     } catch (error) {
       sessionLog.debug(`Failed to inspect provider-native session ${info.sessionId}:`, error)
       return undefined
@@ -2061,6 +2070,35 @@ export class SessionManager implements ISessionManager {
     unregisterSessionScopedToolCallbacks(managed.id)
     deleteStoredSession(workspace.rootPath, managed.id)
     this.automationSystems.get(workspace.rootPath)?.removeSessionMetadata(managed.id)
+  }
+
+  private applyAvailableCommandsSnapshot(managed: ManagedSession, snapshot: AvailableCommandsSnapshot, source: string): void {
+    if (snapshot.availableCommands.length === 0 && (!snapshot.availableSkills || snapshot.availableSkills.length === 0)) return
+
+    managed.availableCommands = snapshot.availableCommands
+    managed.availableSkills = snapshot.availableSkills
+    sessionLog.info('Available commands updated', {
+      sessionId: managed.id,
+      source,
+      commandCount: snapshot.availableCommands.length,
+      skillCount: snapshot.availableSkills?.length ?? 0,
+      commandNames: snapshot.availableCommands.map(command => command.name),
+      skillNames: snapshot.availableSkills ?? [],
+    })
+    this.sendEvent({
+      type: 'available_commands_update',
+      sessionId: managed.id,
+      availableCommands: snapshot.availableCommands,
+      availableSkills: snapshot.availableSkills,
+    }, managed.workspace.id)
+  }
+
+  private applyAvailableCommandsFromMessagesResult(managed: ManagedSession, result: BackendSessionMessagesResult | undefined, source: string): void {
+    if (!result || (!result.availableCommands?.length && !result.availableSkills?.length)) return
+    this.applyAvailableCommandsSnapshot(managed, {
+      availableCommands: result.availableCommands ?? [],
+      availableSkills: result.availableSkills,
+    }, source)
   }
 
   private applyLoadedExternalMessages(managed: ManagedSession, messages: Message[]): void {
@@ -2095,7 +2133,7 @@ export class SessionManager implements ISessionManager {
     connectionSlug: string
     model: string
     defaultThinkingLevel: ThinkingLevel
-    loadMessages?: (info: BackendSessionInfo) => Promise<Message[] | undefined>
+    loadMessages?: (info: BackendSessionInfo) => Promise<BackendSessionMessagesPayload | undefined>
   }): Promise<boolean> {
     const { workspace, info, connectionSlug, model, defaultThinkingLevel, loadMessages } = args
     if (!info.sessionId || !info.cwd) return false
@@ -2107,10 +2145,11 @@ export class SessionManager implements ISessionManager {
     if (managed) {
       this.removeDuplicateExternalListedMirrors(workspace, managed, info.sessionId)
     }
-    let inspectedMessages: Message[] | undefined
+    let inspectedResult: BackendSessionMessagesResult | undefined
 
     if (title === EXTERNAL_SESSION_PLACEHOLDER_TITLE && this.shouldInspectExternalPlaceholderSession(managed)) {
-      inspectedMessages = await this.loadExternalListedMessages(info, loadMessages)
+      inspectedResult = await this.loadExternalListedMessages(info, loadMessages)
+      const inspectedMessages = inspectedResult?.messages
 
       if (!inspectedMessages || inspectedMessages.length === 0) {
         if (managed && !managed.isProcessing && this.hasNoRenderableLocalMessages(managed)) {
@@ -2130,6 +2169,8 @@ export class SessionManager implements ISessionManager {
       if (!managed.llmConnection) managed.llmConnection = connectionSlug
       if (!managed.model && model) managed.model = model
       if (!managed.thinkingLevel) managed.thinkingLevel = defaultThinkingLevel
+      this.applyAvailableCommandsFromMessagesResult(managed, inspectedResult, 'provider-native session inspection')
+      const inspectedMessages = inspectedResult?.messages
       if (inspectedMessages?.length) {
         this.applyLoadedExternalMessages(managed, inspectedMessages)
         this.markExternalMessagesLoadedThrough(managed)
@@ -2139,6 +2180,7 @@ export class SessionManager implements ISessionManager {
       return true
     }
 
+    const inspectedMessages = inspectedResult?.messages
     const lastInspectedMessage = inspectedMessages?.[inspectedMessages.length - 1]
     const shouldPersistInspectedMessages = connectionSlug !== QWEN_CODE_CONNECTION_SLUG
     const storedSession: StoredSession = {
@@ -2168,6 +2210,10 @@ export class SessionManager implements ISessionManager {
       messagesLoaded: !!inspectedMessages,
       tokenUsage: { ...storedSession.tokenUsage },
     })
+    if (inspectedResult?.availableCommands?.length || inspectedResult?.availableSkills?.length) {
+      imported.availableCommands = inspectedResult.availableCommands ?? []
+      imported.availableSkills = inspectedResult.availableSkills
+    }
     if (inspectedMessages?.length) {
       this.applyLoadedExternalMessages(imported, inspectedMessages)
       this.markExternalMessagesLoadedThrough(imported)
@@ -2772,17 +2818,20 @@ export class SessionManager implements ISessionManager {
     if (!managed.sdkSessionId) return 'unavailable'
 
     try {
-      const messages = await this.withExternalSessionAgent(managed, async (agent) => {
+      const result = normalizeBackendSessionMessages(await this.withExternalSessionAgent(managed, async (agent) => {
         if (!agent.loadSessionMessages) return undefined
         return agent.loadSessionMessages(managed.sdkSessionId!, {
           cwd: managed.sdkCwd || managed.workingDirectory || managed.workspace.rootPath,
         })
-      })
+      }))
 
-      if (!messages) {
+      if (!result) {
         sessionLog.debug(`Provider-native message loader unavailable for session ${managed.id} (connection=${managed.llmConnection ?? 'unset'}, sdkSessionId=${managed.sdkSessionId})`)
         return 'unavailable'
       }
+      this.applyAvailableCommandsFromMessagesResult(managed, result, 'provider-native message load')
+
+      const messages = result.messages
       if (messages.length === 0) {
         sessionLog.debug(`Provider-native message loader returned 0 messages for session ${managed.id} (sdkSessionId=${managed.sdkSessionId})`)
         return 'empty'
@@ -6674,6 +6723,64 @@ export class SessionManager implements ISessionManager {
     }
   }
 
+  async refreshAvailableCommands(sessionId: string): Promise<{ success: boolean; availableCommands?: AvailableCommandsSnapshot['availableCommands']; availableSkills?: string[]; error?: string }> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) {
+      sessionLog.warn(`refreshAvailableCommands: session ${sessionId} not found`)
+      return { success: false, error: 'Session not found' }
+    }
+
+    sessionLog.info('refreshAvailableCommands: starting', {
+      sessionId,
+      hasAgent: !!managed.agent,
+      llmConnection: managed.llmConnection,
+      workingDirectory: managed.workingDirectory,
+      existingCommandCount: managed.availableCommands?.length ?? 0,
+      existingSkillCount: managed.availableSkills?.length ?? 0,
+    })
+
+    try {
+      const reusedAgent = !!managed.agent
+      const agent = await this.getOrCreateAgent(managed)
+      sessionLog.info('refreshAvailableCommands: agent ready', {
+        sessionId,
+        reusedAgent,
+        sdkSessionId: managed.sdkSessionId ?? null,
+      })
+      if (!agent.refreshAvailableCommands) {
+        sessionLog.info('refreshAvailableCommands: provider does not support discovery', {
+          sessionId,
+          llmConnection: managed.llmConnection,
+        })
+        return { success: false, error: 'Provider does not support slash command discovery' }
+      }
+
+      const snapshot = await agent.refreshAvailableCommands()
+      if (!snapshot || (snapshot.availableCommands.length === 0 && (!snapshot.availableSkills || snapshot.availableSkills.length === 0))) {
+        sessionLog.warn('refreshAvailableCommands: no commands returned', {
+          sessionId,
+          llmConnection: managed.llmConnection,
+        })
+        return { success: false, error: 'No provider slash commands available' }
+      }
+
+      sessionLog.info('refreshAvailableCommands: received commands', {
+        sessionId,
+        commandCount: snapshot.availableCommands.length,
+        skillCount: snapshot.availableSkills?.length ?? 0,
+        commandNames: snapshot.availableCommands.map(command => command.name),
+        skillNames: snapshot.availableSkills ?? [],
+      })
+      this.applyAvailableCommandsSnapshot(managed, snapshot, 'explicit refresh')
+
+      return { success: true, ...snapshot }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      sessionLog.warn(`refreshAvailableCommands failed for session ${sessionId}: ${message}`)
+      return { success: false, error: message }
+    }
+  }
+
   /**
    * Set the thinking level for a session. See {@link ThinkingLevel} for valid values.
    * This is sticky and persisted across messages.
@@ -7376,14 +7483,10 @@ export class SessionManager implements ISessionManager {
         break
 
       case 'available_commands_update':
-        managed.availableCommands = event.availableCommands
-        managed.availableSkills = event.availableSkills
-        this.sendEvent({
-          type: 'available_commands_update',
-          sessionId: managed.id,
+        this.applyAvailableCommandsSnapshot(managed, {
           availableCommands: event.availableCommands,
           availableSkills: event.availableSkills,
-        }, workspaceId)
+        }, 'agent event')
         break
 
       case 'steer_undelivered':
