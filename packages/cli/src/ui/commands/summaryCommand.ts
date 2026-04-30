@@ -11,7 +11,10 @@ import {
   CommandKind,
   type SlashCommandActionReturn,
 } from './types.js';
-import { getProjectSummaryPrompt } from '@qwen-code/qwen-code-core';
+import {
+  getProjectSummaryPrompt,
+  runSideQuery,
+} from '@qwen-code/qwen-code-core';
 import type { HistoryItemSummary } from '../types.js';
 import { t } from '../../i18n/index.js';
 
@@ -89,9 +92,10 @@ export const summaryCommand: SlashCommand = {
         parts: message.parts,
       }));
 
-      // Use generateContent with chat history as context
-      const response = await geminiClient.generateContent(
-        [
+      const result = await runSideQuery(config, {
+        purpose: 'project-summary',
+        model: config.getModel(),
+        contents: [
           ...conversationContext,
           {
             role: 'user',
@@ -102,21 +106,10 @@ export const summaryCommand: SlashCommand = {
             ],
           },
         ],
-        {},
-        abortSignal ?? new AbortController().signal,
-        config.getModel(),
-      );
+        abortSignal: abortSignal ?? new AbortController().signal,
+      });
 
-      // Extract text from response
-      const parts = response.candidates?.[0]?.content?.parts;
-
-      const markdownSummary =
-        parts
-          ?.map((part) => part.text)
-          .filter((text): text is string => typeof text === 'string')
-          .join('') || '';
-
-      if (!markdownSummary) {
+      if (!result.text) {
         throw new Error(
           t(
             'Failed to generate summary - no text content received from LLM response',
@@ -124,7 +117,7 @@ export const summaryCommand: SlashCommand = {
         );
       }
 
-      return markdownSummary;
+      return result.text;
     };
 
     const saveSummaryToDisk = async (

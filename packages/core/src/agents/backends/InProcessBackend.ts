@@ -51,7 +51,6 @@ export class InProcessBackend implements Backend {
 
   private readonly runtimeContext: Config;
   private readonly agents = new Map<string, AgentInteractive>();
-  private readonly agentContentGenerators = new Map<string, ContentGenerator>();
   private readonly agentRegistries: ToolRegistry[] = [];
   private readonly agentOrder: string[] = [];
   private activeAgentId: string | null = null;
@@ -96,12 +95,6 @@ export class InProcessBackend implements Backend {
       inProcessConfig.authOverrides,
     );
     const agentContext = perAgent.config;
-    if (perAgent.contentGenerator) {
-      this.agentContentGenerators.set(
-        config.agentId,
-        perAgent.contentGenerator,
-      );
-    }
 
     this.agentRegistries.push(agentContext.getToolRegistry());
 
@@ -208,7 +201,6 @@ export class InProcessBackend implements Backend {
     this.agentRegistries.length = 0;
 
     this.agents.clear();
-    this.agentContentGenerators.clear();
     this.agentOrder.length = 0;
     this.activeAgentId = null;
     debugLogger.info('InProcessBackend cleaned up');
@@ -318,18 +310,6 @@ export class InProcessBackend implements Backend {
     return this.agents.get(agentId);
   }
 
-  /**
-   * Get the ContentGenerator this agent can use for summary generation.
-   * If auth overrides created an isolated generator, this returns that
-   * generator. If no override was requested, this returns the inherited
-   * generator the agent already runs with. If override creation failed, this is
-   * undefined so callers can avoid sending agent data through a fallback
-   * provider.
-   */
-  getAgentContentGenerator(agentId: string): ContentGenerator | undefined {
-    return this.agentContentGenerators.get(agentId);
-  }
-
   // ─── Private ───────────────────────────────────────────────
 
   private navigate(direction: 1 | -1): string | null {
@@ -357,17 +337,15 @@ export class InProcessBackend implements Backend {
  *   the agent Config
  * - `getContentGenerator()` / `getContentGeneratorConfig()` / `getAuthType()`
  *   → per-agent ContentGenerator when `authOverrides` is provided
- * - returned `contentGenerator` → the generator safe to use for summaries
  */
 async function createPerAgentConfig(
   base: Config,
   cwd: string,
   modelId?: string,
   authOverrides?: InProcessSpawnConfig['authOverrides'],
-): Promise<{ config: Config; contentGenerator?: ContentGenerator }> {
+): Promise<{ config: Config }> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const override = Object.create(base) as any;
-  let dedicatedContentGenerator: ContentGenerator | undefined;
 
   override.getWorkingDir = () => cwd;
   override.getTargetDir = () => cwd;
@@ -397,7 +375,6 @@ async function createPerAgentConfig(
         agentGeneratorConfig,
         override as Config,
       );
-      dedicatedContentGenerator = agentGenerator;
       override.getContentGenerator = (): ContentGenerator => agentGenerator;
       override.getContentGeneratorConfig = (): ContentGeneratorConfig =>
         agentGeneratorConfig;
@@ -416,10 +393,5 @@ async function createPerAgentConfig(
     }
   }
 
-  return {
-    config: override as Config,
-    contentGenerator:
-      dedicatedContentGenerator ??
-      (authOverrides?.authType ? undefined : base.getContentGenerator()),
-  };
+  return { config: override as Config };
 }

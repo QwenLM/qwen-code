@@ -7,6 +7,7 @@
 import type {
   Content,
   GenerateContentConfig,
+  GenerateContentResponseUsageMetadata,
   Part,
   EmbedContentParameters,
   FunctionDeclaration,
@@ -19,8 +20,50 @@ import { reportError } from '../utils/errorReporting.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
+import { getResponseText } from '../utils/partUtils.js';
 
 const DEFAULT_MAX_ATTEMPTS = 7;
+
+/**
+ * Options for the generateText utility function.
+ */
+export interface GenerateTextOptions {
+  /** The input prompt or history. */
+  contents: Content[];
+  /** The specific model to use for this task. */
+  model: string;
+  /**
+   * Task-specific system instructions. Passed through to the underlying
+   * content generator without the geminiClient main-prompt fallback or
+   * user-memory wrapping that `getCustomSystemPrompt` applies.
+   */
+  systemInstruction?: string | Part | Part[] | Content;
+  /**
+   * Overrides for generation configuration (e.g., temperature, thinkingConfig).
+   */
+  config?: Omit<
+    GenerateContentConfig,
+    'systemInstruction' | 'tools' | 'abortSignal'
+  >;
+  /** Signal for cancellation. */
+  abortSignal: AbortSignal;
+  /**
+   * A unique ID for the prompt, used for logging/telemetry correlation.
+   */
+  promptId?: string;
+  /**
+   * The maximum number of attempts for the request.
+   */
+  maxAttempts?: number;
+}
+
+/**
+ * Result of a generateText call.
+ */
+export interface GenerateTextResult {
+  text: string;
+  usage: GenerateContentResponseUsageMetadata | undefined;
+}
 
 /**
  * Options for the generateJson utility function.
@@ -157,6 +200,76 @@ export class BaseLlmClient {
       );
       throw new Error(
         `Failed to generate JSON content: ${getErrorMessage(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Free-form text generation primitive used by `runSideQuery` text mode.
+   *
+   * Distinct from `GeminiClient.generateContent`: this calls the underlying
+   * `ContentGenerator` directly, so the caller's `systemInstruction` is sent
+   * through verbatim — no `getCustomSystemPrompt` wrapping (which would append
+   * user memory) and no main-session-prompt fallback when omitted. Side queries
+   * need that contract; the main turn does not.
+   */
+  async generateText(
+    options: GenerateTextOptions,
+  ): Promise<GenerateTextResult> {
+    const {
+      contents,
+      model,
+      abortSignal,
+      systemInstruction,
+      promptId,
+      maxAttempts,
+    } = options;
+
+    const requestConfig: GenerateContentConfig = {
+      abortSignal,
+      ...options.config,
+      ...(systemInstruction && { systemInstruction }),
+    };
+
+    try {
+      const apiCall = () =>
+        this.contentGenerator.generateContent(
+          {
+            model,
+            config: requestConfig,
+            contents,
+          },
+          promptId ?? '',
+        );
+
+      const result = await retryWithBackoff(apiCall, {
+        maxAttempts: maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+        persistentMode: isUnattendedMode(),
+        signal: abortSignal,
+        heartbeatFn: (info) => {
+          process.stderr.write(
+            `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+          );
+        },
+      });
+
+      return {
+        text: (getResponseText(result) ?? '').trim(),
+        usage: result.usageMetadata,
+      };
+    } catch (error) {
+      if (abortSignal.aborted) {
+        throw error;
+      }
+
+      await reportError(
+        error,
+        'Error generating text content via API.',
+        contents,
+        'generateText-api',
+      );
+      throw new Error(
+        `Failed to generate text content: ${getErrorMessage(error)}`,
       );
     }
   }

@@ -22,6 +22,7 @@ import {
   type ContentGenerator,
   type ContentGeneratorConfig,
 } from './contentGenerator.js';
+import { BaseLlmClient } from './baseLlmClient.js';
 import { type GeminiChat } from './geminiChat.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
@@ -376,12 +377,7 @@ describe('Gemini Client (client.ts)', () => {
           .mockReturnValue('/test/project/root/.gemini/projects/test-project'),
       },
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
-      getBaseLlmClient: vi.fn().mockReturnValue({
-        generateJson: vi.fn().mockResolvedValue({
-          next_speaker: 'user',
-          reasoning: 'test',
-        }),
-      }),
+      getBaseLlmClient: vi.fn(),
       getSubagentManager: vi.fn().mockReturnValue(mockSubagentManager),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
@@ -401,6 +397,19 @@ describe('Gemini Client (client.ts)', () => {
         error: vi.fn(),
       }),
     } as unknown as Config;
+
+    // Real BaseLlmClient routes generateText through mockContentGenerator;
+    // generateJson is stubbed only for the next-speaker classifier so the
+    // next-speaker schema isn't reproduced in every test.
+    const realBaseLlmClient = new BaseLlmClient(
+      mockContentGenerator,
+      mockConfig,
+    );
+    realBaseLlmClient.generateJson = vi.fn().mockResolvedValue({
+      next_speaker: 'user',
+      reasoning: 'test',
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue(realBaseLlmClient);
 
     client = new GeminiClient(mockConfig);
     await client.initialize();

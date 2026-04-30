@@ -9,13 +9,13 @@ import {
   ChatCompressionService,
   findCompressSplitPoint,
 } from './chatCompressionService.js';
-import type { Content, GenerateContentResponse } from '@google/genai';
+import type { Content } from '@google/genai';
 import { CompressionStatus } from '../core/turn.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
-import type { ContentGenerator } from '../core/contentGenerator.js';
+import type { BaseLlmClient } from '../core/baseLlmClient.js';
 import {
   SessionStartSource,
   PreCompactTrigger,
@@ -293,7 +293,7 @@ describe('ChatCompressionService', () => {
     });
     mockConfig = {
       getChatCompression: vi.fn(),
-      getContentGenerator: vi.fn(),
+      getBaseLlmClient: vi.fn(),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getHookSystem: mockGetHookSystem,
       getModel: () => 'test-model',
@@ -373,9 +373,9 @@ describe('ChatCompressionService', () => {
     });
 
     const mockGenerateContent = vi.fn();
-    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-      generateContent: mockGenerateContent,
-    } as unknown as ContentGenerator);
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
 
     const result = await service.compress(
       mockChat,
@@ -433,9 +433,9 @@ describe('ChatCompressionService', () => {
     vi.mocked(tokenLimit).mockReturnValue(1000);
 
     const mockGenerateContent = vi.fn();
-    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-      generateContent: mockGenerateContent,
-    } as unknown as ContentGenerator);
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
 
     // force=true bypasses the token threshold gate so we exercise the 5% guard
     const result = await service.compress(
@@ -468,22 +468,16 @@ describe('ChatCompressionService', () => {
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
     // newTokenCount = 800 - (1600 - 1000) + 50 = 800 - 600 + 50 = 250 <= 800 (success)
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      candidates: [
-        {
-          content: {
-            parts: [{ text: 'Summary' }],
-          },
-        },
-      ],
-      usageMetadata: {
+      text: 'Summary',
+      usage: {
         promptTokenCount: 1600,
         candidatesTokenCount: 50,
         totalTokenCount: 1650,
       },
-    } as unknown as GenerateContentResponse);
-    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-      generateContent: mockGenerateContent,
-    } as unknown as ContentGenerator);
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
 
     const result = await service.compress(
       mockChat,
@@ -522,22 +516,16 @@ describe('ChatCompressionService', () => {
 
     // newTokenCount = 100 - (1100 - 1000) + 50 = 100 - 100 + 50 = 50 <= 100 (success)
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      candidates: [
-        {
-          content: {
-            parts: [{ text: 'Summary' }],
-          },
-        },
-      ],
-      usageMetadata: {
+      text: 'Summary',
+      usage: {
         promptTokenCount: 1100,
         candidatesTokenCount: 50,
         totalTokenCount: 1150,
       },
-    } as unknown as GenerateContentResponse);
-    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-      generateContent: mockGenerateContent,
-    } as unknown as ContentGenerator);
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
 
     const result = await service.compress(
       mockChat,
@@ -569,22 +557,16 @@ describe('ChatCompressionService', () => {
     vi.mocked(tokenLimit).mockReturnValue(1000);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      candidates: [
-        {
-          content: {
-            parts: [{ text: 'Summary' }],
-          },
-        },
-      ],
-      usageMetadata: {
+      text: 'Summary',
+      usage: {
         promptTokenCount: 1,
         candidatesTokenCount: 20,
         totalTokenCount: 21,
       },
-    } as unknown as GenerateContentResponse);
-    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-      generateContent: mockGenerateContent,
-    } as unknown as ContentGenerator);
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
 
     const result = await service.compress(
       mockChat,
@@ -616,18 +598,13 @@ describe('ChatCompressionService', () => {
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      candidates: [
-        {
-          content: {
-            parts: [{ text: 'Summary' }],
-          },
-        },
-      ],
-      // No usageMetadata -> keep original token count
-    } as unknown as GenerateContentResponse);
-    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-      generateContent: mockGenerateContent,
-    } as unknown as ContentGenerator);
+      text: 'Summary',
+      // No usage -> keep original token count
+      usage: undefined,
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
 
     const result = await service.compress(
       mockChat,
@@ -656,17 +633,12 @@ describe('ChatCompressionService', () => {
     vi.mocked(tokenLimit).mockReturnValue(1000);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      candidates: [
-        {
-          content: {
-            parts: [{ text: '' }], // Empty summary
-          },
-        },
-      ],
-    } as unknown as GenerateContentResponse);
-    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-      generateContent: mockGenerateContent,
-    } as unknown as ContentGenerator);
+      text: '', // Empty summary
+      usage: undefined,
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
 
     const result = await service.compress(
       mockChat,
@@ -695,17 +667,12 @@ describe('ChatCompressionService', () => {
     vi.mocked(tokenLimit).mockReturnValue(1000);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      candidates: [
-        {
-          content: {
-            parts: [{ text: '   \n\t  ' }], // Only whitespace
-          },
-        },
-      ],
-    } as unknown as GenerateContentResponse);
-    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-      generateContent: mockGenerateContent,
-    } as unknown as ContentGenerator);
+      text: '   \n\t  ', // Only whitespace
+      usage: undefined,
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
 
     const result = await service.compress(
       mockChat,
@@ -732,22 +699,16 @@ describe('ChatCompressionService', () => {
     vi.mocked(tokenLimit).mockReturnValue(1000);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      candidates: [
-        {
-          content: {
-            parts: [{ text: 'Summary' }],
-          },
-        },
-      ],
-      usageMetadata: {
+      text: 'Summary',
+      usage: {
         promptTokenCount: 1,
         candidatesTokenCount: 20,
         totalTokenCount: 21,
       },
-    } as unknown as GenerateContentResponse);
-    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-      generateContent: mockGenerateContent,
-    } as unknown as ContentGenerator);
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
 
     const result = await service.compress(
       mockChat,
@@ -784,22 +745,16 @@ describe('ChatCompressionService', () => {
     );
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      candidates: [
-        {
-          content: {
-            parts: [{ text: 'Summary' }],
-          },
-        },
-      ],
-      usageMetadata: {
+      text: 'Summary',
+      usage: {
         promptTokenCount: 1600,
         candidatesTokenCount: 50,
         totalTokenCount: 1650,
       },
-    } as unknown as GenerateContentResponse);
-    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-      generateContent: mockGenerateContent,
-    } as unknown as ContentGenerator);
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
 
     const result = await service.compress(
       mockChat,
@@ -843,22 +798,16 @@ describe('ChatCompressionService', () => {
       vi.mocked(tokenLimit).mockReturnValue(1000);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        candidates: [
-          {
-            content: {
-              parts: [{ text: 'Summary' }],
-            },
-          },
-        ],
-        usageMetadata: {
+        text: 'Summary',
+        usage: {
           promptTokenCount: 1100,
           candidatesTokenCount: 50,
           totalTokenCount: 1150,
         },
-      } as unknown as GenerateContentResponse);
-      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-        generateContent: mockGenerateContent,
-      } as unknown as ContentGenerator);
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText: mockGenerateContent,
+      } as unknown as BaseLlmClient);
 
       await service.compress(
         mockChat,
@@ -893,22 +842,16 @@ describe('ChatCompressionService', () => {
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        candidates: [
-          {
-            content: {
-              parts: [{ text: 'Summary' }],
-            },
-          },
-        ],
-        usageMetadata: {
+        text: 'Summary',
+        usage: {
           promptTokenCount: 1600,
           candidatesTokenCount: 50,
           totalTokenCount: 1650,
         },
-      } as unknown as GenerateContentResponse);
-      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-        generateContent: mockGenerateContent,
-      } as unknown as ContentGenerator);
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText: mockGenerateContent,
+      } as unknown as BaseLlmClient);
 
       await service.compress(
         mockChat,
@@ -1010,22 +953,16 @@ describe('ChatCompressionService', () => {
       );
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        candidates: [
-          {
-            content: {
-              parts: [{ text: 'Summary' }],
-            },
-          },
-        ],
-        usageMetadata: {
+        text: 'Summary',
+        usage: {
           promptTokenCount: 1600,
           candidatesTokenCount: 50,
           totalTokenCount: 1650,
         },
-      } as unknown as GenerateContentResponse);
-      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-        generateContent: mockGenerateContent,
-      } as unknown as ContentGenerator);
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText: mockGenerateContent,
+      } as unknown as BaseLlmClient);
 
       const result = await service.compress(
         mockChat,
@@ -1067,22 +1004,16 @@ describe('ChatCompressionService', () => {
       });
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        candidates: [
-          {
-            content: {
-              parts: [{ text: 'Summary' }],
-            },
-          },
-        ],
-        usageMetadata: {
+        text: 'Summary',
+        usage: {
           promptTokenCount: 1600,
           candidatesTokenCount: 50,
           totalTokenCount: 1650,
         },
-      } as unknown as GenerateContentResponse);
-      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-        generateContent: mockGenerateContent,
-      } as unknown as ContentGenerator);
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText: mockGenerateContent,
+      } as unknown as BaseLlmClient);
 
       await service.compress(
         mockChat,
@@ -1116,22 +1047,16 @@ describe('ChatCompressionService', () => {
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        candidates: [
-          {
-            content: {
-              parts: [{ text: 'Summary' }],
-            },
-          },
-        ],
-        usageMetadata: {
+        text: 'Summary',
+        usage: {
           promptTokenCount: 1600,
           candidatesTokenCount: 50,
           totalTokenCount: 1650,
         },
-      } as unknown as GenerateContentResponse);
-      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-        generateContent: mockGenerateContent,
-      } as unknown as ContentGenerator);
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText: mockGenerateContent,
+      } as unknown as BaseLlmClient);
 
       const result = await service.compress(
         mockChat,
@@ -1178,22 +1103,16 @@ describe('ChatCompressionService', () => {
       vi.mocked(tokenLimit).mockReturnValue(1000);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        candidates: [
-          {
-            content: {
-              parts: [{ text: 'Summary' }],
-            },
-          },
-        ],
-        usageMetadata: {
+        text: 'Summary',
+        usage: {
           promptTokenCount: 1100,
           candidatesTokenCount: 50,
           totalTokenCount: 1150,
         },
-      } as unknown as GenerateContentResponse);
-      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-        generateContent: mockGenerateContent,
-      } as unknown as ContentGenerator);
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText: mockGenerateContent,
+      } as unknown as BaseLlmClient);
 
       await service.compress(
         mockChat,
@@ -1228,22 +1147,16 @@ describe('ChatCompressionService', () => {
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        candidates: [
-          {
-            content: {
-              parts: [{ text: 'Auto Summary' }],
-            },
-          },
-        ],
-        usageMetadata: {
+        text: 'Auto Summary',
+        usage: {
           promptTokenCount: 1600,
           candidatesTokenCount: 50,
           totalTokenCount: 1650,
         },
-      } as unknown as GenerateContentResponse);
-      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-        generateContent: mockGenerateContent,
-      } as unknown as ContentGenerator);
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText: mockGenerateContent,
+      } as unknown as BaseLlmClient);
 
       await service.compress(
         mockChat,
@@ -1275,22 +1188,16 @@ describe('ChatCompressionService', () => {
       vi.mocked(tokenLimit).mockReturnValue(1000);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        candidates: [
-          {
-            content: {
-              parts: [{ text: '' }], // Empty summary
-            },
-          },
-        ],
-        usageMetadata: {
+        text: '', // Empty summary
+        usage: {
           promptTokenCount: 1100,
           candidatesTokenCount: 0,
           totalTokenCount: 1100,
         },
-      } as unknown as GenerateContentResponse);
-      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-        generateContent: mockGenerateContent,
-      } as unknown as ContentGenerator);
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText: mockGenerateContent,
+      } as unknown as BaseLlmClient);
 
       const result = await service.compress(
         mockChat,
@@ -1328,22 +1235,16 @@ describe('ChatCompressionService', () => {
       );
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        candidates: [
-          {
-            content: {
-              parts: [{ text: 'Summary' }],
-            },
-          },
-        ],
-        usageMetadata: {
+        text: 'Summary',
+        usage: {
           promptTokenCount: 1600,
           candidatesTokenCount: 50,
           totalTokenCount: 1650,
         },
-      } as unknown as GenerateContentResponse);
-      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-        generateContent: mockGenerateContent,
-      } as unknown as ContentGenerator);
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText: mockGenerateContent,
+      } as unknown as BaseLlmClient);
 
       const result = await service.compress(
         mockChat,
@@ -1388,22 +1289,16 @@ describe('ChatCompressionService', () => {
       });
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        candidates: [
-          {
-            content: {
-              parts: [{ text: 'Summary' }],
-            },
-          },
-        ],
-        usageMetadata: {
+        text: 'Summary',
+        usage: {
           promptTokenCount: 1600,
           candidatesTokenCount: 50,
           totalTokenCount: 1650,
         },
-      } as unknown as GenerateContentResponse);
-      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-        generateContent: mockGenerateContent,
-      } as unknown as ContentGenerator);
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText: mockGenerateContent,
+      } as unknown as BaseLlmClient);
 
       await service.compress(
         mockChat,
@@ -1437,22 +1332,16 @@ describe('ChatCompressionService', () => {
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        candidates: [
-          {
-            content: {
-              parts: [{ text: 'Summary' }],
-            },
-          },
-        ],
-        usageMetadata: {
+        text: 'Summary',
+        usage: {
           promptTokenCount: 1600,
           candidatesTokenCount: 50,
           totalTokenCount: 1650,
         },
-      } as unknown as GenerateContentResponse);
-      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-        generateContent: mockGenerateContent,
-      } as unknown as ContentGenerator);
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText: mockGenerateContent,
+      } as unknown as BaseLlmClient);
 
       const result = await service.compress(
         mockChat,
@@ -1522,18 +1411,16 @@ describe('ChatCompressionService', () => {
       vi.mocked(tokenLimit).mockReturnValue(1000);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        candidates: [
-          { content: { parts: [{ text: 'Summary of all work done' }] } },
-        ],
-        usageMetadata: {
+        text: 'Summary of all work done',
+        usage: {
           promptTokenCount: 1100,
           candidatesTokenCount: 50,
           totalTokenCount: 1150,
         },
-      } as unknown as GenerateContentResponse);
-      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-        generateContent: mockGenerateContent,
-      } as unknown as ContentGenerator);
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText: mockGenerateContent,
+      } as unknown as BaseLlmClient);
 
       const result = await service.compress(
         mockChat,
@@ -1554,8 +1441,8 @@ describe('ChatCompressionService', () => {
       expect(result.newHistory![1].role).toBe('model');
       // The orphaned funcCall is stripped before compression, so only the first 5
       // messages are sent, plus the compression instruction (+1) = history.length total.
-      const callArg = mockGenerateContent.mock.calls[0][0];
-      expect(callArg.contents.length).toBe(history.length); // (history.length - 1) messages + 1 instruction
+      const optionsArg = mockGenerateContent.mock.calls[0][0];
+      expect(optionsArg.contents.length).toBe(history.length); // (history.length - 1) messages + 1 instruction
     });
 
     it('should NOT compress orphaned funcCall when force=false (auto-compress)', async () => {
@@ -1596,9 +1483,9 @@ describe('ChatCompressionService', () => {
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn();
-      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
-        generateContent: mockGenerateContent,
-      } as unknown as ContentGenerator);
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText: mockGenerateContent,
+      } as unknown as BaseLlmClient);
 
       const result = await service.compress(
         mockChat,
