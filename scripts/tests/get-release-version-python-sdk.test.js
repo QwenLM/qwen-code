@@ -36,6 +36,20 @@ function makeResponse({ status = 200, json = {}, statusText = 'OK' } = {}) {
   };
 }
 
+function makeExecError(message, { stderr = '', stdout = '', status } = {}) {
+  const error = new Error(message);
+  if (stderr) {
+    error.stderr = Buffer.from(stderr);
+  }
+  if (stdout) {
+    error.stdout = Buffer.from(stdout);
+  }
+  if (status !== undefined) {
+    error.status = status;
+  }
+  return error;
+}
+
 function makeExecSyncMock({
   tags = {},
   tagError = null,
@@ -67,9 +81,7 @@ function makeExecSyncMock({
       if (typeof outcome === 'string') {
         return Buffer.from(outcome);
       }
-      const error = new Error('release not found');
-      error.status = 1;
-      throw error;
+      throw makeExecError('release not found', { status: 1 });
     }
 
     throw new Error(`Unexpected execSync command: ${command}`);
@@ -102,6 +114,13 @@ describe('python sdk get-release-version', () => {
         },
       }),
     );
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        releases: {
+          'sdk-python-v0.1.1-preview.0': 'sdk-python-v0.1.1-preview.0',
+        },
+      }),
+    );
 
     const getVersion = await loadGetVersion();
 
@@ -122,6 +141,13 @@ describe('python sdk get-release-version', () => {
           releases: {
             '0.1.1rc0': [{}],
           },
+        },
+      }),
+    );
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        releases: {
+          'sdk-python-v0.1.1-preview.0': 'sdk-python-v0.1.1-preview.0',
         },
       }),
     );
@@ -211,6 +237,43 @@ describe('python sdk get-release-version', () => {
     );
   });
 
+  it('fails closed when unrelated lowercase not-found errors occur', async () => {
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        releases: {
+          'sdk-python-v0.1.1-preview.0': makeExecError('host not found'),
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'preview' })).rejects.toThrow(
+      'Failed to check GitHub releases for conflicts: host not found',
+    );
+  });
+
+  it('reuses a PyPI version when GitHub release finalization needs to resume', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.1.0': [{}],
+            '0.1.1rc0': [{}],
+          },
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'preview' })).resolves.toMatchObject({
+      releaseTag: 'v0.1.1-preview.0',
+      packageVersion: '0.1.1rc0',
+      resumeExistingRelease: true,
+    });
+  });
+
   it('fails when the latest preview base is not newer than the latest stable', async () => {
     fetchMock.mockResolvedValue(
       makeResponse({
@@ -242,6 +305,13 @@ describe('python sdk get-release-version', () => {
         },
       }),
     );
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        releases: {
+          'sdk-python-v0.1.1': 'sdk-python-v0.1.1',
+        },
+      }),
+    );
 
     const getVersion = await loadGetVersion();
 
@@ -257,6 +327,13 @@ describe('python sdk get-release-version', () => {
           releases: {
             '0.1.0': [{}],
           },
+        },
+      }),
+    );
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        releases: {
+          'sdk-python-v0.1.0': 'sdk-python-v0.1.0',
         },
       }),
     );
@@ -323,12 +400,51 @@ describe('python sdk get-release-version', () => {
         },
       }),
     );
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        releases: {
+          'sdk-python-v0.2.0-preview.0': 'sdk-python-v0.2.0-preview.0',
+        },
+      }),
+    );
 
     const getVersion = await loadGetVersion();
 
     await expect(getVersion({ type: 'preview' })).resolves.toMatchObject({
       releaseVersion: '0.2.0-preview.1',
       packageVersion: '0.2.0rc1',
+    });
+  });
+
+  it('keeps bumping preview slots until it finds an unused iteration', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.1.0': [{}],
+            '0.1.1rc0': [{}],
+            '0.1.1rc1': [{}],
+            '0.1.1rc2': [{}],
+          },
+        },
+      }),
+    );
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        releases: {
+          'sdk-python-v0.1.1-preview.0': 'sdk-python-v0.1.1-preview.0',
+          'sdk-python-v0.1.1-preview.1': 'sdk-python-v0.1.1-preview.1',
+          'sdk-python-v0.1.1-preview.2': 'sdk-python-v0.1.1-preview.2',
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'preview' })).resolves.toMatchObject({
+      releaseVersion: '0.1.1-preview.3',
+      packageVersion: '0.1.1rc3',
+      resumeExistingRelease: false,
     });
   });
 
@@ -339,6 +455,14 @@ describe('python sdk get-release-version', () => {
           releases: {
             '0.1.1.dev20260430031516': [{}],
           },
+        },
+      }),
+    );
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        releases: {
+          'sdk-python-v0.1.1-nightly.20260430031516.abc1234':
+            'sdk-python-v0.1.1-nightly.20260430031516.abc1234',
         },
       }),
     );

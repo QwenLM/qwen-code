@@ -240,18 +240,24 @@ function validateVersion(version, format, name) {
   }
 }
 
-async function doesVersionExist({ packageVersion, releaseTag }, versions) {
-  if (versions.includes(packageVersion)) {
-    console.error(`PyPI version ${packageVersion} already exists.`);
-    return true;
-  }
+function isExpectedMissingGitHubRelease(error) {
+  const stderr = error.stderr?.toString() ?? '';
+  const stdout = error.stdout?.toString() ?? '';
+  const message = `${error.message}\n${stderr}\n${stdout}`;
+  return message.includes('release not found') || message.includes('Not Found');
+}
 
+async function getReleaseState({ packageVersion, releaseTag }, versions) {
+  const state = {
+    packageVersionExistsOnPyPI: versions.includes(packageVersion),
+    gitTagExists: false,
+    githubReleaseExists: false,
+  };
   const fullTag = `${TAG_PREFIX}${releaseTag}`;
   try {
     const tagOutput = execSync(`git tag -l '${fullTag}'`).toString().trim();
     if (tagOutput === fullTag) {
-      console.error(`Git tag ${fullTag} already exists.`);
-      return true;
+      state.gitTagExists = true;
     }
   } catch (error) {
     throw new Error(`Failed to check git tags for conflicts: ${error.message}`);
@@ -264,25 +270,17 @@ async function doesVersionExist({ packageVersion, releaseTag }, versions) {
       .toString()
       .trim();
     if (output === fullTag) {
-      console.error(`GitHub release ${fullTag} already exists.`);
-      return true;
+      state.githubReleaseExists = true;
     }
   } catch (error) {
-    const stderr = error.stderr?.toString() ?? '';
-    const stdout = error.stdout?.toString() ?? '';
-    const combinedMessage = `${error.message}\n${stderr}\n${stdout}`;
-    const isExpectedNotFound =
-      combinedMessage.includes('release not found') ||
-      combinedMessage.includes('Not Found') ||
-      combinedMessage.includes('not found');
-    if (!isExpectedNotFound) {
+    if (!isExpectedMissingGitHubRelease(error)) {
       throw new Error(
         `Failed to check GitHub releases for conflicts: ${error.message}`,
       );
     }
   }
 
-  return false;
+  return state;
 }
 
 function getNightlyVersion(versions) {
@@ -402,6 +400,7 @@ async function getVersion(options = {}) {
     (type === 'stable' && Boolean(args.stable_version_override));
 
   let versionData;
+  let resumeExistingRelease = false;
   switch (type) {
     case 'nightly':
       versionData = getNightlyVersion(versions);
@@ -417,7 +416,7 @@ async function getVersion(options = {}) {
   }
 
   while (true) {
-    const versionExists = await doesVersionExist(
+    const releaseState = await getReleaseState(
       {
         packageVersion: versionData.packageVersion,
         releaseTag: `v${versionData.releaseVersion}`,
@@ -425,13 +424,42 @@ async function getVersion(options = {}) {
       versions,
     );
 
+    const versionExists =
+      releaseState.packageVersionExistsOnPyPI ||
+      releaseState.gitTagExists ||
+      releaseState.githubReleaseExists;
     if (!versionExists) {
+      break;
+    }
+
+    if (
+      releaseState.packageVersionExistsOnPyPI &&
+      !releaseState.githubReleaseExists
+    ) {
+      console.error(
+        `PyPI version ${versionData.packageVersion} already exists without a matching GitHub release. Reusing the same release version.`,
+      );
+      resumeExistingRelease = true;
       break;
     }
 
     if (hasManualOverride) {
       throw new Error(
         `Requested ${type} release ${versionData.releaseVersion} already exists.`,
+      );
+    }
+
+    if (releaseState.githubReleaseExists) {
+      console.error(
+        `GitHub release ${TAG_PREFIX}v${versionData.releaseVersion} already exists.`,
+      );
+    } else if (releaseState.gitTagExists) {
+      console.error(
+        `Git tag ${TAG_PREFIX}v${versionData.releaseVersion} already exists.`,
+      );
+    } else if (releaseState.packageVersionExistsOnPyPI) {
+      console.error(
+        `PyPI version ${versionData.packageVersion} already exists.`,
       );
     }
 
@@ -459,6 +487,7 @@ async function getVersion(options = {}) {
     packageVersion: versionData.packageVersion,
     previousReleaseTag: previousVersion ? `v${previousVersion}` : '',
     publishChannel: versionData.publishChannel,
+    resumeExistingRelease,
   };
 }
 

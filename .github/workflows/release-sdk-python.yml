@@ -8,7 +8,7 @@ on:
         required: false
         type: 'string'
       ref:
-        description: 'The branch or ref (full git sha) to release SDK from. This privileged workflow only permits main.'
+        description: 'The protected branch ref to release SDK from. This privileged workflow only permits main.'
         required: true
         type: 'string'
         default: 'main'
@@ -157,12 +157,14 @@ jobs:
           PACKAGE_VERSION=$(echo "$VERSION_JSON" | jq -r .packageVersion)
           PUBLISH_CHANNEL=$(echo "$VERSION_JSON" | jq -r .publishChannel)
           PREVIOUS_RELEASE_TAG=$(echo "$VERSION_JSON" | jq -r .previousReleaseTag)
+          RESUME_EXISTING_RELEASE=$(echo "$VERSION_JSON" | jq -r .resumeExistingRelease)
 
           echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
           echo "RELEASE_VERSION=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
           echo "PACKAGE_VERSION=${PACKAGE_VERSION}" >> "$GITHUB_OUTPUT"
           echo "PUBLISH_CHANNEL=${PUBLISH_CHANNEL}" >> "$GITHUB_OUTPUT"
           echo "PREVIOUS_RELEASE_TAG=${PREVIOUS_RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "RESUME_EXISTING_RELEASE=${RESUME_EXISTING_RELEASE}" >> "$GITHUB_OUTPUT"
 
           echo "========================================"
           echo "Python SDK Release Version Info"
@@ -172,6 +174,7 @@ jobs:
           echo "Package Version:    ${PACKAGE_VERSION}"
           echo "Publish Channel:    ${PUBLISH_CHANNEL}"
           echo "Previous Release:   ${PREVIOUS_RELEASE_TAG}"
+          echo "Resume Existing:    ${RESUME_EXISTING_RELEASE}"
           echo "========================================"
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
@@ -182,6 +185,7 @@ jobs:
       - name: 'Setup Python'
         uses: 'actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065' # ratchet:actions/setup-python@v5
         with:
+          # Keep in sync with packages/sdk-python/pyproject.toml [project] requires-python.
           python-version: '3.11'
 
       - name: 'Install Dependencies'
@@ -247,6 +251,7 @@ jobs:
         id: 'release_branch'
         env:
           RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
+          RESUME_EXISTING_RELEASE: '${{ steps.version.outputs.RESUME_EXISTING_RELEASE }}'
         run: |
           BRANCH_NAME="release/sdk-python/${RELEASE_TAG}"
           VERSIONED_PYPROJECT="$(mktemp)"
@@ -263,6 +268,10 @@ jobs:
             git reset --hard "origin/${BRANCH_NAME}"
             echo "REMOTE_BRANCH_EXISTS=true" >> "${GITHUB_OUTPUT}"
           else
+            if [[ "${RESUME_EXISTING_RELEASE}" == "true" ]]; then
+              echo "Published version ${RELEASE_TAG} exists without a persisted release branch ${BRANCH_NAME}." >&2
+              exit 1
+            fi
             git switch -c "${BRANCH_NAME}"
             echo "REMOTE_BRANCH_EXISTS=false" >> "${GITHUB_OUTPUT}"
           fi
@@ -310,10 +319,18 @@ jobs:
 
       - name: 'Publish qwen-code-sdk to PyPI'
         if: |-
-          ${{ steps.vars.outputs.is_dry_run == 'false' }}
+          ${{ steps.vars.outputs.is_dry_run == 'false' && steps.version.outputs.RESUME_EXISTING_RELEASE != 'true' }}
         uses: 'pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b' # ratchet:pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: 'packages/sdk-python/dist'
+
+      - name: 'Skip duplicate PyPI publish for resumed release'
+        if: |-
+          ${{ steps.vars.outputs.is_dry_run == 'false' && steps.version.outputs.RESUME_EXISTING_RELEASE == 'true' }}
+        env:
+          PACKAGE_VERSION: '${{ steps.version.outputs.PACKAGE_VERSION }}'
+        run: |
+          echo "PyPI already has ${PACKAGE_VERSION}; reusing it and resuming GitHub release finalization."
 
       - name: 'Show publish artifacts for dry-run'
         if: |-
@@ -333,10 +350,25 @@ jobs:
           IS_NIGHTLY: '${{ steps.vars.outputs.is_nightly }}'
           IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
         run: |
+          TAG_NAME="sdk-python-${RELEASE_TAG}"
+
           if [[ "${IS_NIGHTLY}" == "true" || "${IS_PREVIEW}" == "true" ]]; then
             PRERELEASE_FLAG="--prerelease"
           else
             PRERELEASE_FLAG=""
+          fi
+
+          if gh release view "${TAG_NAME}" --json tagName >/dev/null 2>&1; then
+            echo "::warning::GitHub release ${TAG_NAME} already exists; skipping create."
+            exit 0
+          fi
+
+          if git rev-parse "${TAG_NAME}" >/dev/null 2>&1; then
+            EXISTING_TAG_SHA="$(git rev-list -n 1 "${TAG_NAME}")"
+            if [[ "${EXISTING_TAG_SHA}" != "${RELEASE_TARGET_SHA}" ]]; then
+              echo "Existing tag ${TAG_NAME} points to ${EXISTING_TAG_SHA}, expected ${RELEASE_TARGET_SHA}." >&2
+              exit 1
+            fi
           fi
 
           NOTES_FILE=$(mktemp)
@@ -357,7 +389,7 @@ jobs:
             echo "See commit history for changes." >> "${NOTES_FILE}"
           fi
 
-          gh release create "sdk-python-${RELEASE_TAG}" \
+          gh release create "${TAG_NAME}" \
             --target "${RELEASE_TARGET_SHA}" \
             --title "SDK Python Release ${RELEASE_TAG}" \
             --notes-file "${NOTES_FILE}" \
