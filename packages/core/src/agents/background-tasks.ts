@@ -108,6 +108,11 @@ export interface BackgroundTaskEntry {
   endTime?: number;
   result?: string;
   error?: string;
+  /**
+   * Present only when the task is intentionally kept paused but cannot be
+   * safely resumed under the current conditions.
+   */
+  resumeBlockedReason?: string;
   abortController: AbortController;
   stats?: AgentCompletionStats;
   toolUseId?: string;

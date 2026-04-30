@@ -753,15 +753,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     opts: {
       agentId: string;
       agentType: string;
+      transcriptPath?: string;
       resolvedMode: PermissionMode;
       signal?: AbortSignal;
     },
   ): Promise<void> {
-    const { agentId, agentType, resolvedMode, signal } = opts;
+    const { agentId, agentType, transcriptPath, resolvedMode, signal } = opts;
     const hookSystem = this.config.getHookSystem();
     if (!hookSystem) return;
 
-    const transcriptPath = this.config.getTranscriptPath();
+    const effectiveTranscriptPath =
+      transcriptPath ?? this.config.getTranscriptPath();
     let stopHookActive = false;
     const maxIterations = 5;
 
@@ -770,7 +772,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const stopHookOutput = await hookSystem.fireSubagentStopEvent(
           agentId,
           agentType,
-          transcriptPath,
+          effectiveTranscriptPath,
           subagent.getFinalText(),
           stopHookActive,
           resolvedMode,
@@ -1218,6 +1220,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               await this.runSubagentStopHookLoop(bgSubagent, {
                 agentId: hookOpts.agentId,
                 agentType: hookOpts.agentType,
+                transcriptPath: jsonlPath,
                 resolvedMode,
                 signal: bgAbortController.signal,
               });

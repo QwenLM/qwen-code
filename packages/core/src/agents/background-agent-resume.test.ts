@@ -250,9 +250,54 @@ describe('BackgroundAgentResumeService', () => {
       agentId,
       status: 'paused',
       subagentType: 'deleted-agent',
-      error: 'Subagent "deleted-agent" is no longer available.',
+      resumeBlockedReason: 'Subagent "deleted-agent" is no longer available.',
     });
     expect(subagentManager.loadSubagent).toHaveBeenCalledWith('deleted-agent');
+  });
+
+  it('keeps paused tasks resumable when they only carry a stale lastError', async () => {
+    const sessionId = 'session-stale-error';
+    const agentId = 'agent-stale-error';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Interrupted task with stale error',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+      lastError: 'Temporary resume setup failed',
+    });
+    fs.writeFileSync(
+      getAgentJsonlPath(tempDir, sessionId, agentId),
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: 'Interrupted task with stale error' }],
+        },
+      }) + '\n',
+      'utf8',
+    );
+
+    const { service } = createService();
+    const recovered = await service.loadPausedBackgroundAgents(sessionId);
+
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({
+      agentId,
+      status: 'paused',
+      error: 'Temporary resume setup failed',
+    });
+    expect(recovered[0]?.resumeBlockedReason).toBeUndefined();
   });
 
   it('falls back to legacy agentType metadata when resume fields are missing', async () => {
@@ -780,9 +825,10 @@ describe('BackgroundAgentResumeService', () => {
 
     expect(resumed).toBeUndefined();
     expect(registry.get(agentId)?.status).toBe('paused');
-    expect(registry.get(agentId)?.error).toContain(
+    expect(registry.get(agentId)?.resumeBlockedReason).toContain(
       'bootstrap transcript is missing',
     );
+    expect(registry.get(agentId)?.error).toBeUndefined();
     expect(createSpy).not.toHaveBeenCalled();
     createSpy.mockRestore();
   });

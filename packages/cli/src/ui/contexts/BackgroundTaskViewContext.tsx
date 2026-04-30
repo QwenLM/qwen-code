@@ -196,7 +196,7 @@ export function BackgroundTaskViewProvider({
       !target ||
       target.kind !== 'agent' ||
       target.status !== 'paused' ||
-      target.error
+      target.resumeBlockedReason
     ) {
       return;
     }

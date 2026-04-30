@@ -55,6 +55,9 @@ const META_FILE_SUFFIX = '.meta.json';
 export const DEFAULT_BACKGROUND_AGENT_CONTINUATION_MESSAGE =
   'Continue working on the current task from the last completed step.';
 
+const LEGACY_FORK_RESUME_BLOCKED_REASON =
+  'Fork background task cannot be safely resumed because its bootstrap transcript is missing.';
+
 type ApprovalModeValue = 'plan' | 'default' | 'auto-edit' | 'yolo';
 
 interface TranscriptRecovery {
@@ -79,6 +82,11 @@ interface ResolvedResumeTarget {
 interface ResumeOperation {
   continuationMessages: string[];
   promise: Promise<BackgroundTaskEntry | undefined>;
+}
+
+interface RestorePausedEntryOptions {
+  error?: string;
+  resumeBlockedReason?: string;
 }
 
 function approvalModeToPermissionMode(mode?: string): PermissionMode {
@@ -387,6 +395,12 @@ export class BackgroundAgentResumeService {
         const recovery = recoverTranscript(records);
         const parsedStartTime = Date.parse(meta.createdAt);
 
+        const resumeBlockedReason =
+          target.unavailableReason ||
+          (target.isFork && !recovery.forkBootstrap
+            ? LEGACY_FORK_RESUME_BLOCKED_REASON
+            : undefined);
+
         const entry: BackgroundTaskEntry = {
           agentId: meta.agentId,
           description: meta.description,
@@ -399,7 +413,9 @@ export class BackgroundAgentResumeService {
           prompt: recovery.initialPrompt,
           outputFile,
           metaPath,
-          error: meta.lastError ?? target.unavailableReason,
+          error:
+            meta.lastError === resumeBlockedReason ? undefined : meta.lastError,
+          resumeBlockedReason,
         };
         registry.register(entry);
         recovered.push(entry);
@@ -484,6 +500,7 @@ export class BackgroundAgentResumeService {
       endTime: undefined,
       result: undefined,
       error: undefined,
+      resumeBlockedReason: undefined,
       stats: undefined,
       recentActivities: [],
       pendingMessages: [...(existing.pendingMessages ?? [])],
@@ -498,10 +515,10 @@ export class BackgroundAgentResumeService {
           target.unavailableReason ||
           `Subagent "${subagentName}" is no longer available.`;
         patchAgentMeta(metaPath, {
-          lastError: reason,
+          lastError: undefined,
           lastUpdatedAt: new Date().toISOString(),
         });
-        this.restorePausedEntry(agentId, reason);
+        this.restorePausedEntry(agentId, { resumeBlockedReason: reason });
         return undefined;
       }
 
@@ -554,23 +571,21 @@ export class BackgroundAgentResumeService {
         : undefined;
       const writerInitialPrompt = continuationPrompt;
       if (target.isFork && (!resumeHistory || resumeHistory.length === 0)) {
-        const reason =
-          'Fork background task cannot be safely resumed because its bootstrap transcript is missing.';
+        const reason = LEGACY_FORK_RESUME_BLOCKED_REASON;
         patchAgentMeta(metaPath, {
-          lastError: reason,
+          lastError: undefined,
           lastUpdatedAt: new Date().toISOString(),
         });
-        this.restorePausedEntry(agentId, reason);
+        this.restorePausedEntry(agentId, { resumeBlockedReason: reason });
         return undefined;
       }
       if (target.isFork && !recovery.forkBootstrap) {
-        const reason =
-          'Fork background task cannot be safely resumed because its bootstrap transcript is missing.';
+        const reason = LEGACY_FORK_RESUME_BLOCKED_REASON;
         patchAgentMeta(metaPath, {
-          lastError: reason,
+          lastError: undefined,
           lastUpdatedAt: new Date().toISOString(),
         });
-        this.restorePausedEntry(agentId, reason);
+        this.restorePausedEntry(agentId, { resumeBlockedReason: reason });
         return undefined;
       }
 
@@ -630,6 +645,7 @@ export class BackgroundAgentResumeService {
         endTime: undefined,
         result: undefined,
         error: undefined,
+        resumeBlockedReason: undefined,
         stats: undefined,
         prompt: recovery.initialPrompt ?? existing.prompt,
         recentActivities: [],
@@ -781,7 +797,7 @@ export class BackgroundAgentResumeService {
         if (latest.abortController.signal.aborted) {
           registry.finalizeCancelled(agentId, errorMessage);
         } else {
-          this.restorePausedEntry(agentId, errorMessage);
+          this.restorePausedEntry(agentId, { error: errorMessage });
         }
       }
       return undefined;
@@ -839,7 +855,7 @@ export class BackgroundAgentResumeService {
 
   private restorePausedEntry(
     agentId: string,
-    error?: string,
+    options: RestorePausedEntryOptions = {},
   ): BackgroundTaskEntry | undefined {
     const registry = this.config.getBackgroundTaskRegistry();
     const latest = registry.get(agentId);
@@ -851,7 +867,8 @@ export class BackgroundAgentResumeService {
       abortController: new AbortController(),
       endTime: undefined,
       result: undefined,
-      error,
+      error: options.error,
+      resumeBlockedReason: options.resumeBlockedReason,
       stats: undefined,
       recentActivities: [],
       pendingMessages: [...(latest.pendingMessages ?? [])],

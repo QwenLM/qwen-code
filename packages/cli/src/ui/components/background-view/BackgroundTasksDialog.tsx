@@ -30,6 +30,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import {
+  type AgentDialogEntry,
   type DialogEntry,
   entryId,
 } from '../../hooks/useBackgroundTaskView.js';
@@ -249,7 +250,7 @@ const DetailBody: React.FC<{
   );
 
 const AgentDetailBody: React.FC<{
-  entry: BackgroundTaskEntry;
+  entry: AgentDialogEntry;
   maxHeight: number;
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
@@ -272,8 +273,9 @@ const AgentDetailBody: React.FC<{
   // row sits at the bottom of the Progress block. Cap at 5 in case the
   // registry ever raises its buffer.
   const activities = (entry.recentActivities ?? []).slice(-5);
+  const blockedReason = entry.resumeBlockedReason;
   const hasError = Boolean(entry.error);
-  const errorTitle = entry.status === 'paused' ? 'Resume blocked' : 'Error';
+  const hasBlockedReason = Boolean(blockedReason);
 
   // Prompt: show at most 5 newline-delimited segments, each row truncated
   // to one visual line. Append an ellipsis if the source had more.
@@ -357,12 +359,28 @@ const AgentDetailBody: React.FC<{
         </Fragment>
       )}
 
+      {hasBlockedReason && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={theme.status.error}>
+              Resume blocked
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.status.error} wrap="wrap">
+              {blockedReason}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+
       {hasError && (
         <Fragment>
           <Box />
           <Box>
             <Text bold color={theme.status.error}>
-              {errorTitle}
+              Error
             </Text>
           </Box>
           <Box>
@@ -662,7 +680,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   const selectedEntryAllowsResume =
     selectedEntry?.kind === 'agent' &&
     selectedEntry.status === 'paused' &&
-    !selectedEntry.error;
+    !selectedEntry.resumeBlockedReason;
 
   // Hint footer — context-sensitive.
   const hints: string[] = [];

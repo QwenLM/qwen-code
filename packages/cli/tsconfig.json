@@ -7,7 +7,7 @@
     "lib": ["DOM", "DOM.Iterable", "ES2023"],
     "types": ["node", "vitest/globals"],
     "paths": {
-      "@qwen-code/qwen-code-core": ["../core/index.ts"],
+      "@qwen-code/qwen-code-core": ["../core/src/index.ts"],
       "@qwen-code/qwen-code-core/*": ["../core/src/*"]
     }
   },

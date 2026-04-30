@@ -1531,6 +1531,40 @@ describe('AgentTool', () => {
       expect(mockRegistry.register).toHaveBeenCalled();
     });
 
+    it('passes the sidechain transcript path to SubagentStop hooks for fresh background agents', async () => {
+      const mockHookSystem = {
+        fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
+        fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
+      } as unknown as HookSystem;
+      (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
+        .fn()
+        .mockReturnValue(mockHookSystem);
+
+      const params: AgentParams = {
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+      await vi.waitFor(() => {
+        expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenCalledWith(
+          expect.stringContaining('monitor-'),
+          'monitor',
+          expect.stringMatching(
+            /^\/tmp\/qwen-test\/subagents\/test-session-id\/agent-monitor-.*\.jsonl$/,
+          ),
+          'Monitor done',
+          false,
+          PermissionMode.AutoEdit,
+          expect.any(AbortSignal),
+        );
+      });
+    });
+
     it('should run in foreground when neither flag is set', async () => {
       const fgSubagent: SubagentConfig = {
         ...bgSubagent,

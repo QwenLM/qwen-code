@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useState } from 'react';
 import { act } from '@testing-library/react';
 import { render } from 'ink-testing-library';
-import type { BackgroundTaskEntry, Config } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
 import { BackgroundTasksDialog } from './BackgroundTasksDialog.js';
 import {
   BackgroundTaskViewProvider,
@@ -17,6 +17,7 @@ import {
 } from '../../contexts/BackgroundTaskViewContext.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import {
+  type AgentDialogEntry,
   useBackgroundTaskView,
   type DialogEntry,
 } from '../../hooks/useBackgroundTaskView.js';
@@ -38,7 +39,7 @@ vi.mock('../../hooks/useKeypress.js', () => ({
 const mockedUseBackgroundTaskView = vi.mocked(useBackgroundTaskView);
 const mockedUseKeypress = vi.mocked(useKeypress);
 
-function entry(overrides: Partial<BackgroundTaskEntry> = {}): DialogEntry {
+function entry(overrides: Partial<AgentDialogEntry> = {}): DialogEntry {
   return {
     kind: 'agent',
     agentId: 'a',
@@ -249,7 +250,7 @@ describe('BackgroundTasksDialog', () => {
     const blocked = entry({
       agentId: 'a',
       status: 'paused',
-      error: 'Legacy fork bootstrap transcript is missing.',
+      resumeBlockedReason: 'Legacy fork bootstrap transcript is missing.',
     });
     const h = setup([blocked]);
 
@@ -267,5 +268,26 @@ describe('BackgroundTasksDialog', () => {
       'Legacy fork bootstrap transcript is missing.',
     );
     expect(detailFrame).not.toContain('r resume');
+  });
+
+  it('still allows resume for paused tasks that only have a stale error', () => {
+    const paused = entry({
+      agentId: 'a',
+      status: 'paused',
+      error: 'Temporary resume setup failed.',
+    });
+    const h = setup([paused]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    expect(h.lastFrame()).toContain('r resume');
+
+    h.pressKey({ sequence: 'r' });
+    expect(h.resume).toHaveBeenCalledWith('a');
+
+    h.call(() => h.probe.current!.actions.enterDetail());
+    const detailFrame = h.lastFrame();
+    expect(detailFrame).toContain('Error');
+    expect(detailFrame).toContain('Temporary resume setup failed.');
+    expect(detailFrame).toContain('r resume');
   });
 });
