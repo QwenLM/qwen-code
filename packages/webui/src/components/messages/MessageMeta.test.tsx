@@ -51,8 +51,10 @@ describe('MessageMeta', () => {
       );
     });
 
+    const time = container.querySelector('time');
+    expect(time?.getAttribute('datetime')).toMatch(/^\d{2}:\d{2}$/);
+
     const html = container.innerHTML;
-    expect(html).toMatch(/dateTime="\d{2}:\d{2}"/);
     expect(html).not.toContain('2026-04-30');
     expect(html).toContain('Copy message');
   });
