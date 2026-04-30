@@ -24,7 +24,7 @@ import {
 import {
   API_KEY_PROVIDERS,
   type ApiKeyProviderConfig,
-} from '../constants/apiKeyProviders.js';
+} from '../auth/setupMethods/apiKey/index.js';
 
 const debugLogger = createDebugLogger('PRECONNECT');
 

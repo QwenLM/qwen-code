@@ -13,36 +13,40 @@ import {
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { t } from '../../i18n/index.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { applyProviderInstallPlan } from '../../auth/install/applyProviderInstallPlan.js';
 import {
-  getCodingPlanConfig,
-  isCodingPlanConfig,
-  CodingPlanRegion,
-  CODING_PLAN_ENV_KEY,
-} from '../../constants/codingPlan.js';
-import { backupSettingsFile } from '../../utils/settingsUtils.js';
+  CODING_PLAN_ENDPOINTS,
+  codingPlanProvider,
+  createCodingPlanInstallPlan,
+  findCodingPlanConfig,
+} from '../../auth/providers/alibaba/codingPlan.js';
+import { findTokenPlanConfig } from '../../auth/providers/alibaba/tokenPlan.js';
+import {
+  createOpenRouterProviderInstallPlan,
+  openRouterProvider,
+} from '../../auth/providers/oauth/openrouter.js';
 import { loadSettings, type LoadedSettings } from '../../config/settings.js';
 import { loadCliConfig } from '../../config/config.js';
 import type { CliArgs } from '../../config/config.js';
 import { InteractiveSelector } from './interactiveSelector.js';
 import {
-  applyOpenRouterModelsConfiguration,
   createOpenRouterOAuthSession,
   isOpenRouterConfig,
   OPENROUTER_ENV_KEY,
   runOpenRouterOAuthLogin,
-} from './openrouterOAuth.js';
+} from '../../auth/providers/oauth/openrouterOAuth.js';
 
 function formatElapsedTime(startMs: number): string {
   return `${((Date.now() - startMs) / 1000).toFixed(2)}s`;
 }
 
 interface QwenAuthOptions {
-  region?: string;
+  baseUrl?: string;
   key?: string;
 }
 
 interface CodingPlanSettings {
-  region?: CodingPlanRegion;
+  baseUrl?: string;
   version?: string;
 }
 
@@ -190,94 +194,31 @@ async function handleCodePlanAuth(
   settings: LoadedSettings,
   options: QwenAuthOptions,
 ): Promise<void> {
-  const { region, key } = options;
+  const { baseUrl, key } = options;
 
-  let selectedRegion: CodingPlanRegion;
+  let selectedBaseUrl: string;
   let selectedKey: string;
 
-  // If region and key are provided as options, use them
-  if (region && key) {
-    selectedRegion =
-      region.toLowerCase() === 'global'
-        ? CodingPlanRegion.GLOBAL
-        : CodingPlanRegion.CHINA;
+  if (baseUrl && key) {
+    selectedBaseUrl = baseUrl;
     selectedKey = key;
   } else {
-    // Otherwise, prompt interactively
-    selectedRegion = await promptForRegion();
+    selectedBaseUrl = await promptForCodingPlanBaseUrl();
     selectedKey = await promptForAuthKey(t('Enter your Coding Plan API key: '));
   }
 
   writeStdoutLine(t('Processing Alibaba Cloud Coding Plan authentication...'));
 
   try {
-    // Get configuration based on region
-    const { template, version } = getCodingPlanConfig(selectedRegion);
-
-    // Get persist scope
-    const authTypeScope = getPersistScopeForModelSelection(settings);
-
-    // Backup settings file before modification
-    const settingsFile = settings.forScope(authTypeScope);
-    backupSettingsFile(settingsFile.path);
-
-    // Store api-key in settings.env (unified env key)
-    settings.setValue(authTypeScope, `env.${CODING_PLAN_ENV_KEY}`, selectedKey);
-
-    // Sync to process.env immediately so refreshAuth can read the apiKey
-    process.env[CODING_PLAN_ENV_KEY] = selectedKey;
-
-    // Generate model configs from template
-    const newConfigs = template.map((templateConfig) => ({
-      ...templateConfig,
-      envKey: CODING_PLAN_ENV_KEY,
-    }));
-
-    // Get existing configs
-    const existingConfigs =
-      (settings.merged.modelProviders as Record<string, ModelConfig[]>)?.[
-        AuthType.USE_OPENAI
-      ] || [];
-
-    // Filter out all existing Coding Plan configs (mutually exclusive)
-    const nonCodingPlanConfigs = existingConfigs.filter(
-      (existing) => !isCodingPlanConfig(existing.baseUrl, existing.envKey),
-    );
-
-    // Add new Coding Plan configs at the beginning
-    const updatedConfigs = [...newConfigs, ...nonCodingPlanConfigs];
-
-    // Persist to modelProviders
-    settings.setValue(
-      authTypeScope,
-      `modelProviders.${AuthType.USE_OPENAI}`,
-      updatedConfigs,
-    );
-
-    // Also persist authType
-    settings.setValue(
-      authTypeScope,
-      'security.auth.selectedType',
-      AuthType.USE_OPENAI,
-    );
-
-    // Persist coding plan region
-    settings.setValue(authTypeScope, 'codingPlan.region', selectedRegion);
-
-    // Persist coding plan version (single field for backward compatibility)
-    settings.setValue(authTypeScope, 'codingPlan.version', version);
-
-    // If there are configs, use the first one as the model
-    if (updatedConfigs.length > 0 && updatedConfigs[0]?.id) {
-      settings.setValue(
-        authTypeScope,
-        'model.name',
-        (updatedConfigs[0] as ModelConfig).id,
-      );
-    }
-
-    // Refresh auth with the new configuration
-    await config.refreshAuth(AuthType.USE_OPENAI);
+    const installPlan = createCodingPlanInstallPlan({
+      apiKey: selectedKey,
+      baseUrl: selectedBaseUrl,
+    });
+    await applyProviderInstallPlan(installPlan, {
+      settings,
+      config,
+      provider: codingPlanProvider,
+    });
 
     writeStdoutLine(
       t('Successfully authenticated with Alibaba Cloud Coding Plan.'),
@@ -350,16 +291,14 @@ async function handleOpenRouterAuth(
       );
     }
 
-    const authTypeScope = getPersistScopeForModelSelection(settings);
-    const settingsFile = settings.forScope(authTypeScope);
-    backupSettingsFile(settingsFile.path);
-
     const modelsStartMs = Date.now();
-    await applyOpenRouterModelsConfiguration({
+    const installPlan = await createOpenRouterProviderInstallPlan({
+      apiKey: selectedKey,
+    });
+    await applyProviderInstallPlan(installPlan, {
       settings,
       config,
-      apiKey: selectedKey,
-      reloadConfig: true,
+      provider: openRouterProvider,
     });
     writeStdoutLine(
       t('Fetched OpenRouter models in {{elapsed}}.', {
@@ -367,13 +306,6 @@ async function handleOpenRouterAuth(
       }),
     );
 
-    const refreshStartMs = Date.now();
-    await config.refreshAuth(AuthType.USE_OPENAI);
-    writeStdoutLine(
-      t('Refreshed OpenRouter auth in {{elapsed}}.', {
-        elapsed: formatElapsedTime(refreshStartMs),
-      }),
-    );
     writeStdoutLine(
       t('Total OpenRouter setup time: {{elapsed}}.', {
         elapsed: formatElapsedTime(authStartMs),
@@ -391,24 +323,14 @@ async function handleOpenRouterAuth(
   }
 }
 
-/**
- * Prompts the user to select a region using an interactive selector
- */
-async function promptForRegion(): Promise<CodingPlanRegion> {
+async function promptForCodingPlanBaseUrl(): Promise<string> {
   const selector = new InteractiveSelector(
-    [
-      {
-        value: CodingPlanRegion.CHINA,
-        label: t('中国 (China)'),
-        description: t('阿里云百炼 (aliyun.com)'),
-      },
-      {
-        value: CodingPlanRegion.GLOBAL,
-        label: t('Global'),
-        description: t('Alibaba Cloud (alibabacloud.com)'),
-      },
-    ],
-    t('Select region for Coding Plan:'),
+    CODING_PLAN_ENDPOINTS.map((endpoint) => ({
+      value: endpoint.baseUrl,
+      label: t(endpoint.title),
+      description: endpoint.baseUrl,
+    })),
+    t('Select Base URL for Coding Plan:'),
   );
 
   return await selector.select();
@@ -570,8 +492,6 @@ export async function showAuthStatus(): Promise<void> {
         t('\n  ⚠ Run /auth to switch to Coding Plan or another provider.\n'),
       );
     } else if (selectedType === AuthType.USE_OPENAI) {
-      const codingPlanRegion = mergedSettings.codingPlan?.region;
-      const codingPlanVersion = mergedSettings.codingPlan?.version;
       const modelName = mergedSettings.model?.name;
       const openAiProviders =
         mergedSettings.modelProviders?.[AuthType.USE_OPENAI] || [];
@@ -599,53 +519,75 @@ export async function showAuthStatus(): Promise<void> {
           writeStdoutLine(t('  Run `qwen auth openrouter` to re-configure.\n'));
         }
       } else {
-        // Check for Coding Plan configuration
-        const hasApiKey =
-          !!process.env[CODING_PLAN_ENV_KEY] ||
-          !!mergedSettings.env?.[CODING_PLAN_ENV_KEY];
+        const managedPlan = openAiProviders
+          .map(
+            (providerConfig) =>
+              findCodingPlanConfig(
+                providerConfig.baseUrl,
+                providerConfig.envKey,
+              ) ||
+              findTokenPlanConfig(
+                providerConfig.baseUrl,
+                providerConfig.envKey,
+              ),
+          )
+          .find((plan) => plan !== undefined);
 
-        if (hasApiKey) {
-          writeStdoutLine(
-            t('✓ Authentication Method: Alibaba Cloud Coding Plan'),
-          );
+        if (managedPlan) {
+          const metadata = (mergedSettings as Record<string, unknown>)[
+            managedPlan.metadataKey
+          ] as { version?: string; baseUrl?: string } | undefined;
+          const hasApiKey =
+            !!process.env[managedPlan.envKey] ||
+            !!mergedSettings.env?.[managedPlan.envKey];
 
-          if (codingPlanRegion) {
-            const regionDisplay =
-              codingPlanRegion === CodingPlanRegion.CHINA
-                ? t('中国 (China) - 阿里云百炼')
-                : t('Global - Alibaba Cloud');
+          if (hasApiKey) {
             writeStdoutLine(
-              t('  Region: {{region}}', { region: regionDisplay }),
+              t('✓ Authentication Method: {{plan}}', {
+                plan: t(managedPlan.displayName),
+              }),
+            );
+
+            writeStdoutLine(
+              t('  Base URL: {{baseUrl}}', { baseUrl: managedPlan.baseUrl }),
+            );
+
+            if (modelName) {
+              writeStdoutLine(
+                t('  Current Model: {{model}}', { model: modelName }),
+              );
+            }
+
+            if (metadata?.version) {
+              writeStdoutLine(
+                t('  Config Version: {{version}}', {
+                  version: metadata.version.substring(0, 8) + '...',
+                }),
+              );
+            }
+
+            writeStdoutLine(t('  Status: API key configured\n'));
+          } else {
+            writeStdoutLine(
+              t('⚠️  Authentication Method: {{plan}} (Incomplete)', {
+                plan: t(managedPlan.displayName),
+              }),
+            );
+            writeStdoutLine(
+              t('  Issue: API key not found in environment or settings\n'),
+            );
+            writeStdoutLine(
+              t('  Run `qwen auth` to re-configure authentication.\n'),
             );
           }
-
+        } else {
+          writeStdoutLine(t('✓ Authentication Method: API Key'));
           if (modelName) {
             writeStdoutLine(
               t('  Current Model: {{model}}', { model: modelName }),
             );
           }
-
-          if (codingPlanVersion) {
-            writeStdoutLine(
-              t('  Config Version: {{version}}', {
-                version: codingPlanVersion.substring(0, 8) + '...',
-              }),
-            );
-          }
-
           writeStdoutLine(t('  Status: API key configured\n'));
-        } else {
-          writeStdoutLine(
-            t(
-              '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)',
-            ),
-          );
-          writeStdoutLine(
-            t('  Issue: API key not found in environment or settings\n'),
-          );
-          writeStdoutLine(
-            t('  Run `qwen auth coding-plan` to re-configure.\n'),
-          );
         }
       }
     } else {

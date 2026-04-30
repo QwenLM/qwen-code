@@ -5,27 +5,70 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import type { Config, ModelProvidersConfig } from '@qwen-code/qwen-code-core';
-import {
-  AuthType,
-  isCodingPlanConfig,
-  getCodingPlanConfig,
-  CodingPlanRegion,
-  CODING_PLAN_ENV_KEY,
-} from '@qwen-code/qwen-code-core';
+import { AuthType, type Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
+import { applyProviderInstallPlan } from '../../auth/install/applyProviderInstallPlan.js';
+import {
+  codingPlanProvider,
+  createCodingPlanInstallPlan,
+  findCodingPlanConfig,
+  getCodingPlanConfig,
+  type CodingPlanConfig,
+} from '../../auth/providers/alibaba/codingPlan.js';
+import {
+  createTokenPlanInstallPlan,
+  findTokenPlanConfig,
+  getTokenPlanConfig,
+  tokenPlanProvider,
+  type TokenPlanConfig,
+} from '../../auth/providers/alibaba/tokenPlan.js';
 
 export interface CodingPlanUpdateRequest {
   prompt: string;
   onConfirm: (confirmed: boolean) => void;
 }
 
+interface PlanMetadata {
+  version?: string;
+  baseUrl?: string;
+}
+
+type ManagedPlan = CodingPlanConfig | TokenPlanConfig;
+
+function getPlanMetadata(
+  settings: LoadedSettings,
+  metadataKey: string,
+): PlanMetadata {
+  const mergedSettings = settings.merged as Record<string, unknown>;
+  const metadata = mergedSettings[metadataKey];
+  return metadata && typeof metadata === 'object'
+    ? (metadata as PlanMetadata)
+    : {};
+}
+
+function findManagedPlanInConfigs(
+  configs: ReadonlyArray<Record<string, unknown>>,
+): ManagedPlan | undefined {
+  for (const config of configs) {
+    const baseUrl =
+      typeof config['baseUrl'] === 'string' ? config['baseUrl'] : undefined;
+    const envKey =
+      typeof config['envKey'] === 'string' ? config['envKey'] : undefined;
+    const match =
+      findCodingPlanConfig(baseUrl, envKey) ||
+      findTokenPlanConfig(baseUrl, envKey);
+    if (match) {
+      return match;
+    }
+  }
+
+  return undefined;
+}
+
 /**
- * Hook for detecting and handling Coding Plan template updates.
- * Compares the persisted version with the current template version
- * and prompts the user to update if they differ.
+ * Hook for detecting and handling Coding Plan and Token Plan template updates.
+ * Keeps the historical export name for compatibility with existing callers.
  */
 export function useCodingPlanUpdates(
   settings: LoadedSettings,
@@ -39,83 +82,26 @@ export function useCodingPlanUpdates(
     CodingPlanUpdateRequest | undefined
   >();
 
-  /**
-   * Execute the Coding Plan configuration update.
-   * Removes old Coding Plan configs and replaces them with new ones from the template.
-   * Preserves the user's current model selection if it still exists in the new template.
-   * Uses the region from settings.codingPlan.region (defaults to CHINA).
-   */
   const executeUpdate = useCallback(
-    async (region: CodingPlanRegion = CodingPlanRegion.CHINA) => {
+    async (plan: ManagedPlan) => {
       try {
-        const persistScope = getPersistScopeForModelSelection(settings);
-
-        // Get current configs
-        const currentConfigs =
-          (
-            settings.merged.modelProviders as
-              | Record<string, Array<Record<string, unknown>>>
-              | undefined
-          )?.[AuthType.USE_OPENAI] || [];
-
-        // Filter out all Coding Plan configs (since they are mutually exclusive)
-        // Keep only non-Coding-Plan user custom configs
-        const nonCodingPlanConfigs = currentConfigs.filter(
-          (cfg) =>
-            !isCodingPlanConfig(
-              cfg['baseUrl'] as string | undefined,
-              cfg['envKey'] as string | undefined,
-            ),
-        );
-
-        // Get the configuration for the current region
-        const { template, version } = getCodingPlanConfig(region);
-
-        // Generate new configs from template
-        const newConfigs = template.map((templateConfig) => ({
-          ...templateConfig,
-          envKey: CODING_PLAN_ENV_KEY,
-        }));
-
-        // Combine: new Coding Plan configs at the front, user configs preserved
-        const updatedConfigs = [
-          ...newConfigs,
-          ...(nonCodingPlanConfigs as Array<Record<string, unknown>>),
-        ] as Array<Record<string, unknown>>;
-
-        // Record the user's current model before the update
+        const provider =
+          plan.id === 'token' ? tokenPlanProvider : codingPlanProvider;
+        const installPlan =
+          plan.id === 'token'
+            ? createTokenPlanInstallPlan({})
+            : createCodingPlanInstallPlan({ baseUrl: plan.baseUrl });
         const previousModel = config.getModel();
+        const newConfigs = installPlan.modelProviders?.[0]?.models ?? [];
         const previousModelStillAvailable = newConfigs.some(
           (cfg) => cfg.id === previousModel,
         );
 
-        // Hot-reload model providers configuration first (in-memory only)
-        const updatedModelProviders = {
-          ...(settings.merged.modelProviders as
-            | Record<string, unknown>
-            | undefined),
-          [AuthType.USE_OPENAI]: updatedConfigs,
-        };
-        config.reloadModelProvidersConfig(
-          updatedModelProviders as unknown as ModelProvidersConfig,
-        );
-
-        // Refresh auth with the new configuration
-        // This validates the configuration before persisting
-        await config.refreshAuth(AuthType.USE_OPENAI);
-
-        // Persist to settings only after successful auth refresh
-        settings.setValue(
-          persistScope,
-          `modelProviders.${AuthType.USE_OPENAI}`,
-          updatedConfigs,
-        );
-
-        // Update the version (single version field for backward compatibility)
-        settings.setValue(persistScope, 'codingPlan.version', version);
-
-        // Update the region
-        settings.setValue(persistScope, 'codingPlan.region', region);
+        await applyProviderInstallPlan(installPlan, {
+          settings,
+          config,
+          provider,
+        });
 
         const activeModel = config.getModel();
 
@@ -123,8 +109,8 @@ export function useCodingPlanUpdates(
           addItem(
             {
               type: 'info',
-              text: t('{{region}} configuration updated successfully.', {
-                region: t('Alibaba Cloud Coding Plan'),
+              text: t('{{plan}} configuration updated successfully.', {
+                plan: t(plan.displayName),
               }),
             },
             Date.now(),
@@ -134,8 +120,8 @@ export function useCodingPlanUpdates(
             {
               type: 'info',
               text: t(
-                '{{region}} configuration updated successfully. Model switched to "{{model}}".',
-                { region: t('Alibaba Cloud Coding Plan'), model: activeModel },
+                '{{plan}} configuration updated successfully. Model switched to "{{model}}".',
+                { plan: t(plan.displayName), model: activeModel },
               ),
             },
             Date.now(),
@@ -146,7 +132,10 @@ export function useCodingPlanUpdates(
           {
             type: 'info',
             text: t(
-              'Tip: Use /model to switch between available Coding Plan models.',
+              'Tip: Use /model to switch between available {{plan}} models.',
+              {
+                plan: t(plan.displayName),
+              },
             ),
           },
           Date.now(),
@@ -159,7 +148,7 @@ export function useCodingPlanUpdates(
         addItem(
           {
             type: 'error',
-            text: t('Failed to update Coding Plan configuration: {{message}}', {
+            text: t('Failed to update provider configuration: {{message}}', {
               message: errorMessage,
             }),
           },
@@ -171,50 +160,52 @@ export function useCodingPlanUpdates(
     [settings, config, addItem],
   );
 
-  /**
-   * Check for version mismatch and prompt user for update if needed.
-   * Uses the region from settings.codingPlan.region (defaults to CHINA if not set).
-   */
   const checkForUpdates = useCallback(() => {
-    const mergedSettings = settings.merged as {
-      codingPlan?: {
-        version?: string;
-        region?: CodingPlanRegion;
-      };
-    };
+    const currentConfigs =
+      (
+        settings.merged.modelProviders as
+          | Record<string, Array<Record<string, unknown>>>
+          | undefined
+      )?.[AuthType.USE_OPENAI] || [];
+    const legacyCodingPlanMetadata = getPlanMetadata(settings, 'codingPlan');
+    const matchedPlan =
+      findManagedPlanInConfigs(currentConfigs) ||
+      (legacyCodingPlanMetadata.version
+        ? getCodingPlanConfig(legacyCodingPlanMetadata.baseUrl)
+        : undefined);
 
-    // Get the region (default to CHINA if not set)
-    const region = mergedSettings.codingPlan?.region ?? CodingPlanRegion.CHINA;
+    if (!matchedPlan) {
+      return;
+    }
 
-    // Get the saved version for the current region
-    const savedVersion = mergedSettings.codingPlan?.version;
+    const metadata = getPlanMetadata(settings, matchedPlan.metadataKey);
+    const savedVersion = metadata.version;
 
-    // If no version is stored, user hasn't used Coding Plan yet - skip check
     if (!savedVersion) {
       return;
     }
 
-    // Get current version for the region
-    const currentVersion = getCodingPlanConfig(region).version;
+    const currentPlan =
+      matchedPlan.id === 'token'
+        ? getTokenPlanConfig()
+        : getCodingPlanConfig(metadata.baseUrl || matchedPlan.baseUrl);
 
-    // Check if version matches
-    if (savedVersion !== currentVersion) {
+    if (savedVersion !== currentPlan.version) {
       setUpdateRequest({
         prompt: t(
-          'New model configurations are available for {{region}}. Update now?',
-          { region: t('Alibaba Cloud Coding Plan') },
+          'New model configurations are available for {{plan}}. Update now?',
+          { plan: t(currentPlan.displayName) },
         ),
         onConfirm: async (confirmed: boolean) => {
           setUpdateRequest(undefined);
           if (confirmed) {
-            await executeUpdate(region);
+            await executeUpdate(currentPlan);
           }
         },
       });
     }
   }, [settings, executeUpdate]);
 
-  // Check for updates on mount
   useEffect(() => {
     checkForUpdates();
   }, [checkForUpdates]);

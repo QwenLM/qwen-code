@@ -18,11 +18,10 @@ import type {
   PluginChoiceRequest,
 } from '../types.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
-import type { ExternalAuthState, QwenAuthState } from '../hooks/useQwenAuth.js';
+import type { AuthUiState } from '../auth/useAuth.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
 import type {
-  AuthType,
   IdeContext,
   ApprovalMode,
   IdeInfo,
@@ -43,14 +42,8 @@ export interface UIState {
   historyManager: UseHistoryManagerReturn;
   isThemeDialogOpen: boolean;
   themeError: string | null;
-  isAuthenticating: boolean;
+  auth: AuthUiState;
   isConfigInitialized: boolean;
-  authError: string | null;
-  isAuthDialogOpen: boolean;
-  pendingAuthType: AuthType | undefined;
-  externalAuthState: ExternalAuthState | null;
-  // Qwen OAuth state
-  qwenAuthState: QwenAuthState;
   editorError: string | null;
   isEditorDialogOpen: boolean;
   debugMessage: string;

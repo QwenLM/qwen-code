@@ -5,8 +5,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AuthType, type Config } from '@qwen-code/qwen-code-core';
-import type { LoadedSettings } from '../../config/settings.js';
 import {
   buildOpenRouterAuthorizationUrl,
   createOpenRouterOAuthSession,
@@ -24,7 +22,6 @@ import {
   runOpenRouterOAuthLogin,
   selectRecommendedOpenRouterModels,
   startOAuthCallbackListener,
-  applyOpenRouterModelsConfiguration,
 } from './openrouterOAuth.js';
 import { request } from 'node:http';
 
@@ -582,76 +579,6 @@ describe('openrouterOAuth', () => {
       'anthropic/claude-3.7-sonnet',
       'google/gemini-2.5-flash',
     ]);
-  });
-
-  it('applies OpenRouter configuration to settings and reloads providers', async () => {
-    const settings = {
-      merged: {
-        modelProviders: {
-          [AuthType.USE_OPENAI]: [
-            { id: 'custom/model', baseUrl: 'https://example.com/v1' },
-          ],
-        },
-      },
-      user: { settings: { modelProviders: {} }, path: '/user.json' },
-      workspace: { settings: {}, path: '/workspace.json' },
-      system: { settings: {}, path: '/system.json' },
-      systemDefaults: { settings: {}, path: '/system-defaults.json' },
-      setValue: vi.fn(),
-      forScope: vi.fn(),
-    } as unknown as LoadedSettings;
-    const config = {
-      reloadModelProvidersConfig: vi.fn(),
-    } as unknown as Config;
-    const fetchSpy = vi
-      .spyOn(
-        await import('./openrouterOAuth.js'),
-        'getOpenRouterModelsWithFallback',
-      )
-      .mockResolvedValue([
-        {
-          id: 'openai/gpt-4o-mini',
-          name: 'OpenRouter · GPT-4o mini',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-      ]);
-
-    const result = await applyOpenRouterModelsConfiguration({
-      settings,
-      config,
-      apiKey: 'or-key-123',
-      reloadConfig: true,
-    });
-
-    expect(settings.setValue).toHaveBeenCalledWith(
-      expect.anything(),
-      'env.OPENROUTER_API_KEY',
-      'or-key-123',
-    );
-
-    const modelProvidersCall = vi
-      .mocked(settings.setValue)
-      .mock.calls.find(
-        (call) => call[1] === `modelProviders.${AuthType.USE_OPENAI}`,
-      );
-    expect(modelProvidersCall).toBeDefined();
-    expect(modelProvidersCall?.[2]).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        }),
-        expect.objectContaining({
-          id: 'custom/model',
-          baseUrl: 'https://example.com/v1',
-        }),
-      ]),
-    );
-
-    expect(config.reloadModelProvidersConfig).toHaveBeenCalled();
-    expect(result.activeModelId).toBeDefined();
-    fetchSpy.mockRestore();
   });
 
   it('prefers the default OpenRouter model when it remains enabled', () => {

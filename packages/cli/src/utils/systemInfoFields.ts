@@ -6,7 +6,8 @@
 
 import type { ExtendedSystemInfo } from './systemInfo.js';
 import { t } from '../i18n/index.js';
-import { isCodingPlanConfig } from '@qwen-code/qwen-code-core';
+import { findCodingPlanConfig } from '../auth/providers/alibaba/codingPlan.js';
+import { findTokenPlanConfig } from '../auth/providers/alibaba/tokenPlan.js';
 
 /**
  * Field configuration for system information display
@@ -90,8 +91,11 @@ function formatAuth(info: ExtendedSystemInfo): string {
     return '';
   }
 
-  if (isCodingPlanConfig(info.baseUrl, info.apiKeyEnvKey)) {
-    return t('Alibaba Cloud Coding Plan');
+  const managedPlan =
+    findCodingPlanConfig(info.baseUrl, info.apiKeyEnvKey) ||
+    findTokenPlanConfig(info.baseUrl, info.apiKeyEnvKey);
+  if (managedPlan) {
+    return t(managedPlan.title);
   }
 
   if (

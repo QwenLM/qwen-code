@@ -15,10 +15,9 @@ import {
 } from './useAuth.js';
 import {
   OPENROUTER_OAUTH_CALLBACK_URL,
-  applyOpenRouterModelsConfiguration,
   createOpenRouterOAuthSession,
   runOpenRouterOAuthLogin,
-} from '../../commands/auth/openrouterOAuth.js';
+} from '../../auth/providers/oauth/openrouterOAuth.js';
 
 vi.mock('../hooks/useQwenAuth.js', () => ({
   useQwenAuth: vi.fn(() => ({
@@ -35,7 +34,7 @@ vi.mock('../../config/modelProvidersScope.js', () => ({
   getPersistScopeForModelSelection: vi.fn(() => 'user'),
 }));
 
-vi.mock('../../commands/auth/openrouterOAuth.js', () => ({
+vi.mock('../../auth/providers/oauth/openrouterOAuth.js', () => ({
   OPENROUTER_OAUTH_CALLBACK_URL: 'http://localhost:3000/openrouter/callback',
   createOpenRouterOAuthSession: vi.fn(() => ({
     callbackUrl: 'http://localhost:3000/openrouter/callback',
@@ -44,18 +43,20 @@ vi.mock('../../commands/auth/openrouterOAuth.js', () => ({
     authorizationUrl:
       'https://openrouter.ai/auth?callback_url=http%3A%2F%2Flocalhost%3A3000%2Fopenrouter%2Fcallback&code_challenge=test-challenge&state=test-state',
   })),
-  applyOpenRouterModelsConfiguration: vi.fn(async () => ({
-    updatedConfigs: [
-      {
-        id: 'openai/gpt-4o-mini:free',
-        name: 'OpenRouter · GPT-4o mini',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
-    ],
-    activeModelId: 'openai/gpt-4o-mini:free',
-    persistScope: 'user',
-  })),
+  getOpenRouterModelsWithFallback: vi.fn(async () => [
+    {
+      id: 'openai/gpt-4o-mini:free',
+      name: 'OpenRouter · GPT-4o mini',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      envKey: 'OPENROUTER_API_KEY',
+    },
+  ]),
+  getPreferredOpenRouterModelId: vi.fn((models) => models[0]?.id),
+  isOpenRouterConfig: vi.fn((model) =>
+    Boolean(model.baseUrl?.includes('openrouter.ai')),
+  ),
+  OPENROUTER_ENV_KEY: 'OPENROUTER_API_KEY',
+  selectRecommendedOpenRouterModels: vi.fn((models) => models),
   runOpenRouterOAuthLogin: vi.fn(
     () => new Promise(() => undefined) as Promise<{ apiKey: string }>,
   ),
@@ -202,14 +203,36 @@ describe('useAuthCommand', () => {
       await result.current.handleOpenRouterSubmit();
     });
 
-    expect(applyOpenRouterModelsConfiguration).toHaveBeenCalledWith(
-      expect.objectContaining({
-        settings: expect.anything(),
-        config: expect.anything(),
-        apiKey: 'oauth-key-123',
-        reloadConfig: true,
-      }),
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'env.OPENROUTER_API_KEY',
+      'oauth-key-123',
     );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'modelProviders.openai',
+      [
+        {
+          id: 'openai/gpt-4o-mini:free',
+          name: 'OpenRouter · GPT-4o mini',
+          baseUrl: 'https://openrouter.ai/api/v1',
+          envKey: 'OPENROUTER_API_KEY',
+        },
+      ],
+    );
+    expect(config.reloadModelProvidersConfig).toHaveBeenCalledWith({
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'openai/gpt-4o-mini:free',
+          name: 'OpenRouter · GPT-4o mini',
+          baseUrl: 'https://openrouter.ai/api/v1',
+          envKey: 'OPENROUTER_API_KEY',
+        },
+      ],
+    });
+    expect(config.refreshAuth).not.toHaveBeenCalled();
+    expect(result.current.authError).toBe(null);
+    expect(result.current.isAuthDialogOpen).toBe(false);
     expect(addItem).toHaveBeenCalledWith(
       expect.objectContaining({ text: 'Successfully configured OpenRouter.' }),
       expect.any(Number),
@@ -272,6 +295,140 @@ describe('useAuthCommand', () => {
     expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
   });
 
+  it('configures Token Plan with the independent Token Plan endpoint', async () => {
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+
+    await act(async () => {
+      await result.current.handleTokenPlanSubmit('sk-token-plan');
+    });
+
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'env.BAILIAN_TOKEN_PLAN_API_KEY',
+      'sk-token-plan',
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'modelProviders.openai',
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'qwen3.5-plus',
+          name: '[ModelStudio Token Plan] qwen3.5-plus',
+          baseUrl:
+            'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          envKey: 'BAILIAN_TOKEN_PLAN_API_KEY',
+        }),
+      ]),
+    );
+    expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+  });
+
+  it('configures Custom API Key via the provider install plan flow', async () => {
+    const settings = createSettings();
+    settings.merged.modelProviders = {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'old-custom',
+          name: 'old-custom',
+          baseUrl: 'https://api.example.com/v1',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_EXAMPLE_COM_V1',
+        },
+        {
+          id: 'preserved-model',
+          name: 'preserved-model',
+          baseUrl: 'https://api.other.com/v1',
+          envKey: 'OTHER_API_KEY',
+          generationConfig: { contextWindowSize: 999 },
+        },
+      ],
+    };
+    const config = createConfig();
+    const addItem = vi.fn();
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+
+    await act(async () => {
+      await result.current.handleCustomApiKeySubmit(
+        AuthType.USE_OPENAI,
+        ' https://api.example.com/v1 ',
+        ' sk-custom ',
+        'custom-model, custom-model-2, custom-model',
+        {
+          enableThinking: true,
+          multimodal: { image: true, video: false, audio: true },
+          maxTokens: 4096,
+        },
+      );
+    });
+
+    const envKey = 'QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_EXAMPLE_COM_V1';
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      `env.${envKey}`,
+      'sk-custom',
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'modelProviders.openai',
+      [
+        {
+          id: 'custom-model',
+          name: 'custom-model',
+          baseUrl: 'https://api.example.com/v1',
+          envKey,
+          generationConfig: {
+            modalities: { image: true, video: false, audio: true },
+            extra_body: { enable_thinking: true },
+            samplingParams: { max_tokens: 4096 },
+          },
+        },
+        {
+          id: 'custom-model-2',
+          name: 'custom-model-2',
+          baseUrl: 'https://api.example.com/v1',
+          envKey,
+          generationConfig: {
+            modalities: { image: true, video: false, audio: true },
+            extra_body: { enable_thinking: true },
+            samplingParams: { max_tokens: 4096 },
+          },
+        },
+        {
+          id: 'preserved-model',
+          name: 'preserved-model',
+          baseUrl: 'https://api.other.com/v1',
+          envKey: 'OTHER_API_KEY',
+          generationConfig: { contextWindowSize: 999 },
+        },
+      ],
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'security.auth.selectedType',
+      AuthType.USE_OPENAI,
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'model.name',
+      'custom-model',
+    );
+    expect(config.reloadModelProvidersConfig).toHaveBeenCalledWith({
+      [AuthType.USE_OPENAI]: expect.arrayContaining([
+        expect.objectContaining({ id: 'custom-model' }),
+        expect.objectContaining({ id: 'preserved-model' }),
+      ]),
+    });
+    expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+  });
+
   it('configures Alibaba standard regional endpoints via the shared API key provider flow', async () => {
     const settings = createSettings();
     settings.merged.modelProviders = {
@@ -285,6 +442,12 @@ describe('useAuthCommand', () => {
         {
           id: 'old-qwen',
           name: '[ModelStudio Standard] old-qwen',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          envKey: 'DASHSCOPE_API_KEY',
+        },
+        {
+          id: 'custom-dashscope-compatible',
+          name: '[Custom] custom-dashscope-compatible',
           baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
           envKey: 'DASHSCOPE_API_KEY',
         },
@@ -326,6 +489,12 @@ describe('useAuthCommand', () => {
           name: '[DeepSeek] deepseek-v4-flash',
           baseUrl: 'https://api.deepseek.com/v1',
           envKey: 'DEEPSEEK_API_KEY',
+        },
+        {
+          id: 'custom-dashscope-compatible',
+          name: '[Custom] custom-dashscope-compatible',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          envKey: 'DASHSCOPE_API_KEY',
         },
       ],
     );

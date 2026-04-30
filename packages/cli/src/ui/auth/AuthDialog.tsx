@@ -6,18 +6,32 @@
 
 import type React from 'react';
 import { useState } from 'react';
+import { AuthType } from '@qwen-code/qwen-code-core';
 import {
-  AuthType,
-  CodingPlanRegion,
+  CODING_PLAN_ENDPOINTS,
+  CODING_PLAN_OPTION,
   isCodingPlanConfig,
-} from '@qwen-code/qwen-code-core';
+  resolveCodingPlanEndpoint,
+  getCodingPlanConfig,
+} from '../../auth/providers/alibaba/codingPlan.js';
+import {
+  TOKEN_PLAN_OPTION,
+  getTokenPlanConfig,
+} from '../../auth/providers/alibaba/tokenPlan.js';
 import { Box, Text } from 'ink';
 import Link from 'ink-link';
+import { AlibabaModelStudioFlow } from './flows/AlibabaModelStudioFlow.js';
+import { CustomProviderFlow } from './flows/CustomProviderFlow.js';
+import { OAuthFlow } from './flows/OAuthFlow.js';
+import { ThirdPartyProvidersFlow } from './flows/ThirdPartyProvidersFlow.js';
 import { theme } from '../semantic-colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { DescriptiveRadioButtonSelect } from '../components/shared/DescriptiveRadioButtonSelect.js';
-import { ApiKeyInput } from '../components/ApiKeyInput.js';
-import { TextInput } from '../components/shared/TextInput.js';
+import {
+  CODING_PLAN_API_KEY_URL,
+  CODING_PLAN_INTL_API_KEY_URL,
+  type ApiKeyInputPlan,
+} from '../components/ApiKeyInput.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
@@ -29,12 +43,19 @@ import {
   type ApiKeyProviderId,
   type ApiKeyProviderRegion,
   type ApiKeyProviderRegionConfig,
-} from '../../constants/apiKeyProviders.js';
+} from '../../auth/setupMethods/apiKey/index.js';
 import {
   generateCustomApiKeyEnvKey,
   normalizeCustomModelIds,
   maskApiKey,
 } from './useAuth.js';
+import type {
+  ApiKeyOption,
+  MainOption,
+  OAuthOption,
+  SubscribeOption,
+  ViewLevel,
+} from './flows/AuthFlowTypes.js';
 
 const MODEL_PROVIDERS_DOCUMENTATION_URL =
   'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/';
@@ -50,32 +71,6 @@ function parseDefaultAuthType(
   }
   return null;
 }
-
-// Main menu option type
-type MainOption = 'OAUTH' | 'CODING_PLAN' | 'API_KEY';
-type PresetApiKeyOption = (typeof API_KEY_PROVIDER_OPTIONS)[number]['option'];
-type ApiKeyOption = 'OPENROUTER_OAUTH' | PresetApiKeyOption | 'CUSTOM_API_KEY';
-type OAuthOption =
-  | 'OPENROUTER_OAUTH'
-  | 'MODELSCOPE_OAUTH'
-  | 'QWEN_OAUTH_DISCONTINUED';
-
-// View level for navigation
-type ViewLevel =
-  | 'main'
-  | 'region-select'
-  | 'api-key-input'
-  | 'api-key-type-select'
-  | 'preset-api-key-region-select'
-  | 'preset-api-key-input'
-  | 'preset-model-id-input'
-  | 'custom-protocol-select'
-  | 'custom-base-url-input'
-  | 'custom-api-key-input'
-  | 'custom-model-id-input'
-  | 'custom-advanced-config'
-  | 'custom-review-json'
-  | 'oauth-provider-select';
 
 function getDefaultRegion(
   provider: ApiKeyProviderConfig,
@@ -112,23 +107,30 @@ function getProviderDocumentationUrl(
 }
 
 export function AuthDialog(): React.JSX.Element {
-  const { pendingAuthType, authError } = useUIState();
   const {
-    handleAuthSelect: onAuthSelect,
-    handleCodingPlanSubmit,
-    handleApiKeyProviderSubmit,
-    handleOpenRouterSubmit,
-    handleCustomApiKeySubmit,
-    onAuthError,
+    auth: { pendingAuthType, authError },
+  } = useUIState();
+  const {
+    auth: {
+      handleAuthSelect: onAuthSelect,
+      handleSubscriptionPlanSubmit,
+      handleApiKeyProviderSubmit,
+      handleOpenRouterSubmit,
+      handleCustomApiKeySubmit,
+      onAuthError,
+    },
   } = useUIActions();
   const config = useConfig();
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
-  const [regionIndex, setRegionIndex] = useState<number>(0);
-  const [region, setRegion] = useState<CodingPlanRegion>(
-    CodingPlanRegion.CHINA,
+  const [baseUrlIndex, setBaseUrlIndex] = useState<number>(0);
+  const [baseUrl, setBaseUrl] = useState<string>(
+    CODING_PLAN_ENDPOINTS[0].baseUrl,
   );
+  const [activeSubscriptionPlan, setActiveSubscriptionPlan] = useState<
+    'coding' | 'token'
+  >('coding');
   const [presetApiKeyRegionIndex, setPresetApiKeyRegionIndex] =
     useState<number>(0);
   const [apiKeyTypeIndex, setApiKeyTypeIndex] = useState<number>(0);
@@ -171,70 +173,64 @@ export function AuthDialog(): React.JSX.Element {
   const [focusedConfigIndex, setFocusedConfigIndex] = useState(0);
   // 0 = thinking, 1 = modality
 
-  // Main authentication entries (flat three-option layout)
+  // Main authentication entries mirror the four user-facing flows from the design doc.
   const mainItems = [
     {
-      key: 'CODING_PLAN',
-      title: t('Alibaba Cloud Coding Plan'),
-      label: t('Alibaba Cloud Coding Plan'),
+      key: 'ALIBABA_MODELSTUDIO',
+      title: t('Alibaba ModelStudio'),
+      label: t('Alibaba ModelStudio'),
       description: t(
-        'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models',
+        'Official recommended setup: Coding Plan, Token Plan, or Standard API Key',
       ),
-      value: 'CODING_PLAN' as MainOption,
+      value: 'ALIBABA_MODELSTUDIO' as MainOption,
     },
     {
-      key: 'API_KEY',
-      title: t('API Key'),
-      label: t('API Key'),
-      description: t('Bring your own API key'),
-      value: 'API_KEY' as MainOption,
+      key: 'THIRD_PARTY_PROVIDERS',
+      title: t('Third-party Providers'),
+      label: t('Third-party Providers'),
+      description: t('Choose a built-in provider and connect with an API key'),
+      value: 'THIRD_PARTY_PROVIDERS' as MainOption,
     },
     {
       key: 'OAUTH',
       title: t('OAuth'),
       label: t('OAuth'),
       description: t(
-        'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)',
+        'Open a browser, sign in, and let the CLI finish provider setup',
       ),
       value: 'OAUTH' as MainOption,
     },
+    {
+      key: 'CUSTOM_PROVIDER',
+      title: t('Custom Provider'),
+      label: t('Custom Provider'),
+      description: t(
+        'Manually connect a local server, proxy, or unsupported provider',
+      ),
+      value: 'CUSTOM_PROVIDER' as MainOption,
+    },
   ];
 
-  // Region selection entries (shown after selecting Alibaba Cloud Coding Plan)
-  const regionItems = [
-    {
-      key: 'china',
-      title: '阿里云百炼 (aliyun.com)',
-      label: '阿里云百炼 (aliyun.com)',
-      description: (
-        <Link
-          url="https://help.aliyun.com/zh/model-studio/coding-plan"
-          fallback={false}
-        >
-          <Text color={theme.text.secondary}>
-            https://help.aliyun.com/zh/model-studio/coding-plan
-          </Text>
-        </Link>
-      ),
-      value: CodingPlanRegion.CHINA,
-    },
-    {
-      key: 'global',
-      title: 'Alibaba Cloud (alibabacloud.com)',
-      label: 'Alibaba Cloud (alibabacloud.com)',
-      description: (
-        <Link
-          url="https://www.alibabacloud.com/help/en/model-studio/coding-plan"
-          fallback={false}
-        >
-          <Text color={theme.text.secondary}>
-            https://www.alibabacloud.com/help/en/model-studio/coding-plan
-          </Text>
-        </Link>
-      ),
-      value: CodingPlanRegion.GLOBAL,
-    },
-  ];
+  const subscriptionPlanOptions = [CODING_PLAN_OPTION, TOKEN_PLAN_OPTION];
+  const subscriptionPlanItems = subscriptionPlanOptions.map((plan) => ({
+    key: plan.option,
+    title: t(plan.title),
+    label: t(plan.title),
+    description: t(plan.description),
+    value: plan.option as SubscribeOption,
+  }));
+
+  const baseUrlItems = CODING_PLAN_ENDPOINTS.map((endpoint) => ({
+    key: endpoint.baseUrl,
+    title: t(endpoint.title),
+    label: t(endpoint.title),
+    description: (
+      <Link url={endpoint.documentationUrl} fallback={false}>
+        <Text color={theme.text.secondary}>{endpoint.baseUrl}</Text>
+      </Link>
+    ),
+    value: endpoint.baseUrl,
+  }));
 
   const presetApiKeyRegionItems =
     presetApiKeyProvider.regions?.map((regionConfig) => ({
@@ -281,24 +277,28 @@ export function AuthDialog(): React.JSX.Element {
     [AuthType.USE_GEMINI]: 'https://generativelanguage.googleapis.com',
   };
 
-  const apiKeyTypeItems = [
-    ...API_KEY_PROVIDER_OPTIONS.map((provider) => ({
-      key: provider.option,
-      title: t(provider.title),
-      label: t(provider.title),
-      description: t(provider.description),
-      value: provider.option as ApiKeyOption,
-    })),
+  const alibabaModelStudioItems = [
+    ...subscriptionPlanItems,
     {
-      key: 'CUSTOM_API_KEY',
-      title: t('Custom API Key'),
-      label: t('Custom API Key'),
-      description: t(
-        'For other OpenAI / Anthropic / Gemini-compatible providers',
-      ),
-      value: 'CUSTOM_API_KEY' as ApiKeyOption,
+      key: API_KEY_PROVIDERS.alibabaStandard.option,
+      title: t(API_KEY_PROVIDERS.alibabaStandard.title),
+      label: t(API_KEY_PROVIDERS.alibabaStandard.title),
+      description: t(API_KEY_PROVIDERS.alibabaStandard.description),
+      value: API_KEY_PROVIDERS.alibabaStandard.option as
+        | SubscribeOption
+        | ApiKeyOption,
     },
   ];
+
+  const apiKeyTypeItems = API_KEY_PROVIDER_OPTIONS.filter(
+    (provider) => provider.id !== API_KEY_PROVIDERS.alibabaStandard.id,
+  ).map((provider) => ({
+    key: provider.option,
+    title: t(provider.title),
+    label: t(provider.title),
+    description: t(provider.description),
+    value: provider.option as ApiKeyOption,
+  }));
 
   const oauthProviderItems = [
     {
@@ -311,15 +311,6 @@ export function AuthDialog(): React.JSX.Element {
       value: 'OPENROUTER_OAUTH' as OAuthOption,
     },
     {
-      key: 'MODELSCOPE_OAUTH',
-      title: t('ModelScope'),
-      label: t('ModelScope'),
-      description: t(
-        'Browser OAuth · Auto-configure API key and ModelScope models',
-      ),
-      value: 'MODELSCOPE_OAUTH' as OAuthOption,
-    },
-    {
       key: 'QWEN_OAUTH_DISCONTINUED',
       title: t('Qwen'),
       label: t('Qwen'),
@@ -328,10 +319,7 @@ export function AuthDialog(): React.JSX.Element {
     },
   ];
 
-  // Map an AuthType to the corresponding main menu option.
-  // QWEN_OAUTH maps to 'OAUTH'; USE_OPENAI maps to:
-  // - CODING_PLAN when current config matches coding plan
-  // - API_KEY for other OpenAI / Anthropic / Gemini-compatible configs
+  // Map a saved auth type to the closest user-facing flow.
   const contentGenConfig = config.getContentGeneratorConfig();
   const isCurrentlyCodingPlan =
     isCodingPlanConfig(
@@ -341,9 +329,9 @@ export function AuthDialog(): React.JSX.Element {
   const authTypeToMainOption = (authType: AuthType): MainOption => {
     if (authType === AuthType.QWEN_OAUTH) return 'OAUTH';
     if (authType === AuthType.USE_OPENAI && isCurrentlyCodingPlan) {
-      return 'CODING_PLAN';
+      return 'ALIBABA_MODELSTUDIO';
     }
-    return 'API_KEY';
+    return 'THIRD_PARTY_PROVIDERS';
   };
 
   const initialAuthIndex = Math.max(
@@ -368,8 +356,8 @@ export function AuthDialog(): React.JSX.Element {
         return item.value === authTypeToMainOption(defaultAuthType);
       }
 
-      // Priority 4: default to OAUTH
-      return item.value === 'OAUTH';
+      // Priority 4: default to the official recommended flow.
+      return item.value === 'ALIBABA_MODELSTUDIO';
     }),
   );
 
@@ -377,13 +365,12 @@ export function AuthDialog(): React.JSX.Element {
     setErrorMessage(null);
     onAuthError(null);
 
-    if (value === 'CODING_PLAN') {
-      // Navigate to region selection
-      setViewLevel('region-select');
+    if (value === 'ALIBABA_MODELSTUDIO') {
+      setViewLevel('alibaba-modelstudio-select');
       return;
     }
 
-    if (value === 'API_KEY') {
+    if (value === 'THIRD_PARTY_PROVIDERS') {
       setViewLevel('api-key-type-select');
       return;
     }
@@ -393,7 +380,54 @@ export function AuthDialog(): React.JSX.Element {
       return;
     }
 
-    await onAuthSelect(value);
+    setCustomProtocolIndex(0);
+    setCustomProtocol(AuthType.USE_OPENAI);
+    setCustomBaseUrl('');
+    setCustomBaseUrlError(null);
+    setCustomApiKey('');
+    setCustomApiKeyError(null);
+    setCustomModelIds('');
+    setCustomModelIdsError(null);
+    setAdvancedThinkingEnabled(false);
+    setAdvancedModalityEnabled(false);
+    setFocusedConfigIndex(0);
+    setViewLevel('custom-protocol-select');
+  };
+
+  const handleAlibabaModelStudioSelect = async (
+    value: SubscribeOption | ApiKeyOption,
+  ) => {
+    const selectedPlan = subscriptionPlanOptions.find(
+      (plan) => plan.option === value,
+    );
+    if (selectedPlan) {
+      await handleSubscriptionPlanSelect(value as SubscribeOption);
+      return;
+    }
+
+    await handleApiKeyTypeSelect(value as ApiKeyOption);
+  };
+
+  const handleSubscriptionPlanSelect = async (value: SubscribeOption) => {
+    setErrorMessage(null);
+    onAuthError(null);
+
+    const selectedPlan = subscriptionPlanOptions.find(
+      (plan) => plan.option === value,
+    );
+    if (!selectedPlan) {
+      return;
+    }
+
+    setActiveSubscriptionPlan(selectedPlan.id);
+    if (selectedPlan.id === 'coding') {
+      setBaseUrl(CODING_PLAN_ENDPOINTS[0].baseUrl);
+      setBaseUrlIndex(0);
+      setViewLevel('base-url-select');
+      return;
+    }
+
+    setViewLevel('api-key-input');
   };
 
   const handleApiKeyTypeSelect = async (value: ApiKeyOption) => {
@@ -418,20 +452,6 @@ export function AuthDialog(): React.JSX.Element {
       );
       return;
     }
-
-    // Reset custom wizard state and go to protocol selection
-    setCustomProtocolIndex(0);
-    setCustomProtocol(AuthType.USE_OPENAI);
-    setCustomBaseUrl('');
-    setCustomBaseUrlError(null);
-    setCustomApiKey('');
-    setCustomApiKeyError(null);
-    setCustomModelIds('');
-    setCustomModelIdsError(null);
-    setAdvancedThinkingEnabled(false);
-    setAdvancedModalityEnabled(false);
-    setFocusedConfigIndex(0);
-    setViewLevel('custom-protocol-select');
   };
 
   const handleOAuthProviderSelect = async (value: OAuthOption) => {
@@ -453,25 +473,13 @@ export function AuthDialog(): React.JSX.Element {
       return;
     }
 
-    // Future: Add support for ModelScope OAuth when implemented
-    if (value === 'MODELSCOPE_OAUTH') {
-      // Currently not implemented, show message
-      setErrorMessage(
-        t(
-          'ModelScope OAuth is not yet implemented. Please select another option.',
-        ),
-      );
-      return;
-    }
-
-    // For other OAuth providers, you can extend the functionality here
     await onAuthSelect(AuthType.USE_OPENAI);
   };
 
-  const handleRegionSelect = async (selectedRegion: CodingPlanRegion) => {
+  const handleBaseUrlSelect = async (selectedBaseUrl: string) => {
     setErrorMessage(null);
     onAuthError(null);
-    setRegion(selectedRegion);
+    setBaseUrl(selectedBaseUrl);
     setViewLevel('api-key-input');
   };
 
@@ -494,8 +502,7 @@ export function AuthDialog(): React.JSX.Element {
       return;
     }
 
-    // Submit to parent for processing with region info
-    await handleCodingPlanSubmit(apiKey, region);
+    await handleSubscriptionPlanSubmit(activeSubscriptionPlan, apiKey, baseUrl);
   };
 
   const handlePresetApiKeySubmit = () => {
@@ -621,14 +628,20 @@ export function AuthDialog(): React.JSX.Element {
     setErrorMessage(null);
     onAuthError(null);
 
-    if (viewLevel === 'region-select') {
+    if (viewLevel === 'alibaba-modelstudio-select') {
       setViewLevel('main');
+    } else if (viewLevel === 'base-url-select') {
+      setViewLevel('alibaba-modelstudio-select');
     } else if (viewLevel === 'api-key-input') {
-      setViewLevel('region-select');
+      setViewLevel(
+        activeSubscriptionPlan === 'coding'
+          ? 'base-url-select'
+          : 'alibaba-modelstudio-select',
+      );
     } else if (viewLevel === 'api-key-type-select') {
       setViewLevel('main');
     } else if (viewLevel === 'custom-protocol-select') {
-      setViewLevel('api-key-type-select');
+      setViewLevel('main');
     } else if (viewLevel === 'custom-base-url-input') {
       setViewLevel('custom-protocol-select');
     } else if (viewLevel === 'custom-api-key-input') {
@@ -640,12 +653,18 @@ export function AuthDialog(): React.JSX.Element {
     } else if (viewLevel === 'custom-review-json') {
       setViewLevel('custom-advanced-config');
     } else if (viewLevel === 'preset-api-key-region-select') {
-      setViewLevel('api-key-type-select');
+      setViewLevel(
+        presetApiKeyProvider.id === API_KEY_PROVIDERS.alibabaStandard.id
+          ? 'alibaba-modelstudio-select'
+          : 'api-key-type-select',
+      );
     } else if (viewLevel === 'preset-api-key-input') {
       setViewLevel(
         presetApiKeyProvider.regions
           ? 'preset-api-key-region-select'
-          : 'api-key-type-select',
+          : presetApiKeyProvider.id === API_KEY_PROVIDERS.alibabaStandard.id
+            ? 'alibaba-modelstudio-select'
+            : 'api-key-type-select',
       );
     } else if (viewLevel === 'preset-model-id-input') {
       setViewLevel('preset-api-key-input');
@@ -658,7 +677,12 @@ export function AuthDialog(): React.JSX.Element {
     (key) => {
       if (key.name === 'escape') {
         // Handle Escape based on current view level
-        if (viewLevel === 'region-select') {
+        if (viewLevel === 'alibaba-modelstudio-select') {
+          handleGoBack();
+          return;
+        }
+
+        if (viewLevel === 'base-url-select') {
           handleGoBack();
           return;
         }
@@ -765,380 +789,43 @@ export function AuthDialog(): React.JSX.Element {
     </>
   );
 
-  // Render region selection for Alibaba Cloud Coding Plan
-  const renderRegionSelectView = () => (
-    <>
-      <Box marginTop={1}>
-        <Text color={theme.text.primary}>
-          {t('Choose based on where your account is registered')}
-        </Text>
-      </Box>
-      <Box marginTop={1}>
-        <DescriptiveRadioButtonSelect
-          items={regionItems}
-          initialIndex={regionIndex}
-          onSelect={handleRegionSelect}
-          onHighlight={(value) => {
-            const index = regionItems.findIndex((item) => item.value === value);
-            setRegionIndex(index);
-          }}
-          itemGap={1}
-        />
-      </Box>
-      <Box marginTop={1}>
-        <Text color={theme?.text?.secondary}>
-          {t('Enter to select, ↑↓ to navigate, Esc to go back')}
-        </Text>
-      </Box>
-    </>
-  );
+  const getSubscriptionApiKeyInputPlan = (): ApiKeyInputPlan => {
+    const plan =
+      activeSubscriptionPlan === 'token'
+        ? getTokenPlanConfig()
+        : getCodingPlanConfig(baseUrl);
+    const resolvedEndpoint = resolveCodingPlanEndpoint(baseUrl);
+    const apiKeyUrl =
+      plan.apiKeyUrl ||
+      (activeSubscriptionPlan === 'coding' &&
+      resolvedEndpoint.baseUrl === CODING_PLAN_ENDPOINTS[1].baseUrl
+        ? CODING_PLAN_INTL_API_KEY_URL
+        : CODING_PLAN_API_KEY_URL);
 
-  // Render API key input for coding-plan mode
-  const renderApiKeyInputView = () => (
-    <Box marginTop={1}>
-      <ApiKeyInput
-        onSubmit={handleApiKeyInputSubmit}
-        onCancel={handleGoBack}
-        region={region}
-      />
-    </Box>
-  );
-
-  const renderApiKeyTypeSelectView = () => (
-    <>
-      <Box marginTop={1}>
-        <DescriptiveRadioButtonSelect
-          items={apiKeyTypeItems}
-          initialIndex={apiKeyTypeIndex}
-          onSelect={handleApiKeyTypeSelect}
-          onHighlight={(value) => {
-            const index = apiKeyTypeItems.findIndex(
-              (item) => item.value === value,
-            );
-            setApiKeyTypeIndex(index);
-          }}
-          itemGap={1}
-        />
-      </Box>
-      <Box marginTop={1}>
-        <Text color={theme?.text?.secondary}>
-          {t('Enter to select, ↑↓ to navigate, Esc to go back')}
-        </Text>
-      </Box>
-    </>
-  );
-
-  const renderPresetApiKeyRegionSelectView = () => (
-    <>
-      <Box marginTop={1}>
-        <DescriptiveRadioButtonSelect
-          items={presetApiKeyRegionItems}
-          initialIndex={presetApiKeyRegionIndex}
-          onSelect={handlePresetApiKeyRegionSelect}
-          onHighlight={(value) => {
-            const index = presetApiKeyRegionItems.findIndex(
-              (item) => item.value === value,
-            );
-            setPresetApiKeyRegionIndex(index);
-          }}
-          itemGap={1}
-        />
-      </Box>
-      <Box marginTop={1}>
-        <Text color={theme?.text?.secondary}>
-          {t('Enter to select, ↑↓ to navigate, Esc to go back')}
-        </Text>
-      </Box>
-    </>
-  );
-
-  const renderPresetApiKeyInputView = () => {
-    const documentationUrl = getProviderDocumentationUrl(
-      presetApiKeyProvider,
-      presetApiKeyRegion,
-    );
-
-    return (
-      <Box marginTop={1} flexDirection="column">
-        <Box marginTop={1}>
-          <Text color={theme.text.secondary}>
-            Endpoint:{' '}
-            {getProviderEndpoint(presetApiKeyProvider, presetApiKeyRegion)}
-          </Text>
-        </Box>
-        {documentationUrl && (
-          <>
-            <Box marginTop={1}>
-              <Text color={theme.text.secondary}>{t('Documentation')}:</Text>
-            </Box>
-            <Box marginTop={0}>
-              <Link url={documentationUrl} fallback={false}>
-                <Text color={theme.text.link}>{documentationUrl}</Text>
-              </Link>
-            </Box>
-          </>
-        )}
-        <Box marginTop={1}>
-          <TextInput
-            value={presetApiKey}
-            onChange={(value) => {
-              setPresetApiKey(value);
-              if (presetApiKeyError) {
-                setPresetApiKeyError(null);
-              }
-            }}
-            onSubmit={handlePresetApiKeySubmit}
-            placeholder="sk-..."
-          />
-        </Box>
-        {presetApiKeyError && (
-          <Box marginTop={1}>
-            <Text color={theme.status.error}>{presetApiKeyError}</Text>
-          </Box>
-        )}
-        <Box marginTop={1}>
-          <Text color={theme.text.secondary}>
-            {t('Enter to submit, Esc to go back')}
-          </Text>
-        </Box>
-      </Box>
-    );
+    return {
+      apiKeyUrl,
+      helpText: t('You can get your {{plan}} API key here', {
+        plan: t(plan.displayName),
+      }),
+      placeholder: activeSubscriptionPlan === 'coding' ? 'sk-sp-...' : 'sk-...',
+      validate: (apiKey) =>
+        activeSubscriptionPlan === 'coding' &&
+        resolvedEndpoint.baseUrl === CODING_PLAN_ENDPOINTS[0].baseUrl &&
+        !apiKey.startsWith('sk-sp-')
+          ? t(
+              'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.',
+            )
+          : null,
+    };
   };
 
-  const renderPresetModelIdInputView = () => (
-    <Box marginTop={1} flexDirection="column">
-      <Box marginTop={1}>
-        <Text color={theme.text.secondary}>
-          {t(
-            'You can enter multiple model IDs, separated by commas. Examples: {{modelIds}}',
-            { modelIds: presetApiKeyProvider.defaultModelIds },
-          )}
-        </Text>
-      </Box>
-      <Box marginTop={1}>
-        <TextInput
-          value={presetModelId}
-          onChange={(value) => {
-            setPresetModelId(value);
-            if (presetModelIdError) {
-              setPresetModelIdError(null);
-            }
-          }}
-          onSubmit={handlePresetModelSubmit}
-          placeholder={presetApiKeyProvider.defaultModelIds}
-        />
-      </Box>
-      {presetModelIdError && (
-        <Box marginTop={1}>
-          <Text color={theme.status.error}>{presetModelIdError}</Text>
-        </Box>
-      )}
-      <Box marginTop={1}>
-        <Text color={theme.text.secondary}>
-          {t('Enter to submit, Esc to go back')}
-        </Text>
-      </Box>
-    </Box>
-  );
-
-  // Render custom protocol selection
-  const renderCustomProtocolSelectView = () => (
-    <>
-      <Box marginTop={1}>
-        <DescriptiveRadioButtonSelect
-          items={protocolItems}
-          initialIndex={customProtocolIndex}
-          onSelect={handleCustomProtocolSelect}
-          onHighlight={(value) => {
-            const index = protocolItems.findIndex(
-              (item) => item.value === value,
-            );
-            setCustomProtocolIndex(index);
-          }}
-          itemGap={1}
-        />
-      </Box>
-      <Box marginTop={1}>
-        <Text color={theme.text.secondary}>
-          {t('Enter to select, ↑↓ to navigate, Esc to go back')}
-        </Text>
-      </Box>
-    </>
-  );
-
-  // Render custom base URL input
-  const renderCustomBaseUrlInputView = () => (
-    <Box marginTop={1} flexDirection="column">
-      <Box marginTop={1}>
-        <Text color={theme.text.primary}>
-          {t('Enter the API endpoint for this protocol.')}
-        </Text>
-      </Box>
-      <Box marginTop={1}>
-        <TextInput
-          value={customBaseUrl}
-          onChange={(value) => {
-            setCustomBaseUrl(value);
-            if (customBaseUrlError) {
-              setCustomBaseUrlError(null);
-            }
-          }}
-          onSubmit={handleCustomBaseUrlSubmit}
-          placeholder="https://api.openai.com/v1"
-        />
-      </Box>
-      {customBaseUrlError && (
-        <Box marginTop={1}>
-          <Text color={theme.status.error}>{customBaseUrlError}</Text>
-        </Box>
-      )}
-      <Box marginTop={1}>
-        <Link url={MODEL_PROVIDERS_DOCUMENTATION_URL} fallback={false}>
-          <Text color={theme.text.link}>
-            {t(
-              'Need advanced generationConfig or capabilities? See documentation',
-            )}
-          </Text>
-        </Link>
-      </Box>
-      <Box marginTop={1}>
-        <Text color={theme.text.secondary}>
-          {t('Enter to submit, Esc to go back')}
-        </Text>
-      </Box>
-    </Box>
-  );
-
-  // Render custom API key input
-  const renderCustomApiKeyInputView = () => (
-    <Box marginTop={1} flexDirection="column">
-      <Box marginTop={1}>
-        <Text color={theme.text.primary}>
-          {t('Enter the API key for this endpoint.')}
-        </Text>
-      </Box>
-      <Box marginTop={1}>
-        <TextInput
-          value={customApiKey}
-          onChange={(value) => {
-            setCustomApiKey(value);
-            if (customApiKeyError) {
-              setCustomApiKeyError(null);
-            }
-          }}
-          onSubmit={handleCustomApiKeySubmitLocal}
-          placeholder="sk-..."
-        />
-      </Box>
-      {customApiKeyError && (
-        <Box marginTop={1}>
-          <Text color={theme.status.error}>{customApiKeyError}</Text>
-        </Box>
-      )}
-      <Box marginTop={1}>
-        <Text color={theme.text.secondary}>
-          {t('Enter to submit, Esc to go back')}
-        </Text>
-      </Box>
-    </Box>
-  );
-
-  // Render custom model ID input
-  const renderCustomModelIdInputView = () => (
-    <Box marginTop={1} flexDirection="column">
-      <Box marginTop={1}>
-        <Text color={theme.text.primary}>
-          {t('Enter one or more model IDs, separated by commas.')}
-        </Text>
-      </Box>
-      <Box marginTop={1}>
-        <TextInput
-          value={customModelIds}
-          onChange={(value) => {
-            setCustomModelIds(value);
-            if (customModelIdsError) {
-              setCustomModelIdsError(null);
-            }
-          }}
-          onSubmit={handleCustomModelIdSubmit}
-          placeholder="qwen/qwen3-coder,openai/gpt-4.1"
-        />
-      </Box>
-      {customModelIdsError && (
-        <Box marginTop={1}>
-          <Text color={theme.status.error}>{customModelIdsError}</Text>
-        </Box>
-      )}
-      <Box marginTop={1}>
-        <Text color={theme.text.secondary}>
-          {t('Enter to submit, Esc to go back')}
-        </Text>
-      </Box>
-    </Box>
-  );
-
-  // Render custom advanced config
-  const renderCustomAdvancedConfigView = () => {
-    const checkmark = (v: boolean) => (v ? '◉' : '○');
-    const cursor = (index: number) =>
-      focusedConfigIndex === index ? '›' : ' ';
-
-    return (
-      <Box marginTop={1} flexDirection="column">
-        <Box marginTop={1}>
-          <Text color={theme.text.primary}>
-            {t('Optional: configure advanced generation settings.')}
-          </Text>
-        </Box>
-        <Box marginTop={1} marginLeft={2}>
-          <Text
-            color={focusedConfigIndex === 0 ? theme.status.success : undefined}
-          >
-            {cursor(0)} {checkmark(advancedThinkingEnabled)}{' '}
-            {t('Enable thinking')}
-          </Text>
-        </Box>
-        <Box marginTop={0} marginLeft={4}>
-          <Text color={theme.text.secondary}>
-            {t(
-              'Allows the model to perform extended reasoning before responding.',
-            )}
-          </Text>
-        </Box>
-        <Box marginTop={1} marginLeft={2}>
-          <Text
-            color={focusedConfigIndex === 1 ? theme.status.success : undefined}
-          >
-            {cursor(1)} {checkmark(advancedModalityEnabled)}{' '}
-            {t('Enable modality')}
-          </Text>
-        </Box>
-        <Box marginTop={0} marginLeft={4}>
-          <Text color={theme.text.secondary}>
-            {t('Enables image, video, and audio input/output capabilities.')}
-          </Text>
-        </Box>
-        <Box marginTop={1}>
-          <Text color={theme.text.secondary}>
-            {t(
-              '\u2191\u2193 to navigate, Space to toggle, Enter to continue, Esc to go back',
-            )}
-          </Text>
-        </Box>
-      </Box>
-    );
-  };
-
-  // Render custom review JSON
-  const renderCustomReviewJsonView = () => {
+  const getCustomProviderPreviewJson = () => {
     const generatedEnvKey = generateCustomApiKeyEnvKey(
       customProtocol,
       customBaseUrl.trim(),
     );
     const normalizedIds = normalizeCustomModelIds(customModelIds);
     const maskedKey = maskApiKey(customApiKey);
-
-    // Build generationConfig preview lines
     const hasThinking = advancedThinkingEnabled;
     const hasModality = advancedModalityEnabled;
     const hasGenConfig = hasThinking || hasModality;
@@ -1173,76 +860,40 @@ export function AuthDialog(): React.JSX.Element {
       return entry;
     });
 
-    const preview = {
-      env: { [generatedEnvKey]: maskedKey },
-      modelProviders: {
-        [customProtocol]: modelEntries,
-      },
-      security: {
-        auth: {
-          selectedType: customProtocol,
+    return JSON.stringify(
+      {
+        env: { [generatedEnvKey]: maskedKey },
+        modelProviders: {
+          [customProtocol]: modelEntries,
+        },
+        security: {
+          auth: {
+            selectedType: customProtocol,
+          },
+        },
+        model: {
+          name: normalizedIds[0],
         },
       },
-      model: {
-        name: normalizedIds[0],
-      },
-    };
-
-    const jsonPreview = JSON.stringify(preview, null, 2);
-
-    return (
-      <Box marginTop={1} flexDirection="column">
-        <Box marginTop={1}>
-          <Text color={theme.text.primary}>
-            {t('The following JSON will be saved to settings.json:')}
-          </Text>
-        </Box>
-        <Box marginTop={1}>
-          <Text>{jsonPreview}</Text>
-        </Box>
-        <Box marginTop={1}>
-          <Text color={theme.text.secondary}>
-            {t('Enter to save, Esc to go back')}
-          </Text>
-        </Box>
-      </Box>
+      null,
+      2,
     );
   };
-
-  const renderOAuthProviderSelectView = () => (
-    <>
-      <Box marginTop={1}>
-        <DescriptiveRadioButtonSelect
-          items={oauthProviderItems}
-          initialIndex={oauthProviderIndex}
-          onSelect={handleOAuthProviderSelect}
-          onHighlight={(value) => {
-            const index = oauthProviderItems.findIndex(
-              (item) => item.value === value,
-            );
-            setOAuthProviderIndex(index);
-          }}
-          itemGap={1}
-        />
-      </Box>
-      <Box marginTop={1}>
-        <Text color={theme?.text?.secondary}>
-          {t('Enter to select, ↑↓ to navigate, Esc to go back')}
-        </Text>
-      </Box>
-    </>
-  );
 
   const getViewTitle = () => {
     switch (viewLevel) {
       case 'main':
         return t('Select Authentication Method');
-      case 'region-select':
-        return t('Select Region for Coding Plan');
+      case 'alibaba-modelstudio-select':
+        return t('Alibaba ModelStudio');
+      case 'base-url-select':
+        return t('Select Base URL for Coding Plan');
       case 'api-key-input':
-        return t('Enter Coding Plan API Key');
+        return activeSubscriptionPlan === 'token'
+          ? t('Enter Token Plan API Key')
+          : t('Enter Coding Plan API Key');
       case 'api-key-type-select':
-        return t('Select API Key Type');
+        return t('Select Third-party Provider');
       case 'preset-api-key-region-select':
         return t('Select Region for {{providerName}}', {
           providerName: presetApiKeyProvider.title,
@@ -1254,7 +905,7 @@ export function AuthDialog(): React.JSX.Element {
       case 'preset-model-id-input':
         return t('Enter Model IDs');
       case 'custom-protocol-select':
-        return t('Step 1/6 \u00B7 Protocol');
+        return t('Custom Provider · Step 1/6 · Protocol');
       case 'custom-base-url-input':
         return t('Step 2/6 \u00B7 Base URL');
       case 'custom-api-key-input':
@@ -1283,22 +934,131 @@ export function AuthDialog(): React.JSX.Element {
       <Text bold>{getViewTitle()}</Text>
 
       {viewLevel === 'main' && renderMainView()}
-      {viewLevel === 'region-select' && renderRegionSelectView()}
-      {viewLevel === 'api-key-input' && renderApiKeyInputView()}
-      {viewLevel === 'api-key-type-select' && renderApiKeyTypeSelectView()}
-      {viewLevel === 'preset-api-key-region-select' &&
-        renderPresetApiKeyRegionSelectView()}
-      {viewLevel === 'preset-api-key-input' && renderPresetApiKeyInputView()}
-      {viewLevel === 'preset-model-id-input' && renderPresetModelIdInputView()}
-      {viewLevel === 'custom-protocol-select' &&
-        renderCustomProtocolSelectView()}
-      {viewLevel === 'custom-base-url-input' && renderCustomBaseUrlInputView()}
-      {viewLevel === 'custom-api-key-input' && renderCustomApiKeyInputView()}
-      {viewLevel === 'custom-model-id-input' && renderCustomModelIdInputView()}
-      {viewLevel === 'custom-advanced-config' &&
-        renderCustomAdvancedConfigView()}
-      {viewLevel === 'custom-review-json' && renderCustomReviewJsonView()}
-      {viewLevel === 'oauth-provider-select' && renderOAuthProviderSelectView()}
+      <AlibabaModelStudioFlow
+        viewLevel={viewLevel}
+        items={alibabaModelStudioItems}
+        baseUrlItems={baseUrlItems}
+        baseUrlIndex={baseUrlIndex}
+        subscriptionApiKeyPlan={getSubscriptionApiKeyInputPlan()}
+        onSelect={handleAlibabaModelStudioSelect}
+        onBaseUrlSelect={handleBaseUrlSelect}
+        onBaseUrlHighlight={(value) => {
+          const index = baseUrlItems.findIndex((item) => item.value === value);
+          setBaseUrlIndex(index);
+        }}
+        onApiKeySubmit={handleApiKeyInputSubmit}
+        onBack={handleGoBack}
+      />
+      <ThirdPartyProvidersFlow
+        viewLevel={viewLevel}
+        items={apiKeyTypeItems}
+        initialIndex={apiKeyTypeIndex}
+        preset={{
+          providerTitle: presetApiKeyProvider.title,
+          providerDefaultModelIds: presetApiKeyProvider.defaultModelIds,
+          region: presetApiKeyRegion,
+          regionItems: presetApiKeyRegionItems,
+          regionIndex: presetApiKeyRegionIndex,
+          apiKey: presetApiKey,
+          apiKeyError: presetApiKeyError,
+          modelId: presetModelId,
+          modelIdError: presetModelIdError,
+          endpoint: getProviderEndpoint(
+            presetApiKeyProvider,
+            presetApiKeyRegion,
+          ),
+          documentationUrl: getProviderDocumentationUrl(
+            presetApiKeyProvider,
+            presetApiKeyRegion,
+          ),
+        }}
+        onSelect={handleApiKeyTypeSelect}
+        onHighlight={(value) => {
+          const index = apiKeyTypeItems.findIndex(
+            (item) => item.value === value,
+          );
+          setApiKeyTypeIndex(index);
+        }}
+        onRegionSelect={handlePresetApiKeyRegionSelect}
+        onRegionHighlight={(value) => {
+          const index = presetApiKeyRegionItems.findIndex(
+            (item) => item.value === value,
+          );
+          setPresetApiKeyRegionIndex(index);
+        }}
+        onApiKeyChange={(value) => {
+          setPresetApiKey(value);
+          if (presetApiKeyError) {
+            setPresetApiKeyError(null);
+          }
+        }}
+        onApiKeySubmit={handlePresetApiKeySubmit}
+        onModelIdChange={(value) => {
+          setPresetModelId(value);
+          if (presetModelIdError) {
+            setPresetModelIdError(null);
+          }
+        }}
+        onModelSubmit={handlePresetModelSubmit}
+      />
+      {viewLevel === 'oauth-provider-select' && (
+        <OAuthFlow
+          items={oauthProviderItems}
+          initialIndex={oauthProviderIndex}
+          onSelect={handleOAuthProviderSelect}
+          onHighlight={(value) => {
+            const index = oauthProviderItems.findIndex(
+              (item) => item.value === value,
+            );
+            setOAuthProviderIndex(index);
+          }}
+        />
+      )}
+      <CustomProviderFlow
+        viewLevel={viewLevel}
+        state={{
+          protocolItems,
+          protocolIndex: customProtocolIndex,
+          protocol: customProtocol,
+          baseUrl: customBaseUrl,
+          baseUrlError: customBaseUrlError,
+          apiKey: customApiKey,
+          apiKeyError: customApiKeyError,
+          modelIds: customModelIds,
+          modelIdsError: customModelIdsError,
+          focusedConfigIndex,
+          thinkingEnabled: advancedThinkingEnabled,
+          modalityEnabled: advancedModalityEnabled,
+          previewJson: getCustomProviderPreviewJson(),
+        }}
+        documentationUrl={MODEL_PROVIDERS_DOCUMENTATION_URL}
+        onProtocolSelect={handleCustomProtocolSelect}
+        onProtocolHighlight={(value) => {
+          const index = protocolItems.findIndex((item) => item.value === value);
+          setCustomProtocolIndex(index);
+        }}
+        onBaseUrlChange={(value) => {
+          setCustomBaseUrl(value);
+          if (customBaseUrlError) {
+            setCustomBaseUrlError(null);
+          }
+        }}
+        onBaseUrlSubmit={handleCustomBaseUrlSubmit}
+        onApiKeyChange={(value) => {
+          setCustomApiKey(value);
+          if (customApiKeyError) {
+            setCustomApiKeyError(null);
+          }
+        }}
+        onApiKeySubmit={handleCustomApiKeySubmitLocal}
+        onModelIdsChange={(value) => {
+          setCustomModelIds(value);
+          if (customModelIdsError) {
+            setCustomModelIdsError(null);
+          }
+        }}
+        onModelIdsSubmit={handleCustomModelIdSubmit}
+      />
 
       {(authError || errorMessage) && (
         <Box marginTop={1}>

@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ApiKeyProviderConfig } from './apiKeyProviders.js';
+import { defineApiKeyProvider } from '../../setupMethods/apiKey/defineApiKeyProvider.js';
 
-export const DEEPSEEK_API_KEY_PROVIDER = {
+export const DEEPSEEK_API_KEY_PROVIDER = defineApiKeyProvider({
   id: 'deepseek',
   option: 'DEEPSEEK_API_KEY',
   title: 'DeepSeek API Key',
@@ -16,4 +16,4 @@ export const DEEPSEEK_API_KEY_PROVIDER = {
   endpoint: 'https://api.deepseek.com/v1',
   defaultModelIds: 'deepseek-v4-flash,deepseek-v4-pro',
   documentationUrl: 'https://api-docs.deepseek.com/zh-cn/',
-} as const satisfies ApiKeyProviderConfig;
+});

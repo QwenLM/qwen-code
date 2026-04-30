@@ -15,15 +15,19 @@ const {
   mockForScope,
   mockBackupSettingsFile,
   mockLoadCliConfig,
+  mockReloadModelProvidersConfig,
 } = vi.hoisted(() => {
   const mockRefreshAuth = vi.fn();
+  const mockReloadModelProvidersConfig = vi.fn();
   return {
     mockRefreshAuth,
     mockSetValue: vi.fn(),
     mockForScope: vi.fn(() => ({ path: '/user.json' })),
     mockBackupSettingsFile: vi.fn(),
+    mockReloadModelProvidersConfig,
     mockLoadCliConfig: vi.fn(async () => ({
       refreshAuth: mockRefreshAuth,
+      reloadModelProvidersConfig: mockReloadModelProvidersConfig,
     })),
   };
 });
@@ -44,12 +48,54 @@ vi.mock('../../config/modelProvidersScope.js', () => ({
   getPersistScopeForModelSelection: vi.fn(() => 'user'),
 }));
 
+vi.mock('../../auth/providers/oauth/openrouter.js', () => ({
+  openRouterProvider: {
+    id: 'openrouter',
+    label: 'OpenRouter',
+    category: 'third-party',
+    protocol: 'openai',
+    setupMethods: [{ type: 'oauth' }],
+    ownsModel: (model: { baseUrl?: string }) =>
+      model.baseUrl === 'https://openrouter.ai/api/v1',
+  },
+  createOpenRouterProviderInstallPlan: vi.fn(async ({ apiKey }) => ({
+    providerId: 'openrouter',
+    authType: 'openai',
+    env: {
+      OPENROUTER_API_KEY: apiKey,
+    },
+    modelSelection: {
+      modelId: 'openai/gpt-4o-mini:free',
+    },
+    modelProviders: [
+      {
+        authType: 'openai',
+        models: [
+          {
+            id: 'openai/gpt-4o-mini:free',
+            name: 'OpenRouter · GPT-4o mini',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            envKey: 'OPENROUTER_API_KEY',
+          },
+          {
+            id: 'anthropic/claude-3.7-sonnet',
+            name: 'OpenRouter · Claude 3.7 Sonnet',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            envKey: 'OPENROUTER_API_KEY',
+          },
+        ],
+        mergeStrategy: 'prepend-and-remove-owned',
+      },
+    ],
+  })),
+}));
+
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
 }));
 
-vi.mock('./openrouterOAuth.js', () => ({
+vi.mock('../../auth/providers/oauth/openrouterOAuth.js', () => ({
   OPENROUTER_ENV_KEY: 'OPENROUTER_API_KEY',
   OPENROUTER_OAUTH_CALLBACK_URL: 'http://localhost:3000/openrouter/callback',
   createOpenRouterOAuthSession: vi.fn(() => ({
@@ -57,68 +103,11 @@ vi.mock('./openrouterOAuth.js', () => ({
     codeVerifier: 'test-verifier',
     authorizationUrl: 'https://openrouter.ai/auth?manual=1',
   })),
-  applyOpenRouterModelsConfiguration: vi.fn(async ({ settings, apiKey }) => {
-    process.env['OPENROUTER_API_KEY'] = apiKey;
-    settings.setValue('user', 'env.OPENROUTER_API_KEY', apiKey);
-    settings.setValue(
-      'user',
-      'security.auth.selectedType',
-      AuthType.USE_OPENAI,
-    );
-    settings.setValue('user', 'model.name', 'openai/gpt-4o-mini:free');
-    settings.setValue('user', `modelProviders.${AuthType.USE_OPENAI}`, [
-      {
-        id: 'openai/gpt-4o-mini:free',
-        name: 'OpenRouter · GPT-4o mini',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
-      {
-        id: 'anthropic/claude-3.7-sonnet',
-        name: 'OpenRouter · Claude 3.7 Sonnet',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
-      {
-        id: 'gpt-4.1',
-        name: 'OpenAI GPT-4.1',
-        baseUrl: 'https://api.openai.com/v1',
-        envKey: 'OPENAI_API_KEY',
-      },
-    ]);
-    return {
-      updatedConfigs: [
-        {
-          id: 'openai/gpt-4o-mini:free',
-          name: 'OpenRouter · GPT-4o mini',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-        {
-          id: 'anthropic/claude-3.7-sonnet',
-          name: 'OpenRouter · Claude 3.7 Sonnet',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-        {
-          id: 'gpt-4.1',
-          name: 'OpenAI GPT-4.1',
-          baseUrl: 'https://api.openai.com/v1',
-          envKey: 'OPENAI_API_KEY',
-        },
-      ],
-      activeModelId: 'openai/gpt-4o-mini:free',
-      persistScope: 'user',
-    };
-  }),
   runOpenRouterOAuthLogin: vi.fn(),
 }));
 
 import { loadSettings } from '../../config/settings.js';
-import {
-  applyOpenRouterModelsConfiguration,
-  runOpenRouterOAuthLogin,
-} from './openrouterOAuth.js';
+import { runOpenRouterOAuthLogin } from '../../auth/providers/oauth/openrouterOAuth.js';
 
 describe('handleQwenAuth openrouter', () => {
   beforeEach(() => {
@@ -207,12 +196,11 @@ describe('handleQwenAuth openrouter', () => {
         envKey: 'OPENAI_API_KEY',
       },
     ]);
-    expect(applyOpenRouterModelsConfiguration).toHaveBeenCalledWith(
+    expect(mockReloadModelProvidersConfig).toHaveBeenCalledWith(
       expect.objectContaining({
-        settings: expect.anything(),
-        config: expect.anything(),
-        apiKey: 'or-key-123',
-        reloadConfig: true,
+        [AuthType.USE_OPENAI]: expect.arrayContaining([
+          expect.objectContaining({ id: 'openai/gpt-4o-mini:free' }),
+        ]),
       }),
     );
     expect(mockRefreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
@@ -287,18 +275,17 @@ describe('handleQwenAuth openrouter', () => {
     expect(process.env['OPENROUTER_API_KEY']).toBe('oauth-key-123');
   });
 
-  it('delegates OpenRouter provider updates to the shared configuration helper', async () => {
+  it('applies OpenRouter provider updates through the shared installer', async () => {
     vi.mocked(loadSettings).mockReturnValue(createMockSettings({}));
 
     await handleQwenAuth('openrouter', { key: 'or-key-dynamic' });
 
-    expect(applyOpenRouterModelsConfiguration).toHaveBeenCalledWith(
-      expect.objectContaining({
-        settings: expect.anything(),
-        config: expect.anything(),
-        apiKey: 'or-key-dynamic',
-        reloadConfig: true,
-      }),
+    expect(mockSetValue).toHaveBeenCalledWith(
+      'user',
+      'env.OPENROUTER_API_KEY',
+      'or-key-dynamic',
     );
+    expect(mockReloadModelProvidersConfig).toHaveBeenCalled();
+    expect(mockRefreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
   });
 });

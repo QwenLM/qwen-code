@@ -15,40 +15,76 @@ import { UIActionsContext } from '../contexts/UIActionsContext.js';
 import type { UIState } from '../contexts/UIStateContext.js';
 import type { UIActions } from '../contexts/UIActionsContext.js';
 
-const createMockUIState = (overrides: Partial<UIState> = {}): UIState => {
-  // AuthDialog only uses authError and pendingAuthType
+type UIStateOverrides = Partial<UIState> & Partial<UIState['auth']>;
+
+type UIActionsOverrides = Partial<UIActions> & Partial<UIActions['auth']>;
+
+const createMockUIState = (overrides: UIStateOverrides = {}): UIState => {
   const baseState = {
-    authError: null,
-    pendingAuthType: undefined,
+    auth: {
+      authError: null,
+      isAuthDialogOpen: false,
+      isAuthenticating: false,
+      pendingAuthType: undefined,
+      externalAuthState: null,
+      qwenAuthState: {
+        deviceAuth: null,
+        authStatus: 'idle',
+        authMessage: null,
+      },
+    },
   } as Partial<UIState>;
 
   return {
     ...baseState,
     ...overrides,
+    auth: {
+      ...baseState.auth,
+      ...(overrides.auth ?? {}),
+      authError: overrides.auth?.authError ?? overrides.authError ?? null,
+      pendingAuthType:
+        overrides.auth?.pendingAuthType ?? overrides.pendingAuthType,
+    },
   } as UIState;
 };
 
-const createMockUIActions = (overrides: Partial<UIActions> = {}): UIActions => {
-  // AuthDialog only uses handleAuthSelect
-  const baseActions = {
+const createMockUIActions = (overrides: UIActionsOverrides = {}): UIActions => {
+  const { auth, ...topLevelOverrides } = overrides;
+  const authActions = {
     handleAuthSelect: vi.fn(),
-    handleCodingPlanSubmit: vi.fn(),
+    handleSubscriptionPlanSubmit: vi.fn(),
     handleApiKeyProviderSubmit: vi.fn(),
     handleOpenRouterSubmit: vi.fn(),
+    handleCustomApiKeySubmit: vi.fn(),
+    setAuthState: vi.fn(),
     onAuthError: vi.fn(),
-    handleRetryLastPrompt: vi.fn(),
-  } as Partial<UIActions>;
+    openAuthDialog: vi.fn(),
+    cancelAuthentication: vi.fn(),
+    ...auth,
+  } as UIActions['auth'];
+
+  for (const key of Object.keys(topLevelOverrides) as Array<
+    keyof UIActions['auth']
+  >) {
+    if (key in authActions) {
+      Object.assign(authActions, {
+        [key]: topLevelOverrides[key],
+      });
+      delete topLevelOverrides[key];
+    }
+  }
 
   return {
-    ...baseActions,
-    ...overrides,
+    auth: authActions,
+    handleRetryLastPrompt: vi.fn(),
+    ...topLevelOverrides,
   } as UIActions;
 };
 
 const renderAuthDialog = (
   settings: LoadedSettings,
-  uiStateOverrides: Partial<UIState> = {},
-  uiActionsOverrides: Partial<UIActions> = {},
+  uiStateOverrides: UIStateOverrides = {},
+  uiActionsOverrides: UIActionsOverrides = {},
   configAuthType: AuthType | undefined = undefined,
   configApiKey: string | undefined = undefined,
 ) => {
@@ -129,21 +165,15 @@ const navigateToCustomProtocolSelect = async (
   stdin: { write: (s: string) => void },
   lastFrame: () => string | undefined,
 ) => {
-  await waitForSelectedOption(lastFrame, 'OAuth');
-  await moveDownAndWaitForSelection(
+  await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+  await moveDownAndWaitForSelection(stdin, lastFrame, 'Third-party Providers');
+  await moveDownAndWaitForSelection(stdin, lastFrame, 'OAuth');
+  await moveDownAndWaitForSelection(stdin, lastFrame, 'Custom Provider');
+  await pressEnterAndWaitFor(
     stdin,
     lastFrame,
-    'Alibaba Cloud Coding Plan',
+    'Custom Provider · Step 1/6 · Protocol',
   );
-  await moveDownAndWaitForSelection(stdin, lastFrame, 'API Key');
-  await pressEnterAndWaitFor(stdin, lastFrame, 'Select API Key Type');
-  await waitForSelectedOption(
-    lastFrame,
-    'Alibaba Cloud ModelStudio Standard API Key',
-  );
-  await moveDownAndWaitForSelection(stdin, lastFrame, 'DeepSeek API Key');
-  await moveDownAndWaitForSelection(stdin, lastFrame, 'Custom API Key');
-  await pressEnterAndWaitFor(stdin, lastFrame, 'Step 1/6 · Protocol');
 };
 
 const navigateToCustomBaseUrlInput = async (
@@ -240,7 +270,10 @@ describe('AuthDialog', () => {
     );
 
     const { lastFrame } = renderAuthDialog(settings, {
-      authError: 'GEMINI_API_KEY  environment variable not found',
+      auth: {
+        ...createMockUIState().auth,
+        authError: 'GEMINI_API_KEY  environment variable not found',
+      },
     });
 
     expect(lastFrame()).toContain(
@@ -287,9 +320,9 @@ describe('AuthDialog', () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // Since the auth dialog shows API Key option now,
+      // Since the auth dialog shows a third-party provider flow now,
       // it won't show GEMINI_API_KEY messages
-      expect(lastFrame()).toContain('API Key');
+      expect(lastFrame()).toContain('Third-party Providers');
     });
 
     it('should not show the GEMINI_API_KEY message if QWEN_DEFAULT_AUTH_TYPE is set to something else', () => {
@@ -375,9 +408,9 @@ describe('AuthDialog', () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // Since the auth dialog shows API Key option now,
+      // Since the auth dialog shows a third-party provider flow now,
       // it won't show GEMINI_API_KEY messages
-      expect(lastFrame()).toContain('API Key');
+      expect(lastFrame()).toContain('Third-party Providers');
     });
   });
 
@@ -422,7 +455,7 @@ describe('AuthDialog', () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // QWEN_OAUTH maps to 'OAUTH' in the new three-option main menu
+      // QWEN_OAUTH maps to the OAuth entry in the four-flow main menu
       expect(lastFrame()).toContain('OAuth');
     });
 
@@ -462,8 +495,8 @@ describe('AuthDialog', () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // Default is Coding Plan (first option); Qwen OAuth is last (discontinued)
-      expect(lastFrame()).toContain('Alibaba Cloud Coding Plan');
+      // Default is Alibaba ModelStudio (first option); Qwen OAuth is under OAuth.
+      expect(lastFrame()).toContain('Alibaba ModelStudio');
     });
 
     it('should show an error and fall back to default if QWEN_DEFAULT_AUTH_TYPE is invalid', () => {
@@ -505,8 +538,8 @@ describe('AuthDialog', () => {
       const { lastFrame } = renderAuthDialog(settings);
 
       // Since the auth dialog doesn't show QWEN_DEFAULT_AUTH_TYPE errors anymore,
-      // it will just show the default OAuth option
-      expect(lastFrame()).toContain('OAuth');
+      // it will just show the default Alibaba ModelStudio option.
+      expect(lastFrame()).toContain('Alibaba ModelStudio');
     });
   });
 
@@ -604,7 +637,12 @@ describe('AuthDialog', () => {
 
     const { lastFrame, stdin, unmount } = renderAuthDialog(
       settings,
-      { authError: 'Initial error' },
+      {
+        auth: {
+          ...createMockUIState().auth,
+          authError: 'Initial error',
+        },
+      },
       { handleAuthSelect },
       undefined, // config.getAuthType() returns undefined
     );
@@ -673,7 +711,7 @@ describe('AuthDialog', () => {
     unmount();
   });
 
-  it('should show OpenRouter in API key options', async () => {
+  it('should go back from Coding Plan region selection to Alibaba ModelStudio', async () => {
     const settings: LoadedSettings = new LoadedSettings(
       {
         settings: { ui: { customThemes: {} }, mcpServers: {} },
@@ -710,20 +748,257 @@ describe('AuthDialog', () => {
     const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
     await wait();
 
-    // OAuth is selected by default, press Enter to enter OAuth provider list
-    stdin.write('\r');
-    await wait();
+    await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+    await pressEnterAndWaitFor(stdin, lastFrame, 'Alibaba ModelStudio');
+    await waitForSelectedOption(lastFrame, 'Alibaba Cloud Coding Plan');
+    await pressEnterAndWaitFor(
+      stdin,
+      lastFrame,
+      'Select Region for Coding Plan',
+    );
+    stdin.write('\u001b');
 
     await vi.waitFor(() => {
       const frame = lastFrame();
-      expect(frame).toContain('OpenRouter');
-      expect(frame).toContain('Browser OAuth');
+      expect(frame).toContain('Alibaba ModelStudio');
+      expect(frame).toContain('Alibaba Cloud Coding Plan');
+      expect(frame).toContain('Alibaba Cloud Token Plan');
     });
 
     unmount();
   });
 
-  it('should trigger OpenRouter OAuth from API key options', async () => {
+  it('should go back from third-party provider API key input to provider list', async () => {
+    const settings: LoadedSettings = new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        originalSettings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+    const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+    await wait();
+
+    await moveDownAndWaitForSelection(
+      stdin,
+      lastFrame,
+      'Third-party Providers',
+    );
+    await pressEnterAndWaitFor(stdin, lastFrame, 'Select Third-party Provider');
+    await waitForSelectedOption(lastFrame, 'DeepSeek API Key');
+    await pressEnterAndWaitFor(stdin, lastFrame, 'Enter DeepSeek API Key');
+    stdin.write('\u001b');
+
+    await vi.waitFor(() => {
+      const frame = lastFrame();
+      expect(frame).toContain('Select Third-party Provider');
+      expect(frame).toContain('DeepSeek API Key');
+    });
+
+    unmount();
+  });
+
+  it('should show preset providers in third-party provider options', async () => {
+    const settings: LoadedSettings = new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        originalSettings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+    const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+    await wait();
+
+    await moveDownAndWaitForSelection(
+      stdin,
+      lastFrame,
+      'Third-party Providers',
+    );
+    await pressEnterAndWaitFor(stdin, lastFrame, 'Select Third-party Provider');
+
+    await vi.waitFor(() => {
+      const frame = lastFrame();
+      expect(frame).toContain('DeepSeek API Key');
+      expect(frame).toContain('OpenAI API Key');
+      expect(frame).not.toContain('Alibaba Cloud ModelStudio Standard API Key');
+    });
+
+    unmount();
+  });
+
+  it('should show Alibaba ModelStudio access methods after selecting Alibaba ModelStudio', async () => {
+    const settings: LoadedSettings = new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        originalSettings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+    const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+    await wait();
+
+    await pressEnterAndWaitFor(stdin, lastFrame, 'Alibaba ModelStudio');
+
+    await vi.waitFor(() => {
+      const frame = lastFrame();
+      expect(frame).toContain('Alibaba Cloud Coding Plan');
+      expect(frame).toContain('Alibaba Cloud Token Plan');
+      expect(frame).toContain('Dedicated API key and base URL');
+    });
+
+    unmount();
+  });
+
+  it('should submit Token Plan through the shared subscription handler', async () => {
+    const handleSubscriptionPlanSubmit = vi.fn().mockResolvedValue(undefined);
+    const settings: LoadedSettings = new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        originalSettings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+    const { stdin, lastFrame, unmount } = renderAuthDialog(
+      settings,
+      {},
+      { handleSubscriptionPlanSubmit },
+    );
+    await wait();
+
+    await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+    stdin.write('\r');
+    await waitForSelectedOption(lastFrame, 'Alibaba Cloud Coding Plan');
+    await moveDownAndWaitForSelection(
+      stdin,
+      lastFrame,
+      'Alibaba Cloud Token Plan',
+    );
+    await pressEnterAndWaitFor(stdin, lastFrame, 'Enter Token Plan API Key');
+    await vi.waitFor(() => {
+      const frame = lastFrame();
+      expect(frame).toContain(
+        'You can get your Alibaba Cloud Token Plan API key here',
+      );
+      expect(frame).toContain('url=3029263');
+    });
+    await typeText(stdin, 'sk-token-plan');
+    stdin.write('\r');
+    await vi.waitFor(() => {
+      expect(handleSubscriptionPlanSubmit).toHaveBeenCalledWith(
+        'token',
+        'sk-token-plan',
+        'china',
+      );
+    });
+
+    unmount();
+  });
+
+  it('should trigger OpenRouter OAuth from OAuth provider options', async () => {
     const handleOpenRouterSubmit = vi.fn().mockResolvedValue(undefined);
     const settings: LoadedSettings = new LoadedSettings(
       {
@@ -758,17 +1033,21 @@ describe('AuthDialog', () => {
       new Set(),
     );
 
-    const { stdin, unmount } = renderAuthDialog(
+    const { stdin, lastFrame, unmount } = renderAuthDialog(
       settings,
       {},
       { handleOpenRouterSubmit },
     );
     await wait();
 
-    // OAuth is selected by default, press Enter to enter OAuth provider list
-    stdin.write('\r');
-    await wait();
-    // OpenRouter is the first option, press Enter to trigger OAuth
+    await moveDownAndWaitForSelection(
+      stdin,
+      lastFrame,
+      'Third-party Providers',
+    );
+    await moveDownAndWaitForSelection(stdin, lastFrame, 'OAuth');
+    await pressEnterAndWaitFor(stdin, lastFrame, 'Select OAuth Provider');
+    await waitForSelectedOption(lastFrame, 'OpenRouter');
     stdin.write('\r');
     await wait();
 
@@ -828,20 +1107,8 @@ describe('AuthDialog Custom API Key Wizard', () => {
       const settings = createStandardSettings();
       const handleCustomApiKeySubmit = vi.fn();
 
-      const mockUIState = {
-        authError: null,
-        pendingAuthType: undefined,
-      } as UIState;
-
-      const mockUIActions = {
-        handleAuthSelect: vi.fn(),
-        handleCodingPlanSubmit: vi.fn(),
-        handleApiKeyProviderSubmit: vi.fn(),
-        handleOpenRouterSubmit: vi.fn(),
-        handleCustomApiKeySubmit,
-        onAuthError: vi.fn(),
-        handleRetryLastPrompt: vi.fn(),
-      } as unknown as UIActions;
+      const mockUIState = createMockUIState();
+      const mockUIActions = createMockUIActions({ handleCustomApiKeySubmit });
 
       const mockConfig = {
         getAuthType: vi.fn(() => undefined),
@@ -861,7 +1128,7 @@ describe('AuthDialog Custom API Key Wizard', () => {
 
       await vi.waitFor(() => {
         const frame = lastFrame();
-        expect(frame).toContain('Step 1/6 · Protocol');
+        expect(frame).toContain('Custom Provider · Step 1/6 · Protocol');
         expect(frame).toContain('OpenAI-compatible');
         expect(frame).toContain('Anthropic-compatible');
         expect(frame).toContain('Gemini-compatible');
@@ -877,20 +1144,8 @@ describe('AuthDialog Custom API Key Wizard', () => {
       const settings = createStandardSettings();
       const handleCustomApiKeySubmit = vi.fn();
 
-      const mockUIState = {
-        authError: null,
-        pendingAuthType: undefined,
-      } as UIState;
-
-      const mockUIActions = {
-        handleAuthSelect: vi.fn(),
-        handleCodingPlanSubmit: vi.fn(),
-        handleApiKeyProviderSubmit: vi.fn(),
-        handleOpenRouterSubmit: vi.fn(),
-        handleCustomApiKeySubmit,
-        onAuthError: vi.fn(),
-        handleRetryLastPrompt: vi.fn(),
-      } as unknown as UIActions;
+      const mockUIState = createMockUIState();
+      const mockUIActions = createMockUIActions({ handleCustomApiKeySubmit });
 
       const mockConfig = {
         getAuthType: vi.fn(() => undefined),
@@ -924,20 +1179,8 @@ describe('AuthDialog Custom API Key Wizard', () => {
       const settings = createStandardSettings();
       const handleCustomApiKeySubmit = vi.fn();
 
-      const mockUIState = {
-        authError: null,
-        pendingAuthType: undefined,
-      } as UIState;
-
-      const mockUIActions = {
-        handleAuthSelect: vi.fn(),
-        handleCodingPlanSubmit: vi.fn(),
-        handleApiKeyProviderSubmit: vi.fn(),
-        handleOpenRouterSubmit: vi.fn(),
-        handleCustomApiKeySubmit,
-        onAuthError: vi.fn(),
-        handleRetryLastPrompt: vi.fn(),
-      } as unknown as UIActions;
+      const mockUIState = createMockUIState();
+      const mockUIActions = createMockUIActions({ handleCustomApiKeySubmit });
 
       const mockConfig = {
         getAuthType: vi.fn(() => undefined),
@@ -981,20 +1224,8 @@ describe('AuthDialog Custom API Key Wizard', () => {
       const settings = createStandardSettings();
       const handleCustomApiKeySubmit = vi.fn().mockResolvedValue(undefined);
 
-      const mockUIState = {
-        authError: null,
-        pendingAuthType: undefined,
-      } as UIState;
-
-      const mockUIActions = {
-        handleAuthSelect: vi.fn(),
-        handleCodingPlanSubmit: vi.fn(),
-        handleApiKeyProviderSubmit: vi.fn(),
-        handleOpenRouterSubmit: vi.fn(),
-        handleCustomApiKeySubmit,
-        onAuthError: vi.fn(),
-        handleRetryLastPrompt: vi.fn(),
-      } as unknown as UIActions;
+      const mockUIState = createMockUIState();
+      const mockUIActions = createMockUIActions({ handleCustomApiKeySubmit });
 
       const mockConfig = {
         getAuthType: vi.fn(() => undefined),
@@ -1046,20 +1277,8 @@ describe('AuthDialog Custom API Key Wizard', () => {
       const settings = createStandardSettings();
       const handleCustomApiKeySubmit = vi.fn();
 
-      const mockUIState = {
-        authError: null,
-        pendingAuthType: undefined,
-      } as UIState;
-
-      const mockUIActions = {
-        handleAuthSelect: vi.fn(),
-        handleCodingPlanSubmit: vi.fn(),
-        handleApiKeyProviderSubmit: vi.fn(),
-        handleOpenRouterSubmit: vi.fn(),
-        handleCustomApiKeySubmit,
-        onAuthError: vi.fn(),
-        handleRetryLastPrompt: vi.fn(),
-      } as unknown as UIActions;
+      const mockUIState = createMockUIState();
+      const mockUIActions = createMockUIActions({ handleCustomApiKeySubmit });
 
       const mockConfig = {
         getAuthType: vi.fn(() => undefined),
@@ -1103,20 +1322,8 @@ describe('AuthDialog Custom API Key Wizard', () => {
       const settings = createStandardSettings();
       const handleCustomApiKeySubmit = vi.fn().mockResolvedValue(undefined);
 
-      const mockUIState = {
-        authError: null,
-        pendingAuthType: undefined,
-      } as UIState;
-
-      const mockUIActions = {
-        handleAuthSelect: vi.fn(),
-        handleCodingPlanSubmit: vi.fn(),
-        handleApiKeyProviderSubmit: vi.fn(),
-        handleOpenRouterSubmit: vi.fn(),
-        handleCustomApiKeySubmit,
-        onAuthError: vi.fn(),
-        handleRetryLastPrompt: vi.fn(),
-      } as unknown as UIActions;
+      const mockUIState = createMockUIState();
+      const mockUIActions = createMockUIActions({ handleCustomApiKeySubmit });
 
       const mockConfig = {
         getAuthType: vi.fn(() => undefined),

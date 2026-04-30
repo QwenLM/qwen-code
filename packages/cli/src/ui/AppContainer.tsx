@@ -59,7 +59,6 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { getStickyTodos } from './utils/todoSnapshot.js';
-import { validateAuthMethod } from '../config/auth.js';
 import { loadHierarchicalGeminiMemory } from '../config/config.js';
 import process from 'node:process';
 import { useHistory } from './hooks/useHistoryManager.js';
@@ -526,23 +525,15 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeSelect,
   } = useApprovalModeCommand(settings, config);
 
-  const {
-    setAuthState,
-    authError,
-    onAuthError,
-    isAuthDialogOpen,
-    isAuthenticating,
-    pendingAuthType,
-    externalAuthState,
-    qwenAuthState,
-    handleAuthSelect,
-    handleCodingPlanSubmit,
-    handleApiKeyProviderSubmit,
-    handleOpenRouterSubmit,
-    handleCustomApiKeySubmit,
-    openAuthDialog,
-    cancelAuthentication,
-  } = useAuthCommand(settings, config, historyManager.addItem, refreshStatic);
+  const auth = useAuthCommand(
+    settings,
+    config,
+    historyManager.addItem,
+    refreshStatic,
+  );
+  const { state: authState, actions: authActions } = auth;
+  const { onAuthError, openAuthDialog, handleAuthSelect } = authActions;
+  const { isAuthDialogOpen, isAuthenticating, pendingAuthType } = authState;
 
   useInitializationAuthError(initializationResult.authError, onAuthError);
 
@@ -573,22 +564,8 @@ export const AppContainer = (props: AppContainerProps) => {
           },
         ),
       );
-    } else if (!settings.merged.security?.auth?.useExternal) {
-      // If no authType is selected yet, allow the auth UI flow to prompt the user.
-      // Only validate credentials once a concrete authType exists.
-      if (currentAuthType) {
-        const error = validateAuthMethod(currentAuthType, config);
-        if (error) {
-          onAuthError(error);
-        }
-      }
     }
-  }, [
-    settings.merged.security?.auth?.enforcedType,
-    settings.merged.security?.auth?.useExternal,
-    config,
-    onAuthError,
-  ]);
+  }, [settings.merged.security?.auth?.enforcedType, config, onAuthError]);
 
   const [editorError, setEditorError] = useState<string | null>(null);
   const {
@@ -2260,14 +2237,8 @@ export const AppContainer = (props: AppContainerProps) => {
       historyManager,
       isThemeDialogOpen,
       themeError,
-      isAuthenticating,
+      auth: authState,
       isConfigInitialized,
-      authError,
-      isAuthDialogOpen,
-      pendingAuthType,
-      externalAuthState,
-      // Qwen OAuth state
-      qwenAuthState,
       editorError,
       isEditorDialogOpen,
       debugMessage,
@@ -2381,14 +2352,8 @@ export const AppContainer = (props: AppContainerProps) => {
     [
       isThemeDialogOpen,
       themeError,
-      isAuthenticating,
+      authState,
       isConfigInitialized,
-      authError,
-      isAuthDialogOpen,
-      pendingAuthType,
-      externalAuthState,
-      // Qwen OAuth state
-      qwenAuthState,
       editorError,
       isEditorDialogOpen,
       debugMessage,
@@ -2510,14 +2475,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
-      handleAuthSelect,
-      setAuthState,
-      onAuthError,
-      cancelAuthentication,
-      handleCodingPlanSubmit,
-      handleApiKeyProviderSubmit,
-      handleOpenRouterSubmit,
-      handleCustomApiKeySubmit,
+      auth: authActions,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
@@ -2584,14 +2542,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
-      handleAuthSelect,
-      setAuthState,
-      onAuthError,
-      cancelAuthentication,
-      handleCodingPlanSubmit,
-      handleApiKeyProviderSubmit,
-      handleOpenRouterSubmit,
-      handleCustomApiKeySubmit,
+      authActions,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,

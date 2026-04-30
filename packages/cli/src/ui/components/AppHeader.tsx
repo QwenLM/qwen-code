@@ -5,7 +5,9 @@
  */
 
 import { Box } from 'ink';
-import { AuthType, isCodingPlanConfig } from '@qwen-code/qwen-code-core';
+import { AuthType } from '@qwen-code/qwen-code-core';
+import { isCodingPlanConfig } from '../../auth/providers/alibaba/codingPlan.js';
+import { isTokenPlanConfig } from '../../auth/providers/alibaba/tokenPlan.js';
 import { Header, AuthDisplayType } from './Header.js';
 import { Tips } from './Tips.js';
 import { useSettings } from '../contexts/SettingsContext.js';
@@ -28,8 +30,10 @@ function getAuthDisplayType(
     return AuthDisplayType.UNKNOWN;
   }
 
-  // Check if it's a Coding Plan config
-  if (isCodingPlanConfig(baseUrl, apiKeyEnvKey)) {
+  if (
+    isCodingPlanConfig(baseUrl, apiKeyEnvKey) ||
+    isTokenPlanConfig(baseUrl, apiKeyEnvKey)
+  ) {
     return AuthDisplayType.CODING_PLAN;
   }
 

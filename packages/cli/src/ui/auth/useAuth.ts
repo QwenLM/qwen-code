@@ -4,23 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  Config,
-  ContentGeneratorConfig,
-  ModelProvidersConfig,
-  ProviderModelConfig,
-} from '@qwen-code/qwen-code-core';
 import {
   AuthEvent,
   AuthType,
   getErrorMessage,
   logAuth,
-  getCodingPlanConfig,
-  isCodingPlanConfig,
-  CodingPlanRegion,
-  CODING_PLAN_ENV_KEY,
+  type Config,
+  type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 // OpenAICredentials type (previously imported from OpenAIKeyPrompt)
@@ -33,21 +25,42 @@ import { useQwenAuth } from '../hooks/useQwenAuth.js';
 import { AuthState, MessageType } from '../types.js';
 import type { HistoryItem } from '../types.js';
 import { t } from '../../i18n/index.js';
-import { backupSettingsFile } from '../../utils/settingsUtils.js';
 import {
   API_KEY_PROVIDERS,
-  getApiKeyProviderEndpoint,
-  isApiKeyProviderConfig,
   type ApiKeyProviderId,
   type ApiKeyProviderConfig,
   type ApiKeyProviderRegion,
-} from '../../constants/apiKeyProviders.js';
+} from '../../auth/setupMethods/apiKey/index.js';
 import {
-  applyOpenRouterModelsConfiguration,
   createOpenRouterOAuthSession,
   OPENROUTER_OAUTH_CALLBACK_URL,
   runOpenRouterOAuthLogin,
-} from '../../commands/auth/openrouterOAuth.js';
+} from '../../auth/providers/oauth/openrouterOAuth.js';
+import { applyProviderInstallPlan } from '../../auth/install/applyProviderInstallPlan.js';
+import {
+  createCustomProviderInstallPlan,
+  customProvider,
+} from '../../auth/providers/custom/index.js';
+import {
+  createOpenRouterProviderInstallPlan,
+  openRouterProvider,
+} from '../../auth/providers/oauth/openrouter.js';
+import {
+  codingPlanProvider,
+  createCodingPlanInstallPlan,
+  getCodingPlanConfig,
+  type CodingPlanConfig,
+} from '../../auth/providers/alibaba/codingPlan.js';
+import {
+  createTokenPlanInstallPlan,
+  getTokenPlanConfig,
+  tokenPlanProvider,
+  type TokenPlanConfig,
+} from '../../auth/providers/alibaba/tokenPlan.js';
+import {
+  createApiKeyLlmProvider,
+  createApiKeyProviderInstallPlan,
+} from '../../auth/setupMethods/apiKey/index.js';
 
 /**
  * Generate a Qwen-managed env key from protocol and base URL.
@@ -90,20 +103,64 @@ export function maskApiKey(apiKey: string): string {
   return `${head}...${tail}`;
 }
 
-function buildApiKeyProviderModelConfigs(
-  provider: ApiKeyProviderConfig,
-  modelIds: string[],
-  baseUrl: string,
-): ProviderModelConfig[] {
-  return modelIds.map((modelId) => ({
-    id: modelId,
-    name: `[${provider.modelNamePrefix}] ${modelId}`,
-    baseUrl,
-    envKey: provider.envKey,
-  }));
-}
-
 export type { QwenAuthState } from '../hooks/useQwenAuth.js';
+
+export type AuthUiState = {
+  authError: string | null;
+  isAuthDialogOpen: boolean;
+  isAuthenticating: boolean;
+  pendingAuthType: AuthType | undefined;
+  externalAuthState: {
+    title: string;
+    message: string;
+    detail?: string;
+  } | null;
+  qwenAuthState: ReturnType<typeof useQwenAuth>['qwenAuthState'];
+};
+
+export type AuthController = {
+  state: AuthUiState;
+  actions: {
+    setAuthState: (state: AuthState) => void;
+    onAuthError: (error: string | null) => void;
+    handleAuthSelect: (
+      authType: AuthType | undefined,
+      credentials?: OpenAICredentials,
+    ) => Promise<void>;
+    handleSubscriptionPlanSubmit: (
+      planId: 'coding' | 'token',
+      apiKey: string,
+      baseUrl?: string,
+    ) => Promise<void>;
+    handleApiKeyProviderSubmit: (
+      providerId: ApiKeyProviderId,
+      apiKey: string,
+      modelIdsInput: string,
+      region?: ApiKeyProviderRegion,
+    ) => Promise<void>;
+    handleOpenRouterSubmit: () => Promise<void>;
+    handleCustomApiKeySubmit: (
+      protocol:
+        | AuthType.USE_OPENAI
+        | AuthType.USE_ANTHROPIC
+        | AuthType.USE_GEMINI,
+      baseUrl: string,
+      apiKey: string,
+      modelIdsInput: string,
+      generationConfig?: {
+        enableThinking?: boolean;
+        multimodal?: {
+          image?: boolean;
+          video?: boolean;
+          audio?: boolean;
+        };
+        maxTokens?: number;
+      },
+    ) => Promise<void>;
+    openAuthDialog: () => void;
+    cancelAuthentication: () => void;
+  };
+};
 
 export const useAuthCommand = (
   settings: LoadedSettings,
@@ -172,50 +229,19 @@ export const useAuthCommand = (
   );
 
   const handleAuthSuccess = useCallback(
-    async (authType: AuthType, credentials?: OpenAICredentials) => {
-      try {
-        const authTypeScope = getPersistScopeForModelSelection(settings);
-
-        // Persist authType
-        settings.setValue(
-          authTypeScope,
-          'security.auth.selectedType',
-          authType,
-        );
-
-        // Persist model from ContentGenerator config (handles fallback cases)
-        // This ensures that when syncAfterAuthRefresh falls back to default model,
-        // it gets persisted to settings.json
-        const contentGeneratorConfig = config.getContentGeneratorConfig();
-        if (contentGeneratorConfig?.model) {
+    async (authType: AuthType) => {
+      if (authType === AuthType.QWEN_OAUTH) {
+        try {
+          const authTypeScope = getPersistScopeForModelSelection(settings);
           settings.setValue(
             authTypeScope,
-            'model.name',
-            contentGeneratorConfig.model,
+            'security.auth.selectedType',
+            authType,
           );
+        } catch (error) {
+          handleAuthFailure(error);
+          return;
         }
-
-        // Only update credentials if not switching to QWEN_OAUTH,
-        // so that OpenAI credentials are preserved when switching to QWEN_OAUTH.
-        if (authType !== AuthType.QWEN_OAUTH && credentials) {
-          if (credentials?.apiKey != null) {
-            settings.setValue(
-              authTypeScope,
-              'security.auth.apiKey',
-              credentials.apiKey,
-            );
-          }
-          if (credentials?.baseUrl != null) {
-            settings.setValue(
-              authTypeScope,
-              'security.auth.baseUrl',
-              credentials.baseUrl,
-            );
-          }
-        }
-      } catch (error) {
-        handleAuthFailure(error);
-        return;
       }
 
       setAuthError(null);
@@ -231,7 +257,7 @@ export const useAuthCommand = (
       addItem(
         {
           type: MessageType.INFO,
-          text: t('Authenticated successfully with {{authType}} credentials.', {
+          text: t('Authenticated successfully with {{authType}}.', {
             authType,
           }),
         },
@@ -246,10 +272,10 @@ export const useAuthCommand = (
   );
 
   const performAuth = useCallback(
-    async (authType: AuthType, credentials?: OpenAICredentials) => {
+    async (authType: AuthType) => {
       try {
         await config.refreshAuth(authType);
-        handleAuthSuccess(authType, credentials);
+        handleAuthSuccess(authType);
       } catch (e) {
         handleAuthFailure(e);
       }
@@ -308,34 +334,20 @@ export const useAuthCommand = (
       setIsAuthenticating(true);
 
       if (authType === AuthType.USE_OPENAI) {
-        if (credentials) {
-          // Pass settings.model.generationConfig to updateCredentials so it can be merged
-          // after clearing provider-sourced config. This ensures settings.json generationConfig
-          // fields (e.g., samplingParams, timeout) are preserved.
-          const settingsGenerationConfig = settings.merged.model
-            ?.generationConfig as Partial<ContentGeneratorConfig> | undefined;
-          config.updateCredentials(
-            {
-              apiKey: credentials.apiKey,
-              baseUrl: credentials.baseUrl,
-              model: credentials.model,
-            },
-            settingsGenerationConfig,
-          );
-          await performAuth(authType, credentials);
-        }
+        onAuthError(
+          t(
+            'Manual OpenAI-compatible setup has moved to provider setup. Choose a provider or use Custom API Key.',
+          ),
+        );
+        setIsAuthenticating(false);
+        setPendingAuthType(undefined);
+        setIsAuthDialogOpen(true);
         return;
       }
 
       await performAuth(authType);
     },
-    [
-      config,
-      performAuth,
-      isProviderManagedModel,
-      onAuthError,
-      settings.merged.model?.generationConfig,
-    ],
+    [performAuth, isProviderManagedModel, onAuthError],
   );
 
   const openAuthDialog = useCallback(() => {
@@ -371,132 +383,59 @@ export const useAuthCommand = (
     openRouterAuthAbortController,
   ]);
 
-  /**
-   * Handle coding plan submission - generates configs from template and stores api-key
-   * @param apiKey - The API key to store
-   * @param region - The region to use (default: CHINA)
-   */
-  const handleCodingPlanSubmit = useCallback(
-    async (
-      apiKey: string,
-      region: CodingPlanRegion = CodingPlanRegion.CHINA,
-    ) => {
+  const handleSubscriptionPlanSubmit = useCallback(
+    async (planId: 'coding' | 'token', apiKey: string, baseUrl?: string) => {
       try {
         setIsAuthenticating(true);
         setAuthError(null);
 
-        // Get configuration based on region
-        const { template, version } = getCodingPlanConfig(region);
+        const plan: CodingPlanConfig | TokenPlanConfig =
+          planId === 'token'
+            ? getTokenPlanConfig()
+            : getCodingPlanConfig(baseUrl);
+        const provider =
+          planId === 'token' ? tokenPlanProvider : codingPlanProvider;
+        const installPlan =
+          planId === 'token'
+            ? createTokenPlanInstallPlan({ apiKey })
+            : createCodingPlanInstallPlan({ apiKey, baseUrl });
+        await applyProviderInstallPlan(installPlan, {
+          settings,
+          config,
+          provider,
+        });
 
-        // Get persist scope
-        const persistScope = getPersistScopeForModelSelection(settings);
-
-        // Backup settings file before modification
-        const settingsFile = settings.forScope(persistScope);
-        backupSettingsFile(settingsFile.path);
-
-        // Store api-key in settings.env (unified env key)
-        settings.setValue(persistScope, `env.${CODING_PLAN_ENV_KEY}`, apiKey);
-
-        // Sync to process.env immediately so refreshAuth can read the apiKey
-        process.env[CODING_PLAN_ENV_KEY] = apiKey;
-
-        // Generate model configs from template
-        const newConfigs: ProviderModelConfig[] = template.map(
-          (templateConfig) => ({
-            ...templateConfig,
-            envKey: CODING_PLAN_ENV_KEY,
-          }),
-        );
-
-        // Get existing configs
-        const existingConfigs =
-          (
-            settings.merged.modelProviders as ModelProvidersConfig | undefined
-          )?.[AuthType.USE_OPENAI] || [];
-
-        // Filter out all existing Coding Plan configs (mutually exclusive)
-        const nonCodingPlanConfigs = existingConfigs.filter(
-          (existing) => !isCodingPlanConfig(existing.baseUrl, existing.envKey),
-        );
-
-        // Add new Coding Plan configs at the beginning
-        const updatedConfigs = [...newConfigs, ...nonCodingPlanConfigs];
-
-        // Persist to modelProviders
-        settings.setValue(
-          persistScope,
-          `modelProviders.${AuthType.USE_OPENAI}`,
-          updatedConfigs,
-        );
-
-        // Also persist authType
-        settings.setValue(
-          persistScope,
-          'security.auth.selectedType',
-          AuthType.USE_OPENAI,
-        );
-
-        // Persist coding plan region
-        settings.setValue(persistScope, 'codingPlan.region', region);
-
-        // Persist coding plan version (single field for backward compatibility)
-        settings.setValue(persistScope, 'codingPlan.version', version);
-
-        // If there are configs, use the first one as the model
-        if (updatedConfigs.length > 0 && updatedConfigs[0]?.id) {
-          settings.setValue(persistScope, 'model.name', updatedConfigs[0].id);
-        }
-
-        // Hot-reload model providers configuration before refreshAuth
-        // This ensures ModelsConfig has the latest configuration from settings.json
-        const updatedModelProviders: ModelProvidersConfig = {
-          ...(settings.merged.modelProviders as
-            | ModelProvidersConfig
-            | undefined),
-          [AuthType.USE_OPENAI]: updatedConfigs,
-        };
-        config.reloadModelProvidersConfig(updatedModelProviders);
-
-        // Refresh auth with the new configuration
-        await config.refreshAuth(AuthType.USE_OPENAI);
-
-        // Success handling
         setAuthError(null);
         setAuthState(AuthState.Authenticated);
+        setPendingAuthType(undefined);
         setIsAuthDialogOpen(false);
         setIsAuthenticating(false);
-
-        // Trigger UI refresh
         onAuthChange?.();
 
-        // Add success message
         addItem(
           {
             type: MessageType.INFO,
             text: t(
               'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.',
-              { region: t('Alibaba Cloud Coding Plan') },
+              { region: t(plan.displayName) },
             ),
           },
           Date.now(),
         );
-
-        // Hint about /model command
         addItem(
           {
             type: MessageType.INFO,
             text: t(
-              'Tip: Use /model to switch between available Coding Plan models.',
+              'Tip: Use /model to switch between available {{plan}} models.',
+              { plan: t(plan.displayName) },
             ),
           },
           Date.now(),
         );
 
-        // Log success
         const authEvent = new AuthEvent(
           AuthType.USE_OPENAI,
-          'coding-plan',
+          plan.authEventType,
           'success',
         );
         logAuth(config, authEvent);
@@ -505,6 +444,17 @@ export const useAuthCommand = (
       }
     },
     [settings, config, handleAuthFailure, addItem, onAuthChange],
+  );
+
+  const handleCodingPlanSubmit = useCallback(
+    (apiKey: string, baseUrl?: string) =>
+      handleSubscriptionPlanSubmit('coding', apiKey, baseUrl),
+    [handleSubscriptionPlanSubmit],
+  );
+
+  const handleTokenPlanSubmit = useCallback(
+    (apiKey: string) => handleSubscriptionPlanSubmit('token', apiKey),
+    [handleSubscriptionPlanSubmit],
   );
 
   const submitApiKeyProvider = useCallback(
@@ -527,57 +477,17 @@ export const useAuthCommand = (
           throw new Error(t('Model IDs cannot be empty.'));
         }
 
-        const baseUrl = getApiKeyProviderEndpoint(provider, region);
-        const persistScope = getPersistScopeForModelSelection(settings);
-        const settingsFile = settings.forScope(persistScope);
-        backupSettingsFile(settingsFile.path);
-
-        settings.setValue(
-          persistScope,
-          `env.${provider.envKey}`,
-          trimmedApiKey,
-        );
-        process.env[provider.envKey] = trimmedApiKey;
-
-        const newConfigs = buildApiKeyProviderModelConfigs(
+        const installPlan = createApiKeyProviderInstallPlan({
           provider,
+          apiKey: trimmedApiKey,
           modelIds,
-          baseUrl,
-        );
-        const existingConfigs =
-          (
-            settings.merged.modelProviders as ModelProvidersConfig | undefined
-          )?.[AuthType.USE_OPENAI] || [];
-        const otherProviderConfigs = existingConfigs.filter(
-          (existing) =>
-            !isApiKeyProviderConfig(
-              provider,
-              existing.baseUrl,
-              existing.envKey,
-            ),
-        );
-        const updatedConfigs = [...newConfigs, ...otherProviderConfigs];
-
-        settings.setValue(
-          persistScope,
-          `modelProviders.${AuthType.USE_OPENAI}`,
-          updatedConfigs,
-        );
-        settings.setValue(
-          persistScope,
-          'security.auth.selectedType',
-          AuthType.USE_OPENAI,
-        );
-        settings.setValue(persistScope, 'model.name', modelIds[0]);
-
-        const updatedModelProviders: ModelProvidersConfig = {
-          ...(settings.merged.modelProviders as
-            | ModelProvidersConfig
-            | undefined),
-          [AuthType.USE_OPENAI]: updatedConfigs,
-        };
-        config.reloadModelProvidersConfig(updatedModelProviders);
-        await config.refreshAuth(AuthType.USE_OPENAI);
+          region,
+        });
+        await applyProviderInstallPlan(installPlan, {
+          settings,
+          config,
+          provider: createApiKeyLlmProvider(provider),
+        });
 
         setAuthError(null);
         setAuthState(AuthState.Authenticated);
@@ -683,17 +593,15 @@ export const useAuthCommand = (
         );
       }
 
-      const persistScope = getPersistScopeForModelSelection(settings);
-      const settingsFile = settings.forScope(persistScope);
-      backupSettingsFile(settingsFile.path);
-
-      await applyOpenRouterModelsConfiguration({
+      const installPlan = await createOpenRouterProviderInstallPlan({
+        apiKey: selectedKey,
+      });
+      await applyProviderInstallPlan(installPlan, {
         settings,
         config,
-        apiKey: selectedKey,
-        reloadConfig: true,
+        provider: openRouterProvider,
+        refreshAuth: false,
       });
-      await config.refreshAuth(AuthType.USE_OPENAI);
 
       setAuthError(null);
       setExternalAuthState(null);
@@ -799,91 +707,20 @@ export const useAuthCommand = (
           protocol,
           trimmedBaseUrl,
         );
-        const persistScope = getPersistScopeForModelSelection(settings);
-
-        const settingsFile = settings.forScope(persistScope);
-        backupSettingsFile(settingsFile.path);
-
-        // Persist API key to env
-        settings.setValue(
-          persistScope,
-          `env.${generatedEnvKey}`,
-          trimmedApiKey,
-        );
-        process.env[generatedEnvKey] = trimmedApiKey;
-
-        // Build generationConfig if any option is set
-        let genConfig: ProviderModelConfig['generationConfig'] | undefined;
-        if (generationConfig) {
-          const hasThinking = generationConfig.enableThinking === true;
-          const hasMultimodal =
-            generationConfig.multimodal &&
-            (generationConfig.multimodal.image === true ||
-              generationConfig.multimodal.video === true ||
-              generationConfig.multimodal.audio === true);
-          const hasMaxTokens =
-            generationConfig.maxTokens !== undefined &&
-            generationConfig.maxTokens > 0;
-
-          if (hasThinking || hasMultimodal || hasMaxTokens) {
-            genConfig = {};
-            if (hasMultimodal) {
-              genConfig.modalities = {
-                image: generationConfig.multimodal!.image ?? false,
-                video: generationConfig.multimodal!.video ?? false,
-                audio: generationConfig.multimodal!.audio ?? false,
-              };
-            }
-            if (hasThinking) {
-              genConfig.extra_body = { enable_thinking: true };
-            }
-            if (hasMaxTokens) {
-              genConfig.samplingParams = {
-                max_tokens: generationConfig.maxTokens,
-              };
-            }
-          }
-        }
-
-        // Build new model configs
-        const newConfigs: ProviderModelConfig[] = modelIds.map((modelId) => ({
-          id: modelId,
-          name: modelId,
+        const installPlan = createCustomProviderInstallPlan({
+          protocol,
           baseUrl: trimmedBaseUrl,
+          apiKey: trimmedApiKey,
+          modelIds,
           envKey: generatedEnvKey,
-          ...(genConfig ? { generationConfig: genConfig } : {}),
-        }));
+          generationConfig,
+        });
 
-        // Merge with existing configs: replace same generatedEnvKey, preserve rest
-        const existingConfigs =
-          (
-            settings.merged.modelProviders as ModelProvidersConfig | undefined
-          )?.[protocol] || [];
-
-        const preservedConfigs = existingConfigs.filter(
-          (existing) => existing.envKey !== generatedEnvKey,
-        );
-
-        const updatedConfigs = [...newConfigs, ...preservedConfigs];
-
-        // Persist modelProviders, security, model
-        settings.setValue(
-          persistScope,
-          `modelProviders.${protocol}`,
-          updatedConfigs,
-        );
-        settings.setValue(persistScope, 'security.auth.selectedType', protocol);
-        settings.setValue(persistScope, 'model.name', modelIds[0]);
-
-        // Hot-reload before refreshAuth
-        const updatedModelProviders: ModelProvidersConfig = {
-          ...(settings.merged.modelProviders as
-            | ModelProvidersConfig
-            | undefined),
-          [protocol]: updatedConfigs,
-        };
-        config.reloadModelProvidersConfig(updatedModelProviders);
-        await config.refreshAuth(protocol);
+        await applyProviderInstallPlan(installPlan, {
+          settings,
+          config,
+          provider: customProvider,
+        });
 
         setAuthError(null);
         setAuthState(AuthState.Authenticated);
@@ -959,6 +796,50 @@ export const useAuthCommand = (
     }
   }, [onAuthError]);
 
+  const state = useMemo<AuthUiState>(
+    () => ({
+      authError,
+      isAuthDialogOpen,
+      isAuthenticating,
+      pendingAuthType,
+      externalAuthState,
+      qwenAuthState,
+    }),
+    [
+      authError,
+      isAuthDialogOpen,
+      isAuthenticating,
+      pendingAuthType,
+      externalAuthState,
+      qwenAuthState,
+    ],
+  );
+
+  const actions = useMemo<AuthController['actions']>(
+    () => ({
+      setAuthState,
+      onAuthError,
+      handleAuthSelect,
+      handleSubscriptionPlanSubmit,
+      handleApiKeyProviderSubmit,
+      handleOpenRouterSubmit,
+      handleCustomApiKeySubmit,
+      openAuthDialog,
+      cancelAuthentication,
+    }),
+    [
+      setAuthState,
+      onAuthError,
+      handleAuthSelect,
+      handleSubscriptionPlanSubmit,
+      handleApiKeyProviderSubmit,
+      handleOpenRouterSubmit,
+      handleCustomApiKeySubmit,
+      openAuthDialog,
+      cancelAuthentication,
+    ],
+  );
+
   return {
     authState,
     setAuthState,
@@ -970,11 +851,15 @@ export const useAuthCommand = (
     externalAuthState,
     qwenAuthState,
     handleAuthSelect,
+    handleSubscriptionPlanSubmit,
     handleCodingPlanSubmit,
+    handleTokenPlanSubmit,
     handleApiKeyProviderSubmit,
     handleOpenRouterSubmit,
     handleCustomApiKeySubmit,
     openAuthDialog,
     cancelAuthentication,
+    state,
+    actions,
   };
 };

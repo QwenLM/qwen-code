@@ -311,7 +311,7 @@ export const DialogManager = ({
     }
   }
 
-  if (uiState.isAuthDialogOpen || uiState.authError) {
+  if (uiState.auth.isAuthDialogOpen || uiState.auth.authError) {
     return (
       <Box flexDirection="column">
         <AuthDialog />
@@ -319,19 +319,19 @@ export const DialogManager = ({
     );
   }
 
-  if (uiState.isAuthenticating) {
+  if (uiState.auth.isAuthenticating) {
     if (
-      uiState.pendingAuthType === AuthType.USE_OPENAI &&
-      uiState.externalAuthState
+      uiState.auth.pendingAuthType === AuthType.USE_OPENAI &&
+      uiState.auth.externalAuthState
     ) {
       return (
         <ExternalAuthProgress
-          title={uiState.externalAuthState.title}
-          message={uiState.externalAuthState.message}
-          detail={uiState.externalAuthState.detail}
+          title={uiState.auth.externalAuthState.title}
+          message={uiState.auth.externalAuthState.message}
+          detail={uiState.auth.externalAuthState.detail}
           onCancel={() => {
-            uiActions.cancelAuthentication();
-            uiActions.setAuthState(AuthState.Updating);
+            uiActions.auth.cancelAuthentication();
+            uiActions.auth.setAuthState(AuthState.Updating);
           }}
         />
       );
@@ -339,20 +339,20 @@ export const DialogManager = ({
 
     // OpenAI authentication now handled through AuthDialog with coding-plan/custom sub-modes
     // Qwen OAuth remains as a separate flow
-    if (uiState.pendingAuthType === AuthType.QWEN_OAUTH) {
+    if (uiState.auth.pendingAuthType === AuthType.QWEN_OAUTH) {
       return (
         <QwenOAuthProgress
-          deviceAuth={uiState.qwenAuthState.deviceAuth || undefined}
-          authStatus={uiState.qwenAuthState.authStatus}
-          authMessage={uiState.qwenAuthState.authMessage}
+          deviceAuth={uiState.auth.qwenAuthState.deviceAuth || undefined}
+          authStatus={uiState.auth.qwenAuthState.authStatus}
+          authMessage={uiState.auth.qwenAuthState.authMessage}
           onTimeout={() => {
-            uiActions.onAuthError('Qwen OAuth authentication timed out.');
-            uiActions.cancelAuthentication();
-            uiActions.setAuthState(AuthState.Updating);
+            uiActions.auth.onAuthError('Qwen OAuth authentication timed out.');
+            uiActions.auth.cancelAuthentication();
+            uiActions.auth.setAuthState(AuthState.Updating);
           }}
           onCancel={() => {
-            uiActions.cancelAuthentication();
-            uiActions.setAuthState(AuthState.Updating);
+            uiActions.auth.cancelAuthentication();
+            uiActions.auth.setAuthState(AuthState.Updating);
           }}
         />
       );

@@ -7,7 +7,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { showAuthStatus } from './handler.js';
 import { AuthType } from '@qwen-code/qwen-code-core';
-import { CODING_PLAN_ENV_KEY } from '../../constants/codingPlan.js';
+import {
+  CODING_PLAN_ENV_KEY,
+  CODING_PLAN_CHINA_BASE_URL,
+  CODING_PLAN_GLOBAL_BASE_URL,
+  getCodingPlanConfig,
+} from '../../auth/providers/alibaba/codingPlan.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
 vi.mock('../../config/settings.js', () => ({
@@ -21,6 +26,10 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 
 import { loadSettings } from '../../config/settings.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+
+const codingPlanProviders = (baseUrl: string = CODING_PLAN_CHINA_BASE_URL) => ({
+  [AuthType.USE_OPENAI]: getCodingPlanConfig(baseUrl).template,
+});
 
 describe('showAuthStatus', () => {
   beforeEach(() => {
@@ -106,12 +115,13 @@ describe('showAuthStatus', () => {
           },
         },
         codingPlan: {
-          region: 'china',
+          baseUrl: CODING_PLAN_CHINA_BASE_URL,
           version: 'abc123def456',
         },
         model: {
           name: 'qwen3.5-plus',
         },
+        modelProviders: codingPlanProviders(),
       }),
     );
 
@@ -206,8 +216,9 @@ describe('showAuthStatus', () => {
           },
         },
         codingPlan: {
-          region: 'global',
+          baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
         },
+        modelProviders: codingPlanProviders(CODING_PLAN_GLOBAL_BASE_URL),
       }),
     );
 
@@ -221,7 +232,7 @@ describe('showAuthStatus', () => {
     );
   });
 
-  it('should show Coding Plan region for china', async () => {
+  it('should show Coding Plan base URL for China endpoint', async () => {
     process.env[CODING_PLAN_ENV_KEY] = 'test-api-key';
 
     vi.mocked(loadSettings).mockReturnValue(
@@ -232,22 +243,23 @@ describe('showAuthStatus', () => {
           },
         },
         codingPlan: {
-          region: 'china',
+          baseUrl: CODING_PLAN_CHINA_BASE_URL,
         },
         model: {
           name: 'qwen3.5-plus',
         },
+        modelProviders: codingPlanProviders(),
       }),
     );
 
     await showAuthStatus();
 
     expect(writeStdoutLine).toHaveBeenCalledWith(
-      expect.stringContaining('中国 (China)'),
+      expect.stringContaining(CODING_PLAN_CHINA_BASE_URL),
     );
   });
 
-  it('should show Coding Plan region for global', async () => {
+  it('should show Coding Plan base URL for global endpoint', async () => {
     process.env[CODING_PLAN_ENV_KEY] = 'test-api-key';
 
     vi.mocked(loadSettings).mockReturnValue(
@@ -258,18 +270,19 @@ describe('showAuthStatus', () => {
           },
         },
         codingPlan: {
-          region: 'global',
+          baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
         },
         model: {
           name: 'qwen3-coder-plus',
         },
+        modelProviders: codingPlanProviders(CODING_PLAN_GLOBAL_BASE_URL),
       }),
     );
 
     await showAuthStatus();
 
     expect(writeStdoutLine).toHaveBeenCalledWith(
-      expect.stringContaining('Global'),
+      expect.stringContaining(CODING_PLAN_GLOBAL_BASE_URL),
     );
   });
 
@@ -284,11 +297,12 @@ describe('showAuthStatus', () => {
           },
         },
         codingPlan: {
-          region: 'china',
+          baseUrl: CODING_PLAN_CHINA_BASE_URL,
         },
         model: {
           name: 'qwen3.5-plus',
         },
+        modelProviders: codingPlanProviders(),
       }),
     );
 
@@ -310,12 +324,13 @@ describe('showAuthStatus', () => {
           },
         },
         codingPlan: {
-          region: 'china',
+          baseUrl: CODING_PLAN_CHINA_BASE_URL,
           version: 'abc123def456789',
         },
         model: {
           name: 'qwen3.5-plus',
         },
+        modelProviders: codingPlanProviders(),
       }),
     );
 
