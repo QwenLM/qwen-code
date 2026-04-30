@@ -48,6 +48,11 @@ import { LoopDetectionService } from '../services/loopDetectionService.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
+import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
+import {
+  DEFAULT_AUTO_SKILL_MAX_TURNS,
+  DEFAULT_AUTO_SKILL_TIMEOUT_MS,
+} from '../memory/skillReviewAgentPlanner.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
 
@@ -530,21 +535,25 @@ export class GeminiClient {
         toolCallCount: this.toolCallCount,
         skillsModified: this.skillsModifiedInSession,
         enabled: autoSkillEnabled,
-        threshold: 20,
-        maxTurns: 8,
-        timeoutMs: 120_000,
+        threshold: AUTO_SKILL_THRESHOLD,
+        maxTurns: DEFAULT_AUTO_SKILL_MAX_TURNS,
+        timeoutMs: DEFAULT_AUTO_SKILL_TIMEOUT_MS,
       });
-      if (skillReviewResult.promise) {
-        this.pendingMemoryTaskPromises.push(
-          skillReviewResult.promise.then((record) => {
-            const touched = record.metadata?.['touchedSkillFiles'];
-            return Array.isArray(touched) ? touched.length : 0;
-          }),
-        );
+      if (skillReviewResult.status === 'scheduled') {
+        // Reset per-session counters only when review is actually dispatched,
+        // so the count accumulates correctly across turns within a session.
+        this.toolCallCount = 0;
+        this.skillsModifiedInSession = false;
+        if (skillReviewResult.promise) {
+          this.pendingMemoryTaskPromises.push(
+            skillReviewResult.promise.then((record) => {
+              const touched = record.metadata?.['touchedSkillFiles'];
+              return Array.isArray(touched) ? touched.length : 0;
+            }),
+          );
+        }
       }
     }
-    this.toolCallCount = 0;
-    this.skillsModifiedInSession = false;
 
     if (!this.config.getManagedAutoMemoryEnabled()) {
       return;
@@ -605,13 +614,24 @@ export class GeminiClient {
     return promises;
   }
 
-  recordCompletedToolCall(toolName: string, filePath?: string): void {
-    if (
-      filePath &&
-      (toolName === 'write_file' || toolName === 'edit') &&
-      isProjectSkillPath(filePath, this.config.getProjectRoot())
-    ) {
-      this.skillsModifiedInSession = true;
+  recordCompletedToolCall(
+    toolName: string,
+    args?: Record<string, unknown>,
+  ): void {
+    const SKILL_WRITE_TOOL_NAMES = new Set([
+      'write_file',
+      'edit',
+      'replace',
+      'create_file',
+    ]);
+    if (args && SKILL_WRITE_TOOL_NAMES.has(toolName)) {
+      const filePath = args['file_path'] ?? args['path'] ?? args['target_file'];
+      if (
+        typeof filePath === 'string' &&
+        isProjectSkillPath(filePath, this.config.getProjectRoot())
+      ) {
+        this.skillsModifiedInSession = true;
+      }
     }
     this.toolCallCount += 1;
   }

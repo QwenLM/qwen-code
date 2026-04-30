@@ -18,6 +18,7 @@ import { ToolNames } from '../tools/tool-names.js';
 import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import {
+  assertRealProjectSkillPath,
   getProjectSkillsRoot,
   isProjectSkillPath,
 } from '../skills/skill-paths.js';
@@ -41,25 +42,36 @@ type SkillScopedPermissionManager = Pick<
 >;
 
 /**
- * Returns true if the file at `filePath` exists and contains
- * `source: auto-skill` in its YAML frontmatter block.
- * Returns false if the file does not exist (caller may allow creation).
+ * Returns true if the file at `filePath` exists and its YAML frontmatter
+ * contains `source: auto-skill`.
+ * Returns null if the file does not exist (caller may allow creation).
+ * Returns false for any other read error (EISDIR, EACCES, etc.) — caller
+ * should deny in that case.
  */
 async function hasAutoSkillSource(filePath: string): Promise<boolean | null> {
   let content: string;
   try {
     content = await fs.readFile(filePath, 'utf-8');
-  } catch {
-    // File does not exist — allow creation.
-    return null;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      // File does not exist — allow creation.
+      return null;
+    }
+    // EISDIR, EACCES, EMFILE, EPERM, etc. — deny to be safe.
+    return false;
   }
-  const match = /^---\r?\n([\s\S]*?)\r?\n---/m.exec(content);
+  // Match the opening frontmatter block only (up to the closing ---)
+  const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(\r?\n|$)/.exec(
+    content,
+  );
   if (!match) return false;
-  return /^\s*source:\s*auto-skill\s*$/m.test(match[1]);
+  return /^source:\s*auto-skill\s*$/m.test(match[1]);
 }
 
 function isScopedTool(toolName: string): boolean {
   return (
+    toolName === ToolNames.READ_FILE ||
+    toolName === ToolNames.LS ||
     toolName === ToolNames.SHELL ||
     toolName === ToolNames.EDIT ||
     toolName === ToolNames.WRITE_FILE
@@ -86,6 +98,10 @@ async function evaluateScopedDecision(
   projectRoot: string,
 ): Promise<PermissionDecision> {
   switch (ctx.toolName) {
+    case ToolNames.READ_FILE:
+    case ToolNames.LS:
+      // Read tools are always allowed — the agent needs to inspect skills.
+      return 'allow';
     case ToolNames.SHELL: {
       if (!ctx.command) {
         return 'deny';
@@ -100,10 +116,16 @@ async function evaluateScopedDecision(
       if (!ctx.filePath || !isProjectSkillPath(ctx.filePath, projectRoot)) {
         return 'deny';
       }
+      // Reject symlink traversal (realpath check).
+      try {
+        await assertRealProjectSkillPath(ctx.filePath, projectRoot);
+      } catch {
+        return 'deny';
+      }
       // For existing files, verify source: auto-skill is present.
       const sourceFlag = await hasAutoSkillSource(ctx.filePath);
       if (sourceFlag === null) {
-        // File does not exist yet — allow creation.
+        // File does not exist yet — allow creation (path already validated above).
         return 'allow';
       }
       return sourceFlag ? 'allow' : 'deny';
@@ -118,6 +140,9 @@ function getScopedDenyRule(
   projectRoot: string,
 ): string | undefined {
   switch (ctx.toolName) {
+    case ToolNames.READ_FILE:
+    case ToolNames.LS:
+      return undefined; // always allow — no deny rule needed
     case ToolNames.SHELL:
       return 'ManagedSkillReview(run_shell_command: read-only only)';
     case ToolNames.EDIT:

@@ -461,9 +461,7 @@ export async function runNonInteractive(
               .getGeminiClient()
               .recordCompletedToolCall(
                 finalRequestInfo.name,
-                typeof finalRequestInfo.args['file_path'] === 'string'
-                  ? finalRequestInfo.args['file_path']
-                  : undefined,
+                finalRequestInfo.args as Record<string, unknown>,
               );
 
             if (toolResponse.responseParts) {
@@ -617,9 +615,7 @@ export async function runNonInteractive(
                     .getGeminiClient()
                     .recordCompletedToolCall(
                       requestInfo.name,
-                      typeof requestInfo.args['file_path'] === 'string'
-                        ? requestInfo.args['file_path']
-                        : undefined,
+                      requestInfo.args as Record<string, unknown>,
                     );
 
                   if (toolResponse.responseParts) {

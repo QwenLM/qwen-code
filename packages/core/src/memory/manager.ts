@@ -754,6 +754,7 @@ export class MemoryManager {
         status: 'failed',
         error: error instanceof Error ? error.message : String(error),
       });
+      throw error;
     } finally {
       this.skillReviewInFlightByProject.delete(params.projectRoot);
     }

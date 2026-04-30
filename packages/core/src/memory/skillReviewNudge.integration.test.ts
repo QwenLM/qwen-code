@@ -15,10 +15,14 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Content } from '@google/genai';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { MemoryManager, AUTO_SKILL_THRESHOLD } from './manager.js';
 import { getProjectSkillsRoot } from '../skills/skill-paths.js';
+
+vi.mock('./skillReviewAgentPlanner.js', () => ({
+  runSkillReviewByAgent: vi.fn().mockResolvedValue({ touchedSkillFiles: [] }),
+}));
 
 describe('Skill Nudge E2E Integration Tests', () => {
   let tempDir: string;
@@ -252,7 +256,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
       expect(result.skippedReason).not.toBe('failed');
     });
 
-    it('should handle multiple skill reviews for same project', () => {
+    it('should handle multiple skill reviews for same project (sequential)', async () => {
       const result1 = mgr.scheduleSkillReview({
         projectRoot,
         sessionId: 'session-1',
@@ -263,7 +267,9 @@ describe('Skill Nudge E2E Integration Tests', () => {
         config: mockConfig,
       });
 
-      const result2 = mgr.scheduleSkillReview({
+      // While first is in-flight, the second call for the same project is
+      // deduped — it returns skipped with the existing taskId.
+      const result2WhileRunning = mgr.scheduleSkillReview({
         projectRoot,
         sessionId: 'session-2',
         history: sampleHistory,
@@ -273,12 +279,32 @@ describe('Skill Nudge E2E Integration Tests', () => {
         config: mockConfig,
       });
 
-      // Both should be processed independently
+      expect(result1.status).toBe('scheduled');
       expect(result1.taskId).toBeDefined();
-      expect(result2.taskId).toBeDefined();
-      expect(result1.taskId).not.toBe(result2.taskId);
+      expect(result2WhileRunning.status).toBe('skipped');
+      expect(result2WhileRunning.skippedReason).toBe('already_running');
+      // Returns the existing taskId so callers can observe the in-flight task.
+      expect(result2WhileRunning.taskId).toBe(result1.taskId);
 
-      // Both tasks should be tracked
+      // Wait for the first review to complete.
+      await result1.promise;
+
+      // Now a new review for the same project should be accepted.
+      const result3AfterCompletion = mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'session-3',
+        history: sampleHistory,
+        toolCallCount: AUTO_SKILL_THRESHOLD,
+        skillsModified: false,
+        enabled: true,
+        config: mockConfig,
+      });
+
+      expect(result3AfterCompletion.status).toBe('scheduled');
+      expect(result3AfterCompletion.taskId).toBeDefined();
+      expect(result3AfterCompletion.taskId).not.toBe(result1.taskId);
+
+      // Both completed tasks should be tracked.
       const records = mgr.listTasksByType('skill-review', projectRoot);
       expect(records.length).toBeGreaterThanOrEqual(2);
     });

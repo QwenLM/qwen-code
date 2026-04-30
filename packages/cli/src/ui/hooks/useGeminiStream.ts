@@ -1885,9 +1885,7 @@ export const useGeminiStream = (
       for (const toolCall of geminiTools) {
         geminiClient?.recordCompletedToolCall(
           toolCall.request.name,
-          typeof toolCall.request.args['file_path'] === 'string'
-            ? toolCall.request.args['file_path']
-            : undefined,
+          toolCall.request.args as Record<string, unknown>,
         );
       }
 
