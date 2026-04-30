@@ -645,12 +645,15 @@ function AppShellContent({
     collapseSessionNavigatorForProjectDraft &&
     isSessionsNavigation(navState) &&
     !sessionsContext?.sessionId
+  const isAllSessionsNavigatorHidden =
+    isSessionsNavigation(navState) &&
+    sessionsContext?.filter.kind === 'allSessions'
   const isSessionNavigatorCollapsed =
     !isAutoCompact &&
     isSessionsNavigation(navState) &&
-    (!!sessionsContext?.sessionId || shouldCollapseProjectDraftNavigator)
+    (isAllSessionsNavigatorHidden || !!sessionsContext?.sessionId || shouldCollapseProjectDraftNavigator)
   const effectiveNavigatorWidth = isAutoCompact
-    ? sessionListWidth
+    ? (isAllSessionsNavigatorHidden ? 0 : sessionListWidth)
     : (effectiveSidebarAndNavigatorHidden || isSessionNavigatorCollapsed ? 0 : sessionListWidth)
   const isNavigatorResizeAvailable = !effectiveSidebarAndNavigatorHidden && effectiveNavigatorWidth > 0
   const isSidebarResizeAvailable = !effectiveSidebarAndNavigatorHidden && isSidebarVisible
@@ -2557,7 +2560,7 @@ function AppShellContent({
           </div>
           }
           sidebarWidth={effectiveSidebarAndNavigatorHidden ? 0 : (isSidebarVisible ? sidebarWidth : 0)}
-          navigatorSlot={isSessionNavigatorCollapsed ? null : (
+          navigatorSlot={(isAllSessionsNavigatorHidden || isSessionNavigatorCollapsed) ? null : (
             <div
               style={{ width: isAutoCompact ? '100%' : sessionListWidth }}
               className="h-full flex flex-col min-w-0 relative z-panel"
