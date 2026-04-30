@@ -266,7 +266,17 @@ export function extractToolFilePaths(
     const patternField = obj['pattern'];
     if (typeof patternField === 'string' && patternField.length > 0) {
       if (typeof pathField === 'string' && pathField.length > 0) {
-        push(`${pathField.replace(/[\\/]+$/, '')}/${patternField}`);
+        // Trim trailing `/` or `\` without a regex. The previous form
+        // `pathField.replace(/[\\/]+$/, '')` is functionally equivalent
+        // but CodeQL flags `+` on uncontrolled input as a polynomial
+        // ReDoS candidate (rule #145). The loop is O(n) on the trailing
+        // separator run, no different from the regex engine, but
+        // sidesteps the warning.
+        let trimmed = pathField;
+        while (trimmed.endsWith('/') || trimmed.endsWith('\\')) {
+          trimmed = trimmed.slice(0, -1);
+        }
+        push(`${trimmed}/${patternField}`);
       } else {
         push(patternField);
       }
