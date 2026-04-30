@@ -130,8 +130,6 @@ export interface SwarmTask {
 export interface TeamContext {
   /** Team name. */
   teamName: string;
-  /** Absolute path to the team config file. */
-  teamFilePath: string;
   /** Agent ID of the team leader. */
   leadAgentId: string;
   /** Map of teammate agent IDs → summary info. */
@@ -171,6 +169,9 @@ export interface TeammateIdentity {
 
 /** Maximum number of teammates allowed per team. */
 export const MAX_TEAMMATES = 10;
+
+/** Reserved name for the team leader (case-insensitive in messaging). */
+export const LEADER_NAME = 'leader';
 
 /** Directory name under ~/.qwen for team configs. */
 export const TEAMS_DIR = 'teams';

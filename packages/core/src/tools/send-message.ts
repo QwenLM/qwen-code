@@ -20,6 +20,7 @@ import type { Config } from '../config/config.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { getAgentName } from '../agents/team/identity.js';
+import { LEADER_NAME } from '../agents/team/types.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
@@ -128,7 +129,7 @@ class SendMessageInvocation extends BaseToolInvocation<
       }
 
       if (to === '*') {
-        const sender = getAgentName() ?? 'leader';
+        const sender = getAgentName() ?? LEADER_NAME;
         await teamManager.broadcast(this.params.message, sender);
         const msg = 'Message broadcast to all teammates.';
         return { llmContent: msg, returnDisplay: msg };
@@ -137,7 +138,7 @@ class SendMessageInvocation extends BaseToolInvocation<
       await teamManager.sendMessage(
         to,
         this.params.message,
-        getAgentName() ?? 'leader',
+        getAgentName() ?? LEADER_NAME,
       );
       const msg = `Message sent to "${to}".`;
       return { llmContent: msg, returnDisplay: msg };

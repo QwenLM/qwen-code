@@ -22,6 +22,7 @@ import { clearAllInboxes } from '../agents/team/mailbox.js';
 import { TeamManager } from '../agents/team/TeamManager.js';
 import { InProcessBackend } from '../agents/backends/InProcessBackend.js';
 import type { TeamFile, TeamContext } from '../agents/team/types.js';
+import { LEADER_NAME } from '../agents/team/types.js';
 
 export interface TeamCreateParams {
   team_name: string;
@@ -78,7 +79,7 @@ class TeamCreateInvocation extends BaseToolInvocation<
     }
 
     // Build team file.
-    const leadAgentId = formatAgentId('leader', teamName);
+    const leadAgentId = formatAgentId(LEADER_NAME, teamName);
     const teamFile: TeamFile = {
       name: teamName,
       description: this.params.description,
@@ -106,7 +107,6 @@ class TeamCreateInvocation extends BaseToolInvocation<
 
     const ctx: TeamContext = {
       teamName,
-      teamFilePath: '',
       leadAgentId,
       teammates: {},
     };

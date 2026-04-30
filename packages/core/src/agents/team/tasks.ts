@@ -21,8 +21,11 @@ import { constants as fsConstants } from 'node:fs';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { isNodeError } from '../../utils/errors.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
 import { getTasksDir } from './teamHelpers.js';
 import type { SwarmTask, SwarmTaskStatus } from './types.js';
+
+const debug = createDebugLogger('AGENTS_TEAM_TASKS');
 
 // ─── Lock options ───────────────────────────────────────────
 
@@ -34,7 +37,9 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
     factor: 2,
   },
   stale: 5000,
-  onCompromised: () => {},
+  onCompromised: (err) => {
+    debug.warn('task lock compromised:', err?.message ?? err);
+  },
 };
 
 // ─── Path helpers ───────────────────────────────────────────
@@ -224,15 +229,6 @@ export async function updateTask(
       task.blockedBy = Array.from(blockedBySet);
     }
 
-    // Auto-assign owner when marking in_progress with no owner.
-    if (
-      updates.status === 'in_progress' &&
-      !task.owner &&
-      updates.owner === undefined
-    ) {
-      // Caller should set owner explicitly; this is a safety net.
-    }
-
     await fs.writeFile(taskPath, JSON.stringify(task, null, 2) + '\n', 'utf-8');
 
     notifyTasksUpdated(teamName);
@@ -279,17 +275,18 @@ export async function listTasks(
     return [];
   }
 
-  const tasks: SwarmTask[] = [];
-  for (const entry of entries) {
-    if (!entry.endsWith('.json')) continue;
-    try {
-      const raw = await fs.readFile(path.join(dir, entry), 'utf-8');
-      const task = JSON.parse(raw) as SwarmTask;
-      tasks.push(task);
-    } catch {
-      // Skip corrupt/unreadable files.
-    }
-  }
+  const jsonEntries = entries.filter((e) => e.endsWith('.json'));
+  const reads = await Promise.all(
+    jsonEntries.map(async (entry) => {
+      try {
+        const raw = await fs.readFile(path.join(dir, entry), 'utf-8');
+        return JSON.parse(raw) as SwarmTask;
+      } catch {
+        return undefined;
+      }
+    }),
+  );
+  const tasks = reads.filter((t): t is SwarmTask => t !== undefined);
 
   // Sort by ID (numeric ascending).
   tasks.sort((a, b) => Number(a.id) - Number(b.id));
@@ -461,17 +458,15 @@ export async function unassignTeammateTasks(
   const inProgress = await listTasks(teamName, {
     status: 'in_progress',
   });
-  let count = 0;
-  for (const task of inProgress) {
-    if (task.owner === agentId || task.owner === bareName) {
-      await updateTask(teamName, task.id, {
-        status: 'pending',
-        owner: null,
-      });
-      count++;
-    }
-  }
-  return count;
+  const owned = inProgress.filter(
+    (task) => task.owner === agentId || task.owner === bareName,
+  );
+  await Promise.all(
+    owned.map((task) =>
+      updateTask(teamName, task.id, { status: 'pending', owner: null }),
+    ),
+  );
+  return owned.length;
 }
 
 /**

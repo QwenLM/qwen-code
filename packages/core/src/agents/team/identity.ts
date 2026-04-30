@@ -54,6 +54,17 @@ export function getTeamName(): string | undefined {
 }
 
 /**
+ * Resolve the active team name: teammate identity first (when running
+ * inside a teammate's async context), then fall back to the leader's
+ * team context.
+ */
+export function resolveActiveTeamName(
+  fallback: string | undefined,
+): string | undefined {
+  return getTeamName() ?? fallback;
+}
+
+/**
  * Whether the current context is any teammate (leader or worker).
  * Alias for `isInProcessTeammate()`.
  */

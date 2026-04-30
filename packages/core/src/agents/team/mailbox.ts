@@ -21,7 +21,10 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { isNodeError } from '../../utils/errors.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
 import { getInboxesDir } from './teamHelpers.js';
+
+const debug = createDebugLogger('AGENTS_TEAM_MAILBOX');
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -64,9 +67,11 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
     factor: 2,
   },
   stale: 5000,
-  // Suppress compromised lock errors — stale locks from crashed
-  // processes are expected in multi-agent scenarios.
-  onCompromised: () => {},
+  // Stale locks from crashed processes are expected in multi-agent
+  // scenarios; log at debug level for traceability without noise.
+  onCompromised: (err) => {
+    debug.debug('mailbox lock compromised:', err?.message ?? err);
+  },
 };
 
 // ─── Path helpers ───────────────────────────────────────────

@@ -77,6 +77,15 @@ export interface AgentParams {
 
 const debugLogger = createDebugLogger('AGENT');
 
+const PROCEED_OUTCOMES = new Set<ToolConfirmationOutcome>([
+  ToolConfirmationOutcome.ProceedOnce,
+  ToolConfirmationOutcome.ProceedAlways,
+  ToolConfirmationOutcome.ProceedAlwaysServer,
+  ToolConfirmationOutcome.ProceedAlwaysTool,
+  ToolConfirmationOutcome.ProceedAlwaysProject,
+  ToolConfirmationOutcome.ProceedAlwaysUser,
+]);
+
 /**
  * Maps ApprovalMode to PermissionMode for hook events.
  */
@@ -590,16 +599,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // Clear the inline prompt immediately
             // and optimistically mark the tool as executing for proceed outcomes.
             pendingConfirmationCallId = undefined;
-            const proceedOutcomes = new Set<ToolConfirmationOutcome>([
-              ToolConfirmationOutcome.ProceedOnce,
-              ToolConfirmationOutcome.ProceedAlways,
-              ToolConfirmationOutcome.ProceedAlwaysServer,
-              ToolConfirmationOutcome.ProceedAlwaysTool,
-              ToolConfirmationOutcome.ProceedAlwaysProject,
-              ToolConfirmationOutcome.ProceedAlwaysUser,
-            ]);
 
-            if (proceedOutcomes.has(outcome)) {
+            if (PROCEED_OUTCOMES.has(outcome)) {
               const idx2 = this.currentToolCalls!.findIndex(
                 (c) => c.callId === event.callId,
               );
@@ -920,16 +921,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // named teammate. Auto-generate a name from the
     // description if none was provided.
     if (this.config.getTeamManager() && !isTeammate()) {
-      if (!this.params.name) {
-        // Derive a short kebab-case name from the description.
-        this.params.name =
-          this.params.description
-            .toLowerCase()
-            .replace(/[^a-z0-9]+/g, '-')
-            .replace(/^-|-$/g, '')
-            .slice(0, 30) || 'teammate';
-      }
-      return this.executeTeammate(signal);
+      const teammateName =
+        this.params.name ??
+        (this.params.description
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-|-$/g, '')
+          .slice(0, 30) ||
+          'teammate');
+      return this.executeTeammate(teammateName, signal);
     }
 
     try {
@@ -1348,7 +1348,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
    * Messages from the teammate are delivered to the leader
    * via TeamManager's inbox polling mechanism.
    */
-  private async executeTeammate(_signal?: AbortSignal): Promise<ToolResult> {
+  private async executeTeammate(
+    name: string,
+    _signal?: AbortSignal,
+  ): Promise<ToolResult> {
     const teamManager = this.config.getTeamManager();
     if (!teamManager) {
       return {
@@ -1369,7 +1372,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       };
     }
 
-    const name = this.params.name!;
     try {
       await teamManager.spawnTeammate({
         name,

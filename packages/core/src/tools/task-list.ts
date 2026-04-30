@@ -16,7 +16,7 @@ import type {
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
-import { getTeamName } from '../agents/team/identity.js';
+import { getTeamName, resolveActiveTeamName } from '../agents/team/identity.js';
 import { listTasks } from '../agents/team/tasks.js';
 
 export interface TaskListParams {
@@ -53,7 +53,9 @@ class TaskListInvocation extends BaseToolInvocation<
   }
 
   async execute(): Promise<ToolResult> {
-    const teamName = getTeamName() ?? this.config.getTeamContext()?.teamName;
+    const teamName = resolveActiveTeamName(
+      this.config.getTeamContext()?.teamName,
+    );
     if (!teamName) {
       const msg = 'No active team. Create a team first.';
       return {

@@ -31,7 +31,7 @@ import {
 import type { TeammateApprovalRequestEvent } from './team-events.js';
 import { TeamEventEmitter, TeamEventType } from './team-events.js';
 import type { TeamFile, TeamMember, TeammateIdentity } from './types.js';
-import { MAX_TEAMMATES } from './types.js';
+import { MAX_TEAMMATES, LEADER_NAME } from './types.js';
 import {
   formatAgentId,
   generateUniqueTeammateName,
@@ -235,7 +235,7 @@ export class TeamManager {
     const addendum = buildTeammatePromptAddendum(
       name,
       this.teamFile.name,
-      'leader',
+      LEADER_NAME,
     );
     const basePrompt = subagentPrompt ?? config.prompt;
     const systemPrompt = basePrompt ? `${basePrompt}\n\n${addendum}` : addendum;
@@ -333,10 +333,10 @@ export class TeamManager {
   ): Promise<void> {
     // Messages addressed to the leader go to leader's mailbox.
     if (
-      toName.toLowerCase() === 'leader' ||
+      toName.toLowerCase() === LEADER_NAME ||
       toName === this.teamFile.leadAgentId
     ) {
-      await writeMessage(this.teamFile.name, 'leader', {
+      await writeMessage(this.teamFile.name, LEADER_NAME, {
         from: from ?? 'unknown',
         text: message,
         timestamp: new Date().toISOString(),
@@ -344,7 +344,7 @@ export class TeamManager {
       });
       this.teamEventEmitter.emit(TeamEventType.MESSAGE_SENT, {
         from: from ?? 'unknown',
-        to: 'leader',
+        to: LEADER_NAME,
         message,
         timestamp: Date.now(),
       });
@@ -404,8 +404,8 @@ export class TeamManager {
       .map((m) => this.sendMessage(m.name, message, fromName));
 
     // Also deliver to leader inbox if sender is not the leader.
-    if (fromName.toLowerCase() !== 'leader') {
-      promises.push(this.sendMessage('leader', message, fromName));
+    if (fromName.toLowerCase() !== LEADER_NAME) {
+      promises.push(this.sendMessage(LEADER_NAME, message, fromName));
     }
 
     await Promise.all(promises);
@@ -424,7 +424,7 @@ export class TeamManager {
     this._shutdownRequested = true;
 
     await sendStructuredMessage(this.teamFile.name, member.name, {
-      from: 'leader',
+      from: LEADER_NAME,
       type: 'shutdown_request',
       text:
         'The team leader has requested that you shut down. ' +
@@ -450,7 +450,7 @@ export class TeamManager {
     Array<{ from: string; text: string; timestamp: string }>
   > {
     try {
-      const messages = await readInbox(this.teamFile.name, 'leader');
+      const messages = await readInbox(this.teamFile.name, LEADER_NAME);
       return messages.map((m) => ({
         from: m.from,
         text: m.text,
@@ -510,7 +510,7 @@ export class TeamManager {
       return;
     }
     try {
-      const inbox = await readInbox(this.teamFile.name, 'leader');
+      const inbox = await readInbox(this.teamFile.name, LEADER_NAME);
       if (inbox.length <= this.lastInboxOffset) {
         // No new messages — check if all teammates are done.
         const terminated = this.allTeammatesTerminated();
@@ -822,6 +822,7 @@ export class TeamManager {
 
     this.pendingMessages.clear();
     this.lastActivityAt.clear();
+    this.agentIdentities.clear();
     this.teamEventEmitter.removeAllListeners();
 
     await this.backend.cleanup();
@@ -1101,7 +1102,10 @@ export class TeamManager {
     if (!from) return MessagePriority.PEER;
     // The leader's agentId is stored in teamFile.leadAgentId.
     // Accept both the full agentId and the bare name "leader".
-    if (from === this.teamFile.leadAgentId || from.toLowerCase() === 'leader') {
+    if (
+      from === this.teamFile.leadAgentId ||
+      from.toLowerCase() === LEADER_NAME
+    ) {
       return MessagePriority.LEADER;
     }
     return MessagePriority.PEER;
