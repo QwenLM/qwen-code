@@ -142,6 +142,15 @@ function detectRollbackAndGetBaseline(npmDistTag) {
 }
 
 function doesVersionExist(version) {
+  const isExpectedMissingGitHubRelease = (error) => {
+    const stderr = error.stderr?.toString() ?? '';
+    const stdout = error.stdout?.toString() ?? '';
+    const message = `${error.message}\n${stderr}\n${stdout}`;
+    return (
+      message.includes('release not found') || message.includes('Not Found')
+    );
+  };
+
   // Check NPM
   try {
     const command = `npm view ${PACKAGE_NAME}@${version} version 2>/dev/null`;
@@ -168,19 +177,14 @@ function doesVersionExist(version) {
 
   // Check GitHub releases
   try {
-    const command = `gh release view "${TAG_PREFIX}${version}" --json tagName --jq .tagName 2>/dev/null`;
+    const command = `gh release view "${TAG_PREFIX}${version}" --json tagName --jq .tagName`;
     const output = execSync(command).toString().trim();
     if (output === `${TAG_PREFIX}${version}`) {
       console.error(`GitHub release ${TAG_PREFIX}${version} already exists.`);
       return true;
     }
   } catch (error) {
-    const isExpectedNotFound =
-      error.message.includes('release not found') ||
-      error.message.includes('Not Found') ||
-      error.message.includes('not found') ||
-      error.status === 1;
-    if (!isExpectedNotFound) {
+    if (!isExpectedMissingGitHubRelease(error)) {
       console.error(
         `Failed to check GitHub releases for conflicts: ${error.message}`,
       );
