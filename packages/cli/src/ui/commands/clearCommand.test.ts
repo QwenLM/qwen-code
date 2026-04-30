@@ -60,6 +60,8 @@ describe('clearCommand', () => {
           getModel: () => 'test-model',
           getToolRegistry: () => undefined,
           getApprovalMode: () => 'default',
+          getMonitorRegistry: () => ({ abortAll: vi.fn() }),
+          getBackgroundShellRegistry: () => ({ abortAll: vi.fn() }),
         },
       },
       session: {
@@ -246,6 +248,8 @@ describe('clearCommand', () => {
             getToolRegistry: vi.fn().mockReturnValue({
               getAllTools: vi.fn().mockReturnValue([]),
             }),
+            getMonitorRegistry: () => ({ abortAll: vi.fn() }),
+            getBackgroundShellRegistry: () => ({ abortAll: vi.fn() }),
           },
         },
         session: {

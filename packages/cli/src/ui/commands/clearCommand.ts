@@ -37,6 +37,12 @@ export const clearCommand: SlashCommand = {
 
       const newSessionId = config.startNewSession();
 
+      // Abort all running monitors and background shells so they don't
+      // leak events into the new session. Without this, a malicious prompt
+      // in the old session could persist via long-running monitors.
+      config.getMonitorRegistry().abortAll();
+      config.getBackgroundShellRegistry().abortAll();
+
       // Reset UI telemetry metrics for the new session
       uiTelemetryService.reset();
 
