@@ -41,6 +41,14 @@ interface RawComment {
   in_reply_to_id?: number;
 }
 
+interface RawReview {
+  id: number;
+  user?: { login: string };
+  body?: string;
+  state?: string; // APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED | PENDING
+  submitted_at?: string;
+}
+
 interface PrContextArgs {
   pr_number: string;
   owner_repo: string;
@@ -76,12 +84,28 @@ function findRootId(
   }
 }
 
+/**
+ * Should this review-level summary be shown to agents?
+ *
+ * Filters out empty bodies (`COMMENTED` reviews submitted alongside inline
+ * comments often have body=""), and the canonical "no issues found, LGTM"
+ * template the qwen-review pipeline auto-emits — those carry no review
+ * content beyond their state, which the agent doesn't need re-told.
+ */
+function isReviewWorthShowing(body: string | undefined): boolean {
+  const trimmed = (body ?? '').trim();
+  if (trimmed.length === 0) return false;
+  if (/^No issues found\.?\s*LGTM/i.test(trimmed)) return false;
+  return true;
+}
+
 function buildMarkdown(
   prNumber: string,
   ownerRepo: string,
   meta: PrMetadata,
   inline: RawComment[],
   issue: RawComment[],
+  reviews: RawReview[],
 ): string {
   // Build a map id → comment, and group replies by root id, so each
   // already-discussed thread can be rendered with the reviewer's original
@@ -134,6 +158,28 @@ function buildMarkdown(
     parts.push('_(no description)_');
   }
   parts.push('');
+
+  // Review-level summaries — reviewer's overall comments submitted alongside
+  // an APPROVED / CHANGES_REQUESTED / COMMENTED review. Distinct from inline
+  // comments (which target a specific code line) and issue comments (general
+  // PR-thread chatter). Often carries integration notes the reviewer wants
+  // future agents to remember (e.g. "the previously-flagged X is no longer
+  // applicable to the current diff"). Empty bodies and "LGTM" templates are
+  // filtered to keep the section signal-rich.
+  const meaningfulReviews = reviews
+    .filter((r) => isReviewWorthShowing(r.body))
+    .sort((a, b) => (a.submitted_at ?? '').localeCompare(b.submitted_at ?? ''));
+  if (meaningfulReviews.length > 0) {
+    parts.push('## Review summaries (reviewer-level overall comments)');
+    parts.push('');
+    for (const r of meaningfulReviews) {
+      const date = (r.submitted_at ?? '').slice(0, 10);
+      parts.push(
+        `- **@${r.user?.login ?? '?'}** [${r.state ?? 'COMMENTED'}]${date ? ` ${date}` : ''}: ${snippet(r.body)}`,
+      );
+    }
+    parts.push('');
+  }
 
   // Already-discussed threads — render the full conversation so review
   // agents can see whether the original concern was addressed (e.g. a
@@ -226,13 +272,20 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     (ghApi(
       `repos/${owner}/${repo}/issues/${prNumber}/comments`,
     ) as RawComment[] | null) ?? [];
+  const reviews =
+    (ghApi(
+      `repos/${owner}/${repo}/pulls/${prNumber}/reviews`,
+    ) as RawReview[] | null) ?? [];
 
-  const md = buildMarkdown(prNumber, ownerRepo, meta, inline, issue);
+  const md = buildMarkdown(prNumber, ownerRepo, meta, inline, issue, reviews);
 
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, md, 'utf8');
+  const meaningfulReviewCount = reviews.filter((r) =>
+    isReviewWorthShowing(r.body),
+  ).length;
   writeStdoutLine(
-    `Wrote PR context to ${out} (${inline.length} inline, ${issue.length} issue comments)`,
+    `Wrote PR context to ${out} (${inline.length} inline, ${issue.length} issue comments, ${meaningfulReviewCount}/${reviews.length} review summaries)`,
   );
 }
 
