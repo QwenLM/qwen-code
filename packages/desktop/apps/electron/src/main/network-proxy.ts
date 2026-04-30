@@ -8,8 +8,16 @@
 
 import { app, session } from 'electron';
 import { Agent, Dispatcher, ProxyAgent, setGlobalDispatcher } from 'undici';
-import { parseNoProxyRules, shouldBypassProxy, splitCommaSeparated, type NoProxyRule } from './network-proxy-utils';
-import { getNetworkProxySettings, setNetworkProxySettings } from '@craft-agent/shared/config/storage';
+import {
+  parseNoProxyRules,
+  shouldBypassProxy,
+  splitCommaSeparated,
+  type NoProxyRule,
+} from './network-proxy-utils';
+import {
+  getNetworkProxySettings,
+  setNetworkProxySettings,
+} from '@craft-agent/shared/config/storage';
 import type { NetworkProxySettings } from '@craft-agent/shared/config/types';
 import { BROWSER_PANE_SESSION_PARTITION } from './browser-pane-manager';
 import log from './logger';
@@ -39,8 +47,12 @@ class ProtocolProxyDispatcher extends Dispatcher {
     this.rules = parseNoProxyRules(opts.noProxy);
   }
 
-  dispatch(opts: Dispatcher.DispatchOptions, handler: Dispatcher.DispatchHandler): boolean {
-    const url = typeof opts.origin === 'string' ? opts.origin : opts.origin?.toString();
+  dispatch(
+    opts: Dispatcher.DispatchOptions,
+    handler: Dispatcher.DispatchHandlers,
+  ): boolean {
+    const url =
+      typeof opts.origin === 'string' ? opts.origin : opts.origin?.toString();
 
     // If URL matches bypass rules, go direct
     if (url && shouldBypassProxy(url, this.rules)) {
@@ -49,7 +61,9 @@ class ProtocolProxyDispatcher extends Dispatcher {
 
     // Route based on protocol
     const isHttps = url?.startsWith('https:');
-    const proxy = isHttps ? (this.httpsProxy ?? this.httpProxy) : this.httpProxy;
+    const proxy = isHttps
+      ? (this.httpsProxy ?? this.httpProxy)
+      : this.httpProxy;
 
     if (proxy) {
       return proxy.dispatch(opts, handler);
@@ -107,7 +121,9 @@ function configureNodeProxy(settings: NetworkProxySettings | undefined): void {
  * Configure Electron session proxies (default session + browser-pane partition).
  * Requires app to be ready.
  */
-async function configureElectronProxy(settings: NetworkProxySettings | undefined): Promise<void> {
+async function configureElectronProxy(
+  settings: NetworkProxySettings | undefined,
+): Promise<void> {
   if (!app.isReady()) return;
 
   const proxyConfig = settings?.enabled
@@ -119,10 +135,12 @@ async function configureElectronProxy(settings: NetworkProxySettings | undefined
     session.fromPartition(BROWSER_PANE_SESSION_PARTITION),
   ];
 
-  await Promise.all(sessions.map(ses => ses.setProxy(proxyConfig)));
+  await Promise.all(sessions.map((ses) => ses.setProxy(proxyConfig)));
 }
 
-function buildElectronProxyConfig(settings: NetworkProxySettings): Electron.ProxyConfig {
+function buildElectronProxyConfig(
+  settings: NetworkProxySettings,
+): Electron.ProxyConfig {
   const rules: string[] = [];
 
   if (settings.httpsProxy) {
@@ -168,7 +186,9 @@ export async function applyConfiguredProxySettings(): Promise<void> {
 /**
  * Persist new proxy settings and apply immediately.
  */
-export async function updateConfiguredProxySettings(settings: NetworkProxySettings): Promise<void> {
+export async function updateConfiguredProxySettings(
+  settings: NetworkProxySettings,
+): Promise<void> {
   setNetworkProxySettings(settings);
   await applyConfiguredProxySettings();
 }
