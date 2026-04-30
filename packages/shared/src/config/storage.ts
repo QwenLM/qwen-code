@@ -1774,6 +1774,13 @@ function modelSetEquals(a: string[], b: string[]): boolean {
   return true;
 }
 
+function stripQwenRuntimeModelFields(connection: LlmConnection): void {
+  if (connection.providerType !== 'qwen') return;
+  delete connection.models;
+  delete connection.defaultModel;
+  delete connection.modelSelectionMode;
+}
+
 export function inferModelSelectionMode(
   connection: Pick<LlmConnection, 'models'>,
   providerDefaultModelIds: string[],
@@ -2343,8 +2350,6 @@ export function migrateLegacyLlmConnectionsConfig(): void {
       name: 'Qwen Code',
       providerType: 'qwen',
       authType: 'none',
-      models: existingQwen?.models ?? getDefaultModelsForConnection('qwen'),
-      defaultModel: existingQwen?.defaultModel ?? getDefaultModelForConnection('qwen'),
       createdAt: existingQwen?.createdAt ?? Date.now(),
       lastUsedAt: existingQwen?.lastUsedAt,
     };
@@ -2754,10 +2759,12 @@ export function addLlmConnection(connection: LlmConnection): boolean {
   }
 
   // Add connection with timestamp
-  config.llmConnections.push({
+  const connectionToAdd: LlmConnection = {
     ...connection,
     createdAt: connection.createdAt || Date.now(),
-  });
+  };
+  stripQwenRuntimeModelFields(connectionToAdd);
+  config.llmConnections.push(connectionToAdd);
 
   // Ensure default is set after adding first connection
   ensureDefaultLlmConnection(config);
@@ -2811,6 +2818,8 @@ export function updateLlmConnection(slug: string, updates: Partial<Omit<LlmConne
   };
 
   const updated = connections[index]!;
+  stripQwenRuntimeModelFields(updated);
+
   if (updated.providerType === 'pi') {
     const beforeModelIds = toModelIds(existing.models);
     const afterModelIds = toModelIds(updated.models);

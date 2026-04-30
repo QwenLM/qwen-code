@@ -75,7 +75,6 @@ type SlashCommandInvocation = {
   timestamp: number;
 };
 
-const QWEN_CONTEXT_WINDOW = 1_000_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_INITIALIZE_TIMEOUT_MS = 60_000;
 const INCLUDE_CRAFT_CONTEXT_IN_QWEN_PROMPTS = false;
@@ -107,7 +106,30 @@ function asString(value: unknown): string | undefined {
 }
 
 function asNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+  if (typeof value !== 'string') return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function asBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function firstNumber(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const number = asNumber(value);
+    if (number !== undefined) return number;
+  }
+  return undefined;
+}
+
+function firstBoolean(...values: unknown[]): boolean | undefined {
+  for (const value of values) {
+    const bool = asBoolean(value);
+    if (bool !== undefined) return bool;
+  }
+  return undefined;
 }
 
 function toQwenModelDefinition(value: unknown): ModelDefinition | null {
@@ -115,12 +137,47 @@ function toQwenModelDefinition(value: unknown): ModelDefinition | null {
   const id = asString(model.modelId);
   if (!id) return null;
   const name = asString(model.name) || id;
+  const meta = toRecord(model._meta);
   const generationConfig = toRecord(model.generationConfig);
-  const contextWindow =
-    asNumber(model.contextWindowSize)
-    ?? asNumber(model.contextWindow)
-    ?? asNumber(generationConfig.contextWindowSize)
-    ?? QWEN_CONTEXT_WINDOW;
+  const metaGenerationConfig = toRecord(meta.generationConfig);
+  const extraBody = toRecord(generationConfig.extra_body);
+  const metaExtraBody = toRecord(metaGenerationConfig.extra_body);
+  const capabilities = toRecord(model.capabilities);
+  const limits = toRecord(capabilities.limits);
+  const metaCapabilities = toRecord(meta.capabilities);
+  const metaLimits = toRecord(metaCapabilities.limits);
+  const contextWindow = firstNumber(
+    meta.contextLimit,
+    meta.contextWindowSize,
+    meta.contextWindow,
+    model.contextWindowSize,
+    model.contextWindow,
+    model.maxContextWindowTokens,
+    metaGenerationConfig.contextWindowSize,
+    metaGenerationConfig.contextWindow,
+    generationConfig.contextWindowSize,
+    generationConfig.contextWindow,
+    metaLimits.max_context_window_tokens,
+    limits.max_context_window_tokens,
+  );
+  const supportsThinking = firstBoolean(
+    meta.supportsThinking,
+    meta.supportsReasoning,
+    meta.enableThinking,
+    meta.enable_thinking,
+    model.supportsThinking,
+    model.supportsReasoning,
+    model.enableThinking,
+    model.enable_thinking,
+    metaGenerationConfig.enableThinking,
+    metaGenerationConfig.enable_thinking,
+    metaExtraBody.enableThinking,
+    metaExtraBody.enable_thinking,
+    generationConfig.enableThinking,
+    generationConfig.enable_thinking,
+    extraBody.enableThinking,
+    extraBody.enable_thinking,
+  );
 
   return {
     id,
@@ -128,7 +185,8 @@ function toQwenModelDefinition(value: unknown): ModelDefinition | null {
     shortName: name,
     description: asString(model.description) || '',
     provider: 'qwen',
-    contextWindow,
+    ...(contextWindow !== undefined ? { contextWindow } : {}),
+    ...(supportsThinking !== undefined ? { supportsThinking } : {}),
   };
 }
 
@@ -599,6 +657,7 @@ export class QwenAgent extends BaseAgent {
   private latestAvailableCommandsSnapshot: AvailableCommandsSnapshot | null = null;
   private availableCommandsWaiters: Array<(snapshot: AvailableCommandsSnapshot | null) => void> = [];
   private availableModelIds: Set<string> | null = null;
+  private availableModelsById = new Map<string, ModelDefinition>();
   private firstAvailableModelId: string | undefined;
 
   private sourceMcpServers: Record<string, SdkMcpServerConfig> = {};
@@ -613,7 +672,7 @@ export class QwenAgent extends BaseAgent {
   private static readonly STDERR_BUFFER_MAX_BYTES = 8 * 1024;
 
   constructor(config: BackendConfig) {
-    super(config, config.model || '', QWEN_CONTEXT_WINDOW);
+    super(config, config.model || '');
     this._supportsBranching = false;
     this.persistedQwenSessionId = config.session?.sdkSessionId || null;
     this.pendingModeOverride = config.session?.permissionMode && !config.session?.sdkSessionId
@@ -842,6 +901,7 @@ export class QwenAgent extends BaseAgent {
       return;
     }
     super.setModel(model);
+    this.applyCurrentModelContextWindow(model);
     void this.forwardModel(model);
   }
 
@@ -1319,6 +1379,7 @@ export class QwenAgent extends BaseAgent {
       : [];
     const currentModelId = asString(modelState.currentModelId);
     this.availableModelIds = new Set(availableModels.map(model => model.id));
+    this.availableModelsById = new Map(availableModels.map(model => [model.id, model]));
     this.firstAvailableModelId = availableModels[0]?.id;
     const selectableCurrentModelId = currentModelId && this.availableModelIds.has(currentModelId)
       ? currentModelId
@@ -1328,6 +1389,8 @@ export class QwenAgent extends BaseAgent {
       super.setModel(selectableCurrentModelId || this.firstAvailableModelId || '');
     }
 
+    this.applyCurrentModelContextWindow();
+
     if (availableModels.length > 0) {
       this.config.onAvailableModelsUpdate?.(availableModels, currentModelId);
     }
@@ -1335,6 +1398,17 @@ export class QwenAgent extends BaseAgent {
 
   private isKnownAvailableModel(model: string): boolean {
     return !this.availableModelIds || this.availableModelIds.size === 0 || this.availableModelIds.has(model);
+  }
+
+  private getCurrentModelContextWindow(model = this._model): number | undefined {
+    return model ? this.availableModelsById.get(model)?.contextWindow : undefined;
+  }
+
+  private applyCurrentModelContextWindow(model = this._model): void {
+    const contextWindow = this.getCurrentModelContextWindow(model);
+    if (contextWindow) {
+      this.usageTracker.setContextWindow(contextWindow);
+    }
   }
 
   private recordSessionModes(result: JsonRecord): void {
@@ -2133,9 +2207,13 @@ export class QwenAgent extends BaseAgent {
   private captureUsage(update: JsonRecord): void {
     const usage = this.extractUsage(update);
     if (!usage) return;
+    const contextWindow = this.getCurrentModelContextWindow();
     this.eventQueue.enqueue({
       type: 'usage_update',
-      usage: { inputTokens: usage.inputTokens },
+      usage: {
+        inputTokens: usage.inputTokens,
+        ...(contextWindow ? { contextWindow } : {}),
+      },
     });
   }
 

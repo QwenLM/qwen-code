@@ -16,8 +16,6 @@ import type { ResolvedBackendRuntimePaths } from '../runtime-resolver.ts';
 
 type JsonRecord = Record<string, unknown>;
 
-const QWEN_CONTEXT_WINDOW = 1_000_000;
-
 function isRecord(value: unknown): value is JsonRecord {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -31,7 +29,30 @@ function asString(value: unknown): string | undefined {
 }
 
 function asNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+  if (typeof value !== 'string') return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function asBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function firstNumber(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const number = asNumber(value);
+    if (number !== undefined) return number;
+  }
+  return undefined;
+}
+
+function firstBoolean(...values: unknown[]): boolean | undefined {
+  for (const value of values) {
+    const bool = asBoolean(value);
+    if (bool !== undefined) return bool;
+  }
+  return undefined;
 }
 
 function toQwenModelDefinition(value: unknown): ModelDefinition | null {
@@ -40,12 +61,47 @@ function toQwenModelDefinition(value: unknown): ModelDefinition | null {
   if (!id) return null;
 
   const name = asString(model.name) || id;
+  const meta = toRecord(model._meta);
   const generationConfig = toRecord(model.generationConfig);
-  const contextWindow =
-    asNumber(model.contextWindowSize)
-    ?? asNumber(model.contextWindow)
-    ?? asNumber(generationConfig.contextWindowSize)
-    ?? QWEN_CONTEXT_WINDOW;
+  const metaGenerationConfig = toRecord(meta.generationConfig);
+  const extraBody = toRecord(generationConfig.extra_body);
+  const metaExtraBody = toRecord(metaGenerationConfig.extra_body);
+  const capabilities = toRecord(model.capabilities);
+  const limits = toRecord(capabilities.limits);
+  const metaCapabilities = toRecord(meta.capabilities);
+  const metaLimits = toRecord(metaCapabilities.limits);
+  const contextWindow = firstNumber(
+    meta.contextLimit,
+    meta.contextWindowSize,
+    meta.contextWindow,
+    model.contextWindowSize,
+    model.contextWindow,
+    model.maxContextWindowTokens,
+    metaGenerationConfig.contextWindowSize,
+    metaGenerationConfig.contextWindow,
+    generationConfig.contextWindowSize,
+    generationConfig.contextWindow,
+    metaLimits.max_context_window_tokens,
+    limits.max_context_window_tokens,
+  );
+  const supportsThinking = firstBoolean(
+    meta.supportsThinking,
+    meta.supportsReasoning,
+    meta.enableThinking,
+    meta.enable_thinking,
+    model.supportsThinking,
+    model.supportsReasoning,
+    model.enableThinking,
+    model.enable_thinking,
+    metaGenerationConfig.enableThinking,
+    metaGenerationConfig.enable_thinking,
+    metaExtraBody.enableThinking,
+    metaExtraBody.enable_thinking,
+    generationConfig.enableThinking,
+    generationConfig.enable_thinking,
+    extraBody.enableThinking,
+    extraBody.enable_thinking,
+  );
 
   return {
     id,
@@ -53,7 +109,8 @@ function toQwenModelDefinition(value: unknown): ModelDefinition | null {
     shortName: name,
     description: asString(model.description) || '',
     provider: 'qwen',
-    contextWindow,
+    ...(contextWindow !== undefined ? { contextWindow } : {}),
+    ...(supportsThinking !== undefined ? { supportsThinking } : {}),
   };
 }
 

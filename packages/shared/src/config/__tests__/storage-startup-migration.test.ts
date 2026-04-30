@@ -125,7 +125,7 @@ describe('startup migration (integration)', () => {
     })
   })
 
-  it('preserves existing qwen models and default model', () => {
+  it('removes ACP-owned qwen models and default model from persisted config', () => {
     const { configDir, workspaceRoot, configPath } = setupWorkspaceConfigDir()
     const qwenModels = [
       { id: 'qwen3-coder-plus', name: 'Qwen3 Coder Plus', shortName: 'Qwen Plus', description: '', provider: 'qwen', contextWindow: 1_000_000 },
@@ -158,8 +158,8 @@ describe('startup migration (integration)', () => {
 
     const [connection] = readJson(configPath).llmConnections
     expect(connection.slug).toBe('qwen-code')
-    expect(connection.models).toEqual(qwenModels)
-    expect(connection.defaultModel).toBe('qwen3-coder-flash')
+    expect(connection.models).toBeUndefined()
+    expect(connection.defaultModel).toBeUndefined()
   })
 
   it('creates qwen-code for configs without llmConnections and clears workspace connection overrides', () => {

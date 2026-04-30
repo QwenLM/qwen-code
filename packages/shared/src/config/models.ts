@@ -71,8 +71,8 @@ export interface ModelDefinition {
   descriptionKey?: string;
   /** Provider that offers this model */
   provider: ModelProvider;
-  /** Maximum context window in tokens */
-  contextWindow: number;
+  /** Maximum context window in tokens, when the provider reports it */
+  contextWindow?: number;
   /** Whether this model supports thinking/reasoning effort. Defaults to true when undefined. */
   supportsThinking?: boolean;
 }

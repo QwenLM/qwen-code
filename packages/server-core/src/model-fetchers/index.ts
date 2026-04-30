@@ -4,10 +4,13 @@
  * Centralized service for fetching and refreshing model lists across all providers.
  * Replaces the scattered fetchAndStore*Models() functions and startCodexModelRefresh().
  *
- * Fallback chain (same for every provider):
+ * Fallback chain:
  * 1. Provider runtime discovery via backend driver dispatch
  * 2. Persisted connection.models — previously fetched, survives offline/restart
  * 3. MODEL_REGISTRY — hardcoded offline seed data, last resort
+ *
+ * Qwen is the exception: Qwen Code's ACP response is the source of truth, so
+ * discovered models are kept in memory and never persisted to config.json.
  */
 
 import type { ModelFetcherMap, ModelFetcherCredentials, FetchableProvider } from '@craft-agent/shared/config'
@@ -31,6 +34,11 @@ const COPILOT_REFRESH_INTERVAL_MS = 10 * 60 * 1000
 
 type CredentialResolver = (slug: string) => Promise<ModelFetcherCredentials>
 
+export interface RuntimeModelState {
+  models: ModelDefinition[]
+  serverDefault?: string
+}
+
 // ============================================================
 // ModelRefreshService
 // ============================================================
@@ -38,6 +46,7 @@ type CredentialResolver = (slug: string) => Promise<ModelFetcherCredentials>
 class ModelRefreshService {
   private timers = new Map<string, ReturnType<typeof setInterval>>()
   private inFlight = new Map<string, Promise<void>>()
+  private runtimeModels = new Map<string, RuntimeModelState>()
 
   constructor(
     private fetchers: ModelFetcherMap,
@@ -60,11 +69,34 @@ class ModelRefreshService {
     return promise
   }
 
+  getRuntimeModelState(slug: string): RuntimeModelState | undefined {
+    const state = this.runtimeModels.get(slug)
+    if (!state) return undefined
+    return {
+      models: state.models.map(model => ({ ...model })),
+      serverDefault: state.serverDefault,
+    }
+  }
+
+  setRuntimeModelState(slug: string, state: RuntimeModelState): boolean {
+    const previous = this.runtimeModels.get(slug)
+    const sameModels = JSON.stringify(previous?.models ?? []) === JSON.stringify(state.models)
+    const sameDefault = previous?.serverDefault === state.serverDefault
+
+    this.runtimeModels.set(slug, {
+      models: state.models.map(model => ({ ...model })),
+      serverDefault: state.serverDefault,
+    })
+
+    return !(sameModels && sameDefault)
+  }
+
   /**
    * Internal: actual refresh logic with fallback chain.
    * Skips compat providers (not in fetcher map).
    * Preserves user's defaultModel if still valid.
-   * Updates connection.models in storage on success.
+   * Updates connection.models in storage on success, except for Qwen where ACP
+   * model metadata remains runtime-only.
    */
   private async _doRefresh(slug: string): Promise<void> {
     const connection = getLlmConnection(slug)
@@ -99,6 +131,15 @@ class ModelRefreshService {
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
       handlerLog.warn(`Model refresh [${slug}]: provider fetch failed: ${msg}`)
+    }
+
+    if (connection.providerType === 'qwen') {
+      if (newModels && newModels.length > 0) {
+        this.setRuntimeModelState(slug, { models: newModels, serverDefault })
+      } else {
+        handlerLog.warn(`Model refresh [${slug}]: no ACP models available`)
+      }
+      return
     }
 
     // Layer 2: Persisted connection.models (keep what we have)
@@ -136,20 +177,16 @@ class ModelRefreshService {
       return
     }
 
-    // Preserve user's defaultModel if still valid. Qwen is provider-owned via
-    // ACP, so its default is the ACP-reported currentModelId.
+    // Preserve user's defaultModel if still valid.
     const currentDefault = connection.defaultModel
     const stillValid = currentDefault && newModels.some(m => m.id === currentDefault)
-    const serverDefaultValid = serverDefault && newModels.some(m => m.id === serverDefault)
-    const newDefault = connection.providerType === 'qwen'
-      ? serverDefaultValid ? serverDefault : newModels[0]?.id
-      : stillValid
+    const newDefault = stillValid
       ? currentDefault
       : serverDefault ?? newModels[0]?.id
 
     updateLlmConnection(slug, {
       models: newModels,
-      ...(newDefault && (connection.providerType === 'qwen' || !stillValid) ? { defaultModel: newDefault } : {}),
+      ...(newDefault && !stillValid ? { defaultModel: newDefault } : {}),
     })
   }
 
@@ -194,6 +231,7 @@ class ModelRefreshService {
       handlerLog.info(`Stopped model refresh timer for ${slug}`)
     }
     this.timers.clear()
+    this.runtimeModels.clear()
   }
 
   /**
@@ -227,6 +265,7 @@ class ModelRefreshService {
       clearInterval(timer)
       this.timers.delete(slug)
     }
+    this.runtimeModels.delete(slug)
   }
 
   private startTimer(slug: string, intervalMs: number): void {

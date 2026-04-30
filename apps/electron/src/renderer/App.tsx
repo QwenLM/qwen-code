@@ -627,11 +627,15 @@ export default function App() {
   // Refresh LLM connections from config (called on workspace change and after connection updates)
   const refreshLlmConnections = useCallback(async () => {
     const connections = await window.electronAPI.listLlmConnectionsWithStatus()
-    const visibleConnections = connections.map(connection => (
-      connection.providerType === 'qwen' && !qwenModelRefreshCompletedRef.current.has(connection.slug)
-        ? { ...connection, models: [], defaultModel: '' }
-        : connection
-    ))
+    const visibleConnections = connections.map(connection => {
+      if (connection.providerType !== 'qwen') return connection
+      if (connection.models?.length) {
+        qwenModelRefreshCompletedRef.current.add(connection.slug)
+      }
+      return qwenModelRefreshCompletedRef.current.has(connection.slug)
+        ? connection
+        : { ...connection, models: [], defaultModel: '' }
+    })
     setLlmConnections(visibleConnections)
     setDefaultLlmConnectionSlug(resolveDefaultConnectionSlug(connections))
     // Also refresh workspace default
@@ -641,7 +645,9 @@ export default function App() {
     }
 
     const qwenConnectionToRefresh = connections.find(connection =>
-      connection.providerType === 'qwen' && !qwenModelRefreshAttemptedRef.current.has(connection.slug)
+      connection.providerType === 'qwen'
+      && !connection.models?.length
+      && !qwenModelRefreshAttemptedRef.current.has(connection.slug)
     )
     if (qwenConnectionToRefresh && !qwenModelRefreshInFlightRef.current) {
       qwenModelRefreshAttemptedRef.current.add(qwenConnectionToRefresh.slug)

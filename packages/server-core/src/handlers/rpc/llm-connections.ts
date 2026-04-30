@@ -18,6 +18,22 @@ import { CLIENT_OPEN_EXTERNAL } from '@craft-agent/server-core/transport'
 // Local OAuth state
 let copilotOAuthAbort: AbortController | null = null
 
+function attachRuntimeModelState<T extends LlmConnection>(connection: T): T {
+  if (connection.providerType !== 'qwen') return connection
+  let runtimeState: { models: NonNullable<LlmConnection['models']>; serverDefault?: string } | undefined
+  try {
+    runtimeState = getModelRefreshService().getRuntimeModelState(connection.slug)
+  } catch {
+    runtimeState = undefined
+  }
+  if (!runtimeState?.models.length) return connection
+  return {
+    ...connection,
+    models: runtimeState.models,
+    defaultModel: runtimeState.serverDefault,
+  }
+}
+
 export const HANDLED_CHANNELS = [
   RPC_CHANNELS.llmConnections.LIST,
   RPC_CHANNELS.llmConnections.LIST_WITH_STATUS,
@@ -385,7 +401,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
 
   // List all LLM connections (includes built-in and custom)
   server.handle(RPC_CHANNELS.llmConnections.LIST, async (): Promise<LlmConnection[]> => {
-    return getLlmConnections()
+    return getLlmConnections().map(attachRuntimeModelState)
   })
 
   // List all LLM connections with authentication status
@@ -397,17 +413,18 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
     return Promise.all(connections.map(async (conn): Promise<LlmConnectionWithStatus> => {
       // Check if credentials exist for this connection
       const hasCredentials = await credentialManager.hasLlmCredentials(conn.slug, conn.authType)
-      return {
+      return attachRuntimeModelState({
         ...conn,
         isAuthenticated: conn.authType === 'none' || hasCredentials,
         isDefault: conn.slug === defaultSlug,
-      }
+      })
     }))
   })
 
   // Get a specific LLM connection by slug
   server.handle(RPC_CHANNELS.llmConnections.GET, async (_ctx, slug: string): Promise<LlmConnection | null> => {
-    return getLlmConnection(slug)
+    const connection = getLlmConnection(slug)
+    return connection ? attachRuntimeModelState(connection) : null
   })
 
   // Get stored API key for an LLM connection (masked — for edit form display only)

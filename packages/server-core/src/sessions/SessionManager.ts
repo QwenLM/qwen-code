@@ -22,7 +22,7 @@ import {
   type BackendSessionMessagesResult,
   type PostInitResult,
 } from '@craft-agent/shared/agent/backend'
-import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars, updateLlmConnection, QWEN_CODE_CONNECTION_SLUG, type ModelDefinition } from '@craft-agent/shared/config'
+import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars, QWEN_CODE_CONNECTION_SLUG, type ModelDefinition } from '@craft-agent/shared/config'
 import { PrivilegedExecutionBroker } from '@craft-agent/server-core/services'
 import { isValidWorkingDirectory } from '../utils/path-validation'
 import { InitGate } from '@craft-agent/server-core/domain'
@@ -98,6 +98,7 @@ import { extractLabelId, resolveSessionLabels } from '@craft-agent/shared/labels
 import { ensureLabelsExist } from '@craft-agent/shared/labels/crud'
 import { loadStatusConfig } from '@craft-agent/shared/statuses/storage'
 import { AutomationSystem, createPromptHistoryEntry, appendAutomationHistoryEntry, type AutomationSystemMetadataSnapshot } from '@craft-agent/shared/automations'
+import { getModelRefreshService } from '@craft-agent/server-core/model-fetchers'
 
 // Import from server-core domain utilities
 import { sanitizeForTitle, shouldActivateBrowserOverlay, normalizeBrowserToolName, rollbackFailedBranchCreation, releaseBrowserOwnershipOnForcedStop } from '@craft-agent/server-core/domain'
@@ -1521,22 +1522,19 @@ export class SessionManager implements ISessionManager {
     const connection = getLlmConnection(slug)
     if (!connection || connection.providerType !== 'qwen' || models.length === 0) return
 
-    const currentModelIds = (connection.models ?? []).map(model => typeof model === 'string' ? model : model.id)
-    const nextModelIds = models.map(model => model.id)
-    const sameModels = currentModelIds.length === nextModelIds.length
-      && currentModelIds.every((id, index) => id === nextModelIds[index])
-
-    const reportedDefault = currentModelId && nextModelIds.includes(currentModelId) ? currentModelId : undefined
-    const nextDefault = reportedDefault ?? nextModelIds[0]
-    const sameDefault = (connection.defaultModel ?? '') === (nextDefault ?? '')
-
-    if (sameModels && sameDefault) return
-
-    updateLlmConnection(slug, {
-      models,
-      ...(nextDefault ? { defaultModel: nextDefault } : {}),
-    })
-    this.broadcastLlmConnectionsChanged()
+    const modelIds = models.map(model => model.id)
+    const serverDefault = currentModelId && modelIds.includes(currentModelId) ? currentModelId : undefined
+    let changed = false
+    try {
+      changed = getModelRefreshService().setRuntimeModelState(slug, {
+        models,
+        serverDefault,
+      })
+    } catch (error) {
+      sessionLog.warn(`Qwen runtime model cache unavailable: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    if (changed) this.broadcastLlmConnectionsChanged()
   }
 
   private broadcastSkillsChanged(workspaceId: string, skills: import('@craft-agent/shared/skills').LoadedSkill[]): void {

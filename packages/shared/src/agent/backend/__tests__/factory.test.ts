@@ -410,8 +410,8 @@ describe('Qwen model resolution', () => {
     createdAt: 0,
     defaultModel: 'glm-5.1(dashscope)',
     models: [
-      { id: 'glm-5.1(dashscope)', name: 'GLM 5.1 DashScope', shortName: 'GLM 5.1', description: '', provider: 'qwen', contextWindow: 1_000_000 },
-      { id: 'qwen3-coder-plus', name: 'Qwen3 Coder Plus', shortName: 'Qwen Plus', description: '', provider: 'qwen', contextWindow: 1_000_000 },
+      { id: 'glm-5.1(dashscope)', name: 'GLM 5.1 DashScope', shortName: 'GLM 5.1', description: '', provider: 'qwen', contextWindow: 128_000 },
+      { id: 'qwen3-coder-plus', name: 'Qwen3 Coder Plus', shortName: 'Qwen Plus', description: '', provider: 'qwen', contextWindow: 262_144 },
     ],
   };
 
