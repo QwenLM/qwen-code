@@ -408,7 +408,6 @@ describe('Turn', () => {
               candidatesTokenCount: 50,
               cachedContentTokenCount: 10,
               thoughtsTokenCount: 5,
-              toolUsePromptTokenCount: 2,
             },
           } as GenerateContentResponse,
         };
@@ -435,7 +434,6 @@ describe('Turn', () => {
               candidatesTokenCount: 50,
               cachedContentTokenCount: 10,
               thoughtsTokenCount: 5,
-              toolUsePromptTokenCount: 2,
             },
           },
         },

@@ -1179,7 +1179,7 @@ export class WebViewProvider {
 
   /**
    * Initialize agent connection and session
-   * Can be called from show() or via /login command
+   * Can be called from show() or via /auth command
    */
   async initializeAgentConnection(options?: {
     autoAuthenticate?: boolean;

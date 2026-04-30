@@ -86,7 +86,7 @@ const COUNTER_DEFINITIONS = {
     assign: (c: Counter) => (tokenUsageCounter = c),
     attributes: {} as {
       model: string;
-      type: 'input' | 'output' | 'thought' | 'cache' | 'tool';
+      type: 'input' | 'output' | 'thought' | 'cache';
     },
   },
   [SESSION_COUNT]: {

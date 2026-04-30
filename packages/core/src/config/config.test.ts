@@ -313,6 +313,76 @@ describe('Server Config (config.ts)', () => {
     expect(config.getSystemPrompt()).toBeUndefined();
   });
 
+  describe('FileReadCache isolation', () => {
+    it('returns a distinct cache for child Configs created via Object.create', () => {
+      // Subagent / scoped-agent / fork construction all use
+      // `Object.create(parent)`, which does NOT run field initializers.
+      // Without explicit handling the child would resolve fileReadCache
+      // through the prototype chain back to the parent's instance, so a
+      // subagent's ReadFile would see the parent's recorded reads and
+      // return file_unchanged placeholders for files the subagent has
+      // never received in its own transcript.
+      const parent = new Config(baseParams);
+      const child = Object.create(parent) as Config;
+
+      const parentCache = parent.getFileReadCache();
+      const childCache = child.getFileReadCache();
+
+      expect(parentCache).toBeDefined();
+      expect(childCache).toBeDefined();
+      expect(childCache).not.toBe(parentCache);
+
+      parentCache.recordRead(
+        '/tmp/parent.ts',
+        {
+          dev: 1,
+          ino: 100,
+          mtimeMs: 1_000_000,
+          size: 42,
+        } as unknown as import('node:fs').Stats,
+        { full: true, cacheable: true },
+      );
+
+      expect(parentCache.size()).toBe(1);
+      expect(childCache.size()).toBe(0);
+    });
+
+    it('returns the same cache instance on repeated getter calls within one Config', () => {
+      // Sanity: the lazy own-property initialization in
+      // getFileReadCache() must not allocate a fresh cache on every
+      // call — recorded entries would vanish between operations.
+      const config = new Config(baseParams);
+      expect(config.getFileReadCache()).toBe(config.getFileReadCache());
+    });
+  });
+
+  describe('startNewSession', () => {
+    it('clears the FileReadCache so a new session does not inherit prior reads', () => {
+      // Regression guard: the file-read cache backs ReadFile's
+      // file_unchanged placeholder, whose correctness depends on the
+      // model having seen the prior read earlier in the *current*
+      // conversation. /clear and resume both go through
+      // startNewSession(), so it must drop cache entries the new
+      // session has never seen.
+      const config = new Config(baseParams);
+      const cache = config.getFileReadCache();
+      cache.recordRead(
+        '/tmp/whatever.ts',
+        {
+          dev: 1,
+          ino: 100,
+          mtimeMs: 1_000_000,
+          size: 42,
+        } as unknown as import('node:fs').Stats,
+        { full: true, cacheable: true },
+      );
+      expect(cache.size()).toBe(1);
+
+      config.startNewSession();
+      expect(cache.size()).toBe(0);
+    });
+  });
+
   describe('initialize', () => {
     it('should throw an error if checkpointing is enabled and GitService fails', async () => {
       const gitError = new Error('Git is not installed');

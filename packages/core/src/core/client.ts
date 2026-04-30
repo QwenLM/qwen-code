@@ -1159,6 +1159,14 @@ export class GeminiClient {
         });
 
         await this.startChat(newHistory);
+        // Compaction rewrites the prompt history: prior full-Read tool
+        // results may have been summarised away, but the FileReadCache
+        // still believes those reads are "in this conversation". A
+        // follow-up Read could then return the file_unchanged
+        // placeholder pointing at content the model can no longer
+        // retrieve from its own context. Clear the cache so post-
+        // compaction Reads re-emit the bytes.
+        this.config.getFileReadCache().clear();
         uiTelemetryService.setLastPromptTokenCount(info.newTokenCount);
         this.forceFullIdeContext = true;
       }

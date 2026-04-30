@@ -75,7 +75,6 @@ describe('<SessionSummaryDisplay />', () => {
             total: 3500,
             cached: 500,
             thoughts: 300,
-            tool: 200,
           },
         }),
       },
