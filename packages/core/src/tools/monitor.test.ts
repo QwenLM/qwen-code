@@ -319,6 +319,14 @@ describe('MonitorTool', () => {
       await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
     });
 
+    it('denies command substitution inside env-prefix assignments', async () => {
+      const invocation = createInvocation({
+        command: `FOO=$(cat secret.txt) /bin/bash -c 'echo ok'`,
+      });
+
+      await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
+    });
+
     it('allows read-only monitor commands by default', async () => {
       mockIsShellCommandReadOnlyAST.mockResolvedValueOnce(true);
       const invocation = createInvocation({

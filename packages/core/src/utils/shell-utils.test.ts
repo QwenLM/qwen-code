@@ -538,6 +538,7 @@ describe('normalizeMonitorCommand', () => {
       ),
     ).toEqual({
       analysisCommand: 'echo $(cat secret.txt)',
+      safetyCommand: `FOO="bar baz" echo $(cat secret.txt)`,
       spawnCommand: `FOO="bar baz" /bin/bash -c 'echo $(cat secret.txt)'`,
       strippedTrailingAmp: false,
     });
@@ -550,6 +551,7 @@ describe('normalizeMonitorCommand', () => {
       ),
     ).toEqual({
       analysisCommand: 'tail -f /tmp/app.log',
+      safetyCommand: 'tail -f /tmp/app.log',
       spawnCommand: `/bin/bash --noprofile -c 'tail -f /tmp/app.log'`,
       strippedTrailingAmp: true,
     });
@@ -562,6 +564,7 @@ describe('normalizeMonitorCommand', () => {
       ),
     ).toEqual({
       analysisCommand: 'tail -f /tmp/app.log',
+      safetyCommand: String.raw`FOO=bar\ baz tail -f /tmp/app.log`,
       spawnCommand: String.raw`FOO=bar\ baz /bin/bash --noprofile -c 'tail -f /tmp/app.log'`,
       strippedTrailingAmp: true,
     });
@@ -572,7 +575,19 @@ describe('normalizeMonitorCommand', () => {
       normalizeMonitorCommand(`FOO="bar baz" tail -f /tmp/app.log`),
     ).toEqual({
       analysisCommand: `FOO="bar baz" tail -f /tmp/app.log`,
+      safetyCommand: `FOO="bar baz" tail -f /tmp/app.log`,
       spawnCommand: `FOO="bar baz" tail -f /tmp/app.log`,
+      strippedTrailingAmp: false,
+    });
+  });
+
+  it('keeps env-prefix substitutions in the safety command', () => {
+    expect(
+      normalizeMonitorCommand(`FOO=$(cat secret.txt) /bin/bash -c 'echo ok'`),
+    ).toEqual({
+      analysisCommand: 'echo ok',
+      safetyCommand: 'FOO=$(cat secret.txt) echo ok',
+      spawnCommand: `FOO=$(cat secret.txt) /bin/bash -c 'echo ok'`,
       strippedTrailingAmp: false,
     });
   });

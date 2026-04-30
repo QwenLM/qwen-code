@@ -376,6 +376,7 @@ interface ParsedMonitorShellWrapper {
 
 export interface NormalizedMonitorCommand {
   analysisCommand: string;
+  safetyCommand: string;
   spawnCommand: string;
   strippedTrailingAmp: boolean;
 }
@@ -390,6 +391,8 @@ function takeLeadingToken(
 
   let quote: '"' | "'" | '' = '';
   let escaped = false;
+  let inBackticks = false;
+  let commandSubstitutionDepth = 0;
   let idx = 0;
 
   while (idx < trimmed.length) {
@@ -418,6 +421,18 @@ function takeLeadingToken(
       continue;
     }
 
+    if (inBackticks) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '`') {
+        inBackticks = false;
+      }
+      idx++;
+      continue;
+    }
+
     if (escaped) {
       escaped = false;
       idx++;
@@ -436,14 +451,41 @@ function takeLeadingToken(
       continue;
     }
 
-    if (/\s/.test(char)) {
+    if (char === '`') {
+      inBackticks = true;
+      idx++;
+      continue;
+    }
+
+    if (
+      (char === '$' || char === '<' || char === '>') &&
+      trimmed[idx + 1] === '('
+    ) {
+      commandSubstitutionDepth++;
+      idx += 2;
+      continue;
+    }
+
+    if (char === ')' && commandSubstitutionDepth > 0) {
+      commandSubstitutionDepth--;
+      idx++;
+      continue;
+    }
+
+    if (/\s/.test(char) && commandSubstitutionDepth === 0) {
       break;
     }
 
     idx++;
   }
 
-  if (idx === 0 || quote || escaped) {
+  if (
+    idx === 0 ||
+    quote ||
+    escaped ||
+    inBackticks ||
+    commandSubstitutionDepth
+  ) {
     return null;
   }
 
@@ -572,7 +614,13 @@ export function normalizeMonitorCommand(
 ): NormalizedMonitorCommand {
   const { wrapperTokens, innerCommand, innerQuote } =
     parseMonitorShellWrapper(command);
+  const leadingEnvTokens =
+    wrapperTokens?.filter((token) => isEnvAssignmentToken(token)) ?? [];
   const analysisCommand = stripTrailingBackgroundAmp(innerCommand);
+  const safetyCommand =
+    wrapperTokens && leadingEnvTokens.length > 0
+      ? `${leadingEnvTokens.join(' ')} ${analysisCommand}`.trim()
+      : analysisCommand;
   const strippedTrailingAmp = analysisCommand !== innerCommand;
   const spawnCommand = wrapperTokens
     ? innerQuote
@@ -582,6 +630,7 @@ export function normalizeMonitorCommand(
 
   return {
     analysisCommand,
+    safetyCommand,
     spawnCommand,
     strippedTrailingAmp,
   };

@@ -1526,6 +1526,170 @@ describe('runNonInteractive', () => {
     });
   });
 
+  it('streams late monitor output to the SDK before one-shot completion', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock();
+
+    const writes: string[] = [];
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      if (typeof chunk === 'string') {
+        writes.push(chunk);
+      } else {
+        writes.push(Buffer.from(chunk).toString('utf8'));
+      }
+      return true;
+    });
+
+    let keepBackgroundTaskOpen = true;
+    let lateMonitorEventEmitted = false;
+    mockBackgroundTaskRegistry.hasUnfinalizedTasks.mockImplementation(() => {
+      if (keepBackgroundTaskOpen && !lateMonitorEventEmitted) {
+        lateMonitorEventEmitted = true;
+        monitorNotificationCallback?.(
+          'Monitor "logs" event #2: still running',
+          secondNotificationXml,
+          {
+            monitorId: 'mon_1',
+            toolUseId: 'tool_mon_1',
+            status: 'running',
+            eventCount: 2,
+          },
+        );
+      }
+      return keepBackgroundTaskOpen;
+    });
+
+    const firstNotificationXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>running</status>\n' +
+      '<summary>Monitor emitted event #1.</summary>\n' +
+      '<result>ready</result>\n' +
+      '</task-notification>';
+    const secondNotificationXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>running</status>\n' +
+      '<summary>Monitor emitted event #2.</summary>\n' +
+      '<result>still running</result>\n' +
+      '</task-notification>';
+    const cancelledXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>cancelled</status>\n' +
+      '<summary>Monitor was cancelled.</summary>\n' +
+      '</task-notification>';
+
+    let monitorNotificationCallback:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: {
+            monitorId: string;
+            toolUseId?: string;
+            status: 'running' | 'completed' | 'failed' | 'cancelled';
+            eventCount: number;
+          },
+        ) => void)
+      | undefined;
+
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      monitorNotificationCallback = cb ?? undefined;
+      if (!cb) {
+        return;
+      }
+      cb('Monitor "logs" event #1: ready', firstNotificationXml, {
+        monitorId: 'mon_1',
+        toolUseId: 'tool_mon_1',
+        status: 'running',
+        eventCount: 1,
+      });
+    });
+    mockMonitorRegistry.abortAll.mockImplementation(() => {
+      monitorNotificationCallback?.(
+        'Monitor "logs" was cancelled.',
+        cancelledXml,
+        {
+          monitorId: 'mon_1',
+          toolUseId: 'tool_mon_1',
+          status: 'cancelled',
+          eventCount: 2,
+        },
+      );
+    });
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Monitor launched.' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 2 },
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Observed.' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+    const runPromise = runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Watch the logs',
+      'prompt-monitor-late-sdk',
+    );
+
+    await vi.waitFor(() => {
+      const envelopes = writes
+        .join('')
+        .split('\n')
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line));
+      const monitorNotifications = envelopes.filter(
+        (env) =>
+          env.type === 'system' &&
+          env.subtype === 'task_notification' &&
+          env.data?.task_id === 'mon_1',
+      );
+
+      expect(
+        monitorNotifications.filter((env) => env.data?.status === 'running'),
+      ).toHaveLength(2);
+      expect(envelopes.some((env) => env.type === 'result')).toBe(false);
+    });
+
+    keepBackgroundTaskOpen = false;
+    await runPromise;
+
+    const envelopes = writes
+      .join('')
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line));
+    expect(envelopes.at(-1)).toMatchObject({
+      type: 'result',
+      is_error: false,
+    });
+  });
+
   it('should include usage metadata and API duration in stream-json result', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue('stream-json');
     (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);

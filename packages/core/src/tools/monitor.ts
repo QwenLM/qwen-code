@@ -95,7 +95,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
   override async getDefaultPermission(): Promise<PermissionDecision> {
     const command = normalizeMonitorShellCommand(
       this.params.command,
-    ).analysisCommand;
+    ).safetyCommand;
 
     if (detectCommandSubstitution(command)) {
       return 'deny';

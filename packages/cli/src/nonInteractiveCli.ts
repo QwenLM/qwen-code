@@ -396,6 +396,7 @@ export async function runNonInteractive(
               localQueue.push(queueItem);
             } else {
               sdkOnlyMonitorQueue.push(queueItem);
+              flushQueuedNotificationsToSdk(sdkOnlyMonitorQueue);
             }
           },
         );
