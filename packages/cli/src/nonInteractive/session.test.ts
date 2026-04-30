@@ -59,6 +59,7 @@ interface ConfigOverrides {
 let mockMonitorRegistry: {
   setNotificationCallback: ReturnType<typeof vi.fn>;
   setRegisterCallback: ReturnType<typeof vi.fn>;
+  abortAll: ReturnType<typeof vi.fn>;
 };
 
 function createConfig(overrides: ConfigOverrides = {}): Config {
@@ -167,6 +168,7 @@ describe('runNonInteractiveStreamJson', () => {
     mockMonitorRegistry = {
       setNotificationCallback: vi.fn(),
       setRegisterCallback: vi.fn(),
+      abortAll: vi.fn(),
     };
     config = createConfig();
     runNonInteractiveMock.mockReset();

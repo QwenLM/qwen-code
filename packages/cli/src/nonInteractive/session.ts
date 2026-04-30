@@ -595,6 +595,7 @@ class Session {
     debugLogger.debug('[Session] Shutting down');
 
     this.isShuttingDown = true;
+    this.config.getMonitorRegistry().abortAll();
     this.stopMonitorCallbacks();
 
     // Wait for all pending work
@@ -606,8 +607,9 @@ class Session {
   private async drainAndShutdown(): Promise<void> {
     debugLogger.debug('[Session] Draining pending work before shutdown');
 
-    // Stop accepting new monitor events first, then drain anything already
+    // Abort monitors and stop callbacks first, then drain anything already
     // queued so EOF does not remain coupled to monitor process lifetime.
+    this.config.getMonitorRegistry().abortAll();
     this.stopMonitorCallbacks();
     await this.waitForAllPendingWork();
 
