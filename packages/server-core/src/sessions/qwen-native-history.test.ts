@@ -51,6 +51,7 @@ describe('Qwen native history loading', () => {
       slug: 'qwen-code',
       defaults: {
         defaultLlmConnection: 'qwen-code',
+        permissionMode: 'allow-all',
         workingDirectory: projectRoot,
       },
       localMcpServers: { enabled: true },
@@ -95,6 +96,7 @@ describe('Qwen native history loading', () => {
     expect(imported?.workspaceRootPath).toBe(workspaceRoot)
     expect(imported?.sdkCwd).toBe(projectRoot)
     expect(imported?.workingDirectory).toBe(projectRoot)
+    expect(imported?.permissionMode).toBe('allow-all')
     expect(imported?.llmConnection).toBe('qwen-code')
   })
 
