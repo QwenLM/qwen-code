@@ -596,6 +596,7 @@ class Session {
 
     this.isShuttingDown = true;
     this.config.getMonitorRegistry().abortAll();
+    this.config.getBackgroundShellRegistry().abortAll();
     this.stopMonitorCallbacks();
 
     // Wait for all pending work
@@ -610,6 +611,7 @@ class Session {
     // Abort monitors and stop callbacks first, then drain anything already
     // queued so EOF does not remain coupled to monitor process lifetime.
     this.config.getMonitorRegistry().abortAll();
+    this.config.getBackgroundShellRegistry().abortAll();
     this.stopMonitorCallbacks();
     await this.waitForAllPendingWork();
 

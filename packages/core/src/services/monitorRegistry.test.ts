@@ -119,6 +119,17 @@ describe('MonitorRegistry', () => {
     expect(ac.signal.aborted).toBe(true);
   });
 
+  it('supports silent cancellation without terminal notification', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+    registry.register(createEntry());
+
+    registry.cancel('mon-1', { notify: false });
+
+    expect(registry.get('mon-1')!.status).toBe('cancelled');
+    expect(callback).not.toHaveBeenCalled();
+  });
+
   it('no-op: complete after cancel (one-shot terminal guard)', () => {
     const callback = vi.fn();
     registry.setNotificationCallback(callback);

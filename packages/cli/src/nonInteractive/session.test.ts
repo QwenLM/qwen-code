@@ -61,6 +61,9 @@ let mockMonitorRegistry: {
   setRegisterCallback: ReturnType<typeof vi.fn>;
   abortAll: ReturnType<typeof vi.fn>;
 };
+let mockBackgroundShellRegistry: {
+  abortAll: ReturnType<typeof vi.fn>;
+};
 
 function createConfig(overrides: ConfigOverrides = {}): Config {
   const base = {
@@ -72,6 +75,7 @@ function createConfig(overrides: ConfigOverrides = {}): Config {
     getOutputFormat: () => 'stream-json',
     initialize: vi.fn(),
     getMonitorRegistry: () => mockMonitorRegistry,
+    getBackgroundShellRegistry: () => mockBackgroundShellRegistry,
   };
   return { ...base, ...overrides } as unknown as Config;
 }
@@ -168,6 +172,9 @@ describe('runNonInteractiveStreamJson', () => {
     mockMonitorRegistry = {
       setNotificationCallback: vi.fn(),
       setRegisterCallback: vi.fn(),
+      abortAll: vi.fn(),
+    };
+    mockBackgroundShellRegistry = {
       abortAll: vi.fn(),
     };
     config = createConfig();
@@ -817,6 +824,34 @@ describe('runNonInteractiveStreamJson', () => {
     await runNonInteractiveStreamJson(config, '');
 
     expect(mockDispatcher.shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts background shells on stream completion shutdown', async () => {
+    const initRequest = createControlRequest('initialize');
+
+    mockInputReader.read = async function* () {
+      yield initRequest;
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(1);
+    expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts background shells on error shutdown', async () => {
+    const streamError = new Error('Stream error');
+    // eslint-disable-next-line require-yield
+    mockInputReader.read = async function* () {
+      throw streamError;
+    } as typeof mockInputReader.read;
+
+    await expect(runNonInteractiveStreamJson(config, '')).rejects.toThrow(
+      'Stream error',
+    );
+
+    expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(1);
+    expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalledTimes(1);
   });
 
   it('handles empty stream gracefully', async () => {

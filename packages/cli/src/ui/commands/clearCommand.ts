@@ -35,13 +35,12 @@ export const clearCommand: SlashCommand = {
           config.getDebugLogger().warn(`SessionEnd hook failed: ${err}`);
         });
 
-      const newSessionId = config.startNewSession();
-
-      // Abort all running monitors and background shells so they don't
-      // leak events into the new session. Without this, a malicious prompt
-      // in the old session could persist via long-running monitors.
-      config.getMonitorRegistry().abortAll();
+      // Abort old-session async work before creating the new session so
+      // cancellation notifications cannot leak across the reset boundary.
+      config.getMonitorRegistry().abortAll({ notify: false });
       config.getBackgroundShellRegistry().abortAll();
+
+      const newSessionId = config.startNewSession();
 
       // Reset UI telemetry metrics for the new session
       uiTelemetryService.reset();
