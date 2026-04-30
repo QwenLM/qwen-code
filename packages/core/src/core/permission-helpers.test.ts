@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildPermissionCheckContext } from './permission-helpers.js';
 
@@ -38,7 +39,7 @@ describe('buildPermissionCheckContext', () => {
     ).toMatchObject({
       toolName: 'run_shell_command',
       command: 'cat ./secret.txt',
-      cwd: '/project/subdir',
+      cwd: path.resolve('/project', 'subdir'),
     });
   });
 });

@@ -472,7 +472,16 @@ describe('MonitorTool', () => {
 
         expect(result.llmContent).toContain('Monitor failed to start');
         expect(result.returnDisplay).toContain('limit reached');
-        expect(killSpy).toHaveBeenCalledWith(-12345, 'SIGTERM');
+        if (process.platform === 'win32') {
+          expect(mockSpawn).toHaveBeenCalledWith('taskkill', [
+            '/pid',
+            '12345',
+            '/f',
+            '/t',
+          ]);
+        } else {
+          expect(killSpy).toHaveBeenCalledWith(-12345, 'SIGTERM');
+        }
         expect(monitorRegistry.getAll()).toHaveLength(0);
       } finally {
         killSpy.mockRestore();
