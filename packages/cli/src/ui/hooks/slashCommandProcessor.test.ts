@@ -270,6 +270,24 @@ describe('useSlashCommandProcessor', () => {
       );
     });
 
+    it('should keep a bare slash in the slash command flow', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => expect(result.current.slashCommands).toBeDefined());
+
+      const commandResult = await act(async () =>
+        result.current.handleSlashCommand('/'),
+      );
+
+      expect(commandResult).toEqual({ type: 'handled' });
+      expect(mockAddItem).toHaveBeenLastCalledWith(
+        {
+          type: MessageType.ERROR,
+          text: 'Unknown command: /',
+        },
+        expect.any(Number),
+      );
+    });
+
     it('should display help for a parent command invoked without a subcommand', async () => {
       const parentCommand: SlashCommand = {
         name: 'parent',
@@ -829,6 +847,23 @@ describe('useSlashCommandProcessor', () => {
       );
     });
 
+    it('should correctly match the help alias via slash prefix', async () => {
+      const action = vi.fn();
+      const command = createTestCommand({
+        name: 'help',
+        altNames: ['?'],
+        action,
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/?');
+      });
+
+      expect(action).toHaveBeenCalledTimes(1);
+    });
+
     it('should handle extra whitespace around the command', async () => {
       const action = vi.fn();
       const command = createTestCommand({ name: 'test', action });
@@ -840,6 +875,19 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(action).toHaveBeenCalledWith(expect.anything(), 'with-args');
+    });
+
+    it('should execute Unicode custom commands', async () => {
+      const action = vi.fn();
+      const command = createTestCommand({ name: '文档', action });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/文档 查看内容');
+      });
+
+      expect(action).toHaveBeenCalledWith(expect.anything(), '查看内容');
     });
 
     it('should execute extension-qualified commands with dots', async () => {
@@ -859,9 +907,8 @@ describe('useSlashCommandProcessor', () => {
       const result = setupProcessorHook();
       await waitFor(() => expect(result.current.slashCommands).toBeDefined());
 
-      // File paths should not enter the slash command flow at all because
-      // isSlashCommand() rejects them. handleSlashCommand returns false when
-      // the input doesn't start with '/' or '?'.
+      // File paths should not enter the slash command flow when the first
+      // token contains a path separator.
       const pathResult = await act(async () =>
         result.current.handleSlashCommand('/api/apiFunction/接口的实现'),
       );
@@ -873,6 +920,26 @@ describe('useSlashCommandProcessor', () => {
         ),
       );
       expect(absPathResult).toBe(false);
+    });
+
+    it('should return false for single-segment absolute paths with instructions', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => expect(result.current.slashCommands).toBeDefined());
+
+      const tmpResult = await act(async () =>
+        result.current.handleSlashCommand('/tmp inspect'),
+      );
+      const etcResult = await act(async () =>
+        result.current.handleSlashCommand('/etc explain'),
+      );
+      const readmeResult = await act(async () =>
+        result.current.handleSlashCommand('/README.md summarize'),
+      );
+
+      expect(tmpResult).toBe(false);
+      expect(etcResult).toBe(false);
+      expect(readmeResult).toBe(false);
+      expect(mockAddItem).not.toHaveBeenCalled();
     });
 
     it('should handle `?` as a command prefix', async () => {

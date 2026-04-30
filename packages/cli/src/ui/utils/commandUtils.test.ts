@@ -116,6 +116,14 @@ describe('commandUtils', () => {
       expect(looksLikeCommandName('gcp.deploy1')).toBe(true);
     });
 
+    it('should return true for Unicode command names and aliases', () => {
+      expect(looksLikeCommandName('接口')).toBe(true);
+      expect(looksLikeCommandName('api接口')).toBe(true);
+      expect(looksLikeCommandName('命令')).toBe(true);
+      expect(looksLikeCommandName('文档')).toBe(true);
+      expect(looksLikeCommandName('?')).toBe(true);
+    });
+
     it('should return false for empty string', () => {
       expect(looksLikeCommandName('')).toBe(false);
     });
@@ -124,12 +132,6 @@ describe('commandUtils', () => {
       expect(looksLikeCommandName('api/endpoint')).toBe(false);
       expect(looksLikeCommandName('Users/name/path')).toBe(false);
       expect(looksLikeCommandName('var/log/syslog')).toBe(false);
-    });
-
-    it('should return false for strings containing non-ASCII characters', () => {
-      expect(looksLikeCommandName('接口')).toBe(false);
-      expect(looksLikeCommandName('api接口')).toBe(false);
-      expect(looksLikeCommandName('命令')).toBe(false);
     });
 
     it('should return false for strings containing spaces or special characters', () => {
@@ -160,6 +162,12 @@ describe('commandUtils', () => {
 
     it('should return true for bare slash (triggers autocomplete)', () => {
       expect(isSlashCommand('/')).toBe(true);
+    });
+
+    it('should return true for help alias and Unicode slash commands', () => {
+      expect(isSlashCommand('/?')).toBe(true);
+      expect(isSlashCommand('/接口实现')).toBe(true);
+      expect(isSlashCommand('/文档 查看内容')).toBe(true);
     });
 
     it('should return false when query does not start with /', () => {
@@ -198,9 +206,8 @@ describe('commandUtils', () => {
       expect(isSlashCommand('/etc/nginx/nginx.conf')).toBe(false);
     });
 
-    it('should return false for paths with non-ASCII in the first token', () => {
-      expect(isSlashCommand('/接口实现')).toBe(false);
-      expect(isSlashCommand('/文档 查看内容')).toBe(false);
+    it('should return false for paths with non-ASCII path segments', () => {
+      expect(isSlashCommand('/api/接口实现')).toBe(false);
     });
   });
 
