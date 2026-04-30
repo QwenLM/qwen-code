@@ -1126,6 +1126,81 @@ describe('ShellTool', () => {
           {},
         );
       });
+
+      // Without escaping, a generator name containing `"`, `$`, or a
+      // backtick would either break the user-approved `gh pr create`
+      // command or be evaluated as command substitution. The fix was to
+      // shell-escape the appended text for the surrounding quote style.
+      it('should escape generator names with shell metacharacters in double-quoted body', async () => {
+        (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
+          commit: true,
+          pr: true,
+          // A name designed to break double-quote interpolation if not escaped.
+          name: 'Bot $(rm -rf /) "danger" `eval`',
+          email: 'bot@example.com',
+        });
+        // Generator name only ends up in the attribution when shots > 0.
+        const svc = CommitAttributionService.getInstance();
+        svc.incrementPromptCount();
+
+        const command = 'gh pr create --title "x" --body "Summary"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observedCmd = mockShellExecutionService.mock.calls[0][0];
+        // Each metacharacter must be escaped, not literal.
+        expect(observedCmd).toContain('\\$');
+        expect(observedCmd).toContain('\\"');
+        expect(observedCmd).toContain('\\`');
+        // And the original `--body` quote must still close properly
+        // (`s` flag — body contains newlines from the attribution).
+        expect(observedCmd).toMatch(/--body\s+".+"/s);
+      });
+
+      it('should escape single-quoted body containing apostrophes in generator name', async () => {
+        (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
+          commit: true,
+          pr: true,
+          name: "O'Brien-Bot",
+          email: 'bot@example.com',
+        });
+        const svc = CommitAttributionService.getInstance();
+        svc.incrementPromptCount();
+
+        const command = "gh pr create --title 'x' --body 'Summary'";
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observedCmd = mockShellExecutionService.mock.calls[0][0];
+        // The bash close-escape-reopen trick yields `'\''` in place of `'`.
+        expect(observedCmd).toContain("O'\\''Brien-Bot");
+      });
     });
   });
 

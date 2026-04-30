@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import * as childProcess from 'node:child_process';
 import type { Config } from '../config/config.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { ToolErrorType } from './tool-error.js';
@@ -65,6 +66,24 @@ function stripTrailingBackgroundAmp(command: string): string {
   if (trimmed.endsWith('&&')) return command;
   if (trimmed.endsWith('\\&')) return command;
   return trimmed.slice(0, -1).trimEnd();
+}
+
+/**
+ * Escape `s` so it is safe to interpolate inside a bash double-quoted
+ * string. Inside `"..."`, bash still interprets `$`, backtick, `\`, and
+ * `"`; escape those four. Newlines and other characters are literal.
+ */
+function escapeForBashDoubleQuote(s: string): string {
+  return s.replace(/[\\"$`]/g, '\\$&');
+}
+
+/**
+ * Escape `s` so it is safe to interpolate inside a bash single-quoted
+ * string. Bash single quotes have no escape mechanism — the standard
+ * trick is to close the quote, emit a backslash-escaped `'`, and reopen.
+ */
+function escapeForBashSingleQuote(s: string): string {
+  return s.replace(/'/g, "'\\''");
 }
 
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
@@ -252,6 +271,18 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const commandToExecute = processedCommand;
     const cwd = this.params.directory || this.config.getTargetDir();
 
+    // Snapshot HEAD before running so attachCommitAttribution can detect
+    // commit creation by HEAD movement instead of trusting the shell
+    // exit code (which is unreliable for compound commands). Kick the
+    // lookup off concurrently so we don't block ShellExecutionService.
+    // `git rev-parse HEAD` is a few fs reads (low ms) while a real
+    // `git commit` always takes longer, so the snapshot effectively
+    // resolves before the user's command can move HEAD.
+    const isGitCommitCommand = /\bgit\s+commit\b/.test(strippedCommand);
+    const preHeadPromise: Promise<string | null> = isGitCommitCommand
+      ? this.getGitHead(cwd)
+      : Promise.resolve(null);
+
     let cumulativeOutput: string | AnsiOutput = '';
     let lastUpdateTime = Date.now();
     let isBinaryStream = false;
@@ -360,11 +391,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
         : '(none)';
 
       // After a git commit (whether or not it was the final command in a
-      // compound), attach AI attribution as a git note. The helper detects
-      // commit creation by HEAD movement, not exit code, so a `git commit
-      // && npm test` chain that fails on `npm test` still gets attribution
-      // for the successful commit.
-      await this.attachCommitAttribution(strippedCommand, result, cwd);
+      // compound), attach AI attribution as a git note. The helper
+      // detects commit creation by HEAD movement, not exit code, so a
+      // `git commit && npm test` chain that fails on `npm test` still
+      // gets attribution for the successful commit.
+      const preHead = await preHeadPromise;
+      await this.attachCommitAttribution(strippedCommand, cwd, preHead);
 
       llmContent = [
         `Command: ${this.params.command}`,
@@ -598,9 +630,48 @@ export class ShellToolInvocation extends BaseToolInvocation<
   }
 
   /**
+   * Read the current HEAD SHA, or null if unavailable (no commits yet,
+   * not a git repo, or git failed). Used to detect whether a `git
+   * commit` actually created a new commit, independent of the shell's
+   * exit code.
+   *
+   * Goes through `child_process.execFile` rather than
+   * {@link ShellExecutionService} so the lookup is unaffected by test
+   * mocks of the shell service and stays well clear of any user-supplied
+   * shell wrapper. The 2s timeout means a wedged repo can't stall the
+   * post-command path.
+   */
+  private async getGitHead(cwd: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      const child = childProcess.execFile(
+        'git',
+        ['rev-parse', 'HEAD'],
+        { cwd, timeout: 2000 },
+        (error, stdout) => {
+          if (error) {
+            resolve(null);
+            return;
+          }
+          const sha = String(stdout).trim();
+          resolve(sha.length > 0 ? sha : null);
+        },
+      );
+      // Suppress unhandled-error events from the child stream (e.g. ENOENT
+      // when git is missing); the callback still receives the error.
+      child.on('error', () => {});
+    });
+  }
+
+  /**
    * After a successful git commit, attach per-file AI attribution metadata
    * as git notes. Analyzes staged files via `git diff` to calculate real
    * AI vs human contribution percentages.
+   *
+   * Detects commit creation by HEAD movement, not by shell exit code:
+   * for compound commands like `git commit -m "x" && npm test`, the
+   * commit can succeed and a later step can fail. Gating on `exitCode
+   * !== 0` would skip attribution for the successful commit, so we
+   * compare pre- and post-command HEAD instead.
    *
    * Respects the gitCoAuthor.commit setting: if the user disables commit
    * attribution, the per-file note is skipped too (same toggle governs
@@ -608,8 +679,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
    */
   private async attachCommitAttribution(
     command: string,
-    result: { exitCode: number | null; aborted?: boolean },
     cwd: string,
+    preHead: string | null,
   ): Promise<void> {
     const gitCommitPattern = /\bgit\s+commit\b/;
     if (!gitCommitPattern.test(command)) {
@@ -621,7 +692,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return;
     }
 
-    if (result.exitCode !== 0 || result.aborted) {
+    const postHead = await this.getGitHead(cwd);
+    const commitCreated = postHead !== null && postHead !== preHead;
+    if (!commitCreated) {
+      // No new commit landed (nothing staged, hook rejected, or user
+      // reset right after). Reset prompt counters so the next attempt
+      // starts clean.
       attributionService.clearAttributions(false);
       return;
     }
@@ -891,7 +967,14 @@ Co-authored-by: ${gitCoAuthorSettings.name} <${gitCoAuthorSettings.email}>`;
 
     if (bodyMatch) {
       const [fullMatch, prefix, existingBody] = bodyMatch;
-      const newBody = existingBody + attribution;
+      // Escape the appended text for the surrounding quote style.
+      // Without this, a configured generator name containing `"`, `$`, a
+      // backtick, or `'` would either break the user-approved `gh pr
+      // create` command or, worse, be interpreted as command substitution.
+      const escapedAttribution = bodyDoubleMatch
+        ? escapeForBashDoubleQuote(attribution)
+        : escapeForBashSingleQuote(attribution);
+      const newBody = existingBody + escapedAttribution;
       // Use indexOf + slice instead of String.replace() to avoid
       // special replacement patterns ($&, $1, etc.) in user content
       const idx = command.indexOf(fullMatch);
