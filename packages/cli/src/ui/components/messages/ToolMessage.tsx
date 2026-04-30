@@ -24,6 +24,7 @@ import type {
   McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
 import { AgentExecutionDisplay } from '../subagents/index.js';
+import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
@@ -238,7 +239,19 @@ const PlanResultRenderer: React.FC<{
 );
 
 /**
- * Component to render subagent execution results
+ * Component to render subagent execution results.
+ *
+ * Live (`isPending===true`): the inline frame is suppressed — running
+ * subagents are surfaced through the footer pill + dialog instead, which
+ * removes the live-area flicker that occurred when the frame's tool-call
+ * list grew past the terminal height. The one exception is an active
+ * approval prompt that holds the focus lock: that renders as a small
+ * banner with an agent-name label, since hiding it would block the run
+ * silently.
+ *
+ * Committed (`isPending===false`): renders the full `AgentExecutionDisplay`
+ * exactly as before. Ink's `<Static>` is append-only, so committed frames
+ * never flicker even when verbose.
  */
 const SubagentExecutionRenderer: React.FC<{
   data: AgentResultDisplay;
@@ -246,6 +259,7 @@ const SubagentExecutionRenderer: React.FC<{
   childWidth: number;
   config: Config;
   isFocused?: boolean;
+  isPending?: boolean;
   isWaitingForOtherApproval?: boolean;
 }> = ({
   data,
@@ -253,17 +267,53 @@ const SubagentExecutionRenderer: React.FC<{
   childWidth,
   config,
   isFocused,
+  isPending,
   isWaitingForOtherApproval,
-}) => (
-  <AgentExecutionDisplay
-    data={data}
-    availableHeight={availableHeight}
-    childWidth={childWidth}
-    config={config}
-    isFocused={isFocused}
-    isWaitingForOtherApproval={isWaitingForOtherApproval}
-  />
-);
+}) => {
+  if (isPending) {
+    // Surface only the approval prompt, and only for the subagent
+    // currently holding the focus lock. Queued approvals stay invisible
+    // here — the user can see them in the dialog.
+    if (data.pendingConfirmation && isFocused) {
+      const agentLabel = data.subagentName || 'agent';
+      return (
+        <Box flexDirection="column" paddingLeft={1}>
+          <Box>
+            <Text color={theme.text.secondary}>Approval requested by </Text>
+            <Text bold color={theme.text.accent}>
+              {agentLabel}
+            </Text>
+            <Text color={theme.text.secondary}>:</Text>
+          </Box>
+          {isWaitingForOtherApproval && (
+            <Text color={theme.text.secondary} dimColor>
+              ⏳ Waiting for other approval...
+            </Text>
+          )}
+          <ToolConfirmationMessage
+            confirmationDetails={data.pendingConfirmation}
+            isFocused={isFocused}
+            availableTerminalHeight={availableHeight}
+            contentWidth={childWidth - 2}
+            compactMode={true}
+            config={config}
+          />
+        </Box>
+      );
+    }
+    return null;
+  }
+  return (
+    <AgentExecutionDisplay
+      data={data}
+      availableHeight={availableHeight}
+      childWidth={childWidth}
+      config={config}
+      isFocused={isFocused}
+      isWaitingForOtherApproval={isWaitingForOtherApproval}
+    />
+  );
+};
 
 /**
  * Component to render string results (markdown or plain text)
@@ -344,6 +394,13 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   forceShowResult?: boolean;
   /** Whether this tool's subagent confirmation prompt should respond to keyboard input. */
   isFocused?: boolean;
+  /**
+   * True when rendering inside `pendingHistoryItems` (live area), false once
+   * committed to `<Static>`. Foreground subagents suppress their inline
+   * frame in the live phase — the pill+dialog handle drill-down — but
+   * always render in scrollback.
+   */
+  isPending?: boolean;
   /** Whether another subagent's approval currently holds the focus lock, blocking this one. */
   isWaitingForOtherApproval?: boolean;
 }
@@ -363,6 +420,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   config,
   forceShowResult,
   isFocused,
+  isPending,
   isWaitingForOtherApproval,
   executionStartTime,
 }) => {
@@ -518,6 +576,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 childWidth={innerWidth}
                 config={config}
                 isFocused={isFocused}
+                isPending={isPending}
                 isWaitingForOtherApproval={isWaitingForOtherApproval}
               />
             )}

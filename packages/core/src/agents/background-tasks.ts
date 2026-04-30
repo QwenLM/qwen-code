@@ -5,11 +5,19 @@
  */
 
 /**
- * @fileoverview BackgroundTaskRegistry — tracks background (async) sub-agents.
+ * @fileoverview BackgroundTaskRegistry — tracks background (async) sub-agents
+ * and, with `flavor: 'foreground'`, the currently-running synchronous
+ * sub-agents whose UI is routed through the same pill+dialog while the
+ * parent turn waits on them. The two flavors share the registry (and the
+ * dialog wiring) but differ in lifecycle:
  *
- * When the Agent tool is called with `run_in_background: true`, the sub-agent
- * runs asynchronously. This registry tracks the lifecycle of each background
- * agent so the parent can be notified on completion.
+ * - `background` entries persist across turns, emit a `<task-notification>`
+ *   on terminal status (the parent's only return channel), and contribute to
+ *   `hasUnfinalizedTasks()` so headless callers keep their loop alive.
+ * - `foreground` entries live for the duration of the parent's tool-call,
+ *   are unregistered as soon as `execute()` returns, deliver their result
+ *   through the normal tool-result channel (no XML envelope), and don't
+ *   participate in the headless holdback.
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -98,10 +106,19 @@ export interface BackgroundActivity {
   at: number;
 }
 
+export type BackgroundTaskFlavor = 'foreground' | 'background';
+
 export interface BackgroundTaskEntry {
   agentId: string;
   description: string;
   subagentType?: string;
+  /**
+   * `'background'` — async, persists across turns, emits XML notification.
+   * `'foreground'` — synchronous, unregistered when the tool-call returns,
+   * delivers results via the normal tool-result channel.
+   * Defaults to `'background'` when absent (older callers).
+   */
+  flavor?: BackgroundTaskFlavor;
   status: BackgroundTaskStatus;
   startTime: number;
   endTime?: number;
@@ -218,6 +235,29 @@ export class BackgroundTaskRegistry {
     this.emitStatusChange(entry);
   }
 
+  /**
+   * Remove a foreground entry from the registry without emitting any
+   * terminal notification. Called by the foreground tool-call's `finally`
+   * path, which has already delivered the result through the tool-result
+   * channel — the registry entry has served its UI-surfacing purpose.
+   * Background entries must go through complete/fail/finalizeCancelled
+   * instead, so this throws if asked to remove one.
+   */
+  unregisterForeground(agentId: string): void {
+    const entry = this.agents.get(agentId);
+    if (!entry) return;
+    if (entry.flavor !== 'foreground') {
+      throw new Error(
+        `unregisterForeground called on non-foreground entry ${agentId} ` +
+          `(flavor=${entry.flavor ?? 'undefined'}). ` +
+          `Background entries must terminate via complete/fail/finalizeCancelled.`,
+      );
+    }
+    this.agents.delete(agentId);
+    debugLogger.info(`Unregistered foreground agent: ${agentId}`);
+    this.emitStatusChange(entry);
+  }
+
   // See complete() for the cancelled → terminal path rationale.
   fail(agentId: string, error: string, stats?: AgentCompletionStats): void {
     const entry = this.agents.get(agentId);
@@ -252,6 +292,11 @@ export class BackgroundTaskRegistry {
     entry.endTime = Date.now();
     debugLogger.info(`Background agent cancelled: ${agentId}`);
     this.emitStatusChange(entry);
+
+    // Foreground entries don't emit XML notifications and unregister
+    // themselves in the tool-call's finally path, so the grace timer
+    // would only ever no-op for them.
+    if (entry.flavor === 'foreground') return;
 
     const timer = setTimeout(() => {
       this.finalizeCancellationIfPending(agentId);
@@ -337,6 +382,11 @@ export class BackgroundTaskRegistry {
    */
   hasUnfinalizedTasks(): boolean {
     for (const entry of this.agents.values()) {
+      // Foreground entries block the parent tool-call synchronously, so the
+      // headless event loop is already pinned by the `await` on the caller's
+      // promise — counting them here would be redundant and would also keep
+      // the loop alive for entries that don't even emit a notification.
+      if (entry.flavor === 'foreground') continue;
       if (!entry.notified) return true;
     }
     return false;
@@ -413,6 +463,12 @@ export class BackgroundTaskRegistry {
     // sees the flag and short-circuits, rather than firing twice.
     if (entry.notified) return;
     entry.notified = true;
+
+    // Foreground entries return their result through the parent's normal
+    // tool-result channel (the `returnDisplay` field on the synchronous
+    // tool-call). Emitting the XML envelope on top would feed the parent
+    // model the same payload twice.
+    if (entry.flavor === 'foreground') return;
 
     if (!this.notificationCallback) return;
 

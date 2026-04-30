@@ -114,6 +114,13 @@ vi.mock('../subagents/index.js', () => ({
     );
   },
 }));
+vi.mock('./ToolConfirmationMessage.js', () => ({
+  ToolConfirmationMessage: function MockToolConfirmationMessage() {
+    // Sentinel string lets `isPending && pendingConfirmation` tests
+    // assert the banner renders (instead of being suppressed).
+    return <Text>MockApprovalPrompt</Text>;
+  },
+}));
 
 // Mock settings
 const mockSettings: LoadedSettings = {
@@ -314,6 +321,132 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('🤖'); // Subagent execution display should show
     expect(output).toContain('file-search'); // Actual subagent name
     expect(output).toContain('Search for files matching pattern'); // Actual task description
+  });
+
+  describe('subagent live-render gating (isPending)', () => {
+    // The redesign hides the inline AgentExecutionDisplay while a
+    // foreground subagent runs (the pill+dialog handle drill-down).
+    // Only an active, focused approval prompt renders inline.
+    const buildProps = (overrides: {
+      data: {
+        subagentName: string;
+        taskDescription: string;
+        taskPrompt: string;
+        status: 'running' | 'completed';
+        pendingConfirmation?: object;
+      };
+      isPending?: boolean;
+      isFocused?: boolean;
+    }): ToolMessageProps =>
+      ({
+        name: 'task',
+        description: 'Delegate task to subagent',
+        resultDisplay: {
+          type: 'task_execution' as const,
+          ...overrides.data,
+        },
+        status: ToolCallStatus.Executing,
+        contentWidth: 80,
+        callId: 'gated-task-call',
+        confirmationDetails: undefined,
+        config: mockConfig,
+        forceShowResult: true, // mirror ToolGroupMessage's forceShowResult
+        isPending: overrides.isPending,
+        isFocused: overrides.isFocused,
+      }) as ToolMessageProps;
+
+    it('isPending && no pendingConfirmation → no inline frame', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'fg-agent',
+              taskDescription: 'Search for files',
+              taskPrompt: 'Search',
+              status: 'running',
+            },
+            isPending: true,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      // The mocked AgentExecutionDisplay tags itself with '🤖' — its
+      // absence proves the inline frame was suppressed.
+      expect(output).not.toContain('🤖');
+      expect(output).not.toContain('MockApprovalPrompt');
+    });
+
+    it('isPending && pendingConfirmation && isFocused → renders banner with agent label', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'fg-agent',
+              taskDescription: 'Search for files',
+              taskPrompt: 'Search',
+              status: 'running',
+              pendingConfirmation: {} as object,
+            },
+            isPending: true,
+            isFocused: true,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      // Banner shows up with the originating agent identified, and the
+      // approval prompt itself renders.
+      expect(output).toContain('Approval requested by');
+      expect(output).toContain('fg-agent');
+      expect(output).toContain('MockApprovalPrompt');
+      // The full agent frame (header / tool-call list) stays suppressed.
+      expect(output).not.toContain('🤖');
+    });
+
+    it('isPending && pendingConfirmation && !isFocused → renders nothing (queued in dialog)', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'queued-agent',
+              taskDescription: 'Lint',
+              taskPrompt: 'Lint',
+              status: 'running',
+              pendingConfirmation: {} as object,
+            },
+            isPending: true,
+            isFocused: false,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).not.toContain('Approval requested by');
+      expect(output).not.toContain('MockApprovalPrompt');
+      expect(output).not.toContain('🤖');
+    });
+
+    it('!isPending → committed render shows full inline frame', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'committed-agent',
+              taskDescription: 'Already done',
+              taskPrompt: 'Already done',
+              status: 'completed',
+            },
+            isPending: false,
+          })}
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame() ?? '';
+      // <Static>-rendered scrollback: full frame, no flicker concern.
+      expect(output).toContain('🤖');
+      expect(output).toContain('committed-agent');
+    });
   });
 
   it('renders AnsiOutputText for AnsiOutput results', () => {

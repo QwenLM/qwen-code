@@ -96,15 +96,24 @@ function terminalStatusPresentation(
   }
 }
 
+// Foreground agent rows get this prefix so users can tell at a glance
+// that cancelling one will end the parent's current turn — a much heavier
+// consequence than cancelling a truly async background entry.
+const FOREGROUND_ROW_PREFIX = '[in turn]';
+const SHELL_ROW_PREFIX = '[shell]';
+
 function rowLabel(entry: DialogEntry): string {
   if (entry.kind === 'agent') {
-    return buildBackgroundEntryLabel(entry, { includePrefix: false });
+    const label = buildBackgroundEntryLabel(entry, { includePrefix: false });
+    return entry.flavor === 'foreground'
+      ? `${FOREGROUND_ROW_PREFIX} ${label}`
+      : label;
   }
-  // Shell row: `[shell] <command>`. Prefix mirrors the dialog's "section"
-  // visual hint without needing per-kind section headers (which would
-  // complicate the windowing math). The command itself is plain text and
-  // already truncated by the row renderer's MaxSizedBox.
-  return `[shell] ${entry.command}`;
+  // Shell prefix mirrors the dialog's "section" visual hint without needing
+  // per-kind section headers (which would complicate the windowing math).
+  // The command itself is plain text and already truncated by the row
+  // renderer's MaxSizedBox.
+  return `${SHELL_ROW_PREFIX} ${entry.command}`;
 }
 
 function elapsedFor(entry: { startTime: number; endTime?: number }): string {
@@ -495,6 +504,15 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   // those transitions — so we re-read from the registry here.
   const [activityTick, setActivityTick] = useState(0);
 
+  // Two-step cancel for foreground entries: cancelling one ends the
+  // parent's current turn with a partial result for that subagent —
+  // a much heavier consequence than cancelling a background async task.
+  // `pendingCancelEntryId` records the entry that has been armed for
+  // cancellation; the next `x` press confirms. Esc resets.
+  const [pendingCancelEntryId, setPendingCancelEntryId] = useState<
+    string | null
+  >(null);
+
   const selectedEntry = useMemo(() => {
     const fromSnapshot = entries[selectedIndex] ?? null;
     if (!fromSnapshot || fromSnapshot.kind !== 'agent') return fromSnapshot;
@@ -588,6 +606,22 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     }
   }, [dialogOpen, dialogMode, selectedEntryId, selectedStatus, exitDetail]);
 
+  // Encapsulates the cancel flow with the foreground confirm-step.
+  // Foreground entries: first `x` arms; second `x` confirms. Background
+  // and shell entries: one-shot cancel (no behavior change).
+  const handleCancelKey = () => {
+    if (!selectedEntry) return;
+    const entryKey = entryId(selectedEntry);
+    const isForegroundAgent =
+      selectedEntry.kind === 'agent' && selectedEntry.flavor === 'foreground';
+    if (isForegroundAgent && pendingCancelEntryId !== entryKey) {
+      setPendingCancelEntryId(entryKey);
+      return;
+    }
+    setPendingCancelEntryId(null);
+    cancelSelected();
+  };
+
   useKeypress(
     (key) => {
       if (!dialogOpen) return;
@@ -595,10 +629,12 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       if (dialogMode === 'list') {
         if (key.name === 'up') {
           moveSelectionUp();
+          setPendingCancelEntryId(null);
           return;
         }
         if (key.name === 'down') {
           moveSelectionDown();
+          setPendingCancelEntryId(null);
           return;
         }
         if (key.name === 'return') {
@@ -606,11 +642,16 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
           return;
         }
         if (key.name === 'escape' || key.name === 'left') {
+          if (pendingCancelEntryId) {
+            // Esc backs out of the confirm step before closing the dialog.
+            setPendingCancelEntryId(null);
+            return;
+          }
           closeDialog();
           return;
         }
         if (key.sequence === 'x' && !key.ctrl && !key.meta) {
-          cancelSelected();
+          handleCancelKey();
           return;
         }
         // Note: the "stop all agents" chord (ctrl+x ctrl+k in claw-code)
@@ -631,11 +672,15 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         key.name === 'return' ||
         key.name === 'space'
       ) {
+        if (pendingCancelEntryId && key.name === 'escape') {
+          setPendingCancelEntryId(null);
+          return;
+        }
         closeDialog();
         return;
       }
       if (key.sequence === 'x' && !key.ctrl && !key.meta) {
-        cancelSelected();
+        handleCancelKey();
         return;
       }
     },
@@ -645,8 +690,18 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   if (!dialogOpen) return null;
 
   // Hint footer — context-sensitive.
+  const selectedEntryKey = selectedEntry ? entryId(selectedEntry) : null;
+  const showCancelConfirmHint =
+    pendingCancelEntryId !== null && pendingCancelEntryId === selectedEntryKey;
   const hints: string[] = [];
-  if (dialogMode === 'list') {
+  if (showCancelConfirmHint) {
+    // Force the confirmation step into the hint row so the user sees
+    // exactly what the next `x` will do.
+    hints.push(
+      'x again to confirm stop \u00b7 ends current turn',
+      'Esc cancel',
+    );
+  } else if (dialogMode === 'list') {
     hints.push('\u2191/\u2193 select', 'Enter view');
     if (selectedEntry?.status === 'running') hints.push('x stop');
     hints.push('\u2190/Esc close');
