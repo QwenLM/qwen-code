@@ -835,8 +835,8 @@ describe('runNonInteractiveStreamJson', () => {
 
     await runNonInteractiveStreamJson(config, '');
 
-    expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(1);
-    expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalledTimes(1);
+    expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(2);
+    expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalledTimes(2);
   });
 
   it('aborts background shells on error shutdown', async () => {
@@ -850,8 +850,51 @@ describe('runNonInteractiveStreamJson', () => {
       'Stream error',
     );
 
-    expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(1);
+    expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(2);
+    expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalledTimes(2);
+  });
+
+  it('runs a final background-shell cleanup after in-flight processing drains', async () => {
+    const initRequest = createControlRequest('initialize');
+    const userMessage = createUserMessage('Start background work');
+    let releaseProcessing: (() => void) | undefined;
+    const callOrder: string[] = [];
+
+    mockBackgroundShellRegistry.abortAll.mockImplementation(() => {
+      callOrder.push('abortAll');
+    });
+
+    runNonInteractiveMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          callOrder.push('run:start');
+          releaseProcessing = () => {
+            callOrder.push('run:end');
+            resolve();
+          };
+        }),
+    );
+
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      yield userMessage;
+    };
+
+    const sessionPromise = runNonInteractiveStreamJson(config, '');
+    await vi.waitFor(() => {
+      expect(releaseProcessing).toBeDefined();
+    });
+
     expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalledTimes(1);
+    expect(callOrder).toContain('run:start');
+    expect(callOrder).toContain('abortAll');
+
+    releaseProcessing?.();
+    await sessionPromise;
+
+    expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalledTimes(2);
+    expect(callOrder.at(-2)).toBe('run:end');
+    expect(callOrder.at(-1)).toBe('abortAll');
   });
 
   it('handles empty stream gracefully', async () => {
