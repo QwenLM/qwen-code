@@ -39,7 +39,6 @@ import {
   getShellConfiguration,
   splitCommands,
   stripTrailingBackgroundAmp,
-  stripShellWrapper,
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isSubpaths } from '../utils/paths.js';
@@ -62,35 +61,135 @@ const THROTTLE_BURST_SIZE = 5;
 const THROTTLE_REFILL_INTERVAL_MS = 1000; // 1 token per second
 
 function normalizeMonitorCommand(command: string): string {
-  return stripTrailingBackgroundAmp(stripShellWrapper(command));
+  return normalizeMonitorExecutionCommand(command).analysisCommand;
 }
 
-function normalizeMonitorSpawnCommand(command: string): string {
-  const trimmed = command.trim();
-  const wrapperPattern =
-    /^((?:sh|bash|zsh|cmd\.exe)\s+(?:\/c|-c)\s+)([\s\S]*)$/;
-  const match = trimmed.match(wrapperPattern);
+interface ParsedShellWrapper {
+  wrapperPrefix?: string;
+  innerCommand: string;
+  innerQuote: '"' | "'" | '';
+}
 
+interface NormalizedMonitorCommand {
+  analysisCommand: string;
+  spawnCommand: string;
+  strippedTrailingAmp: boolean;
+}
+
+function takeLeadingToken(
+  input: string,
+): { token: string; rest: string } | null {
+  const trimmed = input.trimStart();
+  if (!trimmed) {
+    return null;
+  }
+
+  const firstChar = trimmed[0];
+  if (firstChar === '"' || firstChar === "'") {
+    const closingIndex = trimmed.indexOf(firstChar, 1);
+    if (closingIndex === -1) {
+      return null;
+    }
+
+    return {
+      token: trimmed.slice(0, closingIndex + 1),
+      rest: trimmed.slice(closingIndex + 1),
+    };
+  }
+
+  const match = /^\S+/.exec(trimmed);
   if (!match) {
-    return stripTrailingBackgroundAmp(trimmed);
+    return null;
   }
 
-  const [, wrapperPrefix, wrappedCommand] = match;
-  let innerCommand = wrappedCommand.trim();
-  let quote = '';
+  return {
+    token: match[0],
+    rest: trimmed.slice(match[0].length),
+  };
+}
 
+function stripSymmetricQuotes(command: string): {
+  value: string;
+  quote: '"' | "'" | '';
+} {
+  const trimmed = command.trim();
   if (
-    (innerCommand.startsWith('"') && innerCommand.endsWith('"')) ||
-    (innerCommand.startsWith("'") && innerCommand.endsWith("'"))
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
   ) {
-    quote = innerCommand[0]!;
-    innerCommand = innerCommand.substring(1, innerCommand.length - 1);
+    return {
+      value: trimmed.substring(1, trimmed.length - 1),
+      quote: trimmed[0] as '"' | "'",
+    };
   }
 
-  const strippedInnerCommand = stripTrailingBackgroundAmp(innerCommand);
-  return quote
-    ? `${wrapperPrefix}${quote}${strippedInnerCommand}${quote}`
-    : `${wrapperPrefix}${strippedInnerCommand}`;
+  return { value: trimmed, quote: '' };
+}
+
+function isKnownShellWrapperToken(token: string): boolean {
+  const { value } = stripSymmetricQuotes(token);
+  const normalized = value.replace(/\\/g, '/').toLowerCase();
+  const base = normalized.split('/').pop();
+
+  return (
+    base === 'sh' ||
+    base === 'sh.exe' ||
+    base === 'bash' ||
+    base === 'bash.exe' ||
+    base === 'zsh' ||
+    base === 'zsh.exe' ||
+    base === 'cmd' ||
+    base === 'cmd.exe'
+  );
+}
+
+function parseShellWrapper(command: string): ParsedShellWrapper {
+  const trimmed = command.trim();
+  const firstToken = takeLeadingToken(trimmed);
+  if (!firstToken || !isKnownShellWrapperToken(firstToken.token)) {
+    return {
+      innerCommand: trimmed,
+      innerQuote: '',
+    };
+  }
+
+  const rest = firstToken.rest.trimStart();
+  const argMatch = /^(\/c|-c)\s+([\s\S]*)$/.exec(rest);
+  if (!argMatch) {
+    return {
+      innerCommand: trimmed,
+      innerQuote: '',
+    };
+  }
+
+  const { value: innerCommand, quote: innerQuote } = stripSymmetricQuotes(
+    argMatch[2] ?? '',
+  );
+  return {
+    wrapperPrefix: `${firstToken.token} ${argMatch[1]} `,
+    innerCommand,
+    innerQuote,
+  };
+}
+
+function normalizeMonitorExecutionCommand(
+  command: string,
+): NormalizedMonitorCommand {
+  const { wrapperPrefix, innerCommand, innerQuote } =
+    parseShellWrapper(command);
+  const analysisCommand = stripTrailingBackgroundAmp(innerCommand);
+  const strippedTrailingAmp = analysisCommand !== innerCommand;
+  const spawnCommand = wrapperPrefix
+    ? innerQuote
+      ? `${wrapperPrefix}${innerQuote}${analysisCommand}${innerQuote}`
+      : `${wrapperPrefix}${analysisCommand}`
+    : analysisCommand;
+
+  return {
+    analysisCommand,
+    spawnCommand,
+    strippedTrailingAmp,
+  };
 }
 
 export interface MonitorToolParams {
@@ -120,12 +219,15 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
   getDescription(): string {
     const desc =
-      this.params.description || normalizeMonitorCommand(this.params.command);
+      this.params.description ||
+      normalizeMonitorExecutionCommand(this.params.command).spawnCommand;
     return `Monitor: ${desc}`;
   }
 
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    const command = normalizeMonitorCommand(this.params.command);
+    const command = normalizeMonitorExecutionCommand(
+      this.params.command,
+    ).analysisCommand;
 
     if (detectCommandSubstitution(command)) {
       return 'deny';
@@ -146,8 +248,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
   override async getConfirmationDetails(
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
-    const command = normalizeMonitorCommand(this.params.command);
-    const subCommands = splitCommands(command);
+    const normalized = normalizeMonitorExecutionCommand(this.params.command);
+    const subCommands = splitCommands(normalized.analysisCommand);
     const confirmableSubCommands: string[] = [];
 
     for (const sub of subCommands) {
@@ -195,15 +297,16 @@ class MonitorToolInvocation extends BaseToolInvocation<
       );
     } catch (e) {
       debugLogger.warn('Failed to extract monitor command rules:', e);
-      permissionRules = [`Monitor(${command})`];
+      permissionRules = [`Monitor(${normalized.spawnCommand})`];
     }
 
     return {
       type: 'exec',
       title: 'Monitor',
-      command,
+      command: normalized.spawnCommand,
       rootCommand:
-        rootCommands.join(', ') || (getCommandRoot(command) ?? command),
+        rootCommands.join(', ') ||
+        (getCommandRoot(normalized.analysisCommand) ?? normalized.spawnCommand),
       permissionRules,
       onConfirm: async (
         _outcome: ToolConfirmationOutcome,
@@ -221,8 +324,9 @@ class MonitorToolInvocation extends BaseToolInvocation<
       };
     }
 
-    const command = normalizeMonitorSpawnCommand(this.params.command);
-    if (command !== this.params.command.trim()) {
+    const normalized = normalizeMonitorExecutionCommand(this.params.command);
+    const command = normalized.spawnCommand;
+    if (normalized.strippedTrailingAmp) {
       debugLogger.warn(
         'Stripped trailing & from monitor command — monitor lifecycle handles backgrounding',
       );
