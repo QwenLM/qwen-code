@@ -379,6 +379,52 @@ jobs:
           npm run bundle
           npm run prepare:package
 
+      - name: 'Build Standalone Archives'
+        env:
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+        run: |-
+          set -euo pipefail
+
+          NODE_VERSION="$(node -p "process.versions.node")"
+          RUNTIME_DIR="${RUNNER_TEMP}/qwen-node-runtime"
+          NODE_DIST_URL="https://nodejs.org/dist/v${NODE_VERSION}"
+          mkdir -p "${RUNTIME_DIR}"
+          curl -fsSL "${NODE_DIST_URL}/SHASUMS256.txt" -o "${RUNTIME_DIR}/SHASUMS256.txt"
+
+          download_node() {
+            local qwen_target="$1"
+            local node_target="$2"
+            local extension="$3"
+            local archive="${RUNTIME_DIR}/node-v${NODE_VERSION}-${node_target}.${extension}"
+            local archive_name
+            archive_name="$(basename "${archive}")"
+            local checksum_line
+            local url="${NODE_DIST_URL}/${archive_name}"
+
+            echo "Downloading ${url}"
+            curl -fsSL "${url}" -o "${archive}"
+            checksum_line="$(awk -v name="${archive_name}" '$2 == name { print }' "${RUNTIME_DIR}/SHASUMS256.txt")"
+            if [[ -z "${checksum_line}" ]]; then
+              echo "::error::Node.js SHASUMS256.txt does not list ${archive_name}"
+              exit 1
+            fi
+            printf '%s\n' "${checksum_line}" | (cd "${RUNTIME_DIR}" && sha256sum -c -)
+            npm run package:standalone -- \
+              --target "${qwen_target}" \
+              --node-archive "${archive}" \
+              --out-dir dist/standalone \
+              --version "${RELEASE_VERSION}"
+          }
+
+          download_node darwin-arm64 darwin-arm64 tar.gz
+          download_node darwin-x64 darwin-x64 tar.gz
+          download_node linux-arm64 linux-arm64 tar.xz
+          download_node linux-x64 linux-x64 tar.xz
+          download_node win-x64 win-x64 zip
+
+          ls -la dist/standalone
+          cat dist/standalone/SHA256SUMS
+
       - name: 'Publish @qwen-code/qwen-code'
         working-directory: 'dist'
         run: |-
@@ -411,6 +457,8 @@ jobs:
 
           gh release create "${RELEASE_TAG}" \
             dist/cli.js \
+            dist/standalone/qwen-code-* \
+            dist/standalone/SHA256SUMS \
             --target "${RELEASE_BRANCH}" \
             --title "Release ${RELEASE_TAG}" \
             --notes-start-tag "${PREVIOUS_RELEASE_TAG}" \

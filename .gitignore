@@ -36,6 +36,10 @@ CLAUDE.md
 !.qwen/skills/**
 !.qwen/agents/
 !.qwen/agents/**
+!.qwen/design/
+!.qwen/design/**
+!.qwen/e2e-tests/
+!.qwen/e2e-tests/**
 
 # OS metadata
 .DS_Store
