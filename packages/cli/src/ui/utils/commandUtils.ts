@@ -83,8 +83,7 @@ export const isSlashCommand = (query: string): boolean => {
 
   // Extract the first token after '/' (split by whitespace).
   // If it contains characters not valid in command names (like '/' for file
-  // paths or non-ASCII characters), treat the input as regular text rather
-  // than a slash command.
+  // paths), treat the input as regular text rather than a slash command.
   // A bare '/' with no token is allowed — it signals the start of command
   // input and triggers the autocomplete dropdown.
   const firstToken = query.slice(1).trimStart().split(/\s+/)[0] ?? '';
