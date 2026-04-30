@@ -42,7 +42,7 @@ interface WorkspaceProjectTreeProps {
   workspaceSessions: Map<string, SessionMeta[]>
   loadingWorkspaceSessionIds?: Set<string>
   workspaceUnreadMap?: Record<string, boolean>
-  onSelectWorkspace: (workspaceId: string, openInNewWindow?: boolean, options?: { route?: ViewRoute }) => void | Promise<void>
+  onSelectWorkspace: (workspaceId: string, openInNewWindow?: boolean, options?: { route?: ViewRoute; suppressSessionListLoading?: boolean }) => void | Promise<void>
   onSelectSession: (workspaceId: string, sessionId: string) => void | Promise<void>
   onNewSession: (workspaceId: string) => void | Promise<void>
   onWorkspaceCreated?: (workspace: Workspace) => void

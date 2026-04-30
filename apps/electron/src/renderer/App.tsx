@@ -1865,7 +1865,7 @@ export default function App() {
   const handleSelectWorkspace = useCallback(async (
     workspaceId: string,
     openInNewWindow = false,
-    options?: { route?: ViewRoute },
+    options?: { route?: ViewRoute; suppressSessionListLoading?: boolean },
   ) => {
     // If selecting current workspace, do nothing
     if (workspaceId === windowWorkspaceIdRef.current) return
@@ -1881,7 +1881,9 @@ export default function App() {
       : null
 
     setSessionLoadError(null)
-    setSessionListLoading(true)
+    if (!options?.suppressSessionListLoading) {
+      setSessionListLoading(true)
+    }
 
     const switchSeq = ++workspaceSwitchSeqRef.current
     const requestSeq = ++sessionListRequestSeqRef.current
@@ -1952,6 +1954,7 @@ export default function App() {
           targetWorkspace?.remoteServer?.remoteWorkspaceId,
         )
         setSessionsLoaded(true)
+        setSessionListLoading(false)
       })
 
       void reconcileLoadedSessionPermissionModes(loadedSessions)

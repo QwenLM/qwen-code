@@ -573,6 +573,7 @@ function AppShellContent({
     return isFocusedMode || storage.get(storage.KEYS.focusModeEnabled, false)
   })
   const [collapseSessionNavigatorForProjectDraft, setCollapseSessionNavigatorForProjectDraft] = React.useState(false)
+  const [projectDraftTargetWorkspaceId, setProjectDraftTargetWorkspaceId] = React.useState<string | null>(null)
 
   // Auto-compact mode: shell width below mobile threshold hides sidebar/navigator
   // and switches to single-panel mode. Works in both webui (narrow viewport) and
@@ -665,11 +666,24 @@ function AppShellContent({
   const isSidebarResizeAvailable = !effectiveSidebarAndNavigatorHidden && isSidebarVisible
 
   useEffect(() => {
-    if (!collapseSessionNavigatorForProjectDraft) return
+    if (!collapseSessionNavigatorForProjectDraft && !projectDraftTargetWorkspaceId) return
+    if (projectDraftTargetWorkspaceId) {
+      if (activeWorkspaceId !== projectDraftTargetWorkspaceId) return
+      if (isSessionsNavigation(navState) && !sessionsContext?.sessionId) {
+        setWorkspaceSessionSnapshotLoadingIds(prev => {
+          if (!prev.has(projectDraftTargetWorkspaceId)) return prev
+          const next = new Set(prev)
+          next.delete(projectDraftTargetWorkspaceId)
+          return next
+        })
+        setProjectDraftTargetWorkspaceId(null)
+      }
+      return
+    }
     if (!isSessionsNavigation(navState) || sessionsContext?.sessionId) {
       setCollapseSessionNavigatorForProjectDraft(false)
     }
-  }, [collapseSessionNavigatorForProjectDraft, navState, sessionsContext?.sessionId])
+  }, [activeWorkspaceId, collapseSessionNavigatorForProjectDraft, navState, projectDraftTargetWorkspaceId, sessionsContext?.sessionId])
 
   // Derive source filter from navigation state (only when in sources navigator)
   const sourceFilter: SourceFilter | null = isSourcesNavigation(navState) ? navState.filter ?? null : null
@@ -1444,9 +1458,13 @@ function AppShellContent({
         return
       }
 
-      onProjectSessionSnapshotsReadyChange?.(false)
-      setWorkspaceSessionSnapshotLoadingIds(new Set(snapshotWorkspaces.map(workspace => workspace.id)))
       const previousCache = workspaceSessionMetaCacheRef.current
+      onProjectSessionSnapshotsReadyChange?.(false)
+      setWorkspaceSessionSnapshotLoadingIds(new Set(
+        snapshotWorkspaces
+          .filter(workspace => !previousCache.has(workspace.id))
+          .map(workspace => workspace.id)
+      ))
       let hasPendingRetry = false
       const pendingRetryWorkspaceIds = new Set<string>()
       const entries = await Promise.all(workspaces.map(async (workspace) => {
@@ -1454,34 +1472,23 @@ function AppShellContent({
           return [workspace.id, previousCache.get(workspace.id) ?? []] as const
         }
 
+        const hasPreviousSnapshot = previousCache.has(workspace.id)
         const previous = previousCache.get(workspace.id) ?? []
 
         try {
           const sessions = await loadProjectWorkspaceSessionSnapshot(workspace)
-          if (sessions.length > 0) {
-            workspaceSessionSnapshotRetryAttemptsRef.current.delete(workspace.id)
-            const retryTimer = workspaceSessionSnapshotRetryTimersRef.current.get(workspace.id)
-            if (retryTimer) {
-              clearTimeout(retryTimer)
-              workspaceSessionSnapshotRetryTimersRef.current.delete(workspace.id)
-            }
-            return [workspace.id, sessions] as const
-          }
-
-          const willRetry = scheduleWorkspaceSessionSnapshotRetry(workspace.id)
-          hasPendingRetry = hasPendingRetry || willRetry
-          if (willRetry && previous.length === 0) {
-            pendingRetryWorkspaceIds.add(workspace.id)
-          }
-          if (willRetry && previous.length > 0) {
-            return [workspace.id, previous] as const
+          workspaceSessionSnapshotRetryAttemptsRef.current.delete(workspace.id)
+          const retryTimer = workspaceSessionSnapshotRetryTimersRef.current.get(workspace.id)
+          if (retryTimer) {
+            clearTimeout(retryTimer)
+            workspaceSessionSnapshotRetryTimersRef.current.delete(workspace.id)
           }
           return [workspace.id, sessions] as const
         } catch (error) {
           console.error(`[AppShell] Failed to load sessions for workspace ${workspace.id}:`, error)
           const willRetry = scheduleWorkspaceSessionSnapshotRetry(workspace.id)
           hasPendingRetry = willRetry || hasPendingRetry
-          if (willRetry && previous.length === 0) {
+          if (willRetry && !hasPreviousSnapshot) {
             pendingRetryWorkspaceIds.add(workspace.id)
           }
           return [workspace.id, previous] as const
@@ -1531,11 +1538,11 @@ function AppShellContent({
 
   const projectTreeLoadingWorkspaceSessionIds = useMemo(() => {
     const next = new Set(workspaceSessionSnapshotLoadingIds)
-    if (activeWorkspaceId && isSessionListLoading) {
-      next.add(activeWorkspaceId)
+    if (projectDraftTargetWorkspaceId) {
+      next.delete(projectDraftTargetWorkspaceId)
     }
     return next
-  }, [activeWorkspaceId, isSessionListLoading, workspaceSessionSnapshotLoadingIds])
+  }, [projectDraftTargetWorkspaceId, workspaceSessionSnapshotLoadingIds])
 
   // Active sessions exclude archived - use this for all counts and filters except archived view
   const activeSessionMetas = useMemo(() => {
@@ -1866,33 +1873,39 @@ function AppShellContent({
 
   const handleAllSessionsClick = useCallback(() => {
     setCollapseSessionNavigatorForProjectDraft(false)
+    setProjectDraftTargetWorkspaceId(null)
     navigate(routes.view.allSessions())
   }, [])
 
   const handleFlaggedClick = useCallback(() => {
     setCollapseSessionNavigatorForProjectDraft(false)
+    setProjectDraftTargetWorkspaceId(null)
     navigate(routes.view.flagged())
   }, [])
 
   const handleArchivedClick = useCallback(() => {
     setCollapseSessionNavigatorForProjectDraft(false)
+    setProjectDraftTargetWorkspaceId(null)
     navigate(routes.view.archived())
   }, [])
 
   // Handler for individual todo state views
   const handleSessionStatusClick = useCallback((stateId: SessionStatusId) => {
     setCollapseSessionNavigatorForProjectDraft(false)
+    setProjectDraftTargetWorkspaceId(null)
     navigate(routes.view.state(stateId))
   }, [])
 
   // Handler for label filter views (hierarchical — includes descendant labels)
   const handleLabelClick = useCallback((labelId: string) => {
     setCollapseSessionNavigatorForProjectDraft(false)
+    setProjectDraftTargetWorkspaceId(null)
     navigate(routes.view.label(labelId))
   }, [])
 
   const handleViewClick = useCallback((viewId: string) => {
     setCollapseSessionNavigatorForProjectDraft(false)
+    setProjectDraftTargetWorkspaceId(null)
     navigate(routes.view.view(viewId))
   }, [])
 
@@ -2093,6 +2106,7 @@ function AppShellContent({
     if (!activeWorkspace) return
 
     setCollapseSessionNavigatorForProjectDraft(false)
+    setProjectDraftTargetWorkspaceId(null)
 
     // Exit search mode and switch to All Sessions
     setSearchActive(false)
@@ -2111,15 +2125,24 @@ function AppShellContent({
   const handleNewProjectSession = useCallback(async (workspaceId: string) => {
     setSearchActive(false)
     setSearchQuery('')
+    setProjectDraftTargetWorkspaceId(workspaceId)
+    setWorkspaceSessionSnapshotLoadingIds(prev => {
+      if (!prev.has(workspaceId)) return prev
+      const next = new Set(prev)
+      next.delete(workspaceId)
+      return next
+    })
+    setCollapseSessionNavigatorForProjectDraft(true)
 
     const createSessionInCurrentWorkspace = () => {
+      setProjectDraftTargetWorkspaceId(workspaceId)
       setCollapseSessionNavigatorForProjectDraft(true)
       navigate(routes.action.newSession())
       setTimeout(() => focusZone('chat', { intent: 'programmatic' }), 50)
     }
 
     if (workspaceId !== activeWorkspaceId) {
-      await Promise.resolve(onSelectWorkspace(workspaceId))
+      await Promise.resolve(onSelectWorkspace(workspaceId, false, { suppressSessionListLoading: true }))
       setTimeout(createSessionInCurrentWorkspace, 50)
       return
     }
@@ -2129,12 +2152,13 @@ function AppShellContent({
 
   const handleSelectProjectSession = useCallback(async (workspaceId: string, sessionId: string) => {
     setCollapseSessionNavigatorForProjectDraft(false)
+    setProjectDraftTargetWorkspaceId(null)
     setSearchActive(false)
     setSearchQuery('')
 
     if (workspaceId !== activeWorkspaceId) {
       const route = routes.view.allSessions(sessionId)
-      await Promise.resolve(onSelectWorkspace(workspaceId, false, { route }))
+      await Promise.resolve(onSelectWorkspace(workspaceId, false, { route, suppressSessionListLoading: true }))
       requestAnimationFrame(() => {
         focusZone('chat', { intent: 'programmatic' })
       })
