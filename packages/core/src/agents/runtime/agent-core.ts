@@ -66,6 +66,7 @@ import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
+import { isTeammate } from '../team/identity.js';
 
 /**
  * Result of a single reasoning loop invocation.
@@ -87,6 +88,18 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.TASK_STOP,
   ToolNames.SEND_MESSAGE,
 ]);
+
+/**
+ * Same as EXCLUDED_TOOLS_FOR_SUBAGENTS but allows SendMessage. Teammates
+ * coordinate with the leader and peers exclusively through send_message —
+ * their final text never reaches the leader otherwise — so it must be
+ * available even though they remain subagents in every other respect.
+ */
+const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set(
+  [...EXCLUDED_TOOLS_FOR_SUBAGENTS].filter(
+    (name) => name !== ToolNames.SEND_MESSAGE,
+  ),
+);
 
 /**
  * Prefix applied to each external message injected into a background agent's
@@ -346,7 +359,9 @@ export class AgentCore {
     await toolRegistry.warmAll();
     const toolsList: FunctionDeclaration[] = [];
 
-    const excludedFromSubagents = EXCLUDED_TOOLS_FOR_SUBAGENTS;
+    const excludedFromSubagents = isTeammate()
+      ? EXCLUDED_TOOLS_FOR_TEAMMATES
+      : EXCLUDED_TOOLS_FOR_SUBAGENTS;
 
     if (this.toolConfig) {
       const asStrings = this.toolConfig.tools.filter(

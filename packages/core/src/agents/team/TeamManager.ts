@@ -984,7 +984,10 @@ export class TeamManager {
     if (queue && queue.length > 0) {
       queue.sort((a, b) => a.priority - b.priority);
       const msg = queue.shift()!;
-      this.enqueueWithIdentity(agentId, agent, msg.text);
+      const labeled = msg.from
+        ? `[Message from ${msg.from}]: ${msg.text}`
+        : msg.text;
+      this.enqueueWithIdentity(agentId, agent, labeled);
       return;
     }
 

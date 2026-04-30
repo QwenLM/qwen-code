@@ -121,6 +121,31 @@ class TaskUpdateInvocation extends BaseToolInvocation<
       };
     }
 
+    // Mirror dependency edges so auto-claim and completion-unblock
+    // see a consistent graph: A.blocks=[B] implies B.blockedBy=[A]
+    // and vice versa. Updating only one side leaves dependents either
+    // permanently blocked or runnable too early.
+    const reciprocalUpdates: Array<Promise<unknown>> = [];
+    if (this.params.addBlocks?.length) {
+      for (const blockedId of this.params.addBlocks) {
+        if (blockedId === taskId) continue;
+        reciprocalUpdates.push(
+          updateTask(teamName, blockedId, { addBlockedBy: [taskId] }),
+        );
+      }
+    }
+    if (this.params.addBlockedBy?.length) {
+      for (const blockerId of this.params.addBlockedBy) {
+        if (blockerId === taskId) continue;
+        reciprocalUpdates.push(
+          updateTask(teamName, blockerId, { addBlocks: [taskId] }),
+        );
+      }
+    }
+    if (reciprocalUpdates.length > 0) {
+      await Promise.all(reciprocalUpdates);
+    }
+
     const llmContent =
       `Task #${taskId} updated (status: ${task.status}` +
       (task.owner ? `, owner: ${task.owner}` : '') +

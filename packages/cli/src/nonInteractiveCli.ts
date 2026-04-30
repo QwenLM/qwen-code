@@ -615,7 +615,7 @@ export async function runNonInteractive(
           // immediately instead of falling through to the
           // success path.
           if (abortController.signal.aborted) {
-            handleCancellationError(config);
+            await handleCancellationError(config);
           }
 
           // Also drain any final teammate messages.

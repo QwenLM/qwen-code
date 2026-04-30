@@ -67,7 +67,9 @@ describe('TeamCoordinationHarness', () => {
       await h.teamManager.sendMessage('worker', 'do the thing', 'leader');
 
       await h.waitForMessages('worker', 1);
-      expect(worker.getReceivedMessages()).toEqual(['do the thing']);
+      expect(worker.getReceivedMessages()).toEqual([
+        '[Message from leader]: do the thing',
+      ]);
     });
 
     it('sends message to busy agent (queued, delivered on idle)', async () => {
@@ -82,12 +84,17 @@ describe('TeamCoordinationHarness', () => {
 
       // Second message should queue.
       await h.teamManager.sendMessage('worker', 'second', 'leader');
-      expect(worker.getReceivedMessages()).toEqual(['first']);
+      expect(worker.getReceivedMessages()).toEqual([
+        '[Message from leader]: first',
+      ]);
 
       // Go idle → queued message delivered.
       worker.goIdle();
       await h.waitForMessages('worker', 2);
-      expect(worker.getReceivedMessages()).toEqual(['first', 'second']);
+      expect(worker.getReceivedMessages()).toEqual([
+        '[Message from leader]: first',
+        '[Message from leader]: second',
+      ]);
     });
 
     it('throws for unknown teammate', async () => {
@@ -140,7 +147,9 @@ describe('TeamCoordinationHarness', () => {
       await new Promise((r) => setTimeout(r, 50));
 
       // Worker only has the original message.
-      expect(h.getAgent('worker').getReceivedMessages()).toEqual(['work']);
+      expect(h.getAgent('worker').getReceivedMessages()).toEqual([
+        '[Message from leader]: work',
+      ]);
     });
   });
 
@@ -192,7 +201,9 @@ describe('TeamCoordinationHarness', () => {
       // Go idle → leader message delivered first.
       worker.goIdle();
       await h.waitForMessages('worker', 2);
-      expect(worker.getReceivedMessages()[1]).toBe('leader msg');
+      expect(worker.getReceivedMessages()[1]).toBe(
+        '[Message from leader]: leader msg',
+      );
     });
   });
 
@@ -225,7 +236,9 @@ describe('TeamCoordinationHarness', () => {
       await h.teamManager.broadcast('status update', 'worker-1');
 
       await h.waitForMessages('worker-2', 1);
-      expect(w2.getReceivedMessages()).toEqual(['status update']);
+      expect(w2.getReceivedMessages()).toEqual([
+        '[Message from worker-1]: status update',
+      ]);
       expect(w1.getReceivedMessages()).toEqual([]);
     });
 
@@ -240,9 +253,13 @@ describe('TeamCoordinationHarness', () => {
       await h.waitForMessages('w1', 1);
       await h.waitForMessages('w3', 1);
 
-      expect(w1.getReceivedMessages()).toEqual(['hello all']);
+      expect(w1.getReceivedMessages()).toEqual([
+        '[Message from w2]: hello all',
+      ]);
       expect(w2.getReceivedMessages()).toEqual([]);
-      expect(w3.getReceivedMessages()).toEqual(['hello all']);
+      expect(w3.getReceivedMessages()).toEqual([
+        '[Message from w2]: hello all',
+      ]);
     });
   });
 

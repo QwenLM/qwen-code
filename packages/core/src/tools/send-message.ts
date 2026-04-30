@@ -134,7 +134,11 @@ class SendMessageInvocation extends BaseToolInvocation<
         return { llmContent: msg, returnDisplay: msg };
       }
 
-      await teamManager.sendMessage(to, this.params.message, getAgentName());
+      await teamManager.sendMessage(
+        to,
+        this.params.message,
+        getAgentName() ?? 'leader',
+      );
       const msg = `Message sent to "${to}".`;
       return { llmContent: msg, returnDisplay: msg };
     } catch (error) {
