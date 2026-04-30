@@ -1114,6 +1114,26 @@ describe('ShellTool', () => {
       expect(details.permissionRules).toEqual(['Bash(git commit *)']);
     });
 
+    it('should pass the invocation directory to permission-manager command checks', async () => {
+      const pm = {
+        isCommandAllowed: vi.fn().mockResolvedValue('ask'),
+      } as unknown as PermissionManager;
+      (mockConfig.getPermissionManager as Mock).mockReturnValue(pm);
+
+      const invocation = shellTool.build({
+        command: 'git commit -m "msg"',
+        directory: '/test/dir/subdir',
+        is_background: false,
+      });
+
+      await invocation.getConfirmationDetails(new AbortController().signal);
+
+      expect(pm.isCommandAllowed).toHaveBeenCalledWith(
+        'git commit -m "msg"',
+        '/test/dir/subdir',
+      );
+    });
+
     it('should throw an error if validation fails', async () => {
       expect(() =>
         shellTool.build({ command: '', is_background: false }),

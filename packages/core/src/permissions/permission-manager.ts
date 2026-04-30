@@ -291,7 +291,7 @@ export class PermissionManager {
    */
   private evaluateShellVirtualOps(
     ops: ShellOperation[],
-    _pathCtx: PathMatchContext | undefined,
+    pathCtx: PathMatchContext | undefined,
   ): PermissionDecision {
     if (ops.length === 0) return 'default';
 
@@ -303,6 +303,7 @@ export class PermissionManager {
       // into the shell-semantics branch.
       const opDecision = this.evaluateSingle({
         toolName: op.virtualTool,
+        cwd: pathCtx?.cwd,
         filePath: op.filePath,
         domain: op.domain,
       });

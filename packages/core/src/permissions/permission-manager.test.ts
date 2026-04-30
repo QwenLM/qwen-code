@@ -984,6 +984,25 @@ describe('PermissionManager', () => {
         }),
       ).toBe('allow');
     });
+
+    it('applies relative virtual file rules using the shell invocation cwd', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Read(./secret.txt)'],
+          projectRoot: '/project',
+          cwd: '/project',
+        }),
+      );
+      pm2.initialize();
+
+      expect(
+        await pm2.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cat ./secret.txt',
+          cwd: '/project/subdir',
+        }),
+      ).toBe('deny');
+    });
   });
 
   describe('monitor command-level evaluation', () => {
