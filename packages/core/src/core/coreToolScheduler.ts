@@ -207,12 +207,23 @@ const FS_PATH_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
  * Pull the filesystem path-bearing fields out of a tool's input. Different
  * core tools name these differently:
  *  - `file_path` — read-file, edit, write-file
- *  - `path`      — ls, ripGrep
+ *  - `path`      — ls (search root); glob (search root, optional)
  *  - `filePath`  — grep, lsp
  *  - `paths`     — ripGrep array form
+ *  - `pattern`   — glob (treated as a path-shaped glob, see below)
  * Used by ConditionalRulesRegistry / SkillActivationRegistry hooks to
  * route every path the tool just touched through the same activation
  * pipeline. Returns input order, with empty / non-string entries dropped.
+ *
+ * For `glob` specifically, `pattern` is the actual selector — `path` is
+ * only the optional search root. `glob({ pattern: 'src/**\/*.tsx' })`
+ * with no `path` therefore needs `pattern` extracted, otherwise no
+ * conditional skill keyed on `paths: ['src/**\/*.tsx']` would ever
+ * activate from a glob call. The pattern goes through the same
+ * registry; picomatch matches glob-vs-glob on common shapes (e.g.
+ * `**\/*.tsx` matches `src/**\/*.tsx` because `**` accepts the
+ * literal `**` in the input). False matches are bounded to the same
+ * project-root scope as any other path.
  *
  * Returns `[]` for tool names outside `FS_PATH_TOOL_NAMES` — see that
  * set's docstring for why this is gated rather than universal.
@@ -234,6 +245,12 @@ export function extractToolFilePaths(
   const pathsField = obj['paths'];
   if (Array.isArray(pathsField)) {
     for (const p of pathsField) push(p);
+  }
+  if (toolName === ToolNames.GLOB) {
+    // Glob-only: include `pattern` as a path-shaped selector. Don't add
+    // it for grep_search even though grep also has a `pattern` field —
+    // grep's pattern is a regex, not a path glob, and would false-match.
+    push(obj['pattern']);
   }
   return out;
 }

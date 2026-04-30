@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   SkillActivationRegistry,
+  resolveProjectRelativePath,
   splitConditionalSkills,
 } from './skill-activation.js';
 import type { SkillConfig } from './types.js';
@@ -149,5 +151,53 @@ describe('SkillActivationRegistry', () => {
     // the project root regardless of platform.
     expect(reg.matchAndConsume('/totally/other/place/file.ts')).toEqual([]);
     expect(reg.activatedCount).toBe(0);
+  });
+});
+
+describe('resolveProjectRelativePath', () => {
+  // Pure helper, exercised directly so the Windows-specific cross-drive
+  // branch is testable on POSIX CI runners. On a real POSIX host
+  // `path.win32` always behaves like Windows path semantics regardless
+  // of the host OS.
+  it('returns the forward-slash-normalized relative path for in-project files (POSIX)', () => {
+    expect(
+      resolveProjectRelativePath(
+        '/project/src/App.tsx',
+        '/project',
+        path.posix,
+      ),
+    ).toBe('src/App.tsx');
+  });
+
+  it('returns null for paths outside the project root (POSIX, `..` prefix)', () => {
+    expect(
+      resolveProjectRelativePath('/elsewhere/foo.ts', '/project', path.posix),
+    ).toBeNull();
+  });
+
+  it('returns null for Windows cross-drive paths (different drive letter)', () => {
+    // Direct exercise of the new `path.isAbsolute(rawRelativePath)`
+    // branch. `path.win32.relative('C:\\project', 'D:\\other\\file.ts')`
+    // returns an absolute string like `D:\\other\\file.ts` — without the
+    // isAbsolute guard, the helper would normalize the backslashes and
+    // return `D:/other/file.ts`, which would false-match a broad glob
+    // such as `**/*.ts`. Must return null instead.
+    expect(
+      resolveProjectRelativePath(
+        'D:\\other\\file.ts',
+        'C:\\project',
+        path.win32,
+      ),
+    ).toBeNull();
+  });
+
+  it('normalizes backslashes for in-project Windows paths', () => {
+    expect(
+      resolveProjectRelativePath(
+        'C:\\project\\src\\App.tsx',
+        'C:\\project',
+        path.win32,
+      ),
+    ).toBe('src/App.tsx');
   });
 });

@@ -4383,6 +4383,32 @@ describe('extractToolFilePaths', () => {
     ).toEqual([]);
   });
 
+  it('extracts pattern for glob (path-shaped selector, glob-only)', () => {
+    // Regression: `glob({ pattern: 'src/**/*.tsx' })` with no `path` is a
+    // common shape that previously produced an empty candidate set, so a
+    // skill keyed on `paths: ['src/**/*.tsx']` would never activate from
+    // a glob call.
+    expect(extractToolFilePaths('glob', { pattern: 'src/**/*.tsx' })).toEqual([
+      'src/**/*.tsx',
+    ]);
+    // Both `path` (search root) and `pattern` (selector) when both
+    // present.
+    expect(
+      extractToolFilePaths('glob', { path: 'src', pattern: '**/*.ts' }),
+    ).toEqual(['src', '**/*.ts']);
+  });
+
+  it('does not extract pattern for non-glob tools', () => {
+    // Grep's `pattern` is a regex, not a path glob; treating it as a
+    // path would false-match. Pattern is only path-shaped for `glob`.
+    expect(
+      extractToolFilePaths('grep_search', {
+        pattern: 'TODO|FIXME',
+        filePath: '/proj/a.ts',
+      }),
+    ).toEqual(['/proj/a.ts']);
+  });
+
   it('returns empty for tool names outside the FS allowlist', () => {
     // Regression: MCP tools and other non-FS tools that happen to use
     // `path` / `paths` for non-filesystem semantics (e.g. URL routes,

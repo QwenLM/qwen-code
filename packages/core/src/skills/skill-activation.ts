@@ -28,6 +28,35 @@ interface CompiledSkill {
 }
 
 /**
+ * Compute a project-relative, forward-slash-normalized path for matching
+ * against skill `paths:` globs, or `null` if the input falls outside the
+ * project root. Pure (no I/O), and parameterized over a `path` module so
+ * unit tests can pin the Windows-specific `path.win32` cross-drive case
+ * (where `path.relative('C:\\proj', 'D:\\elsewhere')` returns an
+ * absolute string that, after normalizing backslashes, would otherwise
+ * false-match a broad glob like `**\/*.ts`).
+ */
+export function resolveProjectRelativePath(
+  filePath: string,
+  projectRoot: string,
+  pathModule: typeof path = path,
+): string | null {
+  const absolutePath = pathModule.isAbsolute(filePath)
+    ? filePath
+    : pathModule.resolve(projectRoot, filePath);
+  const rawRelativePath = pathModule.relative(projectRoot, absolutePath);
+  if (
+    rawRelativePath === '..' ||
+    rawRelativePath.startsWith(`..${pathModule.sep}`) ||
+    rawRelativePath.startsWith('../') ||
+    pathModule.isAbsolute(rawRelativePath)
+  ) {
+    return null;
+  }
+  return rawRelativePath.replace(/\\/g, '/');
+}
+
+/**
  * Splits a skill list into unconditional skills (no `paths:`) and conditional
  * skills (with non-empty `paths:`). Unconditional skills are always offered to
  * the model; conditional skills only appear after activation.
@@ -79,30 +108,17 @@ export class SkillActivationRegistry {
   matchAndConsume(filePath: string): string[] {
     if (this.compiled.length === 0) return [];
 
-    const absolutePath = path.isAbsolute(filePath)
-      ? filePath
-      : path.resolve(this.projectRoot, filePath);
-    const rawRelativePath = path.relative(this.projectRoot, absolutePath);
-
-    // Skip files outside the project root — conditional skills are scoped to
-    // the project, matching ConditionalRulesRegistry's behavior.
-    //
-    // On Windows, `path.relative` between paths on different drives returns
-    // an absolute path (e.g. `D:\\other`), which would otherwise normalize
-    // to forward slashes and false-match a glob like `**/*.ts`. Reject
-    // absolute results before normalizing.
-    if (
-      rawRelativePath === '..' ||
-      rawRelativePath.startsWith(`..${path.sep}`) ||
-      rawRelativePath.startsWith('../') ||
-      path.isAbsolute(rawRelativePath)
-    ) {
+    // Skip files outside the project root — conditional skills are scoped
+    // to the project, matching ConditionalRulesRegistry's behavior. The
+    // helper handles the Windows cross-drive case (where `path.relative`
+    // returns an absolute string).
+    const relativePath = resolveProjectRelativePath(filePath, this.projectRoot);
+    if (relativePath === null) {
       debugLogger.debug(
-        `Skipping ${filePath}: outside project root (relative=${rawRelativePath})`,
+        `Skipping ${filePath}: outside project root or cross-drive`,
       );
       return [];
     }
-    const relativePath = rawRelativePath.replace(/\\/g, '/');
     debugLogger.debug(`matchAndConsume ${filePath} → relative=${relativePath}`);
 
     const newlyActivated: string[] = [];
