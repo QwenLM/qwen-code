@@ -87,7 +87,7 @@ import { getSessionTitle } from "@/utils/session"
 import { useSetAtom } from "jotai"
 import type { Session, Workspace, FileAttachment, PermissionRequest, LoadedSource, LoadedSkill, PermissionMode, SourceFilter, AutomationFilter } from "../../../shared/types"
 import { PERMISSION_MODE_ORDER } from '@craft-agent/shared/agent/mode-types'
-import { extractSessionMeta, sessionMetaMapAtom, sendToWorkspaceAtom, type SessionMeta } from "@/atoms/sessions"
+import { sessionMetaMapAtom, sendToWorkspaceAtom, type SessionMeta } from "@/atoms/sessions"
 import { sourcesAtom } from "@/atoms/sources"
 import { skillsAtom } from "@/atoms/skills"
 import { panelStackAtom, panelCountAtom, focusedPanelIdAtom, focusedSessionIdAtom, focusNextPanelAtom, focusPrevPanelAtom, parseSessionIdFromRoute } from "@/atoms/panel-stack"
@@ -106,6 +106,7 @@ import { resolveEntityColor } from "@craft-agent/shared/colors"
 import * as storage from "@/lib/local-storage"
 import { toast } from "sonner"
 import { navigate, routes } from "@/lib/navigate"
+import { loadProjectWorkspaceSessionSnapshot } from "@/lib/project-session-snapshots"
 import {
   useNavigation,
   useNavigationState,
@@ -163,6 +164,8 @@ interface AppShellProps {
   menuNewChatTrigger?: number
   /** Focused mode - hides sidebars, shows only the chat content */
   isFocusedMode?: boolean
+  /** Reports when the project tree's cross-workspace session snapshots are ready. */
+  onProjectSessionSnapshotsReadyChange?: (ready: boolean) => void
 }
 
 /** Filter mode for tri-state filtering: include shows only matching, exclude hides matching */
@@ -504,6 +507,7 @@ function AppShellContent({
   defaultCollapsed = false,
   menuNewChatTrigger,
   isFocusedMode = false,
+  onProjectSessionSnapshotsReadyChange,
 }: AppShellProps) {
   // Destructure commonly used values from context
   // Note: sessions is NOT destructured here - we use sessionMetaMapAtom instead
@@ -1323,10 +1327,37 @@ function AppShellContent({
 
   const [workspaceSessionSnapshots, setWorkspaceSessionSnapshots] = useState<Map<string, SessionMeta[]>>(() => new Map())
   const workspaceSessionSnapshotsRef = useRef(workspaceSessionSnapshots)
+  const [workspaceSessionSnapshotRefreshTick, setWorkspaceSessionSnapshotRefreshTick] = useState(0)
+  const workspaceSessionSnapshotRetryAttemptsRef = useRef<Map<string, number>>(new Map())
+  const workspaceSessionSnapshotRetryTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
   useEffect(() => {
     workspaceSessionSnapshotsRef.current = workspaceSessionSnapshots
   }, [workspaceSessionSnapshots])
+
+  const scheduleWorkspaceSessionSnapshotRetry = useCallback((workspaceId: string): boolean => {
+    const attempts = workspaceSessionSnapshotRetryAttemptsRef.current.get(workspaceId) ?? 0
+    if (attempts >= 3) return false
+    if (workspaceSessionSnapshotRetryTimersRef.current.has(workspaceId)) return true
+
+    workspaceSessionSnapshotRetryAttemptsRef.current.set(workspaceId, attempts + 1)
+    const delay = 400 * (attempts + 1)
+    const timer = setTimeout(() => {
+      workspaceSessionSnapshotRetryTimersRef.current.delete(workspaceId)
+      setWorkspaceSessionSnapshotRefreshTick(tick => tick + 1)
+    }, delay)
+    workspaceSessionSnapshotRetryTimersRef.current.set(workspaceId, timer)
+    return true
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      for (const timer of workspaceSessionSnapshotRetryTimersRef.current.values()) {
+        clearTimeout(timer)
+      }
+      workspaceSessionSnapshotRetryTimersRef.current.clear()
+    }
+  }, [])
 
   useEffect(() => {
     if (!activeWorkspaceId) return
@@ -1343,22 +1374,44 @@ function AppShellContent({
     let cancelled = false
 
     const loadWorkspaceSessionSnapshots = async () => {
+      const snapshotWorkspaces = workspaces.filter(workspace => workspace.id !== activeWorkspaceId)
+      if (snapshotWorkspaces.length === 0) {
+        onProjectSessionSnapshotsReadyChange?.(true)
+        return
+      }
+
+      onProjectSessionSnapshotsReadyChange?.(false)
       const previousSnapshots = workspaceSessionSnapshotsRef.current
+      let hasPendingRetry = false
       const entries = await Promise.all(workspaces.map(async (workspace) => {
         if (workspace.id === activeWorkspaceId) {
           return [workspace.id, previousSnapshots.get(workspace.id) ?? []] as const
         }
 
-        if (workspace.remoteServer) {
-          return [workspace.id, previousSnapshots.get(workspace.id) ?? []] as const
-        }
+        const previous = previousSnapshots.get(workspace.id) ?? []
 
         try {
-          const sessions = await window.electronAPI.getSessionsForWorkspace(workspace.id)
-          return [workspace.id, sessions.map(extractSessionMeta)] as const
+          const sessions = await loadProjectWorkspaceSessionSnapshot(workspace)
+          if (sessions.length > 0) {
+            workspaceSessionSnapshotRetryAttemptsRef.current.delete(workspace.id)
+            const retryTimer = workspaceSessionSnapshotRetryTimersRef.current.get(workspace.id)
+            if (retryTimer) {
+              clearTimeout(retryTimer)
+              workspaceSessionSnapshotRetryTimersRef.current.delete(workspace.id)
+            }
+            return [workspace.id, sessions] as const
+          }
+
+          const willRetry = scheduleWorkspaceSessionSnapshotRetry(workspace.id)
+          hasPendingRetry = hasPendingRetry || willRetry
+          if (willRetry && previous.length > 0) {
+            return [workspace.id, previous] as const
+          }
+          return [workspace.id, sessions] as const
         } catch (error) {
           console.error(`[AppShell] Failed to load sessions for workspace ${workspace.id}:`, error)
-          return [workspace.id, previousSnapshots.get(workspace.id) ?? []] as const
+          hasPendingRetry = scheduleWorkspaceSessionSnapshotRetry(workspace.id) || hasPendingRetry
+          return [workspace.id, previous] as const
         }
       }))
 
@@ -1371,13 +1424,20 @@ function AppShellContent({
           }
           return next
         })
+        onProjectSessionSnapshotsReadyChange?.(!hasPendingRetry)
       }
     }
 
     void loadWorkspaceSessionSnapshots()
 
     return () => { cancelled = true }
-  }, [workspaces, activeWorkspaceId])
+  }, [
+    workspaces,
+    activeWorkspaceId,
+    workspaceSessionSnapshotRefreshTick,
+    scheduleWorkspaceSessionSnapshotRetry,
+    onProjectSessionSnapshotsReadyChange,
+  ])
 
   const projectTreeWorkspaceSessions = useMemo(() => {
     const next = new Map(workspaceSessionSnapshots)
