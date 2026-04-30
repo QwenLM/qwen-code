@@ -125,15 +125,17 @@ function loadEnvFile(): void {
   }
 }
 
-// Kill any process using the specified port
+// Kill any process listening on the specified port.
+// `lsof -ti:<port>` also returns clients connected to that port; in dev that
+// can include Electron renderer helpers connected to Vite's websocket.
 async function killProcessOnPort(port: string): Promise<void> {
   const isWindows = process.platform === "win32";
 
   try {
     if (isWindows) {
-      // Windows: use netstat to find PID, then taskkill
+      // Windows: use netstat to find listening PIDs, then taskkill
       const netstat = spawn({
-        cmd: ["cmd", "/c", `netstat -ano | findstr :${port}`],
+        cmd: ["cmd", "/c", `netstat -ano -p tcp | findstr :${port}`],
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -145,8 +147,11 @@ async function killProcessOnPort(port: string): Promise<void> {
       for (const line of output.split("\n")) {
         const parts = line.trim().split(/\s+/);
         if (parts.length >= 5) {
+          const localAddress = parts[1];
+          const state = parts[3]?.toUpperCase();
           const pid = parts[parts.length - 1];
-          if (pid && /^\d+$/.test(pid) && pid !== "0") {
+          const isListeningOnPort = localAddress?.endsWith(`:${port}`) && state === "LISTENING";
+          if (isListeningOnPort && pid && /^\d+$/.test(pid) && pid !== "0") {
             pids.add(pid);
           }
         }
@@ -166,9 +171,22 @@ async function killProcessOnPort(port: string): Promise<void> {
         console.log(`🔪 Killed ${pids.size} process(es) on port ${port}`);
       }
     } else {
-      // Mac/Linux: use lsof and kill
+      // Mac/Linux: use lsof and kill only listeners, not Vite websocket clients.
+      const killListeningPidScript = [
+        "pids=$(lsof -tiTCP:$1 -sTCP:LISTEN 2>/dev/null || true)",
+        "if [ -n \"$pids\" ]; then",
+        "kill -9 $pids 2>/dev/null || true",
+        "printf '%s\\n' \"$pids\"",
+        "fi",
+      ].join("; ");
       const lsof = spawn({
-        cmd: ["sh", "-c", `lsof -ti:${port} | xargs kill -9 2>/dev/null || true`],
+        cmd: [
+          "sh",
+          "-c",
+          killListeningPidScript,
+          "sh",
+          port,
+        ],
         stdout: "pipe",
         stderr: "pipe",
       });
