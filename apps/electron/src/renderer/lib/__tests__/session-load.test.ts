@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import type { TransportConnectionState } from '../../../shared/types'
 import {
   formatSessionLoadFailure,
+  hasSessionContentHint,
   shouldShowForegroundMessageLoading,
   shouldTreatSessionLoadFailureAsTransportFallback,
 } from '../session-load'
@@ -73,7 +74,26 @@ describe('shouldShowForegroundMessageLoading', () => {
     expect(shouldShowForegroundMessageLoading(false, 0, 0)).toBe(false)
   })
 
+  it('shows loading for unloaded sessions with content hints even when metadata count is briefly zero', () => {
+    expect(shouldShowForegroundMessageLoading(false, 0, 0, true)).toBe(true)
+  })
+
+  it('shows loading when loaded tracking is stale but the session looks non-empty', () => {
+    expect(shouldShowForegroundMessageLoading(true, 0, 2, true)).toBe(true)
+  })
+
   it('shows loading for unloaded sessions that metadata says have messages', () => {
     expect(shouldShowForegroundMessageLoading(false, 0, 2)).toBe(true)
+  })
+})
+
+describe('hasSessionContentHint', () => {
+  it('treats title or preview metadata as evidence that the session is not an empty draft', () => {
+    expect(hasSessionContentHint({ name: '你好', messageCount: 0 })).toBe(true)
+    expect(hasSessionContentHint({ preview: 'First user message' })).toBe(true)
+  })
+
+  it('returns false for metadata-confirmed empty sessions without content hints', () => {
+    expect(hasSessionContentHint({ messageCount: 0 })).toBe(false)
   })
 })

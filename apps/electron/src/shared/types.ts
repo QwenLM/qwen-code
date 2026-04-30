@@ -216,7 +216,7 @@ import type {
 export interface ElectronAPI {
   // Session management
   getSessions(): Promise<Session[]>
-  getSessionsForWorkspace(workspaceId: string): Promise<Session[]>
+  getSessionsForWorkspace(workspaceId: string, options?: { refreshExternal?: boolean }): Promise<Session[]>
   getUnreadSummary(): Promise<UnreadSummary>
   markAllSessionsRead(workspaceId: string): Promise<void>
   getSessionMessages(sessionId: string): Promise<Session | null>

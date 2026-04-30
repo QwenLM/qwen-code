@@ -12,6 +12,7 @@ import { atom } from 'jotai'
 import type { Getter, Setter } from 'jotai/vanilla'
 import { atomFamily } from 'jotai-family'
 import type { Session, Message } from '../../shared/types'
+import { hasSessionContentHint } from '../lib/session-load'
 
 /**
  * Session metadata for list display (lightweight, no messages)
@@ -23,6 +24,8 @@ export interface SessionMeta {
   /** Preview of first user message (for title fallback) */
   preview?: string
   workspaceId: string
+  /** Last time the session was opened or persisted. Used only as a fallback for legacy sessions without lastMessageAt. */
+  lastUsedAt?: number
   lastMessageAt?: number
   isProcessing?: boolean
   isFlagged?: boolean
@@ -75,6 +78,77 @@ export interface SessionMeta {
   isArchived?: boolean
   /** Timestamp when session was archived (for retention policy) */
   archivedAt?: number
+}
+
+type SessionOrderFields = {
+  id: string
+  lastMessageAt?: number
+  lastUsedAt?: number
+  createdAt?: number
+}
+
+export function getSessionOrderTime(session: SessionOrderFields): number {
+  return session.lastMessageAt ?? session.lastUsedAt ?? session.createdAt ?? 0
+}
+
+export function compareSessionsByActivityDesc(a: SessionOrderFields, b: SessionOrderFields): number {
+  const byTime = getSessionOrderTime(b) - getSessionOrderTime(a)
+  if (byTime !== 0) return byTime
+
+  const byCreatedAt = (b.createdAt ?? 0) - (a.createdAt ?? 0)
+  if (byCreatedAt !== 0) return byCreatedAt
+
+  return a.id.localeCompare(b.id)
+}
+
+export function mergeStableSessionMetaList(previous: SessionMeta[] | undefined, incoming: SessionMeta[]): SessionMeta[] {
+  if (!previous || previous.length === 0) {
+    return [...incoming].sort(compareSessionsByActivityDesc)
+  }
+
+  const incomingById = new Map(incoming.map(session => [session.id, session]))
+  const previousIds = new Set(previous.map(session => session.id))
+  const stableExisting = previous
+    .map(session => incomingById.get(session.id))
+    .filter((session): session is SessionMeta => !!session)
+  const added = incoming
+    .filter(session => !previousIds.has(session.id))
+    .sort(compareSessionsByActivityDesc)
+
+  return [...stableExisting, ...added]
+}
+
+function areSessionMetasShallowEqual(a: SessionMeta, b: SessionMeta): boolean {
+  if (a === b) return true
+
+  const aKeys = Object.keys(a) as Array<keyof SessionMeta>
+  const bKeys = Object.keys(b) as Array<keyof SessionMeta>
+  if (aKeys.length !== bKeys.length) return false
+
+  for (const key of aKeys) {
+    if (a[key] !== b[key]) return false
+  }
+  return true
+}
+
+export function areSessionMetaListsEquivalent(a: SessionMeta[] | undefined, b: SessionMeta[]): boolean {
+  if (!a || a.length !== b.length) return false
+
+  for (let index = 0; index < a.length; index += 1) {
+    if (!areSessionMetasShallowEqual(a[index]!, b[index]!)) return false
+  }
+
+  return true
+}
+
+export function sessionFromMeta(meta: SessionMeta, workspaceName = ''): Session {
+  return {
+    ...meta,
+    workspaceName,
+    lastMessageAt: getSessionOrderTime(meta),
+    messages: [],
+    isProcessing: meta.isProcessing ?? false,
+  } as Session
 }
 
 /**
@@ -155,6 +229,243 @@ export const sessionAtomFamily = atomFamily(
 export const sessionMetaMapAtom = atom<Map<string, SessionMeta>>(new Map())
 
 /**
+ * Workspace-scoped session state. This is the source used by the project tree
+ * and workspace switcher so each workspace keeps its own metadata and order in
+ * memory instead of relying on the currently selected workspace's flat list.
+ */
+export interface WorkspaceSessionState {
+  sessionMetaMap: Map<string, SessionMeta>
+  sessionOrder: string[]
+  loadedAt?: number
+  isRefreshing?: boolean
+  error?: string
+}
+
+export const workspaceSessionsAtom = atom<Map<string, WorkspaceSessionState>>(new Map())
+
+export function getWorkspaceSessionMetas(
+  workspaceSessions: Map<string, WorkspaceSessionState>,
+  workspaceId: string | null | undefined,
+): SessionMeta[] {
+  if (!workspaceId) return []
+
+  const state = workspaceSessions.get(workspaceId)
+  if (!state) return []
+
+  const ordered = state.sessionOrder
+    .map(sessionId => state.sessionMetaMap.get(sessionId))
+    .filter((session): session is SessionMeta => Boolean(session))
+
+  const orderedIds = new Set(ordered.map(session => session.id))
+  const missingOrderedSessions = Array.from(state.sessionMetaMap.values())
+    .filter(session => !orderedIds.has(session.id))
+    .sort(compareSessionsByActivityDesc)
+
+  return [...ordered, ...missingOrderedSessions]
+}
+
+function workspaceStateFromMetas(
+  previousState: WorkspaceSessionState | undefined,
+  incomingMetas: SessionMeta[],
+): WorkspaceSessionState {
+  const previousMetas = previousState ? getWorkspaceSessionMetas(new Map([['workspace', previousState]]), 'workspace') : undefined
+  const mergedMetas = mergeStableSessionMetaList(previousMetas, incomingMetas)
+
+  if (previousState && areSessionMetaListsEquivalent(previousMetas, mergedMetas)) {
+    return previousState
+  }
+
+  return {
+    ...previousState,
+    sessionMetaMap: new Map(mergedMetas.map(session => [session.id, session])),
+    sessionOrder: mergedMetas.map(session => session.id),
+    loadedAt: Date.now(),
+    error: undefined,
+  }
+}
+
+function upsertWorkspaceSessionMeta(
+  previousState: WorkspaceSessionState | undefined,
+  meta: SessionMeta,
+  position: 'preserve' | 'front' = 'preserve',
+): WorkspaceSessionState {
+  const previousMap = previousState?.sessionMetaMap ?? new Map<string, SessionMeta>()
+  const previousMeta = previousMap.get(meta.id)
+  const nextMap = new Map(previousMap)
+  nextMap.set(meta.id, meta)
+
+  const previousOrder = previousState?.sessionOrder ?? []
+  let nextOrder: string[]
+  if (position === 'front') {
+    nextOrder = [meta.id, ...previousOrder.filter(id => id !== meta.id)]
+  } else if (previousOrder.includes(meta.id)) {
+    nextOrder = previousOrder
+  } else {
+    nextOrder = [...previousOrder, meta.id]
+  }
+
+  const nextState: WorkspaceSessionState = {
+    ...previousState,
+    sessionMetaMap: nextMap,
+    sessionOrder: nextOrder,
+  }
+
+  if (
+    previousState &&
+    previousMeta &&
+    areSessionMetasShallowEqual(previousMeta, meta) &&
+    previousOrder.length === nextOrder.length &&
+    previousOrder.every((id, index) => id === nextOrder[index])
+  ) {
+    return previousState
+  }
+
+  return nextState
+}
+
+function setWorkspaceState(
+  get: Getter,
+  set: Setter,
+  workspaceId: string | null | undefined,
+  incomingMetas: SessionMeta[],
+): void {
+  if (!workspaceId) return
+
+  const current = get(workspaceSessionsAtom)
+  const previousState = current.get(workspaceId)
+  const nextState = workspaceStateFromMetas(previousState, incomingMetas)
+  if (nextState === previousState) return
+
+  const next = new Map(current)
+  next.set(workspaceId, nextState)
+  set(workspaceSessionsAtom, next)
+}
+
+function upsertMetaInWorkspaceState(
+  get: Getter,
+  set: Setter,
+  meta: SessionMeta,
+  position: 'preserve' | 'front' = 'preserve',
+): void {
+  if (!meta.workspaceId) return
+
+  const current = get(workspaceSessionsAtom)
+  const previousState = current.get(meta.workspaceId)
+  const nextState = upsertWorkspaceSessionMeta(previousState, meta, position)
+  if (nextState === previousState) return
+
+  const next = new Map(current)
+  next.set(meta.workspaceId, nextState)
+  set(workspaceSessionsAtom, next)
+}
+
+function removeMetaFromWorkspaceStates(get: Getter, set: Setter, sessionId: string): void {
+  const current = get(workspaceSessionsAtom)
+  let changed = false
+  const next = new Map(current)
+
+  for (const [workspaceId, state] of current) {
+    if (!state.sessionMetaMap.has(sessionId)) continue
+
+    const sessionMetaMap = new Map(state.sessionMetaMap)
+    sessionMetaMap.delete(sessionId)
+    next.set(workspaceId, {
+      ...state,
+      sessionMetaMap,
+      sessionOrder: state.sessionOrder.filter(id => id !== sessionId),
+    })
+    changed = true
+  }
+
+  if (changed) {
+    set(workspaceSessionsAtom, next)
+  }
+}
+
+function removeWorkspaceScopedMetas(
+  get: Getter,
+  set: Setter,
+  workspaceIdSet: Set<string>,
+  keepSessionIds: Set<string>,
+): void {
+  const current = get(workspaceSessionsAtom)
+  let changed = false
+  const next = new Map(current)
+
+  for (const [workspaceId, state] of current) {
+    let stateChanged = false
+    const sessionMetaMap = new Map(state.sessionMetaMap)
+    for (const [sessionId, meta] of state.sessionMetaMap) {
+      if (!workspaceIdSet.has(meta.workspaceId) || keepSessionIds.has(sessionId)) continue
+      sessionMetaMap.delete(sessionId)
+      stateChanged = true
+    }
+
+    if (stateChanged) {
+      next.set(workspaceId, {
+        ...state,
+        sessionMetaMap,
+        sessionOrder: state.sessionOrder.filter(id => sessionMetaMap.has(id)),
+      })
+      changed = true
+    }
+  }
+
+  if (changed) {
+    set(workspaceSessionsAtom, next)
+  }
+}
+
+type WorkspaceSessionMetaCacheUpdate =
+  | Map<string, SessionMeta[]>
+  | ((previous: Map<string, SessionMeta[]>) => Map<string, SessionMeta[]>)
+
+/**
+ * Backward-compatible workspace metadata view. New code should prefer
+ * workspaceSessionsAtom, but existing callers can keep reading/writing the
+ * Map<workspaceId, SessionMeta[]> shape while it is backed by the richer state.
+ */
+export const workspaceSessionMetaCacheAtom = atom(
+  (get) => {
+    const workspaceSessions = get(workspaceSessionsAtom)
+    const cache = new Map<string, SessionMeta[]>()
+    for (const [workspaceId] of workspaceSessions) {
+      cache.set(workspaceId, getWorkspaceSessionMetas(workspaceSessions, workspaceId))
+    }
+    return cache
+  },
+  (get, set, update: WorkspaceSessionMetaCacheUpdate) => {
+    const previousCache = get(workspaceSessionMetaCacheAtom)
+    const nextCache = typeof update === 'function' ? update(previousCache) : update
+    if (nextCache === previousCache) return
+
+    const current = get(workspaceSessionsAtom)
+    const next = new Map(current)
+    let changed = false
+
+    for (const [workspaceId, sessions] of nextCache) {
+      const previousState = current.get(workspaceId)
+      const nextState = workspaceStateFromMetas(previousState, sessions)
+      if (nextState !== previousState) {
+        next.set(workspaceId, nextState)
+        changed = true
+      }
+    }
+
+    for (const workspaceId of current.keys()) {
+      if (!nextCache.has(workspaceId)) {
+        next.delete(workspaceId)
+        changed = true
+      }
+    }
+
+    if (changed) {
+      set(workspaceSessionsAtom, next)
+    }
+  },
+)
+
+/**
  * Derived atom: ordered list of session IDs (for list ordering)
  */
 export const sessionIdsAtom = atom<string[]>([])
@@ -209,8 +520,10 @@ export const updateSessionAtom = atom(
     if (newSession) {
       const metaMap = get(sessionMetaMapAtom)
       const newMetaMap = new Map(metaMap)
-      newMetaMap.set(sessionId, extractSessionMeta(newSession))
+      const meta = extractSessionMeta(newSession)
+      newMetaMap.set(sessionId, meta)
       set(sessionMetaMapAtom, newMetaMap)
+      upsertMetaInWorkspaceState(get, set, meta)
     }
   }
 )
@@ -225,9 +538,11 @@ export const updateSessionMetaAtom = atom(
     const metaMap = get(sessionMetaMapAtom)
     const existing = metaMap.get(sessionId)
     if (existing) {
+      const nextMeta = { ...existing, ...updates }
       const newMetaMap = new Map(metaMap)
-      newMetaMap.set(sessionId, { ...existing, ...updates })
+      newMetaMap.set(sessionId, nextMeta)
       set(sessionMetaMapAtom, newMetaMap)
+      upsertMetaInWorkspaceState(get, set, nextMeta)
     }
   }
 )
@@ -324,9 +639,22 @@ export const initializeSessionsAtom = atom(
     }
     set(sessionMetaMapAtom, metaMap)
 
+    const workspaceStates = new Map<string, WorkspaceSessionState>()
+    const metasByWorkspace = new Map<string, SessionMeta[]>()
+    for (const meta of metaMap.values()) {
+      if (!meta.workspaceId) continue
+      const workspaceMetas = metasByWorkspace.get(meta.workspaceId) ?? []
+      workspaceMetas.push(meta)
+      metasByWorkspace.set(meta.workspaceId, workspaceMetas)
+    }
+    for (const [workspaceId, metas] of metasByWorkspace) {
+      workspaceStates.set(workspaceId, workspaceStateFromMetas(undefined, metas))
+    }
+    set(workspaceSessionsAtom, workspaceStates)
+
     // Set ordered IDs (sorted by lastMessageAt desc)
     const ids = sessions
-      .sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0))
+      .sort(compareSessionsByActivityDesc)
       .map(s => s.id)
     set(sessionIdsAtom, ids)
 
@@ -335,6 +663,65 @@ export const initializeSessionsAtom = atom(
     // Already-loaded sessions keep their loaded flag only when their existing
     // messages were preserved above.
     // This reduces initial memory usage from ~500MB to ~50MB for 300+ sessions.
+  }
+)
+
+/**
+ * Action atom: initialize or refresh one workspace without discarding cached
+ * sessions/messages for other workspaces.
+ */
+export const initializeWorkspaceSessionsAtom = atom(
+  null,
+  (
+    get,
+    set,
+    payload: { workspaceIds: string[]; sessions: Session[] }
+  ) => {
+    const { workspaceIds, sessions } = payload
+    const workspaceIdSet = new Set(workspaceIds.filter(Boolean))
+    const nextIdSet = new Set(sessions.map(s => s.id))
+
+    const nextLoadedSessions = new Set(get(loadedSessionsAtom))
+    const metaMap = get(sessionMetaMapAtom)
+    const nextMetaMap = new Map(metaMap)
+    const nextWorkspaceMetas: SessionMeta[] = []
+
+    for (const [sessionId, meta] of metaMap) {
+      if (!workspaceIdSet.has(meta.workspaceId) || nextIdSet.has(sessionId)) continue
+
+      set(sessionAtomFamily(sessionId), null)
+      sessionAtomFamily.remove(sessionId)
+      backgroundTasksAtomFamily.remove(sessionId)
+      nextMetaMap.delete(sessionId)
+      nextLoadedSessions.delete(sessionId)
+    }
+
+    for (const session of sessions) {
+      const currentSession = get(sessionAtomFamily(session.id))
+      const nextSession = mergeSessionWithoutDroppingMessages(currentSession, session)
+      const nextMeta = extractSessionMeta(nextSession)
+      set(sessionAtomFamily(session.id), nextSession)
+      nextMetaMap.set(session.id, nextMeta)
+      nextWorkspaceMetas.push(nextMeta)
+
+      const hasMessages = (nextSession.messages?.length ?? 0) > 0
+      const incomingHadMessages = (session.messages?.length ?? 0) > 0
+      if (incomingHadMessages || (nextLoadedSessions.has(session.id) && hasMessages)) {
+        nextLoadedSessions.add(session.id)
+      } else if (currentSession && currentSession.workspaceId !== session.workspaceId) {
+        nextLoadedSessions.delete(session.id)
+      }
+    }
+
+    set(loadedSessionsAtom, nextLoadedSessions)
+    set(sessionMetaMapAtom, nextMetaMap)
+    removeWorkspaceScopedMetas(get, set, workspaceIdSet, nextIdSet)
+    setWorkspaceState(get, set, workspaceIds.find(Boolean), nextWorkspaceMetas)
+
+    const ids = Array.from(nextMetaMap.values())
+      .sort(compareSessionsByActivityDesc)
+      .map(s => s.id)
+    set(sessionIdsAtom, ids)
   }
 )
 
@@ -353,15 +740,22 @@ export const refreshSessionsMetadataAtom = atom(
   (
     get,
     set,
-    payload: { sessions: Session[]; loadedSessionIds: Set<string> }
+    payload: { sessions: Session[]; loadedSessionIds: Set<string>; workspaceIds?: string[] }
   ): Map<string, SessionMeta> => {
     const { sessions, loadedSessionIds } = payload
+    const workspaceIdSet = payload.workspaceIds
+      ? new Set(payload.workspaceIds.filter(Boolean))
+      : null
 
     // Remove stale sessions that no longer exist on the server
     const currentIds = get(sessionIdsAtom)
     const latestIds = new Set(sessions.map(s => s.id))
     for (const staleId of currentIds) {
       if (!latestIds.has(staleId)) {
+        if (workspaceIdSet) {
+          const meta = get(sessionMetaMapAtom).get(staleId)
+          if (!meta || !workspaceIdSet.has(meta.workspaceId)) continue
+        }
         set(removeSessionAtom, staleId)
       }
     }
@@ -392,16 +786,43 @@ export const refreshSessionsMetadataAtom = atom(
     }
 
     // Build and set metadata map
-    const nextMetaMap = new Map<string, SessionMeta>()
+    const nextMetaMap = workspaceIdSet
+      ? new Map(get(sessionMetaMapAtom))
+      : new Map<string, SessionMeta>()
+    if (workspaceIdSet) {
+      for (const [sessionId, meta] of nextMetaMap) {
+        if (workspaceIdSet.has(meta.workspaceId) && !latestIds.has(sessionId)) {
+          nextMetaMap.delete(sessionId)
+        }
+      }
+    }
     for (const session of sessions) {
       nextMetaMap.set(session.id, extractSessionMeta(session))
     }
     set(sessionMetaMapAtom, nextMetaMap)
 
+    const refreshedMetas = sessions.map(session => nextMetaMap.get(session.id)).filter((meta): meta is SessionMeta => Boolean(meta))
+    if (workspaceIdSet) {
+      removeWorkspaceScopedMetas(get, set, workspaceIdSet, latestIds)
+      setWorkspaceState(get, set, payload.workspaceIds?.find(Boolean), refreshedMetas)
+    } else {
+      const workspaceStates = new Map<string, WorkspaceSessionState>()
+      const metasByWorkspace = new Map<string, SessionMeta[]>()
+      for (const meta of nextMetaMap.values()) {
+        if (!meta.workspaceId) continue
+        const workspaceMetas = metasByWorkspace.get(meta.workspaceId) ?? []
+        workspaceMetas.push(meta)
+        metasByWorkspace.set(meta.workspaceId, workspaceMetas)
+      }
+      for (const [workspaceId, metas] of metasByWorkspace) {
+        workspaceStates.set(workspaceId, workspaceStateFromMetas(undefined, metas))
+      }
+      set(workspaceSessionsAtom, workspaceStates)
+    }
+
     // Set ordered IDs
-    const nextIds = sessions
-      .slice()
-      .sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0))
+    const nextIds = Array.from(nextMetaMap.values())
+      .sort(compareSessionsByActivityDesc)
       .map(s => s.id)
     set(sessionIdsAtom, nextIds)
 
@@ -421,8 +842,10 @@ export const addSessionAtom = atom(
     // Add to metadata map
     const metaMap = get(sessionMetaMapAtom)
     const newMetaMap = new Map(metaMap)
-    newMetaMap.set(session.id, extractSessionMeta(session))
+    const meta = extractSessionMeta(session)
+    newMetaMap.set(session.id, meta)
     set(sessionMetaMapAtom, newMetaMap)
+    upsertMetaInWorkspaceState(get, set, meta, 'front')
 
     // Add to beginning of IDs list
     const ids = get(sessionIdsAtom)
@@ -452,6 +875,7 @@ export const removeSessionAtom = atom(
     const newMetaMap = new Map(metaMap)
     newMetaMap.delete(sessionId)
     set(sessionMetaMapAtom, newMetaMap)
+    removeMetaFromWorkspaceStates(get, set, sessionId)
 
     // Remove from IDs list
     const ids = get(sessionIdsAtom)
@@ -537,6 +961,27 @@ export const syncSessionsToAtomsAtom = atom(
     }
     set(sessionMetaMapAtom, metaMap)
 
+    const workspaceStates = new Map(get(workspaceSessionsAtom))
+    let workspaceStatesChanged = false
+    const metasByWorkspace = new Map<string, SessionMeta[]>()
+    for (const meta of metaMap.values()) {
+      if (!meta.workspaceId) continue
+      const workspaceMetas = metasByWorkspace.get(meta.workspaceId) ?? []
+      workspaceMetas.push(meta)
+      metasByWorkspace.set(meta.workspaceId, workspaceMetas)
+    }
+    for (const [workspaceId, metas] of metasByWorkspace) {
+      const previousState = workspaceStates.get(workspaceId)
+      const nextState = workspaceStateFromMetas(previousState, metas)
+      if (nextState !== previousState) {
+        workspaceStates.set(workspaceId, nextState)
+        workspaceStatesChanged = true
+      }
+    }
+    if (workspaceStatesChanged) {
+      set(workspaceSessionsAtom, workspaceStates)
+    }
+
     // Update ordered IDs (preserve order from React state)
     set(sessionIdsAtom, sessions.map(s => s.id))
   }
@@ -574,9 +1019,24 @@ async function loadSessionMessages(
   } else {
     const loadedSessions = get(loadedSessionsAtom)
 
-    // Already loaded, return current session
     if (loadedSessions.has(sessionId)) {
-      return get(sessionAtomFamily(sessionId))
+      const existingSession = get(sessionAtomFamily(sessionId))
+      const existingMeta = get(sessionMetaMapAtom).get(sessionId)
+      const visibleMessageCount = existingSession?.messages?.length ?? 0
+      const expectedMessageCount = existingMeta?.messageCount ?? existingSession?.messageCount
+      const contentHint = hasSessionContentHint(existingMeta ?? existingSession)
+      const shouldRefetchEmptyLoadedSession = expectedMessageCount !== 0 && contentHint
+
+      // Already loaded, return current session. If the loaded flag says "ready"
+      // but the atom is still empty for a session that looks non-empty, keep
+      // loading instead of flashing the empty-chat composer.
+      if (visibleMessageCount > 0 || !shouldRefetchEmptyLoadedSession) {
+        return existingSession
+      }
+
+      const nextLoadedSessions = new Set(loadedSessions)
+      nextLoadedSessions.delete(sessionId)
+      set(loadedSessionsAtom, nextLoadedSessions)
     }
   }
 
@@ -601,6 +1061,15 @@ async function loadSessionMessages(
       }
 
       throw new Error(`Messages for session ${sessionId} are unavailable`)
+    }
+
+    const existingMeta = get(sessionMetaMapAtom).get(sessionId)
+    if (
+      (loadedSession.messages?.length ?? 0) === 0
+      && hasSessionContentHint(existingMeta)
+      && loadedSession.messageCount !== 0
+    ) {
+      throw new Error(`Messages for session ${sessionId} are still loading`)
     }
 
     // Merge messages and disk-only fields into existing session, preserving in-memory UI state.
@@ -646,9 +1115,11 @@ async function loadSessionMessages(
       const metaMap = get(sessionMetaMapAtom)
       const existingMeta = metaMap.get(sessionId)
       if (existingMeta && existingMeta.lastFinalMessageId !== lastFinalMessageId) {
+        const nextMeta = { ...existingMeta, lastFinalMessageId }
         const newMetaMap = new Map(metaMap)
-        newMetaMap.set(sessionId, { ...existingMeta, lastFinalMessageId })
+        newMetaMap.set(sessionId, nextMeta)
         set(sessionMetaMapAtom, newMetaMap)
+        upsertMetaInWorkspaceState(get, set, nextMeta)
       }
     }
 

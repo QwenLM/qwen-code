@@ -1025,6 +1025,20 @@ function managedToSession(m: ManagedSession, overrides?: Partial<Session>): Sess
   } as Session
 }
 
+function getManagedSessionOrderTime(session: Pick<ManagedSession, 'lastMessageAt' | 'lastUsedAt' | 'createdAt'>): number {
+  return session.lastMessageAt ?? session.lastUsedAt ?? session.createdAt ?? 0
+}
+
+function compareManagedSessionsByActivityDesc(a: ManagedSession, b: ManagedSession): number {
+  const byTime = getManagedSessionOrderTime(b) - getManagedSessionOrderTime(a)
+  if (byTime !== 0) return byTime
+
+  const byCreatedAt = (b.createdAt ?? 0) - (a.createdAt ?? 0)
+  if (byCreatedAt !== 0) return byCreatedAt
+
+  return a.id.localeCompare(b.id)
+}
+
 // Performance: Batch IPC delta events to reduce renderer load
 const DELTA_BATCH_INTERVAL_MS = 50  // Flush batched deltas every 50ms
 
@@ -2595,8 +2609,8 @@ export class SessionManager implements ISessionManager {
     }
 
     return sessions
+      .sort(compareManagedSessionsByActivityDesc)
       .map(m => managedToSession(m))
-      .sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0))
   }
 
   /**

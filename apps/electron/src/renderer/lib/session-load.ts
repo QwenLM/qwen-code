@@ -1,13 +1,31 @@
 import type { TransportConnectionState } from '../../shared/types'
 
+export interface SessionContentHint {
+  name?: string
+  preview?: string
+  lastFinalMessageId?: string
+  messageCount?: number | null
+}
+
+export function hasSessionContentHint(session: SessionContentHint | null | undefined): boolean {
+  if (!session) return false
+  return Boolean(
+    session.name
+    || session.preview
+    || session.lastFinalMessageId
+    || (session.messageCount != null && session.messageCount > 0),
+  )
+}
+
 export function shouldShowForegroundMessageLoading(
   messagesLoaded: boolean,
   visibleMessageCount: number | null | undefined,
   expectedMessageCount?: number | null,
+  hasContentHint = false,
 ): boolean {
-  if (messagesLoaded) return false
   if ((visibleMessageCount ?? 0) > 0) return false
-  if (expectedMessageCount === 0) return false
+  if (expectedMessageCount === 0 && (messagesLoaded || !hasContentHint)) return false
+  if (messagesLoaded) return hasContentHint && expectedMessageCount !== 0
   return true
 }
 

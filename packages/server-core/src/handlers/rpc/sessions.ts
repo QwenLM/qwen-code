@@ -133,14 +133,20 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
   // Get lightweight session metadata for a specific local workspace.
   // Used by the project sidebar to show sessions across workspaces without
   // switching the current window context.
-  server.handle(RPC_CHANNELS.sessions.GET_FOR_WORKSPACE, async (_ctx, workspaceId: string) => {
+  server.handle(RPC_CHANNELS.sessions.GET_FOR_WORKSPACE, async (
+    _ctx,
+    workspaceId: string,
+    options?: { refreshExternal?: boolean },
+  ) => {
     try {
       await sessionManager.waitForInit()
     } catch (error) {
       log.error('GET_SESSIONS_FOR_WORKSPACE continuing after initialization failure:', error)
     }
     const end = perf.start('rpc.getSessionsForWorkspace', { workspaceId })
-    await sessionManager.refreshExternalSessions?.(workspaceId)
+    if (options?.refreshExternal !== false) {
+      await sessionManager.refreshExternalSessions?.(workspaceId)
+    }
     const sessions = sessionManager.getSessions(workspaceId)
     end()
     return sessions

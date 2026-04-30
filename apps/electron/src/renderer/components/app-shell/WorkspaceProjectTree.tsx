@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils"
 import { fullscreenOverlayOpenAtom } from "@/atoms/overlay"
 import { sendToWorkspaceAtom, type SessionMeta } from "@/atoms/sessions"
 import type { Workspace } from "../../../shared/types"
+import type { ViewRoute } from "../../../shared/routes"
 import { CrossfadeAvatar } from "@/components/ui/avatar"
 import { FadingText } from "@/components/ui/fading-text"
 import { WorkspaceCreationScreen } from "@/components/workspace"
@@ -39,7 +40,7 @@ interface WorkspaceProjectTreeProps {
   selectedSessionId?: string | null
   workspaceSessions: Map<string, SessionMeta[]>
   workspaceUnreadMap?: Record<string, boolean>
-  onSelectWorkspace: (workspaceId: string, openInNewWindow?: boolean) => void | Promise<void>
+  onSelectWorkspace: (workspaceId: string, openInNewWindow?: boolean, options?: { route?: ViewRoute }) => void | Promise<void>
   onSelectSession: (workspaceId: string, sessionId: string) => void | Promise<void>
   onNewSession: (workspaceId: string) => void | Promise<void>
   onWorkspaceCreated?: (workspace: Workspace) => void
@@ -642,7 +643,6 @@ export function WorkspaceProjectTree({
     const isSessionListExpanded = expandedWorkspaceSessionIds.has(workspace.id)
     const sessions = [...(workspaceSessions.get(workspace.id) ?? [])]
       .filter(session => !session.hidden && !session.isArchived)
-      .sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0))
     const visibleSessions = isSessionListExpanded ? sessions : sessions.slice(0, PROJECT_SESSION_PREVIEW_LIMIT)
     const canToggleSessionList = sessions.length > PROJECT_SESSION_PREVIEW_LIMIT
     const sessionListToggleLabel = isSessionListExpanded

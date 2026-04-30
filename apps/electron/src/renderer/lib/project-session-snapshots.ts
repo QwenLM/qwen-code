@@ -3,7 +3,7 @@ import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 import { extractSessionMeta, type SessionMeta } from '@/atoms/sessions'
 
 interface ProjectSessionSnapshotApi {
-  getSessionsForWorkspace(workspaceId: string): Promise<Session[]>
+  getSessionsForWorkspace(workspaceId: string, options?: { refreshExternal?: boolean }): Promise<Session[]>
   invokeOnServer(url: string, token: string, channel: string, ...args: unknown[]): Promise<unknown>
 }
 
@@ -17,8 +17,9 @@ export async function loadProjectWorkspaceSessionSnapshot(
         workspace.remoteServer.token,
         RPC_CHANNELS.sessions.GET_FOR_WORKSPACE,
         workspace.remoteServer.remoteWorkspaceId,
+        { refreshExternal: false },
       ) as Session[]
-    : await api.getSessionsForWorkspace(workspace.id)
+    : await api.getSessionsForWorkspace(workspace.id, { refreshExternal: false })
 
   return sessions.map(extractSessionMeta)
 }

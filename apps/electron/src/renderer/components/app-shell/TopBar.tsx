@@ -40,6 +40,7 @@ import { SquarePenRounded } from "../icons/SquarePenRounded"
 import { useEffect, useRef, useState } from "react"
 import { BrowserTabStrip } from "../browser/BrowserTabStrip"
 import type { Workspace } from "../../../shared/types"
+import type { ViewRoute } from "../../../shared/routes"
 import { getDocUrl } from "@craft-agent/shared/docs/doc-links"
 
 // --- Menu rendering (moved from AppMenu) ---
@@ -140,7 +141,7 @@ function renderMenuSection(
 interface TopBarProps {
   workspaces: Workspace[]
   activeWorkspaceId: string | null
-  onSelectWorkspace: (workspaceId: string, openInNewWindow?: boolean) => void | Promise<void>
+  onSelectWorkspace: (workspaceId: string, openInNewWindow?: boolean, options?: { route?: ViewRoute }) => void | Promise<void>
   workspaceUnreadMap?: Record<string, boolean>
   onWorkspaceCreated?: (workspace: Workspace) => void
   onWorkspaceRemoved?: () => void

@@ -22,7 +22,7 @@ import { useAppShellContext, usePendingPermission, usePendingCredential, useSess
 import { rendererPerf } from '@/lib/perf'
 import { routes } from '@/lib/navigate'
 import { coerceInputText } from '@/lib/input-text'
-import { formatSessionLoadFailure, shouldShowForegroundMessageLoading } from '@/lib/session-load'
+import { formatSessionLoadFailure, hasSessionContentHint, shouldShowForegroundMessageLoading } from '@/lib/session-load'
 import { ensureSessionMessagesLoadedAtom, loadedSessionsAtom, sessionMetaMapAtom } from '@/atoms/sessions'
 import { getSessionTitle } from '@/utils/session'
 // Model resolution: connection.defaultModel (no hardcoded defaults)
@@ -382,10 +382,12 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   const sharedUrl = session?.sharedUrl || sessionMeta?.sharedUrl || null
   const currentSessionStatus = session?.sessionStatus || sessionMeta?.sessionStatus || 'todo'
   const expectedMessageCount = sessionMeta?.messageCount ?? session?.messageCount
+  const hasExistingConversationHint = hasSessionContentHint(sessionMeta ?? session)
   const messagesLoading = !messageLoadError && shouldShowForegroundMessageLoading(
     messagesLoaded,
     session?.messages?.length,
     expectedMessageCount,
+    hasExistingConversationHint,
   )
   const hasUnreadMessages = sessionMeta
     ? !!(sessionMeta.lastFinalMessageId && sessionMeta.lastFinalMessageId !== sessionMeta.lastReadMessageId)
@@ -682,7 +684,12 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
                   onSourcesChange={(slugs) => onSessionSourcesChange?.(sessionId, slugs)}
                   workingDirectory={sessionMeta.workingDirectory}
                   onWorkingDirectoryChange={handleWorkingDirectoryChange}
-                  messagesLoading={shouldShowForegroundMessageLoading(messagesLoaded, 0, sessionMeta.messageCount)}
+                  messagesLoading={shouldShowForegroundMessageLoading(
+                    messagesLoaded,
+                    0,
+                    sessionMeta.messageCount,
+                    hasSessionContentHint(sessionMeta),
+                  )}
                   searchQuery={sessionListSearchQuery}
                   isSearchModeActive={isSearchModeActive}
                   onMatchInfoChange={onChatMatchInfoChange}

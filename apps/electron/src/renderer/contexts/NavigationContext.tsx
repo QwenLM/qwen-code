@@ -31,6 +31,7 @@ import {
   useContext,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   useMemo,
@@ -71,7 +72,7 @@ import {
   DEFAULT_NAVIGATION_STATE,
 } from '../../shared/types'
 import { isValidSettingsSubpage, type SettingsSubpage } from '../../shared/settings-registry'
-import { sessionMetaMapAtom, updateSessionMetaAtom, type SessionMeta } from '@/atoms/sessions'
+import { compareSessionsByActivityDesc, sessionMetaMapAtom, updateSessionMetaAtom, type SessionMeta } from '@/atoms/sessions'
 import { sourcesAtom } from '@/atoms/sources'
 import { skillsAtom } from '@/atoms/skills'
 import {
@@ -147,6 +148,32 @@ interface NavigationProviderProps {
   isSessionsReady?: boolean
   /** Remote workspace ID — when set, sessions with this ID are also considered part of the workspace */
   remoteWorkspaceId?: string | null
+  /** One-shot route to use for a UI-triggered workspace switch, such as selecting a project-tree session. */
+  consumeWorkspaceSwitchRoute?: (workspaceId: string) => ViewRoute | null
+}
+
+function applyFocusedRouteToSearchParams(params: URLSearchParams, route: ViewRoute): void {
+  params.set('route', route)
+
+  const panelsParam = params.get('panels')
+  if (!panelsParam) return
+
+  const panelEntries = panelsParam.split(',').filter(Boolean)
+  if (panelEntries.length === 0) return
+
+  const parsedFocusedIndex = Number.parseInt(params.get('fi') ?? '0', 10)
+  const focusedIndex = Number.isFinite(parsedFocusedIndex)
+    ? Math.min(Math.max(parsedFocusedIndex, 0), panelEntries.length - 1)
+    : 0
+
+  const currentEntry = panelEntries[focusedIndex]
+  const colonIdx = currentEntry.lastIndexOf(':')
+  panelEntries[focusedIndex] = colonIdx > 0
+    ? `${route}:${currentEntry.slice(colonIdx + 1)}`
+    : route
+
+  params.set('panels', panelEntries.join(','))
+  params.set('fi', String(focusedIndex))
 }
 
 export function NavigationProvider({
@@ -160,6 +187,7 @@ export function NavigationProvider({
   isReady = true,
   isSessionsReady = true,
   remoteWorkspaceId,
+  consumeWorkspaceSwitchRoute,
 }: NavigationProviderProps) {
   const { t } = useTranslation()
   const [, setSession] = useSession()
@@ -535,7 +563,11 @@ export function NavigationProvider({
     (filter: SessionFilter): SessionMeta[] => {
       // First filter out hidden sessions - they should never appear in any view
       const visibleSessions = sessionMetas.filter(
-        s => !s.hidden && (!workspaceId || s.workspaceId === workspaceId)
+        s => !s.hidden && (
+          !workspaceId ||
+          s.workspaceId === workspaceId ||
+          (remoteWorkspaceId && s.workspaceId === remoteWorkspaceId)
+        )
       )
 
       return visibleSessions.filter((session) => {
@@ -562,13 +594,13 @@ export function NavigationProvider({
         }
       })
     },
-    [sessionMetas, workspaceId]
+    [sessionMetas, workspaceId, remoteWorkspaceId]
   )
 
   const getFirstSessionId = useCallback(
     (filter: SessionFilter): string | null => {
       const filtered = filterSessionsByFilter(filter)
-      return filtered[0]?.id ?? null
+      return [...filtered].sort(compareSessionsByActivityDesc)[0]?.id ?? null
     },
     [filterSessionsByFilter]
   )
@@ -1000,7 +1032,7 @@ export function NavigationProvider({
 
   const previousWorkspaceSlugRef = useRef<string | null>(null)
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!workspaceId || !workspaceSlug || !isSessionsReady) return
 
     if (previousWorkspaceSlugRef.current === null) {
@@ -1023,6 +1055,7 @@ export function NavigationProvider({
     } else {
       // UI-triggered: load stored URL for the new workspace, push history entry
       const savedSearch = storage.get<string>(storage.KEYS.workspaceUrl, '', workspaceSlug)
+      const pendingRoute = consumeWorkspaceSwitchRoute?.(workspaceId) ?? null
 
       const url = new URL(window.location.href)
       if (savedSearch) {
@@ -1035,6 +1068,9 @@ export function NavigationProvider({
         }
         url.searchParams.set('ws', workspaceSlug)
         url.searchParams.set('route', 'allSessions')
+      }
+      if (pendingRoute) {
+        applyFocusedRouteToSearchParams(url.searchParams, pendingRoute)
       }
 
       // Push a new history entry for the workspace switch
@@ -1055,7 +1091,7 @@ export function NavigationProvider({
       suppressPushRef.current = false
       lastSemanticHistoryKeyRef.current = getSemanticHistoryKey()
     })
-  }, [workspaceId, workspaceSlug, store, updateCanGoBackForward, getSemanticHistoryKey, isSessionsReady])
+  }, [workspaceId, workspaceSlug, store, updateCanGoBackForward, getSemanticHistoryKey, isSessionsReady, consumeWorkspaceSwitchRoute])
 
   // =========================================================================
   // INITIAL ROUTE RESTORATION (CMD+R reload)

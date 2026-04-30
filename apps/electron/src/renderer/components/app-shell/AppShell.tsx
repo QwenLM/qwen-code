@@ -87,7 +87,16 @@ import { getSessionTitle } from "@/utils/session"
 import { useSetAtom } from "jotai"
 import type { Session, Workspace, FileAttachment, PermissionRequest, LoadedSource, LoadedSkill, PermissionMode, SourceFilter, AutomationFilter } from "../../../shared/types"
 import { PERMISSION_MODE_ORDER } from '@craft-agent/shared/agent/mode-types'
-import { sessionMetaMapAtom, sendToWorkspaceAtom, type SessionMeta } from "@/atoms/sessions"
+import {
+  areSessionMetaListsEquivalent,
+  getWorkspaceSessionMetas,
+  mergeStableSessionMetaList,
+  sessionMetaMapAtom,
+  sendToWorkspaceAtom,
+  workspaceSessionMetaCacheAtom,
+  workspaceSessionsAtom,
+  type SessionMeta,
+} from "@/atoms/sessions"
 import { sourcesAtom } from "@/atoms/sources"
 import { skillsAtom } from "@/atoms/skills"
 import { panelStackAtom, panelCountAtom, focusedPanelIdAtom, focusedSessionIdAtom, focusNextPanelAtom, focusPrevPanelAtom, parseSessionIdFromRoute } from "@/atoms/panel-stack"
@@ -1304,7 +1313,14 @@ function AppShellContent({
   // Use session metadata from Jotai atom (lightweight, no messages)
   // This prevents closures from retaining full message arrays
   const sessionMetaMap = useAtomValue(sessionMetaMapAtom)
-  const setSessionMetaMap = useSetAtom(sessionMetaMapAtom)
+  const workspaceSessions = useAtomValue(workspaceSessionsAtom)
+  const workspaceSessionMetaCache = useAtomValue(workspaceSessionMetaCacheAtom)
+  const setWorkspaceSessionMetaCache = useSetAtom(workspaceSessionMetaCacheAtom)
+  const workspaceSessionMetaCacheRef = useRef(workspaceSessionMetaCache)
+
+  useEffect(() => {
+    workspaceSessionMetaCacheRef.current = workspaceSessionMetaCache
+  }, [workspaceSessionMetaCache])
 
   const hasPendingPrompt = React.useCallback((sessionId: string) => {
     return (pendingPermissions.get(sessionId)?.length ?? 0) > 0
@@ -1327,28 +1343,28 @@ function AppShellContent({
     })
   }, [activeWorkspaceId, activeSessionWorkingDirectory])
 
-  // Filter session metadata by active workspace
-  // Also exclude hidden sessions (mini-agent sessions) from all counts and lists
+  // Filter session metadata by active workspace, but take the display order from
+  // workspaceSessionsAtom. sessionMetaMapAtom still carries live event updates.
   // For remote workspaces, sessions have the remote workspace ID (not the local one),
-  // so we match against both the local and remote workspace IDs.
+  // so we match live metadata against both the local and remote workspace IDs.
   const remoteWorkspaceId = activeWorkspace?.remoteServer?.remoteWorkspaceId
   const workspaceSessionMetas = useMemo(() => {
-    const metas = Array.from(sessionMetaMap.values())
-    if (!activeWorkspaceId) return metas.filter(s => !s.hidden)
-    return metas.filter(s =>
-      !s.hidden && (s.workspaceId === activeWorkspaceId || (remoteWorkspaceId && s.workspaceId === remoteWorkspaceId))
-    )
-  }, [sessionMetaMap, activeWorkspaceId, remoteWorkspaceId])
+    const liveMetas = Array.from(sessionMetaMap.values())
+    if (!activeWorkspaceId) return liveMetas.filter(s => !s.hidden)
 
-  const [workspaceSessionSnapshots, setWorkspaceSessionSnapshots] = useState<Map<string, SessionMeta[]>>(() => new Map())
-  const workspaceSessionSnapshotsRef = useRef(workspaceSessionSnapshots)
+    const activeWorkspaceMetas = getWorkspaceSessionMetas(workspaceSessions, activeWorkspaceId)
+    const liveWorkspaceMetas = liveMetas.filter(s =>
+      s.workspaceId === activeWorkspaceId || (remoteWorkspaceId && s.workspaceId === remoteWorkspaceId)
+    )
+    if (liveWorkspaceMetas.length === 0 && activeWorkspaceMetas.length > 0) {
+      return activeWorkspaceMetas.filter(s => !s.hidden)
+    }
+    return mergeStableSessionMetaList(activeWorkspaceMetas, liveWorkspaceMetas).filter(s => !s.hidden)
+  }, [sessionMetaMap, workspaceSessions, activeWorkspaceId, remoteWorkspaceId])
+
   const [workspaceSessionSnapshotRefreshTick, setWorkspaceSessionSnapshotRefreshTick] = useState(0)
   const workspaceSessionSnapshotRetryAttemptsRef = useRef<Map<string, number>>(new Map())
   const workspaceSessionSnapshotRetryTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
-
-  useEffect(() => {
-    workspaceSessionSnapshotsRef.current = workspaceSessionSnapshots
-  }, [workspaceSessionSnapshots])
 
   const scheduleWorkspaceSessionSnapshotRetry = useCallback((workspaceId: string): boolean => {
     const attempts = workspaceSessionSnapshotRetryAttemptsRef.current.get(workspaceId) ?? 0
@@ -1377,13 +1393,14 @@ function AppShellContent({
   useEffect(() => {
     if (!activeWorkspaceId) return
 
-    setWorkspaceSessionSnapshots(prev => {
-      if (prev.get(activeWorkspaceId) === workspaceSessionMetas) return prev
+    setWorkspaceSessionMetaCache(prev => {
+      const merged = mergeStableSessionMetaList(prev.get(activeWorkspaceId), workspaceSessionMetas)
+      if (areSessionMetaListsEquivalent(prev.get(activeWorkspaceId), merged)) return prev
       const next = new Map(prev)
-      next.set(activeWorkspaceId, workspaceSessionMetas)
+      next.set(activeWorkspaceId, merged)
       return next
     })
-  }, [activeWorkspaceId, workspaceSessionMetas])
+  }, [activeWorkspaceId, setWorkspaceSessionMetaCache, workspaceSessionMetas])
 
   useEffect(() => {
     let cancelled = false
@@ -1396,14 +1413,14 @@ function AppShellContent({
       }
 
       onProjectSessionSnapshotsReadyChange?.(false)
-      const previousSnapshots = workspaceSessionSnapshotsRef.current
+      const previousCache = workspaceSessionMetaCacheRef.current
       let hasPendingRetry = false
       const entries = await Promise.all(workspaces.map(async (workspace) => {
         if (workspace.id === activeWorkspaceId) {
-          return [workspace.id, previousSnapshots.get(workspace.id) ?? []] as const
+          return [workspace.id, previousCache.get(workspace.id) ?? []] as const
         }
 
-        const previous = previousSnapshots.get(workspace.id) ?? []
+        const previous = previousCache.get(workspace.id) ?? []
 
         try {
           const sessions = await loadProjectWorkspaceSessionSnapshot(workspace)
@@ -1431,13 +1448,17 @@ function AppShellContent({
       }))
 
       if (!cancelled) {
-        setWorkspaceSessionSnapshots(prev => {
+        setWorkspaceSessionMetaCache(prev => {
           const next = new Map(prev)
+          let changed = false
           for (const [workspaceId, sessions] of entries) {
             if (workspaceId === activeWorkspaceId) continue
-            next.set(workspaceId, sessions)
+            const merged = mergeStableSessionMetaList(next.get(workspaceId), sessions)
+            if (areSessionMetaListsEquivalent(next.get(workspaceId), merged)) continue
+            next.set(workspaceId, merged)
+            changed = true
           }
-          return next
+          return changed ? next : prev
         })
         onProjectSessionSnapshotsReadyChange?.(!hasPendingRetry)
       }
@@ -1450,17 +1471,21 @@ function AppShellContent({
     workspaces,
     activeWorkspaceId,
     workspaceSessionSnapshotRefreshTick,
+    setWorkspaceSessionMetaCache,
     scheduleWorkspaceSessionSnapshotRetry,
     onProjectSessionSnapshotsReadyChange,
   ])
 
   const projectTreeWorkspaceSessions = useMemo(() => {
-    const next = new Map(workspaceSessionSnapshots)
+    const next = new Map(workspaceSessionMetaCache)
     if (activeWorkspaceId) {
-      next.set(activeWorkspaceId, workspaceSessionMetas)
+      next.set(
+        activeWorkspaceId,
+        mergeStableSessionMetaList(next.get(activeWorkspaceId), workspaceSessionMetas),
+      )
     }
     return next
-  }, [workspaceSessionSnapshots, activeWorkspaceId, workspaceSessionMetas])
+  }, [workspaceSessionMetaCache, activeWorkspaceId, workspaceSessionMetas])
 
   // Active sessions exclude archived - use this for all counts and filters except archived view
   const activeSessionMetas = useMemo(() => {
@@ -2058,11 +2083,11 @@ function AppShellContent({
     setSearchQuery('')
 
     if (workspaceId !== activeWorkspaceId) {
-      await Promise.resolve(onSelectWorkspace(workspaceId))
-      setTimeout(() => {
-        navigate(routes.view.allSessions(sessionId))
+      const route = routes.view.allSessions(sessionId)
+      await Promise.resolve(onSelectWorkspace(workspaceId, false, { route }))
+      requestAnimationFrame(() => {
         focusZone('chat', { intent: 'programmatic' })
-      }, 50)
+      })
       return
     }
 

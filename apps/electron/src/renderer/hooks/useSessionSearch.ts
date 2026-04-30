@@ -5,7 +5,7 @@ import { searchLog } from "@/lib/logger"
 import { parseLabelEntry } from "@craft-agent/shared/labels"
 import { fuzzyScore } from "@craft-agent/shared/search"
 import { getSessionTitle, getSessionStatus } from "@/utils/session"
-import type { SessionMeta } from "@/atoms/sessions"
+import { compareSessionsByActivityDesc, getSessionOrderTime, type SessionMeta } from "@/atoms/sessions"
 import type { ViewConfig } from "@craft-agent/shared/views"
 import type { SessionFilter } from "@/contexts/NavigationContext"
 
@@ -101,7 +101,7 @@ function groupSessionsByDate(sessions: SessionMeta[]): DateGroup[] {
   const groups = new Map<string, { date: Date; sessions: SessionMeta[] }>()
 
   for (const session of sessions) {
-    const timestamp = session.lastMessageAt || 0
+    const timestamp = getSessionOrderTime(session)
     const date = startOfDay(new Date(timestamp))
     const key = date.toISOString()
 
@@ -122,7 +122,7 @@ function groupSessionsByDate(sessions: SessionMeta[]): DateGroup[] {
 function getCollapseGroupKey(item: SessionMeta, groupingMode?: 'none' | 'date' | 'status'): string {
   return groupingMode === 'status'
     ? `status-${getSessionStatus(item)}`
-    : startOfDay(new Date(item.lastMessageAt || 0)).toISOString()
+    : startOfDay(new Date(getSessionOrderTime(item))).toISOString()
 }
 
 export interface CollapsedPaginationResult {
@@ -387,7 +387,7 @@ export function useSessionSearch({
 
   // Sort by most recent activity first
   const sortedItems = useMemo(() =>
-    [...visibleItems].sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0)),
+    [...visibleItems].sort(compareSessionsByActivityDesc),
     [visibleItems]
   )
 

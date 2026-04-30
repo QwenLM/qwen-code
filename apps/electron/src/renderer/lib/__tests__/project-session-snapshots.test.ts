@@ -30,8 +30,8 @@ describe('loadProjectWorkspaceSessionSnapshot', () => {
   it('loads local workspace snapshots through the local workspace API', async () => {
     const calls: unknown[][] = []
     const api = {
-      getSessionsForWorkspace: async (workspaceId: string) => {
-        calls.push(['getSessionsForWorkspace', workspaceId])
+      getSessionsForWorkspace: async (workspaceId: string, options?: { refreshExternal?: boolean }) => {
+        calls.push(['getSessionsForWorkspace', workspaceId, options])
         return [makeSession({ workspaceId })]
       },
       invokeOnServer: async (...args: unknown[]) => {
@@ -42,15 +42,15 @@ describe('loadProjectWorkspaceSessionSnapshot', () => {
 
     const metas = await loadProjectWorkspaceSessionSnapshot(makeWorkspace(), api)
 
-    expect(calls).toEqual([['getSessionsForWorkspace', 'workspace-local']])
+    expect(calls).toEqual([['getSessionsForWorkspace', 'workspace-local', { refreshExternal: false }]])
     expect(metas.map(meta => meta.id)).toEqual(['session-1'])
   })
 
   it('loads remote workspace snapshots from the remote workspace id', async () => {
     const calls: unknown[][] = []
     const api = {
-      getSessionsForWorkspace: async (workspaceId: string) => {
-        calls.push(['getSessionsForWorkspace', workspaceId])
+      getSessionsForWorkspace: async (workspaceId: string, options?: { refreshExternal?: boolean }) => {
+        calls.push(['getSessionsForWorkspace', workspaceId, options])
         return []
       },
       invokeOnServer: async (...args: unknown[]) => {
@@ -74,6 +74,7 @@ describe('loadProjectWorkspaceSessionSnapshot', () => {
       'token',
       RPC_CHANNELS.sessions.GET_FOR_WORKSPACE,
       'remote-workspace',
+      { refreshExternal: false },
     ]])
     expect(metas.map(meta => meta.id)).toEqual(['remote-session'])
     expect(metas[0]?.workspaceId).toBe('remote-workspace')

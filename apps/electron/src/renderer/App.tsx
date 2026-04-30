@@ -28,6 +28,7 @@ import { useSession } from '@/hooks/useSession'
 import { useUpdateChecker } from '@/hooks/useUpdateChecker'
 import { NavigationProvider } from '@/contexts/NavigationContext'
 import { navigate, routes } from './lib/navigate'
+import type { ViewRoute } from '../shared/routes'
 import { attachmentFromContentRef, toDraftRef } from './lib/drafts'
 import { stripMarkdown } from './utils/text'
 import { coerceInputText } from './lib/input-text'
@@ -38,6 +39,7 @@ import { DEFAULT_THINKING_LEVEL } from '@craft-agent/shared/agent/thinking-level
 import { initRendererPerf } from './lib/perf'
 import {
   initializeSessionsAtom,
+  initializeWorkspaceSessionsAtom,
   addSessionAtom,
   removeSessionAtom,
   updateSessionAtom,
@@ -48,6 +50,11 @@ import {
   forceSessionMessagesReloadAtom,
   backgroundTasksAtomFamily,
   extractSessionMeta,
+  getWorkspaceSessionMetas,
+  mergeStableSessionMetaList,
+  sessionFromMeta,
+  workspaceSessionMetaCacheAtom,
+  workspaceSessionsAtom,
   windowWorkspaceIdAtom,
   type SessionMeta,
 } from '@/atoms/sessions'
@@ -215,6 +222,7 @@ export default function App() {
   // - sessionMetaMapAtom for lightweight listing
   // - sessionAtomFamily(id) for individual session data
   const initializeSessions = useSetAtom(initializeSessionsAtom)
+  const initializeWorkspaceSessions = useSetAtom(initializeWorkspaceSessionsAtom)
   const addSession = useSetAtom(addSessionAtom)
   const removeSession = useSetAtom(removeSessionAtom)
   const updateSessionDirect = useSetAtom(updateSessionAtom)
@@ -240,10 +248,18 @@ export default function App() {
   const sessionListRequestSeqRef = useRef(0)
   const workspaceSwitchSeqRef = useRef(0)
   const workspaceSwitchChainRef = useRef<Promise<void>>(Promise.resolve())
+  const pendingWorkspaceSwitchRouteRef = useRef<{ workspaceId: string; route: ViewRoute } | null>(null)
 
   useEffect(() => {
     windowWorkspaceIdRef.current = windowWorkspaceId
   }, [windowWorkspaceId])
+
+  const consumePendingWorkspaceSwitchRoute = useCallback((workspaceId: string): ViewRoute | null => {
+    const pending = pendingWorkspaceSwitchRouteRef.current
+    if (!pending || pending.workspaceId !== workspaceId) return null
+    pendingWorkspaceSwitchRouteRef.current = null
+    return pending.route
+  }, [])
 
   // Derive workspace slug for SDK skill qualification
   const windowWorkspaceSlug = useMemo(() => {
@@ -443,10 +459,29 @@ export default function App() {
     }
   }, [clearStreamingState, updateSessionDirect, syncSessionOptionsFromSession, reconcilePermissionModeState, store])
 
-  const applyLoadedSessions = useCallback((loadedSessions: Session[]) => {
+  const cacheWorkspaceSessionMetas = useCallback((workspaceId: string, sessions: Session[]) => {
+    const metas = sessions.map(extractSessionMeta)
+    const next = new Map(store.get(workspaceSessionMetaCacheAtom))
+    next.set(workspaceId, mergeStableSessionMetaList(next.get(workspaceId), metas))
+    store.set(workspaceSessionMetaCacheAtom, next)
+  }, [store])
+
+  const applyLoadedSessions = useCallback((
+    loadedSessions: Session[],
+    workspaceId: string | null,
+    remoteWorkspaceId?: string | null,
+  ) => {
     // Initialize per-session atoms and metadata map.
     // NOTE: No sessionsAtom used - sessions are only in per-session atoms.
-    initializeSessions(loadedSessions)
+    if (workspaceId) {
+      initializeWorkspaceSessions({
+        workspaceIds: [workspaceId, remoteWorkspaceId ?? ''].filter(Boolean),
+        sessions: loadedSessions,
+      })
+      cacheWorkspaceSessionMetas(workspaceId, loadedSessions)
+    } else {
+      initializeSessions(loadedSessions)
+    }
 
     // Initialize unified sessionOptions from session data.
     const optionsMap = new Map<string, SessionOptions>()
@@ -461,7 +496,7 @@ export default function App() {
       }
     }
     setSessionOptions(optionsMap)
-  }, [initializeSessions])
+  }, [cacheWorkspaceSessionMetas, initializeSessions, initializeWorkspaceSessions])
 
   const reconcileLoadedSessionPermissionModes = useCallback((loadedSessions: Session[]) => {
     return Promise.allSettled(
@@ -485,7 +520,7 @@ export default function App() {
         return
       }
 
-      applyLoadedSessions(loadedSessions)
+      applyLoadedSessions(loadedSessions, requestWorkspaceId, windowRemoteWorkspaceId)
       await reconcileLoadedSessionPermissionModes(loadedSessions)
 
       if (requestSeq !== sessionListRequestSeqRef.current || requestWorkspaceId !== windowWorkspaceIdRef.current) {
@@ -526,7 +561,7 @@ export default function App() {
       setSessionLoadError(formatSessionLoadFailure(err))
       setSessionsLoaded(true)
     }
-  }, [applyLoadedSessions, initialSessionId, reconcileLoadedSessionPermissionModes, windowWorkspaceId])
+  }, [applyLoadedSessions, initialSessionId, reconcileLoadedSessionPermissionModes, windowRemoteWorkspaceId, windowWorkspaceId])
 
   const refreshSessionListMetadataFromServer = useCallback(async (): Promise<Map<string, SessionMeta> | null> => {
     const requestWorkspaceId = windowWorkspaceIdRef.current
@@ -545,7 +580,14 @@ export default function App() {
       // Single transactional atom write — all cross-atom mutations happen
       // inside one Jotai write function so React subscribers see one
       // consistent update instead of intermediate states.
-      const nextMetaMap = store.set(refreshSessionsMetadataAtom, { sessions, loadedSessionIds })
+      const nextMetaMap = store.set(refreshSessionsMetadataAtom, {
+        sessions,
+        loadedSessionIds,
+        workspaceIds: [requestWorkspaceId ?? '', windowRemoteWorkspaceId ?? ''].filter(Boolean),
+      })
+      if (requestWorkspaceId) {
+        cacheWorkspaceSessionMetas(requestWorkspaceId, sessions)
+      }
 
       // Sync app-level state (React hooks / non-atom concerns) after the atom transaction
       for (const session of sessions) {
@@ -565,7 +607,7 @@ export default function App() {
       console.error('[App] Failed to refresh session list metadata after reconnect:', err)
       return null
     }
-  }, [store, syncSessionOptionsFromSession, reconcilePermissionModeState])
+  }, [cacheWorkspaceSessionMetas, store, syncSessionOptionsFromSession, reconcilePermissionModeState, windowRemoteWorkspaceId])
 
   // Stale session watchdog — catches stuck sessions that the reconnect protocol misses
   const { trackSessionActivity } = useStaleSessionRecovery({
@@ -910,12 +952,16 @@ export default function App() {
               const existingMeta = store.get(sessionMetaMapAtom).has(sessionId)
               if (existingMeta) {
                 updateSessionDirect(sessionId, () => createdSession)
-                const metaMap = store.get(sessionMetaMapAtom)
-                const nextMetaMap = new Map(metaMap)
-                nextMetaMap.set(sessionId, extractSessionMeta(createdSession))
-                store.set(sessionMetaMapAtom, nextMetaMap)
               } else {
                 addSession(createdSession)
+              }
+              if (workspaceId) {
+                cacheWorkspaceSessionMetas(
+                  workspaceId,
+                  Array.from(store.get(sessionMetaMapAtom).values())
+                    .filter(meta => meta.workspaceId === workspaceId || (windowRemoteWorkspaceId && meta.workspaceId === windowRemoteWorkspaceId))
+                    .map(meta => sessionFromMeta(meta, createdSession.workspaceName)),
+                )
               }
               syncSessionOptionsFromSession(createdSession)
               return
@@ -924,7 +970,11 @@ export default function App() {
             const requestWorkspaceId = windowWorkspaceIdRef.current
             return window.electronAPI.getSessions().then((sessions) => {
               if (requestWorkspaceId !== windowWorkspaceIdRef.current) return
-              initializeSessions(sessions)
+              initializeWorkspaceSessions({
+                workspaceIds: [requestWorkspaceId ?? '', windowRemoteWorkspaceId ?? ''].filter(Boolean),
+                sessions,
+              })
+              if (requestWorkspaceId) cacheWorkspaceSessionMetas(requestWorkspaceId, sessions)
             })
           })
           .catch((error: unknown) => console.error('Failed to handle session_created event:', error))
@@ -980,12 +1030,6 @@ export default function App() {
         // For handoff events, update metadata map for list display
         // NOTE: No sessionsAtom to sync - atom and metadata are the source of truth
         if (isHandoff) {
-          // Update metadata map
-          const metaMap = store.get(sessionMetaMapAtom)
-          const newMetaMap = new Map(metaMap)
-          newMetaMap.set(sessionId, extractSessionMeta(updatedSession))
-          store.set(sessionMetaMapAtom, newMetaMap)
-
           // Show notification on complete (when window is not focused)
           // Skip hidden sessions (mini-agent sessions) - they shouldn't trigger notifications
           if (event.type === 'complete' && !updatedSession.hidden) {
@@ -1020,12 +1064,6 @@ export default function App() {
 
       // Update per-session atom
       updateSessionDirect(sessionId, () => updatedSession)
-
-      // Update metadata map
-      const metaMap = store.get(sessionMetaMapAtom)
-      const newMetaMap = new Map(metaMap)
-      newMetaMap.set(sessionId, extractSessionMeta(updatedSession))
-      store.set(sessionMetaMapAtom, newMetaMap)
     })
 
     return cleanup
@@ -1037,11 +1075,14 @@ export default function App() {
     updateSessionDirect,
     showSessionNotification,
     initializeSessions,
+    initializeWorkspaceSessions,
     addSession,
     removeSession,
+    cacheWorkspaceSessionMetas,
     syncSessionOptionsFromSession,
     applyPermissionModeState,
     reconcilePermissionModeState,
+    windowRemoteWorkspaceId,
   ])
 
   // Transport reconnect recovery — refresh session metadata plus active/processing
@@ -1690,7 +1731,11 @@ export default function App() {
   // Handle workspace selection
   // - Default: switch workspace in same window (in-window switching)
   // - With openInNewWindow=true: open in new window (or focus existing)
-  const handleSelectWorkspace = useCallback(async (workspaceId: string, openInNewWindow = false) => {
+  const handleSelectWorkspace = useCallback(async (
+    workspaceId: string,
+    openInNewWindow = false,
+    options?: { route?: ViewRoute },
+  ) => {
     // If selecting current workspace, do nothing
     if (workspaceId === windowWorkspaceIdRef.current) return
 
@@ -1699,6 +1744,10 @@ export default function App() {
       window.electronAPI.openWorkspace(workspaceId)
       return
     }
+
+    pendingWorkspaceSwitchRouteRef.current = options?.route
+      ? { workspaceId, route: options.route }
+      : null
 
     const switchSeq = ++workspaceSwitchSeqRef.current
     const requestSeq = ++sessionListRequestSeqRef.current
@@ -1710,12 +1759,18 @@ export default function App() {
 
       const targetWorkspace = workspaces.find(w => w.id === workspaceId)
       let loadedSessions: Session[] | null = null
+      const workspaceSessions = store.get(workspaceSessionsAtom)
+      const cachedMetas = getWorkspaceSessionMetas(workspaceSessions, workspaceId)
+      if (cachedMetas.length > 0) {
+        loadedSessions = cachedMetas.map(meta => sessionFromMeta(meta, targetWorkspace?.name))
+      }
 
       // Local workspaces can be read before the active window context changes.
       // That lets us commit the target workspace and its session list together.
-      if (!targetWorkspace?.remoteServer) {
+      if (!loadedSessions && !targetWorkspace?.remoteServer) {
         try {
-          loadedSessions = await window.electronAPI.getSessionsForWorkspace(workspaceId)
+          loadedSessions = await window.electronAPI.getSessionsForWorkspace(workspaceId, { refreshExternal: false })
+          cacheWorkspaceSessionMetas(workspaceId, loadedSessions)
         } catch (error) {
           console.warn(`[App] Failed to preload sessions for workspace ${workspaceId}:`, error)
         }
@@ -1759,7 +1814,11 @@ export default function App() {
         setSession({ selected: null })
         setPendingPermissions(new Map())
         setPendingCredentials(new Map())
-        applyLoadedSessions(loadedSessions)
+        applyLoadedSessions(
+          loadedSessions,
+          workspaceId,
+          targetWorkspace?.remoteServer?.remoteWorkspaceId,
+        )
         setSessionsLoaded(true)
       })
 
@@ -1776,7 +1835,7 @@ export default function App() {
 
     workspaceSwitchChainRef.current = nextSwitch.catch(() => {})
     return nextSwitch
-  }, [workspaces, setWindowWorkspaceId, setSession, applyLoadedSessions, reconcileLoadedSessionPermissionModes])
+  }, [workspaces, store, setWindowWorkspaceId, setSession, applyLoadedSessions, cacheWorkspaceSessionMetas, reconcileLoadedSessionPermissionModes])
 
   // Handle workspace switch by slug (called by NavigationContext on popstate when ?ws= changes)
   const handleSwitchWorkspaceBySlug = useCallback((slug: string) => {
@@ -2017,6 +2076,7 @@ export default function App() {
           isReady={appState === 'ready'}
           isSessionsReady={sessionsLoaded}
           remoteWorkspaceId={windowRemoteWorkspaceId}
+          consumeWorkspaceSwitchRoute={consumePendingWorkspaceSwitchRoute}
         >
           {/* Handle window close requests (X button, Cmd+W) - close modal first if open */}
           <WindowCloseHandler />

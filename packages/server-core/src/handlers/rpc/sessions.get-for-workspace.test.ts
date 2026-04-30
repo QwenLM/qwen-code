@@ -82,4 +82,16 @@ describe('registerSessionsHandlers GET_FOR_WORKSPACE', () => {
     ])
     expect(result).toEqual([{ id: 's1', workspaceId: 'target-workspace', messages: [] }])
   })
+
+  it('can return cached workspace sessions without waiting for external refresh', async () => {
+    const { getForWorkspace, ctx, calls } = createTestHarness()
+
+    const result = await getForWorkspace(ctx, 'target-workspace', { refreshExternal: false })
+
+    expect(calls).toEqual([
+      'waitForInit',
+      'getSessions:target-workspace',
+    ])
+    expect(result).toEqual([{ id: 's1', workspaceId: 'target-workspace', messages: [] }])
+  })
 })

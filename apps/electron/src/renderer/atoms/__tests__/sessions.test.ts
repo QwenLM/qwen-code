@@ -10,7 +10,15 @@ import {
   forceSessionMessagesReloadAtom,
   refreshSessionsMetadataAtom,
   initializeSessionsAtom,
+  initializeWorkspaceSessionsAtom,
+  addSessionAtom,
+  updateSessionMetaAtom,
+  removeSessionAtom,
   extractSessionMeta,
+  getWorkspaceSessionMetas,
+  mergeStableSessionMetaList,
+  workspaceSessionMetaCacheAtom,
+  workspaceSessionsAtom,
 } from '../sessions'
 
 function msg(id: string, role: Message['role'] = 'user'): Message {
@@ -52,6 +60,26 @@ describe('extractSessionMeta', () => {
     }))
 
     expect(meta.messageCount).toBe(2)
+  })
+})
+
+describe('mergeStableSessionMetaList', () => {
+  it('preserves existing project tree order and appends newly discovered sessions', () => {
+    const previous = [
+      extractSessionMeta(makeSession({ id: 'old-a', lastMessageAt: 100 })),
+      extractSessionMeta(makeSession({ id: 'old-b', lastMessageAt: 90 })),
+    ]
+    const incoming = [
+      extractSessionMeta(makeSession({ id: 'newer', lastMessageAt: 1000 })),
+      extractSessionMeta(makeSession({ id: 'old-b', lastMessageAt: 95, name: 'Updated B' })),
+      extractSessionMeta(makeSession({ id: 'old-a', lastMessageAt: 110, name: 'Updated A' })),
+    ]
+
+    const merged = mergeStableSessionMetaList(previous, incoming)
+
+    expect(merged.map(session => session.id)).toEqual(['old-a', 'old-b', 'newer'])
+    expect(merged[0]?.name).toBe('Updated A')
+    expect(merged[1]?.name).toBe('Updated B')
   })
 })
 
@@ -181,6 +209,49 @@ describe('session message loading atoms', () => {
     expect(result?.id).toBe(sessionId)
     expect(store.get(loadedSessionsAtom).has(sessionId)).toBe(true)
   })
+
+  it('does not trust a loaded flag when an existing-looking session has no messages in memory', async () => {
+    const store = createStore()
+    const sessionId = 'session-1'
+    const calls: string[] = []
+
+    globalThis.window = {
+      electronAPI: {
+        getSessionMessages: async (id: string) => {
+          calls.push(id)
+          return makeSession({
+            id,
+            name: 'Existing session',
+            messageCount: 2,
+            messages: [msg('m1'), msg('m2', 'assistant')],
+          })
+        },
+      },
+    } as unknown as typeof window
+
+    store.set(sessionAtomFamily(sessionId), makeSession({
+      id: sessionId,
+      name: 'Existing session',
+      messages: [],
+      messageCount: 2,
+    }))
+    store.set(sessionMetaMapAtom, new Map([[
+      sessionId,
+      extractSessionMeta(makeSession({
+        id: sessionId,
+        name: 'Existing session',
+        messages: [],
+        messageCount: 2,
+      })),
+    ]]))
+    store.set(loadedSessionsAtom, new Set([sessionId]))
+
+    const result = await store.set(ensureSessionMessagesLoadedAtom, sessionId)
+
+    expect(calls).toEqual([sessionId])
+    expect(result?.messages.map((message) => message.id)).toEqual(['m1', 'm2'])
+    expect(store.get(loadedSessionsAtom).has(sessionId)).toBe(true)
+  })
 })
 
 describe('initializeSessionsAtom', () => {
@@ -260,6 +331,165 @@ describe('initializeSessionsAtom', () => {
     const session = store.get(sessionAtomFamily('s1'))
     expect(session?.messages).toEqual([])
     expect(store.get(loadedSessionsAtom).has('s1')).toBe(false)
+  })
+})
+
+describe('initializeWorkspaceSessionsAtom', () => {
+  it('keeps already-loaded sessions from other workspaces cached', () => {
+    const store = createStore()
+    const cachedMessages = [msg('cached')]
+
+    store.set(initializeWorkspaceSessionsAtom, {
+      workspaceIds: ['workspace-a'],
+      sessions: [
+        makeSession({
+          id: 'session-a',
+          workspaceId: 'workspace-a',
+          messages: cachedMessages,
+        }),
+      ],
+    })
+
+    store.set(initializeWorkspaceSessionsAtom, {
+      workspaceIds: ['workspace-b'],
+      sessions: [
+        makeSession({
+          id: 'session-b',
+          workspaceId: 'workspace-b',
+          messages: [],
+        }),
+      ],
+    })
+
+    expect(store.get(sessionMetaMapAtom).has('session-a')).toBe(true)
+    expect(store.get(sessionMetaMapAtom).has('session-b')).toBe(true)
+    expect(store.get(sessionAtomFamily('session-a'))?.messages.map(m => m.id)).toEqual(['cached'])
+    expect(store.get(loadedSessionsAtom).has('session-a')).toBe(true)
+  })
+
+  it('removes stale sessions only from the refreshed workspace', () => {
+    const store = createStore()
+
+    store.set(initializeWorkspaceSessionsAtom, {
+      workspaceIds: ['workspace-a'],
+      sessions: [
+        makeSession({ id: 'session-a1', workspaceId: 'workspace-a' }),
+        makeSession({ id: 'session-a2', workspaceId: 'workspace-a' }),
+      ],
+    })
+    store.set(initializeWorkspaceSessionsAtom, {
+      workspaceIds: ['workspace-b'],
+      sessions: [
+        makeSession({ id: 'session-b1', workspaceId: 'workspace-b' }),
+      ],
+    })
+
+    store.set(initializeWorkspaceSessionsAtom, {
+      workspaceIds: ['workspace-a'],
+      sessions: [
+        makeSession({ id: 'session-a1', workspaceId: 'workspace-a' }),
+      ],
+    })
+
+    expect(store.get(sessionMetaMapAtom).has('session-a1')).toBe(true)
+    expect(store.get(sessionMetaMapAtom).has('session-a2')).toBe(false)
+    expect(store.get(sessionMetaMapAtom).has('session-b1')).toBe(true)
+  })
+
+  it('keeps each workspace order in the workspace-scoped state', () => {
+    const store = createStore()
+
+    store.set(initializeWorkspaceSessionsAtom, {
+      workspaceIds: ['workspace-a'],
+      sessions: [
+        makeSession({ id: 'a-old', workspaceId: 'workspace-a', lastMessageAt: 100 }),
+        makeSession({ id: 'a-new', workspaceId: 'workspace-a', lastMessageAt: 200 }),
+      ],
+    })
+    store.set(initializeWorkspaceSessionsAtom, {
+      workspaceIds: ['workspace-b'],
+      sessions: [
+        makeSession({ id: 'b-one', workspaceId: 'workspace-b', lastMessageAt: 500 }),
+      ],
+    })
+
+    expect(getWorkspaceSessionMetas(store.get(workspaceSessionsAtom), 'workspace-a').map(session => session.id))
+      .toEqual(['a-new', 'a-old'])
+    expect(getWorkspaceSessionMetas(store.get(workspaceSessionsAtom), 'workspace-b').map(session => session.id))
+      .toEqual(['b-one'])
+  })
+
+  it('preserves existing workspace order when refreshed metadata changes activity times', () => {
+    const store = createStore()
+
+    store.set(initializeWorkspaceSessionsAtom, {
+      workspaceIds: ['workspace-a'],
+      sessions: [
+        makeSession({ id: 'a-old', workspaceId: 'workspace-a', lastMessageAt: 100 }),
+        makeSession({ id: 'a-new', workspaceId: 'workspace-a', lastMessageAt: 200 }),
+      ],
+    })
+
+    store.set(initializeWorkspaceSessionsAtom, {
+      workspaceIds: ['workspace-a'],
+      sessions: [
+        makeSession({ id: 'a-added', workspaceId: 'workspace-a', lastMessageAt: 1000 }),
+        makeSession({ id: 'a-old', workspaceId: 'workspace-a', lastMessageAt: 700, name: 'Updated old' }),
+        makeSession({ id: 'a-new', workspaceId: 'workspace-a', lastMessageAt: 50 }),
+      ],
+    })
+
+    const metas = getWorkspaceSessionMetas(store.get(workspaceSessionsAtom), 'workspace-a')
+    expect(metas.map(session => session.id)).toEqual(['a-new', 'a-old', 'a-added'])
+    expect(metas.find(session => session.id === 'a-old')?.name).toBe('Updated old')
+  })
+
+  it('updates workspace-scoped metadata without reordering existing sessions', () => {
+    const store = createStore()
+
+    store.set(initializeWorkspaceSessionsAtom, {
+      workspaceIds: ['workspace-a'],
+      sessions: [
+        makeSession({ id: 's1', workspaceId: 'workspace-a', lastMessageAt: 200 }),
+        makeSession({ id: 's2', workspaceId: 'workspace-a', lastMessageAt: 100 }),
+      ],
+    })
+
+    store.set(updateSessionMetaAtom, 's2', { name: 'Updated S2', lastMessageAt: 999 })
+
+    const metas = getWorkspaceSessionMetas(store.get(workspaceSessionsAtom), 'workspace-a')
+    expect(metas.map(session => session.id)).toEqual(['s1', 's2'])
+    expect(metas[1]?.name).toBe('Updated S2')
+  })
+
+  it('adds new sessions to the front and removes them from all workspace states', () => {
+    const store = createStore()
+
+    store.set(initializeWorkspaceSessionsAtom, {
+      workspaceIds: ['workspace-a'],
+      sessions: [
+        makeSession({ id: 's1', workspaceId: 'workspace-a', lastMessageAt: 200 }),
+        makeSession({ id: 's2', workspaceId: 'workspace-a', lastMessageAt: 100 }),
+      ],
+    })
+
+    store.set(addSessionAtom, makeSession({ id: 's3', workspaceId: 'workspace-a', lastMessageAt: 300 }))
+    expect(getWorkspaceSessionMetas(store.get(workspaceSessionsAtom), 'workspace-a').map(session => session.id))
+      .toEqual(['s3', 's1', 's2'])
+
+    store.set(removeSessionAtom, 's1')
+    expect(getWorkspaceSessionMetas(store.get(workspaceSessionsAtom), 'workspace-a').map(session => session.id))
+      .toEqual(['s3', 's2'])
+  })
+
+  it('keeps the legacy workspace meta cache backed by workspaceSessionsAtom', () => {
+    const store = createStore()
+    const meta = extractSessionMeta(makeSession({ id: 'cached', workspaceId: 'workspace-a' }))
+
+    store.set(workspaceSessionMetaCacheAtom, new Map([['workspace-a', [meta]]]))
+
+    expect(getWorkspaceSessionMetas(store.get(workspaceSessionsAtom), 'workspace-a').map(session => session.id))
+      .toEqual(['cached'])
   })
 })
 

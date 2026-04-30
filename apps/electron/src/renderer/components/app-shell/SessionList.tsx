@@ -27,7 +27,7 @@ import { useFocusZone } from "@/hooks/keyboard"
 import { useEscapeInterrupt } from "@/context/EscapeInterruptContext"
 import { useNavigation, useNavigationState, routes, isSessionsNavigation } from "@/contexts/NavigationContext"
 import { useFocusContext } from "@/context/FocusContext"
-import { sendToWorkspaceAtom, type SessionMeta } from "@/atoms/sessions"
+import { compareSessionsByActivityDesc, getSessionOrderTime, sendToWorkspaceAtom, type SessionMeta } from "@/atoms/sessions"
 import type { ViewConfig } from "@craft-agent/shared/views"
 import type { SessionStatusId, SessionStatus } from "@/config/session-status-config"
 import { buildCollapsedGroupsScopeSuffix } from "@/utils/session-list-collapse"
@@ -314,7 +314,7 @@ export function SessionList({
       for (const [key, { rows: groupRows, statusId }] of groupsByKey) {
         const state = sessionStatuses.find(s => s.id === statusId)
         if (!state) continue
-        groupRows.sort((a, b) => (b.item.lastMessageAt || 0) - (a.item.lastMessageAt || 0))
+        groupRows.sort((a, b) => compareSessionsByActivityDesc(a.item, b.item))
         const collapsedMeta = collapsedGroupsMeta.find(m => m.key === key)
         orderedGroups.push({
           key,
@@ -346,7 +346,7 @@ export function SessionList({
     const groupDates = new Map<string, Date>()
 
     for (const row of rows) {
-      const day = startOfDay(new Date(row.item.lastMessageAt || 0))
+      const day = startOfDay(new Date(getSessionOrderTime(row.item)))
       const groupKey = day.toISOString()
 
       if (!groupsByKey.has(groupKey)) {
@@ -404,7 +404,7 @@ export function SessionList({
       setCollapsedGroups(allKeys)
     } else {
       const allKeys = new Set(items.map(item =>
-        startOfDay(new Date(item.lastMessageAt || 0)).toISOString()
+        startOfDay(new Date(getSessionOrderTime(item))).toISOString()
       ))
       setCollapsedGroups(allKeys)
     }

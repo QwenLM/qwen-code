@@ -29,6 +29,7 @@ import type { SessionStatus as SessionStatusConfig } from '@/config/session-stat
 import type { SessionOptions, SessionOptionUpdates } from '../hooks/useSessionOptions'
 import { defaultSessionOptions } from '../hooks/useSessionOptions'
 import { sessionAtomFamily } from '../atoms/sessions'
+import type { ViewRoute } from '../../shared/routes'
 
 export interface AppShellContextType {
   // Data
@@ -108,7 +109,7 @@ export interface AppShellContextType {
   onOpenUrl: (url: string) => void
 
   // Workspace
-  onSelectWorkspace: (id: string, openInNewWindow?: boolean) => void | Promise<void>
+  onSelectWorkspace: (id: string, openInNewWindow?: boolean, options?: { route?: ViewRoute }) => void | Promise<void>
   onRefreshWorkspaces?: () => void
 
   // App actions
