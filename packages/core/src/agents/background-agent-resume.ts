@@ -57,6 +57,8 @@ export const DEFAULT_BACKGROUND_AGENT_CONTINUATION_MESSAGE =
 
 const LEGACY_FORK_RESUME_BLOCKED_REASON =
   'Fork background task cannot be safely resumed because its bootstrap transcript is missing.';
+const LEGACY_FORK_CAPABILITIES_BLOCKED_REASON =
+  'Fork background task cannot be safely resumed because its launch-time runtime constraints are missing.';
 
 type ApprovalModeValue = 'plan' | 'default' | 'auto-edit' | 'yolo';
 
@@ -69,6 +71,8 @@ interface TranscriptRecovery {
     history: Content[];
     taskPrompt: string;
     runtimeHistory: Content[];
+    systemInstruction?: string | Content;
+    tools?: Array<string | FunctionDeclaration>;
   };
 }
 
@@ -144,6 +148,17 @@ function createApprovalModeOverride(
   const override = Object.create(base) as any;
   override.getApprovalMode = () => mode;
   return override as Config;
+}
+
+function persistBackgroundCancellation(
+  metaPath: string,
+  abortedBySignal: boolean,
+): void {
+  patchAgentMeta(metaPath, {
+    status: abortedBySignal ? 'running' : 'cancelled',
+    lastUpdatedAt: new Date().toISOString(),
+    lastError: undefined,
+  });
 }
 
 function isWhitespaceOnlyAssistant(record: ChatRecord): boolean {
@@ -321,6 +336,14 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
               (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload)
                 .history,
             ),
+            systemInstruction: structuredClone(
+              (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload)
+                .systemInstruction,
+            ),
+            tools: structuredClone(
+              (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload)
+                .tools,
+            ),
             taskPrompt: (
               launchPromptRecord!.systemPayload as NotificationRecordPayload
             ).displayText,
@@ -399,7 +422,11 @@ export class BackgroundAgentResumeService {
           target.unavailableReason ||
           (target.isFork && !recovery.forkBootstrap
             ? LEGACY_FORK_RESUME_BLOCKED_REASON
-            : undefined);
+            : target.isFork &&
+                (!recovery.forkBootstrap?.systemInstruction ||
+                  !recovery.forkBootstrap?.tools)
+              ? LEGACY_FORK_CAPABILITIES_BLOCKED_REASON
+              : undefined);
 
         const entry: BackgroundTaskEntry = {
           agentId: meta.agentId,
@@ -482,16 +509,6 @@ export class BackgroundAgentResumeService {
     }
 
     const bgAbortController = new AbortController();
-    bgAbortController.signal.addEventListener(
-      'abort',
-      () => {
-        patchAgentMeta(metaPath, {
-          status: 'cancelled',
-          lastUpdatedAt: new Date().toISOString(),
-        });
-      },
-      { once: true },
-    );
 
     registry.register({
       ...existing,
@@ -588,6 +605,19 @@ export class BackgroundAgentResumeService {
         this.restorePausedEntry(agentId, { resumeBlockedReason: reason });
         return undefined;
       }
+      if (
+        target.isFork &&
+        (!recovery.forkBootstrap?.systemInstruction ||
+          !recovery.forkBootstrap?.tools)
+      ) {
+        const reason = LEGACY_FORK_CAPABILITIES_BLOCKED_REASON;
+        patchAgentMeta(metaPath, {
+          lastError: undefined,
+          lastUpdatedAt: new Date().toISOString(),
+        });
+        this.restorePausedEntry(agentId, { resumeBlockedReason: reason });
+        return undefined;
+      }
 
       const bgEventEmitter = new AgentEventEmitter();
       const subagent = target.isFork
@@ -595,6 +625,7 @@ export class BackgroundAgentResumeService {
             bgConfig as Config,
             bgEventEmitter,
             resumeHistory ?? [],
+            recovery.forkBootstrap!,
           )
         : await this.config
             .getSubagentManager()
@@ -727,11 +758,10 @@ export class BackgroundAgentResumeService {
             });
           } else if (terminateMode === AgentTerminateMode.CANCELLED) {
             registry.finalizeCancelled(meta.agentId, finalText, stats);
-            patchAgentMeta(metaPath, {
-              status: 'cancelled',
-              lastUpdatedAt: new Date().toISOString(),
-              lastError: undefined,
-            });
+            persistBackgroundCancellation(
+              metaPath,
+              bgAbortController.signal.aborted,
+            );
           } else {
             const failureText =
               finalText || `Agent terminated with mode: ${terminateMode}`;
@@ -754,11 +784,10 @@ export class BackgroundAgentResumeService {
               errorMessage,
               getCompletionStats(subagent, liveToolCallCount),
             );
-            patchAgentMeta(metaPath, {
-              status: 'cancelled',
-              lastUpdatedAt: new Date().toISOString(),
-              lastError: undefined,
-            });
+            persistBackgroundCancellation(
+              metaPath,
+              bgAbortController.signal.aborted,
+            );
           } else {
             registry.fail(
               meta.agentId,
@@ -882,36 +911,15 @@ export class BackgroundAgentResumeService {
     agentConfig: Config,
     eventEmitter: AgentEventEmitter,
     initialMessages: Content[],
+    bootstrap: NonNullable<TranscriptRecovery['forkBootstrap']>,
   ): Promise<AgentHeadless> {
-    const geminiClient = this.config.getGeminiClient();
-    const generationConfig = geminiClient?.getChat().getGenerationConfig();
-
-    let promptConfig: PromptConfig;
-    let toolConfig: ToolConfig;
-    if (generationConfig?.systemInstruction) {
-      const parentToolDecls: FunctionDeclaration[] =
-        (
-          generationConfig.tools as Array<{
-            functionDeclarations?: FunctionDeclaration[];
-          }>
-        )?.flatMap((tool) => tool.functionDeclarations ?? []) ?? [];
-
-      promptConfig = {
-        renderedSystemPrompt: generationConfig.systemInstruction as
-          | string
-          | Content,
-        initialMessages,
-      };
-      toolConfig = {
-        tools: parentToolDecls.length > 0 ? parentToolDecls : ['*'],
-      };
-    } else {
-      promptConfig = {
-        systemPrompt: FORK_AGENT.systemPrompt,
-        initialMessages,
-      };
-      toolConfig = { tools: ['*'] };
-    }
+    const promptConfig: PromptConfig = {
+      renderedSystemPrompt: structuredClone(bootstrap.systemInstruction!),
+      initialMessages,
+    };
+    const toolConfig: ToolConfig = {
+      tools: structuredClone(bootstrap.tools!),
+    };
 
     return AgentHeadless.create(
       FORK_AGENT.name,

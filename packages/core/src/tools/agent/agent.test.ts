@@ -36,6 +36,7 @@ import { runWithAgentContext } from './agent-context.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as transcript from '../../agents/agent-transcript.js';
 
 // Type for accessing protected methods in tests
 type AgentToolInvocation = {
@@ -1699,6 +1700,54 @@ describe('AgentTool', () => {
         const meta = readSidecar('monitor-nested-1');
         expect(meta.parentAgentId).toBe('explore-parent-42');
       });
+    });
+
+    it('persists fork capability snapshots in the bootstrap transcript', async () => {
+      const forkParams: AgentParams = {
+        description: 'Fork task',
+        prompt: 'Investigate issue',
+        run_in_background: true,
+      };
+      const generationConfig = {
+        systemInstruction: {
+          role: 'system',
+          parts: [{ text: 'parent system' }],
+        },
+        tools: [{ functionDeclarations: [{ name: 'Bash' }, { name: 'Read' }] }],
+      };
+      const geminiClient = {
+        getHistory: vi
+          .fn()
+          .mockReturnValue([{ role: 'model', parts: [{ text: 'Ready' }] }]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: () => generationConfig,
+        }),
+      };
+      vi.mocked(config.getGeminiClient).mockReturnValue(
+        geminiClient as unknown as ReturnType<Config['getGeminiClient']>,
+      );
+
+      const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
+      const createSpy = vi
+        .spyOn(AgentHeadless, 'create')
+        .mockResolvedValue(mockAgent);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(forkParams);
+      await invocation.execute();
+
+      expect(attachSpy).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.any(String),
+        expect.objectContaining({
+          bootstrapSystemInstruction: generationConfig.systemInstruction,
+          bootstrapTools: generationConfig.tools[0].functionDeclarations,
+        }),
+      );
+
+      attachSpy.mockRestore();
+      createSpy.mockRestore();
     });
   });
 });

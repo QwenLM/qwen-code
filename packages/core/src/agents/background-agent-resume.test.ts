@@ -650,6 +650,11 @@ describe('BackgroundAgentResumeService', () => {
     await vi.waitFor(() => {
       expect(registry.get(agentId)?.status).toBe('completed');
     });
+    const provider = subagent.setExternalMessageProvider.mock.calls[0]?.[0] as
+      | (() => string[])
+      | undefined;
+    expect(provider).toBeDefined();
+    expect(provider?.()).toEqual(['second message']);
   });
 
   it('resumes fork agents from transcript bootstrap instead of current parent config', async () => {
@@ -686,6 +691,11 @@ describe('BackgroundAgentResumeService', () => {
               { role: 'user', parts: [{ text: 'bootstrap env' }] },
               { role: 'model', parts: [{ text: 'bootstrap ack' }] },
             ],
+            systemInstruction: {
+              role: 'system',
+              parts: [{ text: 'persisted system instruction' }],
+            },
+            tools: [{ name: 'Bash' }, { name: 'Read' }],
           },
         }),
         JSON.stringify({
@@ -756,12 +766,19 @@ describe('BackgroundAgentResumeService', () => {
     const createArgs = createSpy.mock.calls[0];
     expect(createArgs).toBeDefined();
     expect(createArgs![2]).toMatchObject({
+      renderedSystemPrompt: {
+        role: 'system',
+        parts: [{ text: 'persisted system instruction' }],
+      },
       initialMessages: [
         { role: 'user', parts: [{ text: 'bootstrap env' }] },
         { role: 'model', parts: [{ text: 'bootstrap ack' }] },
         { role: 'user', parts: [{ text: buildChildMessage(launchPrompt) }] },
         { role: 'model', parts: [{ text: 'Working silently' }] },
       ],
+    });
+    expect(createArgs?.[5]).toEqual({
+      tools: [{ name: 'Bash' }, { name: 'Read' }],
     });
     expect(execute).toHaveBeenCalledTimes(1);
     const executeCall = execute.mock.calls[0];
@@ -832,4 +849,300 @@ describe('BackgroundAgentResumeService', () => {
     expect(createSpy).not.toHaveBeenCalled();
     createSpy.mockRestore();
   });
+
+  it('keeps fork tasks paused when bootstrap capabilities are missing', async () => {
+    const sessionId = 'session-fork-cap-legacy';
+    const agentId = 'agent-fork-cap-legacy';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: FORK_SUBAGENT_TYPE,
+      description: 'Legacy fork task without capabilities',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: FORK_SUBAGENT_TYPE,
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      [
+        JSON.stringify({
+          uuid: 'sys1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'system',
+          subtype: 'agent_bootstrap',
+          systemPayload: {
+            kind: 'fork',
+            history: [{ role: 'user', parts: [{ text: 'bootstrap env' }] }],
+          },
+        }),
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: 'sys1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.100Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Legacy fork task' }] },
+        }),
+        JSON.stringify({
+          uuid: 'sys2',
+          parentUuid: 'u1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.200Z',
+          type: 'system',
+          subtype: 'agent_launch_prompt',
+          systemPayload: {
+            displayText: buildChildMessage('Legacy fork task'),
+          },
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Legacy fork task without capabilities',
+      subagentType: FORK_SUBAGENT_TYPE,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Legacy fork task',
+      outputFile,
+      metaPath,
+    });
+
+    const createSpy = vi.spyOn(AgentHeadless, 'create');
+    const { service } = createService();
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeUndefined();
+    expect(registry.get(agentId)?.status).toBe('paused');
+    expect(registry.get(agentId)?.resumeBlockedReason).toContain(
+      'runtime constraints are missing',
+    );
+    expect(createSpy).not.toHaveBeenCalled();
+    createSpy.mockRestore();
+  });
+
+  it('does not persist cancelled status on generic launch interruption recovery', async () => {
+    const sessionId = 'session-running-shutdown';
+    const agentId = 'agent-running-shutdown';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Interrupted by shutdown',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+
+    registry.register({
+      agentId,
+      description: 'Interrupted by shutdown',
+      subagentType: 'researcher',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Interrupted by shutdown',
+      metaPath,
+      outputFile: getAgentJsonlPath(tempDir, sessionId, agentId),
+    });
+
+    registry.abortAll();
+
+    expect(readMetaStatus(metaPath)).toBe('running');
+  });
+
+  it('keeps resumed tasks resumable after a generic shutdown abort', async () => {
+    const sessionId = 'session-resume-shutdown';
+    const agentId = 'agent-resume-shutdown';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume then shutdown',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume then shutdown' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume then shutdown',
+      subagentType: 'researcher',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume then shutdown',
+      outputFile,
+      metaPath,
+    });
+
+    let releaseExecute: (() => void) | undefined;
+    const execute = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseExecute = resolve;
+        }),
+    );
+    const subagent = {
+      execute,
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.CANCELLED,
+      getFinalText: () => '',
+    };
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+    expect(resumed).toBeDefined();
+    registry.abortAll();
+    releaseExecute?.();
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('cancelled');
+    });
+    expect(readMetaStatus(metaPath)).toBe('running');
+  });
+
+  it('injects pending trailing user text via initial_messages_override', async () => {
+    const sessionId = 'session-pending-user';
+    const agentId = 'agent-pending-user';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Pending user tail',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      [
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'original task' }] },
+        }),
+        JSON.stringify({
+          uuid: 'a1',
+          parentUuid: 'u1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.100Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'working' }] },
+        }),
+        JSON.stringify({
+          uuid: 'u2',
+          parentUuid: 'a1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.200Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'and another thing' }] },
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Pending user tail',
+      subagentType: 'researcher',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'original task',
+      outputFile,
+      metaPath,
+    });
+
+    const execute = vi.fn(
+      async (context: { get: (key: string) => unknown }) => {
+        const override = context.get('initial_messages_override') as
+          | Array<{ parts?: Array<{ text?: string }> }>
+          | undefined;
+        expect(override).toEqual([
+          {
+            role: 'user',
+            parts: [{ text: 'and another thing' }, { text: '\ncontinue work' }],
+          },
+        ]);
+      },
+    );
+    const subagent = {
+      execute,
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+
+    await service.resumeBackgroundAgent(agentId, 'continue work');
+
+    expect(subagentManager.createAgentHeadless).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({
+        promptConfigOverrides: {
+          initialMessages: [
+            { role: 'user', parts: [{ text: 'original task' }] },
+            { role: 'model', parts: [{ text: 'working' }] },
+          ],
+        },
+      }),
+    );
+  });
 });
+
+function readMetaStatus(metaPath: string): string | undefined {
+  const raw = fs.readFileSync(metaPath, 'utf8');
+  return JSON.parse(raw).status;
+}

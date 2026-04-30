@@ -48,20 +48,6 @@ import {
 
 const debugLogger = createDebugLogger('SHELL');
 
-/**
- * Strip a single bare trailing `&` (bash background operator) from a
- * command string. Returns the input unchanged if the trailing form is
- * `&&` (logical AND), `\&` (escaped literal `&`), or there is no `&`
- * at the end at all. Linear time, no regex backtracking risk.
- */
-function stripTrailingBackgroundAmp(command: string): string {
-  const trimmed = command.trimEnd();
-  if (!trimmed.endsWith('&')) return command;
-  if (trimmed.endsWith('&&')) return command;
-  if (trimmed.endsWith('\\&')) return command;
-  return trimmed.slice(0, -1).trimEnd();
-}
-
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
 
@@ -434,25 +420,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<ToolResult> {
     const strippedCommand = stripShellWrapper(this.params.command);
-    // Strip a single bare trailing `&` (the bash background operator) before
-    // spawn: bash treats it as background-detach, exits the wrapper
-    // immediately, and the real child outlives the wrapper — the registry
-    // would settle as `completed` while the shell is still running, and
-    // chunked output would land on a closed stream. The managed path is
-    // itself the backgrounding mechanism, so the trailing `&` is redundant.
-    //
-    // Deliberately precise: do not touch `&&` (logical AND), `\&` (escaped
-    // literal `&`), or commands without a trailing `&`. Earlier `\s*&+\s*$`
-    // was both too greedy (it ate `&&` and `\&`) and a ReDoS hazard on
-    // long all-`&` inputs. Plain string checks here are linear and clearer
-    // than a lookbehind regex.
-    const noTrailingAmp = stripTrailingBackgroundAmp(strippedCommand);
-    if (noTrailingAmp !== strippedCommand) {
-      debugLogger.warn(
-        'Stripped trailing & from background shell command — managed path handles backgrounding',
-      );
-    }
-    const processedCommand = this.addCoAuthorToGitCommit(noTrailingAmp);
+    const processedCommand = this.addCoAuthorToGitCommit(strippedCommand);
     const cwd = this.params.directory || this.config.getTargetDir();
 
     // Output goes under the project temp dir (which `ReadFileTool`

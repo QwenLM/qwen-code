@@ -66,6 +66,17 @@ import {
 } from '../../agents/agent-transcript.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
 
+function persistBackgroundCancellation(
+  metaPath: string,
+  abortedBySignal: boolean,
+): void {
+  patchAgentMeta(metaPath, {
+    status: abortedBySignal ? 'running' : 'cancelled',
+    lastUpdatedAt: new Date().toISOString(),
+    lastError: undefined,
+  });
+}
+
 export interface AgentParams {
   description: string;
   prompt: string;
@@ -643,6 +654,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     subagent: AgentHeadless;
     initialMessages?: Content[];
     taskPrompt: string;
+    promptConfig: PromptConfig;
+    toolConfig: ToolConfig;
   }> {
     const geminiClient = this.config.getGeminiClient();
     const rawHistory = geminiClient ? geminiClient.getHistory(true) : [];
@@ -742,7 +755,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       eventEmitter,
     );
 
-    return { subagent, initialMessages, taskPrompt };
+    return { subagent, initialMessages, taskPrompt, promptConfig, toolConfig };
   }
 
   // Runs the SubagentStop hook after execution. On a blocking decision, feeds the
@@ -1062,6 +1075,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         let bgSubagent: AgentHeadless;
         let bgInitialMessages: Content[] | undefined;
         let bgTaskPrompt: string;
+        let bgPromptConfig: PromptConfig | undefined;
+        let bgToolConfig: ToolConfig | undefined;
         if (isFork) {
           const fork = await this.createForkSubagent(
             bgConfig as Config,
@@ -1070,6 +1085,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           bgSubagent = fork.subagent;
           bgInitialMessages = fork.initialMessages;
           bgTaskPrompt = fork.taskPrompt;
+          bgPromptConfig = fork.promptConfig;
+          bgToolConfig = fork.toolConfig;
         } else {
           bgSubagent = await this.subagentManager.createAgentHeadless(
             subagentConfig,
@@ -1110,6 +1127,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // know what the agent was asked to do.
             initialUserPrompt: this.params.prompt,
             bootstrapHistory: isFork ? bgInitialMessages : undefined,
+            bootstrapSystemInstruction: isFork
+              ? (bgPromptConfig?.renderedSystemPrompt ??
+                bgPromptConfig?.systemPrompt)
+              : undefined,
+            bootstrapTools: isFork ? bgToolConfig?.tools : undefined,
             launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
           },
         );
@@ -1130,17 +1152,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           agentColor: subagentConfig.color,
           resumeCount: 0,
         });
-        bgAbortController.signal.addEventListener(
-          'abort',
-          () => {
-            patchAgentMeta(metaPath, {
-              status: 'cancelled',
-              lastUpdatedAt: new Date().toISOString(),
-            });
-          },
-          { once: true },
-        );
-
         registry.register({
           agentId: hookOpts.agentId,
           description: this.params.description,
@@ -1248,11 +1259,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 finalText,
                 completionStats,
               );
-              patchAgentMeta(metaPath, {
-                status: 'cancelled',
-                lastUpdatedAt: new Date().toISOString(),
-                lastError: undefined,
-              });
+              persistBackgroundCancellation(
+                metaPath,
+                bgAbortController.signal.aborted,
+              );
             } else {
               registry.fail(
                 hookOpts.agentId,
@@ -1280,11 +1290,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 errorMsg,
                 getCompletionStats(),
               );
-              patchAgentMeta(metaPath, {
-                status: 'cancelled',
-                lastUpdatedAt: new Date().toISOString(),
-                lastError: undefined,
-              });
+              persistBackgroundCancellation(
+                metaPath,
+                bgAbortController.signal.aborted,
+              );
             } else {
               registry.fail(hookOpts.agentId, errorMsg, getCompletionStats());
               patchAgentMeta(metaPath, {

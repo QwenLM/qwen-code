@@ -206,4 +206,59 @@ describe('useResumeCommand', () => {
     expect(historyManager.clearItems).toHaveBeenCalledTimes(1);
     expect(historyManager.loadHistory).toHaveBeenCalledTimes(1);
   });
+
+  it('adds a recovered-background-agents notice when paused agents are restored', async () => {
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+    const geminiClient = {
+      initialize: vi.fn(),
+    };
+    const buildRecoveredBackgroundAgentsNotice = vi
+      .fn()
+      .mockReturnValue('Recovered 2 interrupted background agents.');
+
+    const config = {
+      getTargetDir: () => '/tmp',
+      getGeminiClient: () => geminiClient,
+      startNewSession: vi.fn(),
+      loadPausedBackgroundAgents: vi
+        .fn()
+        .mockResolvedValue([{ agentId: 'a' }, { agentId: 'b' }]),
+      getBackgroundAgentResumeService: () => ({
+        buildRecoveredBackgroundAgentsNotice,
+      }),
+      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+        debug: vi.fn(),
+        error: vi.fn(),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        historyManager,
+        startNewSession,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleResume('session-3');
+    });
+
+    expect(config.loadPausedBackgroundAgents).toHaveBeenCalledWith('session-3');
+    expect(buildRecoveredBackgroundAgentsNotice).toHaveBeenCalledWith(2);
+    expect(historyManager.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'info',
+        text: 'Recovered 2 interrupted background agents.',
+      }),
+      expect.any(Number),
+    );
+  });
 });

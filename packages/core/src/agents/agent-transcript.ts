@@ -35,6 +35,7 @@ import type {
 } from '../services/chatRecordingService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { _recoverObjectsFromLine } from '../utils/jsonl-utils.js';
+import type { FunctionDeclaration, Content } from '@google/genai';
 
 const debugLogger = createDebugLogger('AGENT_TRANSCRIPT');
 
@@ -209,7 +210,15 @@ export interface AttachJsonlOptions {
    * Exact bootstrap history that seeded the agent before its first runtime
    * turn. Used by transcript-first resume to reconstruct fork constraints.
    */
-  bootstrapHistory?: Array<import('@google/genai').Content>;
+  bootstrapHistory?: Content[];
+  /**
+   * Immutable launch-time system instruction for fork resume.
+   */
+  bootstrapSystemInstruction?: string | Content;
+  /**
+   * Immutable launch-time tool declarations / allowlist for fork resume.
+   */
+  bootstrapTools?: Array<string | FunctionDeclaration>;
   /**
    * Launching prompt that should be treated as the first model-facing task
    * prompt during transcript-based resume. For forks this may differ from the
@@ -378,6 +387,16 @@ export function attachJsonlTranscriptWriter(
     const payload: AgentBootstrapRecordPayload = {
       kind: 'fork',
       history: structuredClone(options.bootstrapHistory),
+      ...(options.bootstrapSystemInstruction !== undefined
+        ? {
+            systemInstruction: structuredClone(
+              options.bootstrapSystemInstruction,
+            ),
+          }
+        : {}),
+      ...(options.bootstrapTools !== undefined
+        ? { tools: structuredClone(options.bootstrapTools) }
+        : {}),
     };
     recordSystem('agent_bootstrap', payload);
   }

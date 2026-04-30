@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto';
 import {
   type PartListUnion,
   type Content,
+  type FunctionDeclaration,
   type GenerateContentResponseUsageMetadata,
   createUserContent,
   createModelContent,
@@ -163,6 +164,16 @@ export interface AgentBootstrapRecordPayload {
    * the original first task prompt/user turn.
    */
   history: Content[];
+  /**
+   * Immutable launch-time system instruction for the fork runtime. Resume must
+   * reuse this exact value rather than reading the current parent config.
+   */
+  systemInstruction?: string | Content;
+  /**
+   * Immutable launch-time tool declarations / allowlist for the fork runtime.
+   * Resume must reuse this exact capability set or stay blocked.
+   */
+  tools?: Array<string | FunctionDeclaration>;
 }
 
 /**
