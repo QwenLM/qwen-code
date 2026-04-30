@@ -20,6 +20,7 @@ import {
 } from './agent-transcript.js';
 import { AgentEventEmitter, AgentEventType } from './runtime/agent-events.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
+import type { Content, FunctionDeclaration } from '@google/genai';
 
 describe('agent-transcript', () => {
   describe('path helpers', () => {
@@ -169,10 +170,9 @@ describe('agent-transcript', () => {
       jsonlPath: string,
       extra: {
         initialUserPrompt?: string;
-        bootstrapHistory?: Array<{
-          role: 'user' | 'model';
-          parts: Array<{ text: string }>;
-        }>;
+        bootstrapHistory?: Content[];
+        bootstrapSystemInstruction?: string | Content;
+        bootstrapTools?: Array<string | FunctionDeclaration>;
         launchTaskPrompt?: string;
       } = {},
     ) {
@@ -253,6 +253,36 @@ describe('agent-transcript', () => {
       });
       expect(records[2]?.systemPayload).toMatchObject({
         displayText: 'Begin.',
+      });
+    });
+
+    it('writes bootstrap records even when inherited history is empty', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { cleanup } = makeWriter(jsonlPath, {
+        bootstrapHistory: [],
+        bootstrapSystemInstruction: {
+          role: 'system',
+          parts: [{ text: 'fork system' }],
+        },
+        bootstrapTools: [{ name: 'Bash' }],
+        launchTaskPrompt: 'Begin.',
+      });
+
+      cleanup();
+
+      const records = readJsonl(jsonlPath);
+      expect(records.map((record) => [record.type, record.subtype])).toEqual([
+        ['system', 'agent_bootstrap'],
+        ['system', 'agent_launch_prompt'],
+      ]);
+      expect(records[0]?.systemPayload).toMatchObject({
+        kind: 'fork',
+        history: [],
+        systemInstruction: {
+          role: 'system',
+          parts: [{ text: 'fork system' }],
+        },
+        tools: [{ name: 'Bash' }],
       });
     });
 

@@ -383,10 +383,15 @@ export function attachJsonlTranscriptWriter(
     recordUserMessage(event.text);
   };
 
-  if (options.bootstrapHistory && options.bootstrapHistory.length > 0) {
+  const hasBootstrapPayload =
+    options.bootstrapHistory !== undefined ||
+    options.bootstrapSystemInstruction !== undefined ||
+    options.bootstrapTools !== undefined;
+
+  if (hasBootstrapPayload) {
     const payload: AgentBootstrapRecordPayload = {
       kind: 'fork',
-      history: structuredClone(options.bootstrapHistory),
+      history: structuredClone(options.bootstrapHistory ?? []),
       ...(options.bootstrapSystemInstruction !== undefined
         ? {
             systemInstruction: structuredClone(
