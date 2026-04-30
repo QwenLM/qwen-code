@@ -443,6 +443,18 @@ async function getVersion(options = {}) {
       break;
     }
 
+    if (
+      type === 'stable' &&
+      releaseState.packageVersionExistsOnPyPI &&
+      releaseState.githubReleaseExists
+    ) {
+      console.error(
+        `Stable release ${versionData.releaseVersion} already has a matching GitHub release. Reusing the same release version for post-release recovery.`,
+      );
+      resumeExistingRelease = true;
+      break;
+    }
+
     if (hasManualOverride) {
       throw new Error(
         `Requested ${type} release ${versionData.releaseVersion} already exists.`,

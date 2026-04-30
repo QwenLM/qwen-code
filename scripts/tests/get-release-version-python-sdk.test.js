@@ -274,6 +274,33 @@ describe('python sdk get-release-version', () => {
     });
   });
 
+  it('reuses a stable release when only post-release recovery steps remain', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.1.0': [{}],
+          },
+        },
+      }),
+    );
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        releases: {
+          'sdk-python-v0.1.0': 'sdk-python-v0.1.0',
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'stable' })).resolves.toMatchObject({
+      releaseTag: 'v0.1.0',
+      packageVersion: '0.1.0',
+      resumeExistingRelease: true,
+    });
+  });
+
   it('fails when the latest preview base is not newer than the latest stable', async () => {
     fetchMock.mockResolvedValue(
       makeResponse({
@@ -293,21 +320,20 @@ describe('python sdk get-release-version', () => {
     );
   });
 
-  it('fails instead of patch-bumping a stable release derived from preview', async () => {
+  it('fails instead of patch-bumping a stable release derived from preview when its tag already exists', async () => {
     fetchMock.mockResolvedValue(
       makeResponse({
         json: {
           releases: {
             '0.1.0': [{}],
             '0.1.1rc0': [{}],
-            '0.1.1': [{}],
           },
         },
       }),
     );
     execSyncMock.mockImplementation(
       makeExecSyncMock({
-        releases: {
+        tags: {
           'sdk-python-v0.1.1': 'sdk-python-v0.1.1',
         },
       }),
@@ -320,19 +346,19 @@ describe('python sdk get-release-version', () => {
     );
   });
 
-  it('fails instead of patch-bumping the current stable version on rerun', async () => {
+  it('fails instead of patch-bumping the current stable version when its tag already exists', async () => {
     fetchMock.mockResolvedValue(
       makeResponse({
         json: {
           releases: {
-            '0.1.0': [{}],
+            '0.0.9': [{}],
           },
         },
       }),
     );
     execSyncMock.mockImplementation(
       makeExecSyncMock({
-        releases: {
+        tags: {
           'sdk-python-v0.1.0': 'sdk-python-v0.1.0',
         },
       }),
