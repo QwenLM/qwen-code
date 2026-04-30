@@ -285,6 +285,57 @@ describe('BackgroundTaskRegistry', () => {
     expect(callback).toHaveBeenCalledTimes(2);
   });
 
+  it('abortAll({ notify: false }) suppresses terminal notifications from old tasks', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+
+    registry.register({
+      agentId: 'a',
+      description: 'agent a',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    registry.abortAll({ notify: false });
+
+    expect(registry.get('a')!.status).toBe('cancelled');
+    expect(registry.hasUnfinalizedTasks()).toBe(false);
+    expect(callback).not.toHaveBeenCalled();
+
+    registry.complete('a', 'late result');
+    registry.finalizeCancelled('a', 'late partial');
+
+    expect(callback).not.toHaveBeenCalled();
+    expect(registry.get('a')!.status).toBe('cancelled');
+    expect(registry.get('a')!.result).toBeUndefined();
+  });
+
+  it('abortAll({ notify: false }) suppresses pending fallback notifications', () => {
+    vi.useFakeTimers();
+    try {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register({
+        agentId: 'a',
+        description: 'agent a',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      registry.cancel('a');
+      registry.abortAll({ notify: false });
+      vi.runAllTimers();
+
+      expect(callback).not.toHaveBeenCalled();
+      expect(registry.hasUnfinalizedTasks()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('hasUnfinalizedTasks reports cancelled-but-not-notified entries', () => {
     // Headless runs rely on this to keep the event loop alive after a
     // task_stop until the agent's natural handler has emitted the

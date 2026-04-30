@@ -37,6 +37,7 @@ export const clearCommand: SlashCommand = {
 
       // Abort old-session async work before creating the new session so
       // cancellation notifications cannot leak across the reset boundary.
+      config.getBackgroundTaskRegistry().abortAll({ notify: false });
       config.getMonitorRegistry().abortAll({ notify: false });
       config.getBackgroundShellRegistry().abortAll();
 

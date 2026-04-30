@@ -965,6 +965,25 @@ describe('PermissionManager', () => {
       // 'ls' is readonly, resolves to 'allow' when no rule matches
       expect(await pm.isCommandAllowed('ls')).toBe('allow');
     });
+
+    it('resolves shell virtual file operations relative to the explicit cwd', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Read(./subdir/secret.txt)'],
+          projectRoot: '/project',
+          cwd: '/project',
+        }),
+      );
+      pm2.initialize();
+
+      expect(
+        await pm2.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cat ./secret.txt',
+          cwd: '/project/subdir',
+        }),
+      ).toBe('allow');
+    });
   });
 
   describe('monitor command-level evaluation', () => {

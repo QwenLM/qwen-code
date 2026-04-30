@@ -182,6 +182,46 @@ export async function runNonInteractive(
     const geminiClient = config.getGeminiClient();
     const abortController = options.abortController ?? new AbortController();
 
+    interface LocalQueueItem {
+      displayText: string;
+      modelText: string;
+      sendMessageType: SendMessageType;
+      sdkNotification?: {
+        task_id: string;
+        tool_use_id?: string;
+        status: BackgroundTaskStatus;
+        usage?: {
+          total_tokens: number;
+          tool_uses: number;
+          duration_ms: number;
+        };
+      };
+    }
+    const localQueue: LocalQueueItem[] = [];
+    const emitNotificationToSdk = (item: LocalQueueItem) => {
+      if (item.sendMessageType !== SendMessageType.Notification) return;
+      adapter.emitUserMessage([{ text: item.displayText }]);
+      if (item.sdkNotification) {
+        adapter.emitSystemMessage('task_notification', item.sdkNotification);
+      }
+    };
+    const flushSdkNotifications = () => {
+      while (localQueue.length > 0) {
+        emitNotificationToSdk(localQueue.shift()!);
+      }
+    };
+    let oneShotMonitorsFinalized = false;
+    const finalizeOneShotMonitors = () => {
+      if (
+        options.captureMonitorNotifications === false ||
+        oneShotMonitorsFinalized
+      )
+        return;
+      oneShotMonitorsFinalized = true;
+      config.getMonitorRegistry().abortAll();
+      flushSdkNotifications();
+    };
+
     // EPIPE: don't process.exit here — that bypasses the caller's
     // runExitCleanup → flush() and drops queued JSONL writes. Destroy
     // stdout instead and let the natural return drive cleanup. (Aborting
@@ -299,22 +339,6 @@ export async function runNonInteractive(
 
       // Register the callback early so background agents launched during the main
       // tool-call chain can push completions onto the queue.
-      interface LocalQueueItem {
-        displayText: string;
-        modelText: string;
-        sendMessageType: SendMessageType;
-        sdkNotification?: {
-          task_id: string;
-          tool_use_id?: string;
-          status: BackgroundTaskStatus;
-          usage?: {
-            total_tokens: number;
-            tool_uses: number;
-            duration_ms: number;
-          };
-        };
-      }
-      const localQueue: LocalQueueItem[] = [];
       const registry = config.getBackgroundTaskRegistry();
       registry.setNotificationCallback((displayText, modelText, meta) => {
         localQueue.push({
@@ -512,19 +536,6 @@ export async function runNonInteractive(
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
         } else {
-          // Shared between the normal drain and the cancellation flush so stream-json
-          // consumers always see a terminal task_notification paired with task_started.
-          const emitNotificationToSdk = (item: LocalQueueItem) => {
-            if (item.sendMessageType !== SendMessageType.Notification) return;
-            adapter.emitUserMessage([{ text: item.displayText }]);
-            if (item.sdkNotification) {
-              adapter.emitSystemMessage(
-                'task_notification',
-                item.sdkNotification,
-              );
-            }
-          };
-
           // Drain-turns count toward getMaxSessionTurns() for symmetry with the main
           // loop — otherwise a looping cron or a model that keeps replying to
           // notifications could exceed the cap silently in headless runs.
@@ -746,13 +757,10 @@ export async function runNonInteractive(
           while (true) {
             if (abortController.signal.aborted) {
               registry.abortAll();
-              monitorRegistry.abortAll();
               // Flush queued terminal notifications before handleCancellationError
               // exits so stream-json consumers always see a task_notification paired
               // with every task_started.
-              while (localQueue.length > 0) {
-                emitNotificationToSdk(localQueue.shift()!);
-              }
+              finalizeOneShotMonitors();
               await handleCancellationError(config);
             }
             await drainLocalQueue();
@@ -767,6 +775,8 @@ export async function runNonInteractive(
               break;
             await new Promise((r) => setTimeout(r, 100));
           }
+
+          finalizeOneShotMonitors();
 
           const metrics = uiTelemetryService.getMetrics();
           const usage = computeUsageFromMetrics(metrics);
@@ -797,6 +807,8 @@ export async function runNonInteractive(
         // Expected when no message was started or already finalized
       }
 
+      finalizeOneShotMonitors();
+
       // For JSON and STREAM_JSON modes, compute usage from metrics
       const message = error instanceof Error ? error.message : String(error);
       const metrics = uiTelemetryService.getMetrics();
@@ -825,7 +837,9 @@ export async function runNonInteractive(
       // piped stdio refs don't keep the Node event loop alive after the result
       // is emitted. Session runs manage monitor lifecycle independently.
       if (options.captureMonitorNotifications !== false) {
-        monReg.abortAll();
+        if (!oneShotMonitorsFinalized) {
+          monReg.abortAll({ notify: false });
+        }
         monReg.setNotificationCallback(undefined);
       }
       if (options.captureMonitorRegistrations !== false) {

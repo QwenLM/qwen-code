@@ -349,6 +349,32 @@ describe('MonitorTool', () => {
       expect(running[0].pid).toBe(12345);
     });
 
+    it('kills the spawned child if registry registration fails', async () => {
+      const invocation = createInvocation({
+        command: 'tail -f log',
+      });
+      const killSpy = vi
+        .spyOn(process, 'kill')
+        .mockImplementation(() => true as never);
+      const registerSpy = vi
+        .spyOn(monitorRegistry, 'register')
+        .mockImplementation(() => {
+          throw new Error('limit reached');
+        });
+
+      try {
+        const result = await invocation.execute(new AbortController().signal);
+
+        expect(result.llmContent).toContain('Monitor failed to start');
+        expect(result.returnDisplay).toContain('limit reached');
+        expect(killSpy).toHaveBeenCalledWith(-12345, 'SIGTERM');
+        expect(monitorRegistry.getAll()).toHaveLength(0);
+      } finally {
+        killSpy.mockRestore();
+        registerSpy.mockRestore();
+      }
+    });
+
     it('emits events on stdout lines', async () => {
       const callback = vi.fn();
       monitorRegistry.setNotificationCallback(callback);

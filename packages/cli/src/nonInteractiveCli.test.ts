@@ -1176,7 +1176,7 @@ describe('runNonInteractive', () => {
     });
   });
 
-  it('does not wait for running monitors before emitting the final headless result', async () => {
+  it('flushes terminal monitor notifications before the final headless result', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(
       OutputFormat.STREAM_JSON,
     );
@@ -1201,8 +1201,28 @@ describe('runNonInteractive', () => {
       '<summary>Monitor emitted event #1.</summary>\n' +
       '<result>ready</result>\n' +
       '</task-notification>';
+    const cancelledXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>cancelled</status>\n' +
+      '<summary>Monitor was cancelled.</summary>\n' +
+      '</task-notification>';
+    let monitorNotificationCallback:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: {
+            monitorId: string;
+            toolUseId?: string;
+            status: 'running' | 'completed' | 'failed' | 'cancelled';
+            eventCount: number;
+          },
+        ) => void)
+      | undefined;
 
     mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      monitorNotificationCallback = cb ?? undefined;
       if (!cb) {
         return;
       }
@@ -1213,9 +1233,18 @@ describe('runNonInteractive', () => {
         eventCount: 1,
       });
     });
-    mockMonitorRegistry.getRunning.mockReturnValue([
-      { monitorId: 'mon_1', status: 'running' },
-    ]);
+    mockMonitorRegistry.abortAll.mockImplementation(() => {
+      monitorNotificationCallback?.(
+        'Monitor "logs" was cancelled.',
+        cancelledXml,
+        {
+          monitorId: 'mon_1',
+          toolUseId: 'tool_mon_1',
+          status: 'cancelled',
+          eventCount: 1,
+        },
+      );
+    });
 
     mockGeminiClient.sendMessageStream
       .mockReturnValueOnce(
@@ -1276,6 +1305,17 @@ describe('runNonInteractive', () => {
           env.data?.task_id === 'mon_1',
       ),
     ).toBe(true);
+    const cancelledNotificationIndex = envelopes.findIndex(
+      (env) =>
+        env.type === 'system' &&
+        env.subtype === 'task_notification' &&
+        env.data?.task_id === 'mon_1' &&
+        env.data?.status === 'cancelled',
+    );
+    const resultIndex = envelopes.findIndex((env) => env.type === 'result');
+    expect(cancelledNotificationIndex).toBeGreaterThanOrEqual(0);
+    expect(resultIndex).toBeGreaterThan(cancelledNotificationIndex);
+    expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(1);
     expect(envelopes.at(-1)).toMatchObject({
       type: 'result',
       is_error: false,

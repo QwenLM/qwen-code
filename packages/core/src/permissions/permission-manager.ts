@@ -205,14 +205,14 @@ export class PermissionManager {
    *      to match equivalent shell commands (e.g. `cat` → Read, `curl` → WebFetch).
    */
   private evaluateSingle(ctx: PermissionCheckContext): PermissionDecision {
-    const { toolName, command, filePath, domain, specifier } = ctx;
+    const { toolName, command, cwd, filePath, domain, specifier } = ctx;
 
     // Build path context for resolving relative path patterns
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
         ? {
             projectRoot: this.config.getProjectRoot(),
-            cwd: this.config.getCwd(),
+            cwd: cwd ?? this.config.getCwd(),
           }
         : undefined;
 
@@ -478,13 +478,13 @@ export class PermissionManager {
    * Useful for providing user-visible feedback about which rule caused a denial.
    */
   findMatchingDenyRule(ctx: PermissionCheckContext): string | undefined {
-    const { toolName, command, filePath, domain, specifier } = ctx;
+    const { toolName, command, cwd, filePath, domain, specifier } = ctx;
 
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
         ? {
             projectRoot: this.config.getProjectRoot(),
-            cwd: this.config.getCwd(),
+            cwd: cwd ?? this.config.getCwd(),
           }
         : undefined;
 
@@ -518,10 +518,14 @@ export class PermissionManager {
    * @param command - The shell command to evaluate.
    * @returns The PermissionDecision for this command.
    */
-  async isCommandAllowed(command: string): Promise<PermissionDecision> {
+  async isCommandAllowed(
+    command: string,
+    cwd?: string,
+  ): Promise<PermissionDecision> {
     return this.evaluate({
       toolName: 'run_shell_command',
       command,
+      cwd,
     });
   }
 
@@ -551,7 +555,7 @@ export class PermissionManager {
    * @returns true if at least one rule matches.
    */
   hasRelevantRules(ctx: PermissionCheckContext): boolean {
-    const { toolName, command, filePath, domain, specifier } = ctx;
+    const { toolName, command, cwd, filePath, domain, specifier } = ctx;
 
     if (SHELL_LIKE_TOOLS.has(ctx.toolName) && command !== undefined) {
       const subCommands = splitCompoundCommand(command);
@@ -566,7 +570,7 @@ export class PermissionManager {
       this.config.getProjectRoot && this.config.getCwd
         ? {
             projectRoot: this.config.getProjectRoot(),
-            cwd: this.config.getCwd(),
+            cwd: cwd ?? this.config.getCwd(),
           }
         : undefined;
 
@@ -627,7 +631,7 @@ export class PermissionManager {
    * real ask rule matched.
    */
   hasMatchingAskRule(ctx: PermissionCheckContext): boolean {
-    const { toolName, command, filePath, domain, specifier } = ctx;
+    const { toolName, command, cwd, filePath, domain, specifier } = ctx;
 
     if (SHELL_LIKE_TOOLS.has(ctx.toolName) && command !== undefined) {
       const subCommands = splitCompoundCommand(command);
@@ -642,7 +646,7 @@ export class PermissionManager {
       this.config.getProjectRoot && this.config.getCwd
         ? {
             projectRoot: this.config.getProjectRoot(),
-            cwd: this.config.getCwd(),
+            cwd: cwd ?? this.config.getCwd(),
           }
         : undefined;
 

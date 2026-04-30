@@ -237,7 +237,25 @@ class MonitorToolInvocation extends BaseToolInvocation<
     }
 
     entry.pid = child.pid;
-    registry.register(entry);
+    try {
+      registry.register(entry);
+    } catch (err) {
+      if (child.pid) {
+        if (process.platform === 'win32') {
+          spawn('taskkill', ['/pid', child.pid.toString(), '/f', '/t']);
+        } else {
+          try {
+            process.kill(-child.pid, 'SIGTERM');
+          } catch {
+            // process may already be dead
+          }
+        }
+      }
+      return {
+        llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
+        returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
+      };
+    }
 
     // Line buffering (separate per stream to avoid interleave corruption)
     let tokenBucket = THROTTLE_BURST_SIZE;

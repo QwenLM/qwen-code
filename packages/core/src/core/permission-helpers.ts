@@ -39,6 +39,12 @@ export function buildPermissionCheckContext(
 ): PermissionCheckContext {
   const command =
     'command' in toolParams ? String(toolParams['command']) : undefined;
+  const cwd =
+    typeof toolParams['directory'] === 'string'
+      ? path.isAbsolute(toolParams['directory'])
+        ? toolParams['directory']
+        : path.resolve(targetDir, toolParams['directory'])
+      : undefined;
 
   // Extract file path — tools use 'file_path' or 'path' (LS / grep / glob).
   let filePath =
@@ -69,7 +75,7 @@ export function buildPermissionCheckContext(
         ? toolParams['subagent_type']
         : undefined;
 
-  return { toolName, command, filePath, domain, specifier };
+  return { toolName, command, cwd, filePath, domain, specifier };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

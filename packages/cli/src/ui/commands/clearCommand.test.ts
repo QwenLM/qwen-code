@@ -33,6 +33,7 @@ describe('clearCommand', () => {
   let mockFireSessionEndEvent: ReturnType<typeof vi.fn>;
   let mockFireSessionStartEvent: ReturnType<typeof vi.fn>;
   let mockGetHookSystem: ReturnType<typeof vi.fn>;
+  let mockAbortBackgroundTasks: ReturnType<typeof vi.fn>;
   let mockAbortMonitors: ReturnType<typeof vi.fn>;
   let mockAbortBackgroundShells: ReturnType<typeof vi.fn>;
 
@@ -45,6 +46,7 @@ describe('clearCommand', () => {
       fireSessionEndEvent: mockFireSessionEndEvent,
       fireSessionStartEvent: mockFireSessionStartEvent,
     });
+    mockAbortBackgroundTasks = vi.fn();
     mockAbortMonitors = vi.fn();
     mockAbortBackgroundShells = vi.fn();
     vi.clearAllMocks();
@@ -64,6 +66,9 @@ describe('clearCommand', () => {
           getModel: () => 'test-model',
           getToolRegistry: () => undefined,
           getApprovalMode: () => 'default',
+          getBackgroundTaskRegistry: () => ({
+            abortAll: mockAbortBackgroundTasks,
+          }),
           getMonitorRegistry: () => ({ abortAll: mockAbortMonitors }),
           getBackgroundShellRegistry: () => ({
             abortAll: mockAbortBackgroundShells,
@@ -128,15 +133,19 @@ describe('clearCommand', () => {
     expect(sessionEndCallOrder).toBeLessThan(sessionStartCallOrder);
   });
 
-  it('aborts old monitors and background shells before starting a new session', async () => {
+  it('aborts old background work before starting a new session', async () => {
     if (!clearCommand.action) {
       throw new Error('clearCommand must have an action.');
     }
 
     await clearCommand.action(mockContext, '');
 
+    expect(mockAbortBackgroundTasks).toHaveBeenCalledWith({ notify: false });
     expect(mockAbortMonitors).toHaveBeenCalledWith({ notify: false });
     expect(mockAbortBackgroundShells).toHaveBeenCalledTimes(1);
+    expect(mockAbortBackgroundTasks.mock.invocationCallOrder[0]).toBeLessThan(
+      mockStartNewSession.mock.invocationCallOrder[0],
+    );
     expect(mockAbortMonitors.mock.invocationCallOrder[0]).toBeLessThan(
       mockStartNewSession.mock.invocationCallOrder[0],
     );
@@ -270,6 +279,9 @@ describe('clearCommand', () => {
             getApprovalMode: vi.fn().mockReturnValue('default'),
             getToolRegistry: vi.fn().mockReturnValue({
               getAllTools: vi.fn().mockReturnValue([]),
+            }),
+            getBackgroundTaskRegistry: () => ({
+              abortAll: mockAbortBackgroundTasks,
             }),
             getMonitorRegistry: () => ({ abortAll: mockAbortMonitors }),
             getBackgroundShellRegistry: () => ({
