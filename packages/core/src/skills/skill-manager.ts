@@ -85,10 +85,14 @@ export class SkillManager {
   }
 
   /**
-   * Adds a listener that will be called when skills change.
+   * Adds a listener that will be called when skills change. Listeners may
+   * return a Promise, which `notifyChangeListeners` will await before
+   * resolving — callers (e.g. `matchAndActivateByPath`) can therefore wait
+   * for downstream consumers like `SkillTool.refreshSkills()` to apply the
+   * updated state before continuing.
    * @returns A function to remove the listener.
    */
-  addChangeListener(listener: () => void): () => void {
+  addChangeListener(listener: () => void | Promise<void>): () => void {
     this.changeListeners.add(listener);
     return () => {
       this.changeListeners.delete(listener);
@@ -96,12 +100,17 @@ export class SkillManager {
   }
 
   /**
-   * Notifies all registered change listeners.
+   * Notifies all registered change listeners and awaits any returned
+   * promises. Sync listeners resolve immediately; async listeners (e.g.
+   * `SkillTool.refreshSkills`) hold the activation pipeline until their
+   * downstream tool descriptions are refreshed, eliminating the race where
+   * a system-reminder announces a skill before the model can actually see
+   * it in `<available_skills>`.
    */
-  private notifyChangeListeners(): void {
+  private async notifyChangeListeners(): Promise<void> {
     for (const listener of this.changeListeners) {
       try {
-        listener();
+        await listener();
       } catch (error) {
         debugLogger.warn('Skill change listener threw an error:', error);
       }
@@ -330,7 +339,7 @@ export class SkillManager {
       `Skills cache refreshed: ${totalSkills} total skills loaded ` +
         `(${conditional.length} conditional)`,
     );
-    this.notifyChangeListeners();
+    await this.notifyChangeListeners();
   }
 
   /**
@@ -347,14 +356,17 @@ export class SkillManager {
   /**
    * Activate any conditional skills whose `paths:` globs match `filePath`.
    * Returns the names of skills newly activated by this call. When at least
-   * one skill activates, change listeners are notified so the SkillTool
-   * description picks up the new entry on the next refresh.
+   * one skill activates, change listeners are notified and awaited — so by
+   * the time this method resolves, downstream consumers (notably
+   * `SkillTool.refreshSkills` updating the model-facing tool description)
+   * have applied the new state. Callers can therefore announce the
+   * activation in the same turn without racing against a stale tool list.
    */
-  matchAndActivateByPath(filePath: string): string[] {
+  async matchAndActivateByPath(filePath: string): Promise<string[]> {
     if (!this.activationRegistry) return [];
     const newly = this.activationRegistry.matchAndConsume(filePath);
     if (newly.length > 0) {
-      this.notifyChangeListeners();
+      await this.notifyChangeListeners();
     }
     return newly;
   }

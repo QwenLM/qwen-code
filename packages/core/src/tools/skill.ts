@@ -77,9 +77,12 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       throw new Error('SkillManager not available');
     }
     this.skillManager = skillManager;
-    this.skillManager.addChangeListener(() => {
-      void this.refreshSkills();
-    });
+    // Return the refresh promise so SkillManager.notifyChangeListeners can
+    // await it. Without this, matchAndActivateByPath returns before the
+    // tool description picks up the newly activated skill, and the
+    // <system-reminder> announcing the activation can land in the same
+    // turn as a still-stale <available_skills> listing.
+    this.skillManager.addChangeListener(() => this.refreshSkills());
 
     // Initialize the tool asynchronously
     this.refreshSkills();

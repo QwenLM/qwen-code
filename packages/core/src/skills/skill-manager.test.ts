@@ -965,7 +965,9 @@ Body.
     it('activates a conditional skill when a matching file path is touched', async () => {
       await loadConditionalFixture();
 
-      const newly = manager.matchAndActivateByPath('/test/project/src/App.tsx');
+      const newly = await manager.matchAndActivateByPath(
+        '/test/project/src/App.tsx',
+      );
       expect(newly).toEqual(['tsx-helper']);
       expect(manager.getActivatedSkillNames().has('tsx-helper')).toBe(true);
 
@@ -980,24 +982,24 @@ Body.
       const listener = vi.fn();
       manager.addChangeListener(listener);
 
-      expect(manager.matchAndActivateByPath('/test/project/src/A.tsx')).toEqual(
-        ['tsx-helper'],
-      );
+      expect(
+        await manager.matchAndActivateByPath('/test/project/src/A.tsx'),
+      ).toEqual(['tsx-helper']);
       expect(listener).toHaveBeenCalledTimes(1);
 
       // Same pattern touched again — skill already active, no new
       // notification.
-      expect(manager.matchAndActivateByPath('/test/project/src/B.tsx')).toEqual(
-        [],
-      );
+      expect(
+        await manager.matchAndActivateByPath('/test/project/src/B.tsx'),
+      ).toEqual([]);
       expect(listener).toHaveBeenCalledTimes(1);
     });
 
     it('does nothing for paths outside the project root', async () => {
       await loadConditionalFixture();
-      expect(manager.matchAndActivateByPath('/other/place/foo.tsx')).toEqual(
-        [],
-      );
+      expect(
+        await manager.matchAndActivateByPath('/other/place/foo.tsx'),
+      ).toEqual([]);
       expect(manager.getActivatedSkillNames().size).toBe(0);
     });
 
@@ -1028,7 +1030,9 @@ Body.
 `);
       await manager.refreshCache();
 
-      const newly = manager.matchAndActivateByPath('/test/project/src/foo.ts');
+      const newly = await manager.matchAndActivateByPath(
+        '/test/project/src/foo.ts',
+      );
       expect(newly).toEqual([]);
       expect(manager.getActivatedSkillNames().size).toBe(0);
     });
@@ -1095,16 +1099,16 @@ User body.
 
       // Touching `lib/x.ts` (matches user-foo's paths but project-foo wins
       // in listSkills) must NOT activate the visible project-foo.
-      expect(manager.matchAndActivateByPath('/test/project/lib/x.ts')).toEqual(
-        [],
-      );
+      expect(
+        await manager.matchAndActivateByPath('/test/project/lib/x.ts'),
+      ).toEqual([]);
       expect(manager.getActivatedSkillNames().has('foo')).toBe(false);
 
       // Touching `src/x.ts` (matches the visible project-foo's paths) does
       // activate it.
-      expect(manager.matchAndActivateByPath('/test/project/src/x.ts')).toEqual([
-        'foo',
-      ]);
+      expect(
+        await manager.matchAndActivateByPath('/test/project/src/x.ts'),
+      ).toEqual(['foo']);
     });
   });
 

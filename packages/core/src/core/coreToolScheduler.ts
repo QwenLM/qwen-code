@@ -1752,10 +1752,14 @@ export class CoreToolScheduler {
             }
 
             // Activate any conditional skills (skills with `paths:`
-            // frontmatter) whose globs match this file. Newly activated
-            // skills appear in the SkillTool listing on the next turn.
+            // frontmatter) whose globs match this file. The await is
+            // load-bearing: matchAndActivateByPath only resolves after
+            // SkillTool's refresh listener has updated the model-facing
+            // tool description, so the system-reminder we append below
+            // never lands in a turn where <available_skills> is still
+            // stale.
             const activatedSkills =
-              skillManager?.matchAndActivateByPath(candidatePath);
+              await skillManager?.matchAndActivateByPath(candidatePath);
             if (activatedSkills) {
               for (const name of activatedSkills)
                 seenSkillActivations.add(name);
