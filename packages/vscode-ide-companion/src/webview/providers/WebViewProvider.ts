@@ -1179,7 +1179,7 @@ export class WebViewProvider {
 
   /**
    * Initialize agent connection and session
-   * Can be called from show() or via /login command
+   * Can be called from show() or via /auth command
    */
   async initializeAgentConnection(options?: {
     autoAuthenticate?: boolean;
@@ -1737,9 +1737,13 @@ export class WebViewProvider {
    * The webview resolves the content and posts back a 'copyToClipboard' message.
    */
   sendCopyCommand(action: string): boolean {
-    if (WebViewProvider.lastContextMenuProvider !== this) return false;
+    if (WebViewProvider.lastContextMenuProvider !== this) {
+      return false;
+    }
     const webview = this.getActiveWebview();
-    if (!webview) return false;
+    if (!webview) {
+      return false;
+    }
     webview.postMessage({ type: 'copyCommand', data: { action } });
     return true;
   }

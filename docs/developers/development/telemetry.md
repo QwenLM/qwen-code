@@ -249,7 +249,6 @@ Logs are timestamped records of specific events. The following events are logged
     - `output_token_count`
     - `cached_content_token_count`
     - `thoughts_token_count`
-    - `tool_token_count`
     - `response_text` (if applicable)
     - `auth_type`
 
@@ -315,7 +314,7 @@ Metrics are numerical measurements of behavior over time. The following metrics 
 - `qwen-code.token.usage` (Counter, Int): Counts the number of tokens used.
   - **Attributes**:
     - `model`
-    - `type` (string: "input", "output", "thought", "cache", or "tool")
+    - `type` (string: "input", "output", "thought", or "cache")
 
 - `qwen-code.file.operation.count` (Counter, Int): Counts file operations.
   - **Attributes**:

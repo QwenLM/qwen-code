@@ -273,6 +273,22 @@ function extractCuratedHistory(comprehensiveHistory: Content[]): Content[] {
   return curatedHistory;
 }
 
+function stripThoughtPartsFromContent(content: Content): Content | null {
+  if (!content.parts) {
+    return content;
+  }
+
+  const parts = content.parts.filter((part) => !(part as Part).thought);
+  if (parts.length === 0) {
+    return null;
+  }
+
+  return {
+    ...content,
+    parts,
+  };
+}
+
 /**
  * Custom error to signal that a stream completed with invalid content,
  * which should trigger a retry.
@@ -790,6 +806,12 @@ export class GeminiChat {
 
   truncateHistory(keepCount: number): void {
     this.history = this.history.slice(0, keepCount);
+  }
+
+  stripThoughtsFromHistory(): void {
+    this.history = this.history
+      .map(stripThoughtPartsFromContent)
+      .filter((content): content is Content => content !== null);
   }
 
   /**

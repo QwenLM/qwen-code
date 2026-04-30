@@ -2039,6 +2039,26 @@ describe('GeminiChat', async () => {
     );
   });
 
+  describe('stripThoughtsFromHistory', () => {
+    it('should strip thought parts from history and drop thought-only entries', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'question' }] },
+        {
+          role: 'model',
+          parts: [{ text: 'thinking', thought: true }, { text: 'answer' }],
+        },
+        { role: 'model', parts: [{ text: 'more thinking', thought: true }] },
+      ]);
+
+      chat.stripThoughtsFromHistory();
+
+      expect(chat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'question' }] },
+        { role: 'model', parts: [{ text: 'answer' }] },
+      ]);
+    });
+  });
+
   describe('stripOrphanedUserEntriesFromHistory', () => {
     it('should pop a single trailing user entry', () => {
       chat.setHistory([

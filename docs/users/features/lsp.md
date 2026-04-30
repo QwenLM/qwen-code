@@ -40,7 +40,7 @@ You need to have the language server for your programming language installed:
 
 ### .lsp.json File
 
-You can configure language servers using a `.lsp.json` file in your project root. This uses the language-keyed format described in the [Claude Code plugin LSP configuration reference](https://code.claude.com/docs/en/plugins-reference#lsp-servers).
+You can configure language servers using a `.lsp.json` file in your project root. Each top-level key is a language identifier, and its value is the server configuration object.
 
 **Basic format:**
 
@@ -104,9 +104,9 @@ Example:
 
 #### Required Fields
 
-| Option    | Type   | Description                                       |
-| --------- | ------ | ------------------------------------------------- |
-| `command` | string | Command to start the LSP server (must be in PATH) |
+| Option    | Type   | Description                                                                                                                                       |
+| --------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `command` | string | Command to start the LSP server. Supports bare command names resolved via `PATH` (e.g. `clangd`) and absolute paths (e.g. `/opt/llvm/bin/clangd`) |
 
 #### Optional Fields
 
@@ -147,6 +147,8 @@ For servers that use TCP or Unix socket transport:
 ## Available LSP Operations
 
 Qwen Code exposes LSP functionality through the unified `lsp` tool. Here are the available operations:
+
+Location-based operations (`goToDefinition`, `findReferences`, `hover`, `goToImplementation`, and `prepareCallHierarchy`) require an exact `filePath` + `line` + `character` position. If you do not know the exact position, use `workspaceSymbol` or `documentSymbol` first to locate the symbol.
 
 ### Code Navigation
 
@@ -315,7 +317,7 @@ LSP servers are only started in trusted workspaces by default. This is because l
 - **Trusted Workspace**: LSP servers start if configured
 - **Untrusted Workspace**: LSP servers won't start unless `trustRequired: false` is set in the server configuration
 
-To mark a workspace as trusted, use the `/trust` command or configure trusted folders in settings.
+To mark a workspace as trusted, use the `/trust` command.
 
 ### Per-Server Trust Override
 
@@ -338,11 +340,12 @@ You can override trust requirements for specific servers in their configuration:
 
 ### Server Not Starting
 
-1. **Check if the server is installed**: Run the command manually to verify
-2. **Check the PATH**: Ensure the server binary is in your system PATH
-3. **Check workspace trust**: The workspace must be trusted for LSP
-4. **Check logs**: Look for error messages in the console output
-5. **Verify --experimental-lsp flag**: Make sure you're using the flag when starting Qwen Code
+1. **Verify `--experimental-lsp` flag**: Make sure you're using the flag when starting Qwen Code
+2. **Check if the server is installed**: Run the command manually (e.g. `clangd --version`) to verify
+3. **Check the command**: The server binary must be in your system `PATH`, or specified as an absolute path (e.g. `/opt/llvm/bin/clangd`). Relative paths that escape the workspace are blocked
+4. **Check workspace trust**: The workspace must be trusted for LSP (use `/trust`)
+5. **Check logs**: Look for `[LSP]` entries in the debug log (see Debugging section below)
+6. **Check the process**: Run `ps aux | grep <server-name>` to verify the server process is running
 
 ### Slow Performance
 
@@ -351,41 +354,34 @@ You can override trust requirements for specific servers in their configuration:
 
 ### No Results
 
-1. **Server not ready**: The server may still be indexing
+1. **Server not ready**: The server may still be indexing. For C/C++ projects with clangd, ensure `--background-index` is in the args and a `compile_commands.json` (or `compile_flags.txt`) exists in the project root or a parent directory. Use `--compile-commands-dir=<path>` if it is in a build subdirectory
 2. **File not saved**: Save your file for the server to pick up changes
 3. **Wrong language**: Check if the correct server is running for your language
+4. **Check the process**: Run `ps aux | grep <server-name>` to verify the server is actually running
 
 ### Debugging
 
-Enable debug logging to see LSP communication:
+LSP debug logs are automatically written to session log files in `~/.qwen/debug/`. To check LSP-related entries:
 
 ```bash
-DEBUG=lsp* qwen --experimental-lsp
+# View the latest session log
+grep '\[LSP\]' ~/.qwen/debug/latest
+
+# Common error messages to look for:
+#   "command path is unsafe"  → relative path escapes workspace, use absolute path or add to PATH
+#   "command not found"       → server binary not installed or not in PATH
+#   "requires trusted workspace" → run /trust first
 ```
 
-Or check the LSP debugging guide at `packages/cli/LSP_DEBUGGING_GUIDE.md`.
+You can also verify the server process is running:
 
-## Claude Code Compatibility
-
-Qwen Code supports Claude Code-style `.lsp.json` configuration files in the language-keyed format defined in the [Claude Code plugins reference](https://code.claude.com/docs/en/plugins-reference#lsp-servers). If you're migrating from Claude Code, use the language-as-key layout in your configuration.
-
-### Configuration Format
-
-The recommended format follows Claude Code's specification:
-
-```json
-{
-  "go": {
-    "command": "gopls",
-    "args": ["serve"],
-    "extensionToLanguage": {
-      ".go": "go"
-    }
-  }
-}
+```bash
+ps aux | grep clangd   # or typescript-language-server, jdtls, etc.
 ```
 
-Claude Code LSP plugins can also supply `lspServers` in `plugin.json` (or a referenced `.lsp.json`). Qwen Code loads those configs when the extension is enabled, and they must use the same language-keyed format.
+## Extension LSP Configuration
+
+Extensions can provide LSP server configurations through the `lspServers` field in their `plugin.json`. This can be either an inline object or a path to a `.lsp.json` file. Qwen Code loads these configs when the extension is enabled. The format is the same language-keyed layout used in project `.lsp.json` files.
 
 ## Best Practices
 
@@ -406,7 +402,7 @@ qwen --experimental-lsp
 
 ### Q: How do I know which language servers are running?
 
-Use the `/lsp status` command to see all configured and running language servers.
+Check the debug log for `[LSP]` entries (`grep '\[LSP\]' ~/.qwen/debug/latest`), or verify the process directly with `ps aux | grep <server-name>`.
 
 ### Q: Can I use multiple language servers for the same file type?
 
