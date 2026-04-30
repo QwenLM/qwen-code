@@ -4391,11 +4391,34 @@ describe('extractToolFilePaths', () => {
     expect(extractToolFilePaths('glob', { pattern: 'src/**/*.tsx' })).toEqual([
       'src/**/*.tsx',
     ]);
-    // Both `path` (search root) and `pattern` (selector) when both
-    // present.
+  });
+
+  it('joins glob.path + glob.pattern into the effective selector', () => {
+    // Regression: glob({ path: 'src', pattern: '**/*.ts' }) actually
+    // searches src/**/*.ts. Emitting them as separate candidates
+    // ('src', '**/*.ts') would NOT activate a skill keyed on
+    // `paths: ['src/**/*.ts']`, because neither component matches the
+    // skill glob in isolation. Join them with path.join so the
+    // effective-selector candidate reflects what the tool really
+    // touched. (The standalone `path` candidate is still emitted by the
+    // generic block above so a broad skill keyed on `paths: ['src/**']`
+    // still matches.)
     expect(
       extractToolFilePaths('glob', { path: 'src', pattern: '**/*.ts' }),
-    ).toEqual(['src', '**/*.ts']);
+    ).toEqual(['src', 'src/**/*.ts']);
+  });
+
+  it('joins absolute glob.path with pattern (registry guard rejects downstream)', () => {
+    // glob({ path: '/tmp/external', pattern: '**/*.ts' }) joins to an
+    // absolute path. SkillActivationRegistry's project-root guard
+    // rejects it; the test pins the joined shape so absolute roots
+    // stay distinguishable from project-relative ones.
+    expect(
+      extractToolFilePaths('glob', {
+        path: '/tmp/external',
+        pattern: '**/*.ts',
+      }),
+    ).toEqual(['/tmp/external', '/tmp/external/**/*.ts']);
   });
 
   it('does not extract pattern for non-glob tools', () => {

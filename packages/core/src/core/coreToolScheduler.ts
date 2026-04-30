@@ -47,6 +47,7 @@ import type {
   Part,
   PartListUnion,
 } from '@google/genai';
+import * as path from 'node:path';
 import { ToolNames } from '../tools/tool-names.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
@@ -247,10 +248,24 @@ export function extractToolFilePaths(
     for (const p of pathsField) push(p);
   }
   if (toolName === ToolNames.GLOB) {
-    // Glob-only: include `pattern` as a path-shaped selector. Don't add
-    // it for grep_search even though grep also has a `pattern` field —
-    // grep's pattern is a regex, not a path glob, and would false-match.
-    push(obj['pattern']);
+    // Glob-only: derive the effective selector from `path` + `pattern`.
+    // The previous version pushed `pattern` standalone, but the glob
+    // call actually searches `<path>/<pattern>` — so a skill keyed on
+    // `paths: ['src/**/*.ts']` would not activate from
+    // `glob({ path: 'src', pattern: '**/*.ts' })` because the candidate
+    // was just `**/*.ts`. Joining matches what the tool really touched.
+    // (Don't add `pattern` for grep_search even though it also has a
+    // `pattern` field — grep's pattern is a regex, not a path glob,
+    // and would false-match.)
+    const pathField = obj['path'];
+    const patternField = obj['pattern'];
+    if (typeof patternField === 'string' && patternField.length > 0) {
+      if (typeof pathField === 'string' && pathField.length > 0) {
+        push(path.join(pathField, patternField));
+      } else {
+        push(patternField);
+      }
+    }
   }
   return out;
 }
