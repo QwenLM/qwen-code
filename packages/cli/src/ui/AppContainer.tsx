@@ -1757,9 +1757,10 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
 
-      // 3. Truncate API history and strip stale thinking blocks
+      // 3. Truncate API history to the target point.
+      // Do NOT strip thought parts — reasoning models (e.g. DeepSeek) require
+      // reasoning_content continuity across all turns in the conversation.
       geminiClient.truncateHistory(apiTruncateIndex);
-      geminiClient.stripThoughtsFromHistory();
 
       // 4. Truncate UI history (keep everything before the target item)
       const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);

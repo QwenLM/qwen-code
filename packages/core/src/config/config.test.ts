@@ -168,7 +168,6 @@ vi.mock('../core/client.js', () => ({
   GeminiClient: vi.fn().mockImplementation(() => ({
     initialize: vi.fn().mockResolvedValue(undefined),
     isInitialized: vi.fn().mockReturnValue(true),
-    stripThoughtsFromHistory: vi.fn(),
     setTools: vi.fn(),
   })),
 }));
@@ -477,10 +476,6 @@ describe('Server Config (config.ts)', () => {
       await config.refreshAuth(AuthType.USE_VERTEX_AI);
 
       await config.refreshAuth(AuthType.USE_GEMINI);
-
-      expect(
-        config.getGeminiClient().stripThoughtsFromHistory,
-      ).not.toHaveBeenCalledWith();
     });
   });
 
@@ -562,12 +557,7 @@ describe('Server Config (config.ts)', () => {
 
       await config.refreshAuth(AuthType.QWEN_OAUTH);
 
-      const stripSpy = config.getGeminiClient().stripThoughtsFromHistory;
-      vi.mocked(stripSpy).mockClear();
-
       await config.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
-
-      expect(stripSpy).not.toHaveBeenCalled();
     });
 
     it('should notify model change listeners after switchModel', async () => {
