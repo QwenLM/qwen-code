@@ -403,9 +403,15 @@ async function getVersion(options = {}) {
       );
     }
 
-    if (type === 'stable' && versionData.source === 'preview') {
+    if (type === 'stable') {
+      if (versionData.source === 'preview') {
+        throw new Error(
+          `Stable release ${versionData.releaseVersion} derived from the latest preview already exists.`,
+        );
+      }
+
       throw new Error(
-        `Stable release ${versionData.releaseVersion} derived from the latest preview already exists.`,
+        `Stable release ${versionData.releaseVersion} already exists. Provide stable_version_override to release a different stable version.`,
       );
     }
 

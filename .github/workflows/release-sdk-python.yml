@@ -59,6 +59,7 @@ jobs:
           DRY_RUN_INPUT: '${{ github.event.inputs.dry_run }}'
           FORCE_SKIP_TESTS: '${{ github.event.inputs.force_skip_tests }}'
           REQUESTED_REF: '${{ github.event.inputs.ref || github.sha }}'
+          WORKFLOW_REF: '${{ github.ref }}'
         run: |
           if [[ "${CREATE_NIGHTLY_RELEASE}" == "true" && "${CREATE_PREVIEW_RELEASE}" == "true" ]]; then
             echo "create_nightly_release and create_preview_release cannot both be true" >&2
@@ -66,6 +67,15 @@ jobs:
           fi
 
           if [[ "${DRY_RUN_INPUT}" != "true" ]]; then
+            case "${WORKFLOW_REF}" in
+              refs/heads/main)
+                ;;
+              *)
+                echo "Production publishes must be launched from the protected main workflow branch." >&2
+                exit 1
+                ;;
+            esac
+
             if [[ "${FORCE_SKIP_TESTS}" == "true" ]]; then
               echo "force_skip_tests cannot be used when dry_run is false" >&2
               exit 1

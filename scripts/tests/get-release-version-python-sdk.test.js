@@ -190,6 +190,24 @@ describe('python sdk get-release-version', () => {
     );
   });
 
+  it('fails instead of patch-bumping the current stable version on rerun', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.1.0': [{}],
+          },
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'stable' })).rejects.toThrow(
+      'Stable release 0.1.0 already exists. Provide stable_version_override to release a different stable version.',
+    );
+  });
+
   it('returns the previous stable tag for stable releases', async () => {
     fetchMock.mockResolvedValue(
       makeResponse({
