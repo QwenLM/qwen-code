@@ -34,6 +34,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
+  detectCommandSubstitution,
   getCommandRoot,
   getShellConfiguration,
   splitCommands,
@@ -62,6 +63,34 @@ const THROTTLE_REFILL_INTERVAL_MS = 1000; // 1 token per second
 
 function normalizeMonitorCommand(command: string): string {
   return stripTrailingBackgroundAmp(stripShellWrapper(command));
+}
+
+function normalizeMonitorSpawnCommand(command: string): string {
+  const trimmed = command.trim();
+  const wrapperPattern =
+    /^((?:sh|bash|zsh|cmd\.exe)\s+(?:\/c|-c)\s+)([\s\S]*)$/;
+  const match = trimmed.match(wrapperPattern);
+
+  if (!match) {
+    return stripTrailingBackgroundAmp(trimmed);
+  }
+
+  const [, wrapperPrefix, wrappedCommand] = match;
+  let innerCommand = wrappedCommand.trim();
+  let quote = '';
+
+  if (
+    (innerCommand.startsWith('"') && innerCommand.endsWith('"')) ||
+    (innerCommand.startsWith("'") && innerCommand.endsWith("'"))
+  ) {
+    quote = innerCommand[0]!;
+    innerCommand = innerCommand.substring(1, innerCommand.length - 1);
+  }
+
+  const strippedInnerCommand = stripTrailingBackgroundAmp(innerCommand);
+  return quote
+    ? `${wrapperPrefix}${quote}${strippedInnerCommand}${quote}`
+    : `${wrapperPrefix}${strippedInnerCommand}`;
 }
 
 export interface MonitorToolParams {
@@ -96,6 +125,21 @@ class MonitorToolInvocation extends BaseToolInvocation<
   }
 
   override async getDefaultPermission(): Promise<PermissionDecision> {
+    const command = normalizeMonitorCommand(this.params.command);
+
+    if (detectCommandSubstitution(command)) {
+      return 'deny';
+    }
+
+    try {
+      const isReadOnly = await isShellCommandReadOnlyAST(command);
+      if (isReadOnly) {
+        return 'allow';
+      }
+    } catch (e) {
+      debugLogger.warn('AST read-only check failed, falling back to ask:', e);
+    }
+
     return 'ask';
   }
 
@@ -177,9 +221,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
       };
     }
 
-    const strippedCommand = stripShellWrapper(this.params.command);
-    const command = stripTrailingBackgroundAmp(strippedCommand);
-    if (command !== strippedCommand) {
+    const command = normalizeMonitorSpawnCommand(this.params.command);
+    if (command !== this.params.command.trim()) {
       debugLogger.warn(
         'Stripped trailing & from monitor command — monitor lifecycle handles backgrounding',
       );

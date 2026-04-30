@@ -28,6 +28,8 @@ vi.mock('../utils/shell-utils.js', () => ({
       .split(/\s*&&\s*/)
       .map((part) => part.trim())
       .filter(Boolean),
+  detectCommandSubstitution: (command: string) =>
+    /\$\(|`|<\(|>\(/.test(command),
   stripTrailingBackgroundAmp: (command: string) => {
     const trimmed = command.trimEnd();
     if (!trimmed.endsWith('&')) return command;
@@ -140,6 +142,7 @@ describe('MonitorTool', () => {
     (
       monitorTool as unknown as {
         createInvocation: (p: Record<string, unknown>) => {
+          getDefaultPermission: () => Promise<string>;
           getConfirmationDetails: (
             s: AbortSignal,
           ) => Promise<ToolCallConfirmationDetails>;
@@ -247,6 +250,25 @@ describe('MonitorTool', () => {
       expect(details.permissionRules).toEqual([
         'Monitor(python -c "print(1)")',
       ]);
+    });
+  });
+
+  describe('getDefaultPermission', () => {
+    it('denies command substitution before confirmation', async () => {
+      const invocation = createInvocation({
+        command: 'echo $(cat secret.txt)',
+      });
+
+      await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
+    });
+
+    it('allows read-only monitor commands by default', async () => {
+      mockIsShellCommandReadOnlyAST.mockResolvedValueOnce(true);
+      const invocation = createInvocation({
+        command: 'tail -f /tmp/app.log',
+      });
+
+      await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
     });
   });
 
@@ -396,6 +418,26 @@ describe('MonitorTool', () => {
       );
       expect(monitorRegistry.getRunning()[0]?.command).toBe(
         'tail -f /var/log/app.log',
+      );
+    });
+
+    it('preserves explicit shell wrappers on the spawn path', async () => {
+      const invocation = createInvocation({
+        command: 'sh -c "tail -f /var/log/app.log &"',
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        '/bin/bash',
+        ['-c', 'sh -c "tail -f /var/log/app.log"'],
+        expect.objectContaining({
+          cwd: '/test/dir',
+          detached: true,
+        }),
+      );
+      expect(monitorRegistry.getRunning()[0]?.command).toBe(
+        'sh -c "tail -f /var/log/app.log"',
       );
     });
 
