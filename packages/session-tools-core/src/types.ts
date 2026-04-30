@@ -2,7 +2,7 @@
  * Session Tools Core - Types
  *
  * Shared type definitions for session-scoped tools used by both
- * Claude (in-process) and Codex (subprocess) implementations.
+ * in-process and subprocess implementations.
  */
 
 // ============================================================
@@ -156,7 +156,7 @@ export interface DeveloperFeedback {
 
 /**
  * Callback message for IPC with main process.
- * Used by Codex subprocess to communicate via stderr.
+ * Used by subprocess runtimes to communicate via stderr.
  */
 export interface CallbackMessage {
   __callback__: string;
@@ -232,7 +232,7 @@ export type McpAuthType = 'oauth' | 'bearer' | 'none';
 /**
  * API auth type
  */
-export type ApiAuthType = 'bearer' | 'header' | 'query' | 'basic' | 'oauth' | 'none';
+export type HttpAuthType = 'bearer' | 'header' | 'query' | 'basic' | 'oauth' | 'none';
 
 /**
  * MCP source configuration block
@@ -255,7 +255,7 @@ export interface McpSourceConfig {
  */
 export interface ApiSourceConfig {
   baseUrl: string;
-  authType: ApiAuthType;
+  authType: HttpAuthType;
   headerName?: string;
   /** Header names for multi-header auth (e.g., ["DD-API-KEY", "DD-APPLICATION-KEY"]) */
   headerNames?: string[];

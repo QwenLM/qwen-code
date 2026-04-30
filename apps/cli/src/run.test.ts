@@ -380,17 +380,16 @@ describe('run command', () => {
     expect(connections).toEqual([])
 
     await client.invoke('LLM_Connection:save', {
-      slug: 'anthropic-api',
-      name: 'Anthropic',
-      providerType: 'anthropic',
-      authType: 'api_key',
+      slug: 'qwen-code',
+      name: 'Qwen Code',
+      providerType: 'qwen',
+      authType: 'none',
       createdAt: 123,
     })
     await client.invoke('settings:setupLlmConnection', {
-      slug: 'anthropic-api',
-      credential: 'sk-test-key',
+      slug: 'qwen-code',
     })
-    await client.invoke('LLM_Connection:setDefault', 'anthropic-api')
+    await client.invoke('LLM_Connection:setDefault', 'qwen-code')
 
     expect(mockWsServer!.invokedChannels).toEqual([
       'LLM_Connection:list',

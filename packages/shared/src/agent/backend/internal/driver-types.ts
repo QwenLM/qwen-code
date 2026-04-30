@@ -12,24 +12,12 @@ import type { CredentialManager } from '../../../credentials/manager.ts';
 import type { ResolvedBackendRuntimePaths } from './runtime-resolver.ts';
 
 export interface BackendRuntimePaths {
-  copilotCli?: string;
-  interceptor?: string;
-  sessionServer?: string;
   node?: string;
-  bridgeServer?: string;
-  piServer?: string;
   qwenCli?: string;
 }
 
 export interface BackendRuntimePayload extends Record<string, unknown> {
   paths?: BackendRuntimePaths;
-  piAuthProvider?: string;
-  /** Custom base URL from the LLM connection (e.g. Azure OpenAI endpoint). */
-  baseUrl?: string;
-  /** Custom endpoint protocol config (api type for routing). */
-  customEndpoint?: { api: string; supportsImages?: boolean };
-  /** Models registered for a custom endpoint. Strings default to 128K context; objects allow overrides. */
-  customModels?: Array<string | { id: string; contextWindow?: number; supportsImages?: boolean }>;
 }
 
 export interface BackendResolutionContext {
@@ -43,9 +31,7 @@ export interface BackendResolutionContext {
   };
 }
 
-export interface BackendProviderOptions {
-  piAuthProvider?: string;
-}
+export interface BackendProviderOptions {}
 
 export interface BackendModelFetchCredentials {
   apiKey?: string;
@@ -90,7 +76,7 @@ export interface DriverTestConnectionArgs extends DriverHostRuntimeArgs {
   apiKey: string;
   model: string;
   baseUrl?: string;
-  connection?: Pick<LlmConnection, 'providerType' | 'piAuthProvider' | 'customEndpoint'>;
+  connection?: Pick<LlmConnection, 'providerType'>;
   timeoutMs: number;
 }
 
@@ -116,12 +102,5 @@ export function getBackendRuntime(config: BackendConfig): BackendRuntimePayload 
 }
 
 export function getDefaultProviderType(provider: AgentProvider): LlmProviderType {
-  switch (provider) {
-    case 'anthropic':
-      return 'anthropic';
-    case 'pi':
-      return 'pi';
-    case 'qwen':
-      return 'qwen';
-  }
+  return 'qwen';
 }

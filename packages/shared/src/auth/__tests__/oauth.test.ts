@@ -36,8 +36,8 @@ describe('getMcpBaseUrl', () => {
     expect(getMcpBaseUrl('https://mcp.linear.app/sse')).toBe('https://mcp.linear.app');
   });
 
-  it('extracts origin from GitHub Copilot MCP', () => {
-    expect(getMcpBaseUrl('https://api.githubcopilot.com/mcp/')).toBe('https://api.githubcopilot.com');
+  it('extracts origin from HTTPS MCP endpoints', () => {
+    expect(getMcpBaseUrl('https://api.github.com/mcp/')).toBe('https://api.github.com');
   });
 
   it('returns as-is for invalid URL', () => {

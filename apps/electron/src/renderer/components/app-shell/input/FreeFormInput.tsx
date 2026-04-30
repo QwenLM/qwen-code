@@ -56,7 +56,7 @@ import { getNextPermissionMode } from '@/lib/permission-mode-cycle'
 import { isMac, PATH_SEP, getPathBasename } from '@/lib/platform'
 import { applySmartTypography } from '@/lib/smart-typography'
 import { AttachmentPreview } from '../AttachmentPreview'
-import { ANTHROPIC_MODELS, getModelShortName, getModelDisplayName, getModelContextWindow, type ModelDefinition } from '@config/models'
+import { QWEN_MODELS, getModelShortName, getModelDisplayName, getModelContextWindow, type ModelDefinition } from '@config/models'
 import { resolveEffectiveConnectionSlug } from '@config/llm-connections'
 import { useOptionalAppShellContext } from '@/context/AppShellContext'
 import { EditPopover, getEditConfig } from '@/components/ui/EditPopover'
@@ -106,10 +106,6 @@ function getModelContextWindowFromList(
 ): number | undefined {
   const model = models?.find(item => typeof item !== 'string' && item.id === modelId)
   return typeof model === 'string' ? undefined : model?.contextWindow
-}
-
-function stripPiPrefixForDisplay(value: string): string {
-  return value.startsWith('pi/') ? value.slice(3) : value
 }
 
 function formatFollowUpChipText(text: string, fallback: string, maxLength = 50): string {
@@ -480,10 +476,10 @@ export function FreeFormInput({
 
   // Compute available models from Qwen Code. In the real app this list is
   // populated from ACP session/new models.availableModels; playground keeps
-  // the Anthropic seed list so local component demos remain useful.
+  // the Qwen seed list so local component demos remain useful.
   const availableModels = React.useMemo(() => {
     if (connectionUnavailable) return []
-    if (!appShellCtx) return ANTHROPIC_MODELS
+    if (!appShellCtx) return QWEN_MODELS
     return qwenConnection?.models ?? []
   }, [appShellCtx, qwenConnection, connectionUnavailable])
 
@@ -503,9 +499,9 @@ export function FreeFormInput({
     if (!model) {
       if (!currentModel) return t('common.model')
       // Fallback: use helper function to format unknown model IDs nicely
-      return stripPiPrefixForDisplay(getModelDisplayName(currentModel))
+      return getModelDisplayName(currentModel)
     }
-    return typeof model === 'string' ? stripPiPrefixForDisplay(model) : model.name
+    return typeof model === 'string' ? model : model.name
   }, [availableModels, currentModel, t])
 
   const currentModelContextWindow = React.useMemo(() => {
@@ -2248,7 +2244,7 @@ export function FreeFormInput({
                   <>
                     {availableModels.map((model) => {
                       const modelId = typeof model === 'string' ? model : model.id
-                      const modelName = typeof model === 'string' ? stripPiPrefixForDisplay(getModelShortName(model)) : model.name
+                      const modelName = typeof model === 'string' ? getModelShortName(model) : model.name
                       const isSelected = currentModel === modelId
                       const descriptionKey = typeof model !== 'string' && 'descriptionKey' in model ? (model.descriptionKey as string) : undefined
                       const description = descriptionKey ? t(descriptionKey) : (typeof model !== 'string' && 'description' in model ? (model.description as string) : '')
@@ -2273,8 +2269,7 @@ export function FreeFormInput({
                   </>
                 )}
 
-              {/* Thinking level selector — only shown when thinking levels are available
-                  (Claude supports extended thinking, OpenAI backends may not) */}
+              {/* Thinking level selector — only shown when thinking levels are available */}
               {availableThinkingLevels.length > 0 && (
                 <>
                   <StyledDropdownMenuSeparator className="my-1" />
@@ -2335,7 +2330,7 @@ export function FreeFormInput({
           {(() => {
             // Calculate usage percentage based on compaction threshold (~77.5% of context window),
             // not the full context window - this gives users meaningful warnings before compaction kicks in.
-            // SDK triggers compaction at ~155k tokens for a 200k context window.
+            // Backend triggers compaction before the full context window is exhausted.
             // Falls back to known per-model context window when SDK hasn't reported usage yet.
             const effectiveContextWindow = contextStatus?.contextWindow || getModelContextWindow(currentModel)
             const compactionThreshold = effectiveContextWindow
@@ -2345,7 +2340,6 @@ export function FreeFormInput({
               ? Math.min(99, Math.round((contextStatus.inputTokens / compactionThreshold) * 100))
               : null
             // Show badge when >= 80% of compaction threshold AND not currently compacting
-            // Hide for Codex and Copilot models which don't support context compaction
             const showWarning = usagePercent !== null && usagePercent >= 80 && !contextStatus?.isCompacting
 
             if (!showWarning) return null

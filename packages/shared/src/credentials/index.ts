@@ -11,7 +11,7 @@
  *
  *   // Get/set API key
  *   const apiKey = await manager.getApiKey();
- *   await manager.setApiKey('sk-ant-...');
+ *   await manager.setApiKey('sk-qwen-...');
  *
  *   // Get/set workspace OAuth
  *   const oauth = await manager.getWorkspaceOAuth(workspaceId);

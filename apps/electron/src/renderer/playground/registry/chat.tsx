@@ -555,7 +555,7 @@ function InputContainerPlayground({
   disabled = false,
   isProcessing = false,
   placeholder = 'Message Craft Agent...',
-  currentModel = 'claude-sonnet-4-6',
+  currentModel = 'qwen3-coder-plus',
   permissionMode = 'ask',
   workingDirectory = '/Users/demo/projects/craft-agent',
   inputMode = 'freeform',
@@ -829,7 +829,7 @@ function ActiveTasksBarContext({ tasks = sampleBackgroundTasks }: ActiveTasksBar
           placeholder="Message Craft Agent..."
           disabled={false}
           isProcessing={false}
-          currentModel="claude-sonnet-4-6"
+          currentModel="qwen3-coder-plus"
           permissionMode={permissionMode}
           onPermissionModeChange={setPermissionMode}
           sources={mockSources}
@@ -932,7 +932,7 @@ function PermissionInputToggle({ autoToggle = false, autoToggleInterval = 3000, 
         placeholder="Message Craft Agent..."
         disabled={false}
         isProcessing={false}
-        currentModel="claude-sonnet-4-6"
+        currentModel="qwen3-coder-plus"
         permissionMode={permissionMode}
         onPermissionModeChange={setPermissionMode}
         sources={mockSources}
@@ -983,7 +983,7 @@ export const chatComponents: ComponentEntry[] = [
     id: 'attachment-preview',
     name: 'AttachmentPreview',
     category: 'Chat',
-    description: 'ChatGPT-style attachment preview strip showing attached files as bubbles above textarea',
+    description: 'attachment attachment preview strip showing attached files as bubbles above textarea',
     component: AttachmentPreview,
     props: [
       {
@@ -1289,12 +1289,12 @@ export const chatComponents: ComponentEntry[] = [
         control: {
           type: 'select',
           options: [
-            { label: 'Sonnet 4.6', value: 'claude-sonnet-4-6' },
-            { label: 'Opus 4.7', value: 'claude-opus-4-7' },
-            { label: 'Haiku 3.5', value: 'claude-3-5-haiku-20241022' },
+            { label: 'Qwen Plus', value: 'qwen3-coder-plus' },
+            { label: 'Qwen Plus', value: 'qwen3-coder-plus' },
+            { label: 'Qwen Flash', value: 'qwen3-coder-flash' },
           ],
         },
-        defaultValue: 'claude-sonnet-4-6',
+        defaultValue: 'qwen3-coder-plus',
       },
       {
         name: 'permissionMode',

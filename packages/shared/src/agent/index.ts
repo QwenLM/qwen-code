@@ -1,12 +1,7 @@
-// Export ClaudeAgent (renamed from CraftAgent) and backward-compatible aliases
-export * from './claude-agent.ts';
 export * from './conversation-summary.ts';
 
-// Export PiAgent for direct use
-export { PiAgent, PiBackend } from './pi-agent.ts';
 export { QwenAgent, QwenBackend } from './qwen-agent.ts';
 export * from './errors.ts';
-export * from './options.ts';
 
 // Export session-scoped-tools - tools scoped to a specific session
 export {
@@ -127,7 +122,7 @@ export {
 } from './base-agent.ts';
 
 // Export backend abstraction - unified interface for AI agents
-// This module enables switching between Claude (Anthropic) and Pi agents
+// Qwen backend abstraction
 export {
   // Factory (createAgent is the preferred name, createBackend is kept for backward compat)
   createBackend,

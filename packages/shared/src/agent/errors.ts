@@ -181,7 +181,7 @@ const ERROR_DEFINITIONS: Record<ErrorCode, Omit<AgentError, 'code' | 'originalEr
   },
   model_no_tool_support: {
     title: 'Model Does Not Support Tools',
-    message: 'The selected model does not support tool/function calling, which is required for Craft Agent. Please choose a model with tool support (e.g., Claude, GPT-4, Gemini).',
+    message: 'The selected model does not support tool/function calling, which is required for Craft Agent. Please choose a Qwen model with tool support.',
     actions: [
       { key: 's', label: 'Change model', command: '/settings', action: 'settings' },
     ],
@@ -346,7 +346,7 @@ function buildProxyErrorMessage(errorMessage: string, fullErrorText: string): st
  */
 export function parseError(
   error: unknown,
-  providerContext?: { providerType?: string; piAuthProvider?: string },
+  providerContext?: { providerType?: string },
 ): AgentError {
   // Extract all error messages including nested causes and subprocess output
   const fullErrorText = extractErrorMessages(error);
@@ -420,8 +420,7 @@ export function parseError(
   // Resolve provider info from context
   const providerInfo = providerContext
     ? getProviderMetadata(
-        providerContext.providerType ?? 'anthropic',
-        providerContext.piAuthProvider,
+        providerContext.providerType ?? 'qwen',
       ) ?? undefined
     : undefined;
 

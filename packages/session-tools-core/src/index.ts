@@ -2,7 +2,7 @@
  * Session Tools Core
  *
  * Shared utilities for session-scoped tools used by both
- * Claude (in-process) and Codex (subprocess) implementations.
+ * in-process and subprocess implementations.
  *
  * @packageDocumentation
  */
@@ -46,7 +46,7 @@ export type {
   SourceType,
   McpTransport,
   McpAuthType,
-  ApiAuthType,
+  HttpAuthType,
   McpSourceConfig,
   ApiSourceConfig,
   LocalSourceConfig,

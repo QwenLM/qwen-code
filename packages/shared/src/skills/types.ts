@@ -2,7 +2,7 @@
  * Skills Types
  *
  * Type definitions for workspace skills.
- * Skills are specialized instructions that extend Claude's capabilities.
+ * Skills are specialized instructions that extend the agent's capabilities.
  */
 
 /**

@@ -118,7 +118,7 @@ export function expandWebhookAction(action: WebhookAction, env: Record<string, s
   return expanded;
 }
 
-/** Default fetch timeout in milliseconds (30 seconds, matching Claude Code's HTTP hook default) */
+/** Default fetch timeout in milliseconds (30 seconds) */
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 export interface RetryConfig {

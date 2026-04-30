@@ -180,15 +180,12 @@ export interface SessionConfig {
    */
   branchFromSessionPath?: string;
   /**
-   * Parent session's sdkCwd (optional). SDK session files are stored per-CWD
-   * (`~/.claude/projects/{cwd-hash}/`), so forking requires the child subprocess
-   * to use the parent's CWD to locate the parent's session file.
+   * Parent session's sdkCwd (optional). Provider session files are stored per-CWD,
+   * so forking requires the child subprocess to use the parent's CWD.
    */
   branchFromSdkCwd?: string;
   /**
    * Provider-native branch anchor at the branch point.
-   * - Claude: assistant message UUID (used as `resumeSessionAt`)
-   * - Pi: session entry ID (used with SessionManager.branch(anchor))
    */
   branchFromSdkTurnId?: string;
   /** One-shot hidden summary injected on the first turn after a remote transfer. */

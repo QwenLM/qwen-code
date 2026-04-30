@@ -44,7 +44,7 @@ export function SearchableModelInput({
   value,
   onChange,
   onBlur,
-  placeholder = 'e.g., claude-sonnet-4-6',
+  placeholder = 'e.g., qwen3-coder-flash',
   models,
   isLoading,
   onFetchModels,

@@ -82,10 +82,10 @@ describe('sdk-bridge', () => {
       it('should map source and model', () => {
         const env = buildEnvFromSdkInput('SessionStart', input({
           source: 'manual',
-          model: 'claude-opus-4-7',
+          model: 'qwen3-coder-plus',
         }));
         expect(env.CRAFT_SOURCE).toBe('manual');
-        expect(env.CRAFT_MODEL).toBe('claude-opus-4-7');
+        expect(env.CRAFT_MODEL).toBe('qwen3-coder-plus');
       });
     });
 

@@ -46,10 +46,10 @@ describe('QwenAgent model metadata', () => {
 
     (agent as unknown as QwenModelInternals).recordSessionModels({
       models: {
-        currentModelId: 'glm-5.1(openai)',
+        currentModelId: 'qwen3-coder-flash',
         availableModels: [
           {
-            modelId: 'glm-5.1(openai)',
+            modelId: 'qwen3-coder-flash',
             name: 'GLM 5.1',
             _meta: {
               contextLimit: 128_000,
@@ -64,10 +64,10 @@ describe('QwenAgent model metadata', () => {
       },
     });
 
-    expect(agent.getModel()).toBe('glm-5.1(openai)');
-    expect(capturedCurrent).toBe('glm-5.1(openai)');
+    expect(agent.getModel()).toBe('qwen3-coder-flash');
+    expect(capturedCurrent).toBe('qwen3-coder-flash');
     expect(capturedModels[0]).toMatchObject({
-      id: 'glm-5.1(openai)',
+      id: 'qwen3-coder-flash',
       contextWindow: 128_000,
       supportsThinking: false,
     });

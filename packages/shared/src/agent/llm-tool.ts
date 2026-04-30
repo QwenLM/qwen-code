@@ -14,8 +14,8 @@
  * All calls are delegated to the agent backend's queryLlm() implementation.
  */
 
-import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
+import { localTool } from '../mcp/local-tools.ts';
 
 // Tool result type - matches what the SDK expects
 type ToolResult = {
@@ -155,12 +155,12 @@ export const OUTPUT_FORMATS = {
 };
 
 // ============================================================================
-// SHARED PRE-EXECUTION PIPELINE (used by Codex/Copilot PreToolUse intercepts)
+// SHARED PRE-EXECUTION PIPELINE
 // Validates input, processes attachments, resolves schema, builds LLMQueryRequest
 // ============================================================================
 
 export interface BuildCallLlmOptions {
-  /** Backend name for error messages (e.g., "Codex", "Copilot") */
+  /** Backend name for error messages */
   backendName: string;
   /** Optional model validation hook — return undefined to reject (falls back to default), or corrected model ID */
   validateModel?: (resolvedModelId: string) => string | undefined;
@@ -173,7 +173,7 @@ export interface BuildCallLlmOptions {
  * Validates input, processes attachments, resolves schema, and builds an LLMQueryRequest
  * ready to be passed to the backend's queryLlm().
  *
- * Used by CodexAgent and CopilotAgent to avoid duplicating the same ~80 lines of logic.
+ * Used by backend adapters to avoid duplicating validation and permission logic.
  */
 export async function buildCallLlmRequest(
   input: Record<string, unknown>,
@@ -217,7 +217,7 @@ export async function buildCallLlmRequest(
       model = modelDef.id;
     }
 
-    // Backend-specific model validation (e.g., Codex rejects non-OpenAI models)
+    // Backend-specific model validation.
     if (options.validateModel) {
       model = options.validateModel(model) ?? undefined;
     }
@@ -560,7 +560,7 @@ export function createLLMTool(options: LLMToolOptions) {
   // sessionId captured in closure for potential future use (logging, rate limiting per session)
   const { sessionId: _sessionId } = options;
 
-  return tool(
+  return localTool(
     'call_llm',
     `Invoke a secondary LLM for focused subtasks. Use for:
 - Cost optimization: use a smaller model for simple tasks (summarization, classification)

@@ -9,9 +9,9 @@
  * - Default: Creates a session and sends the prompt (fire-and-forget)
  */
 
-import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import type { SpawnSessionResult, SpawnSessionHelpResult } from './base-agent.ts';
+import { localTool } from '../mcp/local-tools.ts';
 
 export type SpawnSessionFn = (input: Record<string, unknown>) => Promise<SpawnSessionResult | SpawnSessionHelpResult>;
 
@@ -38,7 +38,7 @@ export interface SpawnSessionToolOptions {
 }
 
 export function createSpawnSessionTool(options: SpawnSessionToolOptions) {
-  return tool(
+  return localTool(
     'spawn_session',
     `Create a new session that runs independently with its own prompt, connection, model, and sources.
 
@@ -61,7 +61,7 @@ Only use 'attachments' for existing file paths on disk — the tool reads them a
       name: z.string().optional()
         .describe('Session name'),
       llmConnection: z.string().optional()
-        .describe('Connection slug (e.g., "anthropic-api", "codex")'),
+        .describe('Connection slug (e.g., "qwen-code")'),
       model: z.string().optional()
         .describe('Model ID override'),
       enabledSourceSlugs: z.array(z.string()).optional()

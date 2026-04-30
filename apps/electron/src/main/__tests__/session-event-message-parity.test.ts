@@ -347,7 +347,7 @@ describe('typed_error → error Message field parity', () => {
         title: 'Connection Failed',
         message: 'Could not connect to API',
         details: ['DNS lookup failed', 'Retried 3 times'],
-        originalError: 'ENOTFOUND api.anthropic.com',
+        originalError: 'ENOTFOUND qwen.local',
         canRetry: true,
         actions: [],
       },

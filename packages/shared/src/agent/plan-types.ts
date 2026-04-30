@@ -11,8 +11,8 @@ import { randomUUID } from 'crypto';
  * The current state of a plan
  */
 export type PlanState =
-  | 'creating'    // Claude is generating the plan
-  | 'refining'    // User is providing feedback, Claude is refining
+  | 'creating'    // Agent is generating the plan
+  | 'refining'    // User is providing feedback, agent is refining
   | 'ready'       // Plan is approved and ready to execute
   | 'executing'   // Plan is being executed
   | 'completed'   // Plan execution finished
@@ -66,7 +66,7 @@ export interface Plan {
 export interface PlanRefinementEntry {
   /** Round number */
   round: number;
-  /** Questions Claude asked */
+  /** Questions the agent asked */
   questions: string[];
   /** User's feedback/answers */
   feedback: string;
@@ -80,7 +80,7 @@ export interface PlanRefinementEntry {
 export interface PlanRefinementRequest {
   /** The current plan */
   plan: Plan;
-  /** Questions from Claude that need user input */
+  /** Questions from the agent that need user input */
   questions: string[];
   /** Optional suggestions for improvement */
   suggestions?: string[];
@@ -131,7 +131,7 @@ export interface PlanReviewRequest {
   requestId: string;
   /** The plan to review */
   plan: Plan;
-  /** Optional questions from Claude that need user input */
+  /** Optional questions from the agent that need user input */
   questions?: string[];
 }
 
@@ -223,7 +223,7 @@ export const PERMISSION_MODE_MESSAGES: Record<PermissionMode, string> = {
   'allow-all': `${PERMISSION_MODE_CONFIG['allow-all'].displayName} mode active. All operations permitted.`,
 };
 
-/** System prompts sent to Claude when mode changes */
+/** System prompts sent to the agent when mode changes */
 export const PERMISSION_MODE_PROMPTS: Record<PermissionMode, string> = {
   'safe': `The user has switched to ${PERMISSION_MODE_CONFIG['safe'].displayName}. You can read files, search, and explore the codebase, but write operations (Bash, Write, Edit, API calls) are blocked until a plan is accepted or the mode changes.`,
   'ask': `The user has switched to ${PERMISSION_MODE_CONFIG['ask'].displayName} mode. Most operations are allowed, but edits and dangerous commands will prompt for user approval.`,

@@ -190,7 +190,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
   // Send a message to a session (with optional file attachments)
   // Note: We intentionally don't await here - the response is streamed via events.
   // The IPC handler returns immediately, and results come through SESSION_EVENT channel.
-  // attachments: FileAttachment[] for Claude (has content), storedAttachments: StoredAttachment[] for persistence (has thumbnailBase64)
+  // attachments: FileAttachment[] for backend input, storedAttachments: StoredAttachment[] for persistence (has thumbnailBase64)
   server.handle(RPC_CHANNELS.sessions.SEND_MESSAGE, async (ctx, sessionId: string, message: string, attachments?: FileAttachment[], storedAttachments?: StoredAttachment[], options?: SendMessageOptions) => {
     // Capture the caller's clientId for error routing
     const callerClientId = ctx.clientId

@@ -110,8 +110,6 @@ import { OAuthFlowStore } from '@craft-agent/shared/auth'
 import { registerThumbnailScheme, registerThumbnailHandler } from './thumbnail-protocol'
 import log, { isDebugMode, mainLog, getLogFilePath, getMessagingGatewayLogFilePath, messagingGatewayLog } from './logger'
 import { setPerfEnabled, enableDebug } from '@craft-agent/shared/utils'
-import { registerPiModelResolver } from '@craft-agent/shared/config'
-import { getPiModelsForAuthProvider, getAllPiModels } from '@craft-agent/shared/config'
 import { initNotificationService, initBadgeIcon, initInstanceBadge, updateBadgeCount } from './notifications'
 import { checkForUpdatesOnLaunch, setAutoUpdateEventSink, isUpdating } from './auto-update'
 import type { EventSink } from '@craft-agent/server-core/transport'
@@ -186,12 +184,6 @@ if (isDebugMode) {
     mainLog.info('CLI tools configured:', { uvBinary: process.env.CRAFT_UV, binDir, scriptsDir, bundledUvExists })
   }
 }
-
-// Register Pi model resolver so llm-connections.ts can resolve Pi models
-// without importing @mariozechner/pi-ai (which breaks the Vite renderer build)
-registerPiModelResolver((piAuthProvider) =>
-  piAuthProvider ? getPiModelsForAuthProvider(piAuthProvider) : getAllPiModels()
-)
 
 // Custom URL scheme for deeplinks (e.g., craftagents://auth-complete)
 // Supports multi-instance dev: CRAFT_DEEPLINK_SCHEME env var (craftagents1, craftagents2, etc.)
@@ -390,7 +382,7 @@ app.whenReady().then(async () => {
   // (docs, permissions, themes, tool-icons resolve via getBundledAssetsDir)
   setBundledAssetsRoot(__dirname)
 
-  // Initialize backend runtime bootstrapping (Codex vendor root, Claude SDK runtime paths).
+  // Initialize backend runtime bootstrapping.
   initializeBackendHostRuntime({
     hostRuntime: {
       appRootPath: app.isPackaged ? app.getAppPath() : process.cwd(),
@@ -560,10 +552,10 @@ app.whenReady().then(async () => {
         if (gitBashPath) {
           const validation = await validateGitBashPath(gitBashPath)
           if (validation.valid) {
-            process.env.CLAUDE_CODE_GIT_BASH_PATH = validation.path
+            process.env.QWEN_CODE_GIT_BASH_PATH = validation.path
           } else {
             clearGitBashPath()
-            delete process.env.CLAUDE_CODE_GIT_BASH_PATH
+            delete process.env.QWEN_CODE_GIT_BASH_PATH
             mainLog.warn(`Cleared invalid persisted Git Bash path: ${gitBashPath}`)
           }
         }
@@ -1081,7 +1073,7 @@ app.whenReady().then(async () => {
       const defaultConn = defaultConnSlug ? getLlmConnection(defaultConnSlug) : null
       Sentry.setTag('authType', defaultConn?.authType ?? 'unknown')
       Sentry.setTag('providerType', defaultConn?.providerType ?? 'unknown')
-      Sentry.setTag('hasCustomEndpoint', String(!!defaultConn?.baseUrl))
+      Sentry.setTag('hasCustomEndpoint', 'false')
       Sentry.setTag('model', defaultConn?.defaultModel ?? 'default')
       Sentry.setTag('workspaceCount', String(workspaces.length))
     } catch (err) {

@@ -1,5 +1,4 @@
 import type { ComponentEntry, CategoryGroup, Category } from './types'
-import { onboardingComponents } from './onboarding'
 import { chatComponents } from './chat'
 import { turnCardComponents, fullscreenOverlayComponents } from './turn-card'
 import { turnCardModesComponents } from './turn-card-modes'
@@ -19,14 +18,11 @@ import { plannerComponents } from './planner'
 import { customShadowsComponents } from './custom-shadows'
 import { transportBannerComponents } from './transport-banner'
 import { containerTransitionsComponents } from './container-transitions'
-import { apiKeyInputComponents } from './api-key-input'
 import { messagingComponents } from './messaging'
 
 export * from './types'
 
 export const componentRegistry: ComponentEntry[] = [
-  ...apiKeyInputComponents,
-  ...onboardingComponents,
   ...chatComponents,
   ...turnCardComponents,
   ...turnCardModesComponents,

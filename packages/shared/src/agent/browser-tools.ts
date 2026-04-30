@@ -10,9 +10,9 @@
  * (getOrCreateForSession pattern), so commands don't need instance IDs.
  */
 
-import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { executeBrowserToolCommand } from './browser-tool-runtime.ts';
+import { localTool } from '../mcp/local-tools.ts';
 
 // Tool result type - matches MCP CallToolResult content blocks
 type ToolResult = {
@@ -241,7 +241,7 @@ export function createBrowserTools(options: BrowserToolsOptions) {
 
   return [
     // Single CLI-like tool for all browser actions
-    tool(
+    localTool(
       'browser_tool',
       BROWSER_TOOL_DESCRIPTION,
       {

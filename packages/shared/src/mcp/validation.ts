@@ -1,18 +1,14 @@
 /**
- * MCP Connection Validation using Claude Agent SDK
+ * MCP Connection Validation
  *
- * Uses the SDK's mcpServerStatus() method to validate MCP connections
- * using the same code path as actual agent usage.
+ * Connects directly to the target MCP server, lists tools, and validates
+ * schemas before a source is enabled for sessions.
  */
 
-import { query, type McpServerStatus } from '@anthropic-ai/claude-agent-sdk';
 import { spawn, type ChildProcess } from 'child_process';
-import { getDefaultOptions } from '../agent/options.ts';
 import { CraftMcpClient } from './client.js';
 import { debug } from '../utils/debug.ts';
-import { getDefaultSummarizationModel } from '../config/models.ts';
 import { parseError, type AgentError } from '../agent/errors.ts';
-import { getLastApiError } from '../interceptor-common.ts';
 import { normalizeMcpUrl } from '../sources/server-builder.ts';
 import type { McpTransport } from '../sources/types.ts';
 
@@ -41,17 +37,9 @@ export interface McpValidationResult {
  * Pattern for valid property names in tool input schemas.
  * Must match: letters, numbers, underscores, dots, hyphens (1-64 chars)
  *
- * This pattern is enforced server-side by the Anthropic API.
- * It is NOT defined in the MCP specification (which has no naming constraints).
- * It is NOT exported by @anthropic-ai/sdk or @anthropic-ai/claude-agent-sdk.
- *
- * API error when violated:
- * "tools.0.custom.input_schema.properties: Property keys should match pattern '^[a-zA-Z0-9_.-]{1,64}$'"
- *
- * @see https://github.com/modelcontextprotocol/go-sdk/issues/169 - confirms this is Claude-specific
- * @see https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview
+ * Keep schemas conservative so they work across MCP clients and model runtimes.
  */
-export const ANTHROPIC_PROPERTY_NAME_PATTERN = /^[a-zA-Z0-9_.-]{1,64}$/;
+export const TOOL_PROPERTY_NAME_PATTERN = /^[a-zA-Z0-9_.-]{1,64}$/;
 
 /**
  * Recursively finds invalid property names in a JSON schema.
@@ -71,7 +59,7 @@ function findInvalidProperties(
   if (schema.properties && typeof schema.properties === 'object') {
     const properties = schema.properties as Record<string, unknown>;
     for (const key of Object.keys(properties)) {
-      if (!ANTHROPIC_PROPERTY_NAME_PATTERN.test(key)) {
+      if (!TOOL_PROPERTY_NAME_PATTERN.test(key)) {
         invalid.push({
           path: path ? `${path}.${key}` : key,
           key,
@@ -125,220 +113,78 @@ export interface McpValidationConfig {
   mcpHeaders?: Record<string, string>;
   /** Access token for MCP server (OAuth or bearer) */
   mcpAccessToken?: string;
-  /** Anthropic API key (for API key auth) */
-  claudeApiKey?: string;
-  /** Claude OAuth token (for Max subscription auth) */
-  claudeOAuthToken?: string;
-  /** Model to use for validation (defaults to sonnet) */
-  model?: string;
 }
 
 /**
- * Validates an MCP connection using the Claude Agent SDK.
- *
- * Creates a minimal query with the MCP server configured, then uses
- * mcpServerStatus() to check if the server is connected. The query
- * is aborted immediately after getting the status.
+ * Validates an MCP connection by opening a direct MCP client and listing tools.
  */
 export async function validateMcpConnection(
   config: McpValidationConfig
 ): Promise<McpValidationResult> {
   debug('Validating MCP connection to', config.mcpUrl);
-  // Store original env vars to restore later
-  const originalApiKey = process.env.ANTHROPIC_API_KEY;
-  const originalOAuthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  const mcpUrl = normalizeMcpUrl(config.mcpUrl);
+  const headers = {
+    ...config.mcpHeaders,
+    ...(config.mcpAccessToken ? { Authorization: `Bearer ${config.mcpAccessToken}` } : {}),
+  };
+  const mcpClient = new CraftMcpClient({
+    transport: 'http',
+    url: mcpUrl,
+    headers: Object.keys(headers).length > 0 ? headers : undefined,
+  });
 
   try {
-    // Set Claude credentials for SDK (temporarily)
-    if (config.claudeApiKey) {
-      process.env.ANTHROPIC_API_KEY = config.claudeApiKey;
-      // Clear OAuth token if API key is provided
-      delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
-    } else if (config.claudeOAuthToken) {
-      process.env.CLAUDE_CODE_OAUTH_TOKEN = config.claudeOAuthToken;
-      // Clear API key if OAuth token is provided
-      delete process.env.ANTHROPIC_API_KEY;
+    const tools = await mcpClient.listTools();
+    const toolNames = tools.map((t) => t.name);
+    const allInvalidProperties: InvalidProperty[] = [];
+
+    debug(`Validating schemas for ${tools.length} tools`);
+
+    for (const tool of tools) {
+      if (tool.inputSchema && typeof tool.inputSchema === 'object') {
+        const invalidProps = findInvalidProperties(tool.inputSchema as Record<string, unknown>);
+        for (const prop of invalidProps) {
+          allInvalidProperties.push({
+            toolName: tool.name,
+            propertyPath: prop.path,
+            propertyKey: prop.key,
+          });
+        }
+      }
     }
 
-    const mcpUrl = normalizeMcpUrl(config.mcpUrl);
-    const mcpType = config.mcpTransport === 'sse' ? 'sse' as const : 'http' as const;
-
-    // Build MCP server config (custom headers first, auth headers override)
-    const headers = {
-      ...config.mcpHeaders,
-      ...(config.mcpAccessToken ? { Authorization: `Bearer ${config.mcpAccessToken}` } : {}),
-    };
-    const mcpServers = {
-      validation_target: {
-        type: mcpType,
-        url: mcpUrl,
-        ...(Object.keys(headers).length > 0 ? { headers } : {}),
-      },
-    };
-
-    // Create abort controller to stop query after getting status
-    const abortController = new AbortController();
-
-    // Create minimal query with MCP server
-    const q = query({
-      prompt: '',
-      options: {
-        ...getDefaultOptions(),
-        mcpServers,
-        model: config.model || getDefaultSummarizationModel(),
-        abortController,
-      },
-    });
-
-    try {
-      // Get server status (this connects to MCP servers)
-      const statuses = await q.mcpServerStatus();
-      const status = statuses.find((s) => s.name === 'validation_target');
-
-      // Abort query immediately - we don't need to continue
-      abortController.abort();
-
-      if (!status) {
-        return {
-          success: false,
-          error: 'Server not found in status response',
-          errorType: 'unknown',
-        };
-      }
-
-      if (status.status === 'connected') {
-        // Connection successful - now validate tool schemas
-        // Use direct MCP client to fetch tools (SDK already validated connection)
-        const clientHeaders = {
-          ...config.mcpHeaders,
-          ...(config.mcpAccessToken ? { Authorization: `Bearer ${config.mcpAccessToken}` } : {}),
-        };
-        const mcpClient = new CraftMcpClient({
-          transport: 'http',
-          url: mcpUrl,
-          headers: Object.keys(clientHeaders).length > 0 ? clientHeaders : undefined,
-        });
-
-        try {
-          const tools = await mcpClient.listTools();
-          const toolNames = tools.map((t) => t.name);
-          const allInvalidProperties: InvalidProperty[] = [];
-
-          debug(`Validating schemas for ${tools.length} tools`);
-
-          for (const tool of tools) {
-            if (tool.inputSchema && typeof tool.inputSchema === 'object') {
-              const invalidProps = findInvalidProperties(
-                tool.inputSchema as Record<string, unknown>
-              );
-              for (const prop of invalidProps) {
-                allInvalidProperties.push({
-                  toolName: tool.name,
-                  propertyPath: prop.path,
-                  propertyKey: prop.key,
-                });
-              }
-            }
-          }
-
-          await mcpClient.close();
-
-          if (allInvalidProperties.length > 0) {
-            // Group by tool for error message
-            const toolsWithIssues = [
-              ...new Set(allInvalidProperties.map((p) => p.toolName)),
-            ];
-            return {
-              success: false,
-              error: `Server has ${allInvalidProperties.length} invalid property name(s) in ${toolsWithIssues.length} tool(s): ${toolsWithIssues.join(', ')}. Property names must match ^[a-zA-Z0-9_.-]{1,64}$`,
-              errorType: 'invalid-schema',
-              serverInfo: status.serverInfo,
-              invalidProperties: allInvalidProperties,
-              tools: toolNames,
-            };
-          }
-
-          return {
-            success: true,
-            serverInfo: status.serverInfo,
-            tools: toolNames,
-          };
-        } catch (err) {
-          // If we can't list tools, for now report connection success
-          // The schema validation is a bonus check, need to evaluate errors here later
-          debug(
-            'WARNING: Could not validate tool schemas:',
-            err instanceof Error ? err.message : err
-          );
-          await mcpClient.close().catch(() => {});
-          return {
-            success: true,
-            serverInfo: status.serverInfo,
-          };
-        }
-      }
-
-      // Use SDK's error field if available (new in v0.2.0), fallback to generic message
+    if (allInvalidProperties.length > 0) {
+      const toolsWithIssues = [...new Set(allInvalidProperties.map((p) => p.toolName))];
       return {
         success: false,
-        error: status.error || getValidationErrorMessage({
-          success: false,
-          errorType: status.status,
-        }),
-        errorType: status.status,
+        error: `Server has ${allInvalidProperties.length} invalid property name(s) in ${toolsWithIssues.length} tool(s): ${toolsWithIssues.join(', ')}. Property names must match ^[a-zA-Z0-9_.-]{1,64}$`,
+        errorType: 'invalid-schema',
+        invalidProperties: allInvalidProperties,
+        tools: toolNames,
       };
-    } catch (err) {
-      // Abort on error
-      abortController.abort();
+    }
 
-      // Check for captured API error from interceptor (most reliable source)
-      const apiError = getLastApiError();
-      if (apiError) {
-        debug('[mcp-validation] Found captured API error:', apiError.status, apiError.message);
-        const typedError = parseError(new Error(`${apiError.status} ${apiError.message}`));
-        if (typedError.code !== 'unknown_error') {
-          return {
-            success: false,
-            error: typedError.message,
-            errorType: 'unknown',
-            typedError,
-          };
-        }
-      }
-
-      // Fall back to parsing the thrown error
-      const typedError = parseError(err);
-
-      // For billing/auth errors, return the typed error for ErrorBanner display
-      if (typedError.code !== 'unknown_error') {
-        return {
-          success: false,
-          error: typedError.message,
-          errorType: 'unknown',
-          typedError,
-        };
-      }
-
-      // For unknown errors, return just the error message
+    return {
+      success: true,
+      tools: toolNames,
+    };
+  } catch (err) {
+    const typedError = parseError(err);
+    if (typedError.code !== 'unknown_error') {
       return {
         success: false,
-        error: err instanceof Error ? err.message : 'Validation failed',
+        error: typedError.message,
         errorType: 'unknown',
+        typedError,
       };
     }
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Validation failed',
+      errorType: 'unknown',
+    };
   } finally {
-    // Restore original env vars
-    if (originalApiKey !== undefined) {
-      process.env.ANTHROPIC_API_KEY = originalApiKey;
-    } else {
-      delete process.env.ANTHROPIC_API_KEY;
-    }
-
-    if (originalOAuthToken !== undefined) {
-      process.env.CLAUDE_CODE_OAUTH_TOKEN = originalOAuthToken;
-    } else {
-      delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
-    }
+    await mcpClient.close().catch(() => {});
   }
 }
 
@@ -561,7 +407,6 @@ export function getValidationErrorMessage(
   result: McpValidationResult,
   context?: { transport?: string }
 ): string {
-  // Prefer the SDK's error field when available (most specific)
   if (result.error) return result.error;
 
   switch (result.errorType) {

@@ -300,7 +300,7 @@ export interface ChatDisplayHandle {
 
 /**
  * Processing status messages - cycles through these randomly
- * Inspired by Claude Code's playful status messages
+ * Playful status messages shown while work is in progress
  */
 const PROCESSING_MESSAGE_KEYS = [
   'chat.processing.thinking',

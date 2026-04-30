@@ -83,7 +83,7 @@ export function createMockSource(overrides: Partial<LoadedSource['config']> = {}
  */
 export function createMockBackendConfig(overrides: Partial<BackendConfig> = {}): BackendConfig {
   return {
-    provider: 'anthropic',
+    provider: 'qwen',
     workspace: createMockWorkspace(),
     session: createMockSession(),
     model: 'test-model',

@@ -1,6 +1,6 @@
 /**
  * Tests for buildCallLlmRequest() — the shared pre-execution pipeline
- * used by CodexAgent and CopilotAgent PreToolUse intercepts.
+ * used by backend PreToolUse adapters.
  *
  * Tests cover input validation, attachment processing, schema injection,
  * and the validateModel callback hook.

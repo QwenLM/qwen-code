@@ -42,11 +42,11 @@ function describeIfReachable(name: string, mcpUrl: string, fn: () => void) {
 }
 
 describe('E2E: OAuth Metadata Discovery', () => {
-  describe('GitHub MCP (api.githubcopilot.com)', () => {
-    const MCP_URL = 'https://api.githubcopilot.com/mcp/';
+  describe('HTTPS MCP endpoint', () => {
+    const MCP_URL = 'https://api.github.com/mcp/';
 
     it('extracts correct origin', () => {
-      expect(getMcpBaseUrl(MCP_URL)).toBe('https://api.githubcopilot.com');
+      expect(getMcpBaseUrl(MCP_URL)).toBe('https://api.github.com');
     });
 
     it('discovers OAuth metadata', async () => {

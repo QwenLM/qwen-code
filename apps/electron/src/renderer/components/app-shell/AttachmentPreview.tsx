@@ -15,7 +15,7 @@ interface AttachmentPreviewProps {
 }
 
 /**
- * AttachmentPreview - ChatGPT-style attachment preview strip
+ * AttachmentPreview - attachment preview strip
  *
  * Shows attached files as small bubbles above the textarea:
  * - Image thumbnails for image files (48x48px)

@@ -18,7 +18,6 @@ import type {
 } from '@craft-agent/core/types'
 import type { PermissionMode } from '../agent/mode-types'
 import type { ThinkingLevel } from '../agent/thinking-levels'
-import type { CustomEndpointConfig } from '../config/llm-connections'
 import type {
   AuthRequest as SharedAuthRequest,
   CredentialInputMode as SharedCredentialInputMode,
@@ -119,7 +118,7 @@ export interface CreateSessionOptions {
    * Reasoning/thinking level override. When set, takes precedence over workspace
    * and global defaults. Silently ignored by the underlying SDK on non-reasoning
    * models (e.g. gpt-4o) — provider drivers don't attach the reasoning param to
-   * the API request for models with `reasoning: false` in the Pi SDK catalog.
+   * the API request for models with `reasoning: false` in the model catalog.
    */
   thinkingLevel?: ThinkingLevel
   /**
@@ -367,36 +366,14 @@ export interface FileSearchResult {
 
 export interface LlmConnectionSetup {
   slug: string
-  credential?: string
-  baseUrl?: string | null
-  defaultModel?: string | null
-  models?: string[] | null
-  piAuthProvider?: string
-  modelSelectionMode?: 'automaticallySyncedFromProvider' | 'userDefined3Tier'
   /** When true, reject setup if the connection doesn't already exist (reauth guard). */
   updateOnly?: boolean
-  /** Custom endpoint protocol for arbitrary OpenAI/Anthropic-compatible APIs */
-  customEndpoint?: CustomEndpointConfig
-  /** IAM credentials for Pi+Bedrock (piAuthProvider='amazon-bedrock') connections */
-  iamCredentials?: {
-    accessKeyId: string
-    secretAccessKey: string
-    sessionToken?: string
-  }
-  /** AWS region for Pi+Bedrock connections */
-  awsRegion?: string
-  /** Bedrock authentication method — determines auth type for Pi+Bedrock connections */
-  bedrockAuthMethod?: 'iam_credentials' | 'environment'
 }
 
 export interface TestLlmConnectionParams {
-  provider: 'anthropic' | 'pi' | 'qwen'
-  apiKey: string
-  baseUrl?: string
+  provider: 'qwen'
+  apiKey?: string
   model?: string
-  piAuthProvider?: string
-  /** Optional custom endpoint protocol hint so setup tests mirror runtime routing */
-  customEndpoint?: CustomEndpointConfig
 }
 
 export interface TestLlmConnectionResult {
@@ -540,7 +517,7 @@ export interface WorkspaceSettings {
 // Auth result types
 // ---------------------------------------------------------------------------
 
-export interface ClaudeOAuthResult {
+export interface OAuthConnectionResult {
   success: boolean
   token?: string
   error?: string

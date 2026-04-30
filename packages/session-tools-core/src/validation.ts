@@ -2,7 +2,7 @@
  * Session Tools Core - Validation Utilities
  *
  * Shared validation logic for session-scoped tools.
- * Provides portable validation that works in both Claude and Codex contexts.
+ * Provides portable validation that works in both in-process and subprocess contexts.
  */
 
 import { z } from 'zod';
@@ -205,7 +205,7 @@ export const SkillMetadataSchema = z.object({
 
 /**
  * Validate skill SKILL.md content (without filesystem access).
- * Used by both Claude and Codex implementations.
+ * Used by both in-process and subprocess implementations.
  *
  * @param markdownContent - The full SKILL.md file content
  * @param slug - The skill slug (folder name), used for slug format validation

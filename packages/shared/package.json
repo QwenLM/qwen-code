@@ -77,14 +77,10 @@
     "date-fns": "^4.1.0",
     "i18next": "^26.0.3",
     "incr-regex-package": "^1.0.4",
-    "shell-quote": "^1.8.3",
-    "@mariozechner/pi-agent-core": "0.70.2",
-    "@mariozechner/pi-ai": "0.70.2",
-    "@mariozechner/pi-coding-agent": "0.70.2"
+    "shell-quote": "^1.8.3"
   },
   "peerDependencies": {
     "@agentclientprotocol/sdk": ">=0.21.0",
-    "@anthropic-ai/claude-agent-sdk": "0.2.111",
     "@modelcontextprotocol/sdk": ">=1.0.0",
     "zod": ">=3.0.0"
   },

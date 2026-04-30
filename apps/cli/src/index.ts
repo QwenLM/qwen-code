@@ -149,7 +149,7 @@ export function parseArgs(argv: string[]): CliArgs {
   if (!url) url = process.env.CRAFT_SERVER_URL ?? ''
   if (!token) token = process.env.CRAFT_SERVER_TOKEN ?? ''
   if (!tlsCa) tlsCa = process.env.CRAFT_TLS_CA
-  if (!provider) provider = process.env.LLM_PROVIDER ?? 'anthropic'
+  if (!provider) provider = process.env.LLM_PROVIDER ?? 'qwen'
   if (!model) model = process.env.LLM_MODEL ?? ''
   if (!apiKey) apiKey = process.env.LLM_API_KEY ?? ''
   if (!baseUrl) baseUrl = process.env.LLM_BASE_URL ?? ''
@@ -513,114 +513,38 @@ async function spawnLocalServer(args: CliArgs, opts?: { quiet?: boolean }): Prom
 // LLM connection helpers
 // ---------------------------------------------------------------------------
 
-const PROVIDER_ENV_KEYS: Record<string, string> = {
-  anthropic: 'ANTHROPIC_API_KEY',
-  openai: 'OPENAI_API_KEY',
-  google: 'GOOGLE_API_KEY',
-  openrouter: 'OPENROUTER_API_KEY',
-  groq: 'GROQ_API_KEY',
-  mistral: 'MISTRAL_API_KEY',
-  deepseek: 'DEEPSEEK_API_KEY',
-  xai: 'XAI_API_KEY',
-  cerebras: 'CEREBRAS_API_KEY',
-  huggingface: 'HUGGINGFACE_API_KEY',
-}
-
-const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
-  anthropic: 'Anthropic',
-  openai: 'OpenAI',
-  google: 'Google',
-  openrouter: 'OpenRouter',
-  groq: 'Groq',
-  mistral: 'Mistral',
-  deepseek: 'DeepSeek',
-  xai: 'xAI',
-  cerebras: 'Cerebras',
-  huggingface: 'Hugging Face',
-  'amazon-bedrock': 'Amazon Bedrock',
-}
-
 function getProviderDisplayName(provider: string): string {
-  return PROVIDER_DISPLAY_NAMES[provider] ?? provider.charAt(0).toUpperCase() + provider.slice(1)
+  return provider === 'qwen' ? 'Qwen Code' : provider.charAt(0).toUpperCase() + provider.slice(1)
 }
 
-export function resolveApiKey(provider: string, explicit: string): string {
-  if (explicit) return explicit
-  if (provider === 'amazon-bedrock') return '' // IAM credentials, not API key
-  const envKey = PROVIDER_ENV_KEYS[provider]
-  if (envKey && process.env[envKey]) return process.env[envKey]!
-  throw new Error(
-    `No API key found. Use --api-key, set $LLM_API_KEY, or set $${envKey ?? `${provider.toUpperCase()}_API_KEY`}`,
-  )
+export function resolveApiKey(_provider: string, explicit: string): string {
+  return explicit
 }
 
-export function shouldSetupLlmConnection(existingConnectionCount: number, args: Pick<CliArgs, 'provider' | 'baseUrl'>): boolean {
-  return existingConnectionCount === 0 || !!args.baseUrl || args.provider !== 'anthropic'
+export function shouldSetupLlmConnection(existingConnectionCount: number, _args: Pick<CliArgs, 'provider' | 'baseUrl'>): boolean {
+  return existingConnectionCount === 0
 }
 
 async function setupLlmConnection(
   client: CliRpcClient,
-  args: CliArgs,
+  _args: CliArgs,
 ): Promise<{ connectionSlug: string }> {
-  const { provider, baseUrl } = args
-  const key = resolveApiKey(provider, args.apiKey)
-  const connectionSlug = `${provider}-cli`
-
-  let providerType: string
-  let authType: string
-  const setupPayload: Record<string, unknown> = { slug: connectionSlug, credential: key }
-
-  if (baseUrl) {
-    // Custom endpoint — send the same payload shape as the desktop UI.
-    // The server handler (llm-connections.ts:102-110) detects customEndpoint + baseUrl
-    // and sets providerType='pi_compat', piAuthProvider, etc.
-    providerType = 'pi_compat'
-    authType = 'api_key_with_endpoint'
-    setupPayload.baseUrl = baseUrl
-    setupPayload.customEndpoint = {
-      api: provider === 'anthropic' ? 'anthropic-messages' : 'openai-completions',
-    }
-    setupPayload.defaultModel = provider === 'anthropic' ? 'claude-sonnet-4-6' : 'gpt-4o'
-  } else if (provider === 'anthropic') {
-    providerType = 'anthropic'
-    authType = 'api_key'
-  } else if (provider === 'amazon-bedrock') {
-    // Bedrock uses IAM credentials, not a single API key
-    const accessKeyId = process.env.AWS_ACCESS_KEY_ID
-    const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY
-    const region = process.env.AWS_REGION || 'us-east-1'
-    const sessionToken = process.env.AWS_SESSION_TOKEN
-    if (!accessKeyId || !secretAccessKey) {
-      throw new Error(
-        'Amazon Bedrock requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables',
-      )
-    }
-    providerType = 'pi'
-    authType = 'iam_credentials'
-    setupPayload.piAuthProvider = 'amazon-bedrock'
-    setupPayload.bedrockAuthMethod = 'iam_credentials'
-    setupPayload.iamCredentials = { accessKeyId, secretAccessKey, sessionToken }
-    setupPayload.awsRegion = region
-    delete setupPayload.credential // IAM credentials go through iamCredentials field
-  } else {
-    providerType = 'pi'
-    authType = 'api_key'
-    setupPayload.piAuthProvider = provider
-  }
+  const provider = 'qwen'
+  const connectionSlug = 'qwen-code'
 
   await client.invoke('LLM_Connection:save', {
     slug: connectionSlug,
     name: getProviderDisplayName(provider),
-    providerType,
-    authType,
+    providerType: 'qwen',
+    authType: 'none',
     createdAt: Date.now(),
   })
-  const setupResult = await client.invoke('settings:setupLlmConnection', setupPayload) as { success: boolean; error?: string }
+  const setupResult = await client.invoke('settings:setupLlmConnection', { slug: connectionSlug }) as { success: boolean; error?: string }
   if (!setupResult?.success) {
     throw new Error(`LLM connection setup failed: ${setupResult?.error ?? 'unknown error'}`)
   }
   await client.invoke('LLM_Connection:setDefault', connectionSlug)
-  process.stderr.write(`LLM connection configured: ${provider}${baseUrl ? ` (${baseUrl})` : ''}\n`)
+  process.stderr.write('LLM connection configured: Qwen Code\n')
 
   return { connectionSlug }
 }
@@ -669,9 +593,7 @@ async function cmdRun(args: CliArgs): Promise<void> {
       process.stderr.write(`Workspace registered: ${absPath}\n`)
     }
 
-    // Auto-setup LLM connection from flags / env vars.
-    // When --base-url is provided, always create the custom endpoint connection
-    // (even if other connections exist) so the session routes through it.
+    // Auto-setup the Qwen Code connection when no connection exists yet.
     const connections = (await client.invoke('LLM_Connection:list')) as any[]
     let connectionSlug: string | undefined
     if (shouldSetupLlmConnection(connections?.length ?? 0, args)) {
@@ -820,7 +742,7 @@ export interface ValidateContext {
   baseUrl?: string
   /** API key override (from --api-key) */
   apiKey?: string
-  /** Provider hint (from --provider, default 'anthropic') */
+  /** Provider hint (from --provider, default 'qwen') */
   provider?: string
   workspaceId?: string
   workspaceRootPath?: string
@@ -1073,95 +995,22 @@ export function getValidateSteps(): ValidateStep[] {
       name: 'LLM_Connection:list',
       fn: async (client, ctx) => {
         const r = (await client.invoke('LLM_Connection:list')) as any[]
-
-        // Custom endpoint: always create/update when --base-url is provided
-        if (ctx.baseUrl) {
-          const provider = ctx.provider || 'anthropic'
-          let key = ''
-          try {
-            key = resolveApiKey(provider, ctx.apiKey || '')
-          } catch (error) {
-            return `0 connections (${error instanceof Error ? error.message : 'missing API key'})`
-          }
-          const slug = `${provider}-cli`
-          const isAnthropicApi = provider === 'anthropic'
-          await client.invoke('LLM_Connection:save', {
-            slug,
-            name: `${getProviderDisplayName(provider)} (Custom Endpoint)`,
-            providerType: 'pi_compat',
-            authType: 'api_key_with_endpoint',
-            createdAt: Date.now(),
-          })
-          const result = await client.invoke('settings:setupLlmConnection', {
-            slug,
-            credential: key,
-            baseUrl: ctx.baseUrl,
-            customEndpoint: { api: isAnthropicApi ? 'anthropic-messages' : 'openai-completions' },
-            defaultModel: isAnthropicApi ? 'claude-sonnet-4-6' : 'gpt-4o',
-          }) as { success: boolean; error?: string }
-          if (!result?.success) return `setup failed: ${result?.error ?? 'unknown'}`
-          await client.invoke('LLM_Connection:setDefault', slug)
-          return `${r?.length ?? 0} existing + custom endpoint via ${ctx.baseUrl}`
-        }
-
-        // Amazon Bedrock: IAM credential setup
-        if (ctx.provider === 'amazon-bedrock') {
-          const accessKeyId = process.env.AWS_ACCESS_KEY_ID
-          const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY
-          const region = process.env.AWS_REGION || 'us-east-1'
-          const sessionToken = process.env.AWS_SESSION_TOKEN
-          if (!accessKeyId || !secretAccessKey) {
-            return '0 connections (missing AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)'
-          }
-          const slug = 'amazon-bedrock-cli'
-          await client.invoke('LLM_Connection:save', {
-            slug,
-            name: 'Amazon Bedrock',
-            providerType: 'pi',
-            authType: 'iam_credentials',
-            piAuthProvider: 'amazon-bedrock',
-            createdAt: Date.now(),
-          })
-          const result = await client.invoke('settings:setupLlmConnection', {
-            slug,
-            piAuthProvider: 'amazon-bedrock',
-            bedrockAuthMethod: 'iam_credentials',
-            iamCredentials: { accessKeyId, secretAccessKey, sessionToken },
-            awsRegion: region,
-          }) as { success: boolean; error?: string }
-          if (!result?.success) return `setup failed: ${result?.error ?? 'unknown'}`
-          await client.invoke('LLM_Connection:setDefault', slug)
-          return `${r?.length ?? 0} existing + Bedrock IAM (${region})`
-        }
-
-        const provider = ctx.provider || 'anthropic'
+        const provider = ctx.provider || 'qwen'
         if (!shouldSetupLlmConnection(r?.length ?? 0, { provider, baseUrl: ctx.baseUrl ?? '' })) {
           return `${r.length} connections`
         }
-        // Auto-setup from env / flags for the requested provider.
-        let key = ''
-        try {
-          key = resolveApiKey(provider, ctx.apiKey || '')
-        } catch (error) {
-          return `0 connections (${error instanceof Error ? error.message : 'missing API key'})`
-        }
-        const slug = `${provider}-cli`
-        const providerType = provider === 'anthropic' ? 'anthropic' : 'pi'
-        const authType = 'api_key'
+        const slug = 'qwen-code'
         await client.invoke('LLM_Connection:save', {
           slug,
-          name: getProviderDisplayName(provider),
-          providerType,
-          authType,
+          name: 'Qwen Code',
+          providerType: 'qwen',
+          authType: 'none',
           createdAt: Date.now(),
         })
-        const setupPayload = provider === 'anthropic'
-          ? { slug, credential: key }
-          : { slug, credential: key, piAuthProvider: provider }
-        const result = await client.invoke('settings:setupLlmConnection', setupPayload) as { success: boolean; error?: string }
+        const result = await client.invoke('settings:setupLlmConnection', { slug }) as { success: boolean; error?: string }
         if (!result?.success) return `setup failed: ${result?.error ?? 'unknown'}`
         await client.invoke('LLM_Connection:setDefault', slug)
-        return `0 found → created ${provider} connection`
+        return '0 found -> created Qwen Code connection'
       },
     },
     {
@@ -1905,11 +1754,11 @@ Connection:
   --json                 Raw JSON output for scripting
 
 LLM Configuration (for 'run' command):
-  --provider <name>      LLM provider (default: anthropic, or $LLM_PROVIDER)
-                         Supported: anthropic, openai, google, openrouter, groq, mistral, deepseek, xai, ...
+  --provider <name>      LLM provider (default: qwen, or $LLM_PROVIDER)
+                         Supported: qwen
   --model <id>           Model to use (or $LLM_MODEL)
-  --api-key <key>        API key (or $LLM_API_KEY, or provider-specific e.g. $OPENAI_API_KEY)
-  --base-url <url>       Custom API endpoint (or $LLM_BASE_URL)
+  --api-key <key>        Ignored for Qwen Code; kept for script compatibility
+  --base-url <url>       Ignored for Qwen Code; kept for script compatibility
 
 Commands:
   run <message>          Spawn server, send message, stream response, exit
@@ -1940,10 +1789,7 @@ Examples:
   craft-cli run "What files are in the current directory?"
   craft-cli run --source craft-kb "Summarize today's daily note"
   craft-cli run --workspace-dir .github/agents --source craft-public "Read the doc"
-  craft-cli run --provider openai --model gpt-4o "Summarize this repo"
-  OPENAI_API_KEY=sk-... craft-cli run --provider openai "Hello"
-  GOOGLE_API_KEY=... craft-cli run --provider google --model gemini-2.0-flash "Hello"
-  DEEPSEEK_API_KEY=sk-... craft-cli run --provider deepseek --model deepseek-v4-flash "Hello"
+  craft-cli run --provider qwen --model qwen3-coder "Summarize this repo"
   echo "Analyze this code" | craft-cli run
   craft-cli ping
   craft-cli sessions

@@ -2,7 +2,7 @@
  * Tests for UsageTracker
  *
  * Tests the token usage and context window tracking
- * used by both ClaudeAgent and CodexAgent.
+ * used by backend agents.
  */
 import { describe, it, expect, beforeEach } from 'bun:test';
 import {

@@ -15,7 +15,7 @@ import {
   rmSync,
   statSync,
 } from 'fs';
-import { join, relative, resolve, isAbsolute } from 'path';
+import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { expandPath, toPortablePath } from '../utils/paths.ts';
 import { atomicWriteFileSync, readJsonFileSync } from '../utils/files.ts';
@@ -33,15 +33,6 @@ import type {
 } from './types.ts';
 
 const DEFAULT_WORKSPACES_DIR = join(CONFIG_DIR, 'workspaces');
-
-function isPathWithin(parentPath: string, childPath: string): boolean {
-  const rel = relative(resolve(parentPath), resolve(childPath));
-  return rel === '' || (!!rel && !rel.startsWith('..') && !isAbsolute(rel));
-}
-
-function isManagedWorkspacePath(rootPath: string): boolean {
-  return isPathWithin(DEFAULT_WORKSPACES_DIR, rootPath);
-}
 
 // ============================================================
 // Path Utilities
@@ -202,11 +193,6 @@ export function loadWorkspace(rootPath: string): LoadedWorkspace | null {
   const config = loadWorkspaceConfig(rootPath);
   if (!config) return null;
 
-  if (isManagedWorkspacePath(rootPath)) {
-    // Ensure plugin manifest exists (migration for existing managed workspaces)
-    ensurePluginManifest(rootPath, config.name);
-  }
-
   return {
     config,
     sourceSlugs: listSubdirNames(getWorkspaceSourcesPath(rootPath)),
@@ -338,9 +324,6 @@ export function createWorkspaceAtPath(
 
   // Initialize label configuration with defaults (two nested groups + valued labels)
   saveLabelConfig(rootPath, getDefaultLabelConfig());
-
-  // Initialize plugin manifest for SDK integration (enables skills, commands, agents)
-  ensurePluginManifest(rootPath, name);
 
   return config;
 }
@@ -495,37 +478,5 @@ export function isLocalMcpEnabled(rootPath: string): boolean {
 // ============================================================
 // Exports
 // ============================================================
-
-// ============================================================
-// Plugin Manifest (for SDK plugin integration)
-// ============================================================
-
-/**
- * Ensure workspace has a .claude-plugin/plugin.json manifest.
- * This allows the workspace to be loaded as an SDK plugin,
- * enabling skills, commands, and agents from the workspace.
- *
- * @param rootPath - Absolute path to workspace root folder
- * @param workspaceName - Display name for the workspace (used in plugin name)
- */
-export function ensurePluginManifest(rootPath: string, workspaceName: string): void {
-  const pluginDir = join(rootPath, '.claude-plugin');
-  const manifestPath = join(pluginDir, 'plugin.json');
-
-  if (existsSync(manifestPath)) return;
-
-  // Create .claude-plugin directory
-  if (!existsSync(pluginDir)) {
-    mkdirSync(pluginDir, { recursive: true });
-  }
-
-  // Create minimal plugin manifest
-  const manifest = {
-    name: `craft-workspace-${workspaceName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
-    version: '1.0.0',
-  };
-
-  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
-}
 
 export { CONFIG_DIR, DEFAULT_WORKSPACES_DIR };

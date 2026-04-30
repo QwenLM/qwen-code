@@ -165,7 +165,7 @@ After validation passes, trigger the appropriate auth flow:
 
 ## guide.md Best Practices
 
-The guide.md file is critical—it helps Claude understand how to use the source effectively in future sessions.
+The guide.md file is critical; it helps the agent understand how to use the source effectively in future sessions.
 
 ### Structure
 
@@ -201,7 +201,7 @@ Concrete examples tailored to the user's workflow:
 2. **Include concrete examples**: Use their actual project names and workflows
 3. **Document user preferences**: Any preferences they shared for future sessions
 4. **Note scope boundaries**: What the source can and cannot do
-5. **Keep it actionable**: Focus on what Claude needs to know to help effectively
+5. **Keep it actionable**: Focus on what the agent needs to know to help effectively
 
 ## Example Conversational Flow
 
@@ -246,7 +246,7 @@ Sources are stored as folders under:
 
 Each source folder contains:
 - `config.json` - Source configuration (required)
-- `guide.md` - Usage documentation for Claude (optional)
+- `guide.md` - Usage documentation for the agent (optional)
 - `permissions.json` - Custom permission rules for Explore mode (optional)
 - `icon.svg`, `icon.png`, `icon.jpg`, or `icon.jpeg` - Source icon (optional)
 
@@ -352,7 +352,7 @@ After creating, use `source_credential_prompt` with mode "bearer".
 
 For MCP servers that run locally via command line (npx, node, python), use the stdio transport.
 
-Users often provide configs in Claude Desktop / Claude Code format:
+Users often provide MCP configs copied from other tools:
 ```json
 {
   "mcpServers": {
@@ -399,7 +399,7 @@ With environment variables:
 
 ### API Sources
 
-REST APIs become flexible tools that Claude can call.
+REST APIs become flexible tools that the agent can call.
 
 **Request bodies:** By default, `params` is JSON-serialized for POST/PUT/PATCH requests. For endpoints that expect non-JSON bodies (plain text, XML, form data, etc.), use the special `_rawBody` and `_contentType` params:
 
@@ -439,9 +439,9 @@ REST APIs become flexible tools that Claude can call.
 ```json
 {
   "type": "api",
-  "provider": "openai",
+  "provider": "example",
   "api": {
-    "baseUrl": "https://api.openai.com/v1/",
+    "baseUrl": "https://api.example.com/v1/",
     "authType": "bearer",
     "testEndpoint": {
       "method": "GET",
@@ -703,7 +703,7 @@ Filesystem access for local folders.
 
 ## guide.md Format
 
-The guide.md file helps Claude understand how to use the source effectively.
+The guide.md file helps the agent understand how to use the source effectively.
 
 ```markdown
 # Source Name
@@ -844,7 +844,7 @@ URL: `https://mcp.linear.app`, OAuth auth.
 
 ### GitHub
 Provider: `github`, Type: `mcp`
-URL: `https://api.githubcopilot.com/mcp/`, **bearer auth** (PAT required - OAuth will fail).
+URL: `https://api.github.com/mcp/`, **bearer auth** (PAT required - OAuth will fail).
 
 ### Exa (Search)
 Provider: `exa`, Type: `api`

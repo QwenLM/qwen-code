@@ -6,11 +6,10 @@ import { DOC_REFS, APP_ROOT } from '../docs/index.ts';
 import { PERMISSION_MODE_CONFIG } from '../agent/mode-types.ts';
 import { FEATURE_FLAGS } from '../feature-flags.ts';
 import { APP_VERSION } from '../version/index.ts';
-import { readPluginName } from '../utils/workspace.ts';
 import { globSync } from 'glob';
 import os from 'os';
 
-/** Maximum size of CLAUDE.md file to include (10KB) */
+/** Maximum size of project context files to include (10KB) */
 const MAX_CONTEXT_FILE_SIZE = 10 * 1024;
 
 /** Maximum number of context files to discover in monorepo */
@@ -35,10 +34,10 @@ const EXCLUDED_DIRECTORIES = [
 ];
 
 /**
- * Context file patterns to look for in working directory (in priority order).
+ * Context file patterns to look for in working directory.
  * Matching is case-insensitive to support AGENTS.md, Agents.md, agents.md, etc.
  */
-const CONTEXT_FILE_PATTERNS = ['agents.md', 'claude.md'];
+const CONTEXT_FILE_PATTERNS = ['agents.md'];
 
 /**
  * Find a file in directory matching the pattern case-insensitively.
@@ -55,7 +54,7 @@ function findFileCaseInsensitive(directory: string, pattern: string): string | n
 }
 
 /**
- * Find a project context file (AGENTS.md or CLAUDE.md) in the directory.
+ * Find a project context file (AGENTS.md) in the directory.
  * Just checks if file exists, doesn't read content.
  * Returns the actual filename if found, null otherwise.
  */
@@ -72,7 +71,7 @@ export function findProjectContextFile(directory: string): string | null {
 
 // ── Context file cache ──────────────────────────────────────────────────
 // The glob walk is expensive (~7s in large monorepos). The result (a list of
-// file paths like "CLAUDE.md", "apps/electron/CLAUDE.md") rarely changes during
+// file paths like "AGENTS.md", "apps/electron/AGENTS.md") rarely changes during
 // a session, so we cache it per working directory with a 5-minute safety TTL.
 // Explicit invalidation happens on working directory changes.
 
@@ -91,7 +90,7 @@ export function invalidateContextFileCache(directory?: string): void {
 }
 
 /**
- * Find all project context files (AGENTS.md or CLAUDE.md) recursively in a directory.
+ * Find all project context files (AGENTS.md) recursively in a directory.
  * Supports monorepo setups where each package may have its own context file.
  * Returns relative paths sorted by depth (root first), capped at MAX_CONTEXT_FILES.
  *
@@ -112,7 +111,7 @@ export function findAllProjectContextFiles(directory: string): string[] {
     const ignorePatterns = EXCLUDED_DIRECTORIES.map((dir) => `**/${dir}/**`);
 
     // Search for all context files (case-insensitive via nocase option)
-    const pattern = '**/{agents,claude}.md';
+    const pattern = '**/agents.md';
     const matches = globSync(pattern, {
       cwd: directory,
       nocase: true,
@@ -147,8 +146,8 @@ export function findAllProjectContextFiles(directory: string): string[] {
 }
 
 /**
- * Read the project context file (AGENTS.md or CLAUDE.md) from a directory.
- * Matching is case-insensitive to support any casing (CLAUDE.md, claude.md, Claude.md, etc.).
+ * Read the project context file (AGENTS.md) from a directory.
+ * Matching is case-insensitive to support any casing (AGENTS.md, agents.md, Agents.md, etc.).
  * Returns the content if found, null otherwise.
  */
 export function readProjectContextFile(directory: string): { filename: string; content: string } | null {
@@ -183,7 +182,7 @@ export function readProjectContextFile(directory: string): { filename: string; c
  * Includes the working directory path and context about what it represents.
  * Returns empty string if no working directory is set.
  *
- * Note: Project context files (CLAUDE.md, AGENTS.md) are now listed in the system prompt
+ * Note: Project context files (AGENTS.md) are listed in the system prompt
  * via getProjectContextFilesPrompt() for persistence across compaction.
  *
  * @param workingDirectory - The effective working directory path (where user wants to work)
@@ -253,7 +252,7 @@ export interface DebugModeConfig {
 
 /**
  * Get the project context files prompt section for the system prompt.
- * Lists all discovered context files (AGENTS.md, CLAUDE.md) in the working directory.
+ * Lists all discovered context files (AGENTS.md) in the working directory.
  * For monorepos, this includes nested package context files.
  * Returns empty string if no working directory or no context files found.
  */
@@ -288,7 +287,7 @@ export interface SystemPromptOptions {
   workspaceRootPath?: string;
   /** Working directory for context file discovery (monorepo support) */
   workingDirectory?: string;
-  /** Backend name for "powered by X" text (default: 'Claude Code') */
+  /** Backend name for "powered by X" text (default: 'Qwen Code') */
   backendName?: string;
 }
 
@@ -340,7 +339,7 @@ Use config_validate to verify changes match the expected schema.
  * @param workspaceRootPath - Root path of the workspace
  * @param workingDirectory - Working directory for context file discovery
  * @param preset - System prompt preset ('default' | 'mini' | custom string)
- * @param backendName - Backend name for "powered by X" text (default: 'Claude Code')
+ * @param backendName - Backend name for "powered by X" text (default: 'Qwen Code')
  */
 export function getSystemPrompt(
   pinnedPreferencesPrompt?: string,
@@ -427,9 +426,9 @@ rg -n "session|OAuth|\"level\":\"error\"" "${logFilePath}" | tail -n 50
 }
 
 /**
- * Get the Craft Agent environment marker for SDK JSONL detection.
+ * Get the Craft Agent environment marker for session detection.
  * This marker is embedded in the system prompt and allows us to identify
- * Craft Agent sessions when importing from Claude Code.
+ * Craft Agent sessions in exported logs.
  */
 function getCraftAgentEnvironmentMarker(): string {
   const platform = process.platform; // 'darwin', 'win32', 'linux'
@@ -446,17 +445,14 @@ function getCraftAgentEnvironmentMarker(): string {
  * ${APP_ROOT}/docs/ and is read on-demand when topics come up.
  *
  * @param workspaceRootPath - Root path of the workspace
- * @param backendName - Backend name for "powered by X" text (default: 'Claude Code')
+ * @param backendName - Backend name for "powered by X" text (default: 'Qwen Code')
  * @param includeCoAuthoredBy - Whether to include the Co-Authored-By git trailer instruction (default: true)
  */
-function getCraftAssistantPrompt(workspaceRootPath?: string, backendName: string = 'Claude Code', includeCoAuthoredBy: boolean = true): string {
+function getCraftAssistantPrompt(workspaceRootPath?: string, backendName: string = 'Qwen Code', includeCoAuthoredBy: boolean = true): string {
   // Default to ${APP_ROOT}/workspaces/{id} if no path provided
   const workspacePath = workspaceRootPath || `${APP_ROOT}/workspaces/{id}`;
 
-  // Read the SDK plugin name from .claude-plugin/plugin.json — this is what the SDK
-  // uses to resolve skills. Falls back to basename for backwards compatibility.
-  const workspaceId = (workspaceRootPath && readPluginName(workspaceRootPath))
-    || basename(workspacePath)
+  const workspaceId = basename(workspacePath)
     || '{workspaceId}';
 
   // Environment marker for SDK JSONL detection
@@ -508,7 +504,7 @@ Skills are stored at three levels (checked in order):
 
 ## Project Context
 
-When \`<project_context_files>\` appears in the system prompt, it lists all discovered context files (CLAUDE.md, AGENTS.md) in the working directory and its subdirectories. This supports monorepos where each package may have its own context file.
+When \`<project_context_files>\` appears in the system prompt, it lists all discovered AGENTS.md context files in the working directory and its subdirectories. This supports monorepos where each package may have its own context file.
 
 Read relevant context files using the Read tool - they contain architecture info, conventions, and project-specific guidance. For monorepos, read the root context file first, then package-specific files as needed based on what you're working on.
 
@@ -590,7 +586,7 @@ When presenting a plan via SubmitPlan the system will interrupt your current run
 Never try to execute a plan without submitting it first - it will fail, especially if user is in ${PERMISSION_MODE_CONFIG['safe'].displayName}.
 
 **CRITICAL:** You MUST write plan files to the **exact \`plansFolderPath\`** and data files to the **exact \`dataFolderPath\`** from \`<session_state>\`. These folders already exist (created by the system). Writes to any other path (including the parent session folder) will be blocked.
-**Do NOT** write to \`.copilot-config/\`, \`session-state/\`, or any other directory — those paths will be rejected. Use ONLY \`plansFolderPath\` or \`dataFolderPath\`.
+**Do NOT** write to \`session-state/\` or any other directory — those paths will be rejected. Use ONLY \`plansFolderPath\` or \`dataFolderPath\`.
 ${backendName === 'Codex' ? `
 ### Planning tools (Codex)
 - **update_plan** — Live task tracking within a turn/session (statuses: pending/in_progress/completed). Does not pause execution or request approval.

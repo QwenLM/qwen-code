@@ -428,7 +428,7 @@ describe('PromptHandler', () => {
           actions: [{
             type: 'prompt',
             prompt: 'Quick review',
-            model: 'claude-sonnet-4-6',
+            model: 'qwen3-coder-plus',
           }],
         }],
       });
@@ -444,7 +444,7 @@ describe('PromptHandler', () => {
 
       expect(onPromptsReady).toHaveBeenCalledTimes(1);
       const prompts: PendingPrompt[] = onPromptsReady.mock.calls[0]![0];
-      expect(prompts[0]!.model).toBe('claude-sonnet-4-6');
+      expect(prompts[0]!.model).toBe('qwen3-coder-plus');
 
       handler.dispose();
     });

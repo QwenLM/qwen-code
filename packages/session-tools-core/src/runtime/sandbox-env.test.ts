@@ -39,11 +39,11 @@ describe('sandbox-env', () => {
       dataDir,
     }, {
       SAFE_VAR: 'ok',
-      OPENAI_API_KEY: 'secret',
+      QWEN_API_KEY: 'secret',
     });
 
     expect(env.SAFE_VAR).toBe('ok');
-    expect(env.OPENAI_API_KEY).toBeUndefined();
+    expect(env.QWEN_API_KEY).toBeUndefined();
 
     expect(env.TMPDIR).toBe(join(dataDir, '.tmp'));
     expect(env.TMP).toBe(join(dataDir, '.tmp'));

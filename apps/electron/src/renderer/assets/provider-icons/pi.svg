@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg width="32px" height="32px" viewBox="0 0 32 32" version="1.1" xmlns="http://www.w3.org/2000/svg">
-    <title>Pi</title>
-    <g id="Pi" stroke="none" fill="none" fill-rule="evenodd">
-        <g transform="translate(4, 4)" fill="currentColor">
-            <path d="M2,4 L22,4 C22.5522847,4 23,4.44771525 23,5 C23,5.55228475 22.5522847,6 22,6 L17,6 L17,20 C17,20.5522847 16.5522847,21 16,21 C15.4477153,21 15,20.5522847 15,20 L15,6 L9,6 L9,20 C9,20.5522847 8.55228475,21 8,21 C7.44771525,21 7,20.5522847 7,20 L7,6 L2,6 C1.44771525,6 1,5.55228475 1,5 C1,4.44771525 1.44771525,4 2,4 Z"/>
-        </g>
-    </g>
-</svg>

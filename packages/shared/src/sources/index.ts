@@ -8,7 +8,7 @@
 export type {
   SourceType,
   SourceMcpAuthType,
-  ApiAuthType,
+  HttpAuthType,
   KnownProvider,
   ApiOAuthProvider,
   ApiOAuthConfig,

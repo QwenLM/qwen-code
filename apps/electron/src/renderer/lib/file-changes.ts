@@ -36,7 +36,7 @@ export function collectFileChangesFromActivities(activities: ActivityItem[]): Fi
         continue
       }
 
-      // Pi SDK >= 0.63.2 edit format: { path, edits: [{ oldText, newText }] }
+      // Structured edit format: { path, edits: [{ oldText, newText }] }
       if (Array.isArray(input.edits) && input.edits.length > 0) {
         const filePath = getFilePath(input)
         for (const [index, edit] of input.edits.entries()) {
@@ -53,7 +53,7 @@ export function collectFileChangesFromActivities(activities: ActivityItem[]): Fi
         continue
       }
 
-      // Claude fields take precedence; legacy Pi fields are additive fallbacks.
+      // Canonical fields take precedence; legacy structured fields are additive fallbacks.
       changes.push({
         id: activity.id,
         filePath: getFilePath(input),

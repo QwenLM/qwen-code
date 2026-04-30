@@ -21,10 +21,11 @@ export type { ActivityItem }
 
 /**
  * Strip error wrapper tags and prefixes from tool error messages.
- * The Claude Agent SDK wraps errors in tags like <error><tool_use_error>...</tool_use_error></error>
+ * Some runtimes wrap errors in tags like <error><tool_use_error>...</tool_use_error></error>
  * which aren't user-friendly. Additionally, errorResponse() and blockWithReason() prefix
- * messages with "[ERROR] " so the Codex model can detect failures (the OpenAI API has no
- * error signaling field). We strip that prefix here for clean UI display.
+ * messages with "[ERROR] " so the backend can detect failures when a tool
+ * protocol has no dedicated error signaling field. We strip that prefix here
+ * for clean UI display.
  */
 function stripErrorTags(content: string | undefined): string | undefined {
   if (!content) return content

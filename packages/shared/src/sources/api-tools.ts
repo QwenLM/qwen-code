@@ -5,7 +5,6 @@
  * Each tool accepts { path, method, params } and auto-injects authentication.
  */
 
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import type { ApiConfig } from './types.ts';
 import { debug } from '../utils/debug.ts';
@@ -13,6 +12,7 @@ import { guardLargeResult } from '../utils/large-response.ts';
 import { MAX_DOWNLOAD_SIZE, formatBytes } from '../utils/binary-detection.ts';
 import type { ApiCredential, BasicAuthCredential } from './credential-manager.ts';
 import { isMultiHeaderCredential } from './credential-manager.ts';
+import { createLocalMcpServer, localTool } from '../mcp/local-tools.ts';
 
 // Re-export for convenience
 export type { ApiCredential, BasicAuthCredential } from './credential-manager.ts';
@@ -212,7 +212,7 @@ export function createApiTool(
 
   const description = buildToolDescription(config);
 
-  return tool(
+  return localTool(
     toolName,
     description,
     {
@@ -322,19 +322,19 @@ export function createApiTool(
  * @param credential - API credential source (string for API key/token, BasicAuthCredential for basic auth,
  *                     empty string for public APIs, or async function for OAuth token refresh)
  * @param sessionPath - Optional path to session folder for saving large responses
- * @returns SDK MCP server that can be passed to query()
+ * @returns Local MCP server that can be exposed through the source pool
  */
 export function createApiServer(
   config: ApiConfig,
   credential: ApiCredentialSource,
   sessionPath?: string,
   summarize?: SummarizeCallback
-): ReturnType<typeof createSdkMcpServer> {
+): ReturnType<typeof createLocalMcpServer> {
   debug(`[api-tools] Creating server for ${config.name}${sessionPath ? ` (session: ${sessionPath})` : ''}`);
 
   const apiTool = createApiTool(config, credential, sessionPath, summarize);
 
-  return createSdkMcpServer({
+  return createLocalMcpServer({
     name: `api_${config.name}`,
     version: '1.0.0',
     tools: [apiTool],

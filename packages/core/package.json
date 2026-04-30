@@ -12,7 +12,6 @@
     "./utils": "./src/utils/index.ts"
   },
   "peerDependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.2.111",
     "@modelcontextprotocol/sdk": ">=1.0.0"
   },
   "devDependencies": {

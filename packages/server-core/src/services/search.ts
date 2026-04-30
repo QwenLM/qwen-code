@@ -85,11 +85,9 @@ export interface SearchOptions {
 function getRipgrepPath(): string | undefined {
   if (!_platform) throw new Error('setSearchPlatform() must be called before search');
   const { ripgrepPath } = resolveBackendHostTooling({
-    hostRuntime: {
-      appRootPath: _platform.appRootPath,
-      resourcesPath: _platform.resourcesPath,
-      isPackaged: _platform.isPackaged,
-    },
+    appRootPath: _platform.appRootPath,
+    resourcesPath: _platform.resourcesPath,
+    isPackaged: _platform.isPackaged,
   });
   return ripgrepPath;
 }
@@ -141,7 +139,7 @@ function extractSnippetFast(rawLine: string, matchText: string, maxLength = 150)
       return content;
     }
 
-    // Content might be an array (Claude format) - extract first text block
+    // Content might be an array of text blocks - extract first text block
     const textBlockMatch = rawLine.match(/"type"\s*:\s*"text"\s*,\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"/);
     if (textBlockMatch) {
       const text = textBlockMatch[1]

@@ -75,7 +75,7 @@ export class ToolIndex {
 }
 
 // ============================================================================
-// Content block types (subset of Anthropic SDK types we need)
+// Content block types used for tool result matching.
 // ============================================================================
 
 /** Represents a tool_use content block from an assistant message */
@@ -315,7 +315,7 @@ export function extractToolResults(
  * Extract intent and displayName metadata for a tool call.
  *
  * Sources (checked in priority order):
- * 1. toolMetadataStore — populated by the SSE stripping stream in unified-network-interceptor.ts
+ * 1. toolMetadataStore — populated by backend-specific metadata capture
  * 2. toolBlock.input._intent / _displayName — fallback for Codex backend or if SSE interception didn't run
  * 3. Bash description field — fallback for intent on Bash tools
  */

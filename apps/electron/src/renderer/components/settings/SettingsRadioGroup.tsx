@@ -118,7 +118,7 @@ export interface SettingsRadioCardProps {
  * <SettingsRadioCard
  *   value="api_key"
  *   label="API Key"
- *   description="Pay-as-you-go with your Anthropic key"
+ *   description="Use your local Qwen Code setup"
  *   expandedContent={<ApiKeyInput />}
  * />
  */

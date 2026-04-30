@@ -2,7 +2,7 @@
  * Centralized MCP Client Pool
  *
  * Owns all MCP source connections in the main Electron process.
- * All backends (Claude, Pi) receive proxy tool definitions
+ * Backends receive proxy tool definitions
  * and route tool calls through this pool instead of managing MCP connections
  * themselves.
  *

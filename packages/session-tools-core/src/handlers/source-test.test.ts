@@ -270,7 +270,7 @@ describe('source_test auto-enable', () => {
     const text = result.content[0]?.text ?? '';
 
     // Both backends route through the same source_activated + auto_retry machinery
-    // now, so the user-visible message is one line — no Claude vs Pi branching.
+    // now, so the user-visible message is one line.
     expect(text).toContain('turn will auto-restart');
     expect(text).not.toContain('tools available now');
     expect(text).not.toContain('available on your next message');

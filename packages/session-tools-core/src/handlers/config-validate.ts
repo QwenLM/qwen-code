@@ -2,7 +2,7 @@
  * Config Validate Handler
  *
  * Validates Craft Agent configuration files.
- * Uses full validators if available (Claude), otherwise basic validation (Codex).
+ * Uses full validators if available, otherwise basic validation.
  */
 
 import { join } from 'node:path';
@@ -37,7 +37,7 @@ export async function handleConfigValidate(
   const { target, sourceSlug } = args;
   const craftAgentRoot = join(homedir(), '.craft-agent');
 
-  // If full validators available (Claude), use them
+  // If full validators are available, use them
   if (ctx.validators) {
     try {
       let result;
@@ -81,7 +81,7 @@ export async function handleConfigValidate(
     }
   }
 
-  // Fallback: basic validation (Codex path)
+  // Fallback: basic validation
   switch (target) {
     case 'config': {
       const result = validateJsonFileHasFields(

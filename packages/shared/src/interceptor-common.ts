@@ -1,7 +1,7 @@
 /**
  * Shared infrastructure for the unified network interceptor.
  *
- * The interceptor runs as a preload script in SDK subprocesses (Claude, Copilot, Pi).
+ * This module stores cross-process tool metadata and recent API errors.
  * This module provides the common pieces:
  * - toolMetadataStore (file-based cross-process sharing)
  * - LastApiError (error capture for error handler)
@@ -141,8 +141,7 @@ export function isExtendedPromptCacheEnabled(): boolean {
 /**
  * Check if 1M context window is enabled.
  * When disabled, the interceptor strips the context-1m beta header.
- * Defaults to false — the 1M beta requires Anthropic Tier 4+, so it's opt-in
- * to avoid 400 "Invalid Request" on lower-tier API keys (issue #567).
+ * Defaults to false.
  * Must stay in sync with getEnable1MContext() in config/storage.ts.
  */
 export function is1MContextEnabled(): boolean {

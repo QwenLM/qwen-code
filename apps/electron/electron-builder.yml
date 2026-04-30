@@ -16,15 +16,11 @@ files:
   - "!dist/renderer/src/**"
   - "!**/*.map"
   - package.json
-  # Include bundled MCP servers (bridge + session) for Codex sessions
+  # Include bundled MCP servers (bridge + session) for agent sessions
   - resources/bridge-mcp-server/**/*
   - resources/session-mcp-server/**/*
-  # Include Pi agent server subprocess for Pi SDK sessions
-  - resources/pi-agent-server/**/*
   # Note: Bundled assets (docs, themes, permissions, tool-icons) are in resources/
   # and copied to dist/resources/ by build:copy. They're included via dist/**/* above.
-  # Include network interceptor for API error capture and MCP schema injection
-  - packages/shared/src/unified-network-interceptor.ts
   - packages/shared/src/interceptor-common.ts
   - packages/shared/src/feature-flags.ts
   - packages/shared/src/interceptor-request-utils.ts
@@ -56,18 +52,10 @@ files:
   - vendor/bun/**/*
   # Include bundled Codex binary (platform-specific, downloaded by build script)
   - vendor/codex/**/*
-  # Include bundled Copilot CLI binary (platform-specific, copied from node_modules by build script)
-  - vendor/copilot/**/*
   # Include bundled Qwen Code CLI package (downloaded by build script)
   - vendor/qwen-code/**/*
-  # Exclude everything from node_modules (will use extraResources for SDK)
+  # Exclude everything from node_modules.
   - "!node_modules/**/*"
-
-# SDK is included as per-platform extraResources (below) to bypass node_modules auto-exclusion
-# and to apply platform-specific ripgrep binary filtering.
-# Since electron-builder v20.15.2, directories named "node_modules" are automatically excluded.
-# Using extraResources with explicit from/to paths works around this limitation.
-# See: https://github.com/electron-userland/electron-builder/issues/3104
 
 extraMetadata:
   main: dist/main.cjs
@@ -101,13 +89,6 @@ mac:
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
   extraResources:
-    - from: node_modules/@anthropic-ai/claude-agent-sdk
-      to: app/node_modules/@anthropic-ai/claude-agent-sdk
-      filter:
-        - "**/*"
-        - "!vendor/ripgrep/arm64-linux/**"
-        - "!vendor/ripgrep/x64-linux/**"
-        - "!vendor/ripgrep/x64-win32/**"
     # WhatsApp worker subprocess (self-contained; Baileys bundled in).
     - from: ../../packages/messaging-whatsapp-worker/dist/worker.cjs
       to: messaging-whatsapp-worker/worker.cjs
@@ -115,8 +96,6 @@ mac:
   files:
     - "!**/vendor/codex/linux-*/**"
     - "!**/vendor/codex/win32-*/**"
-    - "!**/vendor/copilot/linux-*/**"
-    - "!**/vendor/copilot/win32-*/**"
     - "!**/resources/bin/win32-*/**"
     - "!**/resources/bin/linux-*/**"
   # Use predictable naming for macOS packages (applies to zip; dmg uses its own config below)
@@ -158,35 +137,22 @@ win:
     # Exclude binaries for other platforms
     - "!**/vendor/codex/darwin-*/**"
     - "!**/vendor/codex/linux-*/**"
-    - "!**/vendor/copilot/darwin-*/**"
-    - "!**/vendor/copilot/linux-*/**"
     - "!**/resources/bin/darwin-*/**"
     - "!**/resources/bin/linux-*/**"
-    # WORKAROUND: Exclude bun, codex, copilot, and uv from regular files on Windows.
+    # WORKAROUND: Exclude bun, codex, and uv from regular files on Windows.
     # electron-builder's npm node module collector causes EBUSY errors when copying
     # .exe files because it scans/locks files while simultaneously trying to copy them.
     # Moving them to extraResources avoids this by copying before the collector runs.
     # See: https://github.com/electron-userland/electron-builder/issues/8250
     - "!vendor/bun/**/*"
     - "!vendor/codex/**/*"
-    - "!vendor/copilot/**/*"
     - "!**/resources/bin/win32-x64/**"
   # Copy executables as extraResources to avoid EBUSY file locking (see comment above)
   extraResources:
-    - from: node_modules/@anthropic-ai/claude-agent-sdk
-      to: app/node_modules/@anthropic-ai/claude-agent-sdk
-      filter:
-        - "**/*"
-        - "!vendor/ripgrep/arm64-darwin/**"
-        - "!vendor/ripgrep/x64-darwin/**"
-        - "!vendor/ripgrep/arm64-linux/**"
-        - "!vendor/ripgrep/x64-linux/**"
     - from: vendor/bun/bun.exe
       to: vendor/bun/bun.exe
     - from: vendor/codex/win32-x64
       to: app/vendor/codex/win32-x64
-    - from: vendor/copilot/win32-x64
-      to: app/vendor/copilot/win32-x64
     - from: resources/bin/win32-x64
       to: app/resources/bin/win32-x64
     # WhatsApp worker subprocess (self-contained; Baileys bundled in).
@@ -210,13 +176,6 @@ linux:
         - x64
   artifactName: "Craft-Agents-${arch}.${ext}"
   extraResources:
-    - from: node_modules/@anthropic-ai/claude-agent-sdk
-      to: app/node_modules/@anthropic-ai/claude-agent-sdk
-      filter:
-        - "**/*"
-        - "!vendor/ripgrep/arm64-darwin/**"
-        - "!vendor/ripgrep/x64-darwin/**"
-        - "!vendor/ripgrep/x64-win32/**"
     # WhatsApp worker subprocess (self-contained; Baileys bundled in).
     - from: ../../packages/messaging-whatsapp-worker/dist/worker.cjs
       to: messaging-whatsapp-worker/worker.cjs
@@ -224,7 +183,5 @@ linux:
   files:
     - "!**/vendor/codex/darwin-*/**"
     - "!**/vendor/codex/win32-*/**"
-    - "!**/vendor/copilot/darwin-*/**"
-    - "!**/vendor/copilot/win32-*/**"
     - "!**/resources/bin/darwin-*/**"
     - "!**/resources/bin/win32-*/**"

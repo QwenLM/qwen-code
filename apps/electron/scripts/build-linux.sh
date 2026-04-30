@@ -75,7 +75,6 @@ fi
 # 1. Clean previous build artifacts
 echo "Cleaning previous builds..."
 rm -rf "$ELECTRON_DIR/vendor"
-rm -rf "$ELECTRON_DIR/node_modules/@anthropic-ai"
 rm -rf "$ELECTRON_DIR/packages"
 rm -rf "$ELECTRON_DIR/release"
 
@@ -128,34 +127,12 @@ if [ ! -e "$QWEN_VENDOR_DIR/cli.js" ] && [ ! -e "$QWEN_VENDOR_DIR/dist/cli.js" ]
     exit 1
 fi
 
-# 5. Copy SDK from root node_modules (monorepo hoisting)
-# Note: The SDK is hoisted to root node_modules by the package manager.
-# We copy it here because electron-builder only sees apps/electron/.
-SDK_SOURCE="$ROOT_DIR/node_modules/@anthropic-ai/claude-agent-sdk"
-require_path "$SDK_SOURCE" "SDK" "Run 'bun install' from the repository root first."
-echo "Copying SDK..."
-mkdir -p "$ELECTRON_DIR/node_modules/@anthropic-ai"
-cp -r "$SDK_SOURCE" "$ELECTRON_DIR/node_modules/@anthropic-ai/"
-
-# 6. Copy interceptor
-INTERCEPTOR_SOURCE="$ROOT_DIR/packages/shared/src/unified-network-interceptor.ts"
-require_path "$INTERCEPTOR_SOURCE" "Interceptor" "Ensure packages/shared/src/unified-network-interceptor.ts exists."
-echo "Copying interceptor..."
-mkdir -p "$ELECTRON_DIR/packages/shared/src"
-cp "$INTERCEPTOR_SOURCE" "$ELECTRON_DIR/packages/shared/src/"
-# Also copy dependencies imported by the interceptor at runtime
-for dep in interceptor-common.ts feature-flags.ts interceptor-request-utils.ts; do
-  if [ -f "$ROOT_DIR/packages/shared/src/$dep" ]; then
-    cp "$ROOT_DIR/packages/shared/src/$dep" "$ELECTRON_DIR/packages/shared/src/"
-  fi
-done
-
-# 7. Build Electron app
+# 5. Build Electron app
 echo "Building Electron app..."
 cd "$ROOT_DIR"
 bun run electron:build
 
-# 8. Package with electron-builder
+# 6. Package with electron-builder
 echo "Packaging app with electron-builder..."
 cd "$ELECTRON_DIR"
 

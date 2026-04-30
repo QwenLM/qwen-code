@@ -475,8 +475,7 @@ export class AutomationSystem implements AutomationsConfigProvider {
   // ============================================================================
 
   /**
-   * Execute agent event automations directly (without going through the Claude SDK).
-   * This is the backend-agnostic entry point for non-Claude backends (Codex, Copilot, Pi)
+   * Execute agent event automations directly through the backend-agnostic entry point.
    * to fire agent events from automations.json.
    *
    * For each matching automation matcher, builds env vars and evaluates matching.
@@ -501,7 +500,7 @@ export class AutomationSystem implements AutomationsConfigProvider {
       matchedCount++;
 
       // Note: Command execution has been removed. Prompt-based execution for
-      // non-Claude backends is not yet implemented. This method currently only
+      // Direct hook wiring for some backends is not yet implemented. This method currently only
       // validates matching (including condition gating) — actual execution is a no-op.
       log.debug(`[AutomationSystem] Matched ${event} automation (prompt-based execution pending)`);
     }

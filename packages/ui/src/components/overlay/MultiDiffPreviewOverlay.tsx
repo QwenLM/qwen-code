@@ -29,7 +29,7 @@ import { cn } from '../../lib/utils'
  * A single file change (Edit or Write)
  *
  * Supports two formats:
- * - Claude Code: original/modified strings (computed diff)
+ * - Tool edit events: original/modified strings (computed diff)
  * - Codex: unifiedDiff string (pre-computed unified diff patch)
  */
 export interface FileChange {
@@ -127,7 +127,7 @@ function computeChangeStats(change: FileChange): { additions: number; deletions:
     return stats || { additions: 0, deletions: 0 }
   }
 
-  // Handle Claude Code format: original/modified strings
+  // Handle original/modified string format
   const ext = change.filePath.split('.').pop()?.toLowerCase() || ''
   const lang = LANGUAGE_MAP[ext] || 'text'
   const oldFile: FileContents = { name: change.filePath, contents: change.original, lang: lang as any }
@@ -370,7 +370,7 @@ export function MultiDiffPreviewOverlay({
                         onReady={handleDiffReady}
                       />
                     ) : (
-                      // Claude Code format: original/modified strings
+                      // original/modified string format
                       <ShikiDiffViewer
                         original={change.original}
                         modified={change.modified}

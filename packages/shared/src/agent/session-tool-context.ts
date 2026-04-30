@@ -1,11 +1,11 @@
 /**
- * Claude Context Factory
+ * Session Tool Context Factory
  *
- * Creates a SessionToolContext implementation for Claude with full access
+ * Creates a SessionToolContext implementation with full access
  * to Electron internals, credential managers, MCP validation, etc.
  *
  * This enables the shared handlers in session-tools-core to work with
- * Claude's full feature set.
+ * the app's full feature set.
  */
 
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, mkdirSync } from 'fs';
@@ -45,11 +45,6 @@ import {
   validateStdioMcpConnection as validateStdioMcpConnectionImpl,
 } from '../mcp/validation.ts';
 import {
-  getDefaultLlmConnection,
-  getLlmConnection,
-} from '../config/storage.ts';
-import { getCredentialManager } from '../credentials/index.ts';
-import {
   loadSourceConfig as loadSourceConfigImpl,
   saveSourceConfig as saveSourceConfigImpl,
   getSourcePath,
@@ -73,9 +68,9 @@ import { updatePreferences as updatePreferencesImpl } from '../config/preference
 export type { SessionToolContext, SessionToolCallbacks } from '@craft-agent/session-tools-core';
 
 /**
- * Options for creating a Claude context
+ * Options for creating a session tool context
  */
-export interface ClaudeContextOptions {
+export interface SessionToolContextOptions {
   sessionId: string;
   workspacePath: string;
   workspaceId: string;
@@ -84,7 +79,7 @@ export interface ClaudeContextOptions {
 }
 
 /**
- * Create a SessionToolContext for Claude with full capabilities.
+ * Create a SessionToolContext with full capabilities.
  *
  * This provides:
  * - Full file system access
@@ -93,7 +88,7 @@ export interface ClaudeContextOptions {
  * - MCP connection validation
  * - Icon management
  */
-export function createClaudeContext(options: ClaudeContextOptions): SessionToolContext {
+export function createSessionToolContext(options: SessionToolContextOptions): SessionToolContext {
   const { sessionId, workspacePath, workspaceId, onPlanSubmitted, onAuthRequest } = options;
 
   // File system implementation
@@ -196,33 +191,10 @@ export function createClaudeContext(options: ClaudeContextOptions): SessionToolC
 
   const validateMcpConnection = async (config: HttpMcpConfig): Promise<McpValidationResult> => {
     try {
-      // Resolve credentials from the default LLM connection
-      const defaultSlug = getDefaultLlmConnection();
-      const connection = defaultSlug ? getLlmConnection(defaultSlug) : null;
-      const credManager = getCredentialManager();
-
-      let apiKey: string | null = null;
-      let oauthToken: string | null = null;
-
-      if (connection && defaultSlug) {
-        if (connection.authType === 'api_key' || connection.authType === 'api_key_with_endpoint') {
-          apiKey = await credManager.getLlmApiKey(defaultSlug);
-        } else if (connection.authType === 'oauth') {
-          const oauth = await credManager.getLlmOAuth(defaultSlug);
-          oauthToken = oauth?.accessToken || null;
-        }
-      }
-
-      if (!apiKey && !oauthToken) {
-        return { success: false, error: 'No Claude API key or OAuth token configured' };
-      }
-
       const result = await validateMcpConnectionImpl({
         mcpUrl: config.url,
         mcpTransport: config.transport,
         mcpHeaders: config.headers,
-        claudeApiKey: apiKey || undefined,
-        claudeOAuthToken: oauthToken || undefined,
       });
       return {
         success: result.success,
@@ -259,7 +231,7 @@ export function createClaudeContext(options: ClaudeContextOptions): SessionToolC
       mkdirSync(feedbackDir, { recursive: true });
       const filePath = join(feedbackDir, `${feedback.id}.json`);
       writeFileSync(filePath, JSON.stringify(feedback, null, 2), 'utf-8');
-      debug('claude-context', `Developer feedback written to ${filePath}`);
+      debug('session-tool-context', `Developer feedback written to ${filePath}`);
     },
     // Source management
     loadSourceConfig: (sourceSlug: string): SourceConfig | null => {

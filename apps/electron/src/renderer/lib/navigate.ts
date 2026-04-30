@@ -8,7 +8,7 @@
  *   import { navigate, routes } from '@/lib/navigate'
  *
  *   navigate(routes.tab.settings())
- *   navigate(routes.action.newChat({ agentId: 'claude' }))
+ *   navigate(routes.action.newChat({ agentId: 'qwen' }))
  *   navigate(routes.view.allSessions())
  */
 

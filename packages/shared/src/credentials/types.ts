@@ -7,8 +7,6 @@
  * Credential key format: "{type}::{scope...}"
  *
  * Examples:
- *   - anthropic_api_key::global
- *   - claude_oauth::global
  *   - source_oauth::{workspaceId}::{sourceId}
  *   - source_bearer::{workspaceId}::{sourceId}
  *
@@ -17,9 +15,6 @@
 
 /** Types of credentials we store */
 export type CredentialType =
-  // Global credentials (legacy, kept for backwards compatibility)
-  | 'anthropic_api_key'  // Anthropic API key for Claude
-  | 'claude_oauth'       // Claude OAuth token (Max subscription)
   // LLM connection credentials (keyed by connection slug)
   | 'llm_api_key'        // API key for LLM connection
   | 'llm_oauth'          // OAuth token for LLM connection
@@ -37,8 +32,6 @@ export type CredentialType =
 
 /** Valid credential types for validation */
 const VALID_CREDENTIAL_TYPES: readonly CredentialType[] = [
-  'anthropic_api_key',
-  'claude_oauth',
   'llm_api_key',
   'llm_oauth',
   'llm_iam',
@@ -96,11 +89,11 @@ export interface StoredCredential {
   clientSecret?: string;
   /** Token type (e.g., "Bearer") */
   tokenType?: string;
-  /** Where the credential came from: 'native' (our OAuth), 'cli' (Claude CLI import) */
+  /** Where the credential came from. */
   source?: 'native' | 'cli';
   /**
    * OIDC id_token (JWT with user identity claims).
-   * Used by OpenAI/Codex which returns both id_token and access_token.
+   * Used by OIDC providers that return both id_token and access_token.
    * The `value` field stores access_token, this field stores id_token.
    */
   idToken?: string;

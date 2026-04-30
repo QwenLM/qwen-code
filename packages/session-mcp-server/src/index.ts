@@ -2,9 +2,9 @@
 /**
  * Session MCP Server
  *
- * This MCP server provides session-scoped tools to Codex via stdio transport.
+ * This MCP server provides session-scoped tools to backend runtimes via stdio transport.
  * It uses the shared handlers from @craft-agent/session-tools-core to ensure
- * feature parity with Claude's session-scoped tools.
+ * consistent behavior across transport modes.
  *
  * Callback Communication:
  * Tools that need to communicate with the main Electron process (e.g., SubmitPlan
@@ -145,14 +145,14 @@ function createCredentialManager(workspaceRootPath: string): CredentialManagerIn
 }
 
 // ============================================================
-// Codex Context Factory
+// Session Tool Context Factory
 // ============================================================
 
 /**
- * Create a SessionToolContext for the Codex MCP server.
+ * Create a SessionToolContext for the session MCP server.
  * This provides the context needed by all handlers.
  */
-function createCodexContext(config: SessionConfig): SessionToolContext {
+function createSessionMcpContext(config: SessionConfig): SessionToolContext {
   const { sessionId, workspaceRootPath, plansFolderPath } = config;
 
   // File system implementation
@@ -250,7 +250,7 @@ function createCodexContext(config: SessionConfig): SessionToolContext {
     },
 
     // Note: saveSourceConfig, validators, renderMermaid
-    // are not available in Codex context (require Electron internals)
+    // are not available in subprocess context (require main-process internals)
   };
 }
 
@@ -344,7 +344,7 @@ async function handleCallLlm(
   args: Record<string, unknown>,
   config: SessionConfig,
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
-  // Primary path: PreToolUse intercept injects _precomputedResult (works on Codex).
+  // Primary path: PreToolUse injects _precomputedResult when available.
   const precomputed = args?._precomputedResult as string | undefined;
 
   if (precomputed) {
@@ -364,7 +364,7 @@ async function handleCallLlm(
     }
   }
 
-  // Fallback path: HTTP callback to agent (for Copilot where PreToolUse doesn't fire for MCP tools).
+  // Fallback path: HTTP callback to agent.
   // Uses callbackPort from CLI arg (--callback-port) or env var (CRAFT_LLM_CALLBACK_PORT).
   if (config.callbackPort) {
     try {
@@ -400,7 +400,7 @@ async function handleSpawnSession(
   args: Record<string, unknown>,
   config: SessionConfig,
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
-  // Primary path: PreToolUse intercept injects _precomputedResult (works on Codex).
+  // Primary path: PreToolUse injects _precomputedResult when available.
   const precomputed = args?._precomputedResult as string | undefined;
 
   if (precomputed) {
@@ -418,7 +418,7 @@ async function handleSpawnSession(
     }
   }
 
-  // Fallback path: HTTP callback to agent (for Copilot where PreToolUse doesn't fire for MCP tools).
+  // Fallback path: HTTP callback to agent.
   if (config.callbackPort) {
     try {
       const resp = await fetch(`http://127.0.0.1:${config.callbackPort}/spawn-session`, {
@@ -498,12 +498,12 @@ async function main() {
     sessionId,
     workspaceRootPath,
     plansFolderPath,
-    // CLI arg takes priority, env var as fallback (Copilot CLI may not forward env to subprocesses)
+    // CLI arg takes priority, env var as fallback.
     callbackPort: callbackPort || process.env.CRAFT_LLM_CALLBACK_PORT,
   };
 
-  // Create the Codex context
-  const ctx = createCodexContext(config);
+  // Create the session tool context
+  const ctx = createSessionMcpContext(config);
 
   const includeDeveloperFeedback = isDeveloperFeedbackEnabled();
   const sessionToolRegistry = getSessionToolRegistry({ includeDeveloperFeedback });

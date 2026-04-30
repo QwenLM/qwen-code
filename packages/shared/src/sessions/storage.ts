@@ -200,7 +200,7 @@ export async function createSession(
   ensureSessionDir(workspaceRootPath, sessionId);
 
   // Set sdkCwd to initial working directory or session path - this never changes
-  // The SDK stores session transcripts at ~/.claude/projects/{cwd-slugified}/
+  // The backend stores session transcripts in a provider-specific per-CWD folder.
   // If workingDirectory changes later, sdkCwd stays the same to preserve session resumption
   const sdkCwd = options?.workingDirectory ?? getSessionPath(workspaceRootPath, sessionId);
 
@@ -445,7 +445,7 @@ export function deleteSession(workspaceRootPath: string, sessionId: string): boo
 /**
  * Clear messages from a session while preserving metadata.
  * Used for /clear command to reset conversation without creating a new session.
- * Also clears the SDK session ID to start a fresh Claude conversation.
+ * Also clears the SDK session ID to start a fresh backend conversation.
  */
 export async function clearSessionMessages(workspaceRootPath: string, sessionId: string): Promise<void> {
   const session = loadSession(workspaceRootPath, sessionId);
@@ -508,7 +508,7 @@ export async function updateSessionSdkId(
  * Check if sdkCwd can be safely updated for a session.
  *
  * sdkCwd is normally immutable because the SDK stores session transcripts at
- * ~/.claude/projects/{cwd-slugified}/. However, it's safe to update sdkCwd if
+ * provider-specific per-CWD session folder. However, it's safe to update sdkCwd if
  * no SDK interaction has occurred yet (no transcripts to preserve).
  *
  * @returns true if sdkCwd can be updated (no messages and no SDK session ID)

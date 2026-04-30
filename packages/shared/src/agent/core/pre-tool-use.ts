@@ -2,9 +2,9 @@
  * Shared PreToolUse utilities and centralized PreToolUse pipeline.
  *
  * Individual utility functions (path expansion, skill qualification, etc.)
- * are used by the centralized `runPreToolUseChecks()` pipeline, which all
- * four agent backends (Claude, Codex, Copilot, Pi) call with normalized input
- * and then translate the result to their SDK-specific format.
+ * are used by the centralized `runPreToolUseChecks()` pipeline. Agent
+ * backends call it with normalized input and translate the result to their
+ * runtime-specific format.
  *
  * Pipeline steps:
  * 1. Permission mode check: Block tools disallowed by current mode
@@ -193,8 +193,8 @@ export function expandToolPaths(
 /**
  * Ensure skill names are fully-qualified with the correct plugin prefix.
  *
- * The SDK resolves skills as `pluginName:skillSlug` where the plugin name is
- * read from `.claude-plugin/plugin.json` `name` field. Skills can live in 3 tiers:
+ * The runtime resolves skills as `pluginName:skillSlug` where the plugin name is
+ * read from the workspace plugin manifest `name` field. Skills can live in 3 tiers:
  *   1. Workspace: {workspaceRoot}/skills/{slug}/ → plugin name from plugin.json
  *   2. Project:   {workingDir}/.agents/skills/{slug}/ → plugin name = ".agents"
  *   3. Global:    ~/.agents/skills/{slug}/ → plugin name = ".agents"
@@ -205,7 +205,7 @@ export function expandToolPaths(
  * workspace slug, even for global/project skills).
  *
  * @param input - The Skill tool input ({ skill: string, args?: string })
- * @param workspaceSlug - The workspace slug (from .claude-plugin/plugin.json name)
+ * @param workspaceSlug - The workspace plugin slug
  * @param workspaceRootPath - Absolute path to the workspace root
  * @param workingDirectory - Absolute path to the current working directory (optional)
  * @param onDebug - Optional debug callback
@@ -286,9 +286,9 @@ function resolveSkillPlugin(
 /**
  * Strip _intent and _displayName metadata from tool inputs.
  *
- * These fields are injected into all tool schemas by the network interceptor
- * so Claude provides semantic intent for UI display. They must be stripped
- * before execution to avoid SDK validation errors and MCP server rejections.
+ * These fields are injected into tool schemas so the backend can provide
+ * semantic intent for UI display. They must be stripped before execution to
+ * avoid runtime validation errors and MCP server rejections.
  *
  * The extraction for UI happens in tool-matching.ts BEFORE this stripping.
  *
@@ -631,7 +631,7 @@ export interface PreToolUseInput {
   permissionManager: PermissionManagerLike;
   /** PrerequisiteManager for guide.md checking */
   prerequisiteManager?: PrerequisiteManagerLike;
-  /** Backend metadata (from Codex fork params.metadata or Copilot input.metadata) */
+  /** Backend metadata provided alongside a tool call */
   backendMetadata?: { intent?: string; displayName?: string };
   /** Debug callback */
   onDebug?: (message: string) => void;
@@ -899,7 +899,7 @@ export function runPreToolUseChecks(ctx: PreToolUseInput): PreToolUseCheckResult
 }
 
 // ============================================================
-// ASK-MODE PROMPT DECISION (centralized — fixes Copilot + Pi bugs)
+// ASK-MODE PROMPT DECISION
 // ============================================================
 
 interface PromptInfo {
@@ -993,11 +993,8 @@ function wrapCommandForMacAdminPrompt(command: string): string {
  * Determine if user approval is needed in 'ask' mode.
  *
  * Returns prompt info if user should be asked, null if auto-allowed.
- * This is the single source of truth for ask-mode decisions across all agents.
- *
- * Previously: ClaudeAgent had full inline logic, CodexAgent had shouldPromptForPermission(),
- * CopilotAgent and Pi relied on `check.requiresPermission` which was NEVER set to true
- * by shouldAllowToolInMode() in ask mode (it always returns {allowed: true}).
+ * This is the single source of truth for ask-mode decisions across agent
+ * backends.
  */
 export function shouldPromptInAskMode(
   toolName: string,

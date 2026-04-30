@@ -1,7 +1,7 @@
 /**
  * Documentation Utilities
  *
- * Provides access to built-in documentation that Claude can reference
+ * Provides access to built-in documentation that the agent can reference
  * when performing configuration tasks (sources, agents, permissions, etc.).
  *
  * Docs are stored at ~/.craft-agent/docs/ and synced from bundled assets.

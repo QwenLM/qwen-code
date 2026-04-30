@@ -6,16 +6,12 @@
  * - Low: Light reasoning, faster responses
  * - Medium: Balanced speed and reasoning (default)
  * - High: Deep reasoning for complex tasks
- * - XHigh: Extra-high reasoning — Anthropic's recommended level for Opus 4.7 agentic/coding work
+ * - XHigh: Extra-high reasoning for agentic/coding work
  * - Max: Maximum effort reasoning
  *
  * Session-level setting with workspace defaults.
  *
- * Provider mappings:
- * - Anthropic: adaptive thinking + effort levels (Opus 4.7+). On models that
- *   don't accept `xhigh`, the Anthropic SDK silently falls back to `high`.
- * - Pi/OpenAI: reasoning_effort via Pi SDK levels. Pi's ceiling is `xhigh`,
- *   so Craft's `max` saturates there.
+ * Qwen receives these values as provider reasoning effort where supported.
  */
 
 /**
@@ -63,8 +59,7 @@ export const THINKING_LEVELS: readonly ThinkingLevelDefinition[] = [
 export const DEFAULT_THINKING_LEVEL: ThinkingLevel = 'medium';
 
 /**
- * Map ThinkingLevel to Anthropic SDK effort parameter.
- * Used with adaptive thinking (thinking: { type: 'adaptive' }).
+ * Map ThinkingLevel to backend effort parameter.
  * Returns null for 'off' (thinking should be disabled entirely).
  */
 export const THINKING_TO_EFFORT: Record<ThinkingLevel, 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null> = {
@@ -78,12 +73,7 @@ export const THINKING_TO_EFFORT: Record<ThinkingLevel, 'low' | 'medium' | 'high'
 
 /**
  * Token budgets per model family.
- * Used as fallback for models that don't support adaptive thinking
- * (e.g., non-Claude models via OpenRouter/Ollama).
- *
- * Haiku max is 8k per Anthropic docs.
- * Sonnet/Opus can use up to 128k, but Anthropic recommends ≤32k for real-time use
- * (above 32k, batch processing is suggested to avoid timeouts).
+ * Used as fallback for models that don't report thinking support.
  */
 const TOKEN_BUDGETS = {
   haiku: {
@@ -109,7 +99,7 @@ const TOKEN_BUDGETS = {
  * Used as fallback for models that don't support adaptive thinking.
  *
  * @param level - The thinking level
- * @param modelId - The model ID (e.g., 'claude-haiku-4-5-20251001')
+ * @param modelId - The model ID (e.g., 'qwen3-coder-flash')
  * @returns Number of thinking tokens to allocate
  */
 export function getThinkingTokens(level: ThinkingLevel, modelId: string): number {

@@ -4,8 +4,8 @@
  * Canonical Zod schemas, descriptions, and handler registry for all
  * session-scoped tools. Consumers derive what they need:
  *
- * - Claude SDK  → `.shape` extracts the plain `{ key: z.string() }` literal
- * - MCP / Pi    → `getToolDefsAsJsonSchema()` auto-converts to JSON Schema
+ * - in-process runtimes can use Zod schemas directly
+ * - MCP runtimes use `getToolDefsAsJsonSchema()`
  *
  * Adding a new tool: define the schema, description, handler import, and
  * one entry in SESSION_TOOL_DEFS.
@@ -165,7 +165,7 @@ export const SpawnSessionSchema = z.object({
   help: z.boolean().optional().describe('If true, returns available connections, models, and sources instead of creating a session'),
   prompt: z.string().optional().describe('Instructions for the new session (required when not in help mode)'),
   name: z.string().optional().describe('Session name'),
-  llmConnection: z.string().optional().describe('Connection slug (e.g., "anthropic-api", "codex")'),
+  llmConnection: z.string().optional().describe('Connection slug (e.g., "qwen-code")'),
   model: z.string().optional().describe('Model ID override'),
   enabledSourceSlugs: z.array(z.string()).optional().describe('Source slugs to enable in the new session'),
   permissionMode: z.enum(['allow-all', 'safe', 'ask', 'auto-edit']).optional().describe('Permission mode for the new session'),
@@ -514,7 +514,7 @@ export interface RegistrySessionToolDef extends SessionToolDefBase {
   handler: SessionToolHandler;
 }
 
-/** Tool executed by backend-specific adapters (Pi/Claude/session-mcp-server). */
+/** Tool executed by backend-specific adapters. */
 export interface BackendSessionToolDef extends SessionToolDefBase {
   executionMode: 'backend';
   handler: null;
@@ -569,7 +569,7 @@ export interface SessionToolFilterOptions {
  * Return session tools with optional feature filtering.
  *
  * Callers should use this helper instead of filtering ad hoc so tool visibility
- * stays consistent across Claude, Pi, and session-mcp-server backends.
+ * stays consistent across backend implementations.
  */
 export function getSessionToolDefs(options?: SessionToolFilterOptions): SessionToolDef[] {
   const includeDeveloperFeedback = options?.includeDeveloperFeedback ?? true;
@@ -646,7 +646,7 @@ export function getSessionSafeBlockedToolNames(options?: SessionToolNameOptions)
 /** Set of session tool names for quick membership checks. */
 export const SESSION_TOOL_NAMES = new Set(SESSION_TOOL_DEFS.map(d => d.name));
 
-/** Session tool names that must be handled by backend-specific adapters (Pi/Claude/session-mcp-server). */
+/** Session tool names that must be handled by backend-specific adapters. */
 export const SESSION_BACKEND_TOOL_NAMES = new Set(
   SESSION_TOOL_DEFS.filter(d => d.executionMode === 'backend').map(d => d.name)
 );
@@ -670,7 +670,7 @@ export const SESSION_SAFE_BLOCKED_TOOL_NAMES = new Set(
 export const SESSION_TOOL_REGISTRY = new Map(SESSION_TOOL_DEFS.map(d => [d.name, d]));
 
 // ============================================================
-// JSON Schema Converter (for MCP / Pi consumers)
+// JSON Schema Converter (for MCP consumers)
 // ============================================================
 
 export interface JsonSchemaToolDef {
@@ -682,7 +682,7 @@ export interface JsonSchemaToolDef {
 /**
  * Convert session tool definitions to JSON Schema format.
  *
- * @param opts.prefix - Optional prefix for tool names (e.g., 'mcp__session__' for Pi)
+ * @param opts.prefix - Optional prefix for tool names
  * @param opts.includeDeveloperFeedback - Include experimental feedback tool in output
  * @returns Array of tool definitions with JSON Schema inputSchema
  */
@@ -697,7 +697,7 @@ export function getToolDefsAsJsonSchema(opts?: {
     // Explicit `as any` avoids TS2589 ("type instantiation is excessively deep")
     // caused by zodToJsonSchema inferring deep generic chains from union schemas.
     const jsonSchema = zodToJsonSchema(def.inputSchema as any, { $refStrategy: 'none' }) as Record<string, unknown>;
-    // Strip metadata not needed by MCP/Pi consumers
+    // Strip metadata not needed by MCP consumers
     delete jsonSchema.$schema;
     delete jsonSchema.additionalProperties;
     return {

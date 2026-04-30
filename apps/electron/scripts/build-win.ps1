@@ -72,7 +72,6 @@ Start-Sleep -Seconds 2
 Write-Host "Cleaning previous builds..."
 $foldersToClean = @(
     "$ElectronDir\vendor",
-    "$ElectronDir\node_modules\@anthropic-ai",
     "$ElectronDir\packages",
     "$ElectronDir\release"
 )
@@ -178,35 +177,7 @@ try {
     Remove-Item -Recurse -Force $QwenTempDir -ErrorAction SilentlyContinue
 }
 
-# 5. Copy SDK from root node_modules (monorepo hoisting)
-$SdkSource = "$RootDir\node_modules\@anthropic-ai\claude-agent-sdk"
-if (-not (Test-Path $SdkSource)) {
-    Write-Host "ERROR: SDK not found at $SdkSource" -ForegroundColor Red
-    Write-Host "Run 'bun install' from the repository root first."
-    exit 1
-}
-Write-Host "Copying SDK..."
-New-Item -ItemType Directory -Force -Path "$ElectronDir\node_modules\@anthropic-ai" | Out-Null
-Copy-Item -Recurse -Force $SdkSource "$ElectronDir\node_modules\@anthropic-ai\"
-
-# 6. Copy interceptor
-$InterceptorSource = "$RootDir\packages\shared\src\unified-network-interceptor.ts"
-if (-not (Test-Path $InterceptorSource)) {
-    Write-Host "ERROR: Interceptor not found at $InterceptorSource" -ForegroundColor Red
-    exit 1
-}
-Write-Host "Copying interceptor..."
-New-Item -ItemType Directory -Force -Path "$ElectronDir\packages\shared\src" | Out-Null
-Copy-Item $InterceptorSource "$ElectronDir\packages\shared\src\"
-# Also copy dependencies imported by the interceptor at runtime
-foreach ($dep in @("interceptor-common.ts", "feature-flags.ts", "interceptor-request-utils.ts")) {
-    $depPath = "$RootDir\packages\shared\src\$dep"
-    if (Test-Path $depPath) {
-        Copy-Item $depPath "$ElectronDir\packages\shared\src\"
-    }
-}
-
-# 7. Build Electron app
+# 5. Build Electron app
 Write-Host "Building Electron app..."
 
 # Build main process with OAuth credentials

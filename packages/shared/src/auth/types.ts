@@ -17,16 +17,14 @@ export interface MigrationInfo {
 }
 
 export interface AuthState {
-  /** Claude API billing configuration */
+  /** Built-in backend configuration status */
   billing: {
     /** Configured billing type, or null if not yet configured */
     type: AuthType | null;
     /** True if we have the required credentials for the configured billing type */
     hasCredentials: boolean;
-    /** Anthropic API key (if using api_key auth type) */
+    /** Reserved for legacy API-key UI compatibility */
     apiKey: string | null;
-    /** Claude Max OAuth token (if using oauth_token auth type) */
-    claudeOAuthToken: string | null;
     /** Migration info if user needs to re-authenticate */
     migrationRequired?: MigrationInfo;
   };
@@ -42,11 +40,11 @@ export interface AuthState {
  * What setup steps are needed
  */
 export interface SetupNeeds {
-  /** No billing type configured → show billing picker */
+  /** No backend configured -> show setup */
   needsBillingConfig: boolean;
-  /** Billing type set but missing credentials → show credential entry */
+  /** Backend configured but unavailable -> show credential entry */
   needsCredentials: boolean;
-  /** Everything complete → go straight to App */
+  /** Everything complete -> go straight to App */
   isFullyConfigured: boolean;
   /** User has legacy tokens that need migration */
   needsMigration?: MigrationInfo;

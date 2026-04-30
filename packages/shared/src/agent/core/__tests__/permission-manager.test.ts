@@ -1,8 +1,7 @@
 /**
  * Tests for PermissionManager
  *
- * Tests the centralized permission evaluation system used by both
- * ClaudeAgent and CodexAgent.
+ * Tests the centralized permission evaluation system used by agent backends.
  */
 import { describe, it, expect, beforeEach } from 'bun:test';
 import { PermissionManager } from '../permission-manager.ts';

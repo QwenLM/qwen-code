@@ -2,7 +2,7 @@
   "name": "@craft-agent/session-tools-core",
   "version": "0.8.12",
   "license": "Apache-2.0",
-  "description": "Shared utilities for session-scoped tools (Claude and Codex)",
+  "description": "Shared utilities for session-scoped tools",
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",

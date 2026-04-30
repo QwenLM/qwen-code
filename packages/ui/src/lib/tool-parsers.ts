@@ -1,7 +1,7 @@
 /**
  * Tool Result Parsers
  *
- * Shared utilities for parsing tool results from Claude Code SDK tools.
+ * Shared utilities for parsing tool results from agent tools.
  * Used by both Electron and viewer apps for consistent overlay display.
  */
 

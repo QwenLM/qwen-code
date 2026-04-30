@@ -65,18 +65,15 @@ const WorkspaceSchema = z.object({
 // --- LLM Connection schema for config validation ---
 
 const LlmProviderTypeSchema = z.enum([
-  'anthropic', 'openai', 'openai_compat', 'pi', 'pi_compat', 'qwen', 'copilot',
-  // Legacy values kept for config parsing tolerance (migrated at runtime):
-  'anthropic_compat', 'bedrock', 'vertex',
+  'qwen',
 ]);
 
 const LlmAuthTypeSchema = z.enum([
-  'api_key', 'api_key_with_endpoint', 'oauth', 'iam_credentials',
-  'bearer_token', 'service_account_file', 'environment', 'none',
+  'none',
 ]);
 
 const CustomEndpointSchema = z.object({
-  api: z.enum(['openai-completions', 'anthropic-messages']),
+  api: z.never(),
   supportsImages: z.boolean().optional(),
 });
 

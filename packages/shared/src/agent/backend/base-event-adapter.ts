@@ -3,7 +3,7 @@
  *
  * Abstract base class for provider-specific event adapters. Provides shared
  * state management (Maps, lifecycle) that was previously duplicated across
- * CodexEventAdapter and CopilotEventAdapter.
+ * shared backend event adapters.
  *
  * Subclasses implement provider-specific event dispatch (adapt*() methods)
  * while inheriting:
@@ -32,7 +32,7 @@ export abstract class BaseEventAdapter {
   /** Session directory for toolMetadataStore lookups (concurrent-session safe) */
   protected sessionDir: string | undefined;
 
-  // Shared state maps — identical in Codex and Copilot adapters
+  // Shared state maps for backend adapters
   protected commandOutput: Map<string, string> = new Map();
   protected readCommands: Map<string, ReadCommandInfo> = new Map();
   protected blockReasons: Map<string, string> = new Map();

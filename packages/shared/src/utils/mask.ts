@@ -16,7 +16,7 @@ export interface MaskOptions {
 /**
  * Mask a credential value for safe display.
  *
- * - For API keys (sk-ant-...): shows first 7 chars + last 4
+ * - For API keys (sk-qwen-...): shows first 7 chars + last 4
  * - For OAuth tokens: shows first 3 chars + last 3
  * - For generic/unknown: shows first 3 chars + last 3
  * - For null/undefined: returns notSetText (default: '(not set)')

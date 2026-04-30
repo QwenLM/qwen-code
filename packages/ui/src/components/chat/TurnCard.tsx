@@ -128,7 +128,7 @@ function stripMarkdown(text: string): string {
  * Uses @pierre/diffs for accurate line-by-line diff calculation.
  *
  * Supports both:
- * - Claude Code format: { file_path, old_string, new_string }
+ * - Edit format: { file_path, old_string, new_string }
  * - Codex format: { changes: Array<{ path, kind, diff }> }
  *
  * @param toolName - 'Edit' or 'Write'
@@ -159,7 +159,7 @@ function computeEditWriteDiffStats(
       return { additions: totalAdditions, deletions: totalDeletions }
     }
 
-    // Claude Code format: { file_path, old_string, new_string }
+    // Edit format: { file_path, old_string, new_string }
     const oldString = (toolInput.old_string as string) ?? ''
     const newString = (toolInput.new_string as string) ?? ''
     if (!oldString && !newString) return null
@@ -1094,9 +1094,9 @@ function ActivityRow({ activity, onOpenDetails, isLastChild, sessionFolderPath, 
                 style={{ '--shadow-color': 'var(--success-rgb)' } as React.CSSProperties}
               >{diffStats.additions}</span>
             )}
-            {/* Filename badge - supports both Claude Code and Codex formats */}
+            {/* Filename badge - supports multiple edit formats */}
             {(() => {
-              // Claude Code format: file_path
+              // file_path format
               if (typeof activity.toolInput?.file_path === 'string') {
                 return (
                   <span className="px-1.5 py-0.5 bg-background shadow-minimal rounded-[4px] text-[11px] text-foreground/70">

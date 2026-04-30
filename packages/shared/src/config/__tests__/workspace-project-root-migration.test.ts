@@ -82,7 +82,7 @@ describe('project-root workspace storage', () => {
 
     expect(workspace.rootPath).toStartWith(join(configDir, 'workspaces'))
     expect(existsSync(join(projectDir, 'config.json'))).toBe(false)
-    expect(existsSync(join(projectDir, '.claude-plugin', 'plugin.json'))).toBe(false)
+    expect(existsSync(join(projectDir, '.agents-plugin', 'plugin.json'))).toBe(false)
     expect(existsSync(join(workspace.rootPath, 'skills'))).toBe(false)
 
     const workspaceConfig = readJson(join(workspace.rootPath, 'config.json'))
@@ -113,7 +113,7 @@ describe('project-root workspace storage', () => {
     expect(existsSync(join(projectDir, 'sessions'))).toBe(false)
     expect(existsSync(join(projectDir, 'sources'))).toBe(false)
     expect(existsSync(join(projectDir, 'skills'))).toBe(false)
-    expect(existsSync(join(projectDir, '.claude-plugin', 'plugin.json'))).toBe(false)
+    expect(existsSync(join(projectDir, '.agents-plugin', 'plugin.json'))).toBe(false)
 
     const workspaceConfig = readJson(join(workspace.rootPath, 'config.json'))
     expect(workspaceConfig.defaults.workingDirectory).toBe(projectDir)
@@ -150,7 +150,7 @@ describe('project-root workspace storage', () => {
     const config = readJson(join(configDir, 'config.json'))
     const workspace = config.workspaces[0]
     expect(workspace.rootPath).toBe(join(configDir, 'workspaces', 'qwen-code'))
-    expect(existsSync(join(projectDir, '.claude-plugin', 'plugin.json'))).toBe(false)
+    expect(existsSync(join(projectDir, '.agents-plugin', 'plugin.json'))).toBe(false)
 
     const managedRoot = join(configDir, 'workspaces', 'qwen-code')
     expect(existsSync(join(managedRoot, 'skills'))).toBe(false)

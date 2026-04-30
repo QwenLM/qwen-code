@@ -39,7 +39,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
 
-# Create non-root user (Claude Code SDK refuses to run as root).
+# Create non-root user for safer runtime file ownership.
 # At runtime, override with --user $(id -u):$(id -g) to match host permissions.
 RUN groupadd -r craftagents && \
     useradd -r -g craftagents -m -d /home/craftagents -s /bin/bash craftagents
@@ -54,7 +54,6 @@ COPY packages/shared/package.json packages/shared/
 COPY packages/core/package.json packages/core/
 COPY packages/session-tools-core/package.json packages/session-tools-core/
 COPY packages/session-mcp-server/package.json packages/session-mcp-server/
-COPY packages/pi-agent-server/package.json packages/pi-agent-server/
 COPY packages/craft-agents-commands/package.json packages/craft-agents-commands/
 COPY packages/craft-cli/package.json packages/craft-cli/
 COPY packages/ui/package.json packages/ui/
@@ -71,11 +70,9 @@ RUN bun install --frozen-lockfile
 # Copy source
 COPY . .
 
-# Build MCP helper servers (bundled CJS — required by runtime-resolver.ts)
+# Build MCP helper server (bundled CJS — required by runtime-resolver.ts)
 RUN bun build packages/session-mcp-server/src/index.ts \
-      --outfile packages/session-mcp-server/dist/index.js --target node --format cjs && \
-    bun build packages/pi-agent-server/src/index.ts \
-      --outfile packages/pi-agent-server/dist/index.js --target node --format cjs
+      --outfile packages/session-mcp-server/dist/index.js --target node --format cjs
 
 # Build the WhatsApp worker bundle (CJS, Node target — Bun cannot run it).
 RUN bun run scripts/build-wa-worker.ts

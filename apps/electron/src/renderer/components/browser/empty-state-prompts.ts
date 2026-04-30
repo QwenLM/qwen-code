@@ -30,8 +30,8 @@ export const EMPTY_STATE_PROMPT_SAMPLES: readonly BrowserEmptyPromptSample[] = [
     full: 'Use the browser to open https://www.kaggle.com/datasets, search for customer churn, shortlist 8 high-quality datasets, and rank them by usability for a quick ML prototype.',
   },
   {
-    short: 'Status snapshot across OpenAI/GitHub/Cloudflare',
-    full: 'Use the browser to visit https://status.openai.com, https://www.githubstatus.com, and https://www.cloudflarestatus.com; create a concise reliability snapshot with current status, active incidents, and affected components.',
+    short: 'Status snapshot across GitHub/Cloudflare/Qwen',
+    full: 'Use the browser to visit https://www.githubstatus.com, https://www.cloudflarestatus.com, and https://help.aliyun.com/zh/model-studio/; create a concise reliability snapshot with current status, active incidents, and affected components.',
   },
   {
     short: 'Figma Community: trending design systems',

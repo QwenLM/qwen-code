@@ -171,63 +171,6 @@ export class CredentialManager {
   // Convenience Methods
   // ============================================================
 
-  /** Get Anthropic API key */
-  async getApiKey(): Promise<string | null> {
-    const cred = await this.get({ type: 'anthropic_api_key' });
-    return cred?.value || null;
-  }
-
-  /** Set Anthropic API key */
-  async setApiKey(key: string): Promise<void> {
-    await this.set({ type: 'anthropic_api_key' }, { value: key });
-  }
-
-  /** Get Claude OAuth token */
-  async getClaudeOAuth(): Promise<string | null> {
-    const cred = await this.get({ type: 'claude_oauth' });
-    return cred?.value || null;
-  }
-
-  /** Set Claude OAuth token */
-  async setClaudeOAuth(token: string): Promise<void> {
-    await this.set({ type: 'claude_oauth' }, { value: token });
-  }
-
-  /** Get Claude OAuth credentials (with refresh token, expiry, and source) */
-  async getClaudeOAuthCredentials(): Promise<{
-    accessToken: string;
-    refreshToken?: string;
-    expiresAt?: number;
-    /** Where the token came from: 'native' (our OAuth), 'cli' (Claude CLI import), or undefined (unknown) */
-    source?: 'native' | 'cli';
-  } | null> {
-    const cred = await this.get({ type: 'claude_oauth' });
-    if (!cred) return null;
-
-    return {
-      accessToken: cred.value,
-      refreshToken: cred.refreshToken,
-      expiresAt: cred.expiresAt,
-      source: cred.source as 'native' | 'cli' | undefined,
-    };
-  }
-
-  /** Set Claude OAuth credentials (with refresh token, expiry, and source) */
-  async setClaudeOAuthCredentials(credentials: {
-    accessToken: string;
-    refreshToken?: string;
-    expiresAt?: number;
-    /** Where the token came from: 'native' (our OAuth), 'cli' (Claude CLI import) */
-    source?: 'native' | 'cli';
-  }): Promise<void> {
-    await this.set({ type: 'claude_oauth' }, {
-      value: credentials.accessToken,
-      refreshToken: credentials.refreshToken,
-      expiresAt: credentials.expiresAt,
-      source: credentials.source,
-    });
-  }
-
   /** Get workspace MCP OAuth credentials */
   async getWorkspaceOAuth(workspaceId: string): Promise<{
     accessToken: string;
@@ -266,8 +209,6 @@ export class CredentialManager {
       await this.delete(cred);
     }
   }
-
-  // Note: OpenAI API key methods removed - Codex uses native ChatGPT OAuth flow
 
   // ============================================================
   // LLM Connection Credentials
@@ -310,7 +251,7 @@ export class CredentialManager {
     accessToken: string;
     refreshToken?: string;
     expiresAt?: number;
-    /** OIDC id_token (used by OpenAI/Codex) */
+    /** OIDC id_token (used by providers that return identity claims) */
     idToken?: string;
   } | null> {
     const cred = await this.get({ type: 'llm_oauth', connectionSlug });
@@ -332,7 +273,7 @@ export class CredentialManager {
     accessToken: string;
     refreshToken?: string;
     expiresAt?: number;
-    /** OIDC id_token (used by OpenAI/Codex) */
+    /** OIDC id_token (used by providers that return identity claims) */
     idToken?: string;
   }): Promise<void> {
     await this.set({ type: 'llm_oauth', connectionSlug }, {
@@ -460,35 +401,7 @@ export class CredentialManager {
     authType: LlmAuthType,
     providerType?: LlmProviderType
   ): Promise<boolean> {
-    switch (authType) {
-      // No credentials needed
-      case 'none':
-      case 'environment':
-        return true;
-
-      // API key variants - all use the same storage
-      case 'api_key':
-      case 'api_key_with_endpoint':
-      case 'bearer_token':
-        return this.hasLlmApiKeyCredential(connectionSlug);
-
-      // OAuth - browser flow
-      case 'oauth':
-        return this.hasLlmOAuthCredential(connectionSlug, providerType);
-
-      // AWS IAM credentials
-      case 'iam_credentials':
-        return this.hasLlmIamCredential(connectionSlug);
-
-      // GCP service account
-      case 'service_account_file':
-        return this.hasLlmServiceAccountCredential(connectionSlug);
-
-      default:
-        // Exhaustive check - TypeScript will error if we miss a case
-        const _exhaustive: never = authType;
-        return false;
-    }
+    return authType === 'none';
   }
 
   /**

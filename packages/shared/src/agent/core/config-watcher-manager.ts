@@ -4,7 +4,7 @@
  * Provides a simplified interface for watching configuration file changes.
  * Wraps the underlying ConfigWatcher with agent-focused callbacks.
  *
- * Used by both ClaudeAgent and CodexAgent for hot-reloading:
+ * Used by backend agents for hot-reloading:
  * - Source config changes (add/update/delete)
  * - Skills config changes
  * - Permissions config changes

@@ -1,14 +1,7 @@
 /**
  * Model Fetcher — Centralized Model Discovery
  *
- * Type-safe plugin interface for fetching available models from providers.
- * Each provider (Anthropic, Pi, Qwen) implements ModelFetcher.
- * The ModelFetcherMap enforces at compile time that every fetchable provider
- * has a registered fetcher — adding a new LlmProviderType without a fetcher
- * causes a type error.
- *
- * Compat providers (pi_compat) are excluded —
- * they point to arbitrary endpoints where users configure models manually.
+ * Type-safe plugin interface for fetching available models from Qwen Code.
  */
 
 import type { ModelDefinition } from './models';
@@ -18,17 +11,8 @@ import type { LlmProviderType, LlmConnection } from './llm-connections';
 // Types
 // ============================================================
 
-/**
- * Providers that support automatic model fetching.
- * Compat providers are excluded — they point to arbitrary endpoints
- * (Ollama, OpenRouter, etc.) where users configure models manually.
- *
- * Adding a new LlmProviderType without updating this type
- * will cause a compile error in the fetcher registry.
- */
-export type FetchableProvider = Exclude<LlmProviderType,
-  | 'pi_compat'
->;
+/** Providers that support automatic model fetching. */
+export type FetchableProvider = LlmProviderType;
 
 /**
  * Result of a model fetch operation.

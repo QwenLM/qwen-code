@@ -1,7 +1,7 @@
 /**
  * BaseAgent Abstract Class
  *
- * Shared base class for all AI agent backends (ClaudeAgent, CodexAgent, etc.).
+ * Shared base class for AI agent backends.
  * Extracts common functionality including:
  * - Model/thinking configuration
  * - Permission mode management (via PermissionManager)
@@ -63,7 +63,7 @@ import { getSessionPlansPath, getSessionDataPath, getSessionPath } from '../sess
 import { getMiniAgentSystemPrompt } from '../prompts/system.ts';
 import { buildTitlePrompt, buildRegenerateTitlePrompt, validateTitle } from '../utils/title-generator.ts';
 
-// Skill extraction for Codex/Copilot backends (Claude uses native SDK Skill tool)
+// Skill extraction for provider runtimes.
 import { parseMentions, resolveSkillMentions, resolveSourceMentions, resolveFileMentions } from '../mentions/index.ts';
 import { loadAllSkills } from '../skills/storage.ts';
 
@@ -73,7 +73,7 @@ import { loadAllSkills } from '../skills/storage.ts';
 
 /**
  * Mini agent configuration - shared across all backends.
- * Centralized here to avoid duplication between Claude/Codex agents.
+ * Centralized here to avoid duplication between backend agents.
  */
 export interface MiniAgentConfig {
   /** Whether mini agent mode is enabled */
@@ -151,7 +151,7 @@ export const MINI_AGENT_MCP_KEYS = ['session'] as const;
  * - Callback declarations for UI integration
  *
  * Subclasses must implement:
- * - backendName: Display name for error messages ('Claude', 'Codex', etc.)
+ * - backendName: Display name for error messages
  * - chat(): Provider-specific agentic loop
  * - abort(): Provider-specific abort handling
  * - capabilities(): Provider-specific capabilities
@@ -204,11 +204,10 @@ export abstract class BaseAgent implements AgentBackend {
   // + forceAbort + auto_retry pipeline used for tool-call errors).
   //
   // When a session-scoped tool (source_test) successfully activates a new source
-  // mid-turn, the Claude SDK's mcpServers is already frozen for the current query
-  // (and Pi's tool registry is only refreshed between turns). The only way to
-  // expose the new tools is to end the current turn and auto-resend the user's
-  // original message with a "[{slug} activated]" suffix — same as what happens
-  // when a model directly calls an unknown tool on an inactive source.
+  // mid-turn, the backend's tool registry may already be frozen for the current
+  // query. The reliable way to expose the new tools is to end the current turn
+  // and auto-resend the user's original message with a "[{slug} activated]"
+  // suffix.
   //
   // activateSourceInSessionFn in SessionManager sets this; the per-backend event
   // loop consumes it after yielding the source_test tool_result.
@@ -376,7 +375,7 @@ export abstract class BaseAgent implements AgentBackend {
    * Fire an automation agent event (from automations.json) via AutomationSystem.
    * Catches all errors — automations must never break the agent flow.
    *
-   * Non-Claude backends call this directly. ClaudeAgent uses SDK's buildSdkHooks() instead.
+   * Backends call this directly when handling automation hooks.
    *
    * @param signal - Optional AbortSignal for cancelling automation execution on abort
    */
@@ -402,12 +401,11 @@ export abstract class BaseAgent implements AgentBackend {
    * has its own process memory, so when it calls getSessionScopedToolCallbacks(),
    * the callback registry is empty — it was populated in THIS process, not the subprocess.
    *
-   * Instead, each backend (CodexAgent, CopilotAgent) detects session MCP tool
+   * Instead, each backend detects session MCP tool
    * completions from its own event stream (different formats per SDK) and calls
    * THIS shared method to fire the appropriate callback.
    *
-   * ClaudeAgent doesn't need this — its session-scoped tools run in-process
-   * via Claude Agent SDK, so the callback registry works directly.
+   * In-process tools can call the callback registry directly.
    *
    * CALLBACKS FIRED:
    * - SubmitPlan → this.onPlanSubmitted(planPath)
@@ -558,7 +556,7 @@ export abstract class BaseAgent implements AgentBackend {
    */
   updateWorkingDirectory(path: string): void {
     this.workingDirectory = path;
-    // Persist to session config for storage and consistency with ClaudeAgent
+    // Persist to session config for storage consistency.
     if (this.config.session) {
       this.config.session.workingDirectory = path;
     }
@@ -701,8 +699,7 @@ export abstract class BaseAgent implements AgentBackend {
   /**
    * Get mini agent configuration for provider-specific application.
    * Returns centralized config that each backend interprets appropriately:
-   * - ClaudeAgent: Uses tools array, mcpServers filter, maxThinkingTokens: 0
-   * - CodexAgent: Uses baseInstructions, codex-mini model, effort: 'low'
+   * Backends interpret this shared config in their own runtime.
    */
   getMiniAgentConfig(): MiniAgentConfig {
     const enabled = this.isMiniAgent();
@@ -844,7 +841,7 @@ ${formattedMessages}
 
   /**
    * Post-construction initialization.
-   * Default: no-op (auth already handled for Claude/Pi API-key).
+   * Default: no-op for backends without post-construction auth injection.
    * Override in backends that need post-construction auth injection.
    */
   async postInit(): Promise<PostInitResult> {
@@ -853,8 +850,8 @@ ${formattedMessages}
 
   /**
    * Apply bridge/config updates mid-session.
-   * Default: no-op for backends that don't use bridge-mcp-server (Claude, Pi).
-   * Override in Codex/Copilot to regenerate config or write bridge files.
+   * Default: no-op for backends that don't use bridge-mcp-server.
+   * Override in backends that regenerate config or write bridge files.
    */
   async applyBridgeUpdates(_context: BridgeUpdateContext): Promise<void> {
     // No-op by default
@@ -1084,7 +1081,7 @@ ${formattedMessages}
 
   /**
    * Redirect the agent mid-stream. Default: abort and let session layer re-send.
-   * Override in backends that support native steering (e.g., Pi's steer()).
+   * Override in backends that support native steering.
    */
   redirect(_message: string): boolean {
     this.forceAbort(AbortReason.Redirect);
@@ -1104,7 +1101,7 @@ ${formattedMessages}
   /**
    * Run a simple text completion using the agent's auth infrastructure.
    * No tools, no system prompt - just text in → text out.
-   * Each backend implements using its own SDK (Claude SDK query() or Codex app-server).
+   * Each backend implements using its own runtime.
    *
    * @param prompt - The prompt to send
    * @returns The model's response text, or null if completion fails
@@ -1115,10 +1112,7 @@ ${formattedMessages}
    * Execute an LLM query using the agent's auth infrastructure.
    * Used by call_llm tool (via queryFn callback) and potentially by runMiniCompletion.
    *
-   * Each backend implements this using its own SDK/session mechanism:
-   * - ClaudeAgent: SDK query() with OAuth
-   * - CodexAgent: Ephemeral thread on app-server
-   * - CopilotAgent: Ephemeral CopilotSession
+   * Each backend implements this using its own session mechanism.
    *
    * @param request - The query request (prompt, model, systemPrompt, etc.)
    * @returns The model's response text and optional token usage
@@ -1127,7 +1121,7 @@ ${formattedMessages}
 
   /**
    * Pre-execute a call_llm request: resolve attachments, validate model, run query.
-   * Shared across all backends. Codex overrides validateCallLlmModel() for provider filtering.
+   * Shared across all backends. Providers can override validateCallLlmModel().
    */
   protected async preExecuteCallLlm(input: Record<string, unknown>): Promise<LLMQueryResult> {
     const sessionPath = getSessionPath(this.config.workspace.rootPath, this._sessionId);
@@ -1141,7 +1135,7 @@ ${formattedMessages}
 
   /**
    * Optional model validation hook for call_llm.
-   * Override in subclasses to filter models (e.g., Codex rejects non-OpenAI models).
+   * Override in subclasses to filter unsupported models.
    * Return undefined to fall back to miniModel.
    */
   protected validateCallLlmModel?(modelId: string): string | undefined;

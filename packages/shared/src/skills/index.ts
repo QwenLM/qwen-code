@@ -1,7 +1,7 @@
 /**
  * Skills Module
  *
- * Workspace skills are specialized instructions that extend Claude's capabilities.
+ * Workspace skills are specialized instructions that extend the agent's capabilities.
  */
 
 export * from './types.ts';

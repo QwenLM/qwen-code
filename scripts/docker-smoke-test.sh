@@ -9,7 +9,6 @@
 #   bash scripts/docker-smoke-test.sh <image:tag>
 #
 # Environment:
-#   ANTHROPIC_API_KEY   — required for full --validate-server checks
 #   STITCH_API_KEY      — optional, enables additional checks
 #   SMOKE_TEST_TIMEOUT  — seconds to wait for server ready (default: 30)
 # =============================================================================

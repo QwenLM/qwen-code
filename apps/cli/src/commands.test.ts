@@ -237,30 +237,18 @@ describe('parseArgs', () => {
 // ---------------------------------------------------------------------------
 
 describe('resolveApiKey', () => {
-  it('uses DEEPSEEK_API_KEY for the deepseek provider', () => {
-    const prev = process.env.DEEPSEEK_API_KEY
-    process.env.DEEPSEEK_API_KEY = 'deepseek-test-key'
-
-    try {
-      expect(resolveApiKey('deepseek', '')).toBe('deepseek-test-key')
-    } finally {
-      if (prev === undefined) delete process.env.DEEPSEEK_API_KEY
-      else process.env.DEEPSEEK_API_KEY = prev
-    }
+  it('keeps explicit key passthrough for script compatibility', () => {
+    expect(resolveApiKey('qwen', 'unused-key')).toBe('unused-key')
   })
 })
 
 describe('shouldSetupLlmConnection', () => {
-  it('forces setup for non-default providers even when connections already exist', () => {
-    expect(shouldSetupLlmConnection(2, { provider: 'deepseek', baseUrl: '' })).toBe(true)
+  it('sets up Qwen when no connection exists', () => {
+    expect(shouldSetupLlmConnection(0, { provider: 'qwen', baseUrl: '' })).toBe(true)
   })
 
-  it('skips setup for the default anthropic provider when connections already exist', () => {
-    expect(shouldSetupLlmConnection(2, { provider: 'anthropic', baseUrl: '' })).toBe(false)
-  })
-
-  it('forces setup for custom endpoints', () => {
-    expect(shouldSetupLlmConnection(2, { provider: 'anthropic', baseUrl: 'https://api.example.com' })).toBe(true)
+  it('skips setup when a connection already exists', () => {
+    expect(shouldSetupLlmConnection(2, { provider: 'qwen', baseUrl: '' })).toBe(false)
   })
 })
 

@@ -1,8 +1,8 @@
 /**
  * Backend Abstraction Types
  *
- * Defines the core interface that all AI backends (Claude, OpenAI, etc.) must implement.
- * The CraftAgent facade delegates to these backends, enabling provider switching while
+ * Defines the core interface that AI backends must implement.
+ * The CraftAgent facade delegates to the backend runtime while
  * maintaining a consistent API surface.
  *
  * Key design decisions:
@@ -334,7 +334,7 @@ export type SdkMcpServerConfig =
  * Core backend interface - all AI providers must implement this.
  *
  * The interface is designed to:
- * 1. Abstract provider differences (Claude SDK vs OpenAI Responses API)
+ * 1. Abstract provider/runtime differences
  * 2. Enable the facade pattern in CraftAgent
  * 3. Support streaming via AsyncGenerator
  * 4. Allow capability-based UI adaptation
@@ -390,7 +390,7 @@ export interface AgentBackend {
    * Called when the user sends a message while the agent is still processing.
    *
    * Each backend decides its own strategy:
-   * - Backends with native steering (e.g., Pi) inject the message into the
+   * - Backends with native steering inject the message into the
    *   current stream and return true — events continue through the existing
    *   generator, no abort needed.
    * - Backends without steering call forceAbort(Redirect) internally and
@@ -448,10 +448,7 @@ export interface AgentBackend {
   /**
    * Apply bridge/config updates mid-session.
    * Called when sources change, tokens refresh, or auth completes.
-   * Each backend implements its own strategy:
-   * - Codex: regenerates config.toml and queues reconnect
-   * - Copilot: writes bridge-config.json and credential cache
-   * - Claude/Pi: no-op (they don't use bridge-mcp-server)
+   * Each backend implements its own strategy.
    */
   applyBridgeUpdates(context: BridgeUpdateContext): Promise<void>;
 
@@ -632,7 +629,7 @@ export interface AgentBackend {
 
   /**
    * Called when backend-specific authentication is required.
-   * Replaces per-backend callbacks (onChatGptAuthRequired, onGithubAuthRequired).
+   * Replaces per-backend auth callbacks.
    * The session layer wires this to surface auth warnings in the UI.
    */
   onBackendAuthRequired: ((reason: string) => void) | null;
@@ -646,12 +643,8 @@ export interface AgentBackend {
  */
 export interface BackendConfig extends CoreBackendConfig {
   /**
-   * Provider/SDK to use for this backend.
-   * Determines which agent class is instantiated:
-   * - 'anthropic' → ClaudeAgent (Anthropic SDK)
-   * - 'openai' → CodexAgent (OpenAI via app-server)
-   * - 'copilot' → CopilotAgent (GitHub Copilot via @github/copilot-sdk)
-   * - 'pi' → PiAgent (Pi via @mariozechner/pi-coding-agent)
+   * Provider/runtime to use for this backend.
+   * Qwen-only builds instantiate QwenAgent.
    */
   provider: AgentProvider;
 

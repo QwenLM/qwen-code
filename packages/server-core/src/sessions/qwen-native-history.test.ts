@@ -136,7 +136,7 @@ describe('Qwen native history loading', () => {
       permissionMode: 'allow-all',
       llmConnection: 'qwen-code',
       connectionLocked: true,
-      model: 'glm-5.1(openai)',
+      model: 'qwen3-coder-flash',
       thinkingLevel: 'medium',
       messages: [
         { id: 'local-user', type: 'user', content: '/compact', timestamp: newerTimestamp - 10_000 },
@@ -158,7 +158,7 @@ describe('Qwen native history loading', () => {
       permissionMode: 'ask',
       llmConnection: 'qwen-code',
       connectionLocked: true,
-      model: 'glm-5.1(openai)',
+      model: 'qwen3-coder-flash',
       thinkingLevel: 'medium',
       messages: [
         { id: 'mirror-user', type: 'user', content: '/compact', timestamp: olderTimestamp - 1_000 },
@@ -201,7 +201,7 @@ describe('Qwen native history loading', () => {
       messageCount: 2,
       llmConnection: 'qwen-code',
       connectionLocked: true,
-      model: 'glm-5.1(openai)',
+      model: 'qwen3-coder-flash',
       thinkingLevel: 'medium',
     }, workspace)
     const mirrorManaged = createManagedSession({
@@ -216,7 +216,7 @@ describe('Qwen native history loading', () => {
       messageCount: 2,
       llmConnection: 'qwen-code',
       connectionLocked: true,
-      model: 'glm-5.1(openai)',
+      model: 'qwen3-coder-flash',
       thinkingLevel: 'medium',
     }, workspace)
     ;(manager as unknown as { sessions: Map<string, typeof craftManaged> }).sessions.set(craftSessionId, craftManaged)
@@ -383,7 +383,7 @@ describe('Qwen native history loading', () => {
       permissionMode: 'ask',
       llmConnection: 'qwen-code',
       connectionLocked: true,
-      model: 'glm-5.1(openai)',
+      model: 'qwen3-coder-flash',
       thinkingLevel: 'medium',
       messages: [],
       tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 },
@@ -424,7 +424,7 @@ describe('Qwen native history loading', () => {
       messageCount: 0,
       llmConnection: 'qwen-code',
       connectionLocked: true,
-      model: 'glm-5.1(openai)',
+      model: 'qwen3-coder-flash',
       thinkingLevel: 'medium',
     }, workspace)
     ;(manager as unknown as { sessions: Map<string, typeof managed> }).sessions.set(sessionId, managed)
@@ -472,7 +472,7 @@ describe('Qwen native history loading', () => {
       permissionMode: 'ask',
       llmConnection: 'qwen-code',
       connectionLocked: true,
-      model: 'glm-5.1(openai)',
+      model: 'qwen3-coder-flash',
       thinkingLevel: 'medium',
       messages: [{ id: 'old-output', type: 'assistant', content: output, timestamp: resultTimestamp }],
       tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 },
@@ -524,7 +524,7 @@ describe('Qwen native history loading', () => {
       lastMessageRole: 'assistant',
       llmConnection: 'qwen-code',
       connectionLocked: true,
-      model: 'glm-5.1(openai)',
+      model: 'qwen3-coder-flash',
       thinkingLevel: 'medium',
     }, workspace)
     ;(manager as unknown as { sessions: Map<string, typeof managed> }).sessions.set(sessionId, managed)
@@ -563,7 +563,7 @@ describe('Qwen native history loading', () => {
       permissionMode: 'ask',
       llmConnection: 'qwen-code',
       connectionLocked: true,
-      model: 'glm-5.1(openai)',
+      model: 'qwen3-coder-flash',
       thinkingLevel: 'medium',
       messages: [],
       tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 },
@@ -622,7 +622,7 @@ describe('Qwen native history loading', () => {
       messageCount: 0,
       llmConnection: 'qwen-code',
       connectionLocked: true,
-      model: 'glm-5.1(openai)',
+      model: 'qwen3-coder-flash',
       thinkingLevel: 'medium',
     }, workspace, {
       messagesLoaded: true,
@@ -659,7 +659,7 @@ describe('Qwen native history loading', () => {
       permissionMode: 'ask',
       llmConnection: 'qwen-code',
       connectionLocked: true,
-      model: 'glm-5.1(openai)',
+      model: 'qwen3-coder-flash',
       thinkingLevel: 'medium',
       messages: [],
       tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 },
@@ -722,7 +722,7 @@ describe('Qwen native history loading', () => {
       messageCount: 0,
       llmConnection: 'qwen-code',
       connectionLocked: true,
-      model: 'glm-5.1(openai)',
+      model: 'qwen3-coder-flash',
       thinkingLevel: 'medium',
     }, workspace)
     ;(manager as unknown as { sessions: Map<string, typeof managed> }).sessions.set(sessionId, managed)
@@ -764,7 +764,7 @@ describe('Qwen native history loading', () => {
       lastUsedAt: timestamp,
       lastMessageAt: timestamp,
       permissionMode: 'ask',
-      model: 'glm-5.1(openai)',
+      model: 'qwen3-coder-flash',
       thinkingLevel: 'medium',
       messages: [],
       tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 },
@@ -804,7 +804,7 @@ describe('Qwen native history loading', () => {
       lastUsedAt: timestamp,
       lastMessageAt: timestamp,
       messageCount: 0,
-      model: 'glm-5.1(openai)',
+      model: 'qwen3-coder-flash',
       thinkingLevel: 'medium',
     }, workspace)
     ;(manager as unknown as { sessions: Map<string, typeof managed> }).sessions.set(sessionId, managed)

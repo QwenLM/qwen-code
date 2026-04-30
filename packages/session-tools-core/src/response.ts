@@ -2,7 +2,7 @@
  * Session Tools Core - Response Helpers
  *
  * Helper functions for creating standardized tool responses.
- * Used by both Claude and Codex implementations.
+ * Used by all session tool implementations.
  */
 
 import type { ToolResult, TextContent } from './types.ts';
@@ -21,12 +21,7 @@ export function successResponse(text: string): ToolResult {
 /**
  * Create an error response.
  *
- * IMPORTANT — OpenAI Responses API limitation (discovered 2025-02):
- * The `function_call_output` input item only has `type`, `call_id`, and
- * `output` (a plain string). There is NO `success`, `status`, or `error`
- * field. Our Codex fork's FunctionCallOutputPayload has a `success: bool`
- * field, but its custom Serialize impl (codex-rs/protocol/src/models.rs)
- * drops it entirely — only the content string is serialized to the API.
+ * IMPORTANT: some tool-call transports only accept a plain output string.
  *
  * This means `isError: true` is invisible to the model. To make errors
  * distinguishable from successes, we prefix the output text with "[ERROR]".

@@ -11,14 +11,13 @@ import type { ScriptRuntimeLanguage } from './resolve-script-runtime.ts';
  * NOTE: Keep in sync with packages/shared/src/mcp/client.ts (BLOCKED_ENV_VARS).
  */
 export const BLOCKED_ENV_VARS = [
-  'ANTHROPIC_API_KEY',
-  'CLAUDE_CODE_OAUTH_TOKEN',
+  'LLM_API_KEY',
+  'QWEN_API_KEY',
   'AWS_ACCESS_KEY_ID',
   'AWS_SECRET_ACCESS_KEY',
   'AWS_SESSION_TOKEN',
   'GITHUB_TOKEN',
   'GH_TOKEN',
-  'OPENAI_API_KEY',
   'GOOGLE_API_KEY',
   'STRIPE_SECRET_KEY',
   'NPM_TOKEN',

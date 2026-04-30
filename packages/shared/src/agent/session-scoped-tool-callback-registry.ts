@@ -2,8 +2,7 @@
  * Session-Scoped Tool Callback Registry
  *
  * Extracted from session-scoped-tools.ts to break the dependency between
- * the callback registry (shared by Claude + Pi paths) and the Claude SDK
- * adapter layer (only used by ClaudeAgent).
+ * the callback registry and backend adapter layers.
  *
  * The registry is a simple Map keyed by sessionId. Each backend registers
  * callbacks when a session starts and merges additional callbacks (e.g.
@@ -68,7 +67,7 @@ export interface SessionScopedToolCallbacks {
   /**
    * Activate a source in the running session (source_test auto-enable flow).
    * Wired by SessionManager to the per-session onSourceActivationRequest callback
-   * plus a backend-aware readiness signal (Pi vs Claude).
+   * plus a backend-aware readiness signal.
    */
   activateSourceInSessionFn?: (sourceSlug: string) => Promise<{
     ok: boolean;

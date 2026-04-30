@@ -4,9 +4,9 @@ import { validateFilePath, getWorkspaceAllowedDirs } from '@craft-agent/server-c
 import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger } from '@craft-agent/server-core/runtime'
 import { basename, dirname, join } from 'path'
 import { existsSync } from 'fs'
-import { readFile, writeFile, mkdir } from 'fs/promises'
+import { mkdir, readFile, writeFile } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
-import { type AgentEvent, setPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary } from '@craft-agent/shared/agent'
+import { setPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary } from '@craft-agent/shared/agent'
 import {
   resolveSessionConnection,
   createBackendFromConnection,
@@ -22,7 +22,7 @@ import {
   type BackendSessionMessagesResult,
   type PostInitResult,
 } from '@craft-agent/shared/agent/backend'
-import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars, QWEN_CODE_CONNECTION_SLUG, type ModelDefinition } from '@craft-agent/shared/config'
+import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, QWEN_CODE_CONNECTION_SLUG, type ModelDefinition } from '@craft-agent/shared/config'
 import { PrivilegedExecutionBroker } from '@craft-agent/server-core/services'
 import { isValidWorkingDirectory } from '../utils/path-validation'
 import { InitGate } from '@craft-agent/server-core/domain'
@@ -77,7 +77,6 @@ import {
 } from '@craft-agent/shared/sessions'
 import { loadWorkspaceSources, loadAllSources, getSourcesBySlugs, isSourceUsable, type LoadedSource, type McpServerConfig, getSourcesNeedingAuth, getSourceCredentialManager, getSourceServerBuilder, type SourceWithCredential, isApiOAuthProvider, hasRenewEndpoint, SERVER_BUILD_ERRORS, TokenRefreshManager, createTokenGetter } from '@craft-agent/shared/sources'
 import { ConfigWatcher, type ConfigWatcherCallbacks } from '@craft-agent/shared/config'
-import { getValidClaudeOAuthToken } from '@craft-agent/shared/auth'
 import { resolveAuthEnvVars } from '@craft-agent/shared/config'
 import { toolMetadataStore, getLastApiError } from '@craft-agent/shared/interceptor'
 import { isParentTaskTool } from '@craft-agent/shared/utils/toolNames'
@@ -85,7 +84,7 @@ import { restoreFiles } from '@craft-agent/shared/utils/bundle-files'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { CraftMcpClient, McpClientPool, McpPoolServer } from '@craft-agent/shared/mcp'
 import { type Session, type SessionEvent, type FileAttachment, type SendMessageOptions, type UnreadSummary, type RemoteSessionTransferPayload, type ImportRemoteSessionTransferResult, type AvailableSlashCommand, type RefreshAvailableCommandsOptions, RPC_CHANNELS, generateMessageId } from '@craft-agent/shared/protocol'
-import { messageToStored, storedToMessage, type Message, type StoredAttachment, type ToolDisplayMeta } from '@craft-agent/core/types'
+import { messageToStored, storedToMessage, type AgentEvent, type Message, type StoredAttachment, type ToolDisplayMeta } from '@craft-agent/core/types'
 import { textElementsToContentBadges } from '@craft-agent/core/utils'
 import { formatPathsToRelative, formatToolInputPaths, perf, encodeIconToDataUrlAsync, getEmojiIcon, resetSummarizationClient, resolveToolIcon, readFileAttachment, selectSpreadMessages, normalizePath, truncateTitle } from '@craft-agent/shared/utils'
 import { loadAllSkills, loadSkillBySlug, invalidateSkillsCache, type LoadedSkill } from '@craft-agent/shared/skills'
@@ -192,140 +191,6 @@ function isSlashCommandMessage(message: string): boolean {
 const PLAN_APPROVAL_MESSAGE = 'Plan approved, please execute.'
 
 // validateSpawnAttachmentPath removed — use shared validateFilePath from @craft-agent/server-core/handlers
-
-const PI_TURN_ANCHORS_VERSION = 1
-const PI_TURN_ANCHORS_FILE = 'pi-turn-anchors.json'
-
-interface PiTurnAnchorsIndex {
-  version: number
-  anchors: Record<string, string>
-}
-
-function getPiTurnAnchorsPath(sessionPath: string): string {
-  return join(sessionPath, 'meta', PI_TURN_ANCHORS_FILE)
-}
-
-async function loadPiTurnAnchors(sessionPath: string): Promise<PiTurnAnchorsIndex> {
-  const filePath = getPiTurnAnchorsPath(sessionPath)
-  try {
-    const raw = await readFile(filePath, 'utf-8')
-    const parsed = JSON.parse(raw) as Partial<PiTurnAnchorsIndex>
-    const anchors = (parsed.anchors && typeof parsed.anchors === 'object') ? parsed.anchors : {}
-    const normalized: Record<string, string> = {}
-    for (const [messageId, anchor] of Object.entries(anchors)) {
-      if (typeof messageId === 'string' && typeof anchor === 'string' && messageId && anchor) {
-        normalized[messageId] = anchor
-      }
-    }
-    return {
-      version: PI_TURN_ANCHORS_VERSION,
-      anchors: normalized,
-    }
-  } catch {
-    return {
-      version: PI_TURN_ANCHORS_VERSION,
-      anchors: {},
-    }
-  }
-}
-
-async function getPiTurnAnchor(sessionPath: string, messageId: string): Promise<string | undefined> {
-  if (!messageId) return undefined
-  const index = await loadPiTurnAnchors(sessionPath)
-  return index.anchors[messageId]
-}
-
-async function savePiTurnAnchor(sessionPath: string, messageId: string, anchorId: string): Promise<void> {
-  if (!messageId || !anchorId) return
-
-  const index = await loadPiTurnAnchors(sessionPath)
-  if (index.anchors[messageId] === anchorId) return
-
-  index.anchors[messageId] = anchorId
-
-  const filePath = getPiTurnAnchorsPath(sessionPath)
-  await mkdir(join(sessionPath, 'meta'), { recursive: true })
-  await writeFile(filePath, JSON.stringify(index), 'utf-8')
-}
-
-const CLAUDE_TURN_ANCHORS_VERSION = 1
-const CLAUDE_TURN_ANCHORS_FILE = 'claude-turn-anchors.json'
-
-interface ClaudeTurnAnchorRecord {
-  sdkSessionId: string
-  sdkMessageUuid: string
-}
-
-interface ClaudeTurnAnchorsIndex {
-  version: number
-  anchors: Record<string, ClaudeTurnAnchorRecord>
-}
-
-function getClaudeTurnAnchorsPath(sessionPath: string): string {
-  return join(sessionPath, 'meta', CLAUDE_TURN_ANCHORS_FILE)
-}
-
-function isClaudeMessageUuid(turnId: string): boolean {
-  return /^msg_[A-Za-z0-9]+$/.test(turnId)
-}
-
-async function loadClaudeTurnAnchors(sessionPath: string): Promise<ClaudeTurnAnchorsIndex> {
-  const filePath = getClaudeTurnAnchorsPath(sessionPath)
-  try {
-    const raw = await readFile(filePath, 'utf-8')
-    const parsed = JSON.parse(raw) as Partial<ClaudeTurnAnchorsIndex>
-    const anchors = (parsed.anchors && typeof parsed.anchors === 'object') ? parsed.anchors : {}
-    const normalized: Record<string, ClaudeTurnAnchorRecord> = {}
-
-    for (const [messageId, value] of Object.entries(anchors)) {
-      if (!messageId || typeof messageId !== 'string') continue
-      if (!value || typeof value !== 'object') continue
-      const sdkSessionId = (value as { sdkSessionId?: unknown }).sdkSessionId
-      const sdkMessageUuid = (value as { sdkMessageUuid?: unknown }).sdkMessageUuid
-      if (typeof sdkSessionId === 'string' && sdkSessionId && typeof sdkMessageUuid === 'string' && sdkMessageUuid) {
-        normalized[messageId] = { sdkSessionId, sdkMessageUuid }
-      }
-    }
-
-    return {
-      version: CLAUDE_TURN_ANCHORS_VERSION,
-      anchors: normalized,
-    }
-  } catch {
-    return {
-      version: CLAUDE_TURN_ANCHORS_VERSION,
-      anchors: {},
-    }
-  }
-}
-
-async function getClaudeTurnAnchor(sessionPath: string, messageId: string): Promise<ClaudeTurnAnchorRecord | undefined> {
-  if (!messageId) return undefined
-  const index = await loadClaudeTurnAnchors(sessionPath)
-  return index.anchors[messageId]
-}
-
-async function saveClaudeTurnAnchor(
-  sessionPath: string,
-  messageId: string,
-  sdkSessionId: string,
-  sdkMessageUuid: string,
-): Promise<void> {
-  if (!messageId || !sdkSessionId || !sdkMessageUuid) return
-
-  const index = await loadClaudeTurnAnchors(sessionPath)
-  const previous = index.anchors[messageId]
-  if (previous && previous.sdkSessionId === sdkSessionId && previous.sdkMessageUuid === sdkMessageUuid) return
-
-  index.anchors[messageId] = {
-    sdkSessionId,
-    sdkMessageUuid,
-  }
-
-  const filePath = getClaudeTurnAnchorsPath(sessionPath)
-  await mkdir(join(sessionPath, 'meta'), { recursive: true })
-  await writeFile(filePath, JSON.stringify(index), 'utf-8')
-}
 
 /**
  * Build MCP and API servers from sources using the new unified modules.
@@ -878,11 +743,9 @@ interface ManagedSession {
   branchFromSdkSessionId?: string
   // Parent session's storage path (used only when branchContextStrategy === 'sdk-fork')
   branchFromSessionPath?: string
-  // Parent session's sdkCwd — needed so the fork subprocess uses the correct
-  // ~/.claude/projects/{cwd-hash}/ directory to find the parent's session file.
+  // Parent session's sdkCwd — needed so the backend can locate the parent session file.
   branchFromSdkCwd?: string
-  // SDK assistant message UUID at the branch point — used as resumeSessionAt
-  // to trim the forked conversation at the branch point.
+  // Provider-native assistant turn ID at the branch point.
   branchFromSdkTurnId?: string
   // One-shot flag for seeded branch mode - set true after first turn seed injection.
   branchSeedApplied?: boolean
@@ -897,7 +760,7 @@ interface ManagedSession {
   // Promise that resolves when the agent instance is ready (for title gen to await)
   agentReady?: Promise<void>
   agentReadyResolve?: () => void
-  // Per-session env overrides for SDK subprocess (e.g., ANTHROPIC_BASE_URL).
+  // Per-session env overrides for backend subprocesses.
   // Stored on managed session so it persists across agent recreations (auth-retry, etc.)
   envOverrides?: Record<string, string>
   // Whether the previous turn was interrupted (for context injection on next message).
@@ -1588,11 +1451,8 @@ export class SessionManager implements ISessionManager {
    * Reinitialize authentication environment variables.
    * Call this after onboarding or settings changes to pick up new credentials.
    *
-   * SECURITY NOTE: These env vars are propagated to the SDK subprocess via options.ts.
-   * Bun's automatic .env loading is disabled in the subprocess (--env-file=/dev/null)
-   * to prevent a user's project .env from injecting ANTHROPIC_API_KEY and overriding
-   * OAuth auth — Claude Code prioritizes API key over OAuth token when both are set.
-   * See: https://github.com/lukilabs/craft-agents-oss/issues/39
+   * SECURITY NOTE: these env vars are propagated only from trusted app settings,
+   * not from a user's project environment.
    */
   /**
    * Reinitialize authentication environment variables.
@@ -1612,9 +1472,6 @@ export class SessionManager implements ISessionManager {
       }
       const connection = slug ? getLlmConnection(slug) : null
 
-      // Restore managed auth env vars to their baseline before applying this connection.
-      resetManagedAnthropicAuthEnvVars()
-
       if (!connection) {
         sessionLog.error(`No LLM connection found for slug: ${slug}`)
         resetSummarizationClient()
@@ -1623,8 +1480,7 @@ export class SessionManager implements ISessionManager {
 
       sessionLog.info(`Reinitializing auth for connection: ${slug} (${connection.authType})`)
 
-      // Resolve auth env vars via shared utility (provider-agnostic)
-      const result = await resolveAuthEnvVars(connection, slug!, manager, getValidClaudeOAuthToken)
+      const result = await resolveAuthEnvVars()
 
       if (!result.success) {
         sessionLog.error(`Auth resolution failed for ${slug}: ${result.warning}`)
@@ -2906,8 +2762,7 @@ export class SessionManager implements ISessionManager {
     const defaultEnabledSourceSlugs = options?.enabledSourceSlugs ?? wsConfig?.defaults?.enabledSourceSlugs
 
     // Resolve model tier hints ('fast' / 'default') to actual model IDs.
-    // EditPopover uses tier hints instead of hardcoded Anthropic model names
-    // so the right model is selected regardless of the active LLM provider.
+    // EditPopover uses tier hints so the right Qwen model is selected.
     let resolvedModelOption = options?.model || defaultModel
     if (resolvedModelOption === 'fast' || resolvedModelOption === 'default') {
       const tierConnection = resolveSessionConnection(
@@ -2929,9 +2784,7 @@ export class SessionManager implements ISessionManager {
       workspaceDefaultConnectionSlug: wsConfig?.defaults?.defaultLlmConnection,
       managedModel: resolvedModelOption,
     })
-    const targetProviderType = targetBackendContext.connection?.providerType
-      ?? (targetBackendContext.provider === 'pi' ? 'pi' : 'anthropic')
-    const targetPiAuthProvider = targetBackendContext.connection?.piAuthProvider
+    const targetProviderType = targetBackendContext.connection?.providerType ?? 'qwen'
     const sessionPermissionMode = defaultPermissionMode
 
     // Resolve working directory from options:
@@ -3002,25 +2855,19 @@ export class SessionManager implements ISessionManager {
         workspaceDefaultConnectionSlug: wsConfig?.defaults?.defaultLlmConnection,
         managedModel: sourceManaged?.model || sourceSession.model,
       })
-      const sourceProviderType = sourceBackendContext.connection?.providerType
-        ?? (sourceBackendContext.provider === 'pi' ? 'pi' : 'anthropic')
-      const sourcePiAuthProvider = sourceBackendContext.connection?.piAuthProvider
+      const sourceProviderType = sourceBackendContext.connection?.providerType ?? 'qwen'
 
       const providerMismatch = sourceBackendContext.provider !== targetBackendContext.provider
       const providerTypeMismatch = sourceProviderType !== targetProviderType
-      const piAuthProviderMismatch =
-        sourceBackendContext.provider === 'pi' && sourcePiAuthProvider !== targetPiAuthProvider
 
-      if (providerMismatch || providerTypeMismatch || piAuthProviderMismatch) {
+      if (providerMismatch || providerTypeMismatch) {
         sessionLog.warn('Branch validation failed: source and target providers are incompatible', {
           workspaceId,
           branchFromSessionId: options.branchFromSessionId,
           sourceProvider: sourceBackendContext.provider,
           sourceProviderType,
-          sourcePiAuthProvider,
           targetProvider: targetBackendContext.provider,
           targetProviderType,
-          targetPiAuthProvider,
         })
         throw new Error('Branching is only supported within the same provider/backend. Switch this panel connection and try again.')
       }
@@ -3045,61 +2892,15 @@ export class SessionManager implements ISessionManager {
       const branchFromSessionPath = branchContextStrategy === 'sdk-fork'
         ? getSessionStoragePath(workspaceRootPath, options.branchFromSessionId)
         : undefined
-      // Capture parent's sdkCwd so the child SDK subprocess can find the parent's
-      // session file (stored under ~/.claude/projects/{cwd-hash}/).
+      // Capture parent's sdkCwd so the child backend can find the parent's session file.
       const branchFromSdkCwd = branchContextStrategy === 'sdk-fork'
         ? (sourceManaged?.sdkCwd || sourceSession.sdkCwd)
         : undefined
 
-      // Provider-native branch anchor at branch point.
-      // - Claude: assistant message UUID (resumeSessionAt), but only when anchor lineage
-      //   matches the parent SDK session being resumed.
-      // - Pi: session entry ID loaded from sidecar (pi-turn-anchors.json)
       const branchMessage = sourceSession.messages[branchIdx]
       let branchFromSdkTurnId: string | undefined
       if (branchContextStrategy === 'sdk-fork') {
-        if (sourceBackendContext.provider === 'pi') {
-          if (branchFromSessionPath) {
-            branchFromSdkTurnId = await getPiTurnAnchor(branchFromSessionPath, options.branchFromMessageId)
-            if (!branchFromSdkTurnId) {
-              sessionLog.warn('Pi branch anchor missing: falling back to full-history fork for this branch', {
-                workspaceId,
-                branchFromSessionId: options.branchFromSessionId,
-                branchFromMessageId: options.branchFromMessageId,
-              })
-            }
-          }
-        } else if (sourceBackendContext.provider === 'anthropic') {
-          if (branchFromSessionPath && branchFromSdkSessionId) {
-            const anchor = await getClaudeTurnAnchor(branchFromSessionPath, options.branchFromMessageId)
-            if (!anchor) {
-              sessionLog.warn('Claude branch anchor missing: falling back to full-history fork for this branch', {
-                workspaceId,
-                branchFromSessionId: options.branchFromSessionId,
-                branchFromMessageId: options.branchFromMessageId,
-              })
-            } else if (!anchor.sdkMessageUuid || !isClaudeMessageUuid(anchor.sdkMessageUuid)) {
-              sessionLog.warn('Claude branch anchor malformed: falling back to full-history fork for this branch', {
-                workspaceId,
-                branchFromSessionId: options.branchFromSessionId,
-                branchFromMessageId: options.branchFromMessageId,
-                anchorSdkSessionId: anchor.sdkSessionId,
-              })
-            } else if (anchor.sdkSessionId !== branchFromSdkSessionId) {
-              sessionLog.warn('Claude branch anchor lineage mismatch: falling back to full-history fork for this branch', {
-                workspaceId,
-                branchFromSessionId: options.branchFromSessionId,
-                branchFromMessageId: options.branchFromMessageId,
-                anchorSdkSessionId: anchor.sdkSessionId,
-                parentSdkSessionId: branchFromSdkSessionId,
-              })
-            } else {
-              branchFromSdkTurnId = anchor.sdkMessageUuid
-            }
-          }
-        } else {
-          branchFromSdkTurnId = branchMessage?.turnId
-        }
+        branchFromSdkTurnId = branchMessage?.turnId
       }
 
       if (branchContextStrategy === 'sdk-fork' && !branchFromSdkSessionId) {
@@ -3323,7 +3124,7 @@ export class SessionManager implements ISessionManager {
       if (connection) {
         sessionLog.info(`Using LLM connection "${connection.slug}" (${connection.providerType}) for session ${managed.id}`)
       } else {
-        sessionLog.warn(`No LLM connection found for session ${managed.id}, using default anthropic provider`)
+        sessionLog.warn(`No LLM connection found for session ${managed.id}, using Qwen Code fallback`)
       }
 
       // Set session directory for tool metadata cross-process sharing.
@@ -3366,9 +3167,6 @@ export class SessionManager implements ISessionManager {
       const miniModel = connection ? (getMiniModel(connection) ?? connection.defaultModel) : undefined
       const envOverrides: Record<string, string> = {
         CRAFT_WORKSPACE_PATH: managed.workspace.rootPath,
-        // Pass mini model to SDK subprocess so built-in tools like WebFetch
-        // use the correct model for summarization (instead of hardcoded Haiku)
-        ...(miniModel ? { ANTHROPIC_DEFAULT_HAIKU_MODEL: miniModel } : {}),
       }
       managed.envOverrides = envOverrides
 
@@ -3509,7 +3307,6 @@ export class SessionManager implements ISessionManager {
           mcpPool: managed.mcpPool,
           poolServerUrl,
           envOverrides,
-          // Claude-specific
           isHeadless: !AGENT_FLAGS.defaultModesEnabled,
           skipConfigWatcher: true, // Server owns workspace-level ConfigWatcher — don't duplicate in agents
           automationSystem: this.automationSystems.get(managed.workspace.rootPath),
@@ -3578,7 +3375,7 @@ export class SessionManager implements ISessionManager {
         sessionLog.info(msg)
       }
 
-      // Unified auth callback — replaces per-backend onChatGptAuthRequired/onGithubAuthRequired
+      // Unified auth callback for backend-managed authentication.
       managed.agent.onBackendAuthRequired = (reason: string) => {
         sessionLog.warn(`Backend auth required for session ${managed.id}: ${reason}`)
         this.sendEvent({
@@ -4323,11 +4120,9 @@ export class SessionManager implements ISessionManager {
               reason: 'Activation failed — source may be unusable (disabled/unauthenticated) or server build failed. Check session logs.',
             }
           }
-          // Both backends need the current turn to end before new tools are visible:
-          // Claude SDK freezes mcpServers at query() start; Pi only picks up new proxy
-          // tool defs on the next handlePrompt (`toolsChanged` flag in pi-agent-server).
-          // Mark a pending restart on the agent — ClaudeAgent/PiAgent consume it after
-          // the next tool_result, yield source_activated, and forceAbort. The renderer's
+          // The current turn must end before newly activated tools are visible.
+          // Mark a pending restart on the agent so it can emit source_activated
+          // after the next tool_result and forceAbort. The renderer's
           // auto_retry effect then resends the original user message with a
           // "[{slug} activated]" suffix — landing in a fresh turn with tools live.
           // Same machinery as the tool-call-error auto-retry path.
@@ -4852,7 +4647,7 @@ export class SessionManager implements ISessionManager {
     const disabledSlugs = [...previousSlugs].filter(prevSlug => !newSlugs.has(prevSlug))
     if (disabledSlugs.length > 0) {
       try {
-        await cleanupSourceRuntimeArtifacts(workspaceRootPath, disabledSlugs)
+        await cleanupSourceRuntimeArtifacts()
       } catch (err) {
         sessionLog.warn(`Failed to clean up source runtime artifacts: ${err}`)
       }
@@ -5057,7 +4852,7 @@ export class SessionManager implements ISessionManager {
   /**
    * Regenerate the session title based on recent messages.
    * Uses the last few user messages to capture what the session has evolved into.
-   * Automatically uses the same provider as the session (Claude or OpenAI).
+   * Automatically uses the same provider as the session.
    */
   async refreshTitle(sessionId: string): Promise<{ success: boolean; title?: string; error?: string }> {
     sessionLog.info(`refreshTitle called for session ${sessionId}`)
@@ -5239,7 +5034,7 @@ export class SessionManager implements ISessionManager {
       const wsConfig = loadWorkspaceConfig(managed.workspace.rootPath)
       const nextConnectionSlug = connection && !managed.connectionLocked ? connection : managed.llmConnection
       const sessionConn = resolveSessionConnection(nextConnectionSlug, wsConfig?.defaults?.defaultLlmConnection)
-      const provider = sessionConn ? providerTypeToAgentProvider(sessionConn.providerType) : 'anthropic'
+      const provider = sessionConn ? providerTypeToAgentProvider(sessionConn.providerType) : 'qwen'
       const resolveModel = (candidate: string | undefined) =>
         resolveModelForProvider(provider, candidate, sessionConn)
       const persistedModel = model === null ? undefined : (resolveModel(model) || undefined)
@@ -5592,9 +5387,8 @@ export class SessionManager implements ISessionManager {
     // Ensure messages are loaded before we try to add new ones
     await this.ensureMessagesLoaded(managed)
 
-    // If currently processing, redirect mid-stream. Each backend decides its strategy:
-    // - Pi: steers (injects message, events continue through existing stream)
-    // - Claude: aborts internally, session layer queues for re-send
+    // If currently processing, redirect mid-stream. The backend may steer in place
+    // or abort and let the session layer queue a re-send.
     if (managed.isProcessing) {
       const agent = managed.agent
       const steered = agent?.redirect(message) ?? false
@@ -6839,7 +6633,6 @@ export class SessionManager implements ISessionManager {
           : undefined,
         envOverrides: {
           CRAFT_WORKSPACE_PATH: workspace.rootPath,
-          ...(miniModel ? { ANTHROPIC_DEFAULT_HAIKU_MODEL: miniModel } : {}),
         },
         isHeadless: !AGENT_FLAGS.defaultModesEnabled,
         skipConfigWatcher: true,
@@ -7116,28 +6909,6 @@ export class SessionManager implements ISessionManager {
         if (!event.isIntermediate) {
           managed.lastMessageRole = 'assistant'
           managed.lastFinalMessageId = assistantMessage.id
-
-          const sessionPath = getSessionStoragePath(managed.workspace.rootPath, sessionId)
-
-          // Claude branch-cutoff support: persist message UUID + SDK session lineage in sidecar.
-          // Used to guard resumeSessionAt so we only send anchors valid for the parent SDK session.
-          if (event.turnId && managed.sdkSessionId && isClaudeMessageUuid(event.turnId)) {
-            try {
-              await saveClaudeTurnAnchor(sessionPath, assistantMessage.id, managed.sdkSessionId, event.turnId)
-            } catch (error) {
-              sessionLog.warn(`Failed to persist Claude turn anchor for session ${sessionId}:`, error)
-            }
-          }
-
-          // Pi branch-cutoff support: persist provider-native turn anchor in session sidecar.
-          // Keeps session.jsonl schema unchanged while enabling strict branch cutoffs later.
-          if (event.sdkTurnAnchor) {
-            try {
-              await savePiTurnAnchor(sessionPath, assistantMessage.id, event.sdkTurnAnchor)
-            } catch (error) {
-              sessionLog.warn(`Failed to persist Pi turn anchor for session ${sessionId}:`, error)
-            }
-          }
         }
 
         this.sendEvent({ type: 'text_complete', sessionId, text: event.text, isIntermediate: event.isIntermediate, turnId: event.turnId, parentToolUseId: event.parentToolUseId, timestamp: assistantMessage.timestamp, messageId: assistantMessage.id }, workspaceId)
@@ -7153,7 +6924,6 @@ export class SessionManager implements ISessionManager {
 
         // Resolve call_llm model for TurnCard badge display.
         // Resolve call_llm model short names to full IDs for display.
-        // Note: Pi sessions override the model in PiEventAdapter (call_llm always uses miniModel).
         if (event.toolName === 'mcp__session__call_llm' && formattedToolInput?.model) {
           const shortName = String(formattedToolInput.model)
           const modelDef = MODEL_REGISTRY.find(m => m.id === shortName)
@@ -7457,7 +7227,7 @@ export class SessionManager implements ISessionManager {
         }
 
         // Defensive: detect auth-expiry text in plain errors that weren't classified
-        // as typed_error (e.g. Pi SDK error path or future provider changes).
+        // as typed_error.
         const lowerErr = event.message.toLowerCase()
         const isPlainAuthError =
           lowerErr.includes('token is expired') ||
@@ -7872,7 +7642,6 @@ export class SessionManager implements ISessionManager {
 
     const envOverrides: Record<string, string> = {
       CRAFT_WORKSPACE_PATH: workspaceRootPath,
-      ...(miniModel ? { ANTHROPIC_DEFAULT_HAIKU_MODEL: miniModel } : {}),
     }
 
     const agent = createBackendFromResolvedContext({
@@ -7896,7 +7665,7 @@ export class SessionManager implements ISessionManager {
         envOverrides,
         isHeadless: true,
       },
-      providerOptions: { piAuthProvider: backendContext.connection?.piAuthProvider },
+      providerOptions: {},
     })
 
     try {

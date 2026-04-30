@@ -48,13 +48,11 @@ export interface Workspace extends WorkspaceInfo {
 }
 
 /**
- * Authentication type for AI provider
- * - api_key: Anthropic API key
- * - oauth_token: Claude Max OAuth (Anthropic)
- * - codex_oauth: ChatGPT Plus OAuth via Codex app-server
- * - codex_api_key: OpenAI API key via Codex (OpenRouter, Vercel AI Gateway compatible)
+ * Authentication type for the built-in AI backend.
+ * Qwen Code auth is handled by the local Qwen CLI, so the app stores no LLM
+ * credential here.
  */
-export type AuthType = 'api_key' | 'oauth_token' | 'codex_oauth' | 'codex_api_key';
+export type AuthType = 'none';
 
 /**
  * OAuth credentials from a fresh authentication flow.

@@ -8,8 +8,7 @@
 import type { ModelDefinition } from '@craft-agent/shared/config/models'
 import {
   type LlmConnection,
-  getDefaultModelsForConnection,
-  getDefaultModelForConnection,
+  QWEN_CODE_CONNECTION_SLUG,
 } from '@craft-agent/shared/config'
 
 // ============================================================
@@ -25,9 +24,7 @@ export function parseTestConnectionError(msg: string): string {
   if (lower.includes('econnrefused') || lower.includes('enotfound') || lower.includes('fetch failed')) {
     return 'Cannot connect to API server. Check the URL and ensure the server is running.'
   }
-  if (lower.includes('no api key found for')) {
-    return 'Provider mismatch during setup. Select a provider preset in Craft Agents Backend API Key mode, or use Anthropic API Key mode for arbitrary compatible endpoints.'
-  }
+  if (lower.includes('no api key found for')) return 'Qwen Code is not configured correctly.'
   if (lower.includes('401') || lower.includes('unauthorized') || lower.includes('authentication')) {
     return 'Invalid API key'
   }
@@ -48,21 +45,12 @@ export function parseTestConnectionError(msg: string): string {
 }
 
 /**
- * Guard against ambiguous Pi custom endpoint tests where no provider routing is selected.
+ * Validate setup test input for the Qwen-only backend.
  */
 export function validateSetupTestInput(params: {
-  provider: 'anthropic' | 'pi' | 'qwen'
+  provider: 'qwen'
   baseUrl?: string
-  piAuthProvider?: string
 }): { valid: true } | { valid: false; error: string } {
-  const hasCustomEndpoint = !!params.baseUrl?.trim()
-  if (params.provider === 'pi' && hasCustomEndpoint && !params.piAuthProvider) {
-    return {
-      valid: false,
-      error: 'Custom endpoint in Craft Agents Backend mode requires selecting a provider preset. For arbitrary Anthropic-compatible endpoints, use Anthropic API Key mode.',
-    }
-  }
-
   return { valid: true }
 }
 
@@ -103,75 +91,13 @@ export const BUILT_IN_CONNECTION_TEMPLATES: Record<string, {
   name: string | ((hasCustomEndpoint: boolean) => string)
   providerType: LlmConnection['providerType'] | ((hasCustomEndpoint: boolean) => LlmConnection['providerType'])
   authType: LlmConnection['authType'] | ((hasCustomEndpoint: boolean) => LlmConnection['authType'])
-  piAuthProvider?: string
 }> = {
-  'anthropic-api': {
-    name: (h) => h ? 'Custom Anthropic-Compatible' : 'Anthropic (API Key)',
-    providerType: (h) => h ? 'pi_compat' : 'anthropic',
-    authType: (h) => h ? 'api_key_with_endpoint' : 'api_key',
-  },
-  'claude-max': {
-    name: 'Claude Max',
-    providerType: 'anthropic',
-    authType: 'oauth',
-  },
-  'chatgpt-plus': {
-    name: 'ChatGPT Plus',
-    providerType: 'pi',
-    authType: 'oauth',
-    piAuthProvider: 'openai-codex',
-  },
-  'github-copilot': {
-    name: 'GitHub Copilot',
-    providerType: 'pi',
-    authType: 'oauth',
-    piAuthProvider: 'github-copilot',
-  },
-  'pi-api-key': {
-    name: 'Craft Agents Backend (API Key)',
-    providerType: 'pi',
-    authType: 'api_key',
-    // piAuthProvider set dynamically from setup.piAuthProvider
-  },
-  'qwen-code': {
+  [QWEN_CODE_CONNECTION_SLUG]: {
     name: 'Qwen Code',
     providerType: 'qwen',
     authType: 'none',
   },
 }
-
-// ============================================================
-// Pi Auth Provider Display Names
-// ============================================================
-
-const PI_AUTH_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
-  anthropic: 'Anthropic',
-  openai: 'OpenAI',
-  'openai-codex': 'OpenAI',
-  google: 'Google AI Studio',
-  openrouter: 'OpenRouter',
-  'azure-openai-responses': 'Azure OpenAI',
-  'amazon-bedrock': 'Amazon Bedrock',
-  groq: 'Groq',
-  mistral: 'Mistral',
-  xai: 'xAI',
-  cerebras: 'Cerebras',
-  zai: 'z.ai',
-  huggingface: 'Hugging Face',
-  minimax: 'Minimax',
-  'minimax-cn': 'Minimax CN',
-  'kimi-coding': 'Kimi (Coding)',
-  'vercel-ai-gateway': 'Vercel AI Gateway',
-}
-
-/** Get a human-readable display name for a Pi auth provider key */
-export function piAuthProviderDisplayName(piAuthProvider: string): string | null {
-  return PI_AUTH_PROVIDER_DISPLAY_NAMES[piAuthProvider] ?? null
-}
-
-// ============================================================
-// Connection Creation
-// ============================================================
 
 /**
  * Create an LLM connection configuration from a connection slug.
@@ -179,7 +105,7 @@ export function piAuthProviderDisplayName(piAuthProvider: string): string | null
  * (custom connections are created through the settings UI).
  */
 export function createBuiltInConnection(slug: string, baseUrl?: string | null): LlmConnection {
-  // Try exact match first, then strip numeric suffix for derived slugs (e.g. 'anthropic-api-2' → 'anthropic-api')
+  // Try exact match first, then strip numeric suffix for derived slugs.
   const baseSlug = slug.replace(/-\d+$/, '')
   const template = BUILT_IN_CONNECTION_TEMPLATES[slug] ?? BUILT_IN_CONNECTION_TEMPLATES[baseSlug]
   if (!template) {
@@ -197,7 +123,7 @@ export function createBuiltInConnection(slug: string, baseUrl?: string | null): 
     ? template.name(hasCustomEndpoint)
     : template.name
 
-  // Append suffix number to name for derived connections (e.g. 'anthropic-api-2' → 'Anthropic (API Key) 2')
+  // Append suffix number to name for derived connections.
   const suffixMatch = slug.match(/-(\d+)$/)
   if (suffixMatch && !BUILT_IN_CONNECTION_TEMPLATES[slug]) {
     name = `${name} ${suffixMatch[1]}`
@@ -208,14 +134,7 @@ export function createBuiltInConnection(slug: string, baseUrl?: string | null): 
     name,
     providerType,
     authType,
-    modelSelectionMode: providerType === 'pi' ? 'automaticallySyncedFromProvider' : undefined,
-    piAuthProvider: template.piAuthProvider,
     createdAt: Date.now(),
-  }
-
-  if (providerType !== 'qwen') {
-    connection.models = getDefaultModelsForConnection(providerType, template.piAuthProvider)
-    connection.defaultModel = getDefaultModelForConnection(providerType, template.piAuthProvider)
   }
 
   return connection
@@ -231,7 +150,7 @@ export function createBuiltInConnection(slug: string, baseUrl?: string | null): 
  *
  * This was extracted from inline logic in the setupLlmConnection IPC handler
  * to fix a bug where Array.includes() compared strings against ModelDefinition
- * objects, always returning false for Pi connections.
+ * objects.
  */
 export function validateModelList(
   models: Array<ModelDefinition | string>,

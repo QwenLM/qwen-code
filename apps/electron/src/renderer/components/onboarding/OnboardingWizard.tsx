@@ -3,17 +3,14 @@ import { WelcomeStep } from "./WelcomeStep"
 import type { ApiSetupMethod } from "./APISetupStep"
 import { ProviderSelectStep, type ProviderChoice } from "./ProviderSelectStep"
 import { CredentialsStep, type CredentialStatus } from "./CredentialsStep"
-import { LocalModelStep, type LocalModelSubmitData } from "./LocalModelStep"
 import { CompletionStep } from "./CompletionStep"
 import { GitBashWarning, type GitBashStatus } from "./GitBashWarning"
 import type { ApiKeySubmitData } from "../apisetup"
-import type { CustomEndpointApi } from '@config/llm-connections'
 
 export type OnboardingStep =
   | 'welcome'
   | 'git-bash'
   | 'provider-select'
-  | 'local-model'
   | 'credentials'
   | 'complete'
 
@@ -41,16 +38,7 @@ interface OnboardingWizardProps {
   onBack: () => void
   onSelectApiSetupMethod: (method: ApiSetupMethod) => void
   onSubmitCredential: (data: ApiKeySubmitData) => void
-  onStartOAuth?: (methodOverride?: ApiSetupMethod) => void
   onFinish: () => void
-
-  // Claude OAuth (two-step flow)
-  isWaitingForCode?: boolean
-  onSubmitAuthCode?: (code: string) => void
-  onCancelOAuth?: () => void
-
-  // Copilot device flow
-  copilotDeviceCode?: { userCode: string; verificationUri: string }
 
   // Git Bash (Windows)
   onBrowseGitBash?: () => Promise<string | null>
@@ -63,9 +51,6 @@ interface OnboardingWizardProps {
   /** Called when user chooses "Setup later" on provider select */
   onSkipSetup?: () => void
 
-  // Local model
-  onSubmitLocalModel?: (data: LocalModelSubmitData) => void
-
   // Edit mode (pre-fill existing connection values)
   editInitialValues?: {
     apiKey?: string
@@ -73,7 +58,6 @@ interface OnboardingWizardProps {
     connectionDefaultModel?: string
     activePreset?: string
     models?: string[]
-    customApi?: CustomEndpointApi
   }
 
   className?: string
@@ -84,8 +68,8 @@ interface OnboardingWizardProps {
  *
  * Manages the step-by-step flow for setting up Craft Agent:
  * 1. Welcome
- * 2. Provider Select (Claude / ChatGPT / Copilot / API Key / Local)
- * 3. Credentials (API Key or OAuth) or Local Model
+ * 2. Provider Select (Qwen Code)
+ * 3. Qwen Code connection check
  * 4. Completion
  */
 export function OnboardingWizard({
@@ -94,14 +78,7 @@ export function OnboardingWizard({
   onBack,
   onSelectApiSetupMethod,
   onSubmitCredential,
-  onStartOAuth,
   onFinish,
-  // Two-step OAuth flow
-  isWaitingForCode,
-  onSubmitAuthCode,
-  onCancelOAuth,
-  // Copilot device flow
-  copilotDeviceCode,
   // Git Bash (Windows)
   onBrowseGitBash,
   onUseGitBashPath,
@@ -110,8 +87,6 @@ export function OnboardingWizard({
   // Provider select (new flow)
   onSelectProvider,
   onSkipSetup,
-  // Local model
-  onSubmitLocalModel,
   // Edit mode
   editInitialValues,
   className
@@ -149,16 +124,6 @@ export function OnboardingWizard({
           />
         )
 
-      case 'local-model':
-        return (
-          <LocalModelStep
-            onSubmit={onSubmitLocalModel!}
-            onBack={onBack}
-            status={state.credentialStatus === 'validating' ? 'validating' : state.credentialStatus === 'error' ? 'error' : 'idle'}
-            errorMessage={state.errorMessage}
-          />
-        )
-
       case 'credentials':
         return (
           <CredentialsStep
@@ -166,13 +131,8 @@ export function OnboardingWizard({
             status={state.credentialStatus}
             errorMessage={state.errorMessage}
             onSubmit={onSubmitCredential}
-            onStartOAuth={onStartOAuth}
             onBack={onBack}
-            isWaitingForCode={isWaitingForCode}
-            onSubmitAuthCode={onSubmitAuthCode}
             editInitialValues={editInitialValues}
-            onCancelOAuth={onCancelOAuth}
-            copilotDeviceCode={copilotDeviceCode}
           />
         )
 

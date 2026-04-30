@@ -2,7 +2,7 @@
  * Tests for the centralized PreToolUse pipeline.
  *
  * Tests `runPreToolUseChecks()` (6-step pipeline) and `shouldPromptInAskMode()`
- * which are shared by all 4 agent backends (Claude, Codex, Copilot, Pi).
+ * which are shared by agent backends.
  */
 import { describe, it, expect, beforeEach, mock } from 'bun:test';
 

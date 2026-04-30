@@ -2,7 +2,7 @@
  * Session Tools Core - Handlers
  *
  * Exports all handler functions for session-scoped tools.
- * These handlers are used by both Claude and Codex implementations.
+ * These handlers are shared by all session tool implementations.
  */
 
 // SubmitPlan

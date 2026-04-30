@@ -5,7 +5,7 @@ import { validatePathFormat } from '../../utils/path-validation'
 import { randomUUID } from 'crypto'
 import { RPC_CHANNELS, type FileAttachment, type DirectoryListingResult } from '@craft-agent/shared/protocol'
 import type { StoredAttachment } from '@craft-agent/core/types'
-import { readFileAttachment, validateImageForClaudeAPI, IMAGE_LIMITS } from '@craft-agent/shared/utils'
+import { readFileAttachment, validateImageForAgent, IMAGE_LIMITS } from '@craft-agent/shared/utils'
 import { getSessionAttachmentsPath, validateSessionId } from '@craft-agent/shared/sessions'
 import { getWorkspaceByNameOrId } from '@craft-agent/shared/config'
 import { resizeImageForAPI, inspectImageBuffer } from '@craft-agent/server-core/services'
@@ -261,7 +261,7 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
           throw new Error(`Attachment corrupted: size mismatch (expected ${attachment.size}, got ${decoded.length})`)
         }
 
-        // For images: validate and resize if needed for Claude API compatibility
+        // For images: validate and resize if needed for agent compatibility
         if (attachment.type === 'image') {
           const imageInspection = await inspectImageBuffer(decoded, deps.platform.imageProcessor)
           const imageSize = imageInspection.status === 'ok'
@@ -280,8 +280,8 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
           } else if (imageInspection.status === 'invalid_image') {
             throw new Error(imageInspection.error?.message || 'Invalid or unsupported image file')
           } else {
-            // Validate image for Claude API
-            const validation = validateImageForClaudeAPI(decoded.length, imageSize!.width, imageSize!.height)
+            // Validate image for agent compatibility
+            const validation = validateImageForAgent(decoded.length, imageSize!.width, imageSize!.height)
 
             shouldResize = validation.needsResize ?? false
             targetSize = validation.suggestedSize
@@ -348,7 +348,7 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
             deps.platform.logger.info(`Image resized: ${attachment.size} -> ${finalSize} bytes (${Math.round((1 - finalSize / attachment.size) * 100)}% reduction)`)
 
             // Store resized base64 to return to renderer
-            // This is used when sending to Claude API instead of original large base64
+            // This is used when sending to the agent instead of original large base64
             resizedBase64 = decoded.toString('base64')
           }
         }
@@ -382,8 +382,7 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
         deps.platform.logger.info('Thumbnail generation failed (using fallback):', thumbError instanceof Error ? thumbError.message : thumbError)
       }
 
-      // 3. Convert Office files to markdown (for sending to Claude)
-      // This is required for Office files - Claude can't read raw Office binary
+      // 3. Convert Office files to markdown for model-readable content
       let markdownPath: string | undefined
       if (attachment.type === 'office') {
         const mdFileName = `${id}_${safeName}.md`
@@ -400,7 +399,7 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
           deps.platform.logger.info(`Converted Office file to markdown: ${mdPath}`)
         } catch (convertError) {
           // Conversion failed - throw so user knows the file can't be processed
-          // Claude can't read raw Office binary, so a failed conversion = unusable file
+          // A failed conversion means the model cannot inspect the Office binary.
           const errorMsg = convertError instanceof Error ? convertError.message : String(convertError)
           deps.platform.logger.error('Office to markdown conversion failed:', errorMsg)
           throw new Error(`Failed to convert "${attachment.name}" to readable format: ${errorMsg}`)
@@ -409,7 +408,7 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
 
       // Return StoredAttachment metadata
       // Include wasResized flag so UI can show notification
-      // Include resizedBase64 so renderer uses resized image for Claude API
+      // Include resizedBase64 so renderer uses resized image for the agent
       return {
         id,
         type: attachment.type,
@@ -422,7 +421,7 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
         thumbnailBase64,
         markdownPath,
         wasResized,
-        resizedBase64, // Only set when wasResized=true, used for Claude API
+        resizedBase64, // Only set when wasResized=true, used for agent input
       }
     } catch (error) {
       // Clean up any files we've written before the error

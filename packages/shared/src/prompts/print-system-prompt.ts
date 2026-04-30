@@ -54,7 +54,6 @@ ${colors.bgMagenta}${colors.bold}                                               
 
 printHeader('PART 1: STATIC SYSTEM PROMPT (systemPrompt.append)');
 printAnnotation('Built once per session, passed to SDK, enables prompt caching');
-printAnnotation('The SDK also uses preset: "claude_code" which adds Claude Code\'s base system prompt');
 printAnnotation('');
 printAnnotation('Composed of:');
 printAnnotation('  1. User Preferences (if set) - formatPreferencesForPrompt()');
@@ -181,7 +180,7 @@ local-mcp: enabled (stdio subprocess servers supported)
 
 <working_directory_context>The user explicitly selected this as the working directory for this session.</working_directory_context>
 
-<project_context_file>CLAUDE.md</project_context_file>
+<project_context_file>AGENTS.md</project_context_file>
 
 What files are in the src directory?`;
 
@@ -197,7 +196,6 @@ ${colors.bgMagenta}${colors.bold}                              SUMMARY          
 ${colors.bgMagenta}${colors.bold}                                                                                ${colors.reset}
 
 ${colors.bold}SDK Configuration:${colors.reset}
-  systemPrompt.preset: 'claude_code'     ${colors.dim}// Claude Code's base system prompt${colors.reset}
   systemPrompt.append: getSystemPrompt() ${colors.dim}// Craft Agent additions (static, cacheable)${colors.reset}
 
 ${colors.bold}Static System Prompt Components:${colors.reset}

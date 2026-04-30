@@ -3,8 +3,7 @@
  *
  * Shared helpers for building title prompts and validating results.
  * Actual title generation is handled by agent classes using their respective SDKs:
- * - ClaudeAgent: Uses Claude SDK query()
- * - CodexAgent: Uses OpenAI SDK
+ * - Backend agents use their own lightweight completion path
  */
 
 /** Max characters used for persisted/displayed session titles. */

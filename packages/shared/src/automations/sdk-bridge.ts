@@ -1,5 +1,5 @@
 /**
- * SDK Bridge - Environment variable building for Claude SDK automation integration
+ * SDK Bridge - Environment variable building for backend automation integration
  *
  * Maps SDK automation input fields to CRAFT_* environment variables for command execution.
  */

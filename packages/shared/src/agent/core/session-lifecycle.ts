@@ -5,7 +5,7 @@
  * Provides common abort reasons, session state, and cleanup patterns.
  *
  * The actual abort implementation is provider-specific:
- * - ClaudeAgent uses AbortController with the Claude SDK
+ * - Backend agents use their runtime-specific abort mechanism
  * - CodexAgent uses client.turnInterrupt() with the Codex API
  *
  * This module provides the shared types and utilities that both use.

@@ -27,11 +27,9 @@ interface SpawnedServer {
 
 async function spawnTestServer(extraEnv?: Record<string, string>): Promise<SpawnedServer> {
   const token = crypto.randomUUID() + crypto.randomUUID() // 72 chars, well above 16 minimum
-  const { CLAUDECODE: _, ...parentEnv } = process.env
-
   const proc = Bun.spawn(['bun', 'run', SERVER_ENTRY], {
     env: {
-      ...parentEnv,
+      ...process.env,
       ...extraEnv,
       CRAFT_SERVER_TOKEN: token,
       CRAFT_RPC_PORT: '0',
@@ -150,10 +148,9 @@ describe('headless server smoke test', () => {
 
   it('rejects short token at startup', async () => {
     const token = 'short'
-    const { CLAUDECODE: _, ...parentEnv } = process.env
     const proc = Bun.spawn(['bun', 'run', SERVER_ENTRY], {
       env: {
-        ...parentEnv,
+        ...process.env,
         CRAFT_SERVER_TOKEN: token,
         CRAFT_RPC_PORT: '0',
         CRAFT_RPC_HOST: '127.0.0.1',

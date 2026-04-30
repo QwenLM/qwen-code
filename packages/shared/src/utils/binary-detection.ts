@@ -2,7 +2,7 @@
  * Binary Detection & File Saving Utilities
  *
  * Shared binary content detection used by guardLargeResult() to handle
- * binary data across all tool result paths (API tools, MCP tools, Claude SDK).
+ * binary data across all tool result paths (API tools, MCP tools, backend adapters).
  *
  * Extracted from api-tools.ts for centralized use.
  */

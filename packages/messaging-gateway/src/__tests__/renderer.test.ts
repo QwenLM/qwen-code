@@ -129,7 +129,7 @@ const ev = {
     isIntermediate: false,
   }),
   // text_complete without an explicit isIntermediate flag — simulates
-  // backends that don't set the field (older events or non-Claude agents).
+  // backends that don't set the field (older events or other agents).
   completeText: (text: string): SessionEvent => ({
     type: 'text_complete',
     sessionId: 's',

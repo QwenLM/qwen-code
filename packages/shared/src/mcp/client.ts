@@ -42,8 +42,8 @@ export type McpClientConfig = HttpMcpClientConfig | StdioMcpClientConfig;
  */
 const BLOCKED_ENV_VARS = [
   // Craft Agent auth (set by the app itself)
-  'ANTHROPIC_API_KEY',
-  'CLAUDE_CODE_OAUTH_TOKEN',
+  'LLM_API_KEY',
+  'QWEN_API_KEY',
 
   // AWS credentials
   'AWS_ACCESS_KEY_ID',
@@ -53,7 +53,6 @@ const BLOCKED_ENV_VARS = [
   // Common API keys/tokens
   'GITHUB_TOKEN',
   'GH_TOKEN',
-  'OPENAI_API_KEY',
   'GOOGLE_API_KEY',
   'STRIPE_SECRET_KEY',
   'NPM_TOKEN',

@@ -20,7 +20,7 @@ function SlashCommandDemo() {
   const [buttonMenuOpen, setButtonMenuOpen] = React.useState(false)
   const [inputValue, setInputValue] = React.useState('')
   const [permissionMode, setPermissionMode] = React.useState<PermissionMode>('ask')
-  const [model, setModel] = React.useState('claude-sonnet-4-20250514')
+  const [model, setModel] = React.useState('qwen3-coder-flash')
 
   // FreeFormInput depends on Electron bridge APIs (attachments, clipboard, etc.)
   React.useEffect(() => {

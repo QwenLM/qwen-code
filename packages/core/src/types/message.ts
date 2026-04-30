@@ -260,9 +260,9 @@ export interface StoredAttachment {
   storedPath: string;            // Full path to copied file on disk
   thumbnailPath?: string;        // Path to OS-generated thumbnail (images/PDFs/Office)
   thumbnailBase64?: string;      // Base64-encoded thumbnail PNG (for renderer display)
-  markdownPath?: string;         // For Office files: converted markdown for Claude
-  wasResized?: boolean;          // True if image was auto-resized for Claude API limits
-  resizedBase64?: string;        // Base64 of resized image (only when wasResized=true, for Claude API)
+  markdownPath?: string;         // For Office files: converted markdown
+  wasResized?: boolean;          // True if image was auto-resized for backend limits
+  resizedBase64?: string;        // Base64 of resized image (only when wasResized=true)
 }
 
 /**
@@ -571,7 +571,7 @@ export type AgentEvent =
   | { type: 'status'; message: string }
   | { type: 'info'; message: string }
   | { type: 'text_delta'; text: string; turnId?: string; parentToolUseId?: string }
-  | { type: 'text_complete'; text: string; isIntermediate?: boolean; turnId?: string; parentToolUseId?: string; sdkTurnAnchor?: string }
+  | { type: 'text_complete'; text: string; isIntermediate?: boolean; turnId?: string; parentToolUseId?: string }
   | { type: 'tool_start'; toolName: string; toolUseId: string; input: Record<string, unknown>; intent?: string; displayName?: string; turnId?: string; parentToolUseId?: string; toolDisplayMeta?: ToolDisplayMeta }
   | { type: 'tool_result'; toolUseId: string; toolName?: string; result: string; isError: boolean; input?: Record<string, unknown>; turnId?: string; parentToolUseId?: string }
   | {

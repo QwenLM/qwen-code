@@ -24,7 +24,7 @@ export type SourceMcpAuthType = 'oauth' | 'bearer' | 'none';
 /**
  * API authentication types
  */
-export type ApiAuthType = 'bearer' | 'header' | 'query' | 'basic' | 'oauth' | 'none';
+export type HttpAuthType = 'bearer' | 'header' | 'query' | 'basic' | 'oauth' | 'none';
 
 /**
  * Google service types for OAuth scope selection
@@ -369,7 +369,7 @@ export interface ApiRenewEndpoint {
  */
 export interface ApiSourceConfig {
   baseUrl: string;
-  authType: ApiAuthType;
+  authType: HttpAuthType;
   headerName?: string; // For 'header' auth (e.g., "X-API-Key")
   headerNames?: string[]; // For multi-header auth (e.g., ["DD-API-KEY", "DD-APPLICATION-KEY"])
   queryParam?: string; // For 'query' auth (e.g., "api_key")

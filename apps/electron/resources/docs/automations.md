@@ -74,7 +74,7 @@ craft-agent automation validate
 
 > **Note:** `TodoStateChange` is a deprecated alias for `SessionStatusChange`. Existing configs using the old name will continue to work but will show a deprecation warning during validation.
 
-### Agent Events (passed to Claude SDK)
+### Agent Events
 
 | Event | Trigger | Match Value |
 |-------|---------|-------------|
@@ -116,18 +116,18 @@ Send a prompt to Craft Agent (creates a new session for scheduled prompts).
 - Use `@mentions` to reference sources or skills
 - Environment variables are expanded (e.g., `$CRAFT_LABEL`)
 
-**LLM Connection & Model:** Optionally specify which AI provider and model to use for the created session. If omitted, the workspace default connection and model are used.
+**LLM Connection & Model:** Optionally specify the Qwen connection and model to use for the created session. If omitted, the workspace default connection and model are used.
 
 ```json
 {
   "type": "prompt",
   "prompt": "Quick code review of recent changes",
-  "llmConnection": "my-copilot-connection",
-  "model": "gemini-2.5-flash"
+  "llmConnection": "qwen-code",
+  "model": "qwen3-coder-flash"
 }
 ```
 
-The `llmConnection` value is the slug of an LLM connection configured in AI Settings. The `model` value is a model ID supported by the provider. If either is invalid or not found, it gracefully falls back to the workspace default. Both can be used independently or together.
+The `llmConnection` value is the slug of an LLM connection configured in AI Settings. The `model` value is a model ID supported by Qwen Code. If either is invalid or not found, it gracefully falls back to the workspace default. Both can be used independently or together.
 
 ### Webhook Actions
 

@@ -2,7 +2,7 @@
  * MCP Pool Server
  *
  * Serves McpClientPool tools over HTTP using the MCP Streamable HTTP protocol.
- * This allows external SDK subprocesses (Codex, Copilot) to access pool-managed
+ * This allows external backend subprocesses to access pool-managed
  * MCP source tools through a single HTTP endpoint instead of connecting to each
  * source independently.
  *
@@ -11,7 +11,7 @@
  * session tracking — each request is independent.
  *
  * Architecture:
- *   Codex/Copilot SDK subprocess
+ *   Backend subprocess
  *       ↓ (HTTP Streamable HTTP protocol)
  *   McpPoolServer (this, in Electron main process)
  *       ↓

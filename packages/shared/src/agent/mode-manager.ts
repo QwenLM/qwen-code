@@ -2101,7 +2101,7 @@ function getBlockReasonWithConfig(toolName: string, config: ToolCheckConfig): st
  * The reason is prefixed with "[ERROR]" so the Codex model can distinguish
  * blocked tool calls from successful ones. See the detailed comment on
  * errorResponse() in packages/session-tools-core/src/response.ts for the
- * full explanation of the OpenAI Responses API limitation.
+ * full explanation of the tool error signaling behavior.
  *
  * @param reason - The reason for blocking (from shouldAllowToolInMode)
  */

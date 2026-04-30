@@ -5,7 +5,7 @@
  * Provides accurate per-message tracking (not cumulative billing totals)
  * for real-time context window display.
  *
- * Used by both ClaudeAgent and CodexAgent to:
+ * Used by backend agents to:
  * - Track input/output tokens per message
  * - Calculate cache hit/miss rates
  * - Emit usage_update events for UI display

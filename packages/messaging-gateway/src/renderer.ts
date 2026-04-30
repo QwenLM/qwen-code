@@ -403,7 +403,7 @@ export class Renderer {
     switch (event.type) {
       case 'text_complete': {
         // Only keep non-intermediate text. `isIntermediate` is a hint; when
-        // absent (older events or non-Claude backends), we include the text
+        // absent (older events or other backends), we include the text
         // because it's the only thing we might ever see.
         const isIntermediate = Boolean(event.isIntermediate)
         const text = typeof event.text === 'string' ? event.text : ''

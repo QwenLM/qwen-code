@@ -7,7 +7,7 @@
  * The renderer runs in a browser context and CANNOT import from @craft-agent/shared,
  * which uses Node.js APIs (crypto, fs, etc.). Additionally, the automations package is not
  * exported as a package entry point. These types must be manually kept in sync.
- * See apps/electron/CLAUDE.md "Common Mistake: Node.js APIs in Renderer".
+ * Renderer code must not call Node.js APIs directly.
  */
 
 import { computeNextRuns } from './utils'

@@ -335,7 +335,7 @@ fs.writeFileSync(process.argv.at(-1), JSON.stringify({ rows }));
 - **30-second timeout:** Scripts that exceed 30 seconds are killed
 - **Path sandboxing:** Input files must be within the session directory. Output files must be within the session `data/` directory. Path traversal attempts (e.g., `../`) are blocked.
 - **No network access:** Scripts inherit the process environment (minus secrets) but should not make network calls — use MCP tools for data fetching, then transform locally
-- **Blocked env vars:** `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `AWS_*`, `GITHUB_TOKEN`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `STRIPE_SECRET_KEY`, `NPM_TOKEN`
+- **Blocked env vars:** `AWS_*`, `GITHUB_TOKEN`, `GOOGLE_API_KEY`, `STRIPE_SECRET_KEY`, `NPM_TOKEN`, and other configured secret variables
 
 ## Best Practices
 

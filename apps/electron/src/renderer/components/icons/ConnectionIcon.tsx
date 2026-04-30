@@ -11,15 +11,14 @@
  * - New Session (model selector group names)
  */
 
-import { Brain } from 'lucide-react'
-import { getProviderIcon } from '@/lib/provider-icons'
+import { SquareTerminal } from 'lucide-react'
 import { getModelDisplayName } from '@config/models'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@craft-agent/ui'
 import type { LlmConnectionWithStatus } from '../../../shared/types'
 
 interface ConnectionIconProps {
   /** The connection to display an icon for */
-  connection: Pick<LlmConnectionWithStatus, 'name' | 'providerType' | 'baseUrl' | 'piAuthProvider'> & { type?: string; defaultModel?: string }
+  connection: Pick<LlmConnectionWithStatus, 'name' | 'providerType'> & { type?: string; defaultModel?: string }
   /** Size in pixels (default: 16) */
   size?: number
   /** Additional CSS classes */
@@ -29,27 +28,12 @@ interface ConnectionIconProps {
 }
 
 export function ConnectionIcon({ connection, size = 16, className = '', showTooltip = false }: ConnectionIconProps) {
-  const providerIcon = getProviderIcon(
-    connection.providerType || connection.type || '',
-    connection.baseUrl,
-    connection.piAuthProvider
-  )
-
-  const iconElement = providerIcon ? (
-    <img
-      src={providerIcon}
-      alt=""
-      width={size}
-      height={size}
-      className={`rounded-[3px] flex-shrink-0 ${className}`}
-      style={{ width: size, height: size }}
-    />
-  ) : (
+  const iconElement = (
     <div
       className={`rounded-[3px] bg-foreground/10 flex items-center justify-center flex-shrink-0 ${className}`}
       style={{ width: size, height: size }}
     >
-      <Brain
+      <SquareTerminal
         className="text-foreground/50 flex-shrink-0"
         style={{ width: Math.round(size * 0.7), height: Math.round(size * 0.7) }}
       />

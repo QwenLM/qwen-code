@@ -97,7 +97,7 @@ export async function resizeIconBuffer(buffer: Buffer, targetSize: number): Prom
 }
 
 /**
- * Resize and/or compress an image buffer to fit within Claude API limits.
+ * Resize and/or compress an image buffer to fit within agent attachment limits.
  *
  * Strategy:
  * 1. If dimensions exceed OPTIMAL_EDGE (1568px), resize down

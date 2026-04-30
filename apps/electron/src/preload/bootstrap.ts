@@ -23,7 +23,6 @@ import { RoutedClient } from '../transport/routed-client'
 import { buildClientApi } from '../transport/build-api'
 import { CHANNEL_MAP } from '../transport/channel-map'
 import { createCallbackServer } from '@craft-agent/shared/auth/callback-server'
-import { CHATGPT_OAUTH_CONFIG } from '@craft-agent/shared/auth/chatgpt-oauth-config'
 import {
   CLIENT_OPEN_EXTERNAL,
   CLIENT_OPEN_PATH,
@@ -313,88 +312,6 @@ client.onConnectionStateChanged((state) => {
     return {
       success: false,
       error: err instanceof Error ? err.message : 'OAuth flow failed',
-    }
-  } finally {
-    callbackServer?.close()
-  }
-}
-
-// ── startClaudeOAuth ─────────────────────────────────────────────────────
-// Override the channel-map stub: the server now returns authUrl without opening
-// the browser. We open it locally so it works in remote mode.
-// Claude OAuth is two-step: browser opens → user copies code → pastes in UI.
-;(api as any).startClaudeOAuth = async (): Promise<{
-  success: boolean
-  authUrl?: string
-  error?: string
-}> => {
-  try {
-    const result = await client.invoke('onboarding:startClaudeOAuth')
-    if (result.success && result.authUrl) {
-      await shell.openExternal(result.authUrl)
-    }
-    return result
-  } catch (err) {
-    return {
-      success: false,
-      error: err instanceof Error ? err.message : 'Claude OAuth failed',
-    }
-  }
-}
-
-// ── performChatGptOAuth ──────────────────────────────────────────────────
-// Same shape as performOAuth: callback server (port 1455) → chatgpt:startOAuth →
-// browser → callback → chatgpt:completeOAuth.
-// Overrides the startChatGptOAuth API method so the renderer call is unchanged.
-;(api as any).startChatGptOAuth = async (
-  connectionSlug: string,
-): Promise<{ success: boolean; error?: string }> => {
-  let callbackServer: Awaited<ReturnType<typeof createCallbackServer>> | null = null
-  let flowId: string | undefined
-  let state: string | undefined
-
-  try {
-    // 1. Start callback server on ChatGPT's fixed port with /auth/callback path
-    callbackServer = await createCallbackServer({
-      appType: 'electron',
-      port: CHATGPT_OAUTH_CONFIG.CALLBACK_PORT,
-      callbackPaths: ['/auth/callback'],
-    })
-
-    // 2. Ask server to prepare the flow (PKCE, auth URL, store pending flow)
-    const startResult = await client.invoke('chatgpt:startOAuth', connectionSlug)
-    flowId = startResult.flowId
-    state = startResult.state
-
-    // 3. Open browser for user consent
-    await shell.openExternal(startResult.authUrl)
-
-    // 4. Wait for OpenAI to redirect to our callback server
-    const callback = await callbackServer.promise
-
-    // 5. Check for errors from the provider
-    if (callback.query.error) {
-      const error = callback.query.error_description || callback.query.error
-      await client.invoke('chatgpt:cancelOAuth', { state })
-      return { success: false, error }
-    }
-
-    const code = callback.query.code
-    if (!code) {
-      await client.invoke('chatgpt:cancelOAuth', { state })
-      return { success: false, error: 'No authorization code received' }
-    }
-
-    // 6. Send code to server for token exchange + credential storage
-    const result = await client.invoke('chatgpt:completeOAuth', { flowId, code, state })
-    return { success: result.success, error: result.error }
-  } catch (err) {
-    if (state) {
-      client.invoke('chatgpt:cancelOAuth', { state }).catch(() => {})
-    }
-    return {
-      success: false,
-      error: err instanceof Error ? err.message : 'ChatGPT OAuth flow failed',
     }
   } finally {
     callbackServer?.close()

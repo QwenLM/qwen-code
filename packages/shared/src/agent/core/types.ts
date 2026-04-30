@@ -1,7 +1,7 @@
 /**
  * Core Agent Types
  *
- * Shared types used by both ClaudeAgent and CodexAgent.
+ * Shared types used by backend agents.
  * These types define the interfaces for core functionality that is
  * provider-agnostic and shared across all agent implementations.
  */

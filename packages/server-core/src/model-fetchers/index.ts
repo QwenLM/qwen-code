@@ -18,15 +18,9 @@ import type { ModelDefinition } from '@craft-agent/shared/config'
 import {
   getLlmConnections,
   getLlmConnection,
-  updateLlmConnection,
-  isCompatProvider,
-  getModelsForProviderType,
 } from '@craft-agent/shared/config'
 import { MODEL_FETCHERS } from './registry'
 import { handlerLog } from './runtime'
-
-/** Copilot models are server-managed — refresh every 10 minutes to pick up policy changes. */
-const COPILOT_REFRESH_INTERVAL_MS = 10 * 60 * 1000
 
 // ============================================================
 // Types
@@ -93,20 +87,12 @@ class ModelRefreshService {
 
   /**
    * Internal: actual refresh logic with fallback chain.
-   * Skips compat providers (not in fetcher map).
-   * Preserves user's defaultModel if still valid.
-   * Updates connection.models in storage on success, except for Qwen where ACP
-   * model metadata remains runtime-only.
+   * Qwen ACP model metadata remains runtime-only and is never persisted.
    */
   private async _doRefresh(slug: string): Promise<void> {
     const connection = getLlmConnection(slug)
     if (!connection) {
       handlerLog.warn(`Model refresh: connection not found: ${slug}`)
-      return
-    }
-
-    // Skip compat providers — users configure models manually
-    if (isCompatProvider(connection.providerType)) {
       return
     }
 
@@ -123,7 +109,7 @@ class ModelRefreshService {
     // Layer 1: Provider API/SDK
     try {
       const credentials = await this.getCredentials(slug)
-      handlerLog.info(`Model refresh [${slug}]: fetching (provider=${connection.providerType}, piAuth=${connection.piAuthProvider}, hasOAuthRefresh=${!!credentials.oauthRefreshToken}, hasOAuthAccess=${!!credentials.oauthAccessToken})`)
+      handlerLog.info(`Model refresh [${slug}]: fetching (provider=${connection.providerType})`)
       const result = await fetcher.fetchModels(connection, credentials)
       newModels = result.models
       serverDefault = result.serverDefault
@@ -133,61 +119,11 @@ class ModelRefreshService {
       handlerLog.warn(`Model refresh [${slug}]: provider fetch failed: ${msg}`)
     }
 
-    if (connection.providerType === 'qwen') {
-      if (newModels && newModels.length > 0) {
-        this.setRuntimeModelState(slug, { models: newModels, serverDefault })
-      } else {
-        handlerLog.warn(`Model refresh [${slug}]: no ACP models available`)
-      }
-      return
+    if (newModels && newModels.length > 0) {
+      this.setRuntimeModelState(slug, { models: newModels, serverDefault })
+    } else {
+      handlerLog.warn(`Model refresh [${slug}]: no ACP models available`)
     }
-
-    // Layer 2: Persisted connection.models (keep what we have)
-    if (!newModels && connection.models && connection.models.length > 0) {
-      handlerLog.warn(`Model refresh [${slug}]: keeping ${connection.models.length} stale persisted models (live fetch failed)`)
-      return // Nothing to update
-    }
-
-    // Layer 3: MODEL_REGISTRY hardcoded fallback
-    if (!newModels) {
-      const registryModels = getModelsForProviderType(providerType, connection.piAuthProvider)
-      if (registryModels.length > 0) {
-        newModels = registryModels
-        handlerLog.info(`Model refresh [${slug}]: using ${newModels.length} models from MODEL_REGISTRY`)
-      }
-    }
-
-    if (!newModels || newModels.length === 0) {
-      handlerLog.warn(`Model refresh [${slug}]: no models available from any source`)
-      return
-    }
-
-    // For Pi connections with explicit user-owned 3-tier selection,
-    // never overwrite model lists from background refresh.
-    // Exception: Copilot connections are always server-managed — GitHub's
-    // model policy controls which models are enabled, so we must always
-    // accept the live API result.
-    const isCopilot = connection.providerType === 'pi' && connection.piAuthProvider === 'github-copilot'
-    if (connection.providerType === 'pi' && connection.modelSelectionMode === 'userDefined3Tier' && !isCopilot) {
-      const modelCount = connection.models?.length ?? 0
-      handlerLog.info(`Model refresh [${slug}]: preserving user-defined Pi model list (${modelCount} models)`)
-      if (modelCount > 10) {
-        handlerLog.warn(`Model refresh [${slug}]: userDefined3Tier has suspicious model count (${modelCount})`)
-      }
-      return
-    }
-
-    // Preserve user's defaultModel if still valid.
-    const currentDefault = connection.defaultModel
-    const stillValid = currentDefault && newModels.some(m => m.id === currentDefault)
-    const newDefault = stillValid
-      ? currentDefault
-      : serverDefault ?? newModels[0]?.id
-
-    updateLlmConnection(slug, {
-      models: newModels,
-      ...(newDefault && !stillValid ? { defaultModel: newDefault } : {}),
-    })
   }
 
   /**
@@ -199,8 +135,6 @@ class ModelRefreshService {
     const connections = getLlmConnections()
 
     for (const conn of connections) {
-      if (isCompatProvider(conn.providerType)) continue
-
       const providerType = conn.providerType as FetchableProvider
       const fetcher = this.fetchers[providerType]
       if (!fetcher) continue
@@ -210,13 +144,7 @@ class ModelRefreshService {
         handlerLog.warn(`Initial model refresh failed for ${conn.slug}: ${err instanceof Error ? err.message : err}`)
       })
 
-      // Set up periodic refresh: Copilot connections get their own interval
-      // (models are server-managed by GitHub policy), other providers use
-      // the fetcher's generic interval (0 = no periodic refresh for static SDK models).
-      const isCopilot = conn.providerType === 'pi' && conn.piAuthProvider === 'github-copilot'
-      if (isCopilot) {
-        this.startTimer(conn.slug, COPILOT_REFRESH_INTERVAL_MS)
-      } else if (fetcher.refreshIntervalMs > 0) {
+      if (fetcher.refreshIntervalMs > 0) {
         this.startTimer(conn.slug, fetcher.refreshIntervalMs)
       }
     }
@@ -244,14 +172,11 @@ class ModelRefreshService {
 
     // Ensure periodic timer is running
     const connection = getLlmConnection(slug)
-    if (!connection || isCompatProvider(connection.providerType)) return
+    if (!connection) return
 
     const providerType = connection.providerType as FetchableProvider
     const fetcher = this.fetchers[providerType]
-    const isCopilot = connection.providerType === 'pi' && connection.piAuthProvider === 'github-copilot'
-    if (isCopilot && !this.timers.has(slug)) {
-      this.startTimer(slug, COPILOT_REFRESH_INTERVAL_MS)
-    } else if (fetcher && fetcher.refreshIntervalMs > 0 && !this.timers.has(slug)) {
+    if (fetcher && fetcher.refreshIntervalMs > 0 && !this.timers.has(slug)) {
       this.startTimer(slug, fetcher.refreshIntervalMs)
     }
   }

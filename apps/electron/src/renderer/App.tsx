@@ -1430,7 +1430,7 @@ export default function App() {
           }))
         }
 
-        // Step 2: Create processed attachments for Claude
+        // Step 2: Create processed attachments for backend input
         // - Office files: Convert to text with markdown content
         // - Others: Use original FileAttachment
         // - All: Include storedPath so agent knows where files are stored
@@ -1444,7 +1444,7 @@ export default function App() {
             }
             // Include storedPath and markdownPath for all attachment types
             // Agent will use Read tool to access text/office files via these paths
-            // If image was resized, use the resized base64 for Claude API
+            // If image was resized, use the resized base64 for backend input
             return {
               ...att,
               storedPath: stored.storedPath,
@@ -1509,7 +1509,7 @@ export default function App() {
         lastMessageAt: Date.now()
       }))
 
-      // Step 6: Send to Claude with processed attachments + stored attachments for persistence
+      // Step 6: Send with processed attachments + stored attachments for persistence
       await window.electronAPI.sendMessage(sessionId, message, processedAttachments, storedAttachments, {
         skillSlugs,
         textElements,
@@ -2158,13 +2158,7 @@ export default function App() {
             onSkipSetup={onboarding.handleSkipSetup}
             onSelectApiSetupMethod={onboarding.handleSelectApiSetupMethod}
             onSubmitCredential={onboarding.handleSubmitCredential}
-            onSubmitLocalModel={onboarding.handleSubmitLocalModel}
-            onStartOAuth={onboarding.handleStartOAuth}
             onFinish={onboarding.handleFinish}
-            isWaitingForCode={onboarding.isWaitingForCode}
-            onSubmitAuthCode={onboarding.handleSubmitAuthCode}
-            onCancelOAuth={onboarding.handleCancelOAuth}
-            copilotDeviceCode={onboarding.copilotDeviceCode}
             onBrowseGitBash={onboarding.handleBrowseGitBash}
             onUseGitBashPath={onboarding.handleUseGitBashPath}
             onRecheckGitBash={onboarding.handleRecheckGitBash}

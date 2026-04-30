@@ -59,7 +59,7 @@ export interface FileAttachment {
   markdownPath?: string;
 }
 
-// Supported image types for Claude API
+// Supported image types for agent attachments
 const IMAGE_EXTENSIONS: Record<string, string> = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -99,14 +99,13 @@ const OFFICE_EXTENSIONS: Record<string, string> = {
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB limit
 const MAX_TEXT_SIZE = 100 * 1024; // 100KB for text files
 
-// Claude API image limits - images exceeding these will fail silently
-// See: https://docs.anthropic.com/en/docs/build-with-claude/vision
-const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB - Claude API hard limit
+// Conservative image limits for agent attachments.
+const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB hard limit
 const MAX_IMAGE_DIMENSION = 8000; // 8000x8000 max pixels
 const OPTIMAL_IMAGE_EDGE = 1568; // Recommended max edge for quality/cost balance (~1.15MP)
 
 /**
- * Result of validating an image for Claude API compatibility
+ * Result of validating an image for agent compatibility
  */
 export interface ImageValidationResult {
   valid: boolean;
@@ -123,14 +122,14 @@ export interface ImageValidationResult {
 }
 
 /**
- * Validate an image for Claude API compatibility
+ * Validate an image for agent compatibility
  * Returns validation result with errors, warnings, and resize suggestions
  *
  * @param size - File size in bytes
  * @param width - Image width in pixels (optional, for dimension checking)
  * @param height - Image height in pixels (optional, for dimension checking)
  */
-export function validateImageForClaudeAPI(
+export function validateImageForAgent(
   size: number,
   width?: number,
   height?: number
@@ -141,7 +140,7 @@ export function validateImageForClaudeAPI(
     return {
       valid: false,
       errorCode: 'size_exceeded',
-      error: `Image too large (${sizeMB}MB). Claude API limit is 5MB. Please resize or compress the image.`,
+      error: `Image too large (${sizeMB}MB). Limit is 5MB. Please resize or compress the image.`,
     };
   }
 

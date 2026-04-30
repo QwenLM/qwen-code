@@ -11,27 +11,6 @@ import { join } from 'path';
 import type { BuildConfig } from './common';
 
 /**
- * Verify SDK is bundled in the packaged Windows app
- */
-export function verifyPackagedSDK(unpackedPath: string): void {
-  const appPath = join(unpackedPath, 'resources', 'app');
-
-  // Verify SDK
-  const sdkPath = join(appPath, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'cli.js');
-
-  if (!existsSync(sdkPath)) {
-    throw new Error(`CRITICAL: SDK not bundled! Expected at: ${sdkPath}`);
-  }
-
-  const stats = statSync(sdkPath);
-  if (stats.size < 1_000_000) {
-    throw new Error(`CRITICAL: SDK cli.js too small (${stats.size} bytes, expected ~11MB)`);
-  }
-
-  console.log(`  SDK bundled: cli.js is ${(stats.size / 1024 / 1024).toFixed(1)} MB`);
-}
-
-/**
  * Sleep helper (Node.js replacement for Bun.sleep)
  */
 function sleep(ms: number): Promise<void> {
@@ -161,13 +140,6 @@ export async function buildElectronAppWindows(config: BuildConfig): Promise<void
   // Build main process with OAuth defines
   buildMainProcess(config);
 
-  // Build unified network interceptor (--require hook for tool metadata)
-  console.log('  Building interceptor...');
-  run(
-    'node ./node_modules/esbuild/bin/esbuild packages/shared/src/unified-network-interceptor.ts --bundle --platform=node --format=cjs --outfile=apps/electron/dist/interceptor.cjs',
-    rootDir
-  );
-
   // Build preload - invoke esbuild directly via node
   console.log('  Building preload...');
   run(
@@ -256,15 +228,6 @@ export async function packageWindows(config: BuildConfig): Promise<string> {
 
   if (lastError) {
     throw new Error(`electron-builder failed after ${maxRetries} attempts: ${lastError.message}`);
-  }
-
-  // Verify SDK is bundled in the unpacked app before checking artifacts
-  const unpackedPath = join(electronDir, 'release', 'win-unpacked');
-  if (existsSync(unpackedPath)) {
-    console.log('Verifying SDK in packaged app...');
-    verifyPackagedSDK(unpackedPath);
-  } else {
-    console.warn('  win-unpacked not found, skipping SDK verification');
   }
 
   // Find the built installer

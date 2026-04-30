@@ -4,12 +4,12 @@ import {
   mergeSessionScopedToolCallbacks,
   unregisterSessionScopedToolCallbacks,
 } from '../session-scoped-tools.ts';
-import { createClaudeContext } from '../claude-context.ts';
+import { createSessionToolContext } from '../session-tool-context.ts';
 import { attachSessionSelfManagementBindings } from '../session-self-management-bindings.ts';
 import type { SessionToolContext, SessionInfo } from '@craft-agent/session-tools-core';
 import { SESSION_TOOL_REGISTRY } from '@craft-agent/session-tools-core';
 
-// Minimal noop callbacks for createClaudeContext
+// Minimal noop callbacks for createSessionToolContext
 const noopPlan = () => {};
 const noopAuth = () => {};
 
@@ -28,7 +28,7 @@ function makeSessionInfo(overrides: Partial<SessionInfo> = {}): SessionInfo {
 }
 
 function createBaseContext(sessionId: string): SessionToolContext {
-  return createClaudeContext({
+  return createSessionToolContext({
     sessionId,
     workspacePath: '/tmp/test-workspace',
     workspaceId: 'test-ws',
@@ -38,11 +38,11 @@ function createBaseContext(sessionId: string): SessionToolContext {
 }
 
 // ============================================================
-// Phase 1 — Regression test: Pi path must support session tools
+// Phase 1 — Regression test: backend path must support session tools
 // ============================================================
 
-describe('Pi session self-management regression (#511)', () => {
-  const sessionId = 'test-pi-regression-511';
+describe('backend session self-management regression (#511)', () => {
+  const sessionId = 'test-backend-regression-511';
 
   beforeEach(() => {
     unregisterSessionScopedToolCallbacks(sessionId);
@@ -50,7 +50,7 @@ describe('Pi session self-management regression (#511)', () => {
 
   it('context WITHOUT bindings has undefined session management properties', () => {
     const ctx = createBaseContext(sessionId);
-    // This is the bug: PiAgent creates context without session management
+    // This is the bug: backend creates context without session management
     expect(ctx.setSessionLabels).toBeUndefined();
     expect(ctx.setSessionStatus).toBeUndefined();
     expect(ctx.getSessionInfo).toBeUndefined();
@@ -218,10 +218,10 @@ describe('attachSessionSelfManagementBindings', () => {
 });
 
 // ============================================================
-// Phase 3 — Parity: Claude and Pi paths expose same bindings
+// Phase 3 — Parity: backend paths expose same bindings
 // ============================================================
 
-describe('Claude/Pi session self-management parity', () => {
+describe('backend session self-management parity', () => {
   const sessionId = 'test-parity';
 
   beforeEach(() => {
@@ -247,20 +247,20 @@ describe('Claude/Pi session self-management parity', () => {
       resolveStatusFn: (s) => ({ resolved: s, available: [] }),
     });
 
-    // Simulate Pi path: createClaudeContext + attachBindings
-    const piCtx = createBaseContext(sessionId);
-    attachSessionSelfManagementBindings(piCtx, sessionId);
+    // Simulate backend path: create context + attach bindings
+    const primaryCtx = createBaseContext(sessionId);
+    attachSessionSelfManagementBindings(primaryCtx, sessionId);
 
-    // Simulate Claude path: same thing after refactor
-    const claudeCtx = createBaseContext(sessionId);
-    attachSessionSelfManagementBindings(claudeCtx, sessionId);
+    // Simulate backend path: same thing after refactor
+    const secondaryCtx = createBaseContext(sessionId);
+    attachSessionSelfManagementBindings(secondaryCtx, sessionId);
 
     for (const prop of SELF_MGMT_PROPERTIES) {
-      expect(piCtx[prop]).toBeDefined();
-      expect(claudeCtx[prop]).toBeDefined();
+      expect(primaryCtx[prop]).toBeDefined();
+      expect(secondaryCtx[prop]).toBeDefined();
       // Both should be functions
-      expect(typeof piCtx[prop]).toBe('function');
-      expect(typeof claudeCtx[prop]).toBe('function');
+      expect(typeof primaryCtx[prop]).toBe('function');
+      expect(typeof secondaryCtx[prop]).toBe('function');
     }
   });
 

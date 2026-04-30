@@ -2,7 +2,7 @@
  * SourceManager - Centralized Source State Management
  *
  * Provides a unified interface for managing external data source state that both
- * ClaudeAgent and CodexAgent can use. Handles source tracking, formatting for
+ * Backend agents can use. Handles source tracking, formatting for
  * context injection, and auto-activation detection.
  *
  * Key responsibilities:

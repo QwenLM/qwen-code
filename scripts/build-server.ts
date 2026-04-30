@@ -419,35 +419,6 @@ function copyProductionDeps(config: ServerBuildConfig): void {
 
   console.log(`  Total: ${copied.size} packages copied to node_modules`);
 
-  // Filter ripgrep to target platform only
-  filterRipgrep(config);
-}
-
-function filterRipgrep(config: ServerBuildConfig): void {
-  const { outputDir, platform, arch } = config;
-  const ripgrepDir = join(outputDir, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'vendor', 'ripgrep');
-
-  if (!existsSync(ripgrepDir)) {
-    console.warn('  Warning: ripgrep vendor directory not found in SDK');
-    return;
-  }
-
-  const keepPlatform = `${arch}-${platform}`;
-  let removedSize = 0;
-
-  for (const entry of readdirSync(ripgrepDir)) {
-    const fullPath = join(ripgrepDir, entry);
-    const stat = lstatSync(fullPath);
-    if (stat.isDirectory() && entry !== keepPlatform) {
-      const dirSize = getDirSize(fullPath);
-      removedSize += dirSize;
-      rmSync(fullPath, { recursive: true, force: true });
-    }
-  }
-
-  if (removedSize > 0) {
-    console.log(`  Filtered ripgrep: removed ${(removedSize / 1024 / 1024).toFixed(1)} MB (kept ${keepPlatform})`);
-  }
 }
 
 function getDirSize(dir: string): number {

@@ -110,7 +110,7 @@ export function getMatchValue(event: AutomationEvent, data: Record<string, unkno
 
 /**
  * Get the match value for SDK agent events.
- * Mirrors the Claude SDK's `fieldToMatch` per event — each event type matches
+ * Mirrors backend hook `fieldToMatch` per event — each event type matches
  * against a specific field from the input.
  */
 export function getMatchValueForSdkInput(event: AgentEvent, input: SdkAutomationInput): string {

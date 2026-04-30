@@ -7,9 +7,7 @@
  * so late merges and callback replacements are immediately visible without
  * recreating the context.
  *
- * Used by both the Claude and Pi agent paths to ensure a single binding
- * implementation — the root cause of #511 was that PiAgent's context was
- * missing these bindings entirely.
+ * Used by backend paths to ensure a single binding implementation.
  *
  * Design rules:
  * - Each getter calls getSessionScopedToolCallbacks() fresh — NO memoization
