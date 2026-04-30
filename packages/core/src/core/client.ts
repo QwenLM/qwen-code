@@ -206,10 +206,6 @@ export class GeminiClient {
     return this.getChat().getHistory(curated);
   }
 
-  stripThoughtsFromHistory() {
-    this.getChat().stripThoughtsFromHistory();
-  }
-
   private stripOrphanedUserEntriesFromHistory() {
     this.getChat().stripOrphanedUserEntriesFromHistory();
   }

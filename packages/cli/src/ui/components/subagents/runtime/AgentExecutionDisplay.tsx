@@ -16,6 +16,11 @@ import { useKeypress } from '../../../hooks/useKeypress.js';
 import { COLOR_OPTIONS } from '../constants.js';
 import { fmtDuration } from '../utils.js';
 import { ToolConfirmationMessage } from '../../messages/ToolConfirmationMessage.js';
+import {
+  getCachedStringWidth,
+  sliceTextByVisualHeight,
+  toCodePoints,
+} from '../../../utils/textUtils.js';
 
 export type DisplayMode = 'compact' | 'default' | 'verbose';
 
@@ -78,7 +83,58 @@ const BackgroundManageHint: React.FC = () => (
 );
 
 const MAX_TOOL_CALLS = 5;
+const MAX_VERBOSE_TOOL_CALLS = 12;
 const MAX_TASK_PROMPT_LINES = 5;
+const DEFAULT_DETAIL_HEIGHT = 18;
+
+// Approximate fixed-row cost of the default/verbose layout, derived from the
+// JSX structure below: 1 header + (1 "Task Detail:" label + 1 internal gap +
+// optional 1 "...N task lines hidden..." footer) + (1 "Tools:" label + 1
+// marginBottom) + 1 footer + 3 inter-section gaps. We subtract this from the
+// parent-provided `availableHeight` so the budget for the prompt and
+// tool-call lists actually fits inside the assigned frame.
+const RUNNING_FIXED_OVERHEAD = 10;
+// In completed/cancelled/failed mode we lose the running footer but gain the
+// ExecutionSummary block (header + 3 rows) and the ToolUsage block (header +
+// up to 2 wrapped rows) plus an extra inter-block gap, so the overhead grows.
+// Calibrated against the running→completed transition test: assigning <22
+// here lets the completed expanded frame edge past availableHeight when the
+// SubAgent finishes mid-expand.
+const COMPLETED_FIXED_OVERHEAD = 22;
+// "Status icon + name + description" + "truncated output" — each tool call
+// commits two visual rows in default/verbose mode.
+const ROWS_PER_TOOL_CALL = 2;
+
+function truncateToVisualWidth(text: string, maxWidth: number): string {
+  const visualWidth = Math.max(1, Math.floor(maxWidth));
+  const ellipsis = '...';
+  const ellipsisWidth = getCachedStringWidth(ellipsis);
+  let currentWidth = 0;
+  let result = '';
+
+  for (const char of toCodePoints(text)) {
+    const charWidth = Math.max(getCachedStringWidth(char), 1);
+    if (currentWidth + charWidth > visualWidth) {
+      const availableWidth = Math.max(0, visualWidth - ellipsisWidth);
+      let trimmed = '';
+      let trimmedWidth = 0;
+      for (const trimmedChar of toCodePoints(result)) {
+        const trimmedCharWidth = Math.max(getCachedStringWidth(trimmedChar), 1);
+        if (trimmedWidth + trimmedCharWidth > availableWidth) {
+          break;
+        }
+        trimmed += trimmedChar;
+        trimmedWidth += trimmedCharWidth;
+      }
+      return trimmed + ellipsis;
+    }
+
+    result += char;
+    currentWidth += charWidth;
+  }
+
+  return result;
+}
 
 /**
  * Component to display subagent execution progress and results.
@@ -94,6 +150,37 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
   isWaitingForOtherApproval = false,
 }) => {
   const [displayMode, setDisplayMode] = React.useState<DisplayMode>('compact');
+  const detailHeight = Math.max(
+    4,
+    Math.floor(availableHeight ?? DEFAULT_DETAIL_HEIGHT),
+  );
+  // Treat `availableHeight` as the *total* component budget. Subtract the
+  // fixed overhead (header, section labels, gaps, footer/result block) before
+  // splitting the remainder between the prompt preview and the tool-call
+  // list. This guarantees the rendered frame doesn't grow past the budget the
+  // parent layout assigned us, which is the precondition for Ink to keep the
+  // SubAgent display inside its static slot instead of clearing+redrawing.
+  const fixedOverhead =
+    data.status === 'running'
+      ? RUNNING_FIXED_OVERHEAD
+      : COMPLETED_FIXED_OVERHEAD;
+  const renderableBudget = Math.max(2, detailHeight - fixedOverhead);
+  // Prompt gets ~1/3 of the remainder, tool-call list gets the rest. Both are
+  // clamped to >=1 so we always render at least one of each kind, even in
+  // pathological "availableHeight smaller than overhead" cases.
+  const promptBudget = Math.max(1, Math.floor(renderableBudget / 3));
+  const toolBudget = Math.max(
+    1,
+    Math.floor((renderableBudget - promptBudget) / ROWS_PER_TOOL_CALL),
+  );
+  const maxTaskPromptLines =
+    displayMode === 'verbose'
+      ? Math.min(8, promptBudget)
+      : Math.min(MAX_TASK_PROMPT_LINES, promptBudget);
+  const maxToolCalls =
+    displayMode === 'verbose'
+      ? Math.min(MAX_VERBOSE_TOOL_CALLS, toolBudget)
+      : Math.min(MAX_TOOL_CALLS, toolBudget);
 
   const agentColor = useMemo(() => {
     const colorOption = COLOR_OPTIONS.find(
@@ -102,15 +189,31 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
     return colorOption?.value || theme.text.accent;
   }, [data.subagentColor]);
 
+  // Slice the prompt once at the parent so the rendered TaskPromptSection
+  // and the footer's "ctrl+f to show more" hint share the same source of
+  // truth. Counting `data.taskPrompt.split('\n').length` would only see hard
+  // newlines and miss soft-wrapped overflow, so a long single-line prompt
+  // could be visually truncated without surfacing the hint.
+  const promptChildWidth = Math.max(1, childWidth - 2);
+  const slicedPrompt = useMemo(
+    () =>
+      sliceTextByVisualHeight(
+        data.taskPrompt,
+        maxTaskPromptLines,
+        promptChildWidth,
+        { minHeight: 1, overflowDirection: 'bottom' },
+      ),
+    [data.taskPrompt, maxTaskPromptLines, promptChildWidth],
+  );
+
   const footerText = React.useMemo(() => {
     // This component only listens to keyboard shortcut events when the subagent is running
     if (data.status !== 'running') return '';
 
     if (displayMode === 'default') {
-      const hasMoreLines =
-        data.taskPrompt.split('\n').length > MAX_TASK_PROMPT_LINES;
+      const hasMoreLines = slicedPrompt.hiddenLinesCount > 0;
       const hasMoreToolCalls =
-        data.toolCalls && data.toolCalls.length > MAX_TOOL_CALLS;
+        data.toolCalls && data.toolCalls.length > maxToolCalls;
 
       if (hasMoreToolCalls || hasMoreLines) {
         return 'Press ctrl+e to show less, ctrl+f to show more.';
@@ -123,9 +226,22 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
     }
 
     return '';
-  }, [displayMode, data]);
+  }, [
+    displayMode,
+    data.status,
+    data.toolCalls,
+    slicedPrompt.hiddenLinesCount,
+    maxToolCalls,
+  ]);
 
-  // Handle keyboard shortcuts to control display mode
+  // Handle keyboard shortcuts to control display mode. Scope the listener to
+  // the running subagent that currently holds focus — `data.status` rules
+  // out completed/historical instances mounted in scrollback, and
+  // `isFocused` rules out *parallel* running subagents that share the live
+  // viewport. Without the focus gate, two SubAgents running side by side
+  // would both toggle on a single Ctrl+E / Ctrl+F press and the resulting
+  // dual-reflow brings back the flicker this component is meant to
+  // prevent.
   useKeypress(
     (key) => {
       if (key.ctrl && key.name === 'e') {
@@ -140,7 +256,7 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
         );
       }
     },
-    { isActive: true },
+    { isActive: data.status === 'running' && isFocused },
   );
 
   if (displayMode === 'compact') {
@@ -241,8 +357,9 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
 
       {/* Task description */}
       <TaskPromptSection
-        taskPrompt={data.taskPrompt}
+        slicedPrompt={slicedPrompt}
         displayMode={displayMode}
+        maxVisualLines={maxTaskPromptLines}
       />
 
       {/* Progress section for running tasks */}
@@ -253,6 +370,8 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
             <ToolCallsList
               toolCalls={data.toolCalls}
               displayMode={displayMode}
+              maxToolCalls={maxToolCalls}
+              childWidth={childWidth - 2}
             />
           </Box>
         )}
@@ -282,7 +401,12 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
       {(data.status === 'completed' ||
         data.status === 'failed' ||
         data.status === 'cancelled') && (
-        <ResultsSection data={data} displayMode={displayMode} />
+        <ResultsSection
+          data={data}
+          displayMode={displayMode}
+          maxToolCalls={maxToolCalls}
+          childWidth={childWidth - 2}
+        />
       )}
 
       {/* Footer with keyboard shortcuts */}
@@ -296,33 +420,40 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
 };
 
 /**
- * Task prompt section with truncation support
+ * Task prompt section. Receives the already-sliced prompt from the parent so
+ * footer hint and section content share one source of truth for whether
+ * content was hidden (covers soft-wrapped overflow in addition to explicit
+ * newlines).
  */
 const TaskPromptSection: React.FC<{
-  taskPrompt: string;
+  slicedPrompt: { text: string; hiddenLinesCount: number };
   displayMode: DisplayMode;
-}> = ({ taskPrompt, displayMode }) => {
-  const lines = taskPrompt.split('\n');
-  const shouldTruncate = lines.length > 10;
-  const showFull = displayMode === 'verbose';
-  const displayLines = showFull ? lines : lines.slice(0, MAX_TASK_PROMPT_LINES);
+  maxVisualLines: number;
+}> = ({ slicedPrompt, displayMode, maxVisualLines }) => {
+  const shouldTruncate = slicedPrompt.hiddenLinesCount > 0;
 
   return (
     <Box flexDirection="column" gap={1}>
       <Box flexDirection="row">
         <Text color={theme.text.primary}>Task Detail: </Text>
-        {shouldTruncate && displayMode === 'default' && (
+        {shouldTruncate && displayMode !== 'compact' && (
           <Text color={theme.text.secondary}>
             {' '}
-            Showing the first {MAX_TASK_PROMPT_LINES} lines.
+            Showing the first {maxVisualLines} visual lines.
           </Text>
         )}
       </Box>
       <Box paddingLeft={1}>
-        <Text wrap="wrap">
-          {displayLines.join('\n') + (shouldTruncate && !showFull ? '...' : '')}
-        </Text>
+        <Text wrap="wrap">{slicedPrompt.text}</Text>
       </Box>
+      {slicedPrompt.hiddenLinesCount > 0 && (
+        <Box paddingLeft={1}>
+          <Text color={theme.text.secondary} wrap="truncate">
+            ... last {slicedPrompt.hiddenLinesCount} task line
+            {slicedPrompt.hiddenLinesCount === 1 ? '' : 's'} hidden ...
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 };
@@ -355,11 +486,13 @@ const StatusIndicator: React.FC<{
 const ToolCallsList: React.FC<{
   toolCalls: AgentResultDisplay['toolCalls'];
   displayMode: DisplayMode;
-}> = ({ toolCalls, displayMode }) => {
+  maxToolCalls: number;
+  childWidth: number;
+}> = ({ toolCalls, displayMode, maxToolCalls, childWidth }) => {
   const calls = toolCalls || [];
-  const shouldTruncate = calls.length > MAX_TOOL_CALLS;
-  const showAll = displayMode === 'verbose';
-  const displayCalls = showAll ? calls : calls.slice(-MAX_TOOL_CALLS); // Show last 5
+  const displayLimit = Math.max(1, Math.floor(maxToolCalls));
+  const shouldTruncate = calls.length > displayLimit;
+  const displayCalls = calls.slice(-displayLimit);
 
   // Reverse the order to show most recent first
   const reversedDisplayCalls = [...displayCalls].reverse();
@@ -368,15 +501,19 @@ const ToolCallsList: React.FC<{
     <Box flexDirection="column">
       <Box flexDirection="row" marginBottom={1}>
         <Text color={theme.text.primary}>Tools:</Text>
-        {shouldTruncate && displayMode === 'default' && (
+        {shouldTruncate && displayMode !== 'compact' && (
           <Text color={theme.text.secondary}>
             {' '}
-            Showing the last {MAX_TOOL_CALLS} of {calls.length} tools.
+            Showing the last {displayCalls.length} of {calls.length} tools.
           </Text>
         )}
       </Box>
       {reversedDisplayCalls.map((toolCall, index) => (
-        <ToolCallItem key={`${toolCall.name}-${index}`} toolCall={toolCall} />
+        <ToolCallItem
+          key={`${toolCall.name}-${index}`}
+          toolCall={toolCall}
+          childWidth={childWidth}
+        />
       ))}
     </Box>
   );
@@ -396,8 +533,10 @@ const ToolCallItem: React.FC<{
     description?: string;
   };
   compact?: boolean;
-}> = ({ toolCall, compact = false }) => {
+  childWidth?: number;
+}> = ({ toolCall, compact = false, childWidth = 80 }) => {
   const STATUS_INDICATOR_WIDTH = 3;
+  const textWidth = Math.max(8, childWidth - STATUS_INDICATOR_WIDTH - 1);
 
   // Map subagent status to ToolCallStatus-like display
   const statusIcon = React.useMemo(() => {
@@ -423,19 +562,15 @@ const ToolCallItem: React.FC<{
   const description = React.useMemo(() => {
     if (!toolCall.description) return '';
     const firstLine = toolCall.description.split('\n')[0];
-    return firstLine.length > 80
-      ? firstLine.substring(0, 80) + '...'
-      : firstLine;
-  }, [toolCall.description]);
+    return truncateToVisualWidth(firstLine, textWidth);
+  }, [toolCall.description, textWidth]);
 
   // Get first line of resultDisplay for truncated output
   const truncatedOutput = React.useMemo(() => {
     if (!toolCall.resultDisplay) return '';
     const firstLine = toolCall.resultDisplay.split('\n')[0];
-    return firstLine.length > 80
-      ? firstLine.substring(0, 80) + '...'
-      : firstLine;
-  }, [toolCall.resultDisplay]);
+    return truncateToVisualWidth(firstLine, textWidth);
+  }, [toolCall.resultDisplay, textWidth]);
 
   return (
     <Box flexDirection="column" paddingLeft={1} marginBottom={0}>
@@ -537,11 +672,18 @@ const ToolUsageStats: React.FC<{
 const ResultsSection: React.FC<{
   data: AgentResultDisplay;
   displayMode: DisplayMode;
-}> = ({ data, displayMode }) => (
+  maxToolCalls: number;
+  childWidth: number;
+}> = ({ data, displayMode, maxToolCalls, childWidth }) => (
   <Box flexDirection="column" gap={1}>
     {/* Tool calls section - clean list format */}
     {data.toolCalls && data.toolCalls.length > 0 && (
-      <ToolCallsList toolCalls={data.toolCalls} displayMode={displayMode} />
+      <ToolCallsList
+        toolCalls={data.toolCalls}
+        displayMode={displayMode}
+        maxToolCalls={maxToolCalls}
+        childWidth={childWidth}
+      />
     )}
 
     {/* Execution Summary section - hide when cancelled */}

@@ -180,9 +180,9 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
     });
 
     // https://github.com/QwenLM/qwen-code/issues/3695 — DeepSeek's thinking
-    // mode rejects subsequent requests when a prior tool-calling assistant
-    // turn omits reasoning_content, even if the model itself returned no
-    // reasoning text. The provider must always send the field.
+    // mode rejects subsequent requests when any prior assistant turn omits
+    // reasoning_content, even if the model itself returned no reasoning text.
+    // The provider must always send the field.
     it('injects empty reasoning_content on tool-calling assistant turns missing it', () => {
       const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'deepseek-v4-flash',
@@ -245,7 +245,7 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
       expect(assistant.reasoning_content).toBe('Let me glob first.');
     });
 
-    it('does not add reasoning_content to assistant turns without tool_calls', () => {
+    it('injects empty reasoning_content on assistant turns without tool_calls', () => {
       const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'deepseek-v4-flash',
         messages: [
@@ -259,7 +259,7 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
       const assistant = result.messages?.[1] as {
         reasoning_content?: string;
       };
-      expect(assistant.reasoning_content).toBeUndefined();
+      expect(assistant.reasoning_content).toBe('');
     });
   });
 
