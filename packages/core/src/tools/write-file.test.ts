@@ -86,6 +86,12 @@ describe('WriteFileTool', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // The fileReadCache is module-scope (declared at L41) and shared
+    // across every test in this file, so state from one test leaks
+    // into the next. Clear it before each test so every test starts
+    // from a known-empty cache. CI surfaced this on Linux only because
+    // file-creation order across tests differs by platform.
+    fileReadCache.clear();
     // Create a unique temporary directory for files created outside the root
     tempDir = fs.mkdtempSync(
       path.join(os.tmpdir(), 'write-file-test-external-'),
