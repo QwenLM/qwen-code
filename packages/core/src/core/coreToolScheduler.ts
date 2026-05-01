@@ -47,6 +47,7 @@ import type {
   Part,
   PartListUnion,
 } from '@google/genai';
+import { fileURLToPath } from 'node:url';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
@@ -204,29 +205,76 @@ const FS_PATH_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
 ]);
 
 /**
- * Pull the filesystem path-bearing fields out of a tool's input. Different
- * core tools name these differently:
- *  - `file_path` — read-file, edit, write-file
- *  - `path`      — ls (search root); glob (search root, optional)
- *  - `filePath`  — grep, lsp
- *  - `paths`     — ripGrep array form
- *  - `pattern`   — glob (treated as a path-shaped glob, see below)
+ * Trim trailing forward / back slashes from a path-shaped string without
+ * a regex. The regex form `s.replace(/[\\/]+$/, '')` is functionally
+ * equivalent but CodeQL #145 flags `+` on uncontrolled input as a
+ * polynomial ReDoS candidate; the loop is O(n) on the trailing
+ * separator run, no different from the regex engine, but quieter.
+ */
+function trimTrailingSlash(s: string): string {
+  let trimmed = s;
+  while (trimmed.endsWith('/') || trimmed.endsWith('\\')) {
+    trimmed = trimmed.slice(0, -1);
+  }
+  return trimmed;
+}
+
+/**
+ * Combine a search-root path and a path-shaped glob into the effective
+ * selector that the tool actually walks. Used by GLOB (`path` + `pattern`)
+ * and GREP (`path` + `glob`). Plain string concat (rather than
+ * `path.join`) so we don't (1) emit OS-specific backslashes on Windows
+ * and silently diverge from the forward-slash form the activation
+ * registry matches against, or (2) collapse `..` segments and lose
+ * information about which directory the call escaped from.
+ */
+function joinSearchRootAndGlob(
+  searchRoot: string | undefined,
+  globField: string,
+): string {
+  if (!searchRoot || searchRoot.length === 0) return globField;
+  return `${trimTrailingSlash(searchRoot)}/${globField}`;
+}
+
+/**
+ * For LSP-shaped inputs, normalize `filePath`-style strings into project
+ * candidates. Accepts a plain absolute/relative path or a `file://` URI;
+ * silently drops other URI schemes (`http://`, `git://`, etc.) so an
+ * LSP call against a non-file resource cannot reach the activation
+ * registry as if it had touched a project file.
+ */
+function pushLspPathCandidate(out: string[], v: unknown): void {
+  if (typeof v !== 'string' || v.length === 0) return;
+  if (v.startsWith('file://')) {
+    try {
+      out.push(fileURLToPath(v));
+    } catch {
+      // Malformed file URI — drop silently rather than corrupt the
+      // activation pipeline.
+    }
+    return;
+  }
+  if (v.includes('://')) return; // non-file URI scheme: ignore
+  out.push(v);
+}
+
+/**
+ * Pull the filesystem path-bearing fields out of a tool's input.
+ * Per-tool dispatcher because the field name and shape differ:
+ *
+ *  - read_file / edit / write_file → `file_path`
+ *  - list_directory → `path` (search root)
+ *  - glob → `path` (search root, optional) + `pattern` (path-shaped
+ *    selector); `<path>/<pattern>` is the effective glob walked
+ *  - grep_search → `path` (search root, optional) + `glob` (path-shaped
+ *    file filter); `pattern` is a regex on contents, NOT a path
+ *  - lsp → `filePath` (URI-aware: `file://` accepted, others dropped)
+ *    plus `callHierarchyItem.uri` for incomingCalls / outgoingCalls
+ *
  * Used by ConditionalRulesRegistry / SkillActivationRegistry hooks to
- * route every path the tool just touched through the same activation
- * pipeline. Returns input order, with empty / non-string entries dropped.
- *
- * For `glob` specifically, `pattern` is the actual selector — `path` is
- * only the optional search root. `glob({ pattern: 'src/**\/*.tsx' })`
- * with no `path` therefore needs `pattern` extracted, otherwise no
- * conditional skill keyed on `paths: ['src/**\/*.tsx']` would ever
- * activate from a glob call. The pattern goes through the same
- * registry; picomatch matches glob-vs-glob on common shapes (e.g.
- * `**\/*.tsx` matches `src/**\/*.tsx` because `**` accepts the
- * literal `**` in the input). False matches are bounded to the same
- * project-root scope as any other path.
- *
- * Returns `[]` for tool names outside `FS_PATH_TOOL_NAMES` — see that
- * set's docstring for why this is gated rather than universal.
+ * route every project-relative path the tool actually touched through
+ * the same activation pipeline. Returns `[]` for tool names outside
+ * `FS_PATH_TOOL_NAMES` — see that set's docstring for why this is gated.
  */
 export function extractToolFilePaths(
   toolName: string,
@@ -241,55 +289,79 @@ export function extractToolFilePaths(
     (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
   if (!FS_PATH_TOOL_NAMES.has(canonical)) return [];
   if (!toolInput || typeof toolInput !== 'object') return [];
+  const obj = toolInput as Record<string, unknown>;
   const out: string[] = [];
   const push = (v: unknown): void => {
     if (typeof v === 'string' && v.length > 0) out.push(v);
   };
-  const obj = toolInput as Record<string, unknown>;
-  push(obj['file_path']);
-  push(obj['filePath']);
-  push(obj['path']);
-  const pathsField = obj['paths'];
-  if (Array.isArray(pathsField)) {
-    for (const p of pathsField) push(p);
-  }
-  if (canonical === ToolNames.GLOB) {
-    // Glob-only: derive the effective selector from `path` + `pattern`.
-    // The previous version pushed `pattern` standalone, but the glob
-    // call actually searches `<path>/<pattern>` — so a skill keyed on
-    // `paths: ['src/**/*.ts']` would not activate from
-    // `glob({ path: 'src', pattern: '**/*.ts' })` because the candidate
-    // was just `**/*.ts`. Concat (rather than `path.join`) for two
-    // reasons: (1) `path.join` is OS-aware, so on Windows the result
-    // contains backslashes and silently diverges from the forward-slash
-    // form the registry matches against; (2) `path.join` normalizes
-    // `..` segments — `path.join('src', '../foo')` collapses to `foo`,
-    // losing information about the directory the glob actually
-    // escaped from. Trim trailing separators on `pathField` to avoid
-    // `src//pattern`. Don't add `pattern` for grep_search even though
-    // it also has a `pattern` field — grep's pattern is a regex, not
-    // a path glob, and would false-match.
-    const pathField = obj['path'];
-    const patternField = obj['pattern'];
-    if (typeof patternField === 'string' && patternField.length > 0) {
-      if (typeof pathField === 'string' && pathField.length > 0) {
-        // Trim trailing `/` or `\` without a regex. The previous form
-        // `pathField.replace(/[\\/]+$/, '')` is functionally equivalent
-        // but CodeQL flags `+` on uncontrolled input as a polynomial
-        // ReDoS candidate (rule #145). The loop is O(n) on the trailing
-        // separator run, no different from the regex engine, but
-        // sidesteps the warning.
-        let trimmed = pathField;
-        while (trimmed.endsWith('/') || trimmed.endsWith('\\')) {
-          trimmed = trimmed.slice(0, -1);
-        }
-        push(`${trimmed}/${patternField}`);
-      } else {
-        push(patternField);
+
+  switch (canonical) {
+    case ToolNames.LSP: {
+      // `filePath` may be a plain path, a `file://` URI, or a non-file
+      // URI (`http://`, `git://`, etc.). Only the first two correspond
+      // to project files — everything else must be ignored, otherwise
+      // an LSP call on a non-file resource could activate path-gated
+      // skills without the model having touched the project.
+      pushLspPathCandidate(out, obj['filePath']);
+      // incomingCalls / outgoingCalls operate on `callHierarchyItem.uri`,
+      // not the top-level `filePath`. Without this, the model can follow
+      // a call hierarchy through a project file and never trigger
+      // activation for a skill scoped to that file.
+      const item = obj['callHierarchyItem'];
+      if (item && typeof item === 'object') {
+        pushLspPathCandidate(out, (item as Record<string, unknown>)['uri']);
       }
+      return out;
     }
+
+    case ToolNames.GLOB: {
+      const pathField = obj['path'];
+      const patternField = obj['pattern'];
+      // The standalone search-root candidate (so a broad skill keyed on
+      // `paths: ['src/**']` still activates from `glob({ path: 'src' })`).
+      push(pathField);
+      // `pattern` is the actual selector. Combine with `path` to form
+      // the effective walked glob.
+      if (typeof patternField === 'string' && patternField.length > 0) {
+        push(
+          joinSearchRootAndGlob(
+            typeof pathField === 'string' ? pathField : undefined,
+            patternField,
+          ),
+        );
+      }
+      return out;
+    }
+
+    case ToolNames.GREP: {
+      const pathField = obj['path'];
+      const globField = obj['glob'];
+      push(pathField);
+      // `glob` is the path-shaped file filter (NOT `pattern`, which is a
+      // regex on contents). Combine with `path` for the effective
+      // filter selector.
+      if (typeof globField === 'string' && globField.length > 0) {
+        push(
+          joinSearchRootAndGlob(
+            typeof pathField === 'string' ? pathField : undefined,
+            globField,
+          ),
+        );
+      }
+      return out;
+    }
+
+    case ToolNames.LS:
+      push(obj['path']);
+      return out;
+
+    case ToolNames.READ_FILE:
+    case ToolNames.EDIT:
+    case ToolNames.WRITE_FILE:
+    default:
+      push(obj['file_path']);
+      return out;
   }
-  return out;
 }
 
 export type ConfirmHandler = (
