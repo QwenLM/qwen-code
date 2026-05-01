@@ -389,8 +389,12 @@ export class CommitAttributionService {
         aiChars = Math.min(tracked.aiContribution, diffSize);
         humanChars = Math.max(0, diffSize - aiChars);
       } else if (isDeleted) {
+        // Deleted files with no AI tracking are attributed entirely to
+        // the human. diffSize comes from `git diff --numstat` so empty
+        // deletions legitimately have diffSize=0 — a magic fallback
+        // would only inflate totals.
         aiChars = 0;
-        humanChars = diffSize > 0 ? diffSize : 100;
+        humanChars = diffSize;
       } else {
         aiChars = 0;
         humanChars = diffSize;
