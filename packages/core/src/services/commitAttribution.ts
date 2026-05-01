@@ -211,17 +211,6 @@ export class CommitAttributionService {
     this.fileAttributions.set(filePath, existing);
   }
 
-  /** Record an AI file deletion. */
-  recordDeletion(filePath: string, deletedContentLength: number): void {
-    const existing = this.fileAttributions.get(filePath) || {
-      aiContribution: 0,
-      aiCreated: false,
-      contentHash: '',
-    };
-    existing.aiContribution += deletedContentLength;
-    this.fileAttributions.set(filePath, existing);
-  }
-
   // -----------------------------------------------------------------------
   // Prompt / permission counting
   // -----------------------------------------------------------------------
@@ -441,31 +430,6 @@ export class CommitAttributionService {
       excludedGenerated,
       promptCount: this.getPromptsSinceLastCommit(),
     };
-  }
-
-  // -----------------------------------------------------------------------
-  // PR attribution text
-  // -----------------------------------------------------------------------
-
-  /**
-   * Generate enhanced PR attribution text.
-   * Format: "🤖 Generated with Qwen Code (85% 3-shotted by Qwen-Coder)"
-   */
-  generatePRAttribution(
-    stagedInfo: StagedFileInfo,
-    baseDir: string,
-    generatorName?: string,
-  ): string {
-    const note = this.generateNotePayload(stagedInfo, baseDir, generatorName);
-    const generator = note.generator;
-    const percent = note.summary.aiPercent;
-    const shots = this.getPromptsSinceLastCommit();
-
-    if (percent === 0 && shots === 0) {
-      return `🤖 Generated with Qwen Code`;
-    }
-
-    return `🤖 Generated with Qwen Code (${percent}% ${shots}-shotted by ${generator})`;
   }
 }
 

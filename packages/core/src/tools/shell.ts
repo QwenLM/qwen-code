@@ -87,9 +87,45 @@ function escapeForBashSingleQuote(s: string): string {
 }
 
 /**
+ * Strip leading env-var assignments and harmless command wrappers
+ * (`sudo`, `command`) from a single shell command segment so the
+ * caller can match against the real program name. Examples:
+ *   `FOO=bar git commit` → `git commit`
+ *   `sudo git commit`    → `git commit`
+ *   `command -p git ...` → `git ...`
+ *
+ * Conservative: only strips a small allowlist of wrappers that don't
+ * change cwd or shell semantics in ways we care about, so the caller
+ * can keep guarding against `cd` / `git -C` separately.
+ */
+function stripCommandPrefix(segment: string): string {
+  let s = segment.trim();
+  // Strip any number of `KEY=value` env assignments.
+  while (/^[A-Za-z_][A-Za-z0-9_]*=\S*\s+/.test(s)) {
+    s = s.replace(/^[A-Za-z_][A-Za-z0-9_]*=\S*\s+/, '');
+  }
+  // Strip a single safe wrapper. `sudo -E -u user` etc. would be
+  // followed by the real command after the flag block, so consume
+  // any leading flags and their args until we hit a non-flag token.
+  const wrapper = s.match(/^(sudo|command)\b/);
+  if (wrapper) {
+    s = s.slice(wrapper[0].length).trim();
+    // Drop any leading flags and their values; stop at the first
+    // non-flag token (which is the actual program).
+    while (/^-/.test(s)) {
+      const m = s.match(/^(\S+)\s*(.*)$/);
+      if (!m) break;
+      s = m[2];
+    }
+  }
+  return s;
+}
+
+/**
  * Detect whether `command` actually executes `git commit` in the
- * tool's initial cwd — e.g. `git commit -m "x"` or
- * `git status && git commit -m "x"` — without being fooled by:
+ * tool's initial cwd — e.g. `git commit -m "x"`,
+ * `git status && git commit -m "x"`, `sudo git commit ...`, or
+ * `FOO=bar git commit ...` — without being fooled by:
  *
  * - Quoted text such as `echo "git commit"` (uses `splitCommands` to
  *   tokenise on shell separators outside quotes).
@@ -101,22 +137,36 @@ function escapeForBashSingleQuote(s: string): string {
 function looksLikeGitCommit(command: string): boolean {
   let sawGitCommit = false;
   for (const sub of splitCommands(command)) {
-    const trimmed = sub.trim();
-    if (/^cd\b/.test(trimmed)) {
+    const stripped = stripCommandPrefix(sub);
+    if (/^cd\b/.test(stripped)) {
       // A cd anywhere in the chain might redirect a later `git commit`
       // into a different repo. Bailing is conservative but avoids
       // writing a note to the wrong place.
       return false;
     }
-    if (/^git\s+-C\b/.test(trimmed)) {
+    if (/^git\s+-C\b/.test(stripped)) {
       // `git -C <path> commit ...` runs in <path>, not our cwd.
       return false;
     }
-    if (/^git\s+commit\b/.test(trimmed)) {
+    if (/^git\s+commit\b/.test(stripped)) {
       sawGitCommit = true;
     }
   }
   return sawGitCommit;
+}
+
+/**
+ * Detect whether `command` actually invokes `gh pr create` at the
+ * top level. Same shell-aware shape as `looksLikeGitCommit` so
+ * quoted text like `echo "gh pr create --body ..."` doesn't trip
+ * the rewrite path.
+ */
+function looksLikeGhPrCreate(command: string): boolean {
+  for (const sub of splitCommands(command)) {
+    const stripped = stripCommandPrefix(sub);
+    if (/^gh\s+pr\s+create\b/.test(stripped)) return true;
+  }
+  return false;
 }
 
 /** Approximate characters per text line for the diff-size estimate. */
@@ -798,6 +848,25 @@ export class ShellToolInvocation extends BaseToolInvocation<
     shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<ToolResult> {
     const strippedCommand = stripShellWrapper(this.params.command);
+
+    // The background lifecycle (BackgroundShellRegistry) doesn't run
+    // the post-command attribution path — there's no clean place to
+    // hook pre/post-HEAD comparison and `git notes` writes between
+    // the early `Background shell started` return and the eventual
+    // process exit. Allowing `git commit` to slip through would leave
+    // the new commit without notes and let stale per-file attribution
+    // leak into the next foreground commit. Refuse the request and
+    // tell the user to run it foreground.
+    if (looksLikeGitCommit(strippedCommand)) {
+      return {
+        llmContent:
+          'Refusing to run `git commit` in background mode: AI-attribution notes ' +
+          'are written by the foreground completion path. Re-run the commit ' +
+          'with is_background=false (or split it out of the compound command).',
+        returnDisplay:
+          'Refused: `git commit` is not supported in background shell mode.',
+      };
+    }
     // Strip a single bare trailing `&` (the bash background operator) before
     // spawn: bash treats it as background-detach, exits the wrapper
     // immediately, and the real child outlives the wrapper — the registry
@@ -1291,8 +1360,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * Losing PR attribution on Windows is an acceptable trade for safety.
    */
   private addAttributionToPR(command: string): string {
-    const ghPrPattern = /\bgh\s+pr\s+create\b/;
-    if (!ghPrPattern.test(command)) {
+    // Shell-aware detection — a raw regex would falsely match quoted
+    // text such as `echo "gh pr create --body \"x\""` and rewrite a
+    // command that wasn't actually creating a PR.
+    if (!looksLikeGhPrCreate(command)) {
       return command;
     }
 

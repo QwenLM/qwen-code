@@ -102,14 +102,6 @@ describe('CommitAttributionService', () => {
     expect(service.getFileAttribution('/project/f.ts')!.aiContribution).toBe(6);
   });
 
-  it('should record deletions', () => {
-    const service = CommitAttributionService.getInstance();
-    service.recordDeletion('/project/old.ts', 500);
-    expect(service.getFileAttribution('/project/old.ts')!.aiContribution).toBe(
-      500,
-    );
-  });
-
   it('should save session baseline on first edit', () => {
     const service = CommitAttributionService.getInstance();
     service.recordEdit('/project/f.ts', 'original content', 'new content');
@@ -288,30 +280,6 @@ describe('CommitAttributionService', () => {
       // aiChars + humanChars now equals the reported diff size.
       expect(detail.aiChars + detail.humanChars).toBe(40);
       expect(note.summary.aiChars).toBe(40);
-    });
-  });
-
-  describe('generatePRAttribution', () => {
-    it('should generate enhanced PR attribution text', () => {
-      const service = CommitAttributionService.getInstance();
-      service.recordEdit('/project/src/main.ts', '', 'x'.repeat(200));
-      service.incrementPromptCount();
-      service.incrementPromptCount();
-      service.incrementPromptCount();
-
-      const staged = makeStagedInfo(['src/main.ts'], { 'src/main.ts': 200 });
-      const text = service.generatePRAttribution(staged, '/project');
-
-      expect(text).toContain('🤖 Generated with Qwen Code');
-      expect(text).toContain('3-shotted');
-      expect(text).toContain('Qwen-Coder');
-    });
-
-    it('should return default text when no data', () => {
-      const service = CommitAttributionService.getInstance();
-      const staged = makeStagedInfo([], {});
-      const text = service.generatePRAttribution(staged, '/project');
-      expect(text).toBe('🤖 Generated with Qwen Code');
     });
   });
 });

@@ -1132,6 +1132,64 @@ describe('ShellTool', () => {
         );
       });
 
+      // Common real-world prefixes — env-var assignment and `sudo` — must
+      // still be detected so attribution doesn't silently skip the trailer.
+      it('should add co-author when git commit is prefixed with env vars', async () => {
+        const command = 'GIT_COMMITTER_DATE=now git commit -m "Test"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      it('should add co-author when git commit is prefixed with sudo', async () => {
+        const command = 'sudo git commit -m "Test"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
       // Quoted "git commit" should not look like an executed commit.
       it('should NOT add co-author when git commit appears only inside quoted text', async () => {
         const command = 'echo "git commit -m foo"';
@@ -1315,6 +1373,35 @@ describe('ShellTool', () => {
 
         expect(mockShellExecutionService).toHaveBeenCalledWith(
           expect.stringContaining('Generated with Qwen Code'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // Quoted "gh pr create" should not look like an executed PR command.
+      it('should NOT rewrite when gh pr create appears only inside quoted text', async () => {
+        const command = 'echo "gh pr create --title x --body \\"Summary\\""';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.not.stringContaining('Generated with Qwen Code'),
           expect.any(String),
           expect.any(Function),
           expect.any(AbortSignal),
