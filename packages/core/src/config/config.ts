@@ -65,6 +65,7 @@ import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js'
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
+  isTelemetrySdkInitialized,
   initializeTelemetry,
   shutdownTelemetry,
   logStartSession,
@@ -1647,7 +1648,7 @@ export class Config {
       // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
     } finally {
-      if (this.telemetrySettings.enabled) {
+      if (isTelemetrySdkInitialized()) {
         await shutdownTelemetry();
       }
     }

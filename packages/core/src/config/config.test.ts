@@ -15,6 +15,7 @@ import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
   QwenLogger,
+  isTelemetrySdkInitialized,
   shutdownTelemetry,
 } from '../telemetry/index.js';
 import type {
@@ -179,6 +180,7 @@ vi.mock('../telemetry/index.js', async (importOriginal) => {
   return {
     ...actual,
     initializeTelemetry: vi.fn(),
+    isTelemetrySdkInitialized: vi.fn(() => false),
     shutdownTelemetry: vi.fn().mockResolvedValue(undefined),
     uiTelemetryService: {
       getLastPromptTokenCount: vi.fn(),
@@ -278,6 +280,7 @@ describe('Server Config (config.ts)', () => {
   beforeEach(() => {
     // Reset mocks if necessary
     vi.clearAllMocks();
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
     vi.spyOn(QwenLogger.prototype, 'logStartSessionEvent').mockImplementation(
       async () => undefined,
     );
@@ -850,16 +853,30 @@ describe('Server Config (config.ts)', () => {
     expect(config.getTelemetryEnabled()).toBe(true);
   });
 
-  it('Config shutdown should flush telemetry even before initialization completes', async () => {
+  it('Config shutdown should flush telemetry when SDK is initialized', async () => {
     const paramsWithTelemetry: ConfigParameters = {
       ...baseParams,
       telemetry: { enabled: true },
     };
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(true);
     const config = new Config(paramsWithTelemetry);
 
     await config.shutdown();
 
     expect(shutdownTelemetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('Config shutdown should skip telemetry shutdown before SDK initialization', async () => {
+    const paramsWithTelemetry: ConfigParameters = {
+      ...baseParams,
+      telemetry: { enabled: true },
+    };
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
+    const config = new Config(paramsWithTelemetry);
+
+    await config.shutdown();
+
+    expect(shutdownTelemetry).not.toHaveBeenCalled();
   });
 
   it('Config constructor should set telemetry to false when provided as false', () => {

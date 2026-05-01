@@ -193,7 +193,8 @@ export function initializeTelemetry(config: Config): void {
         logExporter = new OTLPLogExporterHttp({ url: logsUrl });
       } else if (tracesUrl) {
         // Bridge: no logs endpoint but traces endpoint exists.
-        // Convert log records to spans and export via a dedicated trace exporter.
+        // Convert log records to spans. Use a dedicated trace exporter so the
+        // bridge owns its own forceFlush/shutdown lifecycle.
         logToSpanProcessor = new LogToSpanProcessor(
           new OTLPTraceExporterHttp({ url: tracesUrl }),
         );

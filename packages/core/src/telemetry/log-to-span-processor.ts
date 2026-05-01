@@ -20,6 +20,12 @@ import { createHash } from 'node:crypto';
 import { SERVICE_NAME } from './constants.js';
 
 const EXPORT_TIMEOUT_MS = 30_000;
+const MAX_SPAN_NAME_LENGTH = 128;
+const SENSITIVE_ATTRIBUTE_KEYS = new Set([
+  'prompt',
+  'function_args',
+  'response_text',
+]);
 
 /**
  * A LogRecordProcessor that converts each OTel log record into a span
@@ -52,13 +58,17 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   }
 
   onEmit(logRecord: ReadableLogRecord): void {
-    const name = String(logRecord.body ?? 'unknown');
+    const name = sanitizeSpanName(logRecord.body);
     const startTime = logRecord.hrTime;
 
     const attributes: Record<string, string | number | boolean> = {};
     if (logRecord.attributes) {
       for (const [key, value] of Object.entries(logRecord.attributes)) {
-        if (value !== undefined && value !== null) {
+        if (
+          value !== undefined &&
+          value !== null &&
+          !SENSITIVE_ATTRIBUTE_KEYS.has(key)
+        ) {
           attributes[key] =
             typeof value === 'object'
               ? safeStringify(value)
@@ -78,7 +88,11 @@ export class LogToSpanProcessor implements LogRecordProcessor {
 
     let endTime = startTime;
     const durationMs = logRecord.attributes?.['duration_ms'];
-    if (typeof durationMs === 'number' && durationMs > 0) {
+    if (
+      typeof durationMs === 'number' &&
+      Number.isFinite(durationMs) &&
+      durationMs > 0
+    ) {
       const [secs, nanos] = startTime;
       const durationNanos = durationMs * 1_000_000;
       const endNanos = nanos + durationNanos;
@@ -123,6 +137,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   }
 
   private flush(): Promise<void> {
+    if (this.inFlightExport) return this.inFlightExport;
     if (this.buffer.length === 0) return Promise.resolve();
     const spans = this.buffer.splice(0);
     const exportPromise = new Promise<void>((resolve) => {
@@ -155,8 +170,10 @@ export class LogToSpanProcessor implements LogRecordProcessor {
         resolve();
       }
     });
-    this.inFlightExport = exportPromise;
-    return exportPromise;
+    this.inFlightExport = exportPromise.finally(() => {
+      this.inFlightExport = undefined;
+    });
+    return this.inFlightExport;
   }
 
   async shutdown(): Promise<void> {
@@ -200,6 +217,13 @@ interface ReadableSpanLike {
   droppedEventsCount: number;
   droppedLinksCount: number;
   recordException: () => void;
+}
+
+function sanitizeSpanName(body: unknown): string {
+  const rawName = String(body ?? 'unknown');
+  return rawName.length > MAX_SPAN_NAME_LENGTH
+    ? `${rawName.slice(0, MAX_SPAN_NAME_LENGTH)}...`
+    : rawName;
 }
 
 /**

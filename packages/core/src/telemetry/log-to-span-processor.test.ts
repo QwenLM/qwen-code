@@ -78,6 +78,19 @@ describe('LogToSpanProcessor', () => {
     expect(exportedSpans[0].endTime).toEqual([1000, 250000000]);
   });
 
+  it('ignores non-finite duration_ms values', async () => {
+    const logRecord = {
+      body: 'api response',
+      hrTime: [1000, 0] as [number, number],
+      attributes: { duration_ms: Infinity },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    expect(exportedSpans[0].endTime).toEqual([1000, 0]);
+  });
+
   it('handles duration_ms that causes second rollover', async () => {
     const logRecord = {
       body: 'long operation',
@@ -119,6 +132,29 @@ describe('LogToSpanProcessor', () => {
     expect(exportedSpans[0].attributes['bad']).toBe('[unserializable]');
   });
 
+  it('drops sensitive attributes before exporting bridged spans', async () => {
+    const logRecord = {
+      body: 'event',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {
+        prompt: 'secret prompt',
+        function_args: '{"token":"secret"}',
+        response_text: 'secret response',
+        safe: 'visible',
+      },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    const attrs = exportedSpans[0].attributes;
+    expect(attrs).not.toHaveProperty('prompt');
+    expect(attrs).not.toHaveProperty('function_args');
+    expect(attrs).not.toHaveProperty('response_text');
+    expect(attrs['safe']).toBe('visible');
+    expect(attrs['log.bridge']).toBe(true);
+  });
+
   it('skips null and undefined attributes', async () => {
     const logRecord = {
       body: 'event',
@@ -147,6 +183,20 @@ describe('LogToSpanProcessor', () => {
     await processor.forceFlush();
 
     expect(exportedSpans[0].name).toBe('unknown');
+  });
+
+  it('truncates long span names', async () => {
+    const longName = 'x'.repeat(200);
+    const logRecord = {
+      body: longName,
+      hrTime: [1000, 0] as [number, number],
+      attributes: {},
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    expect(exportedSpans[0].name).toBe(`${'x'.repeat(128)}...`);
   });
 
   it('generates unique trace IDs without session.id', async () => {
@@ -272,6 +322,52 @@ describe('LogToSpanProcessor', () => {
 
     expect(exportedSpans[0].attributes['log.severity_number']).toBe(9);
     expect(exportedSpans[0].attributes['log.severity_text']).toBe('INFO');
+  });
+
+  it('reuses in-flight exports and flushes queued spans afterwards', async () => {
+    await processor.shutdown();
+    exportedSpans = [];
+    const exportCallbacks: Array<(result: { code: number }) => void> = [];
+    let exportCallCount = 0;
+    mockExporter = {
+      export: vi.fn((spans, cb) => {
+        exportCallCount += 1;
+        exportedSpans.push(...spans);
+        if (exportCallCount === 1) {
+          exportCallbacks.push(cb);
+        } else {
+          cb({ code: 0 });
+        }
+      }),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      forceFlush: vi.fn().mockResolvedValue(undefined),
+    } as unknown as SpanExporter;
+    processor = new LogToSpanProcessor(mockExporter, 60000);
+
+    processor.onEmit({
+      body: 'first',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {},
+    } as unknown as ReadableLogRecord);
+    const firstFlush = processor.forceFlush();
+    await Promise.resolve();
+
+    processor.onEmit({
+      body: 'second',
+      hrTime: [1001, 0] as [number, number],
+      attributes: {},
+    } as unknown as ReadableLogRecord);
+    const secondFlush = processor.forceFlush();
+    await Promise.resolve();
+
+    expect(mockExporter.export).toHaveBeenCalledTimes(1);
+    expect(exportedSpans.map((span) => span.name)).toEqual(['first']);
+
+    exportCallbacks[0]({ code: 0 });
+    await Promise.all([firstFlush, secondFlush]);
+
+    expect(mockExporter.export).toHaveBeenCalledTimes(2);
+    expect(exportedSpans.map((span) => span.name)).toEqual(['first', 'second']);
   });
 
   it('shutdown flushes remaining spans and shuts down exporter', async () => {
