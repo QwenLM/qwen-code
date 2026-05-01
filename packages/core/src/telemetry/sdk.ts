@@ -31,7 +31,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { LogToSpanProcessor } from './log-to-span-processor.js';
 
 // For troubleshooting, set the log level to DiagLogLevel.DEBUG
-diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.ERROR);
+diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.WARN);
 
 /**
  * Standard OTLP HTTP signal-specific paths per the OpenTelemetry specification.
@@ -100,13 +100,23 @@ function parseOtlpEndpoint(
 }
 
 /**
- * Validate a URL string. Returns the URL if valid, undefined otherwise.
+ * Validate a URL string. Returns the URL if valid http(s), undefined otherwise.
  * Logs an error for invalid URLs instead of throwing.
  */
 function validateUrl(url: string | undefined): string | undefined {
   if (!url) return undefined;
   try {
-    new URL(url);
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      diag.error(
+        `OTLP endpoint must use http or https, got ${parsed.protocol}`,
+      );
+      return undefined;
+    }
+    if (!parsed.hostname) {
+      diag.error('OTLP endpoint missing hostname');
+      return undefined;
+    }
     return url;
   } catch {
     diag.error('Invalid OTLP signal endpoint URL, skipping:', url);

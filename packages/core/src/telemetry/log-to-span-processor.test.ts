@@ -35,7 +35,7 @@ describe('LogToSpanProcessor', () => {
       shutdown: vi.fn().mockResolvedValue(undefined),
       forceFlush: vi.fn().mockResolvedValue(undefined),
     } as unknown as SpanExporter;
-    processor = new LogToSpanProcessor(mockExporter, 60000); // long interval to avoid auto-flush
+    processor = new LogToSpanProcessor(mockExporter, 60000);
   });
 
   afterEach(async () => {
@@ -46,11 +46,7 @@ describe('LogToSpanProcessor', () => {
     const logRecord = {
       body: 'test event',
       hrTime: [1000, 500000000] as [number, number],
-      attributes: {
-        key1: 'value1',
-        key2: 42,
-        key3: true,
-      },
+      attributes: { key1: 'value1', key2: 42, key3: true },
     } as unknown as ReadableLogRecord;
 
     processor.onEmit(logRecord);
@@ -65,7 +61,6 @@ describe('LogToSpanProcessor', () => {
     expect(span.attributes['key3']).toBe(true);
     expect(span.attributes['log.bridge']).toBe(true);
     expect(span.startTime).toEqual([1000, 500000000]);
-    // Instant span: end time == start time
     expect(span.endTime).toEqual([1000, 500000000]);
     expect(span.status.code).toBe(SpanStatusCode.OK);
   });
@@ -74,44 +69,33 @@ describe('LogToSpanProcessor', () => {
     const logRecord = {
       body: 'api response',
       hrTime: [1000, 0] as [number, number],
-      attributes: {
-        duration_ms: 250,
-        model: 'test-model',
-      },
+      attributes: { duration_ms: 250 },
     } as unknown as ReadableLogRecord;
 
     processor.onEmit(logRecord);
     await processor.forceFlush();
 
-    const span = exportedSpans[0];
-    // 250ms = 250_000_000 nanoseconds
-    expect(span.endTime).toEqual([1000, 250000000]);
+    expect(exportedSpans[0].endTime).toEqual([1000, 250000000]);
   });
 
   it('handles duration_ms that causes second rollover', async () => {
     const logRecord = {
       body: 'long operation',
       hrTime: [1000, 900000000] as [number, number],
-      attributes: {
-        duration_ms: 500,
-      },
+      attributes: { duration_ms: 500 },
     } as unknown as ReadableLogRecord;
 
     processor.onEmit(logRecord);
     await processor.forceFlush();
 
-    const span = exportedSpans[0];
-    // 900_000_000 + 500_000_000 = 1_400_000_000 → [1001, 400000000]
-    expect(span.endTime).toEqual([1001, 400000000]);
+    expect(exportedSpans[0].endTime).toEqual([1001, 400000000]);
   });
 
   it('serializes object attributes to JSON', async () => {
     const logRecord = {
       body: 'event with object',
       hrTime: [1000, 0] as [number, number],
-      attributes: {
-        metadata: { nested: true },
-      },
+      attributes: { metadata: { nested: true } },
     } as unknown as ReadableLogRecord;
 
     processor.onEmit(logRecord);
@@ -120,15 +104,26 @@ describe('LogToSpanProcessor', () => {
     expect(exportedSpans[0].attributes['metadata']).toBe('{"nested":true}');
   });
 
+  it('handles unserializable object attributes safely', async () => {
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+    const logRecord = {
+      body: 'event',
+      hrTime: [1000, 0] as [number, number],
+      attributes: { bad: circular },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    expect(exportedSpans[0].attributes['bad']).toBe('[unserializable]');
+  });
+
   it('skips null and undefined attributes', async () => {
     const logRecord = {
       body: 'event',
       hrTime: [1000, 0] as [number, number],
-      attributes: {
-        valid: 'yes',
-        nullVal: null,
-        undefinedVal: undefined,
-      },
+      attributes: { valid: 'yes', nullVal: null, undefinedVal: undefined },
     } as unknown as ReadableLogRecord;
 
     processor.onEmit(logRecord);
@@ -195,9 +190,7 @@ describe('LogToSpanProcessor', () => {
 
     const ctx1 = exportedSpans[0].spanContext();
     const ctx2 = exportedSpans[1].spanContext();
-    // Same session → same traceId
     expect(ctx1.traceId).toBe(ctx2.traceId);
-    // Different spanIds
     expect(ctx1.spanId).not.toBe(ctx2.spanId);
   });
 
@@ -220,6 +213,65 @@ describe('LogToSpanProcessor', () => {
     const ctx1 = exportedSpans[0].spanContext();
     const ctx2 = exportedSpans[1].spanContext();
     expect(ctx1.traceId).not.toBe(ctx2.traceId);
+  });
+
+  it('sets ERROR status for truthy error attributes', async () => {
+    const logRecord = {
+      body: 'api error',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {
+        error_message: 'connection refused',
+        error_type: 'NETWORK',
+      },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    expect(exportedSpans[0].status.code).toBe(SpanStatusCode.ERROR);
+    expect(exportedSpans[0].status.message).toBe('connection refused');
+  });
+
+  it('does not set ERROR for success: false (normal decline)', async () => {
+    const logRecord = {
+      body: 'tool call declined',
+      hrTime: [1000, 0] as [number, number],
+      attributes: { success: false, function_name: 'bash' },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    expect(exportedSpans[0].status.code).toBe(SpanStatusCode.OK);
+  });
+
+  it('does not set ERROR for falsy error attributes', async () => {
+    const logRecord = {
+      body: 'ok event',
+      hrTime: [1000, 0] as [number, number],
+      attributes: { error: null, error_message: '', error_type: '' },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    expect(exportedSpans[0].status.code).toBe(SpanStatusCode.OK);
+  });
+
+  it('preserves severity attributes', async () => {
+    const logRecord = {
+      body: 'event',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {},
+      severityNumber: 9,
+      severityText: 'INFO',
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    expect(exportedSpans[0].attributes['log.severity_number']).toBe(9);
+    expect(exportedSpans[0].attributes['log.severity_text']).toBe('INFO');
   });
 
   it('shutdown flushes remaining spans and shuts down exporter', async () => {

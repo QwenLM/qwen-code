@@ -19,6 +19,8 @@ import { createHash } from 'node:crypto';
 
 import { SERVICE_NAME } from './constants.js';
 
+const EXPORT_TIMEOUT_MS = 30_000;
+
 /**
  * A LogRecordProcessor that converts each OTel log record into a span
  * and exports it directly through the provided SpanExporter.
@@ -35,6 +37,7 @@ import { SERVICE_NAME } from './constants.js';
 export class LogToSpanProcessor implements LogRecordProcessor {
   private buffer: ReadableSpanLike[] = [];
   private flushTimer: ReturnType<typeof setInterval> | undefined;
+  private inFlightExport: Promise<void> | undefined;
   private readonly flushIntervalMs: number;
 
   constructor(
@@ -57,11 +60,21 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       for (const [key, value] of Object.entries(logRecord.attributes)) {
         if (value !== undefined && value !== null) {
           attributes[key] =
-            typeof value === 'object' ? JSON.stringify(value) : value;
+            typeof value === 'object'
+              ? safeStringify(value)
+              : (value as string | number | boolean);
         }
       }
     }
     attributes['log.bridge'] = true;
+
+    // Preserve severity so downstream queries can filter by log level.
+    if (logRecord.severityNumber !== undefined) {
+      attributes['log.severity_number'] = logRecord.severityNumber;
+    }
+    if (logRecord.severityText) {
+      attributes['log.severity_text'] = logRecord.severityText;
+    }
 
     let endTime = startTime;
     const durationMs = logRecord.attributes?.['duration_ms'];
@@ -96,7 +109,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       events: [],
       links: [],
       resource: logRecord.resource ?? resourceFromAttributes({}),
-      instrumentationScope: {
+      instrumentationScope: logRecord.instrumentationScope ?? {
         name: SERVICE_NAME,
         version: '',
       },
@@ -112,16 +125,38 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   private flush(): Promise<void> {
     if (this.buffer.length === 0) return Promise.resolve();
     const spans = this.buffer.splice(0);
-    return new Promise<void>((resolve) => {
-      this.spanExporter.export(spans as unknown as ReadableSpan[], (result) => {
-        if (result.code !== 0) {
-          process.stderr.write(
-            `[LogToSpan] export failed: code=${result.code} error=${result.error?.message ?? 'unknown'}\n`,
-          );
-        }
+    const exportPromise = new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => {
+        process.stderr.write(
+          `[LogToSpan] export timeout after ${EXPORT_TIMEOUT_MS}ms\n`,
+        );
         resolve();
-      });
+      }, EXPORT_TIMEOUT_MS);
+      timeout.unref();
+
+      try {
+        this.spanExporter.export(
+          spans as unknown as ReadableSpan[],
+          (result) => {
+            clearTimeout(timeout);
+            if (result.code !== 0) {
+              process.stderr.write(
+                `[LogToSpan] export failed: code=${result.code} error=${result.error?.message ?? 'unknown'}\n`,
+              );
+            }
+            resolve();
+          },
+        );
+      } catch (err) {
+        clearTimeout(timeout);
+        process.stderr.write(
+          `[LogToSpan] export threw: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+        resolve();
+      }
     });
+    this.inFlightExport = exportPromise;
+    return exportPromise;
   }
 
   async shutdown(): Promise<void> {
@@ -129,11 +164,18 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       clearInterval(this.flushTimer);
       this.flushTimer = undefined;
     }
+    // Wait for any in-flight interval-triggered export before final flush.
+    if (this.inFlightExport) {
+      await this.inFlightExport;
+    }
     await this.flush();
     await this.spanExporter.shutdown();
   }
 
   async forceFlush(): Promise<void> {
+    if (this.inFlightExport) {
+      await this.inFlightExport;
+    }
     await this.flush();
     await this.spanExporter.forceFlush?.();
   }
@@ -160,6 +202,18 @@ interface ReadableSpanLike {
   recordException: () => void;
 }
 
+/**
+ * Safely stringify an object value for use as a span attribute.
+ * Handles circular references and BigInt without throwing.
+ */
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return '[unserializable]';
+  }
+}
+
 function randomHexString(length: number): string {
   const bytes = new Uint8Array(length / 2);
   crypto.getRandomValues(bytes);
@@ -179,19 +233,17 @@ function deriveTraceId(sessionId: string): string {
 
 /**
  * Derive span status from log record attributes.
- * Marks the span as ERROR when common error indicators are present.
+ * Marks the span as ERROR when explicit error indicators are present
+ * (truthy `error`, `error_message`, or `error_type` attributes).
+ * Does NOT treat `success: false` as an error — declined/cancelled
+ * operations are a normal outcome, not failures.
  */
 function deriveSpanStatus(attrs: Record<string, unknown> | undefined): {
   code: SpanStatusCode;
   message?: string;
 } {
   if (!attrs) return { code: SpanStatusCode.OK };
-  if (
-    attrs['success'] === false ||
-    attrs['error'] !== undefined ||
-    attrs['error_message'] !== undefined ||
-    attrs['error_type'] !== undefined
-  ) {
+  if (!!attrs['error'] || !!attrs['error_message'] || !!attrs['error_type']) {
     const msg = String(
       attrs['error_message'] ?? attrs['error'] ?? attrs['error_type'] ?? '',
     );
