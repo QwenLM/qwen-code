@@ -212,12 +212,17 @@ jobs:
 
           pyproject = Path('packages/sdk-python/pyproject.toml')
           content = pyproject.read_text()
-          updated = re.sub(
+          updated, count = re.subn(
               r'^version = "[^"]+"$',
               f'version = "{os.environ["PACKAGE_VERSION"]}"',
               content,
+              count=1,
               flags=re.MULTILINE,
           )
+          if count != 1:
+              raise SystemExit(
+                  f'pyproject.toml version rewrite matched {count} lines, expected 1'
+              )
           pyproject.write_text(updated)
           PY
 
@@ -396,6 +401,18 @@ jobs:
             ${PRERELEASE_FLAG}
 
           rm -f "${NOTES_FILE}"
+
+      - name: 'Delete prerelease release branch'
+        if: |-
+          ${{ steps.vars.outputs.is_dry_run == 'false' && (steps.vars.outputs.is_nightly == 'true' || steps.vars.outputs.is_preview == 'true') }}
+        env:
+          BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
+        run: |
+          if git ls-remote --exit-code --heads origin "${BRANCH_NAME}" >/dev/null 2>&1; then
+            git push origin --delete "${BRANCH_NAME}"
+          else
+            echo "No prerelease release branch to delete for ${BRANCH_NAME}."
+          fi
 
       - name: 'Create PR to merge release branch into main'
         if: |-

@@ -433,6 +433,7 @@ async function getVersion(options = {}) {
     }
 
     if (
+      !hasManualOverride &&
       releaseState.packageVersionExistsOnPyPI &&
       !releaseState.githubReleaseExists
     ) {
@@ -444,6 +445,7 @@ async function getVersion(options = {}) {
     }
 
     if (
+      !hasManualOverride &&
       type === 'stable' &&
       releaseState.packageVersionExistsOnPyPI &&
       releaseState.githubReleaseExists

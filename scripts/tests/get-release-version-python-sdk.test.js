@@ -164,6 +164,29 @@ describe('python sdk get-release-version', () => {
     );
   });
 
+  it('fails when an explicit preview override only conflicts with PyPI state', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.1.1rc0': [{}],
+          },
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(
+      getVersion({
+        type: 'preview',
+        preview_version_override: 'v0.1.1-preview.0',
+      }),
+    ).rejects.toThrow(
+      'Requested preview release 0.1.1-preview.0 already exists.',
+    );
+  });
+
   it('fails when an explicit override conflicts with an existing git tag', async () => {
     execSyncMock.mockImplementation(
       makeExecSyncMock({
@@ -299,6 +322,34 @@ describe('python sdk get-release-version', () => {
       packageVersion: '0.1.0',
       resumeExistingRelease: true,
     });
+  });
+
+  it('fails when an explicit stable override conflicts with a completed release', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.1.0': [{}],
+          },
+        },
+      }),
+    );
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        releases: {
+          'sdk-python-v0.1.0': 'sdk-python-v0.1.0',
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(
+      getVersion({
+        type: 'stable',
+        stable_version_override: 'v0.1.0',
+      }),
+    ).rejects.toThrow('Requested stable release 0.1.0 already exists.');
   });
 
   it('fails when the latest preview base is not newer than the latest stable', async () => {
