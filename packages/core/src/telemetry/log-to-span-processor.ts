@@ -170,9 +170,11 @@ function randomHexString(length: number): string {
  * Derive a deterministic 32-char hex traceId from a session ID.
  * All events in the same session will share this traceId,
  * making them appear under a single trace in the backend.
+ * Uses SHA-256 truncated to 32 hex chars (128 bits) to match the
+ * OTel trace ID format.
  */
 function deriveTraceId(sessionId: string): string {
-  return createHash('md5').update(sessionId).digest('hex');
+  return createHash('sha256').update(sessionId).digest('hex').slice(0, 32);
 }
 
 /**
