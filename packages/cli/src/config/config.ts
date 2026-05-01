@@ -1246,6 +1246,7 @@ export async function loadCliConfig(
       argv.checkpointing || settings.general?.checkpointing?.enabled,
     proxy:
       argv.proxy ||
+      settings.proxy ||
       process.env['HTTPS_PROXY'] ||
       process.env['https_proxy'] ||
       process.env['HTTP_PROXY'] ||

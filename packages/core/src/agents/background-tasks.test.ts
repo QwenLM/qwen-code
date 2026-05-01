@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { BackgroundTaskRegistry } from './background-tasks.js';
+import * as transcript from './agent-transcript.js';
 
 describe('BackgroundTaskRegistry', () => {
   let registry: BackgroundTaskRegistry;
@@ -100,6 +101,34 @@ describe('BackgroundTaskRegistry', () => {
     expect(registry.get('test-1')!.status).toBe('cancelled');
     expect(abortController.signal.aborted).toBe(true);
     expect(callback).not.toHaveBeenCalled();
+  });
+
+  it('persists explicit cancellations as cancelled sidecar state', () => {
+    const patchSpy = vi
+      .spyOn(transcript, 'patchAgentMeta')
+      .mockImplementation(() => undefined);
+    try {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        metaPath: '/tmp/test-1.meta.json',
+      });
+
+      registry.cancel('test-1');
+
+      expect(patchSpy).toHaveBeenCalledWith(
+        '/tmp/test-1.meta.json',
+        expect.objectContaining({
+          status: 'cancelled',
+          lastError: undefined,
+        }),
+      );
+    } finally {
+      patchSpy.mockRestore();
+    }
   });
 
   it('emits a fallback cancelled notification after the grace period when the natural handler never runs', () => {
@@ -228,6 +257,37 @@ describe('BackgroundTaskRegistry', () => {
     expect(abortController.signal.aborted).toBe(false);
   });
 
+  it('abandons a paused agent without emitting a notification', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+
+    registry.register({
+      agentId: 'paused-1',
+      description: 'paused agent',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    registry.abandon('paused-1');
+
+    expect(registry.get('paused-1')!.status).toBe('cancelled');
+    expect(registry.get('paused-1')!.notified).toBe(true);
+    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it('does not treat paused entries as unfinalized work', () => {
+    registry.register({
+      agentId: 'paused-1',
+      description: 'paused agent',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    expect(registry.hasUnfinalizedTasks()).toBe(false);
+  });
+
   it('lists running agents', () => {
     registry.register({
       agentId: 'a',
@@ -283,6 +343,34 @@ describe('BackgroundTaskRegistry', () => {
     // finalizeCancellationIfPending emits one cancelled notification per
     // agent to keep the SDK contract intact.
     expect(callback).toHaveBeenCalledTimes(2);
+  });
+
+  it('persists shutdown interruption as running sidecar state', () => {
+    const patchSpy = vi
+      .spyOn(transcript, 'patchAgentMeta')
+      .mockImplementation(() => undefined);
+    try {
+      registry.register({
+        agentId: 'a',
+        description: 'agent a',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        metaPath: '/tmp/a.meta.json',
+      });
+
+      registry.abortAll();
+
+      expect(patchSpy).toHaveBeenCalledWith(
+        '/tmp/a.meta.json',
+        expect.objectContaining({
+          status: 'running',
+          lastError: undefined,
+        }),
+      );
+    } finally {
+      patchSpy.mockRestore();
+    }
   });
 
   it('hasUnfinalizedTasks reports cancelled-but-not-notified entries', () => {
@@ -502,7 +590,9 @@ describe('BackgroundTaskRegistry', () => {
   it('statusChange callback fires on register and every state transition', () => {
     const seen: Array<{ id: string; status: string }> = [];
     registry.setStatusChangeCallback((entry) => {
-      seen.push({ id: entry.agentId, status: entry.status });
+      if (entry) {
+        seen.push({ id: entry.agentId, status: entry.status });
+      }
     });
 
     registry.register({
@@ -730,6 +820,29 @@ describe('BackgroundTaskRegistry', () => {
 
     it('returns empty array for non-existent agent', () => {
       expect(registry.drainMessages('nope')).toEqual([]);
+    });
+  });
+
+  describe('session switch helpers', () => {
+    it('reset clears tracked entries without touching persisted sidecars', () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+      registry.register({
+        agentId: 'test-2',
+        description: 'paused agent',
+        status: 'paused',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      registry.reset();
+
+      expect(registry.getAll()).toEqual([]);
     });
   });
 

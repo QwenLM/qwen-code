@@ -33,6 +33,10 @@
       "type": "object",
       "additionalProperties": true
     },
+    "proxy": {
+      "description": "Proxy URL for CLI HTTP requests. Takes precedence over proxy environment variables when --proxy is not provided.",
+      "type": "string"
+    },
     "general": {
       "description": "General application settings.",
       "type": "object",

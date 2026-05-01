@@ -56,8 +56,10 @@ export interface BackgroundTaskViewActions {
   closeDialog(): void;
   enterDetail(): void;
   exitDetail(): void;
-  /** Cancel the currently selected entry (no-op if not running). */
+  /** Stop or abandon the currently selected entry. */
   cancelSelected(): void;
+  /** Resume the currently selected paused entry. */
+  resumeSelected(): Promise<void>;
   setPillFocused(focused: boolean): void;
 }
 
@@ -89,6 +91,7 @@ const DEFAULT_ACTIONS: BackgroundTaskViewActions = {
   enterDetail: noop,
   exitDetail: noop,
   cancelSelected: noop,
+  resumeSelected: async () => {},
   setPillFocused: noop,
 };
 
@@ -170,6 +173,10 @@ export function BackgroundTaskViewProvider({
     if (!config) return;
     const target = entries[selectedIndex];
     if (!target) return;
+    if (target.kind === 'agent' && target.status === 'paused') {
+      config.abandonBackgroundAgent(target.agentId);
+      return;
+    }
     // Both registries' cancel paths are no-ops on non-running entries, so
     // no pre-check here. Shell cancel goes through requestCancel — it
     // triggers the AbortController only and lets the spawn's settle path
@@ -180,6 +187,20 @@ export function BackgroundTaskViewProvider({
     } else {
       config.getBackgroundShellRegistry().requestCancel(target.shellId);
     }
+  }, [config, entries, selectedIndex]);
+
+  const resumeSelected = useCallback(async () => {
+    if (!config) return;
+    const target = entries[selectedIndex];
+    if (
+      !target ||
+      target.kind !== 'agent' ||
+      target.status !== 'paused' ||
+      target.resumeBlockedReason
+    ) {
+      return;
+    }
+    await config.resumeBackgroundAgent(target.agentId);
   }, [config, entries, selectedIndex]);
 
   const state: BackgroundTaskViewState = useMemo(
@@ -202,6 +223,7 @@ export function BackgroundTaskViewProvider({
       enterDetail,
       exitDetail,
       cancelSelected,
+      resumeSelected,
       setPillFocused,
     }),
     [
@@ -212,6 +234,7 @@ export function BackgroundTaskViewProvider({
       enterDetail,
       exitDetail,
       cancelSelected,
+      resumeSelected,
       setPillFocused,
     ],
   );

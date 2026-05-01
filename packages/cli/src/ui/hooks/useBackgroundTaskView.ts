@@ -28,6 +28,11 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 
+export type AgentDialogEntry = BackgroundTaskEntry & {
+  kind: 'agent';
+  resumeBlockedReason?: string;
+};
+
 /**
  * A unified view-model entry the dialog/pill/context render against.
  * Discriminated by `kind`; agent-shaped fields and shell-shaped fields
@@ -35,7 +40,7 @@ import {
  * branch (just guarded by `kind === 'agent'`).
  */
 export type DialogEntry =
-  | (BackgroundTaskEntry & { kind: 'agent' })
+  | AgentDialogEntry
   | (BackgroundShellEntry & { kind: 'shell' });
 
 export interface UseBackgroundTaskViewResult {
