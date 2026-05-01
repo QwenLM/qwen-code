@@ -1095,9 +1095,15 @@ export class ShellTool extends BaseDeclarativeTool<
         return `Directory '${params.directory}' is not within any of the registered workspace directories.`;
       }
     }
-    // Sleep interception: block sleep >= 2s in foreground, suggest Monitor
+    // Sleep interception: block sleep >= 2s in foreground, suggest Monitor.
+    // Strip shell wrappers first so `bash -c 'sleep 5'` / `sh -c '...'` etc.
+    // cannot route around the check by hiding the foreground sleep inside a
+    // `-c` script. This matches every other sensitive check in this file
+    // (directory, read-only, command-root extraction, etc.).
     if (!params.is_background) {
-      const sleepPattern = detectBlockedSleepPattern(params.command);
+      const sleepPattern = detectBlockedSleepPattern(
+        stripShellWrapper(params.command),
+      );
       if (sleepPattern !== null) {
         return (
           `Blocked: ${sleepPattern}. ` +

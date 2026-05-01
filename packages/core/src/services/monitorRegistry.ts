@@ -140,13 +140,18 @@ export class MonitorRegistry {
 
     this.emitNotification(entry, truncatedLine);
 
-    // Auto-stop if max events reached
+    // Auto-stop if max events reached. Settle BEFORE aborting so that any
+    // synchronous abort listener that flushes buffered output back through
+    // `registry.emitEvent()` (see Monitor tool's flushPartialLineBuffers)
+    // finds `entry.status !== 'running'` and short-circuits, instead of
+    // incrementing `eventCount` past `maxEvents` and emitting a duplicate
+    // terminal notification.
     if (entry.eventCount >= entry.maxEvents) {
       debugLogger.info(
         `Monitor ${monitorId} reached max events (${entry.maxEvents}), stopping`,
       );
-      entry.abortController.abort();
       this.settle(entry, 'completed');
+      entry.abortController.abort();
       this.emitTerminalNotification(entry, 'Max events reached');
     }
   }
@@ -365,8 +370,12 @@ export class MonitorRegistry {
   }
 
   private truncateDescription(desc: string): string {
-    return desc.length > MAX_DESCRIPTION_LENGTH
-      ? desc.slice(0, MAX_DESCRIPTION_LENGTH) + '...'
-      : desc;
+    // Ellipsis counts against the configured cap so the returned string is
+    // guaranteed to be <= MAX_DESCRIPTION_LENGTH characters, matching the
+    // documented contract and the Monitor tool's display truncation.
+    const ELLIPSIS = '...';
+    if (desc.length <= MAX_DESCRIPTION_LENGTH) return desc;
+    const keep = Math.max(0, MAX_DESCRIPTION_LENGTH - ELLIPSIS.length);
+    return desc.slice(0, keep) + ELLIPSIS;
   }
 }

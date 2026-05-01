@@ -25,6 +25,7 @@ vi.mock('crypto');
 import { isCommandAllowed } from '../utils/shell-utils.js';
 import { ShellTool } from './shell.js';
 import { detectBlockedSleepPattern } from './shell.js';
+import { stripShellWrapper } from '../utils/shell-utils.js';
 import { type Config } from '../config/config.js';
 import {
   type ShellExecutionResult,
@@ -1523,6 +1524,32 @@ describe('detectBlockedSleepPattern', () => {
     // and the existing separator logic still rejects it.
     expect(
       detectBlockedSleepPattern("sleep 5 'arg # not a comment'"),
+    ).toBeNull();
+  });
+
+  it('blocks wrapped foreground sleep when paired with stripShellWrapper', () => {
+    // This mirrors the shell validator call site: the foreground sleep
+    // guard runs on `stripShellWrapper(params.command)`, so `bash -c` and
+    // sibling wrappers cannot route around the block by hiding the sleep
+    // inside a `-c` script.
+    expect(
+      detectBlockedSleepPattern(stripShellWrapper("bash -c 'sleep 5'")),
+    ).toBe('standalone sleep 5');
+    expect(
+      detectBlockedSleepPattern(stripShellWrapper("sh -c 'sleep 10'")),
+    ).toBe('standalone sleep 10');
+    expect(
+      detectBlockedSleepPattern(stripShellWrapper("zsh -c 'sleep 2s'")),
+    ).toBe('standalone sleep 2s');
+    expect(
+      detectBlockedSleepPattern(
+        stripShellWrapper("bash -c 'sleep 5 && curl http://localhost'"),
+      ),
+    ).toBe('sleep 5 followed by: curl http://localhost');
+
+    // A wrapped sleep < 2s is still allowed.
+    expect(
+      detectBlockedSleepPattern(stripShellWrapper("bash -c 'sleep 1'")),
     ).toBeNull();
   });
 });

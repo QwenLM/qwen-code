@@ -178,6 +178,77 @@ describe('MonitorRegistry', () => {
     expect(terminalModelText).toContain('<status>completed</status>');
   });
 
+  it('auto-stop is re-entrancy safe: abort-driven flush cannot overshoot maxEvents or double-emit terminal', () => {
+    // Simulate the Monitor tool's abort listener flushing a buffered line
+    // back into emitEvent() synchronously. Before the fix, this re-entrant
+    // call would find status === 'running', increment eventCount past
+    // maxEvents, and emit a second "Max events reached" terminal
+    // notification. After the fix, settle() runs before abort() so the
+    // re-entrant emitEvent() short-circuits on the status guard.
+    const ac = new AbortController();
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+    registry.register(createEntry({ maxEvents: 2, abortController: ac }));
+
+    // Abort listener that attempts to flush a buffered partial line.
+    ac.signal.addEventListener(
+      'abort',
+      () => {
+        registry.emitEvent('mon-1', 'flushed-after-abort');
+      },
+      { once: true },
+    );
+
+    registry.emitEvent('mon-1', 'line 1');
+    registry.emitEvent('mon-1', 'line 2'); // triggers auto-stop + abort flush
+
+    const entry = registry.get('mon-1')!;
+    expect(entry.status).toBe('completed');
+    // eventCount must NOT exceed maxEvents; the flush must be dropped.
+    expect(entry.eventCount).toBe(2);
+    expect(ac.signal.aborted).toBe(true);
+    // Exactly 2 event notifications + 1 terminal notification. Neither the
+    // flushed line nor a second "Max events reached" notification fires.
+    expect(callback).toHaveBeenCalledTimes(3);
+    const terminalCalls = callback.mock.calls.filter(
+      (args) =>
+        typeof args[1] === 'string' &&
+        (args[1] as string).includes('Max events reached'),
+    );
+    expect(terminalCalls).toHaveLength(1);
+    // And no flushed content leaked into any notification.
+    for (const args of callback.mock.calls) {
+      expect(args[0]).not.toContain('flushed-after-abort');
+      expect(args[1]).not.toContain('flushed-after-abort');
+    }
+  });
+
+  it('truncateDescription caps output at MAX_DESCRIPTION_LENGTH including ellipsis', () => {
+    // MAX_DESCRIPTION_LENGTH is a private constant but its value (80) is
+    // documented in the tool schema and mirrored by the Monitor tool. Verify
+    // that descriptions longer than the cap are truncated to exactly 80
+    // chars total (ellipsis included), not 83.
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+    const longDesc = 'A'.repeat(200);
+    registry.register(createEntry({ description: longDesc }));
+
+    registry.emitEvent('mon-1', 'evt');
+
+    const [displayText, modelText] = callback.mock.calls[0] as [string, string];
+    const displayMatch = displayText.match(/Monitor "([^"]*)"/);
+    expect(displayMatch).not.toBeNull();
+    expect(displayMatch![1]!.length).toBeLessThanOrEqual(80);
+    expect(displayMatch![1]!.endsWith('...')).toBe(true);
+
+    // The surrounding `"` chars in the <summary> template are literal;
+    // only the description itself flows through escapeXml.
+    const modelMatch = modelText.match(/<summary>Monitor "([^"]*)"/);
+    expect(modelMatch).not.toBeNull();
+    expect(modelMatch![1]!.length).toBeLessThanOrEqual(80);
+    expect(modelMatch![1]!.endsWith('...')).toBe(true);
+  });
+
   it('auto-stops on idle timeout', () => {
     const ac = new AbortController();
     const callback = vi.fn();
