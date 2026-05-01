@@ -5,15 +5,25 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SpanKind, SpanStatusCode } from '@opentelemetry/api';
+import { SpanKind, SpanStatusCode, type HrTime } from '@opentelemetry/api';
 import { LogToSpanProcessor } from './log-to-span-processor.js';
 import type { ReadableLogRecord } from '@opentelemetry/sdk-logs';
 import type { SpanExporter } from '@opentelemetry/sdk-trace-base';
 
+interface ExportedSpan {
+  name: string;
+  kind: number;
+  spanContext: () => { traceId: string; spanId: string; traceFlags: number };
+  startTime: HrTime;
+  endTime: HrTime;
+  attributes: Record<string, string | number | boolean>;
+  status: { code: number; message?: string };
+}
+
 describe('LogToSpanProcessor', () => {
   let processor: LogToSpanProcessor;
   let mockExporter: SpanExporter;
-  let exportedSpans: Array<Record<string, unknown>>;
+  let exportedSpans: ExportedSpan[];
 
   beforeEach(() => {
     exportedSpans = [];
@@ -50,9 +60,9 @@ describe('LogToSpanProcessor', () => {
     const span = exportedSpans[0];
     expect(span.name).toBe('test event');
     expect(span.kind).toBe(SpanKind.INTERNAL);
-    expect(span.attributes.key1).toBe('value1');
-    expect(span.attributes.key2).toBe(42);
-    expect(span.attributes.key3).toBe(true);
+    expect(span.attributes['key1']).toBe('value1');
+    expect(span.attributes['key2']).toBe(42);
+    expect(span.attributes['key3']).toBe(true);
     expect(span.attributes['log.bridge']).toBe(true);
     expect(span.startTime).toEqual([1000, 500000000]);
     // Instant span: end time == start time
@@ -107,7 +117,7 @@ describe('LogToSpanProcessor', () => {
     processor.onEmit(logRecord);
     await processor.forceFlush();
 
-    expect(exportedSpans[0].attributes.metadata).toBe('{"nested":true}');
+    expect(exportedSpans[0].attributes['metadata']).toBe('{"nested":true}');
   });
 
   it('skips null and undefined attributes', async () => {
@@ -125,7 +135,7 @@ describe('LogToSpanProcessor', () => {
     await processor.forceFlush();
 
     const attrs = exportedSpans[0].attributes;
-    expect(attrs.valid).toBe('yes');
+    expect(attrs['valid']).toBe('yes');
     expect(attrs).not.toHaveProperty('nullVal');
     expect(attrs).not.toHaveProperty('undefinedVal');
     expect(attrs['log.bridge']).toBe(true);
