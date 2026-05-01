@@ -52,11 +52,15 @@ import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import {
-  buildPermissionCheckContext,
-  evaluatePermissionRules,
   injectPermissionRulesIfMissing,
   persistPermissionOutcome,
 } from './permission-helpers.js';
+import {
+  evaluatePermissionFlow,
+  needsConfirmation,
+  isPlanModeBlocked,
+  isAutoEditApproved,
+} from './permissionFlow.js';
 import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
 import type { ModifyContext } from '../tools/modifiable-tool.js';
 import {
@@ -987,20 +991,16 @@ export class CoreToolScheduler {
           // L3→L4→L5 Permission Flow
           // =================================================================
 
-          // ---- L3: Tool's default permission ----
-          const defaultPermission: string =
-            await invocation.getDefaultPermission();
-
-          // ---- L4: PermissionManager override (if relevant rules exist) ----
-          const pm = this.config.getPermissionManager?.();
+          // ---- L3→L4: Shared permission flow ----
           const toolParams = invocation.params as Record<string, unknown>;
-          const pmCtx = buildPermissionCheckContext(
+          const flowResult = await evaluatePermissionFlow(
+            this.config,
+            invocation,
             reqInfo.name,
             toolParams,
-            this.config.getTargetDir?.() ?? '',
           );
-          const { finalPermission, pmForcedAsk } =
-            await evaluatePermissionRules(pm, defaultPermission, pmCtx);
+          const { finalPermission, pmForcedAsk, pmCtx, denyMessage } =
+            flowResult;
 
           // ---- L5: Final decision based on permission + ApprovalMode ----
           const approvalMode = this.config.getApprovalMode();
@@ -1019,22 +1019,12 @@ export class CoreToolScheduler {
 
           if (finalPermission === 'deny') {
             // Hard deny: security violation or PM explicit deny
-            let denyMessage: string;
-            if (defaultPermission === 'deny') {
-              denyMessage = `Tool "${reqInfo.name}" is denied: command substitution is not allowed for security reasons.`;
-            } else {
-              const matchingRule = pm?.findMatchingDenyRule(pmCtx);
-              const ruleInfo = matchingRule
-                ? ` Matching deny rule: "${matchingRule}".`
-                : '';
-              denyMessage = `Tool "${reqInfo.name}" is denied by permission rules.${ruleInfo}`;
-            }
             this.setStatusInternal(
               reqInfo.callId,
               'error',
               createErrorResponse(
                 reqInfo,
-                new Error(denyMessage),
+                new Error(denyMessage ?? `Tool "${reqInfo.name}" is denied.`),
                 ToolErrorType.EXECUTION_DENIED,
               ),
             );
@@ -1049,7 +1039,7 @@ export class CoreToolScheduler {
             reqInfo.name === ToolNames.ASK_USER_QUESTION;
           let confirmationDetails: ToolCallConfirmationDetails | undefined;
 
-          if (approvalMode === ApprovalMode.YOLO && !isAskUserQuestionTool) {
+          if (!needsConfirmation(finalPermission, approvalMode, reqInfo.name)) {
             this.setToolCallOutcome(
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,
@@ -1063,10 +1053,12 @@ export class CoreToolScheduler {
             injectPermissionRulesIfMissing(confirmationDetails, pmCtx);
 
             if (
-              isPlanMode &&
-              !isExitPlanModeTool &&
-              !isAskUserQuestionTool &&
-              confirmationDetails.type !== 'info'
+              isPlanModeBlocked(
+                isPlanMode,
+                isExitPlanModeTool,
+                isAskUserQuestionTool,
+                confirmationDetails,
+              )
             ) {
               this.setStatusInternal(reqInfo.callId, 'error', {
                 callId: reqInfo.callId,
@@ -1083,11 +1075,7 @@ export class CoreToolScheduler {
             }
 
             // AUTO_EDIT mode: auto-approve edit-like and info tools
-            if (
-              approvalMode === ApprovalMode.AUTO_EDIT &&
-              (confirmationDetails.type === 'edit' ||
-                confirmationDetails.type === 'info')
-            ) {
+            if (isAutoEditApproved(approvalMode, confirmationDetails)) {
               this.setToolCallOutcome(
                 reqInfo.callId,
                 ToolConfirmationOutcome.ProceedAlways,
@@ -1917,22 +1905,17 @@ export class CoreToolScheduler {
     for (const pendingTool of pendingTools) {
       try {
         // Re-run L3→L4 to see if the tool can now be auto-approved
-        const defaultPermission =
-          await pendingTool.invocation.getDefaultPermission();
         const toolParams = pendingTool.invocation.params as Record<
           string,
           unknown
         >;
-        const pmCtx = buildPermissionCheckContext(
+        const flowResult = await evaluatePermissionFlow(
+          this.config,
+          pendingTool.invocation,
           pendingTool.request.name,
           toolParams,
-          this.config.getTargetDir?.() ?? '',
         );
-        const { finalPermission } = await evaluatePermissionRules(
-          this.config.getPermissionManager?.(),
-          defaultPermission,
-          pmCtx,
-        );
+        const { finalPermission } = flowResult;
 
         if (finalPermission === 'allow') {
           this.setToolCallOutcome(

@@ -1356,7 +1356,6 @@ describe('runNonInteractive', () => {
             total: 16,
             cached: 3,
             thoughts: 0,
-            tool: 0,
           },
           bySource: {},
         },

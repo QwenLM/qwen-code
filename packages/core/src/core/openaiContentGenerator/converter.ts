@@ -37,7 +37,7 @@ interface ExtendedCompletionUsage extends OpenAI.CompletionUsage {
   cached_tokens?: number;
 }
 
-interface ExtendedChatCompletionAssistantMessageParam
+export interface ExtendedChatCompletionAssistantMessageParam
   extends OpenAI.Chat.ChatCompletionAssistantMessageParam {
   reasoning_content?: string | null;
 }

@@ -509,10 +509,6 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
     model: event.model,
     type: 'thought',
   });
-  recordTokenUsageMetrics(config, event.tool_token_count, {
-    model: event.model,
-    type: 'tool',
-  });
 }
 
 export function logLoopDetected(

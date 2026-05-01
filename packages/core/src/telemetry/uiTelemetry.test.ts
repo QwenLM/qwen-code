@@ -159,7 +159,6 @@ describe('UiTelemetryService', () => {
       total_token_count: 30,
       cached_content_token_count: 5,
       thoughts_token_count: 2,
-      tool_token_count: 3,
     } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
 
     service.addEvent(event);
@@ -181,7 +180,6 @@ describe('UiTelemetryService', () => {
         total_token_count: 30,
         cached_content_token_count: 5,
         thoughts_token_count: 2,
-        tool_token_count: 3,
       } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
 
       service.addEvent(event);
@@ -199,7 +197,6 @@ describe('UiTelemetryService', () => {
           total: 30,
           cached: 5,
           thoughts: 2,
-          tool: 3,
         },
       };
       expect(metrics.models['gemini-2.5-pro']).toEqual({
@@ -221,7 +218,6 @@ describe('UiTelemetryService', () => {
         total_token_count: 30,
         cached_content_token_count: 5,
         thoughts_token_count: 2,
-        tool_token_count: 3,
       } as ApiResponseEvent & {
         'event.name': typeof EVENT_API_RESPONSE;
       };
@@ -234,7 +230,6 @@ describe('UiTelemetryService', () => {
         total_token_count: 40,
         cached_content_token_count: 10,
         thoughts_token_count: 4,
-        tool_token_count: 6,
       } as ApiResponseEvent & {
         'event.name': typeof EVENT_API_RESPONSE;
       };
@@ -255,7 +250,6 @@ describe('UiTelemetryService', () => {
           total: 70,
           cached: 15,
           thoughts: 6,
-          tool: 9,
         },
       };
       expect(metrics.models['gemini-2.5-pro']).toEqual({
@@ -277,7 +271,6 @@ describe('UiTelemetryService', () => {
         total_token_count: 30,
         cached_content_token_count: 5,
         thoughts_token_count: 2,
-        tool_token_count: 3,
       } as ApiResponseEvent & {
         'event.name': typeof EVENT_API_RESPONSE;
       };
@@ -290,7 +283,6 @@ describe('UiTelemetryService', () => {
         total_token_count: 300,
         cached_content_token_count: 50,
         thoughts_token_count: 20,
-        tool_token_count: 30,
       } as ApiResponseEvent & {
         'event.name': typeof EVENT_API_RESPONSE;
       };
@@ -331,7 +323,6 @@ describe('UiTelemetryService', () => {
           total: 0,
           cached: 0,
           thoughts: 0,
-          tool: 0,
         },
       };
       expect(metrics.models['gemini-2.5-pro']).toEqual({
@@ -352,7 +343,6 @@ describe('UiTelemetryService', () => {
         total_token_count: 30,
         cached_content_token_count: 5,
         thoughts_token_count: 2,
-        tool_token_count: 3,
       } as ApiResponseEvent & {
         'event.name': typeof EVENT_API_RESPONSE;
       };
@@ -379,7 +369,6 @@ describe('UiTelemetryService', () => {
           total: 30,
           cached: 5,
           thoughts: 2,
-          tool: 3,
         },
       };
       expect(metrics.models['gemini-2.5-pro']).toEqual({
@@ -402,7 +391,6 @@ describe('UiTelemetryService', () => {
         total_token_count: 15,
         cached_content_token_count: 0,
         thoughts_token_count: 0,
-        tool_token_count: 0,
       } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
 
       service.addEvent(event);
@@ -423,7 +411,6 @@ describe('UiTelemetryService', () => {
         total_token_count: 150,
         cached_content_token_count: 20,
         thoughts_token_count: 0,
-        tool_token_count: 0,
       } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
       const subagentEvent = {
         'event.name': EVENT_API_RESPONSE,
@@ -434,7 +421,6 @@ describe('UiTelemetryService', () => {
         total_token_count: 50,
         cached_content_token_count: 0,
         thoughts_token_count: 0,
-        tool_token_count: 0,
         subagent_name: 'echoer',
       } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
 
@@ -471,7 +457,6 @@ describe('UiTelemetryService', () => {
           total_token_count: 15,
           cached_content_token_count: 0,
           thoughts_token_count: 0,
-          tool_token_count: 0,
           subagent_name: subagentName,
         }) as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
 
@@ -504,7 +489,6 @@ describe('UiTelemetryService', () => {
         total_token_count: 15,
         cached_content_token_count: 0,
         thoughts_token_count: 0,
-        tool_token_count: 0,
         subagent_name: 'constructor',
       } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
 
@@ -767,7 +751,6 @@ describe('UiTelemetryService', () => {
         total_token_count: 300,
         cached_content_token_count: 50,
         thoughts_token_count: 20,
-        tool_token_count: 30,
       } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
 
       service.addEvent(event);
@@ -792,7 +775,6 @@ describe('UiTelemetryService', () => {
         total_token_count: 300,
         cached_content_token_count: 50,
         thoughts_token_count: 20,
-        tool_token_count: 30,
       } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
 
       service.addEvent(event);
@@ -817,7 +799,6 @@ describe('UiTelemetryService', () => {
         total_token_count: 300,
         cached_content_token_count: 50,
         thoughts_token_count: 20,
-        tool_token_count: 30,
       } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
 
       service.addEvent(event);
@@ -849,7 +830,6 @@ describe('UiTelemetryService', () => {
         total_token_count: 300,
         cached_content_token_count: 50,
         thoughts_token_count: 20,
-        tool_token_count: 30,
       } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
 
       service.addEvent(event);

@@ -21,6 +21,7 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAgentViewState } from '../contexts/AgentViewContext.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { StreamingState } from '../types.js';
+import { getStickyTodoMaxVisibleItems } from '../utils/todoSnapshot.js';
 
 export const DefaultAppLayout: React.FC = () => {
   const uiState = useUIState();
@@ -30,6 +31,9 @@ export const DefaultAppLayout: React.FC = () => {
   const hasAgents = agents.size > 0;
   const isAgentTab = activeView !== 'main' && agents.has(activeView);
   const stickyTodoWidth = Math.min(uiState.mainAreaWidth, 64);
+  const stickyTodoMaxVisibleItems = getStickyTodoMaxVisibleItems(
+    uiState.terminalHeight,
+  );
   const shouldShowStickyTodos =
     uiState.stickyTodos !== null &&
     !uiState.dialogsVisible &&
@@ -81,6 +85,7 @@ export const DefaultAppLayout: React.FC = () => {
                   <StickyTodoList
                     todos={uiState.stickyTodos!}
                     width={stickyTodoWidth}
+                    maxVisibleItems={stickyTodoMaxVisibleItems}
                   />
                 )}
                 {uiState.btwItem && (

@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useState } from 'react';
 import { act } from '@testing-library/react';
 import { render } from 'ink-testing-library';
-import type { BackgroundTaskEntry, Config } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
 import { BackgroundTasksDialog } from './BackgroundTasksDialog.js';
 import {
   BackgroundTaskViewProvider,
@@ -16,11 +16,20 @@ import {
   useBackgroundTaskViewState,
 } from '../../contexts/BackgroundTaskViewContext.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
-import { useBackgroundTaskView } from '../../hooks/useBackgroundTaskView.js';
+import {
+  type AgentDialogEntry,
+  useBackgroundTaskView,
+  type DialogEntry,
+} from '../../hooks/useBackgroundTaskView.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 
 vi.mock('../../hooks/useBackgroundTaskView.js', () => ({
   useBackgroundTaskView: vi.fn(),
+  // Re-export the helper so Dialog renderers can still resolve it under the
+  // mocked module. Inline impl keeps the test independent of the hook
+  // module while preserving the discriminator-based id contract.
+  entryId: (entry: DialogEntry): string =>
+    entry.kind === 'agent' ? entry.agentId : entry.shellId,
 }));
 
 vi.mock('../../hooks/useKeypress.js', () => ({
@@ -30,33 +39,36 @@ vi.mock('../../hooks/useKeypress.js', () => ({
 const mockedUseBackgroundTaskView = vi.mocked(useBackgroundTaskView);
 const mockedUseKeypress = vi.mocked(useKeypress);
 
-function entry(overrides: Partial<BackgroundTaskEntry>): BackgroundTaskEntry {
+function entry(overrides: Partial<AgentDialogEntry> = {}): DialogEntry {
   return {
+    kind: 'agent',
     agentId: 'a',
     description: 'desc',
     status: 'running',
     startTime: 0,
     abortController: new AbortController(),
     ...overrides,
-  };
+  } as DialogEntry;
 }
 
 interface ProbeHandle {
   actions: ReturnType<typeof useBackgroundTaskViewActions>;
   state: ReturnType<typeof useBackgroundTaskViewState>;
-  setEntries: (next: readonly BackgroundTaskEntry[]) => void;
+  setEntries: (next: readonly DialogEntry[]) => void;
 }
 
 interface Harness {
   cancel: ReturnType<typeof vi.fn>;
-  setEntries: (next: readonly BackgroundTaskEntry[]) => void;
+  resume: ReturnType<typeof vi.fn>;
+  abandon: ReturnType<typeof vi.fn>;
+  setEntries: (next: readonly DialogEntry[]) => void;
   pressKey: (key: { name?: string; sequence?: string }) => void;
   call: (fn: () => void) => void;
   lastFrame: () => string | undefined;
   probe: { current: ProbeHandle | null };
 }
 
-function setup(initial: readonly BackgroundTaskEntry[]): Harness {
+function setup(initial: readonly DialogEntry[]): Harness {
   const handlers: Array<(key: { name?: string; sequence?: string }) => void> =
     [];
   mockedUseKeypress.mockImplementation((cb, opts) => {
@@ -64,11 +76,25 @@ function setup(initial: readonly BackgroundTaskEntry[]): Harness {
   });
 
   const cancel = vi.fn();
+  const resume = vi.fn();
+  const abandon = vi.fn();
+  // Stub registry that resolves `.get(agentId)` against the current entries
+  // snapshot — the dialog now re-reads agent entries via `.get()` to pick up
+  // live activity/stats mutations the snapshot misses.
+  let currentEntries: readonly DialogEntry[] = initial;
   const config = {
     getBackgroundTaskRegistry: () => ({
       cancel,
       setActivityChangeCallback: vi.fn(),
+      get: (id: string) => {
+        const match = currentEntries.find(
+          (e) => e.kind === 'agent' && e.agentId === id,
+        );
+        return match;
+      },
     }),
+    resumeBackgroundAgent: resume,
+    abandonBackgroundAgent: abandon,
   } as unknown as Config;
 
   const handle: { current: ProbeHandle | null } = { current: null };
@@ -94,7 +120,7 @@ function setup(initial: readonly BackgroundTaskEntry[]): Harness {
   function Probe({
     entriesSetter,
   }: {
-    entriesSetter: (e: readonly BackgroundTaskEntry[]) => void;
+    entriesSetter: (e: readonly DialogEntry[]) => void;
   }) {
     handle.current = {
       actions: useBackgroundTaskViewActions(),
@@ -108,8 +134,11 @@ function setup(initial: readonly BackgroundTaskEntry[]): Harness {
 
   return {
     cancel,
+    resume,
+    abandon,
     setEntries(next) {
       handlers.length = 0;
+      currentEntries = next;
       act(() => handle.current!.setEntries(next));
     },
     pressKey(key) {
@@ -195,5 +224,70 @@ describe('BackgroundTasksDialog', () => {
 
     h.setEntries([]);
     expect(h.probe.current!.state.selectedIndex).toBe(0);
+  });
+
+  it('resumes a paused task with the r key', () => {
+    const paused = entry({ agentId: 'a', status: 'paused' });
+    const h = setup([paused]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.pressKey({ sequence: 'r' });
+
+    expect(h.resume).toHaveBeenCalledWith('a');
+  });
+
+  it('abandons a paused task with the x key', () => {
+    const paused = entry({ agentId: 'a', status: 'paused' });
+    const h = setup([paused]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.pressKey({ sequence: 'x' });
+
+    expect(h.abandon).toHaveBeenCalledWith('a');
+  });
+
+  it('does not resume blocked paused tasks and surfaces the blocked reason', () => {
+    const blocked = entry({
+      agentId: 'a',
+      status: 'paused',
+      resumeBlockedReason: 'Legacy fork bootstrap transcript is missing.',
+    });
+    const h = setup([blocked]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    expect(h.lastFrame()).not.toContain('r resume');
+    expect(h.lastFrame()).toContain('x abandon');
+
+    h.pressKey({ sequence: 'r' });
+    expect(h.resume).not.toHaveBeenCalled();
+
+    h.call(() => h.probe.current!.actions.enterDetail());
+    const detailFrame = h.lastFrame();
+    expect(detailFrame).toContain('Resume blocked');
+    expect(detailFrame).toContain(
+      'Legacy fork bootstrap transcript is missing.',
+    );
+    expect(detailFrame).not.toContain('r resume');
+  });
+
+  it('still allows resume for paused tasks that only have a stale error', () => {
+    const paused = entry({
+      agentId: 'a',
+      status: 'paused',
+      error: 'Temporary resume setup failed.',
+    });
+    const h = setup([paused]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    expect(h.lastFrame()).toContain('r resume');
+
+    h.pressKey({ sequence: 'r' });
+    expect(h.resume).toHaveBeenCalledWith('a');
+
+    h.call(() => h.probe.current!.actions.enterDetail());
+    const detailFrame = h.lastFrame();
+    expect(detailFrame).toContain('Error');
+    expect(detailFrame).toContain('Temporary resume setup failed.');
+    expect(detailFrame).toContain('r resume');
   });
 });
