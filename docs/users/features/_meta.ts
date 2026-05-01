@@ -2,6 +2,7 @@ export default {
   commands: 'Commands',
   'code-review': 'Code Review',
   'followup-suggestions': 'Followup Suggestions',
+  'tool-use-summaries': 'Tool-Use Summaries',
   'sub-agents': 'SubAgents',
   arena: 'Agent Arena',
   skills: 'Skills',

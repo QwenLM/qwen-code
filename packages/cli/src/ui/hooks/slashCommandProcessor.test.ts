@@ -501,7 +501,7 @@ describe('useSlashCommandProcessor', () => {
       );
     });
 
-    it('should strip thoughts when handling "load_history" action', async () => {
+    it('should preserve thoughts when handling "load_history" action', async () => {
       const mockClient = {
         setHistory: vi.fn(),
         stripThoughtsFromHistory: vi.fn(),
@@ -531,7 +531,7 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(mockClient.setHistory).toHaveBeenCalledTimes(1);
-      expect(mockClient.stripThoughtsFromHistory).toHaveBeenCalledWith();
+      expect(mockClient.stripThoughtsFromHistory).not.toHaveBeenCalled();
     });
 
     it('should handle a "quit" action', async () => {

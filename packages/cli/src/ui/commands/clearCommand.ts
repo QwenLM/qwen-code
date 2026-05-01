@@ -12,8 +12,24 @@ import {
   SessionEndReason,
   SessionStartSource,
   ToolNames,
+  type Config,
   type PermissionMode,
 } from '@qwen-code/qwen-code-core';
+
+function hasBlockingBackgroundWork(config: Config): boolean {
+  return (
+    config.getBackgroundTaskRegistry().hasUnfinalizedTasks() ||
+    config
+      .getBackgroundShellRegistry()
+      .getAll()
+      .some((entry) => entry.status === 'running')
+  );
+}
+
+function resetBackgroundStateForSessionSwitch(config: Config): void {
+  (config.getBackgroundTaskRegistry() as unknown as { reset(): void }).reset();
+  (config.getBackgroundShellRegistry() as unknown as { reset(): void }).reset();
+}
 
 export const clearCommand: SlashCommand = {
   name: 'clear',
@@ -27,6 +43,20 @@ export const clearCommand: SlashCommand = {
     const { config } = context.services;
 
     if (config) {
+      if (hasBlockingBackgroundWork(config)) {
+        const content =
+          "Stop the current session's running background tasks before starting a new session.";
+        context.ui.setDebugMessage(content);
+        if (context.executionMode !== 'interactive') {
+          return {
+            type: 'message' as const,
+            messageType: 'error' as const,
+            content,
+          };
+        }
+        return;
+      }
+
       // Fire SessionEnd event (non-blocking to avoid UI lag)
       config
         .getHookSystem()
@@ -35,6 +65,7 @@ export const clearCommand: SlashCommand = {
           config.getDebugLogger().warn(`SessionEnd hook failed: ${err}`);
         });
 
+      resetBackgroundStateForSessionSwitch(config);
       const newSessionId = config.startNewSession();
 
       // Reset UI telemetry metrics for the new session

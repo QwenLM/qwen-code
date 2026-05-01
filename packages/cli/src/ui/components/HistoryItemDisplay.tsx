@@ -64,6 +64,21 @@ interface HistoryItemDisplayProps {
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
   availableTerminalHeightGemini?: number;
+  /**
+   * When the item is a `tool_group`, an optional short LLM-generated label
+   * summarizing the batch. Replaces the generic "Tool × N" line in compact
+   * mode. Computed by the parent from `tool_use_summary` history items.
+   */
+  compactLabel?: string;
+  /**
+   * When the item is a `tool_use_summary`, true if a sibling tool_group has
+   * absorbed this label via its compact-mode header. The standalone `● <label>`
+   * line is suppressed in that case. False for force-expanded groups in
+   * compact mode (they render through the full ToolGroupMessage path and
+   * don't consume compactLabel, so the standalone line is the label's only
+   * path to the screen) and for all tool_use_summary items in full mode.
+   */
+  summaryAbsorbed?: boolean;
 }
 
 const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
@@ -77,6 +92,8 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   activeShellPtyId,
   embeddedShellFocused,
   availableTerminalHeightGemini,
+  compactLabel,
+  summaryAbsorbed = false,
 }) => {
   const marginTop =
     item.type === 'gemini_content' || item.type === 'gemini_thought_content'
@@ -198,8 +215,33 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           memoryWriteCount={itemForDisplay.memoryWriteCount}
           memoryReadCount={itemForDisplay.memoryReadCount}
           isUserInitiated={itemForDisplay.isUserInitiated}
+          compactLabel={compactLabel}
         />
       )}
+      {/*
+        `tool_use_summary` as a standalone inline item.
+
+        In full mode (`compactMode=false`), the label arrives via the fast-model
+        call AFTER the tool_group has been committed to Ink's append-only
+        <Static>, so we cannot update the tool_group's header retroactively.
+        Rendering a standalone `● <label>` line appends cleanly.
+
+        In compact mode, the label is normally absorbed into the merged
+        tool_group's header (via `compactLabel` prop to CompactToolGroupDisplay),
+        and `summaryAbsorbed=true` is set so this block does nothing. But when
+        the sibling tool_group is force-expanded (errors, confirmations,
+        user-initiated, focused shell), the full-expand path ignores
+        `compactLabel`, and `MainContent` leaves `summaryAbsorbed=false` —
+        the standalone line below is then the label's only route to the UI,
+        which is exactly the case where a summary is most diagnostically
+        useful ("Fixed NPE in UserService" on an errored batch).
+      */}
+      {itemForDisplay.type === 'tool_use_summary' &&
+        (!compactMode || !summaryAbsorbed) && (
+          <Box paddingLeft={1}>
+            <Text dimColor>● {itemForDisplay.summary}</Text>
+          </Box>
+        )}
       {itemForDisplay.type === 'compression' && (
         <CompressionMessage compression={itemForDisplay.compression} />
       )}

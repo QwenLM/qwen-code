@@ -14,6 +14,7 @@
  * For persistent interactive agents, see AgentInteractive (Phase 2).
  */
 
+import type { Content } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import type {
@@ -136,6 +137,7 @@ export class AgentHeadless {
   private readonly core: AgentCore;
   private finalText: string = '';
   private terminateMode: AgentTerminateMode = AgentTerminateMode.ERROR;
+  private externalMessageProvider?: () => string[];
 
   private constructor(core: AgentCore) {
     this.core = core;
@@ -193,6 +195,21 @@ export class AgentHeadless {
     context: ContextState,
     externalSignal?: AbortSignal,
   ): Promise<void> {
+    const initialMessagesOverride = context.get('initial_messages_override') as
+      | Content[]
+      | undefined;
+    // Record the initial user turn in the observable message log before
+    // anything that can throw — createChat / prepareTools failures still
+    // get a transcript showing the task that was asked, which is what
+    // the background-agent detail view reads via AgentCore.getMessages().
+    // Mirrors AgentInteractive's run loop.
+    const initialTaskText = String(
+      (context.get('task_prompt') as string) ?? 'Get Started!',
+    );
+    if (!initialMessagesOverride || initialMessagesOverride.length === 0) {
+      this.core.pushMessage('user', initialTaskText);
+    }
+
     const chat = await this.core.createChat(context);
 
     if (!chat) {
@@ -214,12 +231,10 @@ export class AgentHeadless {
 
     const toolsList = await this.core.prepareTools();
 
-    const initialTaskText = String(
-      (context.get('task_prompt') as string) ?? 'Get Started!',
-    );
-    const initialMessages = [
-      { role: 'user' as const, parts: [{ text: initialTaskText }] },
-    ];
+    const initialMessages =
+      initialMessagesOverride && initialMessagesOverride.length > 0
+        ? initialMessagesOverride
+        : [{ role: 'user' as const, parts: [{ text: initialTaskText }] }];
 
     const startTime = Date.now();
     this.core.executionStats.startTimeMs = startTime;
@@ -254,6 +269,7 @@ export class AgentHeadless {
           maxTurns: this.core.runConfig.max_turns,
           maxTimeMinutes: this.core.runConfig.max_time_minutes,
           startTimeMs: startTime,
+          getExternalMessages: this.externalMessageProvider,
         },
       );
 
@@ -348,6 +364,14 @@ export class AgentHeadless {
 
   getTerminateMode(): AgentTerminateMode {
     return this.terminateMode;
+  }
+
+  /**
+   * Sets a callback that the reasoning loop calls between tool rounds
+   * to drain external messages (e.g. from SendMessage tool).
+   */
+  setExternalMessageProvider(provider: () => string[]): void {
+    this.externalMessageProvider = provider;
   }
 
   get name(): string {

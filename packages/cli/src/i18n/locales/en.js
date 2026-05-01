@@ -1361,6 +1361,8 @@ export default {
     'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
   'Bring your own API key': 'Bring your own API key',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)',
   'API-KEY': 'API-KEY',
   'Use coding plan credentials or your own api-keys/providers.':
     'Use coding plan credentials or your own api-keys/providers.',
@@ -1689,6 +1691,7 @@ export default {
   'Command Format Migration': 'Command Format Migration',
   'Found {{count}} TOML command file:': 'Found {{count}} TOML command file:',
   'Found {{count}} TOML command files:': 'Found {{count}} TOML command files:',
+  'Current tasks': 'Current tasks',
   '... and {{count}} more': '... and {{count}} more',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'The TOML format is deprecated. Would you like to migrate them to Markdown format?',

@@ -114,11 +114,16 @@ export function parseSkillContent(
 
   // Extract optional model field
   const model = parseModelField(frontmatter);
+  const argumentHint =
+    typeof frontmatter['argument-hint'] === 'string'
+      ? frontmatter['argument-hint']
+      : undefined;
 
   const config: SkillConfig = {
     name,
     description,
     allowedTools,
+    argumentHint,
     model,
     filePath,
     body: body.trim(),

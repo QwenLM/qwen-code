@@ -18,6 +18,7 @@ import {
   USER_AGREEMENT_RATE_HIGH,
   USER_AGREEMENT_RATE_MEDIUM,
 } from '../utils/displayUtils.js';
+import { getRenderableGradientColors } from '../utils/gradientUtils.js';
 import { computeSessionStats } from '../utils/computeStats.js';
 import { flattenModelsBySource } from '../utils/modelsBySource.js';
 import { t } from '../../i18n/index.js';
@@ -194,8 +195,9 @@ export const StatsDisplay: React.FC<StatsDisplayProps> = ({
 
   const renderTitle = () => {
     if (title) {
-      return theme.ui.gradient && theme.ui.gradient.length > 0 ? (
-        <Gradient colors={theme.ui.gradient}>
+      const gradientColors = getRenderableGradientColors(theme.ui.gradient);
+      return gradientColors ? (
+        <Gradient colors={gradientColors}>
           <Text bold color={theme.text.primary}>
             {title}
           </Text>

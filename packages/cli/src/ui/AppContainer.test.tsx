@@ -15,6 +15,7 @@ import {
 } from 'vitest';
 import { render, cleanup } from 'ink-testing-library';
 import { AppContainer, dedupeNewestFirst } from './AppContainer.js';
+import ansiEscapes from 'ansi-escapes';
 import {
   type Config,
   makeFakeConfig,
@@ -28,8 +29,9 @@ import {
   UIActionsContext,
   type UIActions,
 } from './contexts/UIActionsContext.js';
-import { ToolCallStatus } from './types.js';
+import { type HistoryItem, ToolCallStatus } from './types.js';
 import { useContext } from 'react';
+import { Box, measureElement } from 'ink';
 
 // Mock useStdout to capture terminal title writes
 let mockStdout: { write: ReturnType<typeof vi.fn> };
@@ -49,7 +51,7 @@ let capturedUIActions: UIActions;
 function TestContextConsumer() {
   capturedUIState = useContext(UIStateContext)!;
   capturedUIActions = useContext(UIActionsContext)!;
-  return null;
+  return <Box ref={capturedUIState.mainControlsRef} />;
 }
 
 vi.mock('./App.js', () => ({
@@ -121,7 +123,6 @@ import { useSessionStats } from './contexts/SessionContext.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
-import { measureElement } from 'ink';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core';
 
@@ -150,6 +151,7 @@ describe('AppContainer State Management', () => {
   const mockedUseTextBuffer = useTextBuffer as Mock;
   const mockedUseLogger = useLogger as Mock;
   const mockedUseLoadingIndicator = useLoadingIndicator as Mock;
+  const mockedUseTerminalSize = useTerminalSize as Mock;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -190,9 +192,17 @@ describe('AppContainer State Management', () => {
       onAuthError: vi.fn(),
       isAuthDialogOpen: false,
       isAuthenticating: false,
+      pendingAuthType: undefined,
+      externalAuthState: null,
+      qwenAuthState: {
+        deviceAuth: null,
+        authStatus: 'idle',
+        authMessage: null,
+      },
       handleAuthSelect: vi.fn(),
       handleCodingPlanSubmit: vi.fn(),
       handleAlibabaStandardSubmit: vi.fn(),
+      handleOpenRouterSubmit: vi.fn(),
       openAuthDialog: vi.fn(),
       cancelAuthentication: vi.fn(),
     });
@@ -267,6 +277,7 @@ describe('AppContainer State Management', () => {
       elapsedTime: '0.0s',
       currentLoadingPhrase: '',
     });
+    mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
 
     // Mock Config
     mockConfig = makeFakeConfig();
@@ -426,6 +437,111 @@ describe('AppContainer State Management', () => {
           />,
         );
       }).not.toThrow();
+    });
+
+    it('refreshStatic clears the terminal before remounting history', () => {
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.refreshStatic();
+
+      expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
+    });
+
+    it('does not clear the terminal just because width changed', () => {
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      mockStdout.write.mockClear();
+
+      mockedUseTerminalSize.mockReturnValue({ columns: 100, rows: 24 });
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearTerminal,
+      );
+    });
+
+    it('handleClearScreen avoids a second clearTerminal write', () => {
+      const clearSpy = vi.spyOn(console, 'clear').mockImplementation(() => {});
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleClearScreen();
+
+      expect(clearSpy).toHaveBeenCalledTimes(1);
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearTerminal,
+      );
+
+      clearSpy.mockRestore();
+    });
+
+    it('passes a remount-only refresh callback to slash commands', () => {
+      let slashRefreshStatic: (() => void) | undefined;
+      mockedUseSlashCommandProcessor.mockImplementation(
+        (
+          _config,
+          _settings,
+          _addItem,
+          _clearItems,
+          _loadHistory,
+          refreshStatic,
+        ) => {
+          slashRefreshStatic = refreshStatic;
+          return {
+            handleSlashCommand: vi.fn(),
+            slashCommands: [],
+            pendingHistoryItems: [],
+            commandContext: {},
+            shellConfirmationRequest: null,
+            confirmationRequest: null,
+          };
+        },
+      );
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      slashRefreshStatic?.();
+
+      expect(slashRefreshStatic).toBeDefined();
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearTerminal,
+      );
     });
 
     it('provides ConfigContext with config object', () => {
@@ -1273,6 +1389,43 @@ describe('AppContainer State Management', () => {
   describe('Terminal Height Calculation', () => {
     const mockedMeasureElement = measureElement as Mock;
     const mockedUseTerminalSize = useTerminalSize as Mock;
+    const makeTodoHistory = (
+      status: 'pending' | 'in_progress' | 'completed',
+    ): HistoryItem[] => [
+      {
+        type: 'tool_group',
+        id: 1,
+        tools: [
+          {
+            callId: 'todo-1',
+            name: 'TodoWrite',
+            description: 'Update todos',
+            resultDisplay: {
+              type: 'todo_list',
+              todos: [
+                {
+                  id: 'todo-1',
+                  content: 'Run focused tests',
+                  status,
+                },
+              ],
+            },
+            status: ToolCallStatus.Success,
+            confirmationDetails: undefined,
+          },
+        ],
+      },
+      {
+        type: 'gemini',
+        id: 2,
+        text: 'First response after todo',
+      },
+      {
+        type: 'gemini',
+        id: 3,
+        text: 'Second response after todo',
+      },
+    ];
 
     it('should prevent terminal height from being less than 1', () => {
       const resizePtySpy = vi.spyOn(ShellExecutionService, 'resizePty');
@@ -1308,6 +1461,44 @@ describe('AppContainer State Management', () => {
       // Check the height argument specifically
       expect(lastCall[2]).toBe(1);
     });
+
+    it('does not remeasure footer height for sticky todo status-only updates', () => {
+      const historyManager = {
+        history: makeTodoHistory('pending'),
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      };
+      mockedUseHistory.mockReturnValue(historyManager);
+      mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
+      mockedMeasureElement.mockReturnValue({ width: 80, height: 4 });
+
+      const view = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const callsAfterInitialRender = mockedMeasureElement.mock.calls.length;
+
+      historyManager.history = makeTodoHistory('in_progress');
+      view.rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(mockedMeasureElement).toHaveBeenCalledTimes(
+        callsAfterInitialRender,
+      );
+    });
   });
 
   describe('Keyboard Input Handling', () => {
@@ -1319,7 +1510,17 @@ describe('AppContainer State Management', () => {
         onAuthError: vi.fn(),
         isAuthDialogOpen: false,
         isAuthenticating: true,
+        pendingAuthType: undefined,
+        externalAuthState: null,
+        qwenAuthState: {
+          deviceAuth: null,
+          authStatus: 'idle',
+          authMessage: null,
+        },
         handleAuthSelect: vi.fn(),
+        handleCodingPlanSubmit: vi.fn(),
+        handleAlibabaStandardSubmit: vi.fn(),
+        handleOpenRouterSubmit: vi.fn(),
         openAuthDialog: vi.fn(),
         cancelAuthentication: vi.fn(),
       });

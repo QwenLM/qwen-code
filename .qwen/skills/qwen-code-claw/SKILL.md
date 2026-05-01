@@ -65,27 +65,27 @@ To use acpx:
 
 1.  **Install acpx globally** (recommended) or use npx:
 
-   ```bash
-   npm install -g acpx@latest
-   ```
+```bash
+npm install -g acpx@latest
+```
 
 Or without installing:
 
-   ```bash
-   npx acpx@latest
-   ```
+```bash
+npx acpx@latest
+```
 
 2.  **Install the acpx skill** for full reference:
 
-   ```bash
-   npx acpx@latest --skill install acpx
-   ```
+```bash
+npx acpx@latest --skill install acpx
+```
 
 3.  **Read the acpx skill reference** for every command, flag, and workflow
-   pattern: See the [ACPX Reference](#acpx-reference) section below for details
+    pattern: See the [ACPX Reference](#acpx-reference) section below for details
 
 4.  **For complete CLI reference with all options and examples**:
-   https://raw.githubusercontent.com/openclaw/acpx/main/docs/CLI.md
+    https://raw.githubusercontent.com/openclaw/acpx/main/docs/CLI.md
 
 From now on, when you need to delegate work to Qwen Code, use `acpx` instead of
 spawning raw terminal sessions. For example:
@@ -96,7 +96,7 @@ npx acpx@latest qwen "refactor the auth module"
 npx acpx@latest qwen exec "one-shot: summarize this repo"
 ```
 
->  **Tip:** You should typically use the `--approve-all` flag to prevent task
+> **Tip:** You should typically use the `--approve-all` flag to prevent task
 > interruptions.
 
 ## Practical Workflows
@@ -207,17 +207,17 @@ Full reference: `docs/users/configuration/model-providers.md`.
 ### Key Features
 
 - Approval Mode: control tool execution permissions.
-   See `docs/users/features/approval-mode.md`.
+  See `docs/users/features/approval-mode.md`.
 - MCP: Model Context Protocol server integration.
-   See `docs/users/features/mcp.md`.
+  See `docs/users/features/mcp.md`.
 - Skills: reusable skill system via `/skill`.
-   See `docs/users/features/skills.md`.
+  See `docs/users/features/skills.md`.
 - Sub-agents: delegate tasks to specialized agents.
-   See `docs/users/features/sub-agents.md`.
+  See `docs/users/features/sub-agents.md`.
 - Sandbox: secure code execution environment.
-   See `docs/users/features/sandbox.md`.
+  See `docs/users/features/sandbox.md`.
 - Headless: non-interactive or CI mode.
-   See `docs/users/features/headless.md`.
+  See `docs/users/features/headless.md`.
 
 ## ACPX Reference
 
@@ -254,7 +254,7 @@ acpx [global options] <agent> prompt [options] [prompt text...]
 acpx [global options] <agent> exec [options] [prompt text...]
 ```
 
->  **Note:** If prompt text is omitted and stdin is piped, `acpx` reads prompt
+> **Note:** If prompt text is omitted and stdin is piped, `acpx` reads prompt
 > from stdin.
 
 ### Global Options

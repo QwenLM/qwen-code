@@ -20,7 +20,6 @@ const emptyCore = (): ModelMetricsCore => ({
     total: 0,
     cached: 0,
     thoughts: 0,
-    tool: 0,
   },
 });
 

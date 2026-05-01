@@ -7,7 +7,15 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterAll,
+  vi,
+} from 'vitest';
 import {
   escapePath,
   resolvePath,
@@ -18,6 +26,7 @@ import {
   shortenPath,
   tildeifyPath,
   getProjectHash,
+  _resetValidatePathCacheForTest,
 } from './paths.js';
 import type { Config } from '../config/config.js';
 
@@ -431,6 +440,14 @@ describe('validatePath', () => {
     });
   });
 
+  beforeEach(() => {
+    // Module-level isDirectory cache persists across tests; tests here
+    // mutate the same absolute paths between cases (create file, remove,
+    // re-create as potentially-different type) so we reset to avoid stale
+    // lookups masking regressions.
+    _resetValidatePathCacheForTest();
+  });
+
   afterAll(() => {
     fs.rmSync(workspaceRoot, { recursive: true, force: true });
   });
@@ -480,6 +497,36 @@ describe('validatePath', () => {
 
   it('validates paths at workspace root', () => {
     expect(() => validatePath(config, workspaceRoot)).not.toThrow();
+  });
+
+  it('does not cache ENOENT — recreating the path between calls succeeds', () => {
+    // Regression guard: a path that's missing at first-check, then created,
+    // must NOT be rejected on the second call. Positive stats are cached;
+    // ENOENT paths are not. This lets the model create a file with Edit
+    // and then have the next tool call see it.
+    const ephemeralDir = path.join(workspaceRoot, 'late-created');
+    expect(() => validatePath(config, ephemeralDir)).toThrowError(
+      /Path does not exist:/,
+    );
+    fs.mkdirSync(ephemeralDir);
+    try {
+      expect(() => validatePath(config, ephemeralDir)).not.toThrow();
+    } finally {
+      fs.rmSync(ephemeralDir, { recursive: true, force: true });
+    }
+  });
+
+  it('caches positive isDirectory — repeat call does not re-stat', () => {
+    const spy = vi.spyOn(fs, 'statSync');
+    const dir = path.join(workspaceRoot, 'subdir');
+    try {
+      validatePath(config, dir);
+      const afterFirst = spy.mock.calls.length;
+      validatePath(config, dir);
+      expect(spy.mock.calls.length).toBe(afterFirst);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('validates paths in allowed directories', () => {

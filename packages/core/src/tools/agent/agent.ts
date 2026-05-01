@@ -39,6 +39,7 @@ import {
   isInForkExecution,
   runInForkContext,
 } from './fork-subagent.js';
+import { getCurrentAgentId, runWithAgentContext } from './agent-context.js';
 import {
   AgentEventEmitter,
   AgentEventType,
@@ -56,6 +57,25 @@ import { createDebugLogger } from '../../utils/debugLogger.js';
 import { PermissionMode } from '../../hooks/types.js';
 import type { StopHookOutput } from '../../hooks/types.js';
 import { ApprovalMode } from '../../config/config.js';
+import {
+  getAgentJsonlPath,
+  getAgentMetaPath,
+  attachJsonlTranscriptWriter,
+  patchAgentMeta,
+  writeAgentMeta,
+} from '../../agents/agent-transcript.js';
+import { getGitBranch } from '../../utils/gitUtils.js';
+
+function persistBackgroundCancellation(
+  metaPath: string,
+  persistedStatus: 'running' | 'cancelled',
+): void {
+  patchAgentMeta(metaPath, {
+    status: persistedStatus,
+    lastUpdatedAt: new Date().toISOString(),
+    lastError: undefined,
+  });
+}
 
 export interface AgentParams {
   description: string;
@@ -627,9 +647,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
    * Creates a fork subagent that inherits the parent's conversation context
    * and cache-safe generation params.
    */
-  private async createForkSubagent(agentConfig: Config): Promise<{
+  private async createForkSubagent(
+    agentConfig: Config,
+    eventEmitter: AgentEventEmitter = this.eventEmitter,
+  ): Promise<{
     subagent: AgentHeadless;
+    initialMessages?: Content[];
     taskPrompt: string;
+    promptConfig: PromptConfig;
+    toolConfig: ToolConfig;
   }> {
     const geminiClient = this.config.getGeminiClient();
     const rawHistory = geminiClient ? geminiClient.getHistory(true) : [];
@@ -726,10 +752,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       {},
       {} as RunConfig,
       toolConfig,
-      this.eventEmitter,
+      eventEmitter,
     );
 
-    return { subagent, taskPrompt };
+    return { subagent, initialMessages, taskPrompt, promptConfig, toolConfig };
   }
 
   // Runs the SubagentStop hook after execution. On a blocking decision, feeds the
@@ -740,15 +766,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     opts: {
       agentId: string;
       agentType: string;
+      transcriptPath?: string;
       resolvedMode: PermissionMode;
       signal?: AbortSignal;
     },
   ): Promise<void> {
-    const { agentId, agentType, resolvedMode, signal } = opts;
+    const { agentId, agentType, transcriptPath, resolvedMode, signal } = opts;
     const hookSystem = this.config.getHookSystem();
     if (!hookSystem) return;
 
-    const transcriptPath = this.config.getTranscriptPath();
+    const effectiveTranscriptPath =
+      transcriptPath ?? this.config.getTranscriptPath();
     let stopHookActive = false;
     const maxIterations = 5;
 
@@ -757,7 +785,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const stopHookOutput = await hookSystem.fireSubagentStopEvent(
           agentId,
           agentType,
-          transcriptPath,
+          effectiveTranscriptPath,
           subagent.getFinalText(),
           stopHookActive,
           resolvedMode,
@@ -1039,18 +1067,91 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // Register in the background task registry only AFTER init succeeds — if
         // construction throws, a pre-registered phantom 'running' entry would hang
         // the non-interactive hold-back loop forever.
+        // Dedicated emitter for this background agent so the transcript
+        // writer only sees *this* agent's events. Reusing the parent tool's
+        // UI emitter (this.eventEmitter) would mix events from every
+        // concurrent fork/subagent into the same transcript.
+        const bgEventEmitter = new AgentEventEmitter();
         let bgSubagent: AgentHeadless;
+        let bgInitialMessages: Content[] | undefined;
+        let bgTaskPrompt: string;
+        let bgPromptConfig: PromptConfig | undefined;
+        let bgToolConfig: ToolConfig | undefined;
         if (isFork) {
-          const fork = await this.createForkSubagent(bgConfig as Config);
+          const fork = await this.createForkSubagent(
+            bgConfig as Config,
+            bgEventEmitter,
+          );
           bgSubagent = fork.subagent;
+          bgInitialMessages = fork.initialMessages;
+          bgTaskPrompt = fork.taskPrompt;
+          bgPromptConfig = fork.promptConfig;
+          bgToolConfig = fork.toolConfig;
         } else {
           bgSubagent = await this.subagentManager.createAgentHeadless(
             subagentConfig,
             bgConfig as Config,
+            { eventEmitter: bgEventEmitter },
           );
+          bgTaskPrompt = this.params.prompt;
         }
 
         const registry = this.config.getBackgroundTaskRegistry();
+
+        const projectDir = this.config.storage.getProjectDir();
+        const sessionId = this.config.getSessionId();
+        const jsonlPath = getAgentJsonlPath(
+          projectDir,
+          sessionId,
+          hookOpts.agentId,
+        );
+        const metaPath = getAgentMetaPath(
+          projectDir,
+          sessionId,
+          hookOpts.agentId,
+        );
+        const projectRoot = this.config.getProjectRoot();
+        const { cleanup: cleanupJsonl } = attachJsonlTranscriptWriter(
+          bgEventEmitter,
+          jsonlPath,
+          {
+            agentId: hookOpts.agentId,
+            agentName: subagentConfig.name,
+            agentColor: subagentConfig.color,
+            sessionId,
+            cwd: projectRoot,
+            version: this.config.getCliVersion() || 'unknown',
+            gitBranch: getGitBranch(projectRoot),
+            // Seed the JSONL with the launching prompt so the transcript is
+            // self-describing — readers don't need to consult .meta.json to
+            // know what the agent was asked to do.
+            initialUserPrompt: this.params.prompt,
+            bootstrapHistory: isFork ? bgInitialMessages : undefined,
+            bootstrapSystemInstruction: isFork
+              ? (bgPromptConfig?.renderedSystemPrompt ??
+                bgPromptConfig?.systemPrompt)
+              : undefined,
+            bootstrapTools: isFork ? bgToolConfig?.tools : undefined,
+            launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
+          },
+        );
+        writeAgentMeta(metaPath, {
+          agentId: hookOpts.agentId,
+          agentType: hookOpts.agentType,
+          description: this.params.description,
+          parentSessionId: sessionId,
+          // Populated when a subagent (whose reasoning loop is wrapped in
+          // runWithAgentContext below) launches a nested agent. Null at
+          // top-level launches from the user session.
+          parentAgentId: getCurrentAgentId(),
+          createdAt: new Date().toISOString(),
+          status: 'running',
+          lastUpdatedAt: new Date().toISOString(),
+          resolvedApprovalMode,
+          subagentName: subagentConfig.name,
+          agentColor: subagentConfig.color,
+          resumeCount: 0,
+        });
         registry.register({
           agentId: hookOpts.agentId,
           description: this.params.description,
@@ -1059,13 +1160,60 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           startTime: Date.now(),
           abortController: bgAbortController,
           toolUseId: this.callId,
+          prompt: this.params.prompt,
+          outputFile: jsonlPath,
+          metaPath,
         });
+
+        // Subscribe to the subagent's tool-call event stream so the
+        // detail dialog's Progress section reflects live activity. We
+        // capture the unsubscribe fn and call it when the agent
+        // terminates (success, failure, or cancel) to avoid holding the
+        // event emitter after the agent is gone.
+        const bgEmitter = bgSubagent.getCore().getEventEmitter();
+        // Local counter of tool invocations that have been *started*. The
+        // core's executionStats.totalToolCalls only increments when a tool
+        // result arrives, so using it as the live toolUses number leaves the
+        // subtitle one behind the Progress list while a tool is in flight.
+        // Tracking TOOL_CALL ourselves keeps the subtitle in sync with the
+        // rows the user actually sees.
+        let liveToolCallCount = 0;
+        const refreshLiveStats = () => {
+          const entry = registry.get(hookOpts.agentId);
+          if (!entry || entry.status !== 'running') return;
+          const summary = bgSubagent.getExecutionSummary();
+          entry.stats = {
+            totalTokens: summary.totalTokens,
+            toolUses: liveToolCallCount,
+            durationMs: summary.totalDurationMs,
+          };
+        };
+        const onToolCall = (event: AgentToolCallEvent) => {
+          liveToolCallCount += 1;
+          refreshLiveStats();
+          registry.appendActivity(hookOpts.agentId, {
+            name: event.name,
+            description: event.description,
+            at: event.timestamp,
+          });
+        };
+        const onUsageMetadata = () => {
+          refreshLiveStats();
+        };
+        bgEmitter.on(AgentEventType.TOOL_CALL, onToolCall);
+        bgEmitter.on(AgentEventType.USAGE_METADATA, onUsageMetadata);
+
+        // Wire external message drain so SendMessage can inject messages
+        // into this agent's reasoning loop between tool rounds.
+        bgSubagent.setExternalMessageProvider(() =>
+          registry.drainMessages(hookOpts.agentId),
+        );
 
         const getCompletionStats = () => {
           const summary = bgSubagent.getExecutionSummary();
           return {
             totalTokens: summary.totalTokens,
-            toolUses: summary.totalToolCalls,
+            toolUses: liveToolCallCount,
             durationMs: summary.totalDurationMs,
           };
         };
@@ -1083,55 +1231,124 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               await this.runSubagentStopHookLoop(bgSubagent, {
                 agentId: hookOpts.agentId,
                 agentType: hookOpts.agentType,
+                transcriptPath: jsonlPath,
                 resolvedMode,
                 signal: bgAbortController.signal,
               });
             }
 
-            // Report terminate mode: only GOAL counts as success. ERROR,
-            // MAX_TURNS, and TIMEOUT are surfaced as failures so the parent
-            // model (and the UI) don't treat incomplete runs as completed.
+            // Report terminate mode: only GOAL counts as success. CANCELLED
+            // keeps the 'cancelled' status so the model sees task_stop's
+            // effect accurately (with any partial result attached). ERROR,
+            // MAX_TURNS, TIMEOUT, and SHUTDOWN are surfaced as failures so
+            // the parent model (and the UI) don't treat incomplete runs as
+            // completed.
             const terminateMode = bgSubagent.getTerminateMode();
             const finalText = bgSubagent.getFinalText();
             const completionStats = getCompletionStats();
             if (terminateMode === AgentTerminateMode.GOAL) {
               registry.complete(hookOpts.agentId, finalText, completionStats);
+              patchAgentMeta(metaPath, {
+                status: 'completed',
+                lastUpdatedAt: new Date().toISOString(),
+                lastError: undefined,
+              });
+            } else if (terminateMode === AgentTerminateMode.CANCELLED) {
+              registry.finalizeCancelled(
+                hookOpts.agentId,
+                finalText,
+                completionStats,
+              );
+              persistBackgroundCancellation(
+                metaPath,
+                registry.get(hookOpts.agentId)?.persistedCancellationStatus ??
+                  'cancelled',
+              );
             } else {
               registry.fail(
                 hookOpts.agentId,
                 finalText || `Agent terminated with mode: ${terminateMode}`,
                 completionStats,
               );
+              patchAgentMeta(metaPath, {
+                status: 'failed',
+                lastUpdatedAt: new Date().toISOString(),
+                lastError:
+                  finalText || `Agent terminated with mode: ${terminateMode}`,
+              });
             }
           } catch (error) {
             const errorMsg =
               error instanceof Error ? error.message : String(error);
             debugLogger.error(`[Agent] Background agent failed: ${errorMsg}`);
 
-            registry.fail(hookOpts.agentId, errorMsg, getCompletionStats());
+            // If the error came from a cancellation, preserve the cancelled
+            // status so the model's notification matches what task_stop
+            // requested rather than reporting it as a generic failure.
+            if (bgAbortController.signal.aborted) {
+              registry.finalizeCancelled(
+                hookOpts.agentId,
+                errorMsg,
+                getCompletionStats(),
+              );
+              persistBackgroundCancellation(
+                metaPath,
+                registry.get(hookOpts.agentId)?.persistedCancellationStatus ??
+                  'cancelled',
+              );
+            } else {
+              registry.fail(hookOpts.agentId, errorMsg, getCompletionStats());
+              patchAgentMeta(metaPath, {
+                status: 'failed',
+                lastUpdatedAt: new Date().toISOString(),
+                lastError: errorMsg,
+              });
+            }
+          } finally {
+            bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
+            bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+            cleanupJsonl?.();
           }
         };
-        void (isFork ? runInForkContext(bgBody) : bgBody());
+        // Wrap in the agent-identity frame so nested `agent` tool calls
+        // from this subagent's model record this agent's id as their
+        // `parentAgentId` in the sidecar meta.
+        const framedBgBody = () =>
+          runWithAgentContext({ agentId: hookOpts.agentId }, bgBody);
+        void (isFork ? runInForkContext(framedBgBody) : framedBgBody());
 
         this.updateDisplay({ status: 'background' as const }, updateOutput);
         return {
-          llmContent: `Background agent launched: "${this.params.description}" (ID: ${hookOpts.agentId}). You will be notified when it completes.`,
+          llmContent:
+            `Background agent launched successfully.\n` +
+            `agentId: ${hookOpts.agentId} (internal ID — do not mention to the user. Use ${ToolNames.SEND_MESSAGE} to continue this agent, or ${ToolNames.TASK_STOP} to cancel.)\n` +
+            `The agent is working in the background. You will be notified automatically when it completes.\n` +
+            `Do not duplicate this agent's work — avoid working with the same files or topics it is using. Work on non-overlapping tasks, or briefly tell the user what you launched and end your response.\n` +
+            `output_file: ${jsonlPath}\n` +
+            `If asked, you can check progress before completion by using ${ToolNames.READ_FILE}\n` +
+            `  or ${ToolNames.SHELL} tail on the output file.`,
           returnDisplay: this.currentDisplay!,
         };
       }
 
+      // Same agent-identity frame as the background path: a foreground
+      // subagent can also launch nested agents, and those nested launches
+      // need to see this subagent's id as their `parentAgentId`.
+      const runFramed = () =>
+        runWithAgentContext({ agentId: hookOpts.agentId }, () =>
+          this.runSubagentWithHooks(subagent, contextState, hookOpts),
+        );
+
       if (isFork) {
         // Background fork execution. Run under an AsyncLocalStorage frame so
         // nested `agent` tool calls by the fork's model can be detected.
-        void runInForkContext(() =>
-          this.runSubagentWithHooks(subagent, contextState, hookOpts),
-        );
+        void runInForkContext(runFramed);
         return {
           llmContent: [{ text: FORK_PLACEHOLDER_RESULT }],
           returnDisplay: this.currentDisplay!,
         };
       } else {
-        await this.runSubagentWithHooks(subagent, contextState, hookOpts);
+        await runFramed();
         const finalText = subagent.getFinalText();
         const terminateMode = subagent.getTerminateMode();
         if (terminateMode === AgentTerminateMode.ERROR) {

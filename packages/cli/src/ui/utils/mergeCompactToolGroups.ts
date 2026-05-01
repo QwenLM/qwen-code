@@ -34,8 +34,12 @@ function isAgentWithPendingConfirmation(
 /**
  * Check if a tool_group history item should be excluded from merging due to force-expand conditions.
  * These conditions match ToolGroupMessage.tsx:105-112 showCompact logic.
+ * Exported so MainContent can determine which callIds get their label
+ * "absorbed" by the compact tool_group header vs which need the standalone
+ * `● <label>` line rendered (force-expanded groups never go through the
+ * compact path, so their label would otherwise be invisible).
  */
-function isForceExpandGroup(
+export function isForceExpandGroup(
   item: HistoryItem,
   embeddedShellFocused: boolean,
   activeShellPtyId: number | undefined,
@@ -83,12 +87,16 @@ function isForceExpandGroup(
 
 /**
  * Check if an item is hidden in compact mode (so it shouldn't break tool_group adjacency).
- * This mirrors HistoryItemDisplay.tsx:123-142 which hides gemini_thought / gemini_thought_content
- * when compactMode is true.
+ * This mirrors HistoryItemDisplay.tsx which hides:
+ *  - `gemini_thought` / `gemini_thought_content` (thinking — hidden when compactMode is true),
+ *  - `tool_use_summary` (consumed upstream to decorate the adjacent tool_group's label;
+ *    never rendered standalone so it must not break adjacency between two batches).
  */
 function isHiddenInCompactMode(item: HistoryItem): boolean {
   return (
-    item.type === 'gemini_thought' || item.type === 'gemini_thought_content'
+    item.type === 'gemini_thought' ||
+    item.type === 'gemini_thought_content' ||
+    item.type === 'tool_use_summary'
   );
 }
 
@@ -104,18 +112,54 @@ function isHiddenInCompactMode(item: HistoryItem): boolean {
  * @param items - History items array
  * @param embeddedShellFocused - Whether embedded shell is focused
  * @param activeShellPtyId - PTY ID of the active shell (if any)
+ * @param absorbedCallIds - Set of tool callIds whose summary label is consumed
+ *   by a compact-mode tool_group header (i.e., the corresponding tool_group is
+ *   NOT force-expanded). Summaries for these callIds are dropped from the
+ *   merged result so MainContent's refreshStatic heuristic fires and the
+ *   tool_group re-renders with its label. Summaries for force-expanded groups
+ *   pass through unchanged so HistoryItemDisplay can render them as standalone
+ *   `● <label>` lines (the compact path doesn't consume their label).
  * @returns New array with merged tool_groups (does not mutate input)
  */
 export function mergeCompactToolGroups(
   items: HistoryItem[],
   embeddedShellFocused: boolean = false,
   activeShellPtyId: number | undefined = undefined,
+  absorbedCallIds: ReadonlySet<string> = new Set(),
 ): HistoryItem[] {
   const result: HistoryItem[] = [];
   let i = 0;
 
   while (i < items.length) {
     const item = items[i];
+
+    // Drop `tool_use_summary` items whose preceding callIds are *all* absorbed
+    // by a compact tool_group header. Those headers will display the label
+    // directly (via the `compactLabel` lookup in MainContent), so keeping the
+    // standalone summary in the merged result would either double-display the
+    // label (if HistoryItemDisplay rendered both) or, more importantly, would
+    // bump mergedHistory.length lock-step with history.length and prevent
+    // refreshStatic from firing — Ink's <Static> would never repaint the
+    // committed tool_group with the new label.
+    //
+    // Summaries with at least one non-absorbed preceding callId — e.g., when
+    // the corresponding tool_group is force-expanded (errors / confirming /
+    // user-initiated / focused shell) and renders through the full
+    // ToolGroupMessage path that does not consume `compactLabel` — must
+    // survive in the merged result so HistoryItemDisplay can render them as
+    // standalone `● <label>` lines.
+    if (item.type === 'tool_use_summary') {
+      const allAbsorbed =
+        item.precedingToolUseIds.length > 0 &&
+        item.precedingToolUseIds.every((id) => absorbedCallIds.has(id));
+      if (allAbsorbed) {
+        i++;
+        continue;
+      }
+      result.push(item);
+      i++;
+      continue;
+    }
 
     // Pass through non-mergeable items unchanged
     if (

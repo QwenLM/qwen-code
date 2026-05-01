@@ -15,6 +15,7 @@ import {
 } from '../utils/imageHandler.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
+import { stripZeroWidthSpaces } from '@qwen-code/webui';
 import {
   exportSessionToFile,
   parseExportSlashCommand,
@@ -392,7 +393,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
     // Guard: do not process empty or whitespace-only messages.
     // This prevents ghost user-message bubbles when slash-command completions
     // or model-selector interactions clear the input but still trigger a submit.
-    const trimmedText = text.replace(/\u200B/g, '').trim();
+    const trimmedText = stripZeroWidthSpaces(text).trim();
     const hasAttachments = (attachments?.length ?? 0) > 0;
     if (!trimmedText && !hasAttachments) {
       console.warn('[SessionMessageHandler] Ignoring empty message');

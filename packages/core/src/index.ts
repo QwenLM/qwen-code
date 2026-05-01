@@ -68,6 +68,7 @@ export * from './output/types.js';
 export * from './core/client.js';
 export * from './core/contentGenerator.js';
 export * from './core/coreToolScheduler.js';
+export * from './core/permissionFlow.js';
 export * from './core/permission-helpers.js';
 export * from './core/geminiChat.js';
 export * from './core/geminiRequest.js';
@@ -143,6 +144,7 @@ export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
 export * from './services/fileDiscoveryService.js';
+export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
 export * from './services/gitService.js';
 export * from './services/gitWorktreeService.js';
@@ -151,6 +153,8 @@ export * from './services/sessionService.js';
 export * from './services/sessionTitle.js';
 export { stripTerminalControlSequences } from './utils/terminalSafe.js';
 export * from './services/shellExecutionService.js';
+export * from './services/backgroundShellRegistry.js';
+export * from './services/toolUseSummary.js';
 export * from './utils/bareMode.js';
 
 // ============================================================================
@@ -302,6 +306,10 @@ export * from './utils/request-tokenizer/supportedImageFormats.js';
 export { TextTokenizer } from './utils/request-tokenizer/textTokenizer.js';
 export * from './utils/retry.js';
 export * from './utils/ripgrepUtils.js';
+export {
+  detectRuntime,
+  getOrCreateSharedDispatcher,
+} from './utils/runtimeFetchOptions.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/shell-utils.js';
 export * from './utils/subagentGenerator.js';
