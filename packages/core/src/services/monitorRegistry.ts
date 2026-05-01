@@ -25,10 +25,37 @@ export const MAX_CONCURRENT_MONITORS = 16;
 export const MAX_RETAINED_TERMINAL_MONITORS = 128;
 
 function escapeXml(text: string): string {
+  // Escape all five XML metacharacters. `"` and `'` are not strictly
+  // required in element content today, but escaping them defensively keeps
+  // the helper safe to reuse in any future attribute context.
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+/**
+ * Strip C0 control characters (except tab) and C1 control characters from a
+ * string destined for terminal/UI display. The Monitor tool pre-sanitizes
+ * stdout lines before calling `emitEvent`, but we apply the same strip here
+ * as defense-in-depth so that any direct caller of the registry cannot leak
+ * terminal escape sequences or NUL bytes into the `displayText` surface.
+ */
+function stripDisplayControlChars(text: string): string {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code === 0x09) {
+      out += text[i];
+      continue;
+    }
+    if (code < 0x20) continue; // C0 (NUL, BEL, ESC, \n, \r, ...)
+    if (code >= 0x80 && code <= 0x9f) continue; // C1
+    out += text[i];
+  }
+  return out;
 }
 
 export type MonitorStatus = 'running' | 'completed' | 'failed' | 'cancelled';
@@ -255,8 +282,11 @@ export class MonitorRegistry {
   private emitNotification(entry: MonitorEntry, eventLine: string): void {
     if (!this.notificationCallback) return;
 
-    const desc = this.truncateDescription(entry.description);
-    const displayLine = `Monitor "${desc}" event #${entry.eventCount}: ${eventLine}`;
+    const desc = stripDisplayControlChars(
+      this.truncateDescription(entry.description),
+    );
+    const safeEventLine = stripDisplayControlChars(eventLine);
+    const displayLine = `Monitor "${desc}" event #${entry.eventCount}: ${safeEventLine}`;
 
     const xmlParts: string[] = [
       '<task-notification>',

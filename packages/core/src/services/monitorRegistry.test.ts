@@ -275,6 +275,46 @@ describe('MonitorRegistry', () => {
     expect(modelText.match(/<\/task-notification>/g)!.length).toBe(1);
   });
 
+  it('escapes double and single quotes in event lines (defensive for attribute contexts)', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+    registry.register(createEntry());
+
+    registry.emitEvent('mon-1', `she said "hi" and it's ok`);
+
+    const [, modelText] = callback.mock.calls[0] as [string, string];
+    expect(modelText).toContain('&quot;hi&quot;');
+    expect(modelText).toContain('it&apos;s');
+    expect(modelText).not.toContain('"hi"');
+    expect(modelText).not.toContain("it's");
+  });
+
+  it('strips control characters from the displayText (defense-in-depth, not just XML)', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+    registry.register(createEntry());
+
+    // Caller passes a line containing NUL, BEL, ESC, and a C1 control.
+    // The XML path is already escape-safe; the displayText path must also
+    // not leak these bytes into a terminal.
+    registry.emitEvent('mon-1', 'before\x00mid\x07\x1B[31mafter\u0085end');
+
+    const [displayText] = callback.mock.calls[0] as [string, string];
+    // Verify no C0 (except tab) or C1 controls remain. Iterating code
+    // points keeps the assertion free of control characters in the regex
+    // literal, which would otherwise trip `no-control-regex`.
+    for (let i = 0; i < displayText.length; i++) {
+      const code = displayText.charCodeAt(i);
+      const isForbidden =
+        (code < 0x20 && code !== 0x09) || (code >= 0x80 && code <= 0x9f);
+      expect(isForbidden).toBe(false);
+    }
+    expect(displayText).toContain('before');
+    expect(displayText).toContain('mid');
+    expect(displayText).toContain('after');
+    expect(displayText).toContain('end');
+  });
+
   it('propagates toolUseId in notification XML and meta', () => {
     const callback = vi.fn();
     registry.setNotificationCallback(callback);
