@@ -1176,7 +1176,7 @@ describe('runNonInteractive', () => {
     });
   });
 
-  it('does not wait for running monitors before emitting the final headless result', async () => {
+  it('flushes terminal monitor notifications before the final headless result', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(
       OutputFormat.STREAM_JSON,
     );
@@ -1201,8 +1201,28 @@ describe('runNonInteractive', () => {
       '<summary>Monitor emitted event #1.</summary>\n' +
       '<result>ready</result>\n' +
       '</task-notification>';
+    const cancelledXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>cancelled</status>\n' +
+      '<summary>Monitor was cancelled.</summary>\n' +
+      '</task-notification>';
+    let monitorNotificationCallback:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: {
+            monitorId: string;
+            toolUseId?: string;
+            status: 'running' | 'completed' | 'failed' | 'cancelled';
+            eventCount: number;
+          },
+        ) => void)
+      | undefined;
 
     mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      monitorNotificationCallback = cb ?? undefined;
       if (!cb) {
         return;
       }
@@ -1213,9 +1233,18 @@ describe('runNonInteractive', () => {
         eventCount: 1,
       });
     });
-    mockMonitorRegistry.getRunning.mockReturnValue([
-      { monitorId: 'mon_1', status: 'running' },
-    ]);
+    mockMonitorRegistry.abortAll.mockImplementation(() => {
+      monitorNotificationCallback?.(
+        'Monitor "logs" was cancelled.',
+        cancelledXml,
+        {
+          monitorId: 'mon_1',
+          toolUseId: 'tool_mon_1',
+          status: 'cancelled',
+          eventCount: 1,
+        },
+      );
+    });
 
     mockGeminiClient.sendMessageStream
       .mockReturnValueOnce(
@@ -1276,6 +1305,17 @@ describe('runNonInteractive', () => {
           env.data?.task_id === 'mon_1',
       ),
     ).toBe(true);
+    const cancelledNotificationIndex = envelopes.findIndex(
+      (env) =>
+        env.type === 'system' &&
+        env.subtype === 'task_notification' &&
+        env.data?.task_id === 'mon_1' &&
+        env.data?.status === 'cancelled',
+    );
+    const resultIndex = envelopes.findIndex((env) => env.type === 'result');
+    expect(cancelledNotificationIndex).toBeGreaterThanOrEqual(0);
+    expect(resultIndex).toBeGreaterThan(cancelledNotificationIndex);
+    expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(1);
     expect(envelopes.at(-1)).toMatchObject({
       type: 'result',
       is_error: false,
@@ -1337,6 +1377,317 @@ describe('runNonInteractive', () => {
 
     const userEnvelopes = envelopes.filter((env) => env.type === 'user');
     expect(userEnvelopes).toHaveLength(0);
+  });
+
+  it('does not let late monitor output keep one-shot runs alive', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock();
+
+    const writes: string[] = [];
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      if (typeof chunk === 'string') {
+        writes.push(chunk);
+      } else {
+        writes.push(Buffer.from(chunk).toString('utf8'));
+      }
+      return true;
+    });
+
+    const firstNotificationXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>running</status>\n' +
+      '<summary>Monitor emitted event #1.</summary>\n' +
+      '<result>ready</result>\n' +
+      '</task-notification>';
+    const secondNotificationXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>running</status>\n' +
+      '<summary>Monitor emitted event #2.</summary>\n' +
+      '<result>still running</result>\n' +
+      '</task-notification>';
+    const cancelledXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>cancelled</status>\n' +
+      '<summary>Monitor was cancelled.</summary>\n' +
+      '</task-notification>';
+
+    let monitorNotificationCallback:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: {
+            monitorId: string;
+            toolUseId?: string;
+            status: 'running' | 'completed' | 'failed' | 'cancelled';
+            eventCount: number;
+          },
+        ) => void)
+      | undefined;
+
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      monitorNotificationCallback = cb ?? undefined;
+      if (!cb) {
+        return;
+      }
+      cb('Monitor "logs" event #1: ready', firstNotificationXml, {
+        monitorId: 'mon_1',
+        toolUseId: 'tool_mon_1',
+        status: 'running',
+        eventCount: 1,
+      });
+    });
+    mockMonitorRegistry.abortAll.mockImplementation(() => {
+      monitorNotificationCallback?.(
+        'Monitor "logs" was cancelled.',
+        cancelledXml,
+        {
+          monitorId: 'mon_1',
+          toolUseId: 'tool_mon_1',
+          status: 'cancelled',
+          eventCount: 2,
+        },
+      );
+    });
+
+    async function* secondTurnStream(): AsyncGenerator<ServerGeminiStreamEvent> {
+      yield { type: GeminiEventType.Content, value: 'Observed.' };
+      monitorNotificationCallback?.(
+        'Monitor "logs" event #2: still running',
+        secondNotificationXml,
+        {
+          monitorId: 'mon_1',
+          toolUseId: 'tool_mon_1',
+          status: 'running',
+          eventCount: 2,
+        },
+      );
+      yield {
+        type: GeminiEventType.Finished,
+        value: {
+          reason: undefined,
+          usageMetadata: { totalTokenCount: 1 },
+        },
+      };
+    }
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Monitor launched.' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 2 },
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(secondTurnStream());
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Watch the logs',
+      'prompt-monitor-cutover',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+
+    const envelopes = writes
+      .join('')
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line));
+    const monitorNotifications = envelopes.filter(
+      (env) =>
+        env.type === 'system' &&
+        env.subtype === 'task_notification' &&
+        env.data?.task_id === 'mon_1',
+    );
+    expect(
+      monitorNotifications.filter((env) => env.data?.status === 'running'),
+    ).toHaveLength(2);
+    expect(
+      monitorNotifications.some((env) => env.data?.status === 'cancelled'),
+    ).toBe(true);
+    expect(envelopes.at(-1)).toMatchObject({
+      type: 'result',
+      is_error: false,
+    });
+  });
+
+  it('streams late monitor output to the SDK before one-shot completion', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock();
+
+    const writes: string[] = [];
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      if (typeof chunk === 'string') {
+        writes.push(chunk);
+      } else {
+        writes.push(Buffer.from(chunk).toString('utf8'));
+      }
+      return true;
+    });
+
+    let keepBackgroundTaskOpen = true;
+    let lateMonitorEventEmitted = false;
+    mockBackgroundTaskRegistry.hasUnfinalizedTasks.mockImplementation(() => {
+      if (keepBackgroundTaskOpen && !lateMonitorEventEmitted) {
+        lateMonitorEventEmitted = true;
+        monitorNotificationCallback?.(
+          'Monitor "logs" event #2: still running',
+          secondNotificationXml,
+          {
+            monitorId: 'mon_1',
+            toolUseId: 'tool_mon_1',
+            status: 'running',
+            eventCount: 2,
+          },
+        );
+      }
+      return keepBackgroundTaskOpen;
+    });
+
+    const firstNotificationXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>running</status>\n' +
+      '<summary>Monitor emitted event #1.</summary>\n' +
+      '<result>ready</result>\n' +
+      '</task-notification>';
+    const secondNotificationXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>running</status>\n' +
+      '<summary>Monitor emitted event #2.</summary>\n' +
+      '<result>still running</result>\n' +
+      '</task-notification>';
+    const cancelledXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>cancelled</status>\n' +
+      '<summary>Monitor was cancelled.</summary>\n' +
+      '</task-notification>';
+
+    let monitorNotificationCallback:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: {
+            monitorId: string;
+            toolUseId?: string;
+            status: 'running' | 'completed' | 'failed' | 'cancelled';
+            eventCount: number;
+          },
+        ) => void)
+      | undefined;
+
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      monitorNotificationCallback = cb ?? undefined;
+      if (!cb) {
+        return;
+      }
+      cb('Monitor "logs" event #1: ready', firstNotificationXml, {
+        monitorId: 'mon_1',
+        toolUseId: 'tool_mon_1',
+        status: 'running',
+        eventCount: 1,
+      });
+    });
+    mockMonitorRegistry.abortAll.mockImplementation(() => {
+      monitorNotificationCallback?.(
+        'Monitor "logs" was cancelled.',
+        cancelledXml,
+        {
+          monitorId: 'mon_1',
+          toolUseId: 'tool_mon_1',
+          status: 'cancelled',
+          eventCount: 2,
+        },
+      );
+    });
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Monitor launched.' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 2 },
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Observed.' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+    const runPromise = runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Watch the logs',
+      'prompt-monitor-late-sdk',
+    );
+
+    await vi.waitFor(() => {
+      const envelopes = writes
+        .join('')
+        .split('\n')
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line));
+      const monitorNotifications = envelopes.filter(
+        (env) =>
+          env.type === 'system' &&
+          env.subtype === 'task_notification' &&
+          env.data?.task_id === 'mon_1',
+      );
+
+      expect(
+        monitorNotifications.filter((env) => env.data?.status === 'running'),
+      ).toHaveLength(2);
+      expect(envelopes.some((env) => env.type === 'result')).toBe(false);
+    });
+
+    keepBackgroundTaskOpen = false;
+    await runPromise;
+
+    const envelopes = writes
+      .join('')
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line));
+    expect(envelopes.at(-1)).toMatchObject({
+      type: 'result',
+      is_error: false,
+    });
   });
 
   it('should include usage metadata and API duration in stream-json result', async () => {

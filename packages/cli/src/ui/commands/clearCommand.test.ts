@@ -33,6 +33,9 @@ describe('clearCommand', () => {
   let mockFireSessionEndEvent: ReturnType<typeof vi.fn>;
   let mockFireSessionStartEvent: ReturnType<typeof vi.fn>;
   let mockGetHookSystem: ReturnType<typeof vi.fn>;
+  let mockAbortBackgroundTasks: ReturnType<typeof vi.fn>;
+  let mockAbortMonitors: ReturnType<typeof vi.fn>;
+  let mockAbortBackgroundShells: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     mockResetChat = vi.fn().mockResolvedValue(undefined);
@@ -43,6 +46,9 @@ describe('clearCommand', () => {
       fireSessionEndEvent: mockFireSessionEndEvent,
       fireSessionStartEvent: mockFireSessionStartEvent,
     });
+    mockAbortBackgroundTasks = vi.fn();
+    mockAbortMonitors = vi.fn();
+    mockAbortBackgroundShells = vi.fn();
     vi.clearAllMocks();
 
     mockContext = createMockCommandContext({
@@ -68,8 +74,13 @@ describe('clearCommand', () => {
           getModel: () => 'test-model',
           getToolRegistry: () => undefined,
           getApprovalMode: () => 'default',
-          getMonitorRegistry: () => ({ abortAll: vi.fn() }),
-          getBackgroundShellRegistry: () => ({ abortAll: vi.fn() }),
+          getBackgroundTaskRegistry: () => ({
+            abortAll: mockAbortBackgroundTasks,
+          }),
+          getMonitorRegistry: () => ({ abortAll: mockAbortMonitors }),
+          getBackgroundShellRegistry: () => ({
+            abortAll: mockAbortBackgroundShells,
+          }),
         },
       },
       session: {
@@ -128,6 +139,27 @@ describe('clearCommand', () => {
     const sessionStartCallOrder =
       mockFireSessionStartEvent.mock.invocationCallOrder[0];
     expect(sessionEndCallOrder).toBeLessThan(sessionStartCallOrder);
+  });
+
+  it('aborts old background work before starting a new session', async () => {
+    if (!clearCommand.action) {
+      throw new Error('clearCommand must have an action.');
+    }
+
+    await clearCommand.action(mockContext, '');
+
+    expect(mockAbortBackgroundTasks).toHaveBeenCalledWith({ notify: false });
+    expect(mockAbortMonitors).toHaveBeenCalledWith({ notify: false });
+    expect(mockAbortBackgroundShells).toHaveBeenCalledTimes(1);
+    expect(mockAbortBackgroundTasks.mock.invocationCallOrder[0]).toBeLessThan(
+      mockStartNewSession.mock.invocationCallOrder[0],
+    );
+    expect(mockAbortMonitors.mock.invocationCallOrder[0]).toBeLessThan(
+      mockStartNewSession.mock.invocationCallOrder[0],
+    );
+    expect(mockAbortBackgroundShells.mock.invocationCallOrder[0]).toBeLessThan(
+      mockStartNewSession.mock.invocationCallOrder[0],
+    );
   });
 
   it('should handle hook errors gracefully and continue execution', async () => {
@@ -264,8 +296,13 @@ describe('clearCommand', () => {
             getToolRegistry: vi.fn().mockReturnValue({
               getAllTools: vi.fn().mockReturnValue([]),
             }),
-            getMonitorRegistry: () => ({ abortAll: vi.fn() }),
-            getBackgroundShellRegistry: () => ({ abortAll: vi.fn() }),
+            getBackgroundTaskRegistry: () => ({
+              abortAll: mockAbortBackgroundTasks,
+            }),
+            getMonitorRegistry: () => ({ abortAll: mockAbortMonitors }),
+            getBackgroundShellRegistry: () => ({
+              abortAll: mockAbortBackgroundShells,
+            }),
           },
         },
         session: {

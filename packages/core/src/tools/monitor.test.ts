@@ -11,25 +11,37 @@ import type { ChildProcess } from 'node:child_process';
 
 // Mock child_process.spawn
 const mockSpawn = vi.hoisted(() => vi.fn());
-vi.mock('node:child_process', () => ({
-  spawn: mockSpawn,
-}));
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+
+  return {
+    ...actual,
+    spawn: mockSpawn,
+  };
+});
 
 // Mock shell-utils
-vi.mock('../utils/shell-utils.js', () => ({
-  getShellConfiguration: () => ({
-    executable: '/bin/bash',
-    argsPrefix: ['-c'],
-    shell: 'bash',
-  }),
-  getCommandRoot: (cmd: string) => cmd.split(/\s+/)[0],
-  splitCommands: (cmd: string) =>
-    cmd
-      .split(/\s*&&\s*/)
-      .map((part) => part.trim())
-      .filter(Boolean),
-  stripShellWrapper: (cmd: string) => cmd,
-}));
+vi.mock('../utils/shell-utils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/shell-utils.js')>();
+
+  return {
+    ...actual,
+    getShellConfiguration: () => ({
+      executable: '/bin/bash',
+      argsPrefix: ['-c'],
+      shell: 'bash',
+    }),
+    getCommandRoot: (cmd: string) => cmd.split(/\s+/)[0],
+    splitCommands: (cmd: string) =>
+      cmd
+        .split(/\s*&&\s*/)
+        .map((part) => part.trim())
+        .filter(Boolean),
+    detectCommandSubstitution: (command: string) =>
+      /\$\(|`|<\(|>\(/.test(command),
+  };
+});
 
 const mockIsShellCommandReadOnlyAST = vi.hoisted(() => vi.fn());
 const mockExtractCommandRules = vi.hoisted(() => vi.fn());
@@ -133,6 +145,7 @@ describe('MonitorTool', () => {
     (
       monitorTool as unknown as {
         createInvocation: (p: Record<string, unknown>) => {
+          getDefaultPermission: () => Promise<string>;
           getConfirmationDetails: (
             s: AbortSignal,
           ) => Promise<ToolCallConfirmationDetails>;
@@ -157,6 +170,75 @@ describe('MonitorTool', () => {
 
       expect(details.type).toBe('exec');
       expect(details.permissionRules).toEqual(['Monitor(tail -f *)']);
+    });
+
+    it('strips a trailing bare ampersand before building confirmation details', async () => {
+      const invocation = createInvocation({
+        command: 'tail -f /tmp/app.log &',
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as ToolCallConfirmationDetails & {
+        command: string;
+        permissionRules?: string[];
+      };
+
+      expect(details.command).toBe('tail -f /tmp/app.log');
+      expect(details.permissionRules).toEqual(['Monitor(tail -f *)']);
+    });
+
+    it('preserves explicit shell wrappers while analyzing the wrapped command', async () => {
+      const invocation = createInvocation({
+        command: `/bin/bash -c 'tail -f /tmp/app.log &'`,
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as ToolCallConfirmationDetails & {
+        command: string;
+        rootCommand: string;
+        permissionRules?: string[];
+      };
+
+      expect(details.command).toBe(`/bin/bash -c 'tail -f /tmp/app.log'`);
+      expect(details.rootCommand).toBe('tail');
+      expect(details.permissionRules).toEqual(['Monitor(tail -f *)']);
+    });
+
+    it('unwraps quoted env-prefixed shell wrappers for confirmation analysis', async () => {
+      const invocation = createInvocation({
+        command: `FOO="bar baz" /bin/bash -c 'tail -f /tmp/app.log &'`,
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as ToolCallConfirmationDetails & {
+        command: string;
+        rootCommand: string;
+        permissionRules?: string[];
+      };
+
+      expect(details.command).toBe(
+        `FOO="bar baz" /bin/bash -c 'tail -f /tmp/app.log'`,
+      );
+      expect(details.rootCommand).toBe('tail');
+      expect(details.permissionRules).toEqual(['Monitor(tail -f *)']);
+    });
+
+    it('does not strip non-trailing or non-bare ampersands in confirmation details', async () => {
+      const commands = ['sleep 5 & echo done', 'echo hi &&', 'echo hi \\&'];
+
+      for (const command of commands) {
+        const invocation = createInvocation({ command });
+        const details = (await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        )) as ToolCallConfirmationDetails & {
+          command: string;
+        };
+
+        expect(details.command).toBe(command);
+      }
     });
 
     it('does not consult Bash permission rules for monitor commands', async () => {
@@ -193,11 +275,11 @@ describe('MonitorTool', () => {
       ]);
     });
 
-    it('falls back to a Bash-scoped rule if command extraction fails', async () => {
+    it('falls back to a canonical Monitor rule if command extraction fails', async () => {
       mockExtractCommandRules.mockRejectedValueOnce(new Error('parse failed'));
 
       const invocation = createInvocation({
-        command: 'python -c "print(1)"',
+        command: `/bin/bash --noprofile -c 'tail -f /tmp/app.log &'`,
       });
 
       const details = (await invocation.getConfirmationDetails(
@@ -207,8 +289,59 @@ describe('MonitorTool', () => {
       };
 
       expect(details.permissionRules).toEqual([
-        'Monitor(python -c "print(1)")',
+        'Monitor(tail -f /tmp/app.log)',
       ]);
+    });
+  });
+
+  describe('getDefaultPermission', () => {
+    it('denies command substitution before confirmation', async () => {
+      const invocation = createInvocation({
+        command: 'echo $(cat secret.txt)',
+      });
+
+      await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
+    });
+
+    it('denies command substitution inside explicit shell wrappers', async () => {
+      const invocation = createInvocation({
+        command: `/bin/bash -c 'echo $(cat secret.txt)'`,
+      });
+
+      await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
+    });
+
+    it('denies command substitution inside wrapped scripts with argv suffixes', async () => {
+      const invocation = createInvocation({
+        command: `/bin/bash -c 'echo $(cat secret.txt)' ignored`,
+      });
+
+      await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
+    });
+
+    it('denies command substitution inside quoted env-prefixed wrappers', async () => {
+      const invocation = createInvocation({
+        command: `FOO="bar baz" /bin/bash -c 'echo $(cat secret.txt)'`,
+      });
+
+      await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
+    });
+
+    it('denies command substitution inside env-prefix assignments', async () => {
+      const invocation = createInvocation({
+        command: `FOO=$(cat secret.txt) /bin/bash -c 'echo ok'`,
+      });
+
+      await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
+    });
+
+    it('allows read-only monitor commands by default', async () => {
+      mockIsShellCommandReadOnlyAST.mockResolvedValueOnce(true);
+      const invocation = createInvocation({
+        command: 'tail -f /tmp/app.log',
+      });
+
+      await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
     });
   });
 
@@ -264,6 +397,11 @@ describe('MonitorTool', () => {
       expect(validate({ command: undefined })).toBe('Command cannot be empty.');
       expect(validate({ command: 123 })).toBe('Command cannot be empty.');
       expect(validate({ command: null })).toBe('Command cannot be empty.');
+    });
+
+    it('rejects commands that normalize to empty after stripping trailing &', () => {
+      expect(validate({ command: '&' })).toBe('Command cannot be empty.');
+      expect(validate({ command: '  &  ' })).toBe('Command cannot be empty.');
     });
 
     it('rejects non-absolute directory', () => {
@@ -336,6 +474,86 @@ describe('MonitorTool', () => {
       expect(result.returnDisplay).toContain('watch app logs');
     });
 
+    it('strips a trailing bare ampersand before spawning', async () => {
+      const invocation = createInvocation({
+        command: 'tail -f /var/log/app.log &',
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        '/bin/bash',
+        ['-c', 'tail -f /var/log/app.log'],
+        expect.objectContaining({
+          cwd: '/test/dir',
+          detached: true,
+        }),
+      );
+      expect(monitorRegistry.getRunning()[0]?.command).toBe(
+        'tail -f /var/log/app.log',
+      );
+    });
+
+    it('preserves explicit shell wrappers on the spawn path', async () => {
+      const invocation = createInvocation({
+        command: `/bin/bash -c 'tail -f /var/log/app.log &'`,
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        '/bin/bash',
+        ['-c', `/bin/bash -c 'tail -f /var/log/app.log'`],
+        expect.objectContaining({
+          cwd: '/test/dir',
+          detached: true,
+        }),
+      );
+      expect(monitorRegistry.getRunning()[0]?.command).toBe(
+        `/bin/bash -c 'tail -f /var/log/app.log'`,
+      );
+    });
+
+    it('preserves wrapper flags while stripping trailing ampersands', async () => {
+      const invocation = createInvocation({
+        command: `/bin/bash --noprofile -c 'tail -f /var/log/app.log &'`,
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        '/bin/bash',
+        ['-c', `/bin/bash --noprofile -c 'tail -f /var/log/app.log'`],
+        expect.objectContaining({
+          cwd: '/test/dir',
+          detached: true,
+        }),
+      );
+      expect(monitorRegistry.getRunning()[0]?.command).toBe(
+        `/bin/bash --noprofile -c 'tail -f /var/log/app.log'`,
+      );
+    });
+
+    it('preserves wrapper argv while stripping trailing ampersands from the script', async () => {
+      const invocation = createInvocation({
+        command: `/bin/bash -c 'tail -f /var/log/app.log &' ignored`,
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        '/bin/bash',
+        ['-c', `/bin/bash -c 'tail -f /var/log/app.log' ignored`],
+        expect.objectContaining({
+          cwd: '/test/dir',
+          detached: true,
+        }),
+      );
+      expect(monitorRegistry.getRunning()[0]?.command).toBe(
+        `/bin/bash -c 'tail -f /var/log/app.log' ignored`,
+      );
+    });
+
     it('registers entry in MonitorRegistry', async () => {
       const invocation = createInvocation({
         command: 'tail -f log',
@@ -347,6 +565,139 @@ describe('MonitorTool', () => {
       expect(running).toHaveLength(1);
       expect(running[0].command).toBe('tail -f log');
       expect(running[0].pid).toBe(12345);
+    });
+
+    it('kills the spawned child if registry registration fails', async () => {
+      const invocation = createInvocation({
+        command: 'tail -f log',
+      });
+      const killSpy = vi
+        .spyOn(process, 'kill')
+        .mockImplementation(() => true as never);
+      const registerSpy = vi
+        .spyOn(monitorRegistry, 'register')
+        .mockImplementation(() => {
+          throw new Error('limit reached');
+        });
+
+      try {
+        const result = await invocation.execute(new AbortController().signal);
+
+        expect(result.llmContent).toContain('Monitor failed to start');
+        expect(result.returnDisplay).toContain('limit reached');
+        if (process.platform === 'win32') {
+          expect(mockSpawn).toHaveBeenCalledWith('taskkill', [
+            '/pid',
+            '12345',
+            '/f',
+            '/t',
+          ]);
+        } else {
+          expect(killSpy).toHaveBeenCalledWith(-12345, 'SIGTERM');
+        }
+        expect(monitorRegistry.getAll()).toHaveLength(0);
+      } finally {
+        killSpy.mockRestore();
+        registerSpy.mockRestore();
+      }
+    });
+
+    it('uses SIGKILL fallback if registry registration fails after spawn', async () => {
+      vi.useFakeTimers();
+      const invocation = createInvocation({
+        command: 'tail -f log',
+      });
+      const killSpy = vi
+        .spyOn(process, 'kill')
+        .mockImplementation(() => true as never);
+      const registerSpy = vi
+        .spyOn(monitorRegistry, 'register')
+        .mockImplementation(() => {
+          throw new Error('limit reached');
+        });
+
+      try {
+        await invocation.execute(new AbortController().signal);
+
+        if (process.platform === 'win32') {
+          expect(mockSpawn).toHaveBeenCalledWith('taskkill', [
+            '/pid',
+            '12345',
+            '/f',
+            '/t',
+          ]);
+        } else {
+          expect(killSpy).toHaveBeenCalledWith(-12345, 'SIGTERM');
+          await vi.advanceTimersByTimeAsync(200);
+          expect(killSpy).toHaveBeenCalledWith(-12345, 'SIGKILL');
+        }
+      } finally {
+        killSpy.mockRestore();
+        registerSpy.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it('installs the abort handler before registering the monitor', async () => {
+      const invocation = createInvocation({
+        command: 'tail -f log',
+      });
+      const killSpy = vi
+        .spyOn(process, 'kill')
+        .mockImplementation(() => true as never);
+      const registerSpy = vi
+        .spyOn(monitorRegistry, 'register')
+        .mockImplementation((entry) => {
+          entry.abortController.abort();
+          MonitorRegistry.prototype.register.call(monitorRegistry, entry);
+        });
+
+      try {
+        await invocation.execute(new AbortController().signal);
+
+        if (process.platform === 'win32') {
+          expect(mockSpawn).toHaveBeenCalledWith('taskkill', [
+            '/pid',
+            '12345',
+            '/f',
+            '/t',
+          ]);
+        } else {
+          expect(killSpy).toHaveBeenCalledWith(-12345, 'SIGTERM');
+        }
+      } finally {
+        killSpy.mockRestore();
+        registerSpy.mockRestore();
+      }
+    });
+
+    it('preserves the original spawn error when startup fails synchronously', async () => {
+      const invocation = createInvocation({
+        command: 'tail -f log',
+      });
+      const registerCallback = vi.fn();
+      monitorRegistry.setRegisterCallback(registerCallback);
+      mockSpawn.mockImplementation(() => {
+        throw new Error('spawn failed');
+      });
+      const registerSpy = vi
+        .spyOn(monitorRegistry, 'register')
+        .mockImplementation(() => {
+          throw new Error('limit reached');
+        });
+
+      try {
+        const result = await invocation.execute(new AbortController().signal);
+
+        expect(result.llmContent).toContain('Monitor failed to start');
+        expect(result.llmContent).toContain('spawn failed');
+        expect(result.returnDisplay).toContain('spawn failed');
+        expect(registerSpy).not.toHaveBeenCalled();
+        expect(registerCallback).not.toHaveBeenCalled();
+        expect(monitorRegistry.getAll()).toHaveLength(0);
+      } finally {
+        registerSpy.mockRestore();
+      }
     });
 
     it('emits events on stdout lines', async () => {

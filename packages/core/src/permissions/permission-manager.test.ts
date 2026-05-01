@@ -972,6 +972,44 @@ describe('PermissionManager', () => {
       // 'ls' is readonly, resolves to 'allow' when no rule matches
       expect(await pm.isCommandAllowed('ls')).toBe('allow');
     });
+
+    it('resolves shell virtual file operations relative to the explicit cwd', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Read(./subdir/secret.txt)'],
+          projectRoot: '/project',
+          cwd: '/project',
+        }),
+      );
+      pm2.initialize();
+
+      expect(
+        await pm2.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cat ./secret.txt',
+          cwd: '/project/subdir',
+        }),
+      ).toBe('allow');
+    });
+
+    it('applies relative virtual file rules using the shell invocation cwd', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Read(./secret.txt)'],
+          projectRoot: '/project',
+          cwd: '/project',
+        }),
+      );
+      pm2.initialize();
+
+      expect(
+        await pm2.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cat ./secret.txt',
+          cwd: '/project/subdir',
+        }),
+      ).toBe('deny');
+    });
   });
 
   describe('monitor command-level evaluation', () => {
@@ -986,6 +1024,36 @@ describe('PermissionManager', () => {
         await pm2.evaluate({
           toolName: 'monitor',
           command: 'tail -f /var/log/app.log',
+        }),
+      ).toBe('allow');
+    });
+
+    it('Monitor(...) allow rule matches wrapped monitor invocations', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Monitor(tail -f *)'],
+        }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: `/bin/bash --noprofile -c 'tail -f /var/log/app.log &'`,
+        }),
+      ).toBe('allow');
+    });
+
+    it('exact Monitor(...) allow rule matches wrapped fallback commands', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Monitor(tail -f /var/log/app.log)'],
+        }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: String.raw`FOO="bar baz" /bin/bash --noprofile -c 'tail -f /var/log/app.log &'`,
         }),
       ).toBe('allow');
     });

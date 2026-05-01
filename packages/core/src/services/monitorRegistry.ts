@@ -64,6 +64,10 @@ export type MonitorNotificationCallback = (
 
 export type MonitorRegisterCallback = (entry: MonitorEntry) => void;
 
+interface MonitorCancelOptions {
+  notify?: boolean;
+}
+
 export class MonitorRegistry {
   private readonly monitors = new Map<string, MonitorEntry>();
   private notificationCallback?: MonitorNotificationCallback;
@@ -145,14 +149,16 @@ export class MonitorRegistry {
   }
 
   // No-op if not 'running' — guards against race with concurrent cancellation.
-  cancel(monitorId: string): void {
+  cancel(monitorId: string, options: MonitorCancelOptions = {}): void {
     const entry = this.monitors.get(monitorId);
     if (!entry || entry.status !== 'running') return;
 
     entry.abortController.abort();
     this.settle(entry, 'cancelled');
     debugLogger.info(`Monitor cancelled: ${monitorId}`);
-    this.emitTerminalNotification(entry);
+    if (options.notify !== false) {
+      this.emitTerminalNotification(entry);
+    }
   }
 
   get(monitorId: string): MonitorEntry | undefined {
@@ -177,9 +183,9 @@ export class MonitorRegistry {
     this.registerCallback = cb;
   }
 
-  abortAll(): void {
+  abortAll(options: MonitorCancelOptions = {}): void {
     for (const entry of Array.from(this.monitors.values())) {
-      this.cancel(entry.monitorId);
+      this.cancel(entry.monitorId, options);
     }
     debugLogger.info('Aborted all monitors');
   }

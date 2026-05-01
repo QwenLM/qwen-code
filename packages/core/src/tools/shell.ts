@@ -354,6 +354,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
   ): Promise<ToolCallConfirmationDetails> {
     const command = stripShellWrapper(this.params.command);
     const pm = this.config.getPermissionManager?.();
+    const cwd = this.params.directory || this.config.getTargetDir();
 
     // Split compound command and filter out already-allowed (read-only) sub-commands
     const subCommands = splitCommands(command);
@@ -372,7 +373,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
       if (pm) {
         try {
-          if ((await pm.isCommandAllowed(sub)) === 'allow') {
+          if ((await pm.isCommandAllowed(sub, cwd)) === 'allow') {
             continue;
           }
         } catch (e) {

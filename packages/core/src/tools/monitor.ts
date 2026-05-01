@@ -34,10 +34,11 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
+  detectCommandSubstitution,
   getCommandRoot,
   getShellConfiguration,
+  normalizeMonitorCommand as normalizeMonitorShellCommand,
   splitCommands,
-  stripShellWrapper,
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isSubpaths } from '../utils/paths.js';
@@ -86,19 +87,38 @@ class MonitorToolInvocation extends BaseToolInvocation<
   }
 
   getDescription(): string {
-    const desc = this.params.description || this.params.command;
+    const desc =
+      this.params.description ||
+      normalizeMonitorShellCommand(this.params.command).spawnCommand;
     return `Monitor: ${desc}`;
   }
 
   override async getDefaultPermission(): Promise<PermissionDecision> {
+    const command = normalizeMonitorShellCommand(
+      this.params.command,
+    ).safetyCommand;
+
+    if (detectCommandSubstitution(command)) {
+      return 'deny';
+    }
+
+    try {
+      const isReadOnly = await isShellCommandReadOnlyAST(command);
+      if (isReadOnly) {
+        return 'allow';
+      }
+    } catch (e) {
+      debugLogger.warn('AST read-only check failed, falling back to ask:', e);
+    }
+
     return 'ask';
   }
 
   override async getConfirmationDetails(
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
-    const command = stripShellWrapper(this.params.command);
-    const subCommands = splitCommands(command);
+    const normalized = normalizeMonitorShellCommand(this.params.command);
+    const subCommands = splitCommands(normalized.analysisCommand);
     const confirmableSubCommands: string[] = [];
 
     for (const sub of subCommands) {
@@ -146,15 +166,16 @@ class MonitorToolInvocation extends BaseToolInvocation<
       );
     } catch (e) {
       debugLogger.warn('Failed to extract monitor command rules:', e);
-      permissionRules = [`Monitor(${command})`];
+      permissionRules = [`Monitor(${normalized.analysisCommand})`];
     }
 
     return {
       type: 'exec',
       title: 'Monitor',
-      command,
+      command: normalized.spawnCommand,
       rootCommand:
-        rootCommands.join(', ') || (getCommandRoot(command) ?? command),
+        rootCommands.join(', ') ||
+        (getCommandRoot(normalized.analysisCommand) ?? normalized.spawnCommand),
       permissionRules,
       onConfirm: async (
         _outcome: ToolConfirmationOutcome,
@@ -172,7 +193,13 @@ class MonitorToolInvocation extends BaseToolInvocation<
       };
     }
 
-    const command = this.params.command.trim();
+    const normalized = normalizeMonitorShellCommand(this.params.command);
+    const command = normalized.spawnCommand;
+    if (normalized.strippedTrailingAmp) {
+      debugLogger.warn(
+        'Stripped trailing & from monitor command — monitor lifecycle handles backgrounding',
+      );
+    }
     const description = this.params.description || command;
     const maxEvents = Math.min(
       this.params.max_events ?? DEFAULT_MAX_EVENTS,
@@ -229,8 +256,6 @@ class MonitorToolInvocation extends BaseToolInvocation<
         },
       });
     } catch (err) {
-      registry.register(entry);
-      registry.fail(monitorId, getErrorMessage(err));
       return {
         llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
@@ -238,7 +263,50 @@ class MonitorToolInvocation extends BaseToolInvocation<
     }
 
     entry.pid = child.pid;
-    registry.register(entry);
+    let exited = false;
+
+    const killChildProcessGroup = (): void => {
+      if (exited || !child.pid) return;
+
+      if (process.platform === 'win32') {
+        spawn('taskkill', ['/pid', child.pid.toString(), '/f', '/t']);
+      } else {
+        try {
+          process.kill(-child.pid, 'SIGTERM');
+        } catch {
+          // process may already be dead
+        }
+        setTimeout(() => {
+          if (!exited && child.pid) {
+            try {
+              process.kill(-child.pid, 'SIGKILL');
+            } catch {
+              // ignore
+            }
+          }
+        }, 200);
+      }
+    };
+
+    // Wire abort → kill process (tree) before exposing the entry via register().
+    const abortHandler = (): void => {
+      killChildProcessGroup();
+    };
+    entryAc.signal.addEventListener('abort', abortHandler, { once: true });
+    if (entryAc.signal.aborted) {
+      abortHandler();
+    }
+
+    try {
+      registry.register(entry);
+    } catch (err) {
+      abortHandler();
+      entryAc.signal.removeEventListener('abort', abortHandler);
+      return {
+        llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
+        returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
+      };
+    }
 
     // Line buffering (separate per stream to avoid interleave corruption)
     let tokenBucket = THROTTLE_BURST_SIZE;
@@ -305,33 +373,6 @@ class MonitorToolInvocation extends BaseToolInvocation<
     const stderrBuf = { value: '' };
     child.stdout?.on('data', (data: Buffer) => processLines(stdoutBuf, data));
     child.stderr?.on('data', (data: Buffer) => processLines(stderrBuf, data));
-
-    let exited = false;
-
-    // Wire abort → kill process (tree)
-    const abortHandler = (): void => {
-      if (!exited && child.pid) {
-        if (process.platform === 'win32') {
-          spawn('taskkill', ['/pid', child.pid.toString(), '/f', '/t']);
-        } else {
-          try {
-            process.kill(-child.pid, 'SIGTERM');
-          } catch {
-            // process may already be dead
-          }
-          setTimeout(() => {
-            if (!exited && child.pid) {
-              try {
-                process.kill(-child.pid, 'SIGKILL');
-              } catch {
-                // ignore
-              }
-            }
-          }, 200).unref();
-        }
-      }
-    };
-    entryAc.signal.addEventListener('abort', abortHandler, { once: true });
 
     // Shared cleanup: flush buffers, remove abort listener, log dropped lines.
     // Called from both `exit` and `error` handlers to prevent leaks when
@@ -460,7 +501,10 @@ export class MonitorTool extends BaseDeclarativeTool<
   protected override validateToolParamValues(
     params: MonitorToolParams,
   ): string | null {
-    if (typeof params.command !== 'string' || !params.command.trim()) {
+    if (
+      typeof params.command !== 'string' ||
+      !normalizeMonitorShellCommand(params.command).analysisCommand
+    ) {
       return 'Command cannot be empty.';
     }
     if (params.max_events !== undefined) {

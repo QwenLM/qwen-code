@@ -15,7 +15,10 @@ import type { PathMatchContext } from './rule-parser.js';
 import { extractShellOperations } from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
 import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
-import { detectCommandSubstitution } from '../utils/shell-utils.js';
+import {
+  detectCommandSubstitution,
+  normalizeMonitorCommand,
+} from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type {
   PermissionCheckContext,
@@ -166,6 +169,7 @@ export class PermissionManager {
    * @returns A PermissionDecision indicating how to handle this tool call.
    */
   async evaluate(ctx: PermissionCheckContext): Promise<PermissionDecision> {
+    ctx = this.normalizePermissionContext(ctx);
     const { command, toolName } = ctx;
 
     // For shell commands, split compound commands and evaluate each
@@ -205,14 +209,14 @@ export class PermissionManager {
    *      to match equivalent shell commands (e.g. `cat` → Read, `curl` → WebFetch).
    */
   private evaluateSingle(ctx: PermissionCheckContext): PermissionDecision {
-    const { toolName, command, filePath, domain, specifier } = ctx;
+    const { toolName, command, cwd, filePath, domain, specifier } = ctx;
 
     // Build path context for resolving relative path patterns
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
         ? {
             projectRoot: this.config.getProjectRoot(),
-            cwd: this.config.getCwd(),
+            cwd: cwd ?? this.config.getCwd(),
           }
         : undefined;
 
@@ -291,7 +295,7 @@ export class PermissionManager {
    */
   private evaluateShellVirtualOps(
     ops: ShellOperation[],
-    _pathCtx: PathMatchContext | undefined,
+    pathCtx: PathMatchContext | undefined,
   ): PermissionDecision {
     if (ops.length === 0) return 'default';
 
@@ -303,6 +307,7 @@ export class PermissionManager {
       // into the shell-semantics branch.
       const opDecision = this.evaluateSingle({
         toolName: op.virtualTool,
+        cwd: pathCtx?.cwd,
         filePath: op.filePath,
         domain: op.domain,
       });
@@ -402,6 +407,19 @@ export class PermissionManager {
     return 'ask';
   }
 
+  private normalizePermissionContext(
+    ctx: PermissionCheckContext,
+  ): PermissionCheckContext {
+    if (ctx.toolName !== 'monitor' || ctx.command === undefined) {
+      return ctx;
+    }
+
+    return {
+      ...ctx,
+      command: normalizeMonitorCommand(ctx.command).analysisCommand,
+    };
+  }
+
   // ---------------------------------------------------------------------------
   // Registry-level helper
   // ---------------------------------------------------------------------------
@@ -478,13 +496,14 @@ export class PermissionManager {
    * Useful for providing user-visible feedback about which rule caused a denial.
    */
   findMatchingDenyRule(ctx: PermissionCheckContext): string | undefined {
-    const { toolName, command, filePath, domain, specifier } = ctx;
+    ctx = this.normalizePermissionContext(ctx);
+    const { toolName, command, cwd, filePath, domain, specifier } = ctx;
 
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
         ? {
             projectRoot: this.config.getProjectRoot(),
-            cwd: this.config.getCwd(),
+            cwd: cwd ?? this.config.getCwd(),
           }
         : undefined;
 
@@ -518,10 +537,14 @@ export class PermissionManager {
    * @param command - The shell command to evaluate.
    * @returns The PermissionDecision for this command.
    */
-  async isCommandAllowed(command: string): Promise<PermissionDecision> {
+  async isCommandAllowed(
+    command: string,
+    cwd?: string,
+  ): Promise<PermissionDecision> {
     return this.evaluate({
       toolName: 'run_shell_command',
       command,
+      cwd,
     });
   }
 
@@ -551,7 +574,8 @@ export class PermissionManager {
    * @returns true if at least one rule matches.
    */
   hasRelevantRules(ctx: PermissionCheckContext): boolean {
-    const { toolName, command, filePath, domain, specifier } = ctx;
+    ctx = this.normalizePermissionContext(ctx);
+    const { toolName, command, cwd, filePath, domain, specifier } = ctx;
 
     if (SHELL_LIKE_TOOLS.has(ctx.toolName) && command !== undefined) {
       const subCommands = splitCompoundCommand(command);
@@ -566,7 +590,7 @@ export class PermissionManager {
       this.config.getProjectRoot && this.config.getCwd
         ? {
             projectRoot: this.config.getProjectRoot(),
-            cwd: this.config.getCwd(),
+            cwd: cwd ?? this.config.getCwd(),
           }
         : undefined;
 
@@ -627,7 +651,8 @@ export class PermissionManager {
    * real ask rule matched.
    */
   hasMatchingAskRule(ctx: PermissionCheckContext): boolean {
-    const { toolName, command, filePath, domain, specifier } = ctx;
+    ctx = this.normalizePermissionContext(ctx);
+    const { toolName, command, cwd, filePath, domain, specifier } = ctx;
 
     if (SHELL_LIKE_TOOLS.has(ctx.toolName) && command !== undefined) {
       const subCommands = splitCompoundCommand(command);
@@ -642,7 +667,7 @@ export class PermissionManager {
       this.config.getProjectRoot && this.config.getCwd
         ? {
             projectRoot: this.config.getProjectRoot(),
-            cwd: this.config.getCwd(),
+            cwd: cwd ?? this.config.getCwd(),
           }
         : undefined;
 

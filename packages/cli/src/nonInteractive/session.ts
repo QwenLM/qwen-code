@@ -595,11 +595,12 @@ class Session {
     debugLogger.debug('[Session] Shutting down');
 
     this.isShuttingDown = true;
-    this.config.getMonitorRegistry().abortAll();
+    this.abortTaskRegistries();
     this.stopMonitorCallbacks();
 
     // Wait for all pending work
     await this.waitForAllPendingWork();
+    this.abortTaskRegistries();
 
     this.finishShutdown();
   }
@@ -609,11 +610,17 @@ class Session {
 
     // Abort monitors and stop callbacks first, then drain anything already
     // queued so EOF does not remain coupled to monitor process lifetime.
-    this.config.getMonitorRegistry().abortAll();
+    this.abortTaskRegistries();
     this.stopMonitorCallbacks();
     await this.waitForAllPendingWork();
+    this.abortTaskRegistries();
 
     this.finishShutdown();
+  }
+
+  private abortTaskRegistries(): void {
+    this.config.getMonitorRegistry().abortAll();
+    this.config.getBackgroundShellRegistry().abortAll();
   }
 
   private finishShutdown(): void {
