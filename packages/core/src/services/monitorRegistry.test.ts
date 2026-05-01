@@ -370,15 +370,19 @@ describe('MonitorRegistry', () => {
   });
 
   it('reset clears retained entries and running monitor timers', () => {
+    const ac = new AbortController();
     registry.register(createEntry({ monitorId: 'completed' }));
     registry.complete('completed', 0);
-    registry.register(createEntry({ monitorId: 'running' }));
+    registry.register(
+      createEntry({ monitorId: 'running', abortController: ac }),
+    );
 
     registry.reset();
 
     expect(registry.getAll()).toEqual([]);
     vi.advanceTimersByTime(300_001);
     expect(registry.getAll()).toEqual([]);
+    expect(ac.signal.aborted).toBe(true);
   });
 
   it('rejects registration when max concurrent monitors reached', () => {

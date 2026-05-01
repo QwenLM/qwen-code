@@ -194,6 +194,9 @@ export class MonitorRegistry {
   reset(): void {
     for (const entry of this.monitors.values()) {
       this.clearIdleTimer(entry);
+      if (entry.status === 'running') {
+        entry.abortController.abort();
+      }
     }
     this.monitors.clear();
   }
