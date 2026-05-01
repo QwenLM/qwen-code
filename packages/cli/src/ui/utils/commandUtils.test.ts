@@ -111,6 +111,11 @@ describe('commandUtils', () => {
       expect(looksLikeCommandName('123')).toBe(true);
     });
 
+    it('should return true for loaded command names with filename punctuation', () => {
+      expect(looksLikeCommandName('deploy@prod')).toBe(true);
+      expect(looksLikeCommandName('cmd#1')).toBe(true);
+    });
+
     it('should return true for extension-qualified command names with dots', () => {
       expect(looksLikeCommandName('gcp.deploy')).toBe(true);
       expect(looksLikeCommandName('gcp.deploy1')).toBe(true);
@@ -134,11 +139,9 @@ describe('commandUtils', () => {
       expect(looksLikeCommandName('var/log/syslog')).toBe(false);
     });
 
-    it('should return false for strings containing spaces or special characters', () => {
+    it('should return false for strings containing whitespace or path separators', () => {
       expect(looksLikeCommandName('my command')).toBe(false);
-      expect(looksLikeCommandName('test@file')).toBe(false);
       expect(looksLikeCommandName('path\\to')).toBe(false);
-      expect(looksLikeCommandName('cmd#1')).toBe(false);
     });
   });
 
@@ -158,6 +161,11 @@ describe('commandUtils', () => {
     it('should return true for extension-qualified slash commands with dots', () => {
       expect(isSlashCommand('/gcp.deploy args')).toBe(true);
       expect(isSlashCommand('/gcp.deploy1')).toBe(true);
+    });
+
+    it('should return true for loaded command names with filename punctuation', () => {
+      expect(isSlashCommand('/deploy@prod args')).toBe(true);
+      expect(isSlashCommand('/cmd#1')).toBe(true);
     });
 
     it('should return true for bare slash (triggers autocomplete)', () => {

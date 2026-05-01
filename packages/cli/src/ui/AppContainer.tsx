@@ -2240,7 +2240,8 @@ export const AppContainer = (props: AppContainerProps) => {
     if (dialogsVisible) return;
     if (messageQueue.length === 0) return;
 
-    // Two-phase: batch plain prompts as one turn, else pop next slash command.
+    // Batch the leading plain-prompt run; if the queue starts with a slash
+    // command, submit that segment on its own to preserve typed order.
     const plainPrompts = drainQueue();
     const submission =
       plainPrompts.length > 0 ? plainPrompts.join('\n\n') : popNextSegment();

@@ -40,11 +40,10 @@ export const isAtCommand = (query: string): boolean =>
 
 /**
  * Checks if a string looks like a valid slash command name.
- * Command names may contain Unicode letters/numbers/marks, colons, dots,
- * hyphens, underscores, and question marks (e.g. "help", "config",
- * "mcp:server__tool", "gcp.deploy", "文档", "?"). Strings containing path
- * separators or whitespace are not valid command names and likely represent
- * file paths or other input.
+ * Command names come from several sources, including user filenames, so this
+ * helper only rejects token shapes that cannot be command names here:
+ * whitespace and path separators. Inputs containing path separators likely
+ * represent file paths or other regular text.
  *
  * @param name The potential command name to check (without the leading '/').
  * @returns True if the name matches the command name pattern, false otherwise.
@@ -53,7 +52,7 @@ export const looksLikeCommandName = (name: string): boolean => {
   if (!name) {
     return false;
   }
-  return /^[\p{L}\p{N}\p{M}:._?-]+$/u.test(name);
+  return !/[\s/\\]/u.test(name);
 };
 
 /**

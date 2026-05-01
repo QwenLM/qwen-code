@@ -903,6 +903,36 @@ describe('useSlashCommandProcessor', () => {
       expect(action).toHaveBeenCalledWith(expect.anything(), 'with-args');
     });
 
+    it('should execute loaded commands with filename punctuation', async () => {
+      const action = vi.fn();
+      const command = createTestCommand({ name: 'deploy@prod', action });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/deploy@prod with-args');
+      });
+
+      expect(action).toHaveBeenCalledWith(expect.anything(), 'with-args');
+    });
+
+    it('should execute loaded commands before falling back for slash-prefixed input with args', async () => {
+      const action = vi.fn();
+      const command = createTestCommand({ name: 'tmp', action });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/tmp inspect');
+      });
+
+      expect(action).toHaveBeenCalledWith(expect.anything(), 'inspect');
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: MessageType.ERROR }),
+        expect.any(Number),
+      );
+    });
+
     it('should return false for file-path-like input (issue #1804)', async () => {
       const result = setupProcessorHook();
       await waitFor(() => expect(result.current.slashCommands).toBeDefined());
@@ -922,7 +952,7 @@ describe('useSlashCommandProcessor', () => {
       expect(absPathResult).toBe(false);
     });
 
-    it('should return false for single-segment absolute paths with instructions', async () => {
+    it('should return false for unknown slash-prefixed input with arguments', async () => {
       const result = setupProcessorHook();
       await waitFor(() => expect(result.current.slashCommands).toBeDefined());
 
@@ -935,10 +965,22 @@ describe('useSlashCommandProcessor', () => {
       const readmeResult = await act(async () =>
         result.current.handleSlashCommand('/README.md summarize'),
       );
+      const dataResult = await act(async () =>
+        result.current.handleSlashCommand('/data foo'),
+      );
+      const vendorResult = await act(async () =>
+        result.current.handleSlashCommand('/vendor explain'),
+      );
+      const workspaceResult = await act(async () =>
+        result.current.handleSlashCommand('/workspace check'),
+      );
 
       expect(tmpResult).toBe(false);
       expect(etcResult).toBe(false);
       expect(readmeResult).toBe(false);
+      expect(dataResult).toBe(false);
+      expect(vendorResult).toBe(false);
+      expect(workspaceResult).toBe(false);
       expect(mockAddItem).not.toHaveBeenCalled();
     });
 

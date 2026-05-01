@@ -14,7 +14,7 @@ export interface UseMessageQueueReturn {
   getQueuedMessagesText: () => string;
   /** Drain the entire queue joined with `\n\n`. For Ctrl+C / ESC / Up edit-restore. */
   popAllMessages: () => string | null;
-  /** Drain plain-text prompts; leave slash commands queued. Safe from non-React callbacks. */
+  /** Drain leading plain-text prompts; stop before slash commands to preserve order. */
   drainQueue: () => string[];
   /** Pop the first item from the queue. */
   popNextSegment: () => string | null;
@@ -54,9 +54,15 @@ export function useMessageQueue(): UseMessageQueueReturn {
   const drainQueue = useCallback((): string[] => {
     const current = queueRef.current;
     if (current.length === 0) return [];
-    const drained = current.filter((message) => !isSlashCommand(message));
-    if (drained.length === 0) return [];
-    const rest = current.filter((message) => isSlashCommand(message));
+
+    const firstSlashIndex = current.findIndex((message) =>
+      isSlashCommand(message),
+    );
+    const drainEnd = firstSlashIndex === -1 ? current.length : firstSlashIndex;
+    if (drainEnd === 0) return [];
+
+    const drained = current.slice(0, drainEnd);
+    const rest = current.slice(drainEnd);
     queueRef.current = rest;
     setMessageQueue(rest);
     return drained;

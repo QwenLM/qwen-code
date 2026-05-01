@@ -165,7 +165,7 @@ describe('useMessageQueue', () => {
       expect(drained).toEqual([]);
     });
 
-    it('drains all plain-text messages and leaves slash commands queued', () => {
+    it('drains leading plain-text messages and preserves later queue order', () => {
       const { result } = renderHook(() => useMessageQueue());
 
       act(() => {
@@ -180,8 +180,26 @@ describe('useMessageQueue', () => {
         drained = result.current.drainQueue();
       });
 
-      expect(drained).toEqual(['one', 'two', 'three']);
-      expect(result.current.messageQueue).toEqual(['/model']);
+      expect(drained).toEqual(['one', 'two']);
+      expect(result.current.messageQueue).toEqual(['/model', 'three']);
+    });
+
+    it('does not reorder slash-like prompts ahead of following plain text', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('hello');
+        result.current.addMessage('/data foo');
+        result.current.addMessage('world');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue();
+      });
+
+      expect(drained).toEqual(['hello']);
+      expect(result.current.messageQueue).toEqual(['/data foo', 'world']);
     });
 
     it('returns an empty array when the queue contains only slash commands', () => {

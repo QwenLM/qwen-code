@@ -78,35 +78,6 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'btw',
 ]);
 
-const COMMON_ABSOLUTE_PATH_ROOTS = new Set([
-  'Applications',
-  'Library',
-  'System',
-  'Users',
-  'Volumes',
-  'bin',
-  'boot',
-  'dev',
-  'etc',
-  'home',
-  'lib',
-  'media',
-  'mnt',
-  'opt',
-  'private',
-  'proc',
-  'root',
-  'run',
-  'sbin',
-  'srv',
-  'sys',
-  'tmp',
-  'usr',
-  'var',
-]);
-
-const SINGLE_SEGMENT_FILE_RE = /^[^\s/\\]+\.[A-Za-z0-9]{1,16}$/;
-
 function getSlashCommandParts(query: string): string[] {
   const commandText = query.slice(1).trim();
   return commandText ? commandText.split(/\s+/) : [];
@@ -118,12 +89,6 @@ function isKnownTopLevelCommandToken(
 ): boolean {
   return commands.some(
     (command) => command.name === token || command.altNames?.includes(token),
-  );
-}
-
-function looksLikeSingleSegmentAbsolutePath(token: string): boolean {
-  return (
-    COMMON_ABSOLUTE_PATH_ROOTS.has(token) || SINGLE_SEGMENT_FILE_RE.test(token)
   );
 }
 
@@ -498,23 +463,22 @@ export const useSlashCommandProcessor = (
         return false;
       }
 
-      // For '/' prefix, check if the first token looks like a valid command
-      // name. File paths like '/api/endpoint' or '/Users/name/path' contain
-      // path separators that are not valid in command names, so they should
-      // fall through to be sent to the model as regular input.
+      // For '/' prefix, only keep command-shaped inputs in the slash command
+      // flow. Inputs with path separators, such as '/api/endpoint', should be
+      // sent to the model as regular text.
       if (trimmed.startsWith('/')) {
         const commandParts = getSlashCommandParts(trimmed);
         const firstToken = commandParts[0] ?? '';
         if (firstToken && !looksLikeCommandName(firstToken)) {
           return false;
         }
-        // Loaded commands and aliases win, but unknown root-level path-like
-        // prompts such as "/tmp inspect" should fall through to the model.
+        // Loaded commands and aliases win. Otherwise, slash-prefixed input
+        // with arguments is ambiguous with root-level paths such as
+        // "/data foo", so let the model handle it instead of reporting
+        // "Unknown command" and dropping the user's content.
         if (
-          firstToken &&
           commandParts.length > 1 &&
-          !isKnownTopLevelCommandToken(firstToken, commands) &&
-          looksLikeSingleSegmentAbsolutePath(firstToken)
+          !isKnownTopLevelCommandToken(firstToken, commands)
         ) {
           return false;
         }
