@@ -1023,6 +1023,41 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('Per-Signal OTLP Endpoint Configuration', () => {
+    it('should return per-signal endpoints when provided', () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        telemetry: {
+          enabled: true,
+          otlpTracesEndpoint: 'http://traces:4318/v1/traces',
+          otlpLogsEndpoint: 'http://logs:4318/v1/logs',
+          otlpMetricsEndpoint: 'http://metrics:4318/v1/metrics',
+        },
+      };
+      const config = new Config(params);
+      expect(config.getTelemetryOtlpTracesEndpoint()).toBe(
+        'http://traces:4318/v1/traces',
+      );
+      expect(config.getTelemetryOtlpLogsEndpoint()).toBe(
+        'http://logs:4318/v1/logs',
+      );
+      expect(config.getTelemetryOtlpMetricsEndpoint()).toBe(
+        'http://metrics:4318/v1/metrics',
+      );
+    });
+
+    it('should return undefined when per-signal endpoints are not provided', () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        telemetry: { enabled: true },
+      };
+      const config = new Config(params);
+      expect(config.getTelemetryOtlpTracesEndpoint()).toBeUndefined();
+      expect(config.getTelemetryOtlpLogsEndpoint()).toBeUndefined();
+      expect(config.getTelemetryOtlpMetricsEndpoint()).toBeUndefined();
+    });
+  });
+
   describe('UseRipgrep Configuration', () => {
     it('should default useRipgrep to true when not provided', () => {
       const config = new Config(baseParams);

@@ -215,6 +215,12 @@ export interface TelemetrySettings {
   target?: TelemetryTarget;
   otlpEndpoint?: string;
   otlpProtocol?: 'grpc' | 'http';
+  /** Per-signal endpoint override for traces (HTTP only). Used as-is without path appending. */
+  otlpTracesEndpoint?: string;
+  /** Per-signal endpoint override for logs (HTTP only). Used as-is without path appending. */
+  otlpLogsEndpoint?: string;
+  /** Per-signal endpoint override for metrics (HTTP only). Used as-is without path appending. */
+  otlpMetricsEndpoint?: string;
   logPrompts?: boolean;
   outfile?: string;
   useCollector?: boolean;
@@ -741,8 +747,11 @@ export class Config {
     this.telemetrySettings = {
       enabled: params.telemetry?.enabled ?? false,
       target: params.telemetry?.target ?? DEFAULT_TELEMETRY_TARGET,
-      otlpEndpoint: params.telemetry?.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT,
+      otlpEndpoint: params.telemetry?.otlpEndpoint,
       otlpProtocol: params.telemetry?.otlpProtocol,
+      otlpTracesEndpoint: params.telemetry?.otlpTracesEndpoint,
+      otlpLogsEndpoint: params.telemetry?.otlpLogsEndpoint,
+      otlpMetricsEndpoint: params.telemetry?.otlpMetricsEndpoint,
       logPrompts: params.telemetry?.logPrompts ?? true,
       outfile: params.telemetry?.outfile,
       useCollector: params.telemetry?.useCollector,
@@ -1975,12 +1984,24 @@ export class Config {
     return this.telemetrySettings.logPrompts ?? true;
   }
 
-  getTelemetryOtlpEndpoint(): string {
+  getTelemetryOtlpEndpoint(): string | undefined {
     return this.telemetrySettings.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT;
   }
 
   getTelemetryOtlpProtocol(): 'grpc' | 'http' {
     return this.telemetrySettings.otlpProtocol ?? 'grpc';
+  }
+
+  getTelemetryOtlpTracesEndpoint(): string | undefined {
+    return this.telemetrySettings.otlpTracesEndpoint;
+  }
+
+  getTelemetryOtlpLogsEndpoint(): string | undefined {
+    return this.telemetrySettings.otlpLogsEndpoint;
+  }
+
+  getTelemetryOtlpMetricsEndpoint(): string | undefined {
+    return this.telemetrySettings.otlpMetricsEndpoint;
   }
 
   getTelemetryTarget(): TelemetryTarget {

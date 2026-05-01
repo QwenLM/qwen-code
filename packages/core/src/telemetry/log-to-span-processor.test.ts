@@ -1,0 +1,228 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { SpanKind, SpanStatusCode } from '@opentelemetry/api';
+import { LogToSpanProcessor } from './log-to-span-processor.js';
+import type { ReadableLogRecord } from '@opentelemetry/sdk-logs';
+import type { SpanExporter } from '@opentelemetry/sdk-trace-base';
+
+describe('LogToSpanProcessor', () => {
+  let processor: LogToSpanProcessor;
+  let mockExporter: SpanExporter;
+  let exportedSpans: Array<Record<string, unknown>>;
+
+  beforeEach(() => {
+    exportedSpans = [];
+    mockExporter = {
+      export: vi.fn((spans, cb) => {
+        exportedSpans.push(...spans);
+        cb({ code: 0 });
+      }),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      forceFlush: vi.fn().mockResolvedValue(undefined),
+    } as unknown as SpanExporter;
+    processor = new LogToSpanProcessor(mockExporter, 60000); // long interval to avoid auto-flush
+  });
+
+  afterEach(async () => {
+    await processor.shutdown();
+  });
+
+  it('converts a log record to a span on flush', async () => {
+    const logRecord = {
+      body: 'test event',
+      hrTime: [1000, 500000000] as [number, number],
+      attributes: {
+        key1: 'value1',
+        key2: 42,
+        key3: true,
+      },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    expect(exportedSpans).toHaveLength(1);
+    const span = exportedSpans[0];
+    expect(span.name).toBe('test event');
+    expect(span.kind).toBe(SpanKind.INTERNAL);
+    expect(span.attributes.key1).toBe('value1');
+    expect(span.attributes.key2).toBe(42);
+    expect(span.attributes.key3).toBe(true);
+    expect(span.attributes['log.bridge']).toBe(true);
+    expect(span.startTime).toEqual([1000, 500000000]);
+    // Instant span: end time == start time
+    expect(span.endTime).toEqual([1000, 500000000]);
+    expect(span.status.code).toBe(SpanStatusCode.OK);
+  });
+
+  it('uses duration_ms to compute span end time', async () => {
+    const logRecord = {
+      body: 'api response',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {
+        duration_ms: 250,
+        model: 'test-model',
+      },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    const span = exportedSpans[0];
+    // 250ms = 250_000_000 nanoseconds
+    expect(span.endTime).toEqual([1000, 250000000]);
+  });
+
+  it('handles duration_ms that causes second rollover', async () => {
+    const logRecord = {
+      body: 'long operation',
+      hrTime: [1000, 900000000] as [number, number],
+      attributes: {
+        duration_ms: 500,
+      },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    const span = exportedSpans[0];
+    // 900_000_000 + 500_000_000 = 1_400_000_000 → [1001, 400000000]
+    expect(span.endTime).toEqual([1001, 400000000]);
+  });
+
+  it('serializes object attributes to JSON', async () => {
+    const logRecord = {
+      body: 'event with object',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {
+        metadata: { nested: true },
+      },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    expect(exportedSpans[0].attributes.metadata).toBe('{"nested":true}');
+  });
+
+  it('skips null and undefined attributes', async () => {
+    const logRecord = {
+      body: 'event',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {
+        valid: 'yes',
+        nullVal: null,
+        undefinedVal: undefined,
+      },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    const attrs = exportedSpans[0].attributes;
+    expect(attrs.valid).toBe('yes');
+    expect(attrs).not.toHaveProperty('nullVal');
+    expect(attrs).not.toHaveProperty('undefinedVal');
+    expect(attrs['log.bridge']).toBe(true);
+  });
+
+  it('uses "unknown" as span name when body is missing', async () => {
+    const logRecord = {
+      body: undefined,
+      hrTime: [1000, 0] as [number, number],
+      attributes: {},
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    expect(exportedSpans[0].name).toBe('unknown');
+  });
+
+  it('generates unique trace IDs without session.id', async () => {
+    const logRecord1 = {
+      body: 'event1',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {},
+    } as unknown as ReadableLogRecord;
+    const logRecord2 = {
+      body: 'event2',
+      hrTime: [1001, 0] as [number, number],
+      attributes: {},
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord1);
+    processor.onEmit(logRecord2);
+    await processor.forceFlush();
+
+    const ctx1 = exportedSpans[0].spanContext();
+    const ctx2 = exportedSpans[1].spanContext();
+    expect(ctx1.traceId).toHaveLength(32);
+    expect(ctx1.spanId).toHaveLength(16);
+    expect(ctx1.traceId).not.toBe(ctx2.traceId);
+  });
+
+  it('derives same traceId from same session.id', async () => {
+    const logRecord1 = {
+      body: 'event1',
+      hrTime: [1000, 0] as [number, number],
+      attributes: { 'session.id': 'session-abc' },
+    } as unknown as ReadableLogRecord;
+    const logRecord2 = {
+      body: 'event2',
+      hrTime: [1001, 0] as [number, number],
+      attributes: { 'session.id': 'session-abc' },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord1);
+    processor.onEmit(logRecord2);
+    await processor.forceFlush();
+
+    const ctx1 = exportedSpans[0].spanContext();
+    const ctx2 = exportedSpans[1].spanContext();
+    // Same session → same traceId
+    expect(ctx1.traceId).toBe(ctx2.traceId);
+    // Different spanIds
+    expect(ctx1.spanId).not.toBe(ctx2.spanId);
+  });
+
+  it('derives different traceIds from different session.ids', async () => {
+    const logRecord1 = {
+      body: 'event1',
+      hrTime: [1000, 0] as [number, number],
+      attributes: { 'session.id': 'session-abc' },
+    } as unknown as ReadableLogRecord;
+    const logRecord2 = {
+      body: 'event2',
+      hrTime: [1001, 0] as [number, number],
+      attributes: { 'session.id': 'session-xyz' },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord1);
+    processor.onEmit(logRecord2);
+    await processor.forceFlush();
+
+    const ctx1 = exportedSpans[0].spanContext();
+    const ctx2 = exportedSpans[1].spanContext();
+    expect(ctx1.traceId).not.toBe(ctx2.traceId);
+  });
+
+  it('shutdown flushes remaining spans and shuts down exporter', async () => {
+    const logRecord = {
+      body: 'final event',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {},
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.shutdown();
+
+    expect(exportedSpans).toHaveLength(1);
+    expect(mockExporter.shutdown).toHaveBeenCalled();
+  });
+});
