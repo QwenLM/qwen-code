@@ -190,12 +190,19 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
       });
   };
 
-  process.once('SIGTERM', handleSignal);
-  process.once('SIGINT', handleSignal);
+  const handleSigterm = () => {
+    handleSignal('SIGTERM');
+  };
+  const handleSigint = () => {
+    handleSignal('SIGINT');
+  };
+
+  process.once('SIGTERM', handleSigterm);
+  process.once('SIGINT', handleSigint);
 
   return () => {
-    process.removeListener('SIGTERM', handleSignal);
-    process.removeListener('SIGINT', handleSignal);
+    process.removeListener('SIGTERM', handleSigterm);
+    process.removeListener('SIGINT', handleSigint);
   };
 }
 

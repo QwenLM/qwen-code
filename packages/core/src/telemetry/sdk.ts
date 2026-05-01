@@ -208,10 +208,13 @@ export function initializeTelemetry(config: Config): void {
     } else {
       // grpc — per-signal endpoints are not supported with gRPC protocol.
       if (!parsedEndpoint) {
-        debugLogger.warn(
+        const warning =
           'Per-signal OTLP endpoints are only supported with HTTP protocol. ' +
-            'Set otlpProtocol to "http" or provide a base otlpEndpoint for gRPC.',
-        );
+          'Set otlpProtocol to "http" or provide a base otlpEndpoint for gRPC. ' +
+          'Telemetry SDK startup was skipped because no supported gRPC endpoint was configured.';
+        diag.warn(warning);
+        debugLogger.warn(warning);
+        return;
       } else {
         spanExporter = new OTLPTraceExporter({
           url: parsedEndpoint,

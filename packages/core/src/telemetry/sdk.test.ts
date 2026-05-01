@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { diag } from '@opentelemetry/api';
 import type { Config } from '../config/config.js';
 import {
   initializeTelemetry,
@@ -233,6 +234,27 @@ describe('Telemetry SDK', () => {
     expect(OTLPLogExporterHttp).not.toHaveBeenCalled();
     expect(LogToSpanProcessor).toHaveBeenCalled();
     expect(NodeSDK.prototype.start).toHaveBeenCalled();
+  });
+
+  it('should warn and skip startup for gRPC per-signal endpoints without base endpoint', () => {
+    const diagWarnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+    try {
+      vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('grpc');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue('');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpTracesEndpoint').mockReturnValue(
+        'http://traces-host/token/api/otlp/traces',
+      );
+
+      initializeTelemetry(mockConfig);
+
+      expect(diagWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Telemetry SDK startup was skipped'),
+      );
+      expect(NodeSDK.prototype.start).not.toHaveBeenCalled();
+      expect(isTelemetrySdkInitialized()).toBe(false);
+    } finally {
+      diagWarnSpy.mockRestore();
+    }
   });
 
   it('should use OTLP exporters when target is gcp but useCollector is true', () => {

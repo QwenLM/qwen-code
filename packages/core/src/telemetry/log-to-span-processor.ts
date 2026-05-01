@@ -228,7 +228,8 @@ function sanitizeSpanName(body: unknown): string {
 
 /**
  * Safely stringify an object value for use as a span attribute.
- * Handles circular references and BigInt without throwing.
+ * Returns a bounded fallback when JSON serialization fails, such as for
+ * circular references or BigInt values.
  */
 function safeStringify(value: unknown): string {
   try {

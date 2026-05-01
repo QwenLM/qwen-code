@@ -639,7 +639,7 @@ describe('gemini.tsx main function kitty protocol', () => {
     expect(detectAndEnableKittyProtocol).toHaveBeenCalledTimes(1);
   });
 
-  it('should run cleanup before exiting on interactive SIGTERM', async () => {
+  it('should run cleanup before exiting on interactive SIGINT', async () => {
     const { loadCliConfig, parseArguments } = await import(
       './config/config.js'
     );
@@ -700,13 +700,13 @@ describe('gemini.tsx main function kitty protocol', () => {
     } as never);
 
     await main();
-    signalHandlers.get('SIGTERM')?.('SIGTERM');
+    signalHandlers.get('SIGINT')?.();
     await Promise.resolve();
     await Promise.resolve();
 
     expect(setRawModeSpy).toHaveBeenCalledWith(false);
     expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
-    expect(processExitSpy).toHaveBeenCalledWith(143);
+    expect(processExitSpy).toHaveBeenCalledWith(130);
 
     processOnceSpy.mockRestore();
     processExitSpy.mockRestore();
