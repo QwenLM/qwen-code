@@ -292,7 +292,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
               // ignore
             }
           }
-        }, 200);
+        }, 200).unref?.();
       }
     };
 

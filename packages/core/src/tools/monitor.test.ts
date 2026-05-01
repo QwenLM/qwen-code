@@ -567,6 +567,22 @@ describe('MonitorTool', () => {
       expect(result.returnDisplay).toContain('watch app logs');
     });
 
+    it('does not spawn when the turn signal is already aborted', async () => {
+      const invocation = createInvocation({
+        command: 'tail -f /var/log/app.log',
+      });
+      const ac = new AbortController();
+      ac.abort();
+
+      const result = await invocation.execute(ac.signal);
+
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(monitorRegistry.getAll()).toHaveLength(0);
+      expect(result.llmContent).toContain(
+        'Monitor was cancelled before it could start.',
+      );
+    });
+
     it('truncates long monitor descriptions in display surfaces', async () => {
       const longDescription = 'x'.repeat(120);
       const invocation = createInvocation({
