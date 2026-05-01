@@ -64,6 +64,9 @@ let mockMonitorRegistry: {
 let mockBackgroundShellRegistry: {
   abortAll: ReturnType<typeof vi.fn>;
 };
+let mockBackgroundTaskRegistry: {
+  abortAll: ReturnType<typeof vi.fn>;
+};
 
 function createConfig(overrides: ConfigOverrides = {}): Config {
   const base = {
@@ -76,6 +79,7 @@ function createConfig(overrides: ConfigOverrides = {}): Config {
     initialize: vi.fn(),
     getMonitorRegistry: () => mockMonitorRegistry,
     getBackgroundShellRegistry: () => mockBackgroundShellRegistry,
+    getBackgroundTaskRegistry: () => mockBackgroundTaskRegistry,
   };
   return { ...base, ...overrides } as unknown as Config;
 }
@@ -175,6 +179,9 @@ describe('runNonInteractiveStreamJson', () => {
       abortAll: vi.fn(),
     };
     mockBackgroundShellRegistry = {
+      abortAll: vi.fn(),
+    };
+    mockBackgroundTaskRegistry = {
       abortAll: vi.fn(),
     };
     config = createConfig();
@@ -826,7 +833,7 @@ describe('runNonInteractiveStreamJson', () => {
     expect(mockDispatcher.shutdown).toHaveBeenCalledTimes(1);
   });
 
-  it('aborts background shells on stream completion shutdown', async () => {
+  it('aborts background registries on stream completion shutdown', async () => {
     const initRequest = createControlRequest('initialize');
 
     mockInputReader.read = async function* () {
@@ -837,9 +844,10 @@ describe('runNonInteractiveStreamJson', () => {
 
     expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(2);
     expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalledTimes(2);
+    expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledTimes(2);
   });
 
-  it('aborts background shells on error shutdown', async () => {
+  it('aborts background registries on error shutdown', async () => {
     const streamError = new Error('Stream error');
     // eslint-disable-next-line require-yield
     mockInputReader.read = async function* () {
@@ -852,9 +860,10 @@ describe('runNonInteractiveStreamJson', () => {
 
     expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(2);
     expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalledTimes(2);
+    expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledTimes(2);
   });
 
-  it('runs final monitor and background-shell cleanup after in-flight processing drains', async () => {
+  it('runs final background cleanup after in-flight processing drains', async () => {
     const initRequest = createControlRequest('initialize');
     const userMessage = createUserMessage('Start background work');
     let releaseProcessing: (() => void) | undefined;
@@ -865,6 +874,9 @@ describe('runNonInteractiveStreamJson', () => {
     });
     mockBackgroundShellRegistry.abortAll.mockImplementation(() => {
       callOrder.push('background:abortAll');
+    });
+    mockBackgroundTaskRegistry.abortAll.mockImplementation(() => {
+      callOrder.push('agent:abortAll');
     });
 
     runNonInteractiveMock.mockImplementationOnce(
@@ -890,23 +902,27 @@ describe('runNonInteractiveStreamJson', () => {
 
     expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(1);
     expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalledTimes(1);
+    expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledTimes(1);
     expect(callOrder).toContain('run:start');
     expect(callOrder).toContain('monitor:abortAll');
     expect(callOrder).toContain('background:abortAll');
+    expect(callOrder).toContain('agent:abortAll');
 
     releaseProcessing?.();
     await sessionPromise;
 
     expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(2);
     expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalledTimes(2);
-    expect(callOrder.slice(-3)).toEqual([
+    expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledTimes(2);
+    expect(callOrder.slice(-4)).toEqual([
       'run:end',
       'monitor:abortAll',
       'background:abortAll',
+      'agent:abortAll',
     ]);
   });
 
-  it('runs final monitor and background-shell cleanup after in-flight processing drains on error shutdown', async () => {
+  it('runs final background cleanup after in-flight processing drains on error shutdown', async () => {
     const initRequest = createControlRequest('initialize');
     const userMessage = createUserMessage('Start background work');
     let releaseProcessing: (() => void) | undefined;
@@ -918,6 +934,9 @@ describe('runNonInteractiveStreamJson', () => {
     });
     mockBackgroundShellRegistry.abortAll.mockImplementation(() => {
       callOrder.push('background:abortAll');
+    });
+    mockBackgroundTaskRegistry.abortAll.mockImplementation(() => {
+      callOrder.push('agent:abortAll');
     });
 
     runNonInteractiveMock.mockImplementationOnce(
@@ -944,6 +963,7 @@ describe('runNonInteractiveStreamJson', () => {
 
     expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(1);
     expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalledTimes(1);
+    expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledTimes(1);
     expect(callOrder).toContain('run:start');
 
     releaseProcessing?.();
@@ -951,10 +971,12 @@ describe('runNonInteractiveStreamJson', () => {
 
     expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(2);
     expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalledTimes(2);
-    expect(callOrder.slice(-3)).toEqual([
+    expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledTimes(2);
+    expect(callOrder.slice(-4)).toEqual([
       'run:end',
       'monitor:abortAll',
       'background:abortAll',
+      'agent:abortAll',
     ]);
   });
 

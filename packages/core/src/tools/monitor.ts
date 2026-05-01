@@ -55,11 +55,18 @@ const DEFAULT_MAX_EVENTS = 1000;
 const MAX_MAX_EVENTS = 10000;
 const DEFAULT_IDLE_TIMEOUT_MS = 300_000; // 5 minutes
 const MAX_IDLE_TIMEOUT_MS = 600_000; // 10 minutes
+const MAX_DISPLAY_DESCRIPTION_LENGTH = 80;
 const PARTIAL_LINE_BUFFER_CAP = 4096;
 
 // Throttling constants (token bucket)
 const THROTTLE_BURST_SIZE = 5;
 const THROTTLE_REFILL_INTERVAL_MS = 1000; // 1 token per second
+
+function truncateDisplayDescription(description: string): string {
+  return description.length > MAX_DISPLAY_DESCRIPTION_LENGTH
+    ? description.slice(0, MAX_DISPLAY_DESCRIPTION_LENGTH - 1) + '…'
+    : description;
+}
 
 export interface MonitorToolParams {
   command: string;
@@ -90,7 +97,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
     const desc =
       this.params.description ||
       normalizeMonitorShellCommand(this.params.command).spawnCommand;
-    return `Monitor: ${desc}`;
+    return `Monitor: ${truncateDisplayDescription(desc)}`;
   }
 
   override async getDefaultPermission(): Promise<PermissionDecision> {
@@ -201,6 +208,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       );
     }
     const description = this.params.description || command;
+    const displayDescription = truncateDisplayDescription(description);
     const maxEvents = Math.min(
       this.params.max_events ?? DEFAULT_MAX_EVENTS,
       MAX_MAX_EVENTS,
@@ -433,7 +441,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
         `idle_timeout: ${idleTimeoutMs}ms\n` +
         `Events will be delivered as notifications. ` +
         `The monitor auto-stops after ${maxEvents} events or ${idleTimeoutMs}ms of silence.`,
-      returnDisplay: `Monitor started: ${description} (${monitorId})`,
+      returnDisplay: `Monitor started: ${displayDescription} (${monitorId})`,
     };
   }
 }

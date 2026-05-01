@@ -621,6 +621,7 @@ class Session {
   private abortTaskRegistries(): void {
     this.config.getMonitorRegistry().abortAll();
     this.config.getBackgroundShellRegistry().abortAll();
+    this.config.getBackgroundTaskRegistry().abortAll();
   }
 
   private finishShutdown(): void {

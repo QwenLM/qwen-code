@@ -21,6 +21,77 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 
 // Mock shell-utils
+function isEnvAssignmentToken(token: string): boolean {
+  const equalsIndex = token.indexOf('=');
+  if (equalsIndex <= 0) return false;
+
+  const name = token.slice(0, equalsIndex);
+  const firstChar = name.charCodeAt(0);
+  const isAlpha =
+    (firstChar >= 65 && firstChar <= 90) ||
+    (firstChar >= 97 && firstChar <= 122);
+  if (!isAlpha && name[0] !== '_') return false;
+
+  for (let i = 1; i < name.length; i++) {
+    const code = name.charCodeAt(i);
+    const isAlphaNumeric =
+      (code >= 65 && code <= 90) ||
+      (code >= 97 && code <= 122) ||
+      (code >= 48 && code <= 57);
+    if (!isAlphaNumeric && name[i] !== '_') return false;
+  }
+
+  return true;
+}
+
+function takeLeadingShellToken(command: string): {
+  token: string;
+  rest: string;
+} | null {
+  const trimmed = command.trimStart();
+  if (!trimmed) return null;
+
+  let quote: '"' | "'" | '' = '';
+  let escaped = false;
+  let idx = 0;
+  for (; idx < trimmed.length; idx++) {
+    const char = trimmed[idx]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (/\s/.test(char)) break;
+  }
+
+  return {
+    token: trimmed.slice(0, idx),
+    rest: trimmed.slice(idx),
+  };
+}
+
+function stripLeadingEnvAssignments(command: string): string {
+  let rest = command.trimStart();
+  while (true) {
+    const token = takeLeadingShellToken(rest);
+    if (!token || !isEnvAssignmentToken(token.token)) {
+      return rest;
+    }
+    rest = token.rest.trimStart();
+  }
+}
+
 vi.mock('../utils/shell-utils.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../utils/shell-utils.js')>();
@@ -33,12 +104,7 @@ vi.mock('../utils/shell-utils.js', async (importOriginal) => {
       shell: 'bash',
     }),
     getCommandRoot: (cmd: string) =>
-      cmd
-        .replace(
-          /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|(?:\\.|[^\s])+)\s+)*/,
-          '',
-        )
-        .split(/\s+/)[0],
+      stripLeadingEnvAssignments(cmd).split(/\s+/)[0],
     splitCommands: (cmd: string) =>
       cmd
         .split(/\s*&&\s*/)
@@ -111,10 +177,7 @@ describe('MonitorTool', () => {
     mockIsPathWithinWorkspace = vi.fn().mockReturnValue(true);
     mockIsShellCommandReadOnlyAST.mockResolvedValue(false);
     mockExtractCommandRules.mockImplementation(async (command: string) => {
-      const normalized = command.replace(
-        /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|(?:\\.|[^\s])+)\s+)*/,
-        '',
-      );
+      const normalized = stripLeadingEnvAssignments(command);
       return [`${normalized.split(/\s+/).slice(0, 2).join(' ')} *`];
     });
 
@@ -155,6 +218,7 @@ describe('MonitorTool', () => {
     (
       monitorTool as unknown as {
         createInvocation: (p: Record<string, unknown>) => {
+          getDescription: () => string;
           getDefaultPermission: () => Promise<string>;
           getConfirmationDetails: (
             s: AbortSignal,
@@ -501,6 +565,21 @@ describe('MonitorTool', () => {
       expect(result.llmContent).toContain('Monitor started');
       expect(result.llmContent).toContain('mon_');
       expect(result.returnDisplay).toContain('watch app logs');
+    });
+
+    it('truncates long monitor descriptions in display surfaces', async () => {
+      const longDescription = 'x'.repeat(120);
+      const invocation = createInvocation({
+        command: 'tail -f /var/log/app.log',
+        description: longDescription,
+      });
+
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(invocation.getDescription()).toBe(`Monitor: ${'x'.repeat(79)}…`);
+      expect(result.returnDisplay).toContain(`${'x'.repeat(79)}…`);
+      expect(result.returnDisplay).not.toContain(longDescription);
+      expect(result.llmContent).toContain(`description: ${longDescription}`);
     });
 
     it('strips a trailing bare ampersand before spawning', async () => {

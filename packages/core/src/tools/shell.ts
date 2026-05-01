@@ -53,26 +53,107 @@ const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
 
 /**
  * Detect standalone or leading `sleep N` patterns that should use Monitor
- * instead. Catches `sleep 5`, `sleep 5 && check`, `sleep 5; check` — but
- * not sleep inside pipelines, subshells, or scripts (those are fine).
+ * instead. Catches `sleep 5`, `sleep 2.5`, `sleep 2s`,
+ * `sleep 5 && check`, `sleep 5; check` — but not sleep inside pipelines,
+ * subshells, backgrounded commands, or scripts (those are fine).
  */
 export function detectBlockedSleepPattern(command: string): string | null {
   const trimmed = command.trim();
-  // Match `sleep N` at the very start. Only integer durations >= 2.
-  // After the number: end of string, or a sequential separator (&&, ||, ;, newline).
-  // Pipes (|) and bare `&` (background operator) are NOT matched — those are
-  // legitimate non-blocking patterns (e.g. `sleep 5 & echo done`).
-  const m = /^sleep\s+(\d+)(?:\s*$|\s*(&&|\|\||[;\n])\s*([\s\S]*))$/.exec(
-    trimmed,
-  );
-  if (!m) return null;
-  const secs = parseInt(m[1]!, 10);
-  if (secs < 2) return null;
+  if (!trimmed.startsWith('sleep')) return null;
+  const afterSleep = trimmed.slice('sleep'.length);
+  if (!afterSleep || !/\s/.test(afterSleep[0]!)) return null;
 
-  const rest = (m[3] ?? '').trim();
+  let index = 0;
+  while (index < afterSleep.length && /\s/.test(afterSleep[index]!)) {
+    index++;
+  }
+  const durationStart = index;
+  while (
+    index < afterSleep.length &&
+    !/\s/.test(afterSleep[index]!) &&
+    ![';', '&', '|', '\n'].includes(afterSleep[index]!)
+  ) {
+    index++;
+  }
+
+  const durationToken = afterSleep.slice(durationStart, index);
+  const secs = parseSleepDurationToSeconds(durationToken);
+  if (secs === null || secs < 2) return null;
+
+  const suffix = afterSleep.slice(index);
+  const separator = getSleepSequentialSeparator(suffix);
+  if (separator === null) return null;
+
+  const rest = separator.rest.trim();
   return rest
-    ? `sleep ${secs} followed by: ${rest}`
-    : `standalone sleep ${secs}`;
+    ? `sleep ${durationToken} followed by: ${rest}`
+    : `standalone sleep ${durationToken}`;
+}
+
+function parseSleepDurationToSeconds(token: string): number | null {
+  if (!token) return null;
+
+  let index = 0;
+  let seenDigit = false;
+  let seenDot = false;
+  while (index < token.length) {
+    const char = token[index]!;
+    if (char >= '0' && char <= '9') {
+      seenDigit = true;
+      index++;
+      continue;
+    }
+    if (char === '.' && !seenDot) {
+      seenDot = true;
+      index++;
+      continue;
+    }
+    break;
+  }
+
+  if (!seenDigit) return null;
+  const value = Number.parseFloat(token.slice(0, index));
+  if (!Number.isFinite(value)) return null;
+
+  const unit = token.slice(index).toLowerCase();
+  switch (unit || 's') {
+    case 'ms':
+      return value / 1000;
+    case 's':
+      return value;
+    case 'm':
+      return value * 60;
+    case 'h':
+      return value * 60 * 60;
+    case 'd':
+      return value * 60 * 60 * 24;
+    default:
+      return null;
+  }
+}
+
+function getSleepSequentialSeparator(suffix: string): { rest: string } | null {
+  let index = 0;
+  while (
+    index < suffix.length &&
+    suffix[index] !== '\n' &&
+    /\s/.test(suffix[index]!)
+  ) {
+    index++;
+  }
+
+  const restWithSeparator = suffix.slice(index);
+  if (!restWithSeparator) return { rest: '' };
+  if (
+    restWithSeparator.startsWith('&&') ||
+    restWithSeparator.startsWith('||')
+  ) {
+    return { rest: restWithSeparator.slice(2) };
+  }
+  if (restWithSeparator[0] === ';' || restWithSeparator[0] === '\n') {
+    return { rest: restWithSeparator.slice(1) };
+  }
+  return null;
 }
 
 function trimTrailingShellComment(command: string): string {

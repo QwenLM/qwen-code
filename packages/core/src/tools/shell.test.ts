@@ -1440,6 +1440,12 @@ describe('detectBlockedSleepPattern', () => {
   it('blocks standalone sleep >= 2s', () => {
     expect(detectBlockedSleepPattern('sleep 5')).toBe('standalone sleep 5');
     expect(detectBlockedSleepPattern('sleep 10')).toBe('standalone sleep 10');
+    expect(detectBlockedSleepPattern('sleep 2.5')).toBe('standalone sleep 2.5');
+    expect(detectBlockedSleepPattern('sleep 2s')).toBe('standalone sleep 2s');
+    expect(detectBlockedSleepPattern('sleep 2000ms')).toBe(
+      'standalone sleep 2000ms',
+    );
+    expect(detectBlockedSleepPattern('sleep 3m')).toBe('standalone sleep 3m');
   });
 
   it('blocks sleep followed by another command', () => {
@@ -1449,6 +1455,12 @@ describe('detectBlockedSleepPattern', () => {
     expect(detectBlockedSleepPattern('sleep 3; echo done')).toBe(
       'sleep 3 followed by: echo done',
     );
+    expect(detectBlockedSleepPattern('sleep 2.5 || echo done')).toBe(
+      'sleep 2.5 followed by: echo done',
+    );
+    expect(detectBlockedSleepPattern('sleep 2s\necho done')).toBe(
+      'sleep 2s followed by: echo done',
+    );
   });
 
   it('allows sleep < 2s', () => {
@@ -1456,9 +1468,10 @@ describe('detectBlockedSleepPattern', () => {
     expect(detectBlockedSleepPattern('sleep 0')).toBeNull();
   });
 
-  it('allows float sleep durations (not matched by integer regex)', () => {
+  it('allows sleep durations below 2 seconds', () => {
     expect(detectBlockedSleepPattern('sleep 0.5')).toBeNull();
     expect(detectBlockedSleepPattern('sleep 1.5')).toBeNull();
+    expect(detectBlockedSleepPattern('sleep 1500ms')).toBeNull();
   });
 
   it('allows sleep not as first subcommand', () => {
