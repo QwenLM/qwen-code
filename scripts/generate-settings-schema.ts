@@ -25,6 +25,7 @@ import type {
   SettingsSchema,
 } from '../packages/cli/src/config/settingsSchema.js';
 import { getSettingsSchema } from '../packages/cli/src/config/settingsSchema.js';
+import { SETTINGS_VERSION } from '../packages/cli/src/config/settings.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -194,11 +195,12 @@ function generateJsonSchema(
     );
   }
 
-  // Add $version property
+  // Add $version property — sourced from settings.ts so a SETTINGS_VERSION
+  // bump propagates here instead of needing a parallel manual edit.
   jsonSchema.properties!['$version'] = {
     type: 'number',
     description: 'Settings schema version for migration tracking.',
-    default: 3,
+    default: SETTINGS_VERSION,
   };
 
   return jsonSchema;

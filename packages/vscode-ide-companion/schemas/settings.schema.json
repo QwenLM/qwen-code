@@ -2048,7 +2048,7 @@
     "$version": {
       "type": "number",
       "description": "Settings schema version for migration tracking.",
-      "default": 3
+      "default": 4
     }
   },
   "additionalProperties": true

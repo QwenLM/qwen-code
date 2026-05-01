@@ -86,6 +86,73 @@ function escapeForBashSingleQuote(s: string): string {
   return s.replace(/'/g, "'\\''");
 }
 
+/**
+ * Parse `git diff --stat` output into a `path → approximate change size`
+ * map for attribution accounting. Approximate size is what ends up
+ * clamping `aiChars` in the attribution payload, so missing entries
+ * silently zero out a file's contribution — meaning binary edits should
+ * land in the map too.
+ *
+ * Two line formats handled:
+ * - Text:   ` path/to/file | 5 ++---`         → `lines * 40` chars
+ * - Binary: ` path/to/file | Bin 0 -> 123 b`  → `|new - old|` bytes (≥1)
+ *
+ * Rename notations (`{old => new}` and bare `old => new`) are normalized
+ * to the new path so lookups match `--name-only` output.
+ *
+ * Exported for unit testing — the function is otherwise an implementation
+ * detail of `attachCommitAttribution`.
+ */
+export function parseDiffStat(statOutput: string): Map<string, number> {
+  const sizes = new Map<string, number>();
+  const lines = statOutput.split('\n').filter(Boolean);
+
+  const normalizeFilePath = (filePath: string): string => {
+    let p = filePath.trim();
+    // Brace rename: `{old => new}` or `dir/{old => new}/file`
+    p = p.replace(/\{[^}]*?=>\s*([^}]*)\}/g, '$1');
+    // Bare rename across directories: `old/path/file => new/path/file`
+    if (p.includes('=>')) {
+      const m = p.match(/^(.*?)\s=>\s(.*)$/);
+      if (m) p = m[2]!.trim();
+    }
+    return p;
+  };
+
+  for (const line of lines) {
+    // Skip summary line ("N files changed, X insertions(+), Y deletions(-)")
+    if (line.includes('file changed') || line.includes('files changed')) {
+      continue;
+    }
+
+    // Text diff: " path/to/file | 5 ++---"
+    const textMatch = line.match(/^\s*(.+?)\s+\|\s+(\d+)/);
+    if (textMatch) {
+      const filePath = normalizeFilePath(textMatch[1]!);
+      const changes = parseInt(textMatch[2]!, 10);
+      // Approximate chars: lines changed * avg 40 chars/line
+      sizes.set(filePath, changes * 40);
+      continue;
+    }
+
+    // Binary diff: " path/to/file | Bin 0 -> 123 bytes"
+    // Use the byte delta with a floor of 1 so binary-only changes still
+    // land in the map (otherwise they'd flow through as `diffSize=0` and
+    // silently drop out of attribution).
+    const binaryMatch = line.match(
+      /^\s*(.+?)\s+\|\s+Bin\s+(\d+)\s+->\s+(\d+)\s+bytes$/,
+    );
+    if (binaryMatch) {
+      const filePath = normalizeFilePath(binaryMatch[1]!);
+      const oldBytes = parseInt(binaryMatch[2]!, 10);
+      const newBytes = parseInt(binaryMatch[3]!, 10);
+      sizes.set(filePath, Math.max(1, Math.abs(newBytes - oldBytes)));
+    }
+  }
+
+  return sizes;
+}
+
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
 
@@ -921,12 +988,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // The commit already happened, so we diff HEAD~1..HEAD instead of --cached.
       const stagedInfo = await this.getCommittedFileInfo(cwd);
 
-      const generatorName = gitCoAuthorSettings.name ?? 'Qwen-Coder';
+      // Pass the actual model name (e.g. `qwen3-coder-plus`) rather than the
+      // co-author display label so the note's `generator` field reflects
+      // which model produced the changes — and so generateNotePayload's
+      // sanitizeModelName() actually has the codename it's meant to scrub.
       const baseDir = this.config.getTargetDir();
       const note = attributionService.generateNotePayload(
         stagedInfo,
         baseDir,
-        generatorName,
+        this.config.getModel(),
       );
       const notesCommand = buildGitNotesCommand(note);
 
@@ -1049,7 +1119,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
 
       // Get diff sizes from stat output
-      const diffSizes = this.parseDiffStat(statOutput);
+      const diffSizes = parseDiffStat(statOutput);
 
       return { files, diffSizes, deletedFiles };
     } catch {
@@ -1061,38 +1131,19 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * Parse `git diff --stat` output to extract per-file change sizes.
    * Estimates character count as (insertions + deletions) * 40 chars/line.
    */
-  private parseDiffStat(statOutput: string): Map<string, number> {
-    const sizes = new Map<string, number>();
-    const lines = statOutput.split('\n').filter(Boolean);
-
-    for (const line of lines) {
-      // Skip summary line ("N files changed, X insertions(+), Y deletions(-)")
-      if (line.includes('file changed') || line.includes('files changed')) {
-        continue;
-      }
-      // Format: " path/to/file | 5 ++---"
-      const match = line.match(/^\s*(.+?)\s+\|\s+(\d+)/);
-      if (match) {
-        let filePath = match[1]!.trim();
-        // Handle rename brace notation: "{old => new}" or "dir/{old => new}".
-        // Extract the new name so the key matches --name-only output.
-        filePath = filePath.replace(/\{[^}]*?=>\s*([^}]*)\}/g, '$1');
-        // Handle plain rename notation when the rename crosses directories:
-        // "old/path/file => new/path/file". Keep only the new path.
-        if (filePath.includes('=>')) {
-          const renameMatch = filePath.match(/^(.*?)\s=>\s(.*)$/);
-          if (renameMatch) {
-            filePath = renameMatch[2]!.trim();
-          }
-        }
-        const changes = parseInt(match[2]!, 10);
-        // Approximate chars: lines changed * avg 40 chars/line
-        sizes.set(filePath, changes * 40);
-      }
-    }
-
-    return sizes;
-  }
+  /**
+   * Parse `git diff --stat` output into a `path → approximate change size`
+   * map. Approximate size is what ends up clamping `aiChars` in the
+   * attribution payload, so missing entries silently zero out a file's
+   * contribution — meaning binary edits should land in the map too.
+   *
+   * Two line formats handled:
+   * - Text:   ` path/to/file | 5 ++---`         → `lines * 40` chars
+   * - Binary: ` path/to/file | Bin 0 -> 123 b`  → `|new - old|` bytes (≥1)
+   *
+   * Rename notations (`{old => new}` and bare `old => new`) are normalized
+   * to the new path so lookups match `--name-only` output.
+   */
 
   private addCoAuthorToGitCommit(command: string): string {
     // Check if commit co-author feature is enabled

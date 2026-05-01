@@ -33,7 +33,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import { ToolErrorType } from './tool-error.js';
-import { OUTPUT_UPDATE_INTERVAL_MS } from './shell.js';
+import { OUTPUT_UPDATE_INTERVAL_MS, parseDiffStat } from './shell.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
@@ -67,6 +67,7 @@ describe('ShellTool', () => {
       getTruncateToolOutputLines: vi.fn().mockReturnValue(0),
       getPermissionManager: vi.fn().mockReturnValue(undefined),
       getGeminiClient: vi.fn(),
+      getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
       getGitCoAuthor: vi.fn().mockReturnValue({
         commit: true,
         pr: true,
@@ -1598,5 +1599,39 @@ describe('ShellTool', () => {
         {},
       );
     });
+  });
+});
+
+describe('parseDiffStat', () => {
+  it('parses text-diff lines as lines * 40', () => {
+    const out = ' src/main.ts   | 5 ++---\n 1 file changed';
+    expect(parseDiffStat(out).get('src/main.ts')).toBe(200);
+  });
+
+  it('parses binary-diff lines as |new - old| with a floor of 1', () => {
+    const out =
+      ' assets/logo.png | Bin 0 -> 1024 bytes\n' +
+      ' assets/icon.png | Bin 1024 -> 1024 bytes';
+    const sizes = parseDiffStat(out);
+    expect(sizes.get('assets/logo.png')).toBe(1024);
+    // Same-size binary edit still lands in the map so attribution
+    // doesn't drop the file via diffSize=0.
+    expect(sizes.get('assets/icon.png')).toBe(1);
+  });
+
+  it('normalizes brace rename notation to the new path', () => {
+    const out = ' src/{old => new}/file.ts | 3 +++';
+    expect([...parseDiffStat(out).keys()]).toEqual(['src/new/file.ts']);
+  });
+
+  it('normalizes bare cross-directory rename to the new path', () => {
+    const out = ' old/dir/file.ts => new/dir/file.ts | 2 +-';
+    expect([...parseDiffStat(out).keys()]).toEqual(['new/dir/file.ts']);
+  });
+
+  it('skips the summary line', () => {
+    const out =
+      ' src/a.ts | 1 +\n 2 files changed, 1 insertion(+), 1 deletion(-)';
+    expect(parseDiffStat(out).size).toBe(1);
   });
 });
