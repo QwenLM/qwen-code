@@ -125,6 +125,22 @@ export function parseSkillContent(
       ? frontmatter['argument-hint']
       : undefined;
 
+  // `whenToUse` and `disable-model-invocation` were historically only
+  // parsed by the project/user/bundled parser in skill-manager.ts, which
+  // meant an extension SKILL.md with `disable-model-invocation: true`
+  // had the flag silently stripped — and (post-paths PR) would still
+  // fire path-activation reminders for a skill the model can't invoke.
+  // Extract them here too so the extension and managed parsers agree.
+  const whenToUse =
+    typeof frontmatter['when_to_use'] === 'string'
+      ? frontmatter['when_to_use']
+      : undefined;
+  const disableModelInvocationRaw = frontmatter['disable-model-invocation'];
+  const disableModelInvocation =
+    disableModelInvocationRaw === true || disableModelInvocationRaw === 'true'
+      ? true
+      : undefined;
+
   // Optional `paths` frontmatter: glob patterns that gate when this skill
   // is offered to the model (conditional skill).
   const paths = parsePathsField(frontmatter);
@@ -138,6 +154,8 @@ export function parseSkillContent(
     filePath,
     body: body.trim(),
     level: 'extension',
+    whenToUse,
+    disableModelInvocation,
     paths,
   };
 

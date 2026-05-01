@@ -4464,6 +4464,21 @@ describe('extractToolFilePaths', () => {
     ).toEqual(['/proj/a.ts']);
   });
 
+  it('canonicalizes legacy tool-name aliases before the allowlist check', () => {
+    // Regression: the tool registry resolves `replace` → `edit`,
+    // `search_file_content` → `grep_search`, etc. at execution time, so
+    // a model call like `replace({ file_path: 'src/App.tsx' })` actually
+    // runs EditTool. If the activation pipeline gates on the raw alias
+    // name, conditional rules and skill activation silently skip every
+    // tool call that uses a legacy name.
+    expect(
+      extractToolFilePaths('replace', { file_path: '/proj/a.ts' }),
+    ).toEqual(['/proj/a.ts']);
+    expect(
+      extractToolFilePaths('search_file_content', { filePath: '/proj/b.ts' }),
+    ).toEqual(['/proj/b.ts']);
+  });
+
   it('returns empty for tool names outside the FS allowlist', () => {
     // Regression: MCP tools and other non-FS tools that happen to use
     // `path` / `paths` for non-filesystem semantics (e.g. URL routes,

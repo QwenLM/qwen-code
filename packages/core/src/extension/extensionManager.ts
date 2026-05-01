@@ -1347,18 +1347,31 @@ export class ExtensionManager {
     // refresh mcp servers
     await this.config.getToolRegistry().restartMcpServers();
     // Refresh skills + subagents in parallel. Both `refreshCache` calls
-    // now resolve only after their async change-listener chain settles —
-    // for skills, that includes `SkillTool.refreshSkills()` rebuilding
+    // now resolve only after their async change-listener chain settles
+    // — for skills, that includes `SkillTool.refreshSkills()` rebuilding
     // the model-facing tool description and updating `geminiClient`'s
-    // tool list. Without these awaits the function would resolve before
-    // those side-effects land, and any rejection from them would be
-    // silently swallowed.
-    await Promise.all([
-      this.config.getSkillManager()?.refreshCache(),
+    // tool list. allSettled (rather than Promise.all) so a rejection
+    // from one leg does not cascade — the other leg's result is still
+    // applied, refreshHierarchicalMemory below still runs, and the
+    // `refreshTools` callers (`enableExtension`, etc.) don't unwind
+    // because of an unrelated transient failure.
+    const skillManager = this.config.getSkillManager();
+    const settled = await Promise.allSettled([
+      skillManager?.refreshCache(),
       this.config.getSubagentManager().refreshCache(),
     ]);
-    // refresh context files
-    this.config.refreshHierarchicalMemory();
+    for (const result of settled) {
+      if (result.status === 'rejected') {
+        debugLogger.warn(
+          'refreshMemory: a refreshCache leg failed:',
+          result.reason,
+        );
+      }
+    }
+    // Hierarchical memory refresh is now awaited too — the previous
+    // fire-and-forget defeated the rest of the function's "wait until
+    // refresh is done" contract.
+    await this.config.refreshHierarchicalMemory();
   }
 
   async refreshTools(): Promise<void> {

@@ -163,17 +163,44 @@ export function parsePathsField(
     throw new Error('"paths" must be an array of glob patterns');
   }
   const cleaned = raw.map((p) => String(p).trim()).filter((p) => p.length > 0);
+  // Surface obvious silent-failures at parse time. Without these the
+  // skill loads fine but its globs never match anything: the activation
+  // registry resolves candidates against the project root and rejects
+  // anything starting with `..` or anything that resolves outside the
+  // project. An author who writes `paths: ['/etc/passwd']` or `['../*.ts']`
+  // would otherwise see the skill in `/skills` and never understand why
+  // it never activates from the model side.
+  for (const pattern of cleaned) {
+    if (pattern.startsWith('/') || pattern.startsWith('\\')) {
+      throw new Error(
+        `"paths" entry "${pattern}" looks absolute; patterns are project-root-relative — drop the leading slash`,
+      );
+    }
+    if (pattern === '..' || pattern.startsWith('../')) {
+      throw new Error(
+        `"paths" entry "${pattern}" escapes the project root; patterns must stay within the project`,
+      );
+    }
+  }
   return cleaned.length > 0 ? cleaned : undefined;
 }
 
 /**
- * Strict allowed-character set for skill names. Names flow into multiple
+ * Allowed-character set for skill names. Names flow into multiple
  * trust-relevant sinks: the `<available_skills>` description (consumed by
  * the model), the `<system-reminder>` emitted on path activation, the
  * SkillTool schema's enum, and various UI listings. Rejecting structurally
- * unsafe names at parse time is more reliable than escaping at every sink.
+ * unsafe characters at parse time is more reliable than escaping at every
+ * sink.
+ *
+ * Charset uses Unicode property classes so non-ASCII names (CJK, Cyrillic,
+ * accented Latin, etc.) keep working — the original `[a-zA-Z0-9_:.-]+`
+ * silently dropped any such skill on upgrade, which is a real
+ * backwards-compat regression for the project's CJK userbase. The
+ * structurally unsafe characters (`<>/\"'\n\r\t`, whitespace) are still
+ * out, which is the actual injection vector this guards against.
  */
-export const SKILL_NAME_PATTERN = /^[a-zA-Z0-9_:.-]+$/;
+export const SKILL_NAME_PATTERN = /^[\p{L}\p{N}_:.-]+$/u;
 
 /**
  * Validate that a skill `name` is safe to embed into prompts and reminders

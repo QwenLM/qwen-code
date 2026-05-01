@@ -94,10 +94,24 @@ export class SkillActivationRegistry {
 
   constructor(conditionalSkills: readonly SkillConfig[], projectRoot: string) {
     this.projectRoot = projectRoot;
-    this.compiled = conditionalSkills.map((skill) => ({
-      skill,
-      matchers: (skill.paths ?? []).map((p) => picomatch(p, { dot: false })),
-    }));
+    this.compiled = conditionalSkills.map((skill) => {
+      const matchers: picomatch.Matcher[] = [];
+      for (const p of skill.paths ?? []) {
+        try {
+          matchers.push(picomatch(p, { dot: false }));
+        } catch (e) {
+          // picomatch can throw on pathological inputs (oversize patterns,
+          // broken extglob nesting). Drop the offending pattern but keep
+          // the rest of the skill — better than letting the error bubble
+          // up to refreshCache and abort skill loading entirely (this
+          // site is outside the levels-level Promise.allSettled boundary).
+          debugLogger.warn(
+            `Skill "${skill.name}" has invalid glob "${p}", skipping pattern: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      }
+      return { skill, matchers };
+    });
   }
 
   /**

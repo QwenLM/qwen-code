@@ -351,6 +351,20 @@ describe('SkillTool', () => {
     });
   });
 
+  describe('dispose', () => {
+    it('detaches the change listener so per-subagent SkillTools do not leak', () => {
+      // Regression: subagents share the parent's SkillManager via
+      // InProcessBackend.createPerAgentConfig, so each per-subagent
+      // SkillTool registers its own listener on the parent's manager.
+      // Without dispose() the listeners accumulate and every
+      // matchAndActivateByPaths call awaits each stale subagent's
+      // refreshSkills sequentially.
+      expect(changeListeners.length).toBe(1);
+      (skillTool as unknown as { dispose: () => void }).dispose();
+      expect(changeListeners.length).toBe(0);
+    });
+  });
+
   describe('SkillToolInvocation', () => {
     const mockRuntimeConfig: SkillConfig = {
       ...mockSkills[0],

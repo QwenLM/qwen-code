@@ -47,7 +47,7 @@ import type {
   Part,
   PartListUnion,
 } from '@google/genai';
-import { ToolNames } from '../tools/tool-names.js';
+import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
@@ -232,7 +232,14 @@ export function extractToolFilePaths(
   toolName: string,
   toolInput: unknown,
 ): string[] {
-  if (!FS_PATH_TOOL_NAMES.has(toolName)) return [];
+  // Canonicalize legacy aliases (e.g. `replace` → `edit`,
+  // `search_file_content` → `grep_search`) before the allowlist check.
+  // The tool registry resolves these at execution time, so a tool call
+  // like `replace({ file_path: 'src/App.tsx' })` actually runs EditTool;
+  // gating only on the canonical name closes the alias-bypass hole.
+  const canonical =
+    (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
+  if (!FS_PATH_TOOL_NAMES.has(canonical)) return [];
   if (!toolInput || typeof toolInput !== 'object') return [];
   const out: string[] = [];
   const push = (v: unknown): void => {
@@ -246,7 +253,7 @@ export function extractToolFilePaths(
   if (Array.isArray(pathsField)) {
     for (const p of pathsField) push(p);
   }
-  if (toolName === ToolNames.GLOB) {
+  if (canonical === ToolNames.GLOB) {
     // Glob-only: derive the effective selector from `path` + `pattern`.
     // The previous version pushed `pattern` standalone, but the glob
     // call actually searches `<path>/<pattern>` — so a skill keyed on
@@ -1845,11 +1852,21 @@ export class CoreToolScheduler {
           const activatedSkills =
             await skillManager?.matchAndActivateByPaths(candidatePaths);
           if (activatedSkills && activatedSkills.length > 0) {
-            const names = activatedSkills.join(', ');
-            content = appendAdditionalContext(
-              content,
-              `<system-reminder>\nThe following skill(s) are now available via the Skill tool based on the file you just accessed: ${names}. Use them if relevant to the task.\n</system-reminder>`,
-            );
+            // Subagents share the parent's SkillManager but may have a
+            // restricted toolsList that excludes SkillTool entirely.
+            // Telling such a context "skill X is now available via the
+            // Skill tool" is misleading — the subagent can't invoke it
+            // and would waste a turn trying. Gate the reminder on
+            // whether the active tool registry actually exposes
+            // SkillTool to the model.
+            const hasSkillTool = !!this.toolRegistry.getTool(ToolNames.SKILL);
+            if (hasSkillTool) {
+              const names = activatedSkills.join(', ');
+              content = appendAdditionalContext(
+                content,
+                `<system-reminder>\nThe following skill(s) are now available via the Skill tool based on the file you just accessed: ${names}. Use them if relevant to the task.\n</system-reminder>`,
+              );
+            }
           }
         }
 

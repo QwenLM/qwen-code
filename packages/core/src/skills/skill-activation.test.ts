@@ -133,6 +133,30 @@ describe('SkillActivationRegistry', () => {
     expect(reg.matchAndConsume('/project/src/Bar.tsx')).toEqual([]);
   });
 
+  it('survives an invalid picomatch pattern (drops it, keeps the rest)', () => {
+    // Regression: picomatch can throw on pathological patterns
+    // (oversized strings, broken extglob nesting). The constructor
+    // previously let that throw escape and abort skill loading
+    // entirely. With the try/catch, the bad pattern is dropped with
+    // a debug log and the remaining patterns still compile.
+    //
+    // Use an oversized pattern (~70 KB) — picomatch's default limit
+    // is 65,536 chars and it throws above that.
+    const bigPattern = 'a'.repeat(70_000);
+    const reg = new SkillActivationRegistry(
+      [
+        makeSkill({
+          name: 'mixed',
+          paths: [bigPattern, 'src/**/*.ts'],
+        }),
+      ],
+      projectRoot,
+    );
+    expect(reg.totalCount).toBe(1);
+    // The good pattern still works.
+    expect(reg.matchAndConsume('/project/src/App.ts')).toEqual(['mixed']);
+  });
+
   it('rejects an absolute relative path (Windows cross-drive case)', () => {
     // Regression: on Windows, `path.relative('C:\\project', 'D:\\other')`
     // returns an absolute path like `D:\\other`. After normalizing

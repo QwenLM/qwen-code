@@ -46,6 +46,13 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     description: string;
   }> = [];
   private loadedSkillNames: Set<string> = new Set();
+  // Cleanup function returned by `addChangeListener`. Stored so per-agent
+  // SkillTool instances (subagents share the parent's SkillManager) can
+  // detach their listener at teardown — without this the SkillManager
+  // accumulates listeners across subagent lifetimes, and each path
+  // activation would serialize through every stale listener's
+  // refreshSkills / setTools round-trip.
+  private removeChangeListener: () => void;
 
   constructor(private readonly config: Config) {
     // Initialize with a basic schema first
@@ -82,7 +89,9 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     // tool description picks up the newly activated skill, and the
     // <system-reminder> announcing the activation can land in the same
     // turn as a still-stale <available_skills> listing.
-    this.skillManager.addChangeListener(() => this.refreshSkills());
+    this.removeChangeListener = this.skillManager.addChangeListener(() =>
+      this.refreshSkills(),
+    );
 
     // Initialize the tool asynchronously
     this.refreshSkills();
@@ -294,6 +303,20 @@ ${skillDescriptions}
    */
   clearLoadedSkills(): void {
     this.loadedSkillNames.clear();
+  }
+
+  /**
+   * Detach the change listener from SkillManager. Tool registries call
+   * this on teardown (mirroring AgentTool's pattern). Per-subagent
+   * SkillTool instances share the parent's SkillManager via
+   * `InProcessBackend.createPerAgentConfig`, so without dispose the
+   * SkillManager would accumulate one stale listener per subagent
+   * lifetime — and `notifyChangeListeners` is now `await`-ed
+   * sequentially, so each path activation would serialize through every
+   * accumulated listener's refreshSkills + setTools round-trip.
+   */
+  dispose(): void {
+    this.removeChangeListener();
   }
 }
 

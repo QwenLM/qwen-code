@@ -439,6 +439,83 @@ Valid skill.
       expect(() => validateSkillName('newline\nin-name')).toThrow();
       expect(() => validateSkillName('quote"in-name')).toThrow();
     });
+
+    it('accepts non-ASCII letters (CJK / Cyrillic / accented Latin)', async () => {
+      const { validateSkillName } = await import('./types.js');
+      // Regression: the previous /^[a-zA-Z0-9_:.-]+$/ rejected every
+      // non-ASCII name, silently dropping CJK skills on upgrade. The
+      // structural-injection guard targets <>"'/\\\n\r\t etc — entire
+      // Unicode planes are not the threat.
+      expect(() => validateSkillName('中文助手')).not.toThrow();
+      expect(() => validateSkillName('помощник')).not.toThrow();
+      expect(() => validateSkillName('café-helper')).not.toThrow();
+      expect(() => validateSkillName('日本語_v2')).not.toThrow();
+    });
+  });
+
+  describe('parsePathsField content validation', () => {
+    it('rejects absolute path entries (project-relative only)', async () => {
+      const { parsePathsField } = await import('./types.js');
+      expect(() => parsePathsField({ paths: ['/etc/passwd'] })).toThrow(
+        /looks absolute/,
+      );
+      expect(() => parsePathsField({ paths: ['\\\\server\\share'] })).toThrow(
+        /looks absolute/,
+      );
+    });
+
+    it('rejects parent-dir-escape patterns', async () => {
+      const { parsePathsField } = await import('./types.js');
+      expect(() => parsePathsField({ paths: ['../*.ts'] })).toThrow(
+        /escapes the project root/,
+      );
+      expect(() => parsePathsField({ paths: ['..'] })).toThrow(
+        /escapes the project root/,
+      );
+    });
+
+    it('still accepts in-project relative globs', async () => {
+      const { parsePathsField } = await import('./types.js');
+      expect(parsePathsField({ paths: ['src/**/*.ts', '**/*.tsx'] })).toEqual([
+        'src/**/*.ts',
+        '**/*.tsx',
+      ]);
+    });
+  });
+
+  describe('extension parser parity (skill-load.ts)', () => {
+    it('extracts disable-model-invocation alongside paths', () => {
+      // Regression: the extension parser previously dropped the
+      // disable-model-invocation field, so an extension SKILL.md with
+      // both `paths:` and `disable-model-invocation: true` would still
+      // be eligible for path activation — directly contradicting the
+      // bug_004 fix at the project/user level.
+      mockParseYaml.mockReturnValueOnce({
+        name: 'secret-helper',
+        description: 'Hidden helper',
+        paths: ['src/**/*.ts'],
+        'disable-model-invocation': true,
+      });
+      const config = parseSkillContent(
+        `---\nname: secret-helper\ndescription: Hidden helper\npaths:\n  - "src/**/*.ts"\ndisable-model-invocation: true\n---\n\nBody.\n`,
+        '/test/extension/skills/secret-helper/SKILL.md',
+      );
+      expect(config.disableModelInvocation).toBe(true);
+      expect(config.paths).toEqual(['src/**/*.ts']);
+    });
+
+    it('extracts when_to_use', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'tsx-helper',
+        description: 'React skill',
+        when_to_use: 'When editing React components',
+      });
+      const config = parseSkillContent(
+        `---\nname: tsx-helper\ndescription: React skill\nwhen_to_use: When editing React components\n---\n\nBody.\n`,
+        '/test/extension/skills/tsx-helper/SKILL.md',
+      );
+      expect(config.whenToUse).toBe('When editing React components');
+    });
   });
 
   describe('parseSkillContent model field', () => {
