@@ -29,6 +29,7 @@ import {
 } from '../services/fileSystemService.js';
 import type { LineEnding } from '../services/fileSystemService.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
+import { checkPriorRead } from './priorReadEnforcement.js';
 import { ReadFileTool } from './read-file.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { logFileOperation } from '../telemetry/loggers.js';
@@ -159,7 +160,11 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     // file the model has never legitimately Read. New-file creation
     // is exempt because there are no current bytes to read first.
     if (fileExists && !this.config.getFileReadCacheDisabled()) {
-      const decision = await this.checkPriorRead(params.file_path);
+      const decision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        params.file_path,
+        'editing',
+      );
       if (!decision.ok) {
         return {
           currentContent: null,
@@ -552,75 +557,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     if (!fs.existsSync(dirName)) {
       fs.mkdirSync(dirName, { recursive: true });
     }
-  }
-
-  /**
-   * Test whether the edit is cleared to proceed against an existing
-   * file based on the session FileReadCache. Returns a structured
-   * decision so the caller can route it into the right shape — a
-   * `CalculatedEdit.error` from `calculateEdit`, or a thrown error
-   * from `getConfirmationDetails`.
-   *
-   * Approval requires more than `state === 'fresh'`: the recorded
-   * read must also have been (a) stamped with `lastReadAt`,
-   * (b) `lastReadWasFull` (no offset / limit / pages), and
-   * (c) `lastReadCacheable` (i.e. plain text, not binary / image /
-   * audio / video / PDF / notebook). Otherwise the model has only
-   * seen a slice or a structured proxy of the file, not the bytes
-   * a prospective edit would mutate.
-   *
-   * Stat failures here are intentionally non-blocking: the existing
-   * write path surfaces a richer error.
-   */
-  private async checkPriorRead(filePath: string): Promise<
-    | { ok: true }
-    | {
-        ok: false;
-        type: ToolErrorType;
-        rawMessage: string;
-        displayMessage: string;
-      }
-  > {
-    let stats: fs.Stats;
-    try {
-      stats = await fs.promises.stat(filePath);
-    } catch {
-      return { ok: true };
-    }
-    const status = this.config.getFileReadCache().check(stats);
-    if (
-      status.state === 'fresh' &&
-      status.entry.lastReadAt !== undefined &&
-      status.entry.lastReadWasFull &&
-      status.entry.lastReadCacheable
-    ) {
-      return { ok: true };
-    }
-    if (status.state === 'stale') {
-      const raw =
-        `File ${filePath} has been modified since you last read it ` +
-        `(mtime or size changed). Re-read it with the ${ReadFileTool.Name} ` +
-        `tool before editing to ensure your changes are based on current ` +
-        `content.`;
-      return {
-        ok: false,
-        type: ToolErrorType.FILE_CHANGED_SINCE_READ,
-        rawMessage: raw,
-        displayMessage: `file changed since last read; re-run ${ReadFileTool.Name} first.`,
-      };
-    }
-    // unknown OR fresh-but-partial / non-cacheable: require a fresh
-    // full text read.
-    const raw =
-      `File ${filePath} has not been fully read in this session. ` +
-      `Use the ${ReadFileTool.Name} tool first (without offset / limit ` +
-      `/ pages) to load the entire current text content before editing.`;
-    return {
-      ok: false,
-      type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
-      rawMessage: raw,
-      displayMessage: `${ReadFileTool.Name} required before editing this file.`,
-    };
   }
 }
 

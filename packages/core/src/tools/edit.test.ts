@@ -1090,6 +1090,37 @@ describe('EditTool', () => {
       expect(fs.readFileSync(newPath, 'utf8')).toBe('fresh creation');
     });
 
+    it('allows a create-then-edit-then-edit chain without an intervening read', async () => {
+      // The author of a brand-new file has, by definition, "seen"
+      // the bytes it just wrote. Without recordWrite seeding read
+      // metadata, the second edit would be rejected because
+      // lastReadWasFull / lastReadCacheable would still be unset on
+      // the entry recordWrite created during the create step.
+      const newPath = path.join(rootDir, 'create-then-edit.txt');
+      (mockConfig.getApprovalMode as Mock).mockReturnValue(
+        ApprovalMode.AUTO_EDIT,
+      );
+
+      const created = await tool
+        .build({
+          file_path: newPath,
+          old_string: '',
+          new_string: 'first content\n',
+        })
+        .execute(abortSignal);
+      expect(created.error).toBeUndefined();
+
+      const edited = await tool
+        .build({
+          file_path: newPath,
+          old_string: 'first',
+          new_string: 'second',
+        })
+        .execute(abortSignal);
+      expect(edited.error).toBeUndefined();
+      expect(fs.readFileSync(newPath, 'utf8')).toBe('second content\n');
+    });
+
     it('allows a chain of edits without re-reading between them', async () => {
       // After the first Edit, recordWrite stamps `lastWriteAt`. The
       // second Edit's stat will still match the cache entry (because

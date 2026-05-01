@@ -213,11 +213,19 @@ describe('FileReadCache', () => {
       expect(entry.lastWriteAt).toBe(Date.now());
     });
 
-    it('does not set lastReadAt or flip lastReadWasFull', () => {
+    it('seeds read metadata when recording a write on a brand-new entry', () => {
+      // The model authored the bytes it just wrote — for the purposes
+      // of prior-read enforcement on the *next* Edit, that counts as
+      // having seen the full text content. Without this seeding a
+      // create→edit→edit chain would reject the second edit because
+      // lastReadWasFull / lastReadCacheable would still be unset on
+      // the entry recordWrite created.
       const cache = new FileReadCache();
       const entry = cache.recordWrite('/x/foo.ts', makeStats());
-      expect(entry.lastReadAt).toBeUndefined();
-      expect(entry.lastReadWasFull).toBe(false);
+      expect(entry.lastReadAt).toBeDefined();
+      expect(entry.lastReadAt).toBe(entry.lastWriteAt);
+      expect(entry.lastReadWasFull).toBe(true);
+      expect(entry.lastReadCacheable).toBe(true);
     });
 
     it('refreshes mtime+size so a follow-up Edit sees fresh', () => {

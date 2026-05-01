@@ -785,6 +785,10 @@ describe('WriteFileTool', () => {
       fs.writeFileSync(filePath, 'untouched bytes', 'utf-8');
       // No seedPriorRead — model has not Read this file in the session.
 
+      // Spy on readTextFile to assert enforcement runs *before* any
+      // I/O against the file's contents — see the L4 review comment.
+      const readSpy = vi.spyOn(fsService, 'readTextFile');
+
       const params = { file_path: filePath, content: 'clobber attempt' };
       const result = await tool.build(params).execute(abortSignal);
 
@@ -792,9 +796,13 @@ describe('WriteFileTool', () => {
       expect(result.error?.message).toMatch(
         /has not been fully read in this session/,
       );
-      // File must remain at its pre-call content.
+      // File must remain at its pre-call content, and the tool must
+      // not have slurped the existing bytes into memory before
+      // rejecting.
       expect(fs.readFileSync(filePath, 'utf-8')).toBe('untouched bytes');
+      expect(readSpy).not.toHaveBeenCalled();
 
+      readSpy.mockRestore();
       fs.unlinkSync(filePath);
     });
 
