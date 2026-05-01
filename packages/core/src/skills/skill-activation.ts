@@ -98,7 +98,12 @@ export class SkillActivationRegistry {
       const matchers: picomatch.Matcher[] = [];
       for (const p of skill.paths ?? []) {
         try {
-          matchers.push(picomatch(p, { dot: false }));
+          // dot: true so broad globs like `**/*.js` activate on
+          // dotfiles too (`.eslintrc.js`, `.env`, `.github/foo.yml`).
+          // Skill activation asks "did the model touch a file matching
+          // this glob" — the gitignore-style "skip hidden" exclusion
+          // makes sense for filesystem walks, not for activation.
+          matchers.push(picomatch(p, { dot: true }));
         } catch (e) {
           // picomatch can throw on pathological inputs (oversize patterns,
           // broken extglob nesting). Drop the offending pattern but keep

@@ -133,6 +133,21 @@ describe('SkillActivationRegistry', () => {
     expect(reg.matchAndConsume('/project/src/Bar.tsx')).toEqual([]);
   });
 
+  it('activates broad globs on dotfiles too (dot: true semantics)', () => {
+    // Regression: picomatch `dot: false` would silently exclude
+    // `.eslintrc.js`, `.env`, `.github/*.yml`, etc. from broad globs.
+    // Skill activation is "did the model touch a file matching this
+    // glob"; the gitignore-style hidden-file exclusion is the wrong
+    // semantic for activation.
+    const reg = new SkillActivationRegistry(
+      [makeSkill({ name: 'lint-helper', paths: ['**/*.js'] })],
+      projectRoot,
+    );
+    expect(reg.matchAndConsume('/project/.eslintrc.js')).toEqual([
+      'lint-helper',
+    ]);
+  });
+
   it('survives an invalid picomatch pattern (drops it, keeps the rest)', () => {
     // Regression: picomatch can throw on pathological patterns
     // (oversized strings, broken extglob nesting). The constructor
