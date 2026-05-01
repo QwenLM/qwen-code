@@ -1102,6 +1102,36 @@ describe('ShellTool', () => {
         );
       });
 
+      // A cd that comes AFTER an in-cwd commit doesn't invalidate the
+      // commit's attribution — the commit already landed in our repo.
+      it('should add co-author when cd comes AFTER git commit', async () => {
+        const command = 'git commit -m "Test" && cd /tmp/test';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
       // `git -C <path> commit` runs in <path>, not our cwd — same risk
       // as the cd case, so the rewrite should be skipped.
       it('should NOT add co-author for git -C <path> commit', async () => {

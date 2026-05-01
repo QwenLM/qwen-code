@@ -46,6 +46,7 @@ import {
   splitCommands,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
+import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   isShellCommandReadOnlyAST,
@@ -87,84 +88,127 @@ function escapeForBashSingleQuote(s: string): string {
 }
 
 /**
- * Strip leading env-var assignments and harmless command wrappers
- * (`sudo`, `command`) from a single shell command segment so the
- * caller can match against the real program name. Examples:
- *   `FOO=bar git commit` → `git commit`
- *   `sudo git commit`    → `git commit`
- *   `command -p git ...` → `git ...`
+ * Tokenise a single shell-command segment and return the program name
+ * plus its first argument, after skipping leading env-var assignments
+ * (`KEY=value`, including quoted values) and a small allowlist of safe
+ * wrappers (`sudo`, `command`, with their flag block consumed).
  *
- * Conservative: only strips a small allowlist of wrappers that don't
- * change cwd or shell semantics in ways we care about, so the caller
- * can keep guarding against `cd` / `git -C` separately.
+ * Uses `shell-quote`'s `parse` so quoted env values (`FOO="a b" cmd`)
+ * and other quoting forms are tokenised correctly — a regex-based
+ * scan would either miss those or risk catastrophic backtracking on
+ * adversarial input.
+ *
+ * Returns `{ program: undefined, ... }` if the segment doesn't parse
+ * to a recognisable program (operators, parse errors, empty input).
  */
-function stripCommandPrefix(segment: string): string {
-  let s = segment.trim();
-  // Strip any number of `KEY=value` env assignments.
-  while (/^[A-Za-z_][A-Za-z0-9_]*=\S*\s+/.test(s)) {
-    s = s.replace(/^[A-Za-z_][A-Za-z0-9_]*=\S*\s+/, '');
+function tokeniseProgram(segment: string): {
+  program: string | undefined;
+  arg1: string | undefined;
+  arg2: string | undefined;
+  arg3: string | undefined;
+} {
+  let tokens: string[];
+  try {
+    tokens = parse(segment).filter((t): t is string => typeof t === 'string');
+  } catch {
+    return {
+      program: undefined,
+      arg1: undefined,
+      arg2: undefined,
+      arg3: undefined,
+    };
   }
-  // Strip a single safe wrapper. `sudo -E -u user` etc. would be
-  // followed by the real command after the flag block, so consume
-  // any leading flags and their args until we hit a non-flag token.
-  const wrapper = s.match(/^(sudo|command)\b/);
-  if (wrapper) {
-    s = s.slice(wrapper[0].length).trim();
-    // Drop any leading flags and their values; stop at the first
-    // non-flag token (which is the actual program).
-    while (/^-/.test(s)) {
-      const m = s.match(/^(\S+)\s*(.*)$/);
-      if (!m) break;
-      s = m[2];
+  let i = 0;
+  // Skip env-var assignments (KEY=value).
+  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]!)) {
+    i++;
+  }
+  // Strip a single safe wrapper, then any leading flag tokens it took.
+  if (tokens[i] === 'sudo' || tokens[i] === 'command') {
+    i++;
+    while (i < tokens.length && tokens[i]!.startsWith('-')) {
+      i++;
     }
   }
-  return s;
+  return {
+    program: tokens[i],
+    arg1: tokens[i + 1],
+    arg2: tokens[i + 2],
+    arg3: tokens[i + 3],
+  };
 }
 
 /**
- * Detect whether `command` actually executes `git commit` in the
- * tool's initial cwd — e.g. `git commit -m "x"`,
- * `git status && git commit -m "x"`, `sudo git commit ...`, or
- * `FOO=bar git commit ...` — without being fooled by:
+ * Classify whether a command chain (potentially compound) contains a
+ * `git commit` invocation, and whether that invocation lands in the
+ * tool's initial cwd.
  *
- * - Quoted text such as `echo "git commit"` (uses `splitCommands` to
- *   tokenise on shell separators outside quotes).
- * - A preceding `cd /elsewhere` or `git -C /elsewhere commit` that
- *   would point HEAD lookups at a different repo. Attribution
- *   metadata in that case would land in the wrong repo, so we
- *   conservatively report "no" and skip attribution.
+ * Two flags are returned because the answers feed different decisions:
+ * - `hasCommit` is the broader "did the user try to commit anywhere
+ *   in this chain?" — used to refuse background mode and to gate
+ *   prompt-counter snapshotting.
+ * - `attributableInCwd` is the stricter "is it safe to capture HEAD
+ *   in our cwd and write a note to that repo?" — used by the actual
+ *   trailer rewrite and git-notes write.
+ *
+ * Walks segments in order so a `cd` AFTER an in-cwd commit doesn't
+ * invalidate that commit's attribution; only a `cd` (or `git -C`
+ * without commit) BEFORE the commit shifts safety. `git -C <path>
+ * commit ...` always counts toward `hasCommit` but never toward
+ * `attributableInCwd`.
  */
-function looksLikeGitCommit(command: string): boolean {
-  let sawGitCommit = false;
+function gitCommitContext(command: string): {
+  hasCommit: boolean;
+  attributableInCwd: boolean;
+} {
+  let hasCommit = false;
+  let attributable = false;
+  let cwdShifted = false;
+
   for (const sub of splitCommands(command)) {
-    const stripped = stripCommandPrefix(sub);
-    if (/^cd\b/.test(stripped)) {
-      // A cd anywhere in the chain might redirect a later `git commit`
-      // into a different repo. Bailing is conservative but avoids
-      // writing a note to the wrong place.
-      return false;
+    const { program, arg1, arg3 } = tokeniseProgram(sub);
+    if (!program) continue;
+
+    if (program === 'cd') {
+      // A cd before any commit makes later in-chain commits unsafe to
+      // attribute (might land in a different repo). A cd after the
+      // commit doesn't matter for the commit we already saw.
+      if (!hasCommit) cwdShifted = true;
+      continue;
     }
-    if (/^git\s+-C\b/.test(stripped)) {
-      // `git -C <path> commit ...` runs in <path>, not our cwd.
-      return false;
+
+    if (program === 'git' && arg1 === '-C') {
+      // `git -C <path> commit ...` is a commit in another repo.
+      if (arg3 === 'commit') {
+        hasCommit = true;
+        // Not attributable in our cwd.
+      } else if (!hasCommit) {
+        // Other -C operations (status, log, etc.) signal cwd-elsewhere
+        // intent; subsequent in-cwd commits in this chain are unusual
+        // enough to be conservative about.
+        cwdShifted = true;
+      }
+      continue;
     }
-    if (/^git\s+commit\b/.test(stripped)) {
-      sawGitCommit = true;
+
+    if (program === 'git' && arg1 === 'commit') {
+      hasCommit = true;
+      if (!cwdShifted) attributable = true;
     }
   }
-  return sawGitCommit;
+
+  return { hasCommit, attributableInCwd: attributable };
 }
 
 /**
- * Detect whether `command` actually invokes `gh pr create` at the
- * top level. Same shell-aware shape as `looksLikeGitCommit` so
- * quoted text like `echo "gh pr create --body ..."` doesn't trip
- * the rewrite path.
+ * Detect whether `command` invokes `gh pr create` at the top level —
+ * same shell-aware shape as `gitCommitContext` so quoted text like
+ * `echo "gh pr create --body ..."` doesn't trip the rewrite path.
  */
 function looksLikeGhPrCreate(command: string): boolean {
   for (const sub of splitCommands(command)) {
-    const stripped = stripCommandPrefix(sub);
-    if (/^gh\s+pr\s+create\b/.test(stripped)) return true;
+    const { program, arg1, arg2 } = tokeniseProgram(sub);
+    if (program === 'gh' && arg1 === 'pr' && arg2 === 'create') return true;
   }
   return false;
 }
@@ -638,11 +682,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // ShellExecutionService — `git rev-parse HEAD` is a few fs reads
     // (low ms) while a real `git commit` involves staging, hooks, and
     // object writes (50ms+), so in practice the snapshot resolves
-    // well before the user's command can move HEAD. Using
-    // `looksLikeGitCommit` (shell-aware splitter) instead of a raw
-    // regex avoids triggering on quoted text like `echo "git commit"`.
-    const isGitCommitCommand = looksLikeGitCommit(strippedCommand);
-    const preHeadPromise: Promise<string | null> = isGitCommitCommand
+    // well before the user's command can move HEAD.
+    //
+    // We act on `gitCommitContext` rather than a raw regex so quoted
+    // text like `echo "git commit"` doesn't trigger snapshot/notes,
+    // and so attribution still runs after a `git commit && cd ..`
+    // chain (which would have failed an "any cd anywhere" gate).
+    const commitCtx = gitCommitContext(strippedCommand);
+    const preHeadPromise: Promise<string | null> = commitCtx.attributableInCwd
       ? this.getGitHead(cwd)
       : Promise.resolve(null);
 
@@ -770,7 +817,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // while the stale per-file attribution stays around for a later
     // unrelated commit. attachCommitAttribution already gates on HEAD
     // movement, so it's a no-op when no commit was actually created.
-    if (isGitCommitCommand) {
+    if (commitCtx.attributableInCwd) {
       const preHead = await preHeadPromise;
       await this.attachCommitAttribution(strippedCommand, cwd, preHead);
     }
@@ -857,7 +904,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // the new commit without notes and let stale per-file attribution
     // leak into the next foreground commit. Refuse the request and
     // tell the user to run it foreground.
-    if (looksLikeGitCommit(strippedCommand)) {
+    //
+    // Use the broader `hasCommit` flag rather than `attributableInCwd`:
+    // `cd /elsewhere && git commit` should still be refused even
+    // though we wouldn't attribute it.
+    if (gitCommitContext(strippedCommand).hasCommit) {
       return {
         llmContent:
           'Refusing to run `git commit` in background mode: AI-attribution notes ' +
@@ -1070,24 +1121,33 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // Shell-aware detection — a raw regex would falsely match quoted
     // text such as `echo "git commit"` and clear pending attributions
     // even though no commit ever ran.
-    if (!looksLikeGitCommit(command)) {
-      return;
-    }
-
-    const attributionService = CommitAttributionService.getInstance();
-    if (!attributionService.hasAttributions()) {
+    if (!gitCommitContext(command).attributableInCwd) {
       return;
     }
 
     const postHead = await this.getGitHead(cwd);
     const commitCreated = postHead !== null && postHead !== preHead;
+    const attributionService = CommitAttributionService.getInstance();
+
     if (!commitCreated) {
       // No new commit landed (nothing staged, hook rejected, or user
       // reset right after). Drop the per-file attributions but keep the
       // "since last commit" prompt counters intact — the user's next
       // attempt should still credit prompts that happened during this
       // failed try.
-      attributionService.clearAttributions(false);
+      if (attributionService.hasAttributions()) {
+        attributionService.clearAttributions(false);
+      }
+      return;
+    }
+
+    // A new commit landed. Even when no per-file attribution was
+    // tracked (rare but possible — e.g. user committed external
+    // changes), we still need to snapshot the prompt counters as
+    // "at last commit" so a later `gh pr create` doesn't report an
+    // inflated N-shotted count spanning multiple commits.
+    if (!attributionService.hasAttributions()) {
+      attributionService.clearAttributions(true);
       return;
     }
 
@@ -1284,8 +1344,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     // Shell-aware detection — a raw regex would falsely match quoted
     // text such as `echo "git commit"` and hand a corrupted command
-    // (with the trailer mid-string) back to the executor.
-    if (!looksLikeGitCommit(command)) {
+    // (with the trailer mid-string) back to the executor. The stricter
+    // `attributableInCwd` is what we want here: only inject the
+    // trailer when we're confident the commit lands in our cwd.
+    if (!gitCommitContext(command).attributableInCwd) {
       return command;
     }
 
