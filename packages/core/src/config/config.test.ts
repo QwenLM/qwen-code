@@ -15,6 +15,7 @@ import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
   QwenLogger,
+  shutdownTelemetry,
 } from '../telemetry/index.js';
 import type {
   ContentGenerator,
@@ -178,6 +179,7 @@ vi.mock('../telemetry/index.js', async (importOriginal) => {
   return {
     ...actual,
     initializeTelemetry: vi.fn(),
+    shutdownTelemetry: vi.fn().mockResolvedValue(undefined),
     uiTelemetryService: {
       getLastPromptTokenCount: vi.fn(),
     },
@@ -846,6 +848,18 @@ describe('Server Config (config.ts)', () => {
     };
     const config = new Config(paramsWithTelemetry);
     expect(config.getTelemetryEnabled()).toBe(true);
+  });
+
+  it('Config shutdown should flush telemetry even before initialization completes', async () => {
+    const paramsWithTelemetry: ConfigParameters = {
+      ...baseParams,
+      telemetry: { enabled: true },
+    };
+    const config = new Config(paramsWithTelemetry);
+
+    await config.shutdown();
+
+    expect(shutdownTelemetry).toHaveBeenCalledTimes(1);
   });
 
   it('Config constructor should set telemetry to false when provided as false', () => {

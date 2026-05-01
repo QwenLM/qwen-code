@@ -69,6 +69,7 @@ export function resolveHttpOtlpUrl(
 
 let sdk: NodeSDK | undefined;
 let telemetryInitialized = false;
+let telemetryShutdownPromise: Promise<void> | undefined;
 
 export function isTelemetrySdkInitialized(): boolean {
   return telemetryInitialized;
@@ -258,29 +259,28 @@ export function initializeTelemetry(config: Config): void {
   } catch (error) {
     debugLogger.error('Error starting OpenTelemetry SDK:', error);
   }
-
-  process.on('SIGTERM', () => {
-    shutdownTelemetry();
-  });
-  process.on('SIGINT', () => {
-    shutdownTelemetry();
-  });
-  process.on('exit', () => {
-    shutdownTelemetry();
-  });
 }
 
 export async function shutdownTelemetry(): Promise<void> {
+  if (telemetryShutdownPromise) {
+    return telemetryShutdownPromise;
+  }
   if (!telemetryInitialized || !sdk) {
     return;
   }
+  const currentSdk = sdk;
   const debugLogger = createDebugLogger('OTEL');
-  try {
-    await sdk.shutdown();
-    debugLogger.debug('OpenTelemetry SDK shut down successfully.');
-  } catch (error) {
-    debugLogger.error('Error shutting down SDK:', error);
-  } finally {
-    telemetryInitialized = false;
-  }
+  telemetryShutdownPromise = (async () => {
+    try {
+      await currentSdk.shutdown();
+      debugLogger.debug('OpenTelemetry SDK shut down successfully.');
+    } catch (error) {
+      debugLogger.error('Error shutting down SDK:', error);
+    } finally {
+      telemetryInitialized = false;
+      sdk = undefined;
+      telemetryShutdownPromise = undefined;
+    }
+  })();
+  return telemetryShutdownPromise;
 }

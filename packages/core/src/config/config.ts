@@ -66,6 +66,7 @@ import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
   initializeTelemetry,
+  shutdownTelemetry,
   logStartSession,
   logRipgrepFallback,
   RipgrepFallbackEvent,
@@ -1617,11 +1618,12 @@ export class Config {
    * It handles the case where initialization was not completed.
    */
   async shutdown(): Promise<void> {
-    if (!this.initialized) {
-      // Nothing to clean up if not initialized
-      return;
-    }
     try {
+      if (!this.initialized) {
+        // Nothing else to clean up if not initialized.
+        return;
+      }
+
       // Finalize the current session's metadata before cleanup, then drain
       // the async write queue so no records are lost on exit.
       try {
@@ -1644,6 +1646,10 @@ export class Config {
     } catch (error) {
       // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
+    } finally {
+      if (this.telemetrySettings.enabled) {
+        await shutdownTelemetry();
+      }
     }
   }
 

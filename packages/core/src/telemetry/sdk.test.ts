@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Config } from '../config/config.js';
 import {
   initializeTelemetry,
+  isTelemetrySdkInitialized,
   shutdownTelemetry,
   resolveHttpOtlpUrl,
 } from './sdk.js';
@@ -269,5 +270,35 @@ describe('Telemetry SDK', () => {
     expect(OTLPLogExporterHttp).not.toHaveBeenCalled();
     expect(OTLPMetricExporterHttp).not.toHaveBeenCalled();
     expect(NodeSDK.prototype.start).toHaveBeenCalled();
+  });
+
+  it('should not register async process shutdown handlers', () => {
+    const processOnSpy = vi.spyOn(process, 'on');
+    try {
+      initializeTelemetry(mockConfig);
+
+      expect(processOnSpy).not.toHaveBeenCalledWith(
+        'SIGTERM',
+        expect.any(Function),
+      );
+      expect(processOnSpy).not.toHaveBeenCalledWith(
+        'SIGINT',
+        expect.any(Function),
+      );
+      expect(processOnSpy).not.toHaveBeenCalledWith(
+        'exit',
+        expect.any(Function),
+      );
+    } finally {
+      processOnSpy.mockRestore();
+    }
+  });
+
+  it('should mark telemetry uninitialized after shutdown', async () => {
+    initializeTelemetry(mockConfig);
+
+    await shutdownTelemetry();
+
+    expect(isTelemetrySdkInitialized()).toBe(false);
   });
 });
