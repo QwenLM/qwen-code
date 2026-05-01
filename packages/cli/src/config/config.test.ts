@@ -166,7 +166,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       respectGitIgnore: true,
       respectQwenIgnore: true,
     },
-    normalizeRuleToolName: actualServer.normalizeRuleToolName,
   };
 });
 

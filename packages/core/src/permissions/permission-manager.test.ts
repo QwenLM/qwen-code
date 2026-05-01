@@ -112,6 +112,14 @@ describe('toolMatchesRuleToolName', () => {
     expect(toolMatchesRuleToolName('edit', 'write_file')).toBe(true);
   });
 
+  it('"Bash" (run_shell_command) covers monitor', async () => {
+    expect(toolMatchesRuleToolName('run_shell_command', 'monitor')).toBe(true);
+  });
+
+  it('monitor rules do not cover run_shell_command', async () => {
+    expect(toolMatchesRuleToolName('monitor', 'run_shell_command')).toBe(false);
+  });
+
   it('does not cross categories', async () => {
     expect(toolMatchesRuleToolName('read_file', 'edit')).toBe(false);
     expect(toolMatchesRuleToolName('edit', 'read_file')).toBe(false);
@@ -672,11 +680,10 @@ describe('matchesRule', () => {
     ).toBe(false);
   });
 
-  it('Bash rule does not match monitor', async () => {
+  it('Bash rule also covers monitor (shell deny rules block monitor)', async () => {
     const rule = parseRule('Bash(tail -f *)');
-    expect(matchesRule(rule, 'monitor', 'tail -f /var/log/app.log')).toBe(
-      false,
-    );
+    expect(matchesRule(rule, 'monitor', 'tail -f /var/log/app.log')).toBe(true);
+    expect(matchesRule(rule, 'monitor', 'echo hello')).toBe(false);
   });
 
   it('matchesRule checks individual simple commands (compound splitting is at PM level)', async () => {
@@ -1014,20 +1021,35 @@ describe('PermissionManager', () => {
       ).not.toBe('allow');
     });
 
-    it('Bash approval does NOT allow monitor', async () => {
+    it('Bash approval also allows monitor (shell rules cover monitor)', async () => {
       const pm2 = new PermissionManager(
         makeConfig({
           permissionsAllow: ['Bash(npm *)'],
         }),
       );
       pm2.initialize();
-      // Same command via monitor tool should NOT be allowed by Bash rule
+      // Same command via monitor tool should be allowed by Bash rule
       expect(
         await pm2.evaluate({
           toolName: 'monitor',
           command: 'npm install',
         }),
-      ).not.toBe('allow');
+      ).toBe('allow');
+    });
+
+    it('Bash deny rule blocks equivalent monitor command', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: 'rm -rf /',
+        }),
+      ).toBe('deny');
     });
 
     it('resolves default to allow for readonly monitor commands', async () => {

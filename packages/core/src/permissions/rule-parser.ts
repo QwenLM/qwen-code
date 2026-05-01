@@ -193,6 +193,7 @@ export function getSpecifierKind(canonicalToolName: string): SpecifierKind {
  *
  * "Read" → resolves to "read_file", but also covers grep_search, glob, list_directory
  * "Edit" → resolves to "edit", but also covers write_file
+ * "Bash" → resolves to "run_shell_command", but also covers monitor
  */
 export function toolMatchesRuleToolName(
   ruleToolName: string,
@@ -207,6 +208,13 @@ export function toolMatchesRuleToolName(
   }
   // "Edit" → covers all EDIT_TOOLS
   if (ruleToolName === 'edit' && EDIT_TOOLS.has(contextToolName)) {
+    return true;
+  }
+  // "Bash" (run_shell_command) → covers all SHELL_TOOL_NAMES (including monitor)
+  if (
+    ruleToolName === 'run_shell_command' &&
+    SHELL_TOOL_NAMES.has(contextToolName)
+  ) {
     return true;
   }
   return false;

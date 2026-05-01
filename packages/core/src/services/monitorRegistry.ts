@@ -19,9 +19,9 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('MONITOR_REGISTRY');
 
-const MAX_LINE_LENGTH = 2000;
+const EVENT_LINE_TRUNCATE = 2000;
 const MAX_DESCRIPTION_LENGTH = 80;
-const MAX_CONCURRENT_MONITORS = 16;
+export const MAX_CONCURRENT_MONITORS = 16;
 
 function escapeXml(text: string): string {
   return text
@@ -102,8 +102,8 @@ export class MonitorRegistry {
     this.resetIdleTimer(entry);
 
     const truncatedLine =
-      line.length > MAX_LINE_LENGTH
-        ? line.slice(0, MAX_LINE_LENGTH) + '...[truncated]'
+      line.length > EVENT_LINE_TRUNCATE
+        ? line.slice(0, EVENT_LINE_TRUNCATE) + '...[truncated]'
         : line;
 
     this.emitNotification(entry, truncatedLine);

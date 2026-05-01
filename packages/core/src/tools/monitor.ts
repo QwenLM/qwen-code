@@ -42,6 +42,7 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isSubpaths } from '../utils/paths.js';
 import type { MonitorEntry } from '../services/monitorRegistry.js';
+import { MAX_CONCURRENT_MONITORS } from '../services/monitorRegistry.js';
 import {
   extractCommandRules,
   isShellCommandReadOnlyAST,
@@ -53,7 +54,7 @@ const DEFAULT_MAX_EVENTS = 1000;
 const MAX_MAX_EVENTS = 10000;
 const DEFAULT_IDLE_TIMEOUT_MS = 300_000; // 5 minutes
 const MAX_IDLE_TIMEOUT_MS = 600_000; // 10 minutes
-const MAX_LINE_LENGTH = 4096;
+const PARTIAL_LINE_BUFFER_CAP = 4096;
 
 // Throttling constants (token bucket)
 const THROTTLE_BURST_SIZE = 5;
@@ -187,9 +188,9 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
     // Check concurrent monitor limit before spawning
     const running = registry.getRunning();
-    if (running.length >= 16) {
+    if (running.length >= MAX_CONCURRENT_MONITORS) {
       return {
-        llmContent: `Cannot start monitor: maximum concurrent monitors (16) reached. Stop an existing monitor first.`,
+        llmContent: `Cannot start monitor: maximum concurrent monitors (${MAX_CONCURRENT_MONITORS}) reached. Stop an existing monitor first.`,
         returnDisplay: `Monitor rejected: too many concurrent monitors.`,
       };
     }
@@ -272,15 +273,15 @@ class MonitorToolInvocation extends BaseToolInvocation<
       // a long stream without newlines, buffer.value would otherwise grow
       // without bound and each chunk would re-split the entire string.
       // When no newline has arrived yet and the buffer has already exceeded
-      // MAX_LINE_LENGTH, force-emit a single truncated event through the
+      // PARTIAL_LINE_BUFFER_CAP, force-emit a single truncated event through the
       // throttled path and reset the buffer so it cannot keep growing.
       if (
         !buffer.value.includes('\n') &&
-        buffer.value.length > MAX_LINE_LENGTH
+        buffer.value.length > PARTIAL_LINE_BUFFER_CAP
       ) {
         const trimmed = buffer.value.trim();
         if (trimmed.length > 0) {
-          throttledEmit(trimmed.slice(0, MAX_LINE_LENGTH) + '...');
+          throttledEmit(trimmed.slice(0, PARTIAL_LINE_BUFFER_CAP) + '...');
         }
         buffer.value = '';
         return;
@@ -293,8 +294,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
         const trimmed = line.trim();
         if (trimmed.length === 0) continue;
         const truncated =
-          trimmed.length > MAX_LINE_LENGTH
-            ? trimmed.slice(0, MAX_LINE_LENGTH) + '...'
+          trimmed.length > PARTIAL_LINE_BUFFER_CAP
+            ? trimmed.slice(0, PARTIAL_LINE_BUFFER_CAP) + '...'
             : trimmed;
         throttledEmit(truncated);
       }
@@ -326,7 +327,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
                 // ignore
               }
             }
-          }, 200);
+          }, 200).unref();
         }
       }
     };
@@ -406,20 +407,20 @@ export class MonitorTool extends BaseDeclarativeTool<
     super(
       MonitorTool.Name,
       ToolDisplayNames.MONITOR,
-      'Starts a long-running shell command and streams its stdout as event notifications back to you.\n\n' +
+      'Starts a long-running shell command and streams its stdout/stderr as event notifications back to you.\n\n' +
         'Use this tool for:\n' +
         '- Watching log files: `tail -f /var/log/app.log`\n' +
         '- Monitoring build output: `npm run build --watch`\n' +
         '- Polling for state changes: `while true; do curl -s http://localhost:8080/health; sleep 1; done`\n' +
         '- Watching file changes: `fswatch -r ./src`\n\n' +
-        'Each stdout line from the command becomes a notification event delivered to you. ' +
+        'Each output line from the command becomes a notification event delivered to you. ' +
         'The monitor runs in the background — you can continue working while it streams events.\n\n' +
         '**Auto-stop:** The monitor automatically stops after max_events (default 1000) events ' +
         'or after idle_timeout_ms (default 5 minutes) of silence. The process is killed when the monitor stops.\n\n' +
         '**Do NOT use this tool for:**\n' +
         '- One-shot commands (use run_shell_command instead)\n' +
         '- Commands you need the full output from (use run_shell_command instead)\n' +
-        '- Commands with no stdout output (use run_shell_command with is_background: true instead)',
+        '- Commands with no output (use run_shell_command with is_background: true instead)',
       Kind.Execute,
       {
         type: 'object',
@@ -427,12 +428,12 @@ export class MonitorTool extends BaseDeclarativeTool<
           command: {
             type: 'string',
             description:
-              'Shell command to run and stream stdout from. Each stdout line becomes an event notification.',
+              'Shell command to run and monitor. Each output line (stdout and stderr) becomes an event notification.',
           },
           description: {
             type: 'string',
             description:
-              'Brief description of what this monitor watches (e.g., "webpack build output"). Max 80 characters.',
+              'Brief description of what this monitor watches (e.g., "webpack build output"). Truncated to 80 characters in display.',
           },
           max_events: {
             type: 'number',
