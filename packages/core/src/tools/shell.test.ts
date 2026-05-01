@@ -1162,6 +1162,66 @@ describe('ShellTool', () => {
         );
       });
 
+      // git's global flags (`-c`, `--no-pager`, etc.) push the
+      // subcommand past index 1; a fixed-position check at arg1 used
+      // to silently skip these forms. Make sure we still inject the
+      // trailer for them.
+      it('should add co-author for git -c key=val commit', async () => {
+        const command = 'git -c user.email=x@y commit -m "Test"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      it('should add co-author for git --no-pager commit', async () => {
+        const command = 'git --no-pager commit -m "Test"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
       // Common real-world prefixes — env-var assignment and `sudo` — must
       // still be detected so attribution doesn't silently skip the trailer.
       it('should add co-author when git commit is prefixed with env vars', async () => {

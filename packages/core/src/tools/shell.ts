@@ -43,6 +43,7 @@ import { isSubpaths } from '../utils/paths.js';
 import {
   getCommandRoot,
   getCommandRoots,
+  getShellConfiguration,
   splitCommands,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
@@ -88,35 +89,28 @@ function escapeForBashSingleQuote(s: string): string {
 }
 
 /**
- * Tokenise a single shell-command segment and return the program name
- * plus its first argument, after skipping leading env-var assignments
- * (`KEY=value`, including quoted values) and a small allowlist of safe
- * wrappers (`sudo`, `command`, with their flag block consumed).
+ * Tokenise a single shell-command segment via `shell-quote`. Returns
+ * the parsed string tokens with leading env-var assignments and a
+ * small allowlist of safe wrappers (`sudo`, `command`, with their
+ * flag block consumed) stripped. Returns `null` if the segment
+ * doesn't parse — the caller should then skip the segment.
  *
- * Uses `shell-quote`'s `parse` so quoted env values (`FOO="a b" cmd`)
- * and other quoting forms are tokenised correctly — a regex-based
- * scan would either miss those or risk catastrophic backtracking on
- * adversarial input.
- *
- * Returns `{ program: undefined, ... }` if the segment doesn't parse
- * to a recognisable program (operators, parse errors, empty input).
+ * Using `shell-quote.parse` (rather than a regex scan) is what makes
+ * quoted env values (`FOO="a b" cmd`) tokenise correctly and avoids
+ * the polynomial regex behaviour CodeQL flagged on the previous
+ * `\S*\s+`-based slicing loop.
  */
-function tokeniseProgram(segment: string): {
-  program: string | undefined;
-  arg1: string | undefined;
-  arg2: string | undefined;
-  arg3: string | undefined;
-} {
+function tokeniseSegment(segment: string): string[] | null {
   let tokens: string[];
   try {
     tokens = parse(segment).filter((t): t is string => typeof t === 'string');
-  } catch {
-    return {
-      program: undefined,
-      arg1: undefined,
-      arg2: undefined,
-      arg3: undefined,
-    };
+  } catch (e) {
+    debugLogger.warn(
+      `tokeniseSegment: parse failed for "${segment.slice(0, 80)}": ${
+        e instanceof Error ? e.message : String(e)
+      }`,
+    );
+    return null;
   }
   let i = 0;
   // Skip env-var assignments (KEY=value).
@@ -130,12 +124,63 @@ function tokeniseProgram(segment: string): {
       i++;
     }
   }
-  return {
-    program: tokens[i],
-    arg1: tokens[i + 1],
-    arg2: tokens[i + 2],
-    arg3: tokens[i + 3],
-  };
+  return tokens.slice(i);
+}
+
+/**
+ * Walk a `git ...` token sequence past git's global flags
+ * (`-c key=val`, `-C path`, `--no-pager`, `--git-dir`, `--work-tree`,
+ * `--namespace`, etc.) to find the actual subcommand. Without this,
+ * `git -c k=v commit -m x` and `git --no-pager commit -m x` would
+ * silently slip past a fixed-position check at index 1.
+ *
+ * `changesCwd` is true when any of the consumed flags would relocate
+ * the working directory (`-C`, `--git-dir`, `--work-tree`).
+ */
+function parseGitInvocation(tokens: string[]): {
+  subcommand: string | undefined;
+  changesCwd: boolean;
+} {
+  // Two-token global flags whose second token is consumed as a value.
+  const TAKES_VALUE = new Set([
+    '-c',
+    '-C',
+    '--git-dir',
+    '--work-tree',
+    '--namespace',
+    '--exec-path',
+    '--config-env',
+    '--super-prefix',
+    '--list-cmds',
+  ]);
+  // Flags whose presence shifts cwd interpretation.
+  const SHIFTS_CWD = new Set(['-C', '--git-dir', '--work-tree']);
+
+  let i = 1; // skip 'git'
+  let changesCwd = false;
+  while (i < tokens.length) {
+    const t = tokens[i]!;
+    if (TAKES_VALUE.has(t)) {
+      if (SHIFTS_CWD.has(t)) changesCwd = true;
+      i += 2;
+      continue;
+    }
+    // Attached-value form: `--git-dir=path`, `--work-tree=path`, etc.
+    if (t.startsWith('--git-dir=') || t.startsWith('--work-tree=')) {
+      changesCwd = true;
+      i++;
+      continue;
+    }
+    // Other long/short flag (no separate arg, e.g. --no-pager,
+    // --version, --bare, -p).
+    if (t.startsWith('-')) {
+      i++;
+      continue;
+    }
+    // First non-flag is the subcommand.
+    return { subcommand: t, changesCwd };
+  }
+  return { subcommand: undefined, changesCwd };
 }
 
 /**
@@ -152,10 +197,14 @@ function tokeniseProgram(segment: string): {
  *   trailer rewrite and git-notes write.
  *
  * Walks segments in order so a `cd` AFTER an in-cwd commit doesn't
- * invalidate that commit's attribution; only a `cd` (or `git -C`
- * without commit) BEFORE the commit shifts safety. `git -C <path>
- * commit ...` always counts toward `hasCommit` but never toward
- * `attributableInCwd`.
+ * invalidate that commit's attribution; only a `cd` (or `git -C` /
+ * `--git-dir` / `--work-tree`) BEFORE the commit shifts safety.
+ *
+ * `cwdShifted` is intentionally a one-way latch — it isn't reset on
+ * a subsequent `cd .` or `cd ..`, so harmless cd cycles like
+ * `cd src && cd .. && git commit -m x` will conservatively skip
+ * attribution. The trade-off matches the wrong-repo guard's intent
+ * (better miss than corrupt unrelated repos).
  */
 function gitCommitContext(command: string): {
   hasCommit: boolean;
@@ -166,8 +215,10 @@ function gitCommitContext(command: string): {
   let cwdShifted = false;
 
   for (const sub of splitCommands(command)) {
-    const { program, arg1, arg3 } = tokeniseProgram(sub);
-    if (!program) continue;
+    const tokens = tokeniseSegment(sub);
+    if (!tokens || tokens.length === 0) continue;
+
+    const program = tokens[0]!;
 
     if (program === 'cd') {
       // A cd before any commit makes later in-chain commits unsafe to
@@ -177,23 +228,19 @@ function gitCommitContext(command: string): {
       continue;
     }
 
-    if (program === 'git' && arg1 === '-C') {
-      // `git -C <path> commit ...` is a commit in another repo.
-      if (arg3 === 'commit') {
+    if (program === 'git') {
+      const { subcommand, changesCwd } = parseGitInvocation(tokens);
+      if (subcommand === 'commit') {
         hasCommit = true;
-        // Not attributable in our cwd.
-      } else if (!hasCommit) {
-        // Other -C operations (status, log, etc.) signal cwd-elsewhere
+        // The commit lands in our cwd only if no preceding cd shifted
+        // us and this very invocation didn't redirect via -C/--git-dir.
+        if (!cwdShifted && !changesCwd) attributable = true;
+      } else if (changesCwd && !hasCommit) {
+        // `git -C /path status` and friends signal cwd-elsewhere
         // intent; subsequent in-cwd commits in this chain are unusual
         // enough to be conservative about.
         cwdShifted = true;
       }
-      continue;
-    }
-
-    if (program === 'git' && arg1 === 'commit') {
-      hasCommit = true;
-      if (!cwdShifted) attributable = true;
     }
   }
 
@@ -207,8 +254,11 @@ function gitCommitContext(command: string): {
  */
 function looksLikeGhPrCreate(command: string): boolean {
   for (const sub of splitCommands(command)) {
-    const { program, arg1, arg2 } = tokeniseProgram(sub);
-    if (program === 'gh' && arg1 === 'pr' && arg2 === 'create') return true;
+    const tokens = tokeniseSegment(sub);
+    if (!tokens) continue;
+    if (tokens[0] === 'gh' && tokens[1] === 'pr' && tokens[2] === 'create') {
+      return true;
+    }
   }
   return false;
 }
@@ -1118,12 +1168,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     cwd: string,
     preHead: string | null,
   ): Promise<void> {
-    // Shell-aware detection — a raw regex would falsely match quoted
-    // text such as `echo "git commit"` and clear pending attributions
-    // even though no commit ever ran.
-    if (!gitCommitContext(command).attributableInCwd) {
-      return;
-    }
+    // Caller (`execute`) gates this with `commitCtx.attributableInCwd`,
+    // so we don't re-parse here. Re-parsing would be dead work and a
+    // maintenance trap — if the two checks ever drifted, trailer
+    // injection and git-notes writes could diverge silently.
 
     const postHead = await this.getGitHead(cwd);
     const commitCreated = postHead !== null && postHead !== preHead;
@@ -1335,10 +1383,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return command;
     }
 
-    // Same Windows guard as addAttributionToPR — bash escaping is wrong
-    // for cmd/PowerShell. The trailer goes inside `-m "..."` quotes too,
-    // so the same risk of `$()`/backtick interpolation applies.
-    if (os.platform() === 'win32') {
+    // Same shell-type guard as addAttributionToPR — bash escaping is
+    // wrong for cmd/PowerShell. Gating on the active shell rather than
+    // the OS platform keeps Windows + Git Bash users (where
+    // getShellConfiguration() reports shell:'bash') working.
+    if (getShellConfiguration().shell !== 'bash') {
       return command;
     }
 
@@ -1429,7 +1478,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return command;
     }
 
-    if (os.platform() === 'win32') {
+    // Gate on shell type rather than OS platform: bash escaping is
+    // invalid under cmd/PowerShell but works fine under Windows +
+    // Git Bash, which `getShellConfiguration()` reports as `'bash'`.
+    if (getShellConfiguration().shell !== 'bash') {
       return command;
     }
 
