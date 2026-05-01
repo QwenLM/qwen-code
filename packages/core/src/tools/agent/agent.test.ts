@@ -36,6 +36,7 @@ import { runWithAgentContext } from './agent-context.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as transcript from '../../agents/agent-transcript.js';
 
 // Type for accessing protected methods in tests
 type AgentToolInvocation = {
@@ -53,6 +54,10 @@ type AgentToolInvocation = {
 type AgentToolWithProtectedMethods = AgentTool & {
   createInvocation: (params: AgentParams) => AgentToolInvocation;
 };
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 // Mock dependencies
 vi.mock('../../subagents/subagent-manager.js');
@@ -1435,6 +1440,13 @@ describe('AgentTool', () => {
         getFinalText: vi.fn().mockReturnValue('Monitor done'),
         getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
         getExecutionSummary: vi.fn().mockReturnValue({}),
+        // Background spawn subscribes to the core's event emitter to
+        // populate the entry's recentActivities buffer. Return a stub
+        // whose getEventEmitter() yields a minimal on/off surface so the
+        // test-time listener hookup doesn't throw.
+        getCore: vi.fn().mockReturnValue({
+          getEventEmitter: () => ({ on: vi.fn(), off: vi.fn() }),
+        }),
       } as unknown as AgentHeadless;
 
       mockContextState = { set: vi.fn() } as unknown as ContextState;
@@ -1522,6 +1534,46 @@ describe('AgentTool', () => {
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Background agent launched');
       expect(mockRegistry.register).toHaveBeenCalled();
+    });
+
+    it('passes the sidechain transcript path to SubagentStop hooks for fresh background agents', async () => {
+      const mockHookSystem = {
+        fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
+        fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
+      } as unknown as HookSystem;
+      (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
+        .fn()
+        .mockReturnValue(mockHookSystem);
+
+      const params: AgentParams = {
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+      const expectedTranscriptPrefix = path.join(
+        '/tmp/qwen-test',
+        'subagents',
+        'test-session-id',
+        'agent-monitor-',
+      );
+      await vi.waitFor(() => {
+        expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenCalledWith(
+          expect.stringContaining('monitor-'),
+          'monitor',
+          expect.stringMatching(
+            new RegExp(`^${escapeRegExp(expectedTranscriptPrefix)}.*\\.jsonl$`),
+          ),
+          'Monitor done',
+          false,
+          PermissionMode.AutoEdit,
+          expect.any(AbortSignal),
+        );
+      });
     });
 
     it('should run in foreground when neither flag is set', async () => {
@@ -1658,6 +1710,54 @@ describe('AgentTool', () => {
         const meta = readSidecar('monitor-nested-1');
         expect(meta.parentAgentId).toBe('explore-parent-42');
       });
+    });
+
+    it('persists fork capability snapshots in the bootstrap transcript', async () => {
+      const forkParams: AgentParams = {
+        description: 'Fork task',
+        prompt: 'Investigate issue',
+        run_in_background: true,
+      };
+      const generationConfig = {
+        systemInstruction: {
+          role: 'system',
+          parts: [{ text: 'parent system' }],
+        },
+        tools: [{ functionDeclarations: [{ name: 'Bash' }, { name: 'Read' }] }],
+      };
+      const geminiClient = {
+        getHistory: vi
+          .fn()
+          .mockReturnValue([{ role: 'model', parts: [{ text: 'Ready' }] }]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: () => generationConfig,
+        }),
+      };
+      vi.mocked(config.getGeminiClient).mockReturnValue(
+        geminiClient as unknown as ReturnType<Config['getGeminiClient']>,
+      );
+
+      const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
+      const createSpy = vi
+        .spyOn(AgentHeadless, 'create')
+        .mockResolvedValue(mockAgent);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(forkParams);
+      await invocation.execute();
+
+      expect(attachSpy).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.any(String),
+        expect.objectContaining({
+          bootstrapSystemInstruction: generationConfig.systemInstruction,
+          bootstrapTools: generationConfig.tools[0].functionDeclarations,
+        }),
+      );
+
+      attachSpy.mockRestore();
+      createSpy.mockRestore();
     });
   });
 });

@@ -9,7 +9,8 @@ import {
   runForkedAgent,
   type ForkedAgentResult,
 } from '../utils/forkedAgent.js';
-import { getProjectHash, QWEN_DIR } from '../utils/paths.js';
+import * as path from 'node:path';
+import { Storage } from '../config/storage.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
   getAutoMemoryRoot,
@@ -22,7 +23,11 @@ import type {
   PermissionDecision,
 } from '../permissions/types.js';
 import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
-import { stripShellWrapper } from '../utils/shell-utils.js';
+import {
+  escapeShellArg,
+  getShellConfiguration,
+  stripShellWrapper,
+} from '../utils/shell-utils.js';
 
 const MAX_TURNS = 8;
 const MAX_TIME_MINUTES = 5;
@@ -160,15 +165,21 @@ Rules:
 - Keep the MEMORY.md index concise: one line per file in the format \`- [Title](relative/path.md) — one-line hook\`.
 - If nothing needs consolidation, do nothing and say so.`;
 
-function getTranscriptDir(projectRoot: string): string {
-  const projectHash = getProjectHash(projectRoot);
-  return `${QWEN_DIR}/tmp/${projectHash}/chats`;
+export function getTranscriptDir(projectRoot: string): string {
+  return path.join(new Storage(projectRoot).getProjectDir(), 'chats');
+}
+
+function quoteShellPathWithTrailingSeparator(dirPath: string): string {
+  return escapeShellArg(`${dirPath}${path.sep}`, getShellConfiguration().shell);
 }
 
 export function buildConsolidationTaskPrompt(
   memoryRoot: string,
   transcriptDir: string,
 ): string {
+  const quotedTranscriptDir =
+    quoteShellPathWithTrailingSeparator(transcriptDir);
+
   return [
     `Memory directory: \`${memoryRoot}\``,
     'This directory already exists — write to it directly with the write_file tool (do not run mkdir or check for its existence).',
@@ -187,7 +198,7 @@ export function buildConsolidationTaskPrompt(
     '',
     '1. Existing memories that drifted — facts that contradict something you now know from current memory files',
     '2. Transcript search — if you need specific context, grep session transcripts for narrow terms:',
-    `   \`grep -rn "<narrow term>" ${transcriptDir}/ --include="*.jsonl" | tail -50\``,
+    `   \`grep -rn "<narrow term>" ${quotedTranscriptDir} --include="*.jsonl" | tail -50\``,
     '',
     "Don't exhaustively read transcripts. Look only for things you already suspect matter.",
     '',

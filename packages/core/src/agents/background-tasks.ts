@@ -13,10 +13,12 @@
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { patchAgentMeta } from './agent-transcript.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_TASKS');
 
 const MAX_DESCRIPTION_LENGTH = 40;
+const MAX_RECENT_ACTIVITIES = 5;
 
 // Grace period after cancel() before emitting a fallback cancelled
 // notification. The natural handler (bgBody) almost always settles and
@@ -26,6 +28,36 @@ const MAX_DESCRIPTION_LENGTH = 40;
 // unwind wins the race, short enough that a stuck headless wait loop
 // doesn't feel hung.
 const CANCEL_GRACE_MS = 5000;
+
+/**
+ * Single source of truth for the human-facing label of a background
+ * entry. Shared by the notification payload (model-facing) and the TUI
+ * dialog (user-facing) so the two surfaces never drift.
+ *
+ * When `includePrefix` is true (default), returns `subagentType: desc`;
+ * when false, returns the bare truncated description — used where the
+ * subagent type is already rendered separately (e.g. the dialog header).
+ */
+export function buildBackgroundEntryLabel(
+  entry: { description: string; subagentType?: string },
+  options: { includePrefix?: boolean } = {},
+): string {
+  const { includePrefix = true } = options;
+  let raw = entry.description;
+  if (
+    entry.subagentType &&
+    raw.toLowerCase().startsWith(entry.subagentType.toLowerCase() + ':')
+  ) {
+    raw = raw.slice(entry.subagentType.length + 1).trimStart();
+  }
+  const truncated =
+    raw.length > MAX_DESCRIPTION_LENGTH
+      ? raw.slice(0, MAX_DESCRIPTION_LENGTH - 1) + '\u2026'
+      : raw;
+  return includePrefix && entry.subagentType
+    ? `${entry.subagentType}: ${truncated}`
+    : truncated;
+}
 
 // Escape text so it is safe to interpolate into an XML element body.
 // Subagent-produced strings (description, result, error) can contain `<`,
@@ -40,8 +72,9 @@ function escapeXml(text: string): string {
     .replace(/>/g, '&gt;');
 }
 
-export type BackgroundAgentStatus =
+export type BackgroundTaskStatus =
   | 'running'
+  | 'paused'
   | 'completed'
   | 'failed'
   | 'cancelled';
@@ -52,20 +85,57 @@ export interface AgentCompletionStats {
   durationMs: number;
 }
 
-export interface BackgroundAgentEntry {
+/**
+ * A compact record of a recent tool invocation — drives the Progress
+ * section of the detail dialog. The Agent tool maintains a rolling
+ * buffer of these on each background entry by subscribing to the
+ * subagent's event emitter.
+ */
+export interface BackgroundActivity {
+  /** Tool name (e.g. `Bash`, `Read`). */
+  name: string;
+  /** Short one-line description — the tool's own render-friendly summary. */
+  description: string;
+  /** Emission timestamp (ms). */
+  at: number;
+}
+
+export interface BackgroundTaskEntry {
   agentId: string;
   description: string;
   subagentType?: string;
-  status: BackgroundAgentStatus;
+  status: BackgroundTaskStatus;
   startTime: number;
   endTime?: number;
   result?: string;
   error?: string;
+  /**
+   * Present only when the task is intentionally kept paused but cannot be
+   * safely resumed under the current conditions.
+   */
+  resumeBlockedReason?: string;
   abortController: AbortController;
   stats?: AgentCompletionStats;
   toolUseId?: string;
-  /** Absolute path to the agent's plain-text transcript file. */
+  /**
+   * The original user-supplied prompt for the background task. Surfaced
+   * verbatim in the detail dialog's Prompt section. Optional because
+   * resume-restored entries may not have it.
+   */
+  prompt?: string;
+  /**
+   * Rolling buffer (newest last, capped at MAX_RECENT_ACTIVITIES) of
+   * recent tool invocations by this agent. Feeds the detail dialog's
+   * Progress section. Replaced as a new array each time an activity is
+   * appended so reference-based change detection works. Optional:
+   * callers may register without providing it, and `appendActivity`
+   * initializes the array lazily.
+   */
+  recentActivities?: readonly BackgroundActivity[];
+  /** Absolute path to the agent's on-disk JSONL transcript file. */
   outputFile?: string;
+  /** Absolute path to the agent's sidecar metadata file. */
+  metaPath?: string;
   /** Messages queued by SendMessage, drained between tool rounds. */
   pendingMessages?: string[];
   /**
@@ -75,11 +145,24 @@ export interface BackgroundAgentEntry {
    * fires the notification with the real partial/final result).
    */
   notified?: boolean;
+  /**
+   * Persisted sidecar status to write when the current cancellation settles.
+   * Explicit user cancellation uses `cancelled`; shutdown interruption keeps
+   * `running` so `/resume` can recover the work later.
+   */
+  persistedCancellationStatus?: Extract<
+    BackgroundTaskStatus,
+    'running' | 'cancelled'
+  >;
+}
+
+interface CancelOptions {
+  persistedStatus?: Extract<BackgroundTaskStatus, 'running' | 'cancelled'>;
 }
 
 export interface NotificationMeta {
   agentId: string;
-  status: BackgroundAgentStatus;
+  status: BackgroundTaskStatus;
   stats?: AgentCompletionStats;
   toolUseId?: string;
 }
@@ -90,14 +173,31 @@ export type BackgroundNotificationCallback = (
   meta: NotificationMeta,
 ) => void;
 
-export type BackgroundRegisterCallback = (entry: BackgroundAgentEntry) => void;
+export type BackgroundRegisterCallback = (entry: BackgroundTaskEntry) => void;
+
+/**
+ * Fires on entry status transitions — register, complete, fail, cancel.
+ * Intentionally does NOT fire on `appendActivity` so consumers that only
+ * care about the pill / roster (Footer, AppContainer) don't re-render
+ * on every tool call a background agent makes.
+ */
+export type BackgroundStatusChangeCallback = (
+  entry?: BackgroundTaskEntry,
+) => void;
+
+/** Fires on `appendActivity` — scoped to detail-view consumers. */
+export type BackgroundActivityChangeCallback = (
+  entry: BackgroundTaskEntry,
+) => void;
 
 export class BackgroundTaskRegistry {
-  private readonly agents = new Map<string, BackgroundAgentEntry>();
+  private readonly agents = new Map<string, BackgroundTaskEntry>();
   private notificationCallback?: BackgroundNotificationCallback;
   private registerCallback?: BackgroundRegisterCallback;
+  private statusChangeCallback?: BackgroundStatusChangeCallback;
+  private activityChangeCallback?: BackgroundActivityChangeCallback;
 
-  register(entry: BackgroundAgentEntry): void {
+  register(entry: BackgroundTaskEntry): void {
     if (!entry.pendingMessages) entry.pendingMessages = [];
     this.agents.set(entry.agentId, entry);
     debugLogger.info(`Registered background agent: ${entry.agentId}`);
@@ -109,6 +209,7 @@ export class BackgroundTaskRegistry {
         debugLogger.error('Failed to emit register callback:', error);
       }
     }
+    this.emitStatusChange(entry);
   }
 
   // Transition a still-running entry to 'completed' and emit the terminal
@@ -136,6 +237,7 @@ export class BackgroundTaskRegistry {
     debugLogger.info(`Background agent completed: ${agentId}`);
 
     this.emitNotification(entry);
+    this.emitStatusChange(entry);
   }
 
   // See complete() for the cancelled → terminal path rationale.
@@ -152,6 +254,7 @@ export class BackgroundTaskRegistry {
     debugLogger.info(`Background agent failed: ${agentId}`);
 
     this.emitNotification(entry);
+    this.emitStatusChange(entry);
   }
 
   // Cancellation aborts the signal and marks the entry as cancelled, but
@@ -162,19 +265,45 @@ export class BackgroundTaskRegistry {
   // case where a tool ignores AbortSignal and bgBody never settles — the
   // timeout lands on finalizeCancellationIfPending(), which is a no-op
   // once the natural handler has already emitted.
-  cancel(agentId: string): void {
+  cancel(agentId: string, options: CancelOptions = {}): void {
     const entry = this.agents.get(agentId);
     if (!entry || entry.status !== 'running') return;
+    const persistedStatus = options.persistedStatus ?? 'cancelled';
 
     entry.abortController.abort();
     entry.status = 'cancelled';
     entry.endTime = Date.now();
+    entry.persistedCancellationStatus = persistedStatus;
+    if (entry.metaPath) {
+      patchAgentMeta(entry.metaPath, {
+        status: persistedStatus,
+        lastUpdatedAt: new Date().toISOString(),
+        lastError: undefined,
+      });
+    }
     debugLogger.info(`Background agent cancelled: ${agentId}`);
+    this.emitStatusChange(entry);
 
     const timer = setTimeout(() => {
       this.finalizeCancellationIfPending(agentId);
     }, CANCEL_GRACE_MS);
     timer.unref?.();
+  }
+
+  /**
+   * Marks a paused interrupted task as intentionally discarded/cancelled
+   * without emitting a task-notification. Used when the user explicitly
+   * abandons a recovered task instead of resuming it.
+   */
+  abandon(agentId: string): void {
+    const entry = this.agents.get(agentId);
+    if (!entry || entry.status !== 'paused') return;
+
+    entry.status = 'cancelled';
+    entry.endTime = Date.now();
+    entry.notified = true;
+    debugLogger.info(`Abandoned paused background agent: ${agentId}`);
+    this.emitStatusChange(entry);
   }
 
   // Emit the terminal cancelled notification once the agent's natural
@@ -197,6 +326,7 @@ export class BackgroundTaskRegistry {
     if (partialResult) entry.result = partialResult;
     entry.stats = stats;
     this.emitNotification(entry);
+    this.emitStatusChange(entry);
   }
 
   // Emit the terminal cancelled notification for entries that were cancelled
@@ -208,16 +338,40 @@ export class BackgroundTaskRegistry {
     const entry = this.agents.get(agentId);
     if (!entry || entry.status !== 'cancelled' || entry.notified) return;
     this.emitNotification(entry);
+    this.emitStatusChange(entry);
   }
 
-  get(agentId: string): BackgroundAgentEntry | undefined {
+  /**
+   * Append a recent tool activity to a running entry's rolling buffer.
+   * No-op if the entry is not running — late events after a cancellation
+   * shouldn't leak into the Progress section.
+   */
+  appendActivity(agentId: string, activity: BackgroundActivity): void {
+    const entry = this.agents.get(agentId);
+    if (!entry || entry.status !== 'running') return;
+
+    const prior = entry.recentActivities ?? [];
+    const next = [...prior, activity];
+    if (next.length > MAX_RECENT_ACTIVITIES) {
+      next.splice(0, next.length - MAX_RECENT_ACTIVITIES);
+    }
+    entry.recentActivities = next;
+    this.emitActivityChange(entry);
+  }
+
+  get(agentId: string): BackgroundTaskEntry | undefined {
     return this.agents.get(agentId);
   }
 
-  getRunning(): BackgroundAgentEntry[] {
-    return Array.from(this.agents.values()).filter(
-      (e) => e.status === 'running',
-    );
+  /**
+   * Snapshot of every entry regardless of status. Used by the TUI
+   * footer/dialog to render rows for still-running AND terminal-state
+   * tasks; the headless holdback loop keys off `hasUnfinalizedTasks`
+   * instead, so callers that only need the running slice can filter
+   * this snapshot at the call site.
+   */
+  getAll(): BackgroundTaskEntry[] {
+    return Array.from(this.agents.values());
   }
 
   /**
@@ -230,9 +384,27 @@ export class BackgroundTaskRegistry {
    */
   hasUnfinalizedTasks(): boolean {
     for (const entry of this.agents.values()) {
-      if (!entry.notified) return true;
+      if (entry.status === 'running') return true;
+      if (entry.status === 'cancelled' && !entry.notified) return true;
     }
     return false;
+  }
+
+  /**
+   * Drops every in-memory entry without touching sidecar state.
+   *
+   * Used only when switching to a different session after the caller has
+   * already established that no live work from the current session is still
+   * running. Paused/interrupted entries remain recoverable from disk because
+   * their sidecars keep the persisted status.
+   */
+  reset(): void {
+    const firstEntry = this.agents.values().next().value as
+      | BackgroundTaskEntry
+      | undefined;
+    if (!firstEntry) return;
+    this.agents.clear();
+    this.emitStatusChange(firstEntry);
   }
 
   /**
@@ -274,9 +446,21 @@ export class BackgroundTaskRegistry {
     this.registerCallback = cb;
   }
 
+  setStatusChangeCallback(
+    cb: BackgroundStatusChangeCallback | undefined,
+  ): void {
+    this.statusChangeCallback = cb;
+  }
+
+  setActivityChangeCallback(
+    cb: BackgroundActivityChangeCallback | undefined,
+  ): void {
+    this.activityChangeCallback = cb;
+  }
+
   abortAll(): void {
     for (const entry of Array.from(this.agents.values())) {
-      this.cancel(entry.agentId);
+      this.cancel(entry.agentId, { persistedStatus: 'running' });
       // Shutdown path: no natural handler will run, so emit the cancelled
       // notification here to honour the one-notification-per-agent contract.
       this.finalizeCancellationIfPending(entry.agentId);
@@ -284,24 +468,11 @@ export class BackgroundTaskRegistry {
     debugLogger.info('Aborted all background agents');
   }
 
-  private buildDisplayLabel(entry: BackgroundAgentEntry): string {
-    // Strip the subagent type prefix if the description already starts with it
-    // to avoid duplication like "Explore: Explore: list ts files".
-    let rawDesc = entry.description;
-    if (
-      entry.subagentType &&
-      rawDesc.toLowerCase().startsWith(entry.subagentType.toLowerCase() + ':')
-    ) {
-      rawDesc = rawDesc.slice(entry.subagentType.length + 1).trimStart();
-    }
-    const desc =
-      rawDesc.length > MAX_DESCRIPTION_LENGTH
-        ? rawDesc.slice(0, MAX_DESCRIPTION_LENGTH) + '...'
-        : rawDesc;
-    return entry.subagentType ? `${entry.subagentType}: ${desc}` : desc;
+  private buildDisplayLabel(entry: BackgroundTaskEntry): string {
+    return buildBackgroundEntryLabel(entry);
   }
 
-  private emitNotification(entry: BackgroundAgentEntry): void {
+  private emitNotification(entry: BackgroundTaskEntry): void {
     // Mark notified *before* invoking the callback so that a re-entrant
     // terminal call inside the callback chain (cancel → complete race)
     // sees the flag and short-circuits, rather than firing twice.
@@ -364,6 +535,24 @@ export class BackgroundTaskRegistry {
       this.notificationCallback(displayLine, xmlParts.join('\n'), meta);
     } catch (error) {
       debugLogger.error('Failed to emit background notification:', error);
+    }
+  }
+
+  private emitStatusChange(entry?: BackgroundTaskEntry): void {
+    if (!this.statusChangeCallback) return;
+    try {
+      this.statusChangeCallback(entry);
+    } catch (error) {
+      debugLogger.error('Failed to emit background status change:', error);
+    }
+  }
+
+  private emitActivityChange(entry: BackgroundTaskEntry): void {
+    if (!this.activityChangeCallback) return;
+    try {
+      this.activityChangeCallback(entry);
+    } catch (error) {
+      debugLogger.error('Failed to emit background activity change:', error);
     }
   }
 }

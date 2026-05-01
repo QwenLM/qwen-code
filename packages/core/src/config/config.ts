@@ -61,6 +61,9 @@ import { PermissionManager } from '../permissions/permission-manager.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
+import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
+import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
+import { FileReadCache } from '../services/fileReadCache.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -364,6 +367,14 @@ export interface ConfigParameters {
   telemetry?: TelemetrySettings;
   gitCoAuthor?: boolean;
   usageStatisticsEnabled?: boolean;
+  /**
+   * If true, disables the per-session FileReadCache short-circuit
+   * (file_unchanged placeholder). Useful for sessions that may undergo
+   * context compaction or transcript transformation, where the model
+   * cannot reliably retrieve a previously-emitted full file content
+   * from prior tool results. Defaults to false (cache active).
+   */
+  fileReadCacheDisabled?: boolean;
   fileFiltering?: {
     respectGitIgnore?: boolean;
     respectQwenIgnore?: boolean;
@@ -545,6 +556,13 @@ export class Config {
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
   private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
+  private backgroundAgentResumeService?: BackgroundAgentResumeService;
+  private readonly backgroundShellRegistry = new BackgroundShellRegistry();
+  // Field initializer runs once on the parent Config; child Configs
+  // built via Object.create(parent) intentionally do NOT pick this up
+  // — see getFileReadCache() for the per-instance lazy initialization
+  // that keeps subagent caches isolated from the parent's.
+  private fileReadCache: FileReadCache = new FileReadCache();
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
@@ -599,6 +617,7 @@ export class Config {
   private readonly telemetrySettings: TelemetrySettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
+  private readonly fileReadCacheDisabled: boolean;
   private geminiClient!: GeminiClient;
   private baseLlmClient!: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
@@ -684,6 +703,7 @@ export class Config {
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
   private readonly memoryManager: MemoryManager;
+  private readonly modelChangeListeners = new Set<(model: string) => void>();
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
@@ -750,6 +770,7 @@ export class Config {
       email: 'qwen-coder@alibabacloud.com',
     };
     this.usageStatisticsEnabled = params.usageStatisticsEnabled ?? true;
+    this.fileReadCacheDisabled = params.fileReadCacheDisabled ?? false;
     this.outputLanguageFilePath = params.outputLanguageFilePath;
 
     this.fileFiltering = {
@@ -1332,6 +1353,16 @@ export class Config {
     this.chatRecordingService = this.chatRecordingEnabled
       ? new ChatRecordingService(this)
       : undefined;
+    // The file-read cache is session-scoped: its `file_unchanged`
+    // placeholder relies on the model having seen the prior full read
+    // earlier in the *current* conversation. Carrying entries across
+    // /clear or session resume would let a follow-up Read return the
+    // placeholder despite the new session never having received the
+    // file contents. Use the getter so the lazy own-property
+    // initialization in getFileReadCache() applies even for Configs
+    // constructed via Object.create — those should clear their own
+    // cache, not the parent's.
+    this.getFileReadCache().clear();
     if (this.initialized) {
       logStartSession(this, new StartSessionEvent(this));
     }
@@ -1373,6 +1404,20 @@ export class Config {
     return this.contentGeneratorConfig?.model || this.modelsConfig.getModel();
   }
 
+  onModelChange(listener: (model: string) => void): () => void {
+    this.modelChangeListeners.add(listener);
+    return () => {
+      this.modelChangeListeners.delete(listener);
+    };
+  }
+
+  private notifyModelChangeListeners(): void {
+    const model = this.getModel();
+    for (const listener of this.modelChangeListeners) {
+      listener(model);
+    }
+  }
+
   /**
    * Returns the fast model if one is configured and valid for the current auth type,
    * otherwise returns undefined. Background agents (memory extraction, dream, /btw)
@@ -1409,6 +1454,7 @@ export class Config {
     if (this.contentGeneratorConfig) {
       this.contentGeneratorConfig.model = newModel;
     }
+    this.notifyModelChangeListeners();
   }
 
   /**
@@ -1423,11 +1469,9 @@ export class Config {
       return;
     }
 
-    // Strip thinking blocks from conversation history on model switch.
-    // reasoning_content is a non-standard field that causes strict
-    // OpenAI-compatible providers to reject requests with 422 errors
-    // when thought parts from a previous model leak into the payload (#3304).
-    this.geminiClient.stripThoughtsFromHistory();
+    // Keep full history (including thought parts) on model switch.
+    // Some OpenAI-compatible reasoning models (e.g. DeepSeek) require
+    // reasoning_content to be preserved across turns.
 
     // Hot update path: only supported for qwen-oauth.
     // For other auth types we always refresh to recreate the ContentGenerator.
@@ -1532,6 +1576,7 @@ export class Config {
     options?: { requireCachedCredentials?: boolean },
   ): Promise<void> {
     await this.modelsConfig.switchModel(authType, modelId, options);
+    this.notifyModelChangeListeners();
   }
 
   getMaxSessionTurns(): number {
@@ -1612,6 +1657,7 @@ export class Config {
       }
 
       this.backgroundTaskRegistry.abortAll();
+      this.backgroundShellRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
     } catch (error) {
@@ -2489,6 +2535,88 @@ export class Config {
 
   getBackgroundTaskRegistry(): BackgroundTaskRegistry {
     return this.backgroundTaskRegistry;
+  }
+
+  getBackgroundAgentResumeService(): BackgroundAgentResumeService {
+    if (!this.backgroundAgentResumeService) {
+      this.backgroundAgentResumeService = new BackgroundAgentResumeService(
+        this,
+      );
+    }
+    return this.backgroundAgentResumeService;
+  }
+
+  async loadPausedBackgroundAgents(
+    sessionId: string = this.getSessionId(),
+  ): Promise<
+    ReadonlyArray<import('../agents/background-tasks.js').BackgroundTaskEntry>
+  > {
+    return this.getBackgroundAgentResumeService().loadPausedBackgroundAgents(
+      sessionId,
+    );
+  }
+
+  async resumeBackgroundAgent(
+    agentId: string,
+    initialMessage?: string,
+  ): Promise<
+    import('../agents/background-tasks.js').BackgroundTaskEntry | undefined
+  > {
+    return this.getBackgroundAgentResumeService().resumeBackgroundAgent(
+      agentId,
+      initialMessage,
+    );
+  }
+
+  abandonBackgroundAgent(agentId: string): boolean {
+    return this.getBackgroundAgentResumeService().abandonBackgroundAgent(
+      agentId,
+    );
+  }
+
+  getBackgroundShellRegistry(): BackgroundShellRegistry {
+    return this.backgroundShellRegistry;
+  }
+
+  /**
+   * Session-scoped cache that tracks Read / Edit / WriteFile operations
+   * on files. The cache must be **per-Config-instance** so that each
+   * subagent (which gets its own Config) does not inherit the parent's
+   * recorded reads via the prototype chain.
+   *
+   * The wrinkle: every subagent / scoped-agent / fork path in this
+   * codebase constructs its Config via `Object.create(parent)`. That
+   * does **not** run instance field initializers, so the parent's
+   * `fileReadCache` field is reachable on the child only by prototype
+   * lookup — i.e. child and parent end up sharing the same cache. The
+   * own-property check below detects "this instance was made by
+   * Object.create" and lazily attaches a fresh cache, ensuring
+   * isolation without requiring every Object.create site to remember
+   * to override the field.
+   */
+  getFileReadCache(): FileReadCache {
+    if (!Object.prototype.hasOwnProperty.call(this, 'fileReadCache')) {
+      // The own-property write needs to bypass `private`'s structural
+      // check — the field is conceptually still private to the class,
+      // we just need TS to let us install an own copy on a child
+      // instance produced by `Object.create(parent)`.
+      (this as unknown as { fileReadCache: FileReadCache }).fileReadCache =
+        new FileReadCache();
+    }
+    return this.fileReadCache;
+  }
+
+  /**
+   * When true, ReadFile / Edit / WriteFile must bypass the session
+   * FileReadCache entirely and behave as if it did not exist (no
+   * `file_unchanged` placeholder, no future prior-read enforcement).
+   * Intended as an escape hatch for sessions where the cache's "model
+   * has already seen this content earlier in the conversation"
+   * assumption is unreliable — e.g. after context compaction or
+   * transcript transformation.
+   */
+  getFileReadCacheDisabled(): boolean {
+    return this.fileReadCacheDisabled;
   }
 
   /**

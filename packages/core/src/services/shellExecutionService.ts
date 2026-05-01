@@ -329,6 +329,7 @@ export class ShellExecutionService {
     abortSignal: AbortSignal,
     shouldUseNodePty: boolean,
     shellExecutionConfig: ShellExecutionConfig,
+    options: { streamStdout?: boolean } = {},
   ): Promise<ShellExecutionHandle> {
     if (shouldUseNodePty) {
       const ptyInfo = await getPty();
@@ -353,6 +354,7 @@ export class ShellExecutionService {
       cwd,
       onOutputEvent,
       abortSignal,
+      options.streamStdout ?? false,
     );
   }
 
@@ -361,6 +363,7 @@ export class ShellExecutionService {
     cwd: string,
     onOutputEvent: (event: ShellOutputEvent) => void,
     abortSignal: AbortSignal,
+    streamStdout: boolean,
   ): ShellExecutionHandle {
     try {
       const isWindows = os.platform() === 'win32';
@@ -415,26 +418,61 @@ export class ShellExecutionService {
             }
           }
 
-          outputChunks.push(data);
-
+          // Binary sniff applies in both modes — even streaming consumers
+          // (e.g. background shell output file) shouldn't pile up text-decoded
+          // garbage when the command actually emits binary (`cat /bin/ls`,
+          // image dumps, etc.). Track sniffed bytes by running sum so the
+          // accumulator is truly byte-bounded — the previous version recomputed
+          // sniffedBytes from `slice(0, 20)` on every call, which never grew
+          // past the first 20 chunks' total and let the chunk array leak on
+          // line-sized streams.
           if (isStreamingRawContent && sniffedBytes < MAX_SNIFF_SIZE) {
-            const sniffBuffer = Buffer.concat(outputChunks.slice(0, 20));
-            sniffedBytes = sniffBuffer.length;
-
+            outputChunks.push(data);
+            sniffedBytes += data.length;
+            const sniffBuffer = Buffer.concat(outputChunks);
             if (isBinary(sniffBuffer)) {
               isStreamingRawContent = false;
+              if (streamStdout) {
+                // Tell the streaming consumer to stop writing text chunks;
+                // drop the sniff accumulator now so it can be GC'd.
+                onOutputEvent({ type: 'binary_detected' });
+                outputChunks.length = 0;
+              }
+            } else if (streamStdout && sniffedBytes >= MAX_SNIFF_SIZE) {
+              // Sniff passed in streaming mode — text confirmed, drop the
+              // accumulator. Subsequent chunks fall through to the streaming
+              // emit path below without ever touching outputChunks.
+              outputChunks.length = 0;
             }
+          } else if (!streamStdout) {
+            // Buffered (foreground) mode past sniff: keep accumulating for
+            // the final emit at exit. Streaming mode does not accumulate.
+            outputChunks.push(data);
           }
 
-          if (isStreamingRawContent) {
-            const decoder = stream === 'stdout' ? stdoutDecoder : stderrDecoder;
-            const decodedChunk = decoder.decode(data, { stream: true });
+          if (!isStreamingRawContent) {
+            // Binary mode: drop further data. Foreground emits the
+            // binary_detected event from handleExit (existing behavior);
+            // background already emitted it above.
+            return;
+          }
 
-            if (stream === 'stdout') {
-              stdout += decodedChunk;
-            } else {
-              stderr += decodedChunk;
-            }
+          const decoder = stream === 'stdout' ? stdoutDecoder : stderrDecoder;
+          const decodedChunk = decoder.decode(data, { stream: true });
+
+          if (streamStdout) {
+            // Streaming text mode: push through immediately, no string
+            // accumulation. (Up to ~4KB may already have been emitted
+            // before binary detection trips — bounded, acceptable.)
+            onOutputEvent({ type: 'data', chunk: decodedChunk });
+            return;
+          }
+
+          // Buffered text mode: accumulate for the final cleaned-blob emit.
+          if (stream === 'stdout') {
+            stdout += decodedChunk;
+          } else {
+            stderr += decodedChunk;
           }
         };
 
@@ -451,7 +489,9 @@ export class ShellExecutionService {
           const finalStrippedOutput = stripAnsi(combinedOutput).trim();
 
           if (isStreamingRawContent) {
-            if (finalStrippedOutput) {
+            // In streaming mode chunks were already emitted as they arrived;
+            // re-emitting the final blob would duplicate everything.
+            if (!streamStdout && finalStrippedOutput) {
               onOutputEvent({ type: 'data', chunk: finalStrippedOutput });
             }
           } else {

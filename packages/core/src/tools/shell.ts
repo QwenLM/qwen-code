@@ -6,7 +6,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import os, { EOL } from 'node:os';
+import os from 'node:os';
 import crypto from 'node:crypto';
 import type { Config } from '../config/config.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
@@ -29,6 +29,8 @@ import type {
   ShellOutputEvent,
 } from '../services/shellExecutionService.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
+import type { BackgroundShellEntry } from '../services/backgroundShellRegistry.js';
+import stripAnsi from 'strip-ansi';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import { isSubpaths } from '../utils/paths.js';
@@ -48,6 +50,213 @@ const debugLogger = createDebugLogger('SHELL');
 
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
+
+function trimTrailingShellComment(command: string): string {
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let inBacktick = false;
+  let escapeNext = false;
+  let commandSubstitutionDepth = 0;
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+
+    if (inSingleQuote) {
+      if (ch === "'") inSingleQuote = false;
+      continue;
+    }
+
+    if (inBacktick) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (ch === '`') inBacktick = false;
+      continue;
+    }
+
+    if (inDoubleQuote) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (ch === '"') {
+        inDoubleQuote = false;
+        continue;
+      }
+      if (ch === '$' && command[i + 1] === '(') {
+        commandSubstitutionDepth++;
+        i++;
+        continue;
+      }
+      if (ch === ')' && commandSubstitutionDepth > 0) {
+        commandSubstitutionDepth--;
+      }
+      continue;
+    }
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escapeNext = true;
+      continue;
+    }
+    if (ch === "'") {
+      inSingleQuote = true;
+      continue;
+    }
+    if (ch === '"') {
+      inDoubleQuote = true;
+      continue;
+    }
+    if (ch === '`') {
+      inBacktick = true;
+      continue;
+    }
+    if (ch === '$' && command[i + 1] === '(') {
+      commandSubstitutionDepth++;
+      i++;
+      continue;
+    }
+    if (ch === ')' && commandSubstitutionDepth > 0) {
+      commandSubstitutionDepth--;
+      continue;
+    }
+    if (
+      ch === '#' &&
+      commandSubstitutionDepth === 0 &&
+      (i === 0 || /\s/.test(command[i - 1]!))
+    ) {
+      return command.slice(0, i);
+    }
+  }
+
+  return command;
+}
+
+function hasTopLevelTrailingBackgroundOperator(command: string): boolean {
+  const commentTrimmed = trimTrailingShellComment(command);
+  const trimmed = commentTrimmed.trimEnd();
+  if (!trimmed.endsWith('&')) return false;
+
+  const trailingAmpIndex = trimmed.length - 1;
+  const previousNonWhitespaceIndex = (() => {
+    for (let i = trailingAmpIndex - 1; i >= 0; i--) {
+      if (!/\s/.test(trimmed[i]!)) return i;
+    }
+    return -1;
+  })();
+
+  if (previousNonWhitespaceIndex >= 0) {
+    const previous = trimmed[previousNonWhitespaceIndex]!;
+    if (previous === '&' || previous === '|' || previous === '\\') {
+      return false;
+    }
+  }
+
+  let backslashCount = 0;
+  for (let i = trailingAmpIndex - 1; i >= 0 && trimmed[i] === '\\'; i--) {
+    backslashCount++;
+  }
+  if (backslashCount % 2 === 1) return false;
+
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let inBacktick = false;
+  let escapeNext = false;
+  let commandSubstitutionDepth = 0;
+
+  for (let i = 0; i <= trailingAmpIndex; i++) {
+    const ch = trimmed[i]!;
+
+    if (inSingleQuote) {
+      if (ch === "'") inSingleQuote = false;
+      continue;
+    }
+
+    if (inBacktick) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (ch === '`') inBacktick = false;
+      continue;
+    }
+
+    if (inDoubleQuote) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (ch === '"') {
+        inDoubleQuote = false;
+        continue;
+      }
+      if (ch === '$' && trimmed[i + 1] === '(') {
+        commandSubstitutionDepth++;
+        i++;
+        continue;
+      }
+      if (ch === ')' && commandSubstitutionDepth > 0) {
+        commandSubstitutionDepth--;
+      }
+      continue;
+    }
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escapeNext = true;
+      continue;
+    }
+    if (ch === "'") {
+      inSingleQuote = true;
+      continue;
+    }
+    if (ch === '"') {
+      inDoubleQuote = true;
+      continue;
+    }
+    if (ch === '`') {
+      inBacktick = true;
+      continue;
+    }
+    if (ch === '$' && trimmed[i + 1] === '(') {
+      commandSubstitutionDepth++;
+      i++;
+      continue;
+    }
+    if (ch === ')' && commandSubstitutionDepth > 0) {
+      commandSubstitutionDepth--;
+      continue;
+    }
+    if (i === trailingAmpIndex) {
+      return commandSubstitutionDepth === 0;
+    }
+  }
+
+  return false;
+}
 
 export interface ShellToolParams {
   command: string;
@@ -208,9 +417,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
       };
     }
 
-    const effectiveTimeout = this.params.is_background
-      ? undefined
-      : (this.params.timeout ?? DEFAULT_FOREGROUND_TIMEOUT_MS);
+    if (this.params.is_background) {
+      return this.executeBackground(signal, shellExecutionConfig);
+    }
+
+    const effectiveTimeout =
+      this.params.timeout ?? DEFAULT_FOREGROUND_TIMEOUT_MS;
 
     // Create combined signal with timeout for foreground execution
     let combinedSignal = signal;
@@ -219,294 +431,327 @@ export class ShellToolInvocation extends BaseToolInvocation<
       combinedSignal = AbortSignal.any([signal, timeoutSignal]);
     }
 
-    const isWindows = os.platform() === 'win32';
-    const tempFileName = `shell_pgrep_${crypto
-      .randomBytes(6)
-      .toString('hex')}.tmp`;
-    const tempFilePath = path.join(os.tmpdir(), tempFileName);
+    // Add co-author to git commit commands
+    const processedCommand = this.addCoAuthorToGitCommit(strippedCommand);
+    const commandToExecute = processedCommand;
+    const cwd = this.params.directory || this.config.getTargetDir();
 
-    try {
-      // Add co-author to git commit commands
-      const processedCommand = this.addCoAuthorToGitCommit(strippedCommand);
+    let cumulativeOutput: string | AnsiOutput = '';
+    let lastUpdateTime = Date.now();
+    let isBinaryStream = false;
+    let totalLines = 0;
+    let totalBytes = 0;
 
-      const shouldRunInBackground = this.params.is_background;
-      let finalCommand = processedCommand;
+    const { result: resultPromise, pid } = await ShellExecutionService.execute(
+      commandToExecute,
+      cwd,
+      (event: ShellOutputEvent) => {
+        let shouldUpdate = false;
 
-      // On non-Windows, use & to run in background.
-      // On Windows, we don't use start /B because it creates a detached process that
-      // doesn't die when the parent dies. Instead, we rely on the race logic below
-      // to return early while keeping the process attached (detached: false).
-      if (
-        !isWindows &&
-        shouldRunInBackground &&
-        !finalCommand.trim().endsWith('&')
-      ) {
-        finalCommand = finalCommand.trim() + ' &';
-      }
-
-      // On Windows, we rely on the race logic below to handle background tasks.
-      // We just ensure the command string is clean.
-      if (isWindows && shouldRunInBackground) {
-        finalCommand = finalCommand.trim().replace(/&+$/, '').trim();
-      }
-
-      // On non-Windows background commands, wrap with pgrep to capture
-      // subprocess PIDs so we can report them to the user.
-      const commandToExecute =
-        !isWindows && shouldRunInBackground
-          ? (() => {
-              let command = finalCommand.trim();
-              if (!command.endsWith('&')) command += ';';
-              return `{ ${command} }; __code=$?; pgrep -g 0 >${tempFilePath} 2>&1; exit $__code;`;
-            })()
-          : finalCommand;
-
-      const cwd = this.params.directory || this.config.getTargetDir();
-
-      let cumulativeOutput: string | AnsiOutput = '';
-      let lastUpdateTime = Date.now();
-      let isBinaryStream = false;
-      let totalLines = 0;
-      let totalBytes = 0;
-
-      const { result: resultPromise, pid } =
-        await ShellExecutionService.execute(
-          commandToExecute,
-          cwd,
-          (event: ShellOutputEvent) => {
-            let shouldUpdate = false;
-
-            switch (event.type) {
-              case 'data':
-                if (isBinaryStream) break;
-                cumulativeOutput = event.chunk;
-                // Stats are only consumed by the ANSI-output branch below,
-                // so skip the per-chunk accounting for plain string chunks.
-                if (Array.isArray(event.chunk)) {
-                  totalLines = event.chunk.length;
-                  totalBytes = event.chunk.reduce(
-                    (sum, line) =>
-                      sum +
-                      line.reduce(
-                        (ls, token) =>
-                          ls + Buffer.byteLength(token.text, 'utf-8'),
-                        0,
-                      ),
+        switch (event.type) {
+          case 'data':
+            if (isBinaryStream) break;
+            cumulativeOutput = event.chunk;
+            // Stats are only consumed by the ANSI-output branch below,
+            // so skip the per-chunk accounting for plain string chunks.
+            if (Array.isArray(event.chunk)) {
+              totalLines = event.chunk.length;
+              totalBytes = event.chunk.reduce(
+                (sum, line) =>
+                  sum +
+                  line.reduce(
+                    (ls, token) => ls + Buffer.byteLength(token.text, 'utf-8'),
                     0,
-                  );
-                }
-                shouldUpdate = true;
-                break;
-              case 'binary_detected':
-                isBinaryStream = true;
-                cumulativeOutput =
-                  '[Binary output detected. Halting stream...]';
-                shouldUpdate = true;
-                break;
-              case 'binary_progress':
-                isBinaryStream = true;
-                cumulativeOutput = `[Receiving binary output... ${formatMemoryUsage(
-                  event.bytesReceived,
-                )} received]`;
-                if (Date.now() - lastUpdateTime > OUTPUT_UPDATE_INTERVAL_MS) {
-                  shouldUpdate = true;
-                }
-                break;
-              default: {
-                throw new Error('An unhandled ShellOutputEvent was found.');
-              }
+                  ),
+                0,
+              );
             }
-
-            if (shouldUpdate && updateOutput) {
-              if (typeof cumulativeOutput === 'string') {
-                updateOutput(cumulativeOutput);
-              } else {
-                updateOutput({
-                  ansiOutput: cumulativeOutput,
-                  totalLines,
-                  totalBytes,
-                  // Only include timeout when user explicitly set it
-                  ...(this.params.timeout != null && {
-                    timeoutMs: this.params.timeout,
-                  }),
-                });
-              }
-              lastUpdateTime = Date.now();
+            shouldUpdate = true;
+            break;
+          case 'binary_detected':
+            isBinaryStream = true;
+            cumulativeOutput = '[Binary output detected. Halting stream...]';
+            shouldUpdate = true;
+            break;
+          case 'binary_progress':
+            isBinaryStream = true;
+            cumulativeOutput = `[Receiving binary output... ${formatMemoryUsage(
+              event.bytesReceived,
+            )} received]`;
+            if (Date.now() - lastUpdateTime > OUTPUT_UPDATE_INTERVAL_MS) {
+              shouldUpdate = true;
             }
-          },
-          combinedSignal,
-          shouldRunInBackground
-            ? false
-            : this.config.getShouldUseNodePtyShell(),
-          shellExecutionConfig ?? {},
-        );
-
-      if (pid && setPidCallback) {
-        setPidCallback(pid);
-      }
-
-      // On Windows, background commands rely on early return since there's
-      // no & backgrounding or pgrep. Awaiting would block until completion.
-      if (shouldRunInBackground && isWindows) {
-        const pidMsg = pid ? ` PID: ${pid}` : '';
-        const killHint = ' (Use taskkill /F /T /PID <pid> to stop)';
-
-        return {
-          llmContent: `Background command started.${pidMsg}${killHint}`,
-          returnDisplay: `Background command started.${pidMsg}${killHint}`,
-        };
-      }
-
-      const result = await resultPromise;
-
-      if (shouldRunInBackground) {
-        // Read subprocess PIDs captured by the pgrep wrapper (non-Windows only)
-        const backgroundPIDs: number[] = [];
-        if (!isWindows) {
-          if (fs.existsSync(tempFilePath)) {
-            const pgrepLines = fs
-              .readFileSync(tempFilePath, 'utf8')
-              .split(EOL)
-              .filter(Boolean);
-            for (const line of pgrepLines) {
-              if (!/^\d+$/.test(line)) {
-                debugLogger.warn(`pgrep: ${line}`);
-                continue;
-              }
-              const bgPid = Number(line);
-              if (bgPid !== result.pid) {
-                backgroundPIDs.push(bgPid);
-              }
-            }
-          } else if (!signal.aborted) {
-            debugLogger.warn('missing pgrep output');
+            break;
+          default: {
+            throw new Error('An unhandled ShellOutputEvent was found.');
           }
         }
 
-        const bgPidMsg =
-          backgroundPIDs.length > 0
-            ? ` PIDs: ${backgroundPIDs.join(', ')}`
-            : pid
-              ? ` PID: ${pid}`
-              : '';
-        const killHint = ' (Use kill <pid> to stop)';
-
-        return {
-          llmContent: `Background command started.${bgPidMsg}${killHint}`,
-          returnDisplay: `Background command started.${bgPidMsg}${killHint}`,
-        };
-      }
-
-      let llmContent = '';
-      if (result.aborted) {
-        // Check if it was a timeout or user cancellation
-        const wasTimeout =
-          !this.params.is_background &&
-          effectiveTimeout &&
-          combinedSignal.aborted &&
-          !signal.aborted;
-
-        if (wasTimeout) {
-          llmContent = `Command timed out after ${effectiveTimeout}ms before it could complete.`;
-          if (result.output.trim()) {
-            llmContent += ` Below is the output before it timed out:\n${result.output}`;
+        if (shouldUpdate && updateOutput) {
+          if (typeof cumulativeOutput === 'string') {
+            updateOutput(cumulativeOutput);
           } else {
-            llmContent += ' There was no output before it timed out.';
+            updateOutput({
+              ansiOutput: cumulativeOutput,
+              totalLines,
+              totalBytes,
+              // Only include timeout when user explicitly set it
+              ...(this.params.timeout != null && {
+                timeoutMs: this.params.timeout,
+              }),
+            });
           }
-        } else {
-          llmContent =
-            'Command was cancelled by user before it could complete.';
-          if (result.output.trim()) {
-            llmContent += ` Below is the output before it was cancelled:\n${result.output}`;
-          } else {
-            llmContent += ' There was no output before it was cancelled.';
-          }
+          lastUpdateTime = Date.now();
         }
-      } else {
-        // Create a formatted error string for display, replacing the wrapper command
-        // with the user-facing command.
-        const finalError = result.error
-          ? result.error.message.replace(commandToExecute, this.params.command)
-          : '(none)';
+      },
+      combinedSignal,
+      this.config.getShouldUseNodePtyShell(),
+      shellExecutionConfig ?? {},
+    );
 
-        llmContent = [
-          `Command: ${this.params.command}`,
-          `Directory: ${this.params.directory || '(root)'}`,
-          `Output: ${result.output || '(empty)'}`,
-          `Error: ${finalError}`, // Use the cleaned error string.
-          `Exit Code: ${result.exitCode ?? '(none)'}`,
-          `Signal: ${result.signal ?? '(none)'}`,
-          `Process Group PGID: ${result.pid ?? '(none)'}`,
-        ].join('\n');
-      }
+    if (pid && setPidCallback) {
+      setPidCallback(pid);
+    }
 
-      let returnDisplayMessage = '';
-      if (this.config.getDebugMode()) {
-        returnDisplayMessage = llmContent;
-      } else {
+    const result = await resultPromise;
+
+    let llmContent = '';
+    if (result.aborted) {
+      // Check if it was a timeout or user cancellation
+      const wasTimeout =
+        effectiveTimeout && combinedSignal.aborted && !signal.aborted;
+
+      if (wasTimeout) {
+        llmContent = `Command timed out after ${effectiveTimeout}ms before it could complete.`;
         if (result.output.trim()) {
-          returnDisplayMessage = result.output;
+          llmContent += ` Below is the output before it timed out:\n${result.output}`;
         } else {
-          if (result.aborted) {
-            // Check if it was a timeout or user cancellation
-            const wasTimeout =
-              !this.params.is_background &&
-              effectiveTimeout &&
-              combinedSignal.aborted &&
-              !signal.aborted;
-
-            returnDisplayMessage = wasTimeout
-              ? `Command timed out after ${effectiveTimeout}ms.`
-              : 'Command cancelled by user.';
-          } else if (result.signal) {
-            returnDisplayMessage = `Command terminated by signal: ${result.signal}`;
-          } else if (result.error) {
-            returnDisplayMessage = `Command failed: ${getErrorMessage(
-              result.error,
-            )}`;
-          } else if (result.exitCode !== null && result.exitCode !== 0) {
-            returnDisplayMessage = `Command exited with code: ${result.exitCode}`;
-          }
-          // If output is empty and command succeeded (code 0, no error/signal/abort),
-          // returnDisplayMessage will remain empty, which is fine.
+          llmContent += ' There was no output before it timed out.';
+        }
+      } else {
+        llmContent = 'Command was cancelled by user before it could complete.';
+        if (result.output.trim()) {
+          llmContent += ` Below is the output before it was cancelled:\n${result.output}`;
+        } else {
+          llmContent += ' There was no output before it was cancelled.';
         }
       }
+    } else {
+      // Create a formatted error string for display, replacing the wrapper command
+      // with the user-facing command.
+      const finalError = result.error
+        ? result.error.message.replace(commandToExecute, this.params.command)
+        : '(none)';
 
-      // Truncate large output and save full content to a temp file.
-      if (typeof llmContent === 'string') {
-        const truncatedResult = await truncateToolOutput(
-          this.config,
-          ShellTool.Name,
-          llmContent,
-        );
+      llmContent = [
+        `Command: ${this.params.command}`,
+        `Directory: ${this.params.directory || '(root)'}`,
+        `Output: ${result.output || '(empty)'}`,
+        `Error: ${finalError}`, // Use the cleaned error string.
+        `Exit Code: ${result.exitCode ?? '(none)'}`,
+        `Signal: ${result.signal ?? '(none)'}`,
+        `Process Group PGID: ${result.pid ?? '(none)'}`,
+      ].join('\n');
+    }
 
-        if (truncatedResult.outputFile) {
-          llmContent = truncatedResult.content;
-          returnDisplayMessage +=
-            (returnDisplayMessage ? '\n' : '') +
-            `Output too long and was saved to: ${truncatedResult.outputFile}`;
+    let returnDisplayMessage = '';
+    if (this.config.getDebugMode()) {
+      returnDisplayMessage = llmContent;
+    } else {
+      if (result.output.trim()) {
+        returnDisplayMessage = result.output;
+      } else {
+        if (result.aborted) {
+          // Check if it was a timeout or user cancellation
+          const wasTimeout =
+            effectiveTimeout && combinedSignal.aborted && !signal.aborted;
+
+          returnDisplayMessage = wasTimeout
+            ? `Command timed out after ${effectiveTimeout}ms.`
+            : 'Command cancelled by user.';
+        } else if (result.signal) {
+          returnDisplayMessage = `Command terminated by signal: ${result.signal}`;
+        } else if (result.error) {
+          returnDisplayMessage = `Command failed: ${getErrorMessage(
+            result.error,
+          )}`;
+        } else if (result.exitCode !== null && result.exitCode !== 0) {
+          returnDisplayMessage = `Command exited with code: ${result.exitCode}`;
         }
-      }
-
-      const executionError = result.error
-        ? {
-            error: {
-              message: result.error.message,
-              type: ToolErrorType.SHELL_EXECUTE_ERROR,
-            },
-          }
-        : {};
-
-      return {
-        llmContent,
-        returnDisplay: returnDisplayMessage,
-        ...executionError,
-      };
-    } finally {
-      if (fs.existsSync(tempFilePath)) {
-        fs.unlinkSync(tempFilePath);
+        // If output is empty and command succeeded (code 0, no error/signal/abort),
+        // returnDisplayMessage will remain empty, which is fine.
       }
     }
+
+    // Truncate large output and save full content to a temp file.
+    if (typeof llmContent === 'string') {
+      const truncatedResult = await truncateToolOutput(
+        this.config,
+        ShellTool.Name,
+        llmContent,
+      );
+
+      if (truncatedResult.outputFile) {
+        llmContent = truncatedResult.content;
+        returnDisplayMessage +=
+          (returnDisplayMessage ? '\n' : '') +
+          `Output too long and was saved to: ${truncatedResult.outputFile}`;
+      }
+    }
+
+    const executionError = result.error
+      ? {
+          error: {
+            message: result.error.message,
+            type: ToolErrorType.SHELL_EXECUTE_ERROR,
+          },
+        }
+      : {};
+
+    return {
+      llmContent,
+      returnDisplay: returnDisplayMessage,
+      ...executionError,
+    };
+  }
+
+  /**
+   * Background-execution path: spawn the command into a managed registry
+   * entry instead of detaching with `&`. Output streams to a per-shell file
+   * the agent can `Read`; cancellation flows through the entry's
+   * AbortController; the registry's terminal status is set when the process
+   * exits. Returns immediately so the agent's turn isn't blocked.
+   */
+  private async executeBackground(
+    signal: AbortSignal,
+    shellExecutionConfig?: ShellExecutionConfig,
+  ): Promise<ToolResult> {
+    const strippedCommand = stripShellWrapper(this.params.command);
+    const processedCommand = this.addCoAuthorToGitCommit(strippedCommand);
+    const cwd = this.params.directory || this.config.getTargetDir();
+
+    // Output goes under the project temp dir (which `ReadFileTool`
+    // auto-allows by default), so the LLM can `Read` the captured output
+    // without bouncing off a permission prompt — important because
+    // background-agent contexts can't surface interactive prompts.
+    const outputDir = path.join(
+      this.config.storage.getProjectTempDir(),
+      'background-shells',
+      this.config.getSessionId(),
+    );
+    fs.mkdirSync(outputDir, { recursive: true });
+
+    const shellId = `bg_${crypto.randomBytes(4).toString('hex')}`;
+    const outputPath = path.join(outputDir, `shell-${shellId}.output`);
+
+    // Background shells are explicitly independent of the current turn:
+    // the user pressing Ctrl+C on a turn (which aborts `signal`) should
+    // NOT kill a long-running dev server / watcher they intentionally
+    // backgrounded. Cancellation flows only through the entry's own
+    // AbortController, driven by future `task_stop` integration (#3471).
+    // The `signal` parameter is still honored for the synchronous early
+    // return below (don't even spawn if the agent already aborted), but
+    // we deliberately do not forward it.
+    const entryAc = new AbortController();
+
+    const outputStream = fs.createWriteStream(outputPath, { flags: 'w' });
+    // Without an 'error' listener, a write failure (disk full, permission
+    // change, fs going away) would surface as an uncaught exception and
+    // kill the entire CLI session. Log + drop is the sane default — the
+    // process keeps running, the registry still settles via resultPromise.
+    outputStream.on('error', (err) => {
+      debugLogger.warn(
+        `background shell ${shellId} output write error: ${err.message}`,
+      );
+    });
+
+    const startTime = Date.now();
+    const entry: BackgroundShellEntry = {
+      shellId,
+      command: processedCommand,
+      cwd,
+      status: 'running',
+      startTime,
+      outputPath,
+      abortController: entryAc,
+    };
+
+    const { result: resultPromise, pid } = await ShellExecutionService.execute(
+      processedCommand,
+      cwd,
+      (event: ShellOutputEvent) => {
+        if (event.type === 'data' && typeof event.chunk === 'string') {
+          // Strip ANSI escape codes (color, cursor-move, clear-screen) before
+          // writing — agents read the file as plain text, and dev servers /
+          // build tools spam plenty of escape sequences that would render as
+          // garbage. Costs ~one regex per chunk; cheap relative to disk I/O.
+          outputStream.write(stripAnsi(event.chunk));
+        }
+        // ANSI array chunks and binary streams are not written to the output
+        // file: agents read the file as plain text and binary spam would be
+        // unhelpful.
+      },
+      entryAc.signal,
+      // Background shells are non-interactive by design — no terminal to
+      // attach a PTY to, no human to type at it. Force the child_process
+      // path so we don't pull in node-pty for fire-and-forget commands.
+      false,
+      shellExecutionConfig ?? {},
+      // Stream stdout/stderr through to the output file as chunks arrive.
+      // Default child_process mode buffers until exit, which would leave
+      // dev-server / watcher output files empty until the process dies.
+      { streamStdout: true },
+    );
+
+    if (pid !== undefined) entry.pid = pid;
+    const registry = this.config.getBackgroundShellRegistry();
+    registry.register(entry);
+
+    // Settle in the background — do NOT await here, the agent should be
+    // unblocked immediately.
+    void resultPromise.then(
+      (result) => {
+        outputStream.end();
+        const endTime = Date.now();
+        if (entryAc.signal.aborted) {
+          if (registry.get(shellId)?.status === 'running') {
+            registry.cancel(shellId, endTime);
+          }
+        } else if (
+          result.error ||
+          (result.exitCode !== null && result.exitCode !== 0) ||
+          result.signal !== null
+        ) {
+          // Non-zero exit / killed by signal / spawn error all count as failed.
+          // Treating them as `completed` would let `/tasks` (and any future
+          // model-facing notification) misreport a failed `npm test` or
+          // `false` command as a success.
+          const reason = result.error
+            ? result.error.message
+            : result.signal !== null
+              ? `terminated by signal ${result.signal}`
+              : `exited with code ${result.exitCode}`;
+          registry.fail(shellId, reason, endTime);
+        } else {
+          registry.complete(shellId, result.exitCode ?? 0, endTime);
+        }
+      },
+      (err) => {
+        outputStream.end();
+        registry.fail(shellId, getErrorMessage(err), Date.now());
+      },
+    );
+
+    const pidLine = pid !== undefined ? `pid: ${pid}\n` : '';
+    return {
+      llmContent:
+        `Background shell started.\n` +
+        `id: ${shellId}\n` +
+        pidLine +
+        `output file: ${outputPath}\n` +
+        `Use the /tasks command to list and inspect background shells, or Read the output file directly.`,
+      returnDisplay: `Background shell ${shellId} started${pid !== undefined ? ` (pid ${pid})` : ''}.`,
+    };
   }
 
   private addCoAuthorToGitCommit(command: string): string {
@@ -689,6 +934,13 @@ export class ShellTool extends BaseDeclarativeTool<
     // This method only performs pure parameter validation.
     if (!params.command.trim()) {
       return 'Command cannot be empty.';
+    }
+    const strippedCommand = stripShellWrapper(params.command);
+    if (
+      params.is_background &&
+      hasTopLevelTrailingBackgroundOperator(strippedCommand)
+    ) {
+      return 'Background shell commands must not end with a bare "&". Remove the trailing "&" and rely on is_background: true instead.';
     }
     if (getCommandRoots(params.command).length === 0) {
       return 'Could not identify command root to obtain permission from user.';

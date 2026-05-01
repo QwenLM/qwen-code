@@ -5,7 +5,7 @@
  */
 
 import type {
-  BackgroundAgentStatus,
+  BackgroundTaskStatus,
   Config,
   ToolCallRequestInfo,
 } from '@qwen-code/qwen-code-core';
@@ -302,7 +302,7 @@ export async function runNonInteractive(
         sdkNotification?: {
           task_id: string;
           tool_use_id?: string;
-          status: BackgroundAgentStatus;
+          status: BackgroundTaskStatus;
           usage?: {
             total_tokens: number;
             tool_uses: number;

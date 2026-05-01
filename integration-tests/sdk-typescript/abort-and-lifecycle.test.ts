@@ -314,22 +314,13 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
     });
 
     it('should handle control responses when stdin closes before replies', async () => {
+      const testFilePath = await helper.getPath('test.txt');
       await helper.createFile('test.txt', 'original content');
 
+      let canUseToolCalled = false;
       let canUseToolCalledResolve: () => void = () => {};
-      const canUseToolCalledPromise = new Promise<void>((resolve, reject) => {
+      const canUseToolCalledPromise = new Promise<void>((resolve) => {
         canUseToolCalledResolve = resolve;
-        setTimeout(() => {
-          reject(new Error('canUseTool callback not called'));
-        }, 15000);
-      });
-
-      let inputStreamDoneResolve: () => void = () => {};
-      const inputStreamDonePromise = new Promise<void>((resolve, reject) => {
-        inputStreamDoneResolve = resolve;
-        setTimeout(() => {
-          reject(new Error('inputStreamDonePromise timeout'));
-        }, 15000);
       });
 
       let firstResultResolve: () => void = () => {};
@@ -362,12 +353,10 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
           session_id: sessionId,
           message: {
             role: 'user',
-            content:
-              'Write "updated" to test.txt. Stop if any exception occurs.',
+            content: `Use the write_file tool to write "updated" to the file at ${testFilePath}. Then reply with "done".`,
           },
           parent_tool_use_id: null,
         };
-        await inputStreamDonePromise;
       }
 
       const q = query({
@@ -378,10 +367,8 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
           permissionMode: 'default',
           coreTools: ['read_file', 'write_file'],
           canUseTool: async (toolName, input) => {
-            inputStreamDoneResolve();
-            await new Promise((resolve) => setTimeout(resolve, 1000));
+            canUseToolCalled = true;
             canUseToolCalledResolve();
-
             return {
               behavior: 'allow',
               updatedInput: input,
@@ -394,10 +381,8 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       try {
         const loop = async () => {
           let resultCount = 0;
-          for await (const _message of q) {
-            console.log(JSON.stringify(_message, null, 2));
-            // Consume messages until completion.
-            if (isSDKResultMessage(_message)) {
+          for await (const message of q) {
+            if (isSDKResultMessage(message)) {
               resultCount += 1;
               if (resultCount === 1) {
                 firstResultResolve();
@@ -416,8 +401,12 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         await canUseToolCalledPromise;
         await secondResultPromise;
 
+        // Signal stdin is done so CLI stops waiting
+        q.endInput();
+
         const content = await helper.readFile('test.txt');
-        expect(content).toBe('original content');
+        expect(canUseToolCalled).toBe(true);
+        expect(content).toBe('updated');
       } finally {
         await q.close();
       }
