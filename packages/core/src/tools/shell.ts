@@ -117,11 +117,43 @@ function tokeniseSegment(segment: string): string[] | null {
   while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]!)) {
     i++;
   }
-  // Strip a single safe wrapper, then any leading flag tokens it took.
+  // Strip a single safe wrapper, then any leading flag tokens it
+  // took. Sudo's value-taking flags (`-u user`, `-g group`,
+  // `-h host`, `-D path`, `-r role`, `-t type`) consume the next
+  // argv slot, so without explicitly knowing which take values we'd
+  // leave e.g. `user` standing in for the program in
+  // `sudo -u user git commit ...`. `command` doesn't take any flag
+  // values but its `-p`/`-v`/`-V` are flag-only.
   if (tokens[i] === 'sudo' || tokens[i] === 'command') {
+    const wrapper = tokens[i];
     i++;
+    const sudoFlagsWithValue = new Set([
+      '-u',
+      '-g',
+      '-h',
+      '-D',
+      '-r',
+      '-t',
+      '-C',
+      '--user',
+      '--group',
+      '--host',
+      '--chdir',
+      '--role',
+      '--type',
+    ]);
     while (i < tokens.length && tokens[i]!.startsWith('-')) {
+      const flag = tokens[i]!;
       i++;
+      // Only sudo has value-taking flags in this allowlist; for
+      // `command`'s flag-only options we leave i alone.
+      if (
+        wrapper === 'sudo' &&
+        sudoFlagsWithValue.has(flag) &&
+        i < tokens.length
+      ) {
+        i++;
+      }
     }
   }
   return tokens.slice(i);
@@ -257,6 +289,35 @@ function gitCommitContext(command: string): {
 }
 
 /**
+ * Walk a `gh ...` token sequence past gh's global flags
+ * (`--repo owner/repo`, `--hostname host`, `--help`, `--version`) and
+ * return the resulting subcommand chain. Same purpose as
+ * `parseGitInvocation`: a fixed-position check at index 1 misses
+ * `gh --repo owner/repo pr create ...`, which is a common form.
+ */
+function parseGhInvocation(tokens: string[]): string[] {
+  const TAKES_VALUE = new Set(['--repo', '-R', '--hostname']);
+  let i = 1; // skip 'gh'
+  while (i < tokens.length) {
+    const t = tokens[i]!;
+    if (TAKES_VALUE.has(t)) {
+      i += 2;
+      continue;
+    }
+    if (t.startsWith('--repo=') || t.startsWith('--hostname=')) {
+      i++;
+      continue;
+    }
+    if (t.startsWith('-')) {
+      i++;
+      continue;
+    }
+    return tokens.slice(i);
+  }
+  return [];
+}
+
+/**
  * Detect whether `command` invokes `gh pr create` at the top level —
  * same shell-aware shape as `gitCommitContext` so quoted text like
  * `echo "gh pr create --body ..."` doesn't trip the rewrite path.
@@ -264,10 +325,9 @@ function gitCommitContext(command: string): {
 function looksLikeGhPrCreate(command: string): boolean {
   for (const sub of splitCommands(command)) {
     const tokens = tokeniseSegment(sub);
-    if (!tokens) continue;
-    if (tokens[0] === 'gh' && tokens[1] === 'pr' && tokens[2] === 'create') {
-      return true;
-    }
+    if (!tokens || tokens[0] !== 'gh') continue;
+    const rest = parseGhInvocation(tokens);
+    if (rest[0] === 'pr' && rest[1] === 'create') return true;
   }
   return false;
 }
@@ -1125,22 +1185,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Read the current HEAD SHA, or null if unavailable (no commits yet,
-   * not a git repo, or git failed). Used to detect whether a `git
-   * commit` actually created a new commit, independent of the shell's
-   * exit code.
-   *
-   * Goes through `child_process.execFile` rather than
-   * {@link ShellExecutionService} so the lookup is unaffected by test
-   * mocks of the shell service and stays well clear of any user-supplied
-   * shell wrapper. The 2s timeout means a wedged repo can't stall the
-   * post-command path.
-   */
-  /**
    * Count the commits between `preHead` (exclusive) and `HEAD`
-   * (inclusive). Returns 0 if either side is unreadable or `preHead`
-   * is null (the very first commit case is treated as a single-commit
-   * batch by the caller via the HEAD-movement check). Goes through
+   * (inclusive). Returns 0 if either side is unreadable. Goes through
    * `child_process.execFile` with argv to stay independent of the
    * mockable `ShellExecutionService`.
    */
@@ -1148,10 +1194,26 @@ export class ShellToolInvocation extends BaseToolInvocation<
     cwd: string,
     preHead: string,
   ): Promise<number> {
+    return this.runGitCount(cwd, ['rev-list', '--count', `${preHead}..HEAD`]);
+  }
+
+  /**
+   * Count commits reachable from HEAD when the repo had no prior
+   * HEAD before the user's command — i.e. the very first commit (or
+   * compound `init && commit && commit ...`). Without this fallback
+   * the multi-commit guard would be skipped on a brand-new repo and
+   * mis-attribute combined data to the final commit.
+   */
+  private async countCommitsFromRoot(cwd: string): Promise<number> {
+    return this.runGitCount(cwd, ['rev-list', '--count', 'HEAD']);
+  }
+
+  /** Shared helper for the two `rev-list --count` invocations. */
+  private async runGitCount(cwd: string, args: string[]): Promise<number> {
     return new Promise((resolve) => {
       const child = childProcess.execFile(
         'git',
-        ['rev-list', '--count', `${preHead}..HEAD`],
+        args,
         { cwd, timeout: 2000 },
         (error, stdout) => {
           if (error) {
@@ -1166,6 +1228,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
     });
   }
 
+  /**
+   * Read the current HEAD SHA, or null if unavailable (no commits
+   * yet, not a git repo, or git failed). Used to detect whether a
+   * `git commit` actually created a new commit, independent of the
+   * shell's exit code. Goes through `child_process.execFile` rather
+   * than {@link ShellExecutionService} so the lookup is unaffected
+   * by test mocks of the shell service and stays well clear of any
+   * user-supplied shell wrapper.
+   */
   private async getGitHead(cwd: string): Promise<string | null> {
     return new Promise((resolve) => {
       const child = childProcess.execFile(
@@ -1233,16 +1304,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // contribution across the individual commits, so attaching the
     // combined note to HEAD would mis-attribute earlier commits'
     // changes to the last one. Snapshot prompt counters and bail.
-    if (preHead !== null) {
-      const commitCount = await this.countCommitsAfter(cwd, preHead);
-      if (commitCount > 1) {
-        debugLogger.warn(
-          `Refusing AI attribution for a multi-commit shell command (` +
-            `${commitCount} commits between ${preHead.slice(0, 12)} and HEAD).`,
-        );
-        attributionService.clearAttributions(true);
-        return;
-      }
+    //
+    // For a brand-new repo (preHead === null), use `git rev-list
+    // --count HEAD` so the very first compound `init && commit a &&
+    // commit b` chain still gets caught.
+    const commitCount =
+      preHead !== null
+        ? await this.countCommitsAfter(cwd, preHead)
+        : await this.countCommitsFromRoot(cwd);
+    if (commitCount > 1) {
+      debugLogger.warn(
+        `Refusing AI attribution for a multi-commit shell command ` +
+          `(${commitCount} commits since ${
+            preHead ? preHead.slice(0, 12) : 'repo root'
+          }).`,
+      );
+      attributionService.clearAttributions(true);
+      return;
     }
 
     // A new commit landed. Even when no per-file attribution was
@@ -1265,6 +1343,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return;
     }
 
+    let committedAbsolutePaths: Set<string> | null = null;
     try {
       // Analyze the just-committed files by diffing HEAD against its parent.
       // The commit already happened, so we diff HEAD~1..HEAD instead of --cached.
@@ -1279,6 +1358,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // mismatch here would cause path.relative to produce `../...` keys
       // that never match in the AI-attribution lookup.
       const baseDir = stagedInfo.repoRoot ?? this.config.getTargetDir();
+
+      // Capture the absolute paths actually included in this commit so
+      // the finally block can do a partial clear: files the AI edited
+      // but the user didn't `git add` should still be tracked for a
+      // later commit. Resolved against `baseDir` because diff paths
+      // are repo-root-relative.
+      committedAbsolutePaths = new Set(
+        stagedInfo.files.map((rel) => path.resolve(baseDir, rel)),
+      );
+
       const note = attributionService.generateNotePayload(
         stagedInfo,
         baseDir,
@@ -1334,7 +1423,17 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `Failed to attach AI attribution note: ${getErrorMessage(err)}`,
       );
     } finally {
-      attributionService.clearAttributions();
+      // Partial clear: only drop tracking for the files that actually
+      // landed in this commit. Files the AI edited but the user
+      // omitted from `git add` stay pending for a later commit.
+      // If we never determined the committed set (early failure in
+      // getCommittedFileInfo), fall back to a full clear so we don't
+      // leak stale per-file state — counters still get snapshotted.
+      if (committedAbsolutePaths) {
+        attributionService.clearAttributedFiles(committedAbsolutePaths);
+      } else {
+        attributionService.clearAttributions(true);
+      }
     }
   }
 
@@ -1363,39 +1462,42 @@ export class ShellToolInvocation extends BaseToolInvocation<
     };
 
     try {
-      // Detect whether HEAD has a parent. Also fails for shallow clones
-      // where the parent was pruned, which is fine — diff-tree --root is
-      // a safe fallback that diffs against the empty tree.
-      const hasParent = (await runGit('rev-parse --verify HEAD~1')).length > 0;
+      // The two `rev-parse` calls are independent — fan out so we
+      // don't pay the spawn latency twice serially. Same for the
+      // three diff calls below once we know which form to use.
+      const [hasParentOutput, repoRootOutput] = await Promise.all([
+        runGit('rev-parse --verify HEAD~1'),
+        runGit('rev-parse --show-toplevel'),
+      ]);
+      // hasParent fails for shallow clones where the parent was
+      // pruned, which is fine — diff-tree --root is a safe fallback
+      // that diffs against the empty tree.
+      const hasParent = hasParentOutput.length > 0;
+      // Capture the repo root so the attribution service can
+      // reconcile paths from `git diff` (relative to the toplevel)
+      // against absolute paths recorded by the edit/write tools.
+      // Using the configured target directory as base would zero out
+      // attribution for any file outside it.
+      const repoRoot = repoRootOutput.trim();
 
-      // Capture the repo root so the attribution service can reconcile
-      // paths from `git diff` (relative to the toplevel) against absolute
-      // paths recorded by the edit/write tools. Using the configured
-      // target directory as base would zero out attribution for any file
-      // outside it.
-      const repoRoot = (await runGit('rev-parse --show-toplevel')).trim();
-
-      // Get changed file names.
-      // For the initial commit (no parent), use diff-tree --root since
-      // `git diff --root` is not a valid option for porcelain diff.
-      let nameOutput: string;
-      let statusOutput: string;
-      let numstatOutput: string;
-      if (hasParent) {
-        nameOutput = await runGit('diff --name-only HEAD~1 HEAD');
-        statusOutput = await runGit('diff --name-status HEAD~1 HEAD');
-        numstatOutput = await runGit('diff --numstat HEAD~1 HEAD');
-      } else {
-        nameOutput = await runGit(
-          'diff-tree --root --no-commit-id -r --name-only HEAD',
-        );
-        statusOutput = await runGit(
-          'diff-tree --root --no-commit-id -r --name-status HEAD',
-        );
-        numstatOutput = await runGit(
-          'diff-tree --root --no-commit-id -r --numstat HEAD',
-        );
-      }
+      // For the initial commit (no parent), use diff-tree --root
+      // since `git diff --root` isn't valid for porcelain diff.
+      const diffArgs = hasParent
+        ? {
+            name: 'diff --name-only HEAD~1 HEAD',
+            status: 'diff --name-status HEAD~1 HEAD',
+            numstat: 'diff --numstat HEAD~1 HEAD',
+          }
+        : {
+            name: 'diff-tree --root --no-commit-id -r --name-only HEAD',
+            status: 'diff-tree --root --no-commit-id -r --name-status HEAD',
+            numstat: 'diff-tree --root --no-commit-id -r --numstat HEAD',
+          };
+      const [nameOutput, statusOutput, numstatOutput] = await Promise.all([
+        runGit(diffArgs.name),
+        runGit(diffArgs.status),
+        runGit(diffArgs.numstat),
+      ]);
 
       const files = nameOutput
         .split('\n')
@@ -1469,16 +1571,27 @@ export class ShellToolInvocation extends BaseToolInvocation<
     //   [^"\\]       matches any char except double-quote and backslash
     //   \\.          matches escape sequences like \" or \\
     //   (?:...|...)* matches normal chars or escapes, repeated
-    const doubleQuotePattern = /(-[a-zA-Z]*m\s*)"((?:[^"\\]|\\.)*)"/;
+    const doubleQuotePattern = /(-[a-zA-Z]*m\s*)"((?:[^"\\]|\\.)*)"/g;
     // Bash single quotes can't be escaped, so apostrophes inside a
     // single-quoted message use the close-escape-reopen form `'\''`
     // (e.g. `git commit -m 'don'\''t'`). The negative lookahead leaves
     // those alone — rewriting them correctly needs a real shell parser
     // and a wrong rewrite would mid-insert the trailer and break the
     // command's quoting.
-    const singleQuotePattern = /(-[a-zA-Z]*m\s*)'([^']*)'(?!\\'')/;
-    const doubleMatch = command.match(doubleQuotePattern);
-    const singleMatch = command.match(singleQuotePattern);
+    const singleQuotePattern = /(-[a-zA-Z]*m\s*)'([^']*)'(?!\\'')/g;
+    // Git concatenates multiple `-m` values with a blank line, so the
+    // co-author trailer has to land in the *last* `-m` value to be
+    // recognised by `git interpret-trailers`. matchAll → take the
+    // last match.
+    const lastMatch = <T extends RegExpMatchArray>(
+      matches: IterableIterator<T>,
+    ): T | null => {
+      let result: T | null = null;
+      for (const m of matches) result = m;
+      return result;
+    };
+    const doubleMatch = lastMatch(command.matchAll(doubleQuotePattern));
+    const singleMatch = lastMatch(command.matchAll(singleQuotePattern));
     const match = doubleMatch ?? singleMatch;
     const quote = doubleMatch ? '"' : "'";
 
@@ -1497,9 +1610,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const newMessage = existingMessage + coAuthor;
       const replacement = prefix + quote + newMessage + quote;
 
-      // Use indexOf + slice instead of String.replace() to avoid
-      // special replacement patterns ($&, $1, etc.) in user content
-      const idx = command.indexOf(fullMatch);
+      // Use match.index + slice (rather than indexOf) so multiple
+      // `-m` flags don't collide — we want the position of the
+      // *last* match, not the first occurrence of a string that
+      // could appear earlier in the command.
+      const idx = match.index ?? command.indexOf(fullMatch);
       if (idx >= 0) {
         return (
           command.slice(0, idx) +
@@ -1556,13 +1671,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
         : `\n\n🤖 Generated with Qwen Code`;
 
     // Append to --body "..." or --body '...'
-    const bodyDoublePattern = /(--body\s+)"((?:[^"\\]|\\.)*)"/;
+    // Accept both space and `=` between flag and value: `gh pr create
+    // --body "..."` and `gh pr create --body="..."` are both valid.
+    const bodyDoublePattern = /(--body[\s=]+)"((?:[^"\\]|\\.)*)"/;
     // Bash apostrophes inside a single-quoted body use the
     // close-escape-reopen form `'\''`. The inner alternation matches
     // either a non-apostrophe character or that escape sequence as a
     // whole, so the trailer lands at the true end of the body rather
     // than after only the first quoted segment.
-    const bodySinglePattern = /(--body\s+)'((?:[^']|'\\'')*)'/;
+    const bodySinglePattern = /(--body[\s=]+)'((?:[^']|'\\'')*)'/;
     const bodyDoubleMatch = command.match(bodyDoublePattern);
     const bodySingleMatch = command.match(bodySinglePattern);
     const bodyMatch = bodyDoubleMatch ?? bodySingleMatch;

@@ -22,8 +22,26 @@
  */
 
 import { createHash } from 'node:crypto';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { isGeneratedFile } from './generatedFiles.js';
+
+/**
+ * Resolve symlinks on a path. On macOS in particular, `/var` is a
+ * symlink to `/private/var`, so an absolute path captured via
+ * `fs.realpathSync` (what edit.ts/write-file.ts records) and
+ * `path.relative` against `git rev-parse --show-toplevel` (which may
+ * report either form) won't line up unless we normalise both sides.
+ * Falls back to the input on any fs error so a missing path can't
+ * make the lookup fail outright.
+ */
+function realpathOrSelf(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return p;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -276,6 +294,28 @@ export class CommitAttributionService {
     this.sessionBaselines.clear();
   }
 
+  /**
+   * Clear attribution data for the specific files that just landed in
+   * a commit, leaving entries for files the user *didn't* include
+   * (partial commits, `git add A && git commit -m "..."`) intact so
+   * they're still credited on a later commit. Snapshots prompt
+   * counters since a commit did succeed.
+   *
+   * Keys must be the absolute paths used by `recordEdit` — callers
+   * are responsible for resolving repo-relative diff paths against
+   * the repo root (and following symlinks via fs.realpath where
+   * needed) before passing them in.
+   */
+  clearAttributedFiles(committedAbsolutePaths: Set<string>): void {
+    this.promptCountAtLastCommit = this.promptCount;
+    this.permissionPromptCountAtLastCommit = this.permissionPromptCount;
+    this.escapeCountAtLastCommit = this.escapeCount;
+    for (const p of committedAbsolutePaths) {
+      this.fileAttributions.delete(p);
+      this.sessionBaselines.delete(p);
+    }
+  }
+
   // -----------------------------------------------------------------------
   // Snapshot / restore (session persistence)
   // -----------------------------------------------------------------------
@@ -348,11 +388,19 @@ export class CommitAttributionService {
     let totalAiChars = 0;
     let totalHumanChars = 0;
 
-    // Build lookup: relative path → tracked AI contribution
-    // Normalize to forward slashes so git-style paths match on Windows
+    // Build lookup: relative path → tracked AI contribution. Both
+    // sides are run through realpath so symlinked /var ↔ /private/var
+    // (macOS) or other symlink mismatches don't make
+    // `path.relative` produce a `../...` key that never matches the
+    // diff output. Normalize separators to forward slashes so git
+    // paths line up on Windows.
+    const canonicalBase = realpathOrSelf(baseDir);
     const aiLookup = new Map<string, FileAttribution>();
     for (const [absPath, attr] of this.fileAttributions) {
-      const rel = path.relative(baseDir, absPath).split(path.sep).join('/');
+      const rel = path
+        .relative(canonicalBase, realpathOrSelf(absPath))
+        .split(path.sep)
+        .join('/');
       aiLookup.set(rel, attr);
     }
 

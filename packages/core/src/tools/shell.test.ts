@@ -1252,6 +1252,69 @@ describe('ShellTool', () => {
         );
       });
 
+      // `sudo -u user git commit` puts the program at index [3], not
+      // [1]; a naive flag-only consumer would leave `user` standing
+      // in for the program name.
+      it('should add co-author for sudo with value-taking flag (-u user)', async () => {
+        const command = 'sudo -u other git commit -m "Test"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // git's `-m` can be passed multiple times — `git interpret-trailers`
+      // only recognises trailers that sit at the end of the *last* `-m`
+      // value, so the rewrite must target the last match.
+      it('should add Co-authored-by trailer to the LAST -m when multiple are present', async () => {
+        const command = 'git commit -m "Title" -m "Body line 1"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        // The trailer must land inside the second `-m` quote pair, not
+        // the first; a simple way to assert this is that `Body line 1`
+        // and the trailer share the same closing quote.
+        expect(observed).toMatch(
+          /-m\s+"Body line 1\s+Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud\.com>"/s,
+        );
+        // And the first -m's title is unchanged.
+        expect(observed).toMatch(/-m\s+"Title"\s/);
+      });
+
       it('should add co-author when git commit is prefixed with sudo', async () => {
         const command = 'sudo git commit -m "Test"';
         const invocation = shellTool.build({ command, is_background: false });
@@ -1445,6 +1508,68 @@ describe('ShellTool', () => {
     describe('addAttributionToPR', () => {
       it('should append attribution to gh pr create --body when pr enabled', async () => {
         const command = 'gh pr create --title "x" --body "Summary"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Generated with Qwen Code'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // `gh --repo owner/repo pr create` shifts pr/create past the
+      // fixed `tokens[1]/tokens[2]` slots; a literal-position check
+      // misses these forms.
+      it('should append attribution when gh has global flags before pr create', async () => {
+        const command =
+          'gh --repo owner/repo pr create --title "x" --body "Summary"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Generated with Qwen Code'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // The `--body=value` (equals-sign) form is common with gh; the
+      // earlier `\s+` separator only matched `--body value`.
+      it('should append attribution to --body="..." equals-sign form', async () => {
+        const command = 'gh pr create --title "x" --body="Summary"';
         const invocation = shellTool.build({ command, is_background: false });
         const promise = invocation.execute(mockAbortSignal);
 
