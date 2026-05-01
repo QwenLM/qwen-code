@@ -1034,6 +1034,126 @@ describe('MonitorTool', () => {
       expect(callback).toHaveBeenCalledTimes(2);
     });
   });
+
+  describe('throttling (token bucket)', () => {
+    // The monitor uses a token bucket with burst=5 and refill=1 token/sec
+    // (see THROTTLE_BURST_SIZE / THROTTLE_REFILL_INTERVAL_MS in monitor.ts).
+    // The throttle reads Date.now() directly, so vi.setSystemTime() is
+    // sufficient to simulate elapsed wall-clock time without running any
+    // pending setTimeout (idle timer, SIGKILL fallback) tasks.
+    it('emits up to 5 lines immediately and drops further lines within the same second', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(0);
+        const callback = vi.fn();
+        monitorRegistry.setNotificationCallback(callback);
+
+        const invocation = createInvocation({ command: 'noisy-cmd' });
+        await invocation.execute(new AbortController().signal);
+
+        // Emit 7 lines synchronously within the same millisecond.
+        mockChild.stdout.emit(
+          'data',
+          Buffer.from('l1\nl2\nl3\nl4\nl5\nl6\nl7\n'),
+        );
+
+        // Burst is 5; lines 6 and 7 must be dropped.
+        expect(callback).toHaveBeenCalledTimes(5);
+      } finally {
+        monitorRegistry.abortAll({ notify: false });
+        vi.useRealTimers();
+      }
+    });
+
+    it('refills 1 token per second and releases throttled lines on refill', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(0);
+        const callback = vi.fn();
+        monitorRegistry.setNotificationCallback(callback);
+
+        const invocation = createInvocation({ command: 'noisy-cmd' });
+        await invocation.execute(new AbortController().signal);
+
+        // Burn the entire burst.
+        mockChild.stdout.emit('data', Buffer.from('l1\nl2\nl3\nl4\nl5\n'));
+        expect(callback).toHaveBeenCalledTimes(5);
+
+        // Next line within the same second is dropped.
+        mockChild.stdout.emit('data', Buffer.from('l6\n'));
+        expect(callback).toHaveBeenCalledTimes(5);
+
+        // Advance 1s — one token refills.
+        vi.setSystemTime(1000);
+        mockChild.stdout.emit('data', Buffer.from('l7\n'));
+        expect(callback).toHaveBeenCalledTimes(6);
+
+        // Next line within the same refill window is dropped again.
+        mockChild.stdout.emit('data', Buffer.from('l8\n'));
+        expect(callback).toHaveBeenCalledTimes(6);
+
+        // Advance another second — another token refills.
+        vi.setSystemTime(2000);
+        mockChild.stdout.emit('data', Buffer.from('l9\n'));
+        expect(callback).toHaveBeenCalledTimes(7);
+      } finally {
+        monitorRegistry.abortAll({ notify: false });
+        vi.useRealTimers();
+      }
+    });
+
+    it('caps refilled tokens at the burst size after a long idle period', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(0);
+        const callback = vi.fn();
+        monitorRegistry.setNotificationCallback(callback);
+
+        const invocation = createInvocation({ command: 'noisy-cmd' });
+        await invocation.execute(new AbortController().signal);
+
+        // Burn the initial burst.
+        mockChild.stdout.emit('data', Buffer.from('l1\nl2\nl3\nl4\nl5\n'));
+        expect(callback).toHaveBeenCalledTimes(5);
+
+        // Idle for 100 seconds — without a cap, refill would yield 100
+        // tokens. The bucket must cap at 5.
+        vi.setSystemTime(100_000);
+        mockChild.stdout.emit('data', Buffer.from('b1\nb2\nb3\nb4\nb5\nb6\n'));
+
+        // Exactly 5 additional lines pass; the 6th is dropped despite the
+        // long idle gap.
+        expect(callback).toHaveBeenCalledTimes(10);
+      } finally {
+        monitorRegistry.abortAll({ notify: false });
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not consume throttle budget for empty or whitespace-only lines', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(0);
+        const callback = vi.fn();
+        monitorRegistry.setNotificationCallback(callback);
+
+        const invocation = createInvocation({ command: 'noisy-cmd' });
+        await invocation.execute(new AbortController().signal);
+
+        // 10 empty/whitespace lines then 5 real lines — all 5 real lines
+        // should emit because the empties do not spend budget.
+        mockChild.stdout.emit(
+          'data',
+          Buffer.from('\n\n\n   \n\t\nreal1\nreal2\nreal3\nreal4\nreal5\n'),
+        );
+
+        expect(callback).toHaveBeenCalledTimes(5);
+      } finally {
+        monitorRegistry.abortAll({ notify: false });
+        vi.useRealTimers();
+      }
+    });
+  });
 });
 
 describe('sanitizeMonitorLine', () => {
