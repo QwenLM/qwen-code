@@ -317,21 +317,28 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       const testFilePath = await helper.getPath('test.txt');
       await helper.createFile('test.txt', 'original content');
 
-      // Bounded promise with cleared timeout on settle, so success runs do
-      // not leave dangling timers in the worker.
+      // Bounded promise with explicit timer arming and clearing on settle.
+      // `startTimer()` lets each phase begin counting only when its phase
+      // actually starts, so slow predecessors don't burn its budget and
+      // produce misleading timeout errors.
       const boundedPromise = (label: string, ms: number) => {
         let resolveFn: () => void = () => {};
         let timer: ReturnType<typeof setTimeout> | undefined;
+        let pendingReject: (err: Error) => void = () => {};
         const promise = new Promise<void>((resolve, reject) => {
           resolveFn = () => {
             if (timer !== undefined) clearTimeout(timer);
             resolve();
           };
-          timer = setTimeout(() => {
-            reject(new Error(`${label} timeout after ${ms}ms`));
-          }, ms);
+          pendingReject = reject;
         });
-        return { promise, resolve: () => resolveFn() };
+        const startTimer = () => {
+          if (timer !== undefined) return;
+          timer = setTimeout(() => {
+            pendingReject(new Error(`${label} timeout after ${ms}ms`));
+          }, ms);
+        };
+        return { promise, resolve: () => resolveFn(), startTimer };
       };
 
       const canUseToolCalled = boundedPromise(
@@ -341,6 +348,9 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       const inputStreamDone = boundedPromise('inputStreamDone', 15000);
       const firstResult = boundedPromise('firstResult', 30000);
       const secondResult = boundedPromise('secondResult', 30000);
+
+      // firstResult begins as soon as the query starts.
+      firstResult.startTimer();
 
       let secondResultMessage: unknown;
 
@@ -358,6 +368,12 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         };
 
         await firstResult.promise;
+
+        // The second-turn phases only start now; arm their timers here so
+        // a slow first turn does not burn their budgets.
+        canUseToolCalled.startTimer();
+        inputStreamDone.startTimer();
+        secondResult.startTimer();
 
         yield {
           type: 'user',
