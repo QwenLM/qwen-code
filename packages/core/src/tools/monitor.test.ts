@@ -311,6 +311,14 @@ describe('MonitorTool', () => {
       await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
     });
 
+    it('denies command substitution inside wrapped scripts with argv suffixes', async () => {
+      const invocation = createInvocation({
+        command: `/bin/bash -c 'echo $(cat secret.txt)' ignored`,
+      });
+
+      await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
+    });
+
     it('denies command substitution inside quoted env-prefixed wrappers', async () => {
       const invocation = createInvocation({
         command: `FOO="bar baz" /bin/bash -c 'echo $(cat secret.txt)'`,
@@ -523,6 +531,26 @@ describe('MonitorTool', () => {
       );
       expect(monitorRegistry.getRunning()[0]?.command).toBe(
         `/bin/bash --noprofile -c 'tail -f /var/log/app.log'`,
+      );
+    });
+
+    it('preserves wrapper argv while stripping trailing ampersands from the script', async () => {
+      const invocation = createInvocation({
+        command: `/bin/bash -c 'tail -f /var/log/app.log &' ignored`,
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        '/bin/bash',
+        ['-c', `/bin/bash -c 'tail -f /var/log/app.log' ignored`],
+        expect.objectContaining({
+          cwd: '/test/dir',
+          detached: true,
+        }),
+      );
+      expect(monitorRegistry.getRunning()[0]?.command).toBe(
+        `/bin/bash -c 'tail -f /var/log/app.log' ignored`,
       );
     });
 

@@ -372,6 +372,7 @@ interface ParsedMonitorShellWrapper {
   wrapperTokens?: string[];
   innerCommand: string;
   innerQuote: '"' | "'" | '';
+  innerArgsSuffix?: string;
 }
 
 export interface NormalizedMonitorCommand {
@@ -586,13 +587,21 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
 
     if (isMonitorCommandMarker(wrapperToken.token, token.token)) {
       wrapperTokens.push(token.token);
+      const commandToken = takeLeadingToken(token.rest);
+      if (!commandToken) {
+        return {
+          innerCommand: trimmed,
+          innerQuote: '',
+        };
+      }
       const { value: innerCommand, quote: innerQuote } = stripSymmetricQuotes(
-        token.rest,
+        commandToken.token,
       );
       return {
         wrapperTokens,
         innerCommand,
         innerQuote,
+        innerArgsSuffix: commandToken.rest.trimStart(),
       };
     }
 
@@ -612,20 +621,36 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
 export function normalizeMonitorCommand(
   command: string,
 ): NormalizedMonitorCommand {
-  const { wrapperTokens, innerCommand, innerQuote } =
+  const { wrapperTokens, innerCommand, innerQuote, innerArgsSuffix } =
     parseMonitorShellWrapper(command);
   const leadingEnvTokens =
     wrapperTokens?.filter((token) => isEnvAssignmentToken(token)) ?? [];
   const analysisCommand = stripTrailingBackgroundAmp(innerCommand);
+  const rawInnerArgsSuffix = innerArgsSuffix?.trim() ?? '';
+  const normalizedInnerArgsSuffix =
+    stripTrailingBackgroundAmp(rawInnerArgsSuffix);
+  const safetyParts = [
+    ...(wrapperTokens ? leadingEnvTokens : []),
+    analysisCommand,
+    ...(normalizedInnerArgsSuffix ? [normalizedInnerArgsSuffix] : []),
+  ];
   const safetyCommand =
-    wrapperTokens && leadingEnvTokens.length > 0
-      ? `${leadingEnvTokens.join(' ')} ${analysisCommand}`.trim()
+    wrapperTokens && safetyParts.length > 0
+      ? safetyParts.join(' ').trim()
       : analysisCommand;
-  const strippedTrailingAmp = analysisCommand !== innerCommand;
+  const strippedTrailingAmp =
+    analysisCommand !== innerCommand ||
+    normalizedInnerArgsSuffix !== rawInnerArgsSuffix;
   const spawnCommand = wrapperTokens
-    ? innerQuote
-      ? `${wrapperTokens.join(' ')} ${innerQuote}${analysisCommand}${innerQuote}`
-      : `${wrapperTokens.join(' ')} ${analysisCommand}`
+    ? [
+        wrapperTokens.join(' '),
+        innerQuote
+          ? `${innerQuote}${analysisCommand}${innerQuote}`
+          : analysisCommand,
+        normalizedInnerArgsSuffix,
+      ]
+        .filter(Boolean)
+        .join(' ')
     : analysisCommand;
 
   return {

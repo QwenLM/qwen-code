@@ -557,6 +557,39 @@ describe('normalizeMonitorCommand', () => {
     });
   });
 
+  it('analyzes only the script word after -c while preserving later argv', () => {
+    expect(
+      normalizeMonitorCommand(`/bin/bash -c 'echo $(cat secret.txt)' ignored`),
+    ).toEqual({
+      analysisCommand: 'echo $(cat secret.txt)',
+      safetyCommand: 'echo $(cat secret.txt) ignored',
+      spawnCommand: `/bin/bash -c 'echo $(cat secret.txt)' ignored`,
+      strippedTrailingAmp: false,
+    });
+  });
+
+  it('strips trailing ampersands from the -c script without dropping later argv', () => {
+    expect(
+      normalizeMonitorCommand(`/bin/bash -c 'tail -f /tmp/app.log &' ignored`),
+    ).toEqual({
+      analysisCommand: 'tail -f /tmp/app.log',
+      safetyCommand: 'tail -f /tmp/app.log ignored',
+      spawnCommand: `/bin/bash -c 'tail -f /tmp/app.log' ignored`,
+      strippedTrailingAmp: true,
+    });
+  });
+
+  it('keeps substitutions in wrapper argv suffix in the safety command', () => {
+    expect(
+      normalizeMonitorCommand(`/bin/bash -c 'echo ok' $(cat secret.txt)`),
+    ).toEqual({
+      analysisCommand: 'echo ok',
+      safetyCommand: 'echo ok $(cat secret.txt)',
+      spawnCommand: `/bin/bash -c 'echo ok' $(cat secret.txt)`,
+      strippedTrailingAmp: false,
+    });
+  });
+
   it('handles escaped whitespace in env-prefixed wrappers', () => {
     expect(
       normalizeMonitorCommand(
