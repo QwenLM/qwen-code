@@ -19,6 +19,7 @@ import {
 function hasBlockingBackgroundWork(config: Config): boolean {
   return (
     config.getBackgroundTaskRegistry().hasUnfinalizedTasks() ||
+    config.getMonitorRegistry().getRunning().length > 0 ||
     config
       .getBackgroundShellRegistry()
       .getAll()

@@ -114,6 +114,21 @@ class TaskStopInvocation extends BaseToolInvocation<
       };
     }
 
+    const monitorRegistry = this.config.getMonitorRegistry();
+    const monitorEntry = monitorRegistry.get(taskId);
+    if (monitorEntry) {
+      if (monitorEntry.status !== 'running') {
+        return notRunningError('monitor', taskId, monitorEntry.status);
+      }
+      monitorRegistry.cancel(taskId);
+      return {
+        llmContent:
+          `Cancellation requested for monitor "${taskId}".\n` +
+          `Command: ${monitorEntry.command}`,
+        returnDisplay: `Cancelled monitor: ${monitorEntry.description}`,
+      };
+    }
+
     return {
       llmContent: `Error: No background task found with ID "${taskId}".`,
       returnDisplay: 'Task not found.',
@@ -126,7 +141,7 @@ class TaskStopInvocation extends BaseToolInvocation<
 }
 
 function notRunningError(
-  kind: 'agent' | 'shell',
+  kind: 'agent' | 'shell' | 'monitor',
   taskId: string,
   status: string,
 ): ToolResult {
