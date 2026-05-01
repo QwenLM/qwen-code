@@ -1069,7 +1069,12 @@ describe('ShellTool', () => {
         );
       });
 
-      it('should add co-author when git commit is prefixed with cd command', async () => {
+      // `cd /elsewhere && git commit` could be redirecting the commit
+      // into a different repo than our cwd. We can't take a meaningful
+      // pre-HEAD snapshot or write notes to the right place without
+      // resolving the cd target, so we conservatively skip the
+      // co-author rewrite altogether.
+      it('should NOT add co-author when git commit is preceded by cd', async () => {
         const command = 'cd /tmp/test && git commit -m "Test commit"';
         const invocation = shellTool.build({ command, is_background: false });
         const promise = invocation.execute(mockAbortSignal);
@@ -1088,15 +1093,100 @@ describe('ShellTool', () => {
         await promise;
 
         expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining(
-            'Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>',
-          ),
+          expect.not.stringContaining('Co-authored-by:'),
           expect.any(String),
           expect.any(Function),
           expect.any(AbortSignal),
           false,
           {},
         );
+      });
+
+      // `git -C <path> commit` runs in <path>, not our cwd — same risk
+      // as the cd case, so the rewrite should be skipped.
+      it('should NOT add co-author for git -C <path> commit', async () => {
+        const command = 'git -C /tmp/other commit -m "Other repo"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.not.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // Quoted "git commit" should not look like an executed commit.
+      it('should NOT add co-author when git commit appears only inside quoted text', async () => {
+        const command = 'echo "git commit -m foo"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.not.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // Bash's apostrophe-via-`'\''` form needs to be left alone — a
+      // naive single-quote rewrite would mid-insert the trailer and
+      // break the command's quoting.
+      it("should leave -m 'don'\\''t' (apostrophe-escape form) unrewritten", async () => {
+        const command = "git commit -m 'don'\\''t'";
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        // The original command must be passed through unchanged.
+        expect(observed).toContain("'don'\\''t'");
+        // No trailer was injected mid-quote.
+        expect(observed).not.toContain('Co-authored-by:');
       });
 
       it('should add co-author to git commit with multi-line message', async () => {
@@ -1342,6 +1432,37 @@ describe('ShellTool', () => {
         const observedCmd = mockShellExecutionService.mock.calls[0][0];
         // The bash close-escape-reopen trick yields `'\''` in place of `'`.
         expect(observedCmd).toContain("O'\\''Brien-Bot");
+      });
+
+      // A body that already uses bash's `'\''` apostrophe-escape form
+      // should be matched as a single complete argument so the trailer
+      // appends after the full body, not after the first quote-segment.
+      it("should match the full body across '\\\\'' apostrophe escapes", async () => {
+        const command = "gh pr create --title 'x' --body 'don'\\''t break me'";
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        // The original body content is preserved end-to-end.
+        expect(observed).toContain("don'\\''t break me");
+        // The attribution lands AFTER the original body, not in the
+        // middle of it.
+        expect(observed).toMatch(
+          /don'\\''t break me[\s\S]*Generated with Qwen Code/,
+        );
       });
     });
   });

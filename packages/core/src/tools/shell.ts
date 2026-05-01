@@ -86,6 +86,39 @@ function escapeForBashSingleQuote(s: string): string {
   return s.replace(/'/g, "'\\''");
 }
 
+/**
+ * Detect whether `command` actually executes `git commit` in the
+ * tool's initial cwd — e.g. `git commit -m "x"` or
+ * `git status && git commit -m "x"` — without being fooled by:
+ *
+ * - Quoted text such as `echo "git commit"` (uses `splitCommands` to
+ *   tokenise on shell separators outside quotes).
+ * - A preceding `cd /elsewhere` or `git -C /elsewhere commit` that
+ *   would point HEAD lookups at a different repo. Attribution
+ *   metadata in that case would land in the wrong repo, so we
+ *   conservatively report "no" and skip attribution.
+ */
+function looksLikeGitCommit(command: string): boolean {
+  let sawGitCommit = false;
+  for (const sub of splitCommands(command)) {
+    const trimmed = sub.trim();
+    if (/^cd\b/.test(trimmed)) {
+      // A cd anywhere in the chain might redirect a later `git commit`
+      // into a different repo. Bailing is conservative but avoids
+      // writing a note to the wrong place.
+      return false;
+    }
+    if (/^git\s+-C\b/.test(trimmed)) {
+      // `git -C <path> commit ...` runs in <path>, not our cwd.
+      return false;
+    }
+    if (/^git\s+commit\b/.test(trimmed)) {
+      sawGitCommit = true;
+    }
+  }
+  return sawGitCommit;
+}
+
 /** Approximate characters per text line for the diff-size estimate. */
 const APPROX_CHARS_PER_LINE = 40;
 /** Fallback char estimate when --numstat reports `-` (binary file). */
@@ -549,12 +582,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     // Snapshot HEAD before running so attachCommitAttribution can detect
     // commit creation by HEAD movement instead of trusting the shell
-    // exit code (which is unreliable for compound commands). Kick the
-    // lookup off concurrently so we don't block ShellExecutionService.
-    // `git rev-parse HEAD` is a few fs reads (low ms) while a real
-    // `git commit` always takes longer, so the snapshot effectively
-    // resolves before the user's command can move HEAD.
-    const isGitCommitCommand = /\bgit\s+commit\b/.test(strippedCommand);
+    // exit code (which is unreliable for compound commands).
+    //
+    // The lookup is started concurrently so we don't block
+    // ShellExecutionService — `git rev-parse HEAD` is a few fs reads
+    // (low ms) while a real `git commit` involves staging, hooks, and
+    // object writes (50ms+), so in practice the snapshot resolves
+    // well before the user's command can move HEAD. Using
+    // `looksLikeGitCommit` (shell-aware splitter) instead of a raw
+    // regex avoids triggering on quoted text like `echo "git commit"`.
+    const isGitCommitCommand = looksLikeGitCommit(strippedCommand);
     const preHeadPromise: Promise<string | null> = isGitCommitCommand
       ? this.getGitHead(cwd)
       : Promise.resolve(null);
@@ -666,14 +703,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
         ? result.error.message.replace(commandToExecute, this.params.command)
         : '(none)';
 
-      // After a git commit (whether or not it was the final command in a
-      // compound), attach AI attribution as a git note. The helper
-      // detects commit creation by HEAD movement, not exit code, so a
-      // `git commit && npm test` chain that fails on `npm test` still
-      // gets attribution for the successful commit.
-      const preHead = await preHeadPromise;
-      await this.attachCommitAttribution(strippedCommand, cwd, preHead);
-
       llmContent = [
         `Command: ${this.params.command}`,
         `Directory: ${this.params.directory || '(root)'}`,
@@ -683,6 +712,17 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `Signal: ${result.signal ?? '(none)'}`,
         `Process Group PGID: ${result.pid ?? '(none)'}`,
       ].join('\n');
+    }
+
+    // Run attribution outside the aborted/non-aborted branch: a
+    // `git commit -m "x" && sleep 999` chain can move HEAD and then
+    // time out, leaving the new commit without its attribution note
+    // while the stale per-file attribution stays around for a later
+    // unrelated commit. attachCommitAttribution already gates on HEAD
+    // movement, so it's a no-op when no commit was actually created.
+    if (isGitCommitCommand) {
+      const preHead = await preHeadPromise;
+      await this.attachCommitAttribution(strippedCommand, cwd, preHead);
     }
 
     let returnDisplayMessage = '';
@@ -958,8 +998,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     cwd: string,
     preHead: string | null,
   ): Promise<void> {
-    const gitCommitPattern = /\bgit\s+commit\b/;
-    if (!gitCommitPattern.test(command)) {
+    // Shell-aware detection — a raw regex would falsely match quoted
+    // text such as `echo "git commit"` and clear pending attributions
+    // even though no commit ever ran.
+    if (!looksLikeGitCommit(command)) {
       return;
     }
 
@@ -1171,9 +1213,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return command;
     }
 
-    // Check if this is a git commit command (anywhere in the command, e.g., after "cd /path &&")
-    const gitCommitPattern = /\bgit\s+commit\b/;
-    if (!gitCommitPattern.test(command)) {
+    // Shell-aware detection — a raw regex would falsely match quoted
+    // text such as `echo "git commit"` and hand a corrupted command
+    // (with the trailer mid-string) back to the executor.
+    if (!looksLikeGitCommit(command)) {
       return command;
     }
 
@@ -1191,8 +1234,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
     //   \\.          matches escape sequences like \" or \\
     //   (?:...|...)* matches normal chars or escapes, repeated
     const doubleQuotePattern = /(-[a-zA-Z]*m\s*)"((?:[^"\\]|\\.)*)"/;
-    // Single quotes in bash have no escape mechanism — match until next '
-    const singleQuotePattern = /(-[a-zA-Z]*m\s*)'([^']*)'/;
+    // Bash single quotes can't be escaped, so apostrophes inside a
+    // single-quoted message use the close-escape-reopen form `'\''`
+    // (e.g. `git commit -m 'don'\''t'`). The negative lookahead leaves
+    // those alone — rewriting them correctly needs a real shell parser
+    // and a wrong rewrite would mid-insert the trailer and break the
+    // command's quoting.
+    const singleQuotePattern = /(-[a-zA-Z]*m\s*)'([^']*)'(?!\\'')/;
     const doubleMatch = command.match(doubleQuotePattern);
     const singleMatch = command.match(singleQuotePattern);
     const match = doubleMatch ?? singleMatch;
@@ -1268,8 +1316,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     // Append to --body "..." or --body '...'
     const bodyDoublePattern = /(--body\s+)"((?:[^"\\]|\\.)*)"/;
-    // Single quotes in bash have no escape mechanism — match until next '
-    const bodySinglePattern = /(--body\s+)'([^']*)'/;
+    // Bash apostrophes inside a single-quoted body use the
+    // close-escape-reopen form `'\''`. The inner alternation matches
+    // either a non-apostrophe character or that escape sequence as a
+    // whole, so the trailer lands at the true end of the body rather
+    // than after only the first quoted segment.
+    const bodySinglePattern = /(--body\s+)'((?:[^']|'\\'')*)'/;
     const bodyDoubleMatch = command.match(bodyDoublePattern);
     const bodySingleMatch = command.match(bodySinglePattern);
     const bodyMatch = bodyDoubleMatch ?? bodySingleMatch;
