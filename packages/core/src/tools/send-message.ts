@@ -6,8 +6,9 @@
 
 /**
  * @fileoverview SendMessage tool — lets the model send a text message to
- * a running background task. The message is injected into the task's
- * reasoning loop at the next tool-round boundary.
+ * a background task. Running tasks receive the message at the next tool-round
+ * boundary; paused recovered tasks are resumed first and take the message as
+ * their first continuation instruction.
  */
 
 import type { Config } from '../config/config.js';
@@ -58,6 +59,28 @@ class SendMessageInvocation extends BaseToolInvocation<
       };
     }
 
+    if (entry.status === 'paused') {
+      const resumed = await this.config.resumeBackgroundAgent(
+        this.params.task_id,
+        this.params.message,
+      );
+      if (!resumed) {
+        return {
+          llmContent: `Error: Background task "${this.params.task_id}" could not be resumed.`,
+          returnDisplay: 'Task could not be resumed.',
+          error: {
+            message: `Task could not be resumed: ${this.params.task_id}`,
+            type: ToolErrorType.SEND_MESSAGE_NOT_RUNNING,
+          },
+        };
+      }
+
+      return {
+        llmContent: `Background task "${this.params.task_id}" resumed with your message as the first continuation instruction.`,
+        returnDisplay: `Resumed ${entry.description}`,
+      };
+    }
+
     if (entry.status !== 'running') {
       return {
         llmContent: `Error: Background task "${this.params.task_id}" is not running (status: ${entry.status}). Cannot send messages to stopped tasks.`,
@@ -88,7 +111,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
     super(
       SendMessageTool.Name,
       ToolDisplayNames.SEND_MESSAGE,
-      'Send a text message to a running background task. The message is delivered at the next tool-round boundary. Use this to provide additional instructions or context to a background task.',
+      'Send a text message to a background task. Running tasks receive it at the next tool-round boundary. Paused recovered tasks are resumed first and use the message as their first continuation instruction.',
       Kind.Other,
       {
         type: 'object',
@@ -96,7 +119,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
           task_id: {
             type: 'string',
             description:
-              'The ID of the running background task (from the launch response).',
+              'The ID of the background task (from the launch response or a recovered paused task).',
           },
           message: {
             type: 'string',

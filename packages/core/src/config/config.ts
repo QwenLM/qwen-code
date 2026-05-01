@@ -61,6 +61,7 @@ import { PermissionManager } from '../permissions/permission-manager.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
+import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import {
@@ -555,6 +556,7 @@ export class Config {
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
   private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
+  private backgroundAgentResumeService?: BackgroundAgentResumeService;
   private readonly backgroundShellRegistry = new BackgroundShellRegistry();
   // Field initializer runs once on the parent Config; child Configs
   // built via Object.create(parent) intentionally do NOT pick this up
@@ -2533,6 +2535,43 @@ export class Config {
 
   getBackgroundTaskRegistry(): BackgroundTaskRegistry {
     return this.backgroundTaskRegistry;
+  }
+
+  getBackgroundAgentResumeService(): BackgroundAgentResumeService {
+    if (!this.backgroundAgentResumeService) {
+      this.backgroundAgentResumeService = new BackgroundAgentResumeService(
+        this,
+      );
+    }
+    return this.backgroundAgentResumeService;
+  }
+
+  async loadPausedBackgroundAgents(
+    sessionId: string = this.getSessionId(),
+  ): Promise<
+    ReadonlyArray<import('../agents/background-tasks.js').BackgroundTaskEntry>
+  > {
+    return this.getBackgroundAgentResumeService().loadPausedBackgroundAgents(
+      sessionId,
+    );
+  }
+
+  async resumeBackgroundAgent(
+    agentId: string,
+    initialMessage?: string,
+  ): Promise<
+    import('../agents/background-tasks.js').BackgroundTaskEntry | undefined
+  > {
+    return this.getBackgroundAgentResumeService().resumeBackgroundAgent(
+      agentId,
+      initialMessage,
+    );
+  }
+
+  abandonBackgroundAgent(agentId: string): boolean {
+    return this.getBackgroundAgentResumeService().abandonBackgroundAgent(
+      agentId,
+    );
   }
 
   getBackgroundShellRegistry(): BackgroundShellRegistry {

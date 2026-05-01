@@ -414,24 +414,43 @@ describe('ShellTool', () => {
       expect(registry.complete).not.toHaveBeenCalled();
     });
 
-    it('strips trailing & from the spawned command (managed path handles backgrounding)', async () => {
-      const invocation = shellTool.build({
-        command: 'node server.js &',
-        is_background: true,
-      });
-      await invocation.execute(mockAbortSignal);
-      expect(mockShellExecutionService).toHaveBeenCalledWith(
-        'node server.js',
-        '/test/dir',
-        expect.any(Function),
-        expect.any(AbortSignal),
-        false,
-        {},
-        { streamStdout: true },
+    it('rejects a bare trailing & in managed background mode', async () => {
+      expect(() =>
+        shellTool.build({
+          command: 'node server.js &',
+          is_background: true,
+        }),
+      ).toThrow(
+        'Background shell commands must not end with a bare "&". Remove the trailing "&" and rely on is_background: true instead.',
       );
+      expect(mockShellExecutionService).not.toHaveBeenCalled();
     });
 
-    it('does not strip a trailing && (logical AND would be syntactically broken)', async () => {
+    it('rejects wrapped bash commands whose stripped payload ends with bare &', async () => {
+      expect(() =>
+        shellTool.build({
+          command: 'bash -c "node server.js &"',
+          is_background: true,
+        }),
+      ).toThrow(
+        'Background shell commands must not end with a bare "&". Remove the trailing "&" and rely on is_background: true instead.',
+      );
+      expect(mockShellExecutionService).not.toHaveBeenCalled();
+    });
+
+    it('rejects wrapped sh commands whose stripped payload ends with bare &', async () => {
+      expect(() =>
+        shellTool.build({
+          command: "sh -c 'npm run dev &'",
+          is_background: true,
+        }),
+      ).toThrow(
+        'Background shell commands must not end with a bare "&". Remove the trailing "&" and rely on is_background: true instead.',
+      );
+      expect(mockShellExecutionService).not.toHaveBeenCalled();
+    });
+
+    it('preserves a trailing && (logical AND would be syntactically broken otherwise)', async () => {
       const invocation = shellTool.build({
         command: 'npm run dev &&',
         is_background: true,
@@ -448,7 +467,7 @@ describe('ShellTool', () => {
       );
     });
 
-    it('does not strip an escaped trailing \\& (literal &)', async () => {
+    it('preserves an escaped trailing \\& (literal &)', async () => {
       const invocation = shellTool.build({
         command: 'echo foo \\&',
         is_background: true,
@@ -456,6 +475,57 @@ describe('ShellTool', () => {
       await invocation.execute(mockAbortSignal);
       expect(mockShellExecutionService).toHaveBeenCalledWith(
         'echo foo \\&',
+        expect.any(String),
+        expect.any(Function),
+        expect.any(AbortSignal),
+        false,
+        {},
+        { streamStdout: true },
+      );
+    });
+
+    it('preserves quoted trailing ampersands', async () => {
+      const invocation = shellTool.build({
+        command: `printf '&'`,
+        is_background: true,
+      });
+      await invocation.execute(mockAbortSignal);
+      expect(mockShellExecutionService).toHaveBeenCalledWith(
+        `printf '&'`,
+        expect.any(String),
+        expect.any(Function),
+        expect.any(AbortSignal),
+        false,
+        {},
+        { streamStdout: true },
+      );
+    });
+
+    it('preserves ampersands inside double-quoted script arguments', async () => {
+      const invocation = shellTool.build({
+        command: `node -e "console.log('&')"`,
+        is_background: true,
+      });
+      await invocation.execute(mockAbortSignal);
+      expect(mockShellExecutionService).toHaveBeenCalledWith(
+        `node -e "console.log('&')"`,
+        expect.any(String),
+        expect.any(Function),
+        expect.any(AbortSignal),
+        false,
+        {},
+        { streamStdout: true },
+      );
+    });
+
+    it('preserves ampersands inside command substitutions', async () => {
+      const invocation = shellTool.build({
+        command: `echo $(printf '&')`,
+        is_background: true,
+      });
+      await invocation.execute(mockAbortSignal);
+      expect(mockShellExecutionService).toHaveBeenCalledWith(
+        `echo $(printf '&')`,
         expect.any(String),
         expect.any(Function),
         expect.any(AbortSignal),

@@ -14,10 +14,14 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
+import { MessageType, type HistoryItem } from '../types.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
-  historyManager: Pick<UseHistoryManagerReturn, 'clearItems' | 'loadHistory'>;
+  historyManager: Pick<
+    UseHistoryManagerReturn,
+    'addItem' | 'clearItems' | 'loadHistory'
+  >;
   startNewSession: (sessionId: string) => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
@@ -36,6 +40,24 @@ export interface UseResumeCommandResult {
    * promise.
    */
   handleResume: (sessionId: string) => Promise<void>;
+}
+
+const BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE =
+  "Stop the current session's running background tasks before resuming another session.";
+
+function hasBlockingBackgroundWork(config: Config): boolean {
+  return (
+    config.getBackgroundTaskRegistry().hasUnfinalizedTasks() ||
+    config
+      .getBackgroundShellRegistry()
+      .getAll()
+      .some((entry) => entry.status === 'running')
+  );
+}
+
+function resetBackgroundStateForSessionSwitch(config: Config): void {
+  (config.getBackgroundTaskRegistry() as unknown as { reset(): void }).reset();
+  (config.getBackgroundShellRegistry() as unknown as { reset(): void }).reset();
 }
 
 export function useResumeCommand(
@@ -63,10 +85,22 @@ export function useResumeCommand(
     options ?? {};
 
   const hasHistoryManager = !!historyManager;
-  const { clearItems, loadHistory } = historyManager || {};
+  const { addItem, clearItems, loadHistory } = historyManager || {};
   const handleResume = useCallback(
     async (sessionId: string) => {
       if (!config || !hasHistoryManager || !startNewSession) {
+        return;
+      }
+
+      if (hasBlockingBackgroundWork(config)) {
+        closeResumeDialog();
+        addItem?.(
+          {
+            type: MessageType.ERROR,
+            text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+          } as Omit<HistoryItem, 'id'>,
+          Date.now(),
+        );
         return;
       }
 
@@ -94,12 +128,26 @@ export function useResumeCommand(
       loadHistory?.(uiHistoryItems);
 
       // Update session history core.
+      resetBackgroundStateForSessionSwitch(config);
       config.startNewSession(sessionId, sessionData);
       // Rebuild turn boundary tracking so rewind works within resumed sessions.
       config
         .getChatRecordingService()
         ?.rebuildTurnBoundaries(sessionData.conversation.messages);
       await config.getGeminiClient()?.initialize?.();
+
+      const recovered = await config.loadPausedBackgroundAgents(sessionId);
+      if (recovered.length > 0) {
+        addItem?.(
+          {
+            type: MessageType.INFO,
+            text: config
+              .getBackgroundAgentResumeService()
+              .buildRecoveredBackgroundAgentsNotice(recovered.length),
+          } as Omit<HistoryItem, 'id'>,
+          Date.now(),
+        );
+      }
 
       // Fire SessionStart event after resuming session
       try {
@@ -121,6 +169,7 @@ export function useResumeCommand(
       closeResumeDialog,
       config,
       hasHistoryManager,
+      addItem,
       clearItems,
       loadHistory,
       startNewSession,
@@ -137,3 +186,5 @@ export function useResumeCommand(
     handleResume,
   };
 }
+
+export { BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE };

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { TaskStopTool } from './task-stop.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
@@ -16,12 +16,15 @@ describe('TaskStopTool', () => {
   let shellRegistry: BackgroundShellRegistry;
   let config: Config;
   let tool: TaskStopTool;
+  let abandonBackgroundAgent: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     registry = new BackgroundTaskRegistry();
+    abandonBackgroundAgent = vi.fn();
     shellRegistry = new BackgroundShellRegistry();
     config = {
       getBackgroundTaskRegistry: () => registry,
+      abandonBackgroundAgent,
       getBackgroundShellRegistry: () => shellRegistry,
     } as unknown as Config;
     tool = new TaskStopTool(config);
@@ -96,6 +99,26 @@ describe('TaskStopTool', () => {
     expect(result.returnDisplay).toContain('Search for auth code');
   });
 
+  it('cancels a paused agent through the resume service', async () => {
+    registry.register({
+      agentId: 'agent-1',
+      description: 'Paused agent',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+    abandonBackgroundAgent.mockReturnValue(true);
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'agent-1' },
+      new AbortController().signal,
+    );
+
+    expect(abandonBackgroundAgent).toHaveBeenCalledWith('agent-1');
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('Cancelled paused background agent');
+  });
+
   describe('background shell support', () => {
     it('cancels a running background shell', async () => {
       const ac = new AbortController();
@@ -117,7 +140,9 @@ describe('TaskStopTool', () => {
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain('background shell "bg_a1b2c3d4"');
       expect(result.llmContent).toContain('npm run dev');
-      expect(result.llmContent).toContain('/tmp/bg-out/shell-bg_a1b2c3d4.output');
+      expect(result.llmContent).toContain(
+        '/tmp/bg-out/shell-bg_a1b2c3d4.output',
+      );
       // task_stop only requests cancellation — the entry stays `running`
       // until the spawn handler observes the abort and settles the entry
       // with the real exit moment. Without this guarantee, /tasks would
