@@ -130,6 +130,10 @@ describe('python sdk get-release-version', () => {
     });
 
     await expect(getVersion({ type: 'nightly' })).resolves.toMatchObject({
+      releaseTag: 'v0.1.1-nightly.20260430031516.abc1234',
+      releaseVersion: '0.1.1-nightly.20260430031516.abc1234',
+      packageVersion: '0.1.1.dev20260430031516',
+      publishChannel: 'nightly',
       previousReleaseTag: '',
     });
   });
@@ -324,6 +328,21 @@ describe('python sdk get-release-version', () => {
     });
   });
 
+  it('returns a manual stable override on the happy path', async () => {
+    const getVersion = await loadGetVersion();
+
+    await expect(
+      getVersion({
+        type: 'stable',
+        stable_version_override: 'v0.2.0',
+      }),
+    ).resolves.toMatchObject({
+      releaseVersion: '0.2.0',
+      packageVersion: '0.2.0',
+      publishChannel: 'latest',
+    });
+  });
+
   it('fails when an explicit stable override conflicts with a completed release', async () => {
     fetchMock.mockResolvedValue(
       makeResponse({
@@ -493,6 +512,33 @@ describe('python sdk get-release-version', () => {
     });
   });
 
+  it('continues the highest nightly-only prerelease base for preview releases', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.1.0': [{}],
+            '0.2.0.dev20260429010101': [{}],
+          },
+        },
+      }),
+    );
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        releases: {
+          'sdk-python-v0.2.0-preview.0': 'sdk-python-v0.2.0-preview.0',
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'preview' })).resolves.toMatchObject({
+      releaseVersion: '0.2.0-preview.1',
+      packageVersion: '0.2.0rc1',
+    });
+  });
+
   it('keeps bumping preview slots until it finds an unused iteration', async () => {
     fetchMock.mockResolvedValue(
       makeResponse({
@@ -564,5 +610,19 @@ describe('python sdk get-release-version', () => {
     await expect(getVersion({ type: 'preview' })).rejects.toThrow(
       'Failed to fetch PyPI metadata: 503 Service Unavailable',
     );
+  });
+
+  it('treats a PyPI 404 as a first-release scenario', async () => {
+    fetchMock.mockResolvedValue(makeResponse({ status: 404 }));
+
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'stable' })).resolves.toMatchObject({
+      releaseTag: 'v0.1.0',
+      releaseVersion: '0.1.0',
+      packageVersion: '0.1.0',
+      previousReleaseTag: '',
+      publishChannel: 'latest',
+    });
   });
 });

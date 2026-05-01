@@ -274,7 +274,7 @@ jobs:
             echo "REMOTE_BRANCH_EXISTS=true" >> "${GITHUB_OUTPUT}"
           else
             if [[ "${RESUME_EXISTING_RELEASE}" == "true" ]]; then
-              echo "Published version ${RELEASE_TAG} exists without a persisted release branch ${BRANCH_NAME}." >&2
+              echo "Published version ${RELEASE_TAG} exists without a persisted release branch ${BRANCH_NAME}. To resolve: (1) re-trigger with a different version, or (2) manually create branch ${BRANCH_NAME} from the original release commit." >&2
               exit 1
             fi
             git switch -c "${BRANCH_NAME}"
