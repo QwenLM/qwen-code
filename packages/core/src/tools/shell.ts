@@ -86,26 +86,40 @@ function escapeForBashSingleQuote(s: string): string {
   return s.replace(/'/g, "'\\''");
 }
 
+/** Approximate characters per text line for the diff-size estimate. */
+const APPROX_CHARS_PER_LINE = 40;
+/** Fallback char estimate when --numstat reports `-` (binary file). */
+const BINARY_DIFF_SIZE_FALLBACK = 1024;
+
 /**
- * Parse `git diff --stat` output into a `path → approximate change size`
- * map for attribution accounting. Approximate size is what ends up
- * clamping `aiChars` in the attribution payload, so missing entries
- * silently zero out a file's contribution — meaning binary edits should
- * land in the map too.
+ * Parse `git diff --numstat` output into a `path → approximate change
+ * size` map for attribution accounting. The result feeds in as the
+ * denominator clamp for `aiChars`, so missing entries would silently
+ * drop a file from attribution — every changed file must land in the
+ * map.
  *
- * Two line formats handled:
- * - Text:   ` path/to/file | 5 ++---`         → `lines * 40` chars
- * - Binary: ` path/to/file | Bin 0 -> 123 b`  → `|new - old|` bytes (≥1)
+ * `--numstat` is preferred over `--stat` because the columns are exact
+ * integers (no graphical bars to parse). Each line is:
+ *   `<additions>\t<deletions>\t<path>`
+ * For binary files, both counts are `-`; we fall back to a fixed
+ * estimate so binary-only changes still get a non-zero entry.
  *
- * Rename notations (`{old => new}` and bare `old => new`) are normalized
- * to the new path so lookups match `--name-only` output.
+ * The `(adds + dels) * 40` figure remains a heuristic — git diff has no
+ * cheap way to surface exact character counts. The clamp in
+ * `generateNotePayload` keeps the math consistent (aiChars never
+ * exceeds diffSize), so the heuristic drives the precision of the
+ * percentage but cannot make `aiChars + humanChars` diverge from
+ * `diffSize`.
  *
- * Exported for unit testing — the function is otherwise an implementation
- * detail of `attachCommitAttribution`.
+ * Rename notations (`{old => new}` and bare `old => new`) are
+ * normalized to the new path so lookups match `--name-only` output.
+ *
+ * Exported for unit testing — the function is otherwise an
+ * implementation detail of `attachCommitAttribution`.
  */
-export function parseDiffStat(statOutput: string): Map<string, number> {
+export function parseNumstat(numstatOutput: string): Map<string, number> {
   const sizes = new Map<string, number>();
-  const lines = statOutput.split('\n').filter(Boolean);
+  const lines = numstatOutput.split('\n').filter(Boolean);
 
   const normalizeFilePath = (filePath: string): string => {
     let p = filePath.trim();
@@ -120,34 +134,22 @@ export function parseDiffStat(statOutput: string): Map<string, number> {
   };
 
   for (const line of lines) {
-    // Skip summary line ("N files changed, X insertions(+), Y deletions(-)")
-    if (line.includes('file changed') || line.includes('files changed')) {
+    // Format: "<additions>\t<deletions>\t<path>" — a literal "-" stands
+    // in for both counts on binary entries.
+    const m = line.match(/^([\d-]+)\t([\d-]+)\t(.+)$/);
+    if (!m) continue;
+    const filePath = normalizeFilePath(m[3]!);
+    if (m[1] === '-' && m[2] === '-') {
+      // Binary file: numstat omits exact counts. Fall back to a fixed
+      // estimate so the entry isn't missing entirely (which would zero
+      // out attribution for the file).
+      sizes.set(filePath, BINARY_DIFF_SIZE_FALLBACK);
       continue;
     }
-
-    // Text diff: " path/to/file | 5 ++---"
-    const textMatch = line.match(/^\s*(.+?)\s+\|\s+(\d+)/);
-    if (textMatch) {
-      const filePath = normalizeFilePath(textMatch[1]!);
-      const changes = parseInt(textMatch[2]!, 10);
-      // Approximate chars: lines changed * avg 40 chars/line
-      sizes.set(filePath, changes * 40);
-      continue;
-    }
-
-    // Binary diff: " path/to/file | Bin 0 -> 123 bytes"
-    // Use the byte delta with a floor of 1 so binary-only changes still
-    // land in the map (otherwise they'd flow through as `diffSize=0` and
-    // silently drop out of attribution).
-    const binaryMatch = line.match(
-      /^\s*(.+?)\s+\|\s+Bin\s+(\d+)\s+->\s+(\d+)\s+bytes$/,
-    );
-    if (binaryMatch) {
-      const filePath = normalizeFilePath(binaryMatch[1]!);
-      const oldBytes = parseInt(binaryMatch[2]!, 10);
-      const newBytes = parseInt(binaryMatch[3]!, 10);
-      sizes.set(filePath, Math.max(1, Math.abs(newBytes - oldBytes)));
-    }
+    const adds = parseInt(m[1]!, 10);
+    const dels = parseInt(m[2]!, 10);
+    if (Number.isNaN(adds) || Number.isNaN(dels)) continue;
+    sizes.set(filePath, (adds + dels) * APPROX_CHARS_PER_LINE);
   }
 
   return sizes;
@@ -970,15 +972,20 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const commitCreated = postHead !== null && postHead !== preHead;
     if (!commitCreated) {
       // No new commit landed (nothing staged, hook rejected, or user
-      // reset right after). Reset prompt counters so the next attempt
-      // starts clean.
+      // reset right after). Drop the per-file attributions but keep the
+      // "since last commit" prompt counters intact — the user's next
+      // attempt should still credit prompts that happened during this
+      // failed try.
       attributionService.clearAttributions(false);
       return;
     }
 
     const gitCoAuthorSettings = this.config.getGitCoAuthor();
     if (!gitCoAuthorSettings.commit) {
-      // Commit succeeded but attribution disabled — still reset prompt counters
+      // Commit succeeded but attribution is disabled. Still snapshot
+      // the prompt counters as "at last commit" so the next commit
+      // starts a fresh window — otherwise the user would carry stale
+      // counts forward forever.
       attributionService.clearAttributions(true);
       return;
     }
@@ -992,7 +999,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // co-author display label so the note's `generator` field reflects
       // which model produced the changes — and so generateNotePayload's
       // sanitizeModelName() actually has the codename it's meant to scrub.
-      const baseDir = this.config.getTargetDir();
+      // The base directory must be the git repo root: getCommittedFileInfo
+      // returns paths relative to `git rev-parse --show-toplevel`, and any
+      // mismatch here would cause path.relative to produce `../...` keys
+      // that never match in the AI-attribution lookup.
+      const baseDir = stagedInfo.repoRoot ?? this.config.getTargetDir();
       const note = attributionService.generateNotePayload(
         stagedInfo,
         baseDir,
@@ -1082,16 +1093,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // a safe fallback that diffs against the empty tree.
       const hasParent = (await runGit('rev-parse --verify HEAD~1')).length > 0;
 
+      // Capture the repo root so the attribution service can reconcile
+      // paths from `git diff` (relative to the toplevel) against absolute
+      // paths recorded by the edit/write tools. Using the configured
+      // target directory as base would zero out attribution for any file
+      // outside it.
+      const repoRoot = (await runGit('rev-parse --show-toplevel')).trim();
+
       // Get changed file names.
       // For the initial commit (no parent), use diff-tree --root since
       // `git diff --root` is not a valid option for porcelain diff.
       let nameOutput: string;
       let statusOutput: string;
-      let statOutput: string;
+      let numstatOutput: string;
       if (hasParent) {
         nameOutput = await runGit('diff --name-only HEAD~1 HEAD');
         statusOutput = await runGit('diff --name-status HEAD~1 HEAD');
-        statOutput = await runGit('diff --stat HEAD~1 HEAD');
+        numstatOutput = await runGit('diff --numstat HEAD~1 HEAD');
       } else {
         nameOutput = await runGit(
           'diff-tree --root --no-commit-id -r --name-only HEAD',
@@ -1099,8 +1117,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
         statusOutput = await runGit(
           'diff-tree --root --no-commit-id -r --name-status HEAD',
         );
-        statOutput = await runGit(
-          'diff-tree --root --no-commit-id -r --stat HEAD',
+        numstatOutput = await runGit(
+          'diff-tree --root --no-commit-id -r --numstat HEAD',
         );
       }
 
@@ -1118,38 +1136,38 @@ export class ShellToolInvocation extends BaseToolInvocation<
         }
       }
 
-      // Get diff sizes from stat output
-      const diffSizes = parseDiffStat(statOutput);
+      // Get diff sizes from numstat output
+      const diffSizes = parseNumstat(numstatOutput);
 
-      return { files, diffSizes, deletedFiles };
+      return {
+        files,
+        diffSizes,
+        deletedFiles,
+        repoRoot: repoRoot.length > 0 ? repoRoot : undefined,
+      };
     } catch {
       return empty;
     }
   }
 
   /**
-   * Parse `git diff --stat` output to extract per-file change sizes.
-   * Estimates character count as (insertions + deletions) * 40 chars/line.
+   * Append a configured `Co-authored-by:` trailer to `git commit`
+   * commands when the commit co-author feature is enabled. No-op for
+   * commands that don't carry an inline `-m`/`-am` message (those open
+   * an editor, which we don't try to rewrite).
    */
-  /**
-   * Parse `git diff --stat` output into a `path → approximate change size`
-   * map. Approximate size is what ends up clamping `aiChars` in the
-   * attribution payload, so missing entries silently zero out a file's
-   * contribution — meaning binary edits should land in the map too.
-   *
-   * Two line formats handled:
-   * - Text:   ` path/to/file | 5 ++---`         → `lines * 40` chars
-   * - Binary: ` path/to/file | Bin 0 -> 123 b`  → `|new - old|` bytes (≥1)
-   *
-   * Rename notations (`{old => new}` and bare `old => new`) are normalized
-   * to the new path so lookups match `--name-only` output.
-   */
-
   private addCoAuthorToGitCommit(command: string): string {
     // Check if commit co-author feature is enabled
     const gitCoAuthorSettings = this.config.getGitCoAuthor();
 
     if (!gitCoAuthorSettings.commit) {
+      return command;
+    }
+
+    // Same Windows guard as addAttributionToPR — bash escaping is wrong
+    // for cmd/PowerShell. The trailer goes inside `-m "..."` quotes too,
+    // so the same risk of `$()`/backtick interpolation applies.
+    if (os.platform() === 'win32') {
       return command;
     }
 
@@ -1159,28 +1177,36 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return command;
     }
 
-    // Define the co-author line using configuration
-    const coAuthor = `
-
-Co-authored-by: ${gitCoAuthorSettings.name} <${gitCoAuthorSettings.email}>`;
-
     // Handle different git commit patterns:
     // Match -m "message" or -m 'message', including combined flags like -am
-    // Use separate patterns to avoid ReDoS (catastrophic backtracking)
+    // Use separate patterns to avoid ReDoS (catastrophic backtracking).
+    // The regex tolerates `-m"msg"` shorthand (no space) — bash accepts
+    // both `-m foo` and `-mfoo`, and we shouldn't silently skip the
+    // shorthand form.
     //
     // Pattern breakdown:
     //   -[a-zA-Z]*m  matches -m, -am, -nm, etc. (combined short flags)
-    //   \s+          matches whitespace after the flag
+    //   \s*          matches optional whitespace after the flag
     //   [^"\\]       matches any char except double-quote and backslash
     //   \\.          matches escape sequences like \" or \\
     //   (?:...|...)* matches normal chars or escapes, repeated
-    const doubleQuotePattern = /(-[a-zA-Z]*m\s+)"((?:[^"\\]|\\.)*)"/;
+    const doubleQuotePattern = /(-[a-zA-Z]*m\s*)"((?:[^"\\]|\\.)*)"/;
     // Single quotes in bash have no escape mechanism — match until next '
-    const singleQuotePattern = /(-[a-zA-Z]*m\s+)'([^']*)'/;
+    const singleQuotePattern = /(-[a-zA-Z]*m\s*)'([^']*)'/;
     const doubleMatch = command.match(doubleQuotePattern);
     const singleMatch = command.match(singleQuotePattern);
     const match = doubleMatch ?? singleMatch;
     const quote = doubleMatch ? '"' : "'";
+
+    // Escape the configured name/email for the surrounding quote style.
+    // Without this, a name like `Bot $(rm -rf /)` would be evaluated as
+    // command substitution when the shell parses the rewritten command.
+    const escape = doubleMatch
+      ? escapeForBashDoubleQuote
+      : escapeForBashSingleQuote;
+    const escapedName = escape(gitCoAuthorSettings.name ?? '');
+    const escapedEmail = escape(gitCoAuthorSettings.email ?? '');
+    const coAuthor = `\n\nCo-authored-by: ${escapedName} <${escapedEmail}>`;
 
     if (match) {
       const [fullMatch, prefix, existingMessage] = match;

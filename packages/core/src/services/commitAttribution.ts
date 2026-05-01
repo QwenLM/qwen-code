@@ -74,6 +74,16 @@ export interface StagedFileInfo {
   files: string[];
   diffSizes: Map<string, number>;
   deletedFiles: Set<string>;
+  /**
+   * Absolute path of the repository root (`git rev-parse --show-toplevel`).
+   * Optional for backward compatibility with synthetic test inputs;
+   * production callers should set it so file paths in `files` (which are
+   * relative to the repo root) align with absolute paths tracked by the
+   * attribution service. When absent, callers may fall back to the
+   * configured target directory at the cost of zeroed-out attribution
+   * for files outside that directory.
+   */
+  repoRoot?: string;
 }
 
 /** Serializable snapshot for session persistence. */

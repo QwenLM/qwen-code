@@ -33,7 +33,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import { ToolErrorType } from './tool-error.js';
-import { OUTPUT_UPDATE_INTERVAL_MS, parseDiffStat } from './shell.js';
+import { OUTPUT_UPDATE_INTERVAL_MS, parseNumstat } from './shell.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
@@ -1131,6 +1131,77 @@ describe('ShellTool', () => {
           {},
         );
       });
+
+      // Bash accepts `-mfoo` as well as `-m foo`. The previous regex
+      // required at least one whitespace and silently no-op'd on the
+      // shorthand form, so users who used `git commit -m"msg"` got no
+      // co-author trailer.
+      it('should add co-author to git commit -m"msg" shorthand (no space)', async () => {
+        const command = 'git commit -m"Quick fix"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>',
+          ),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // Without escaping, a co-author name containing `$()`, backticks,
+      // or `"` would either break the user-approved `git commit` command
+      // or be evaluated as command substitution.
+      it('should escape shell metacharacters in name/email', async () => {
+        (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
+          commit: true,
+          pr: true,
+          name: 'Bot $(rm -rf /) `eval` "danger"',
+          email: 'bot@example.com',
+        });
+
+        const command = 'git commit -m "msg"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observedCmd = mockShellExecutionService.mock.calls[0][0];
+        // Each metacharacter must be escaped, not literal.
+        expect(observedCmd).toContain('\\$');
+        expect(observedCmd).toContain('\\`');
+        expect(observedCmd).toContain('\\"');
+        // The `-m "..."` quote pair must stay closed.
+        expect(observedCmd).toMatch(/-m\s+".+"/s);
+      });
     });
 
     describe('addAttributionToPR', () => {
@@ -1602,36 +1673,41 @@ describe('ShellTool', () => {
   });
 });
 
-describe('parseDiffStat', () => {
-  it('parses text-diff lines as lines * 40', () => {
-    const out = ' src/main.ts   | 5 ++---\n 1 file changed';
-    expect(parseDiffStat(out).get('src/main.ts')).toBe(200);
+describe('parseNumstat', () => {
+  it('parses text-diff entries as (additions + deletions) * 40', () => {
+    // Format: "<adds>\t<dels>\t<path>"
+    const out = '2\t3\tsrc/main.ts';
+    expect(parseNumstat(out).get('src/main.ts')).toBe(200);
   });
 
-  it('parses binary-diff lines as |new - old| with a floor of 1', () => {
-    const out =
-      ' assets/logo.png | Bin 0 -> 1024 bytes\n' +
-      ' assets/icon.png | Bin 1024 -> 1024 bytes';
-    const sizes = parseDiffStat(out);
-    expect(sizes.get('assets/logo.png')).toBe(1024);
-    // Same-size binary edit still lands in the map so attribution
-    // doesn't drop the file via diffSize=0.
-    expect(sizes.get('assets/icon.png')).toBe(1);
+  it('uses a fixed fallback for binary entries (- - path)', () => {
+    const out = ['-\t-\tassets/logo.png', '5\t0\tsrc/main.ts'].join('\n');
+    const sizes = parseNumstat(out);
+    // Binary file still lands in the map so attribution doesn't drop
+    // it via diffSize=0; exact size doesn't matter, the constant just
+    // needs to be > 0.
+    expect(sizes.get('assets/logo.png')).toBeGreaterThan(0);
+    expect(sizes.get('src/main.ts')).toBe(200);
   });
 
   it('normalizes brace rename notation to the new path', () => {
-    const out = ' src/{old => new}/file.ts | 3 +++';
-    expect([...parseDiffStat(out).keys()]).toEqual(['src/new/file.ts']);
+    const out = '3\t1\tsrc/{old => new}/file.ts';
+    expect([...parseNumstat(out).keys()]).toEqual(['src/new/file.ts']);
   });
 
   it('normalizes bare cross-directory rename to the new path', () => {
-    const out = ' old/dir/file.ts => new/dir/file.ts | 2 +-';
-    expect([...parseDiffStat(out).keys()]).toEqual(['new/dir/file.ts']);
+    const out = '1\t1\told/dir/file.ts => new/dir/file.ts';
+    expect([...parseNumstat(out).keys()]).toEqual(['new/dir/file.ts']);
   });
 
-  it('skips the summary line', () => {
-    const out =
-      ' src/a.ts | 1 +\n 2 files changed, 1 insertion(+), 1 deletion(-)';
-    expect(parseDiffStat(out).size).toBe(1);
+  it('ignores malformed lines instead of crashing', () => {
+    const out = [
+      '',
+      'garbage line',
+      '5\t2\tsrc/ok.ts',
+      'a\tb\tsrc/bad.ts',
+    ].join('\n');
+    const sizes = parseNumstat(out);
+    expect([...sizes.keys()]).toEqual(['src/ok.ts']);
   });
 });
