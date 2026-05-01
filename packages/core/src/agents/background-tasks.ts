@@ -467,12 +467,16 @@ export class BackgroundTaskRegistry {
   }
 
   abortAll(options: BackgroundTaskCancelOptions = {}): void {
+    const cancelOptions: BackgroundTaskCancelOptions = {
+      persistedStatus: 'running',
+      ...options,
+    };
     for (const entry of Array.from(this.agents.values())) {
       if (entry.status === 'running') {
-        this.cancel(entry.agentId, options);
+        this.cancel(entry.agentId, cancelOptions);
       }
 
-      if (options.notify === false) {
+      if (cancelOptions.notify === false) {
         entry.notified = true;
         continue;
       }
