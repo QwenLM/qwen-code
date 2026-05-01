@@ -416,7 +416,7 @@ export class PermissionManager {
 
     return {
       ...ctx,
-      command: normalizeMonitorCommand(ctx.command).analysisCommand,
+      command: normalizeMonitorCommand(ctx.command).safetyCommand,
     };
   }
 

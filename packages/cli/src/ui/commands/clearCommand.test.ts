@@ -36,6 +36,9 @@ describe('clearCommand', () => {
   let mockAbortBackgroundTasks: ReturnType<typeof vi.fn>;
   let mockAbortMonitors: ReturnType<typeof vi.fn>;
   let mockAbortBackgroundShells: ReturnType<typeof vi.fn>;
+  let mockResetBackgroundTasks: ReturnType<typeof vi.fn>;
+  let mockResetMonitors: ReturnType<typeof vi.fn>;
+  let mockResetBackgroundShells: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     mockResetChat = vi.fn().mockResolvedValue(undefined);
@@ -49,6 +52,9 @@ describe('clearCommand', () => {
     mockAbortBackgroundTasks = vi.fn();
     mockAbortMonitors = vi.fn();
     mockAbortBackgroundShells = vi.fn();
+    mockResetBackgroundTasks = vi.fn();
+    mockResetMonitors = vi.fn();
+    mockResetBackgroundShells = vi.fn();
     vi.clearAllMocks();
 
     mockContext = createMockCommandContext({
@@ -60,12 +66,12 @@ describe('clearCommand', () => {
             }) as unknown as GeminiClient,
           getBackgroundTaskRegistry: vi.fn().mockReturnValue({
             hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
-            reset: vi.fn(),
+            reset: mockResetBackgroundTasks,
             abortAll: mockAbortBackgroundTasks,
           }),
           getBackgroundShellRegistry: vi.fn().mockReturnValue({
             getAll: vi.fn().mockReturnValue([]),
-            reset: vi.fn(),
+            reset: mockResetBackgroundShells,
             abortAll: mockAbortBackgroundShells,
           }),
           startNewSession: mockStartNewSession,
@@ -76,7 +82,10 @@ describe('clearCommand', () => {
           getModel: () => 'test-model',
           getToolRegistry: () => undefined,
           getApprovalMode: () => 'default',
-          getMonitorRegistry: () => ({ abortAll: mockAbortMonitors }),
+          getMonitorRegistry: () => ({
+            abortAll: mockAbortMonitors,
+            reset: mockResetMonitors,
+          }),
         },
       },
       session: {
@@ -154,6 +163,21 @@ describe('clearCommand', () => {
       mockStartNewSession.mock.invocationCallOrder[0],
     );
     expect(mockAbortBackgroundShells.mock.invocationCallOrder[0]).toBeLessThan(
+      mockResetBackgroundShells.mock.invocationCallOrder[0],
+    );
+    expect(mockAbortBackgroundTasks.mock.invocationCallOrder[0]).toBeLessThan(
+      mockResetBackgroundTasks.mock.invocationCallOrder[0],
+    );
+    expect(mockAbortMonitors.mock.invocationCallOrder[0]).toBeLessThan(
+      mockResetMonitors.mock.invocationCallOrder[0],
+    );
+    expect(mockResetBackgroundShells.mock.invocationCallOrder[0]).toBeLessThan(
+      mockStartNewSession.mock.invocationCallOrder[0],
+    );
+    expect(mockResetBackgroundTasks.mock.invocationCallOrder[0]).toBeLessThan(
+      mockStartNewSession.mock.invocationCallOrder[0],
+    );
+    expect(mockResetMonitors.mock.invocationCallOrder[0]).toBeLessThan(
       mockStartNewSession.mock.invocationCallOrder[0],
     );
   });
@@ -277,12 +301,12 @@ describe('clearCommand', () => {
             getHookSystem: mockGetHookSystem,
             getBackgroundTaskRegistry: vi.fn().mockReturnValue({
               hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
-              reset: vi.fn(),
+              reset: mockResetBackgroundTasks,
               abortAll: mockAbortBackgroundTasks,
             }),
             getBackgroundShellRegistry: vi.fn().mockReturnValue({
               getAll: vi.fn().mockReturnValue([]),
-              reset: vi.fn(),
+              reset: mockResetBackgroundShells,
               abortAll: mockAbortBackgroundShells,
             }),
             startNewSession: mockStartNewSession,
@@ -294,7 +318,10 @@ describe('clearCommand', () => {
             getToolRegistry: vi.fn().mockReturnValue({
               getAllTools: vi.fn().mockReturnValue([]),
             }),
-            getMonitorRegistry: () => ({ abortAll: mockAbortMonitors }),
+            getMonitorRegistry: () => ({
+              abortAll: mockAbortMonitors,
+              reset: mockResetMonitors,
+            }),
           },
         },
         session: {

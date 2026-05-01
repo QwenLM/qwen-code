@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { MonitorRegistry, type MonitorEntry } from './monitorRegistry.js';
+import {
+  MAX_RETAINED_TERMINAL_MONITORS,
+  MonitorRegistry,
+  type MonitorEntry,
+} from './monitorRegistry.js';
 
 function createEntry(overrides: Partial<MonitorEntry> = {}): MonitorEntry {
   return {
@@ -348,6 +352,33 @@ describe('MonitorRegistry', () => {
       'failed',
       'running',
     ]);
+  });
+
+  it('retains only a bounded number of terminal entries', () => {
+    for (let i = 0; i < MAX_RETAINED_TERMINAL_MONITORS + 2; i++) {
+      registry.register(createEntry({ monitorId: `mon-${i}` }));
+      registry.complete(`mon-${i}`, 0);
+      vi.advanceTimersByTime(1);
+    }
+
+    expect(registry.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_MONITORS);
+    expect(registry.get('mon-0')).toBeUndefined();
+    expect(registry.get('mon-1')).toBeUndefined();
+    expect(
+      registry.get(`mon-${MAX_RETAINED_TERMINAL_MONITORS + 1}`),
+    ).toBeDefined();
+  });
+
+  it('reset clears retained entries and running monitor timers', () => {
+    registry.register(createEntry({ monitorId: 'completed' }));
+    registry.complete('completed', 0);
+    registry.register(createEntry({ monitorId: 'running' }));
+
+    registry.reset();
+
+    expect(registry.getAll()).toEqual([]);
+    vi.advanceTimersByTime(300_001);
+    expect(registry.getAll()).toEqual([]);
   });
 
   it('rejects registration when max concurrent monitors reached', () => {

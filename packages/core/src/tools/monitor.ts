@@ -118,7 +118,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
     const normalized = normalizeMonitorShellCommand(this.params.command);
-    const subCommands = splitCommands(normalized.analysisCommand);
+    const subCommands = splitCommands(normalized.safetyCommand);
     const confirmableSubCommands: string[] = [];
 
     for (const sub of subCommands) {
@@ -166,7 +166,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       );
     } catch (e) {
       debugLogger.warn('Failed to extract monitor command rules:', e);
-      permissionRules = [`Monitor(${normalized.analysisCommand})`];
+      permissionRules = [`Monitor(${normalized.safetyCommand})`];
     }
 
     return {
@@ -175,7 +175,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       command: normalized.spawnCommand,
       rootCommand:
         rootCommands.join(', ') ||
-        (getCommandRoot(normalized.analysisCommand) ?? normalized.spawnCommand),
+        (getCommandRoot(normalized.safetyCommand) ?? normalized.spawnCommand),
       permissionRules,
       onConfirm: async (
         _outcome: ToolConfirmationOutcome,

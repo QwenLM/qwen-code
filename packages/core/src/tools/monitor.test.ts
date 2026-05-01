@@ -32,7 +32,13 @@ vi.mock('../utils/shell-utils.js', async (importOriginal) => {
       argsPrefix: ['-c'],
       shell: 'bash',
     }),
-    getCommandRoot: (cmd: string) => cmd.split(/\s+/)[0],
+    getCommandRoot: (cmd: string) =>
+      cmd
+        .replace(
+          /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|(?:\\.|[^\s])+)\s+)*/,
+          '',
+        )
+        .split(/\s+/)[0],
     splitCommands: (cmd: string) =>
       cmd
         .split(/\s*&&\s*/)
@@ -104,9 +110,13 @@ describe('MonitorTool', () => {
     monitorRegistry = new MonitorRegistry();
     mockIsPathWithinWorkspace = vi.fn().mockReturnValue(true);
     mockIsShellCommandReadOnlyAST.mockResolvedValue(false);
-    mockExtractCommandRules.mockImplementation(async (command: string) => [
-      `${command.split(/\s+/).slice(0, 2).join(' ')} *`,
-    ]);
+    mockExtractCommandRules.mockImplementation(async (command: string) => {
+      const normalized = command.replace(
+        /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|(?:\\.|[^\s])+)\s+)*/,
+        '',
+      );
+      return [`${normalized.split(/\s+/).slice(0, 2).join(' ')} *`];
+    });
 
     mockConfig = {
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
@@ -272,6 +282,25 @@ describe('MonitorTool', () => {
       expect(details.permissionRules).toEqual([
         'Monitor(git add *)',
         'Monitor(git commit *)',
+      ]);
+    });
+
+    it('includes wrapper suffix commands in confirmation analysis', async () => {
+      const invocation = createInvocation({
+        command: `/bin/bash -c 'tail -f /tmp/app.log' && rm -rf /tmp/owned`,
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as ToolCallConfirmationDetails & {
+        rootCommand: string;
+        permissionRules?: string[];
+      };
+
+      expect(details.rootCommand).toBe('tail, rm');
+      expect(details.permissionRules).toEqual([
+        'Monitor(tail -f *)',
+        'Monitor(rm -rf *)',
       ]);
     });
 

@@ -28,6 +28,7 @@ function hasBlockingBackgroundWork(config: Config): boolean {
 
 function resetBackgroundStateForSessionSwitch(config: Config): void {
   (config.getBackgroundTaskRegistry() as unknown as { reset(): void }).reset();
+  (config.getMonitorRegistry() as unknown as { reset(): void }).reset();
   (config.getBackgroundShellRegistry() as unknown as { reset(): void }).reset();
 }
 
@@ -67,10 +68,10 @@ export const clearCommand: SlashCommand = {
 
       // Abort old-session async work before creating the new session so
       // cancellation notifications cannot leak across the reset boundary.
-      resetBackgroundStateForSessionSwitch(config);
       config.getBackgroundTaskRegistry().abortAll({ notify: false });
       config.getMonitorRegistry().abortAll({ notify: false });
       config.getBackgroundShellRegistry().abortAll();
+      resetBackgroundStateForSessionSwitch(config);
 
       const newSessionId = config.startNewSession();
 

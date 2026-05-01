@@ -22,6 +22,7 @@ const debugLogger = createDebugLogger('MONITOR_REGISTRY');
 const EVENT_LINE_TRUNCATE = 2000;
 const MAX_DESCRIPTION_LENGTH = 80;
 export const MAX_CONCURRENT_MONITORS = 16;
+export const MAX_RETAINED_TERMINAL_MONITORS = 128;
 
 function escapeXml(text: string): string {
   return text
@@ -190,6 +191,13 @@ export class MonitorRegistry {
     debugLogger.info('Aborted all monitors');
   }
 
+  reset(): void {
+    for (const entry of this.monitors.values()) {
+      this.clearIdleTimer(entry);
+    }
+    this.monitors.clear();
+  }
+
   // --- Internal helpers ---
 
   private settle(
@@ -199,6 +207,24 @@ export class MonitorRegistry {
     entry.status = status;
     entry.endTime = Date.now();
     this.clearIdleTimer(entry);
+    this.pruneTerminalEntries();
+  }
+
+  private pruneTerminalEntries(): void {
+    const terminalEntries = Array.from(this.monitors.values())
+      .filter((entry) => entry.status !== 'running')
+      .sort(
+        (a, b) =>
+          (a.endTime ?? a.startTime) - (b.endTime ?? b.startTime) ||
+          a.startTime - b.startTime,
+      );
+
+    while (terminalEntries.length > MAX_RETAINED_TERMINAL_MONITORS) {
+      const oldest = terminalEntries.shift();
+      if (oldest) {
+        this.monitors.delete(oldest.monitorId);
+      }
+    }
   }
 
   private resetIdleTimer(entry: MonitorEntry): void {

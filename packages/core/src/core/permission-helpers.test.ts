@@ -55,8 +55,23 @@ describe('buildPermissionCheckContext', () => {
       ),
     ).toMatchObject({
       toolName: 'monitor',
-      command: 'tail -f ./app.log',
+      command: `FOO="bar baz" tail -f ./app.log`,
       cwd: '/project/subdir',
+    });
+  });
+
+  it('keeps wrapper suffix commands in monitor permission context', () => {
+    expect(
+      buildPermissionCheckContext(
+        'monitor',
+        {
+          command: `/bin/bash -c 'tail -f ./app.log' && rm -rf /tmp/owned`,
+        },
+        '/project',
+      ),
+    ).toMatchObject({
+      toolName: 'monitor',
+      command: 'tail -f ./app.log && rm -rf /tmp/owned',
     });
   });
 });

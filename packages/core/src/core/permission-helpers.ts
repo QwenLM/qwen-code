@@ -42,7 +42,7 @@ export function buildPermissionCheckContext(
     'command' in toolParams ? String(toolParams['command']) : undefined;
   const command =
     rawCommand !== undefined && toolName === 'monitor'
-      ? normalizeMonitorCommand(rawCommand).analysisCommand
+      ? normalizeMonitorCommand(rawCommand).safetyCommand
       : rawCommand;
   const cwd =
     typeof toolParams['directory'] === 'string'
