@@ -216,7 +216,6 @@ jobs:
               r'^version = "[^"]+"$',
               f'version = "{os.environ["PACKAGE_VERSION"]}"',
               content,
-              count=1,
               flags=re.MULTILINE,
           )
           if count != 1:
@@ -409,7 +408,9 @@ jobs:
           BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
         run: |
           if git ls-remote --exit-code --heads origin "${BRANCH_NAME}" >/dev/null 2>&1; then
-            git push origin --delete "${BRANCH_NAME}"
+            if ! git push origin --delete "${BRANCH_NAME}"; then
+              echo "::warning::Failed to delete prerelease release branch ${BRANCH_NAME}; release already exists, so remove the branch manually if it still exists."
+            fi
           else
             echo "No prerelease release branch to delete for ${BRANCH_NAME}."
           fi

@@ -164,7 +164,7 @@ describe('python sdk get-release-version', () => {
         preview_version_override: 'v0.1.1-preview.0',
       }),
     ).rejects.toThrow(
-      'Requested preview release 0.1.1-preview.0 already exists.',
+      'Requested preview release 0.1.1-preview.0 already exists on PyPI, GitHub releases.',
     );
   });
 
@@ -187,7 +187,7 @@ describe('python sdk get-release-version', () => {
         preview_version_override: 'v0.1.1-preview.0',
       }),
     ).rejects.toThrow(
-      'Requested preview release 0.1.1-preview.0 already exists.',
+      'Requested preview release 0.1.1-preview.0 already exists on PyPI.',
     );
   });
 
@@ -208,7 +208,7 @@ describe('python sdk get-release-version', () => {
         preview_version_override: 'v0.1.1-preview.0',
       }),
     ).rejects.toThrow(
-      'Requested preview release 0.1.1-preview.0 already exists.',
+      'Requested preview release 0.1.1-preview.0 already exists on git tags.',
     );
   });
 
@@ -229,7 +229,7 @@ describe('python sdk get-release-version', () => {
         preview_version_override: 'v0.1.1-preview.0',
       }),
     ).rejects.toThrow(
-      'Requested preview release 0.1.1-preview.0 already exists.',
+      'Requested preview release 0.1.1-preview.0 already exists on GitHub releases.',
     );
   });
 
@@ -368,7 +368,9 @@ describe('python sdk get-release-version', () => {
         type: 'stable',
         stable_version_override: 'v0.1.0',
       }),
-    ).rejects.toThrow('Requested stable release 0.1.0 already exists.');
+    ).rejects.toThrow(
+      'Requested stable release 0.1.0 already exists on PyPI, GitHub releases.',
+    );
   });
 
   it('fails when the latest preview base is not newer than the latest stable', async () => {
@@ -388,6 +390,29 @@ describe('python sdk get-release-version', () => {
     await expect(getVersion({ type: 'stable' })).rejects.toThrow(
       'Latest preview base 0.1.1 is not newer than latest stable 0.2.0.',
     );
+  });
+
+  it('uses the latest nightly base for stable releases when no preview exists', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.1.0': [{}],
+            '0.2.0.dev20260429010101': [{}],
+          },
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'stable' })).resolves.toMatchObject({
+      releaseTag: 'v0.2.0',
+      releaseVersion: '0.2.0',
+      packageVersion: '0.2.0',
+      previousReleaseTag: 'v0.1.0',
+      publishChannel: 'latest',
+    });
   });
 
   it('fails instead of patch-bumping a stable release derived from preview when its tag already exists', async () => {
@@ -413,6 +438,32 @@ describe('python sdk get-release-version', () => {
 
     await expect(getVersion({ type: 'stable' })).rejects.toThrow(
       'Stable release 0.1.1 derived from the latest preview already exists.',
+    );
+  });
+
+  it('fails instead of patch-bumping a stable release derived from nightly when its tag already exists', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.1.0': [{}],
+            '0.2.0.dev20260429010101': [{}],
+          },
+        },
+      }),
+    );
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        tags: {
+          'sdk-python-v0.2.0': 'sdk-python-v0.2.0',
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'stable' })).rejects.toThrow(
+      'Stable release 0.2.0 derived from the latest nightly already exists.',
     );
   });
 

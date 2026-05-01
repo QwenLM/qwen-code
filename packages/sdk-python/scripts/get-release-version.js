@@ -329,20 +329,28 @@ function getStableVersion(args, versions) {
     };
   }
 
-  const previewBase = getLatestPreviewBaseVersion(versions);
+  const latestPrerelease = [
+    { baseVersion: getLatestPreviewBaseVersion(versions), source: 'preview' },
+    { baseVersion: getLatestNightlyBaseVersion(versions), source: 'nightly' },
+  ]
+    .filter(({ baseVersion }) => Boolean(baseVersion))
+    .sort((a, b) => compareVersions(b.baseVersion, a.baseVersion))[0];
   const latestStable = getLatestStableVersion(versions);
 
-  if (previewBase) {
-    if (latestStable && compareVersions(previewBase, latestStable) < 0) {
+  if (latestPrerelease) {
+    if (
+      latestStable &&
+      compareVersions(latestPrerelease.baseVersion, latestStable) < 0
+    ) {
       throw new Error(
-        `Latest preview base ${previewBase} is not newer than latest stable ${latestStable}. Provide stable_version_override to continue.`,
+        `Latest ${latestPrerelease.source} base ${latestPrerelease.baseVersion} is not newer than latest stable ${latestStable}. Provide stable_version_override to continue.`,
       );
     }
     return {
-      releaseVersion: previewBase,
-      packageVersion: previewBase,
+      releaseVersion: latestPrerelease.baseVersion,
+      packageVersion: latestPrerelease.baseVersion,
       publishChannel: 'latest',
-      source: 'preview',
+      source: latestPrerelease.source,
     };
   }
 
@@ -353,6 +361,20 @@ function getStableVersion(args, versions) {
     publishChannel: 'latest',
     source: 'current',
   };
+}
+
+function getConflictSources(releaseState) {
+  const sources = [];
+  if (releaseState.packageVersionExistsOnPyPI) {
+    sources.push('PyPI');
+  }
+  if (releaseState.githubReleaseExists) {
+    sources.push('GitHub releases');
+  }
+  if (releaseState.gitTagExists) {
+    sources.push('git tags');
+  }
+  return sources.length > 0 ? sources.join(', ') : 'unknown release state';
 }
 
 function bumpVersion(versionData, type) {
@@ -459,7 +481,7 @@ async function getVersion(options = {}) {
 
     if (hasManualOverride) {
       throw new Error(
-        `Requested ${type} release ${versionData.releaseVersion} already exists.`,
+        `Requested ${type} release ${versionData.releaseVersion} already exists on ${getConflictSources(releaseState)}.`,
       );
     }
 
@@ -478,9 +500,12 @@ async function getVersion(options = {}) {
     }
 
     if (type === 'stable') {
-      if (versionData.source === 'preview') {
+      if (
+        versionData.source === 'preview' ||
+        versionData.source === 'nightly'
+      ) {
         throw new Error(
-          `Stable release ${versionData.releaseVersion} derived from the latest preview already exists.`,
+          `Stable release ${versionData.releaseVersion} derived from the latest ${versionData.source} already exists.`,
         );
       }
 
