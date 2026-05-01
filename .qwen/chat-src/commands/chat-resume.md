@@ -30,60 +30,75 @@ Same rules as `chat-save.md`:
 ### 3. Validate Loaded ID (Security Critical)
 
 - The ID loaded from index **MUST be validated** before being used in any shell command.
-- **Expected format**: UUID format (`^[a-fA-F0-9-]+$`, allows hyphens for standard UUIDs like `2ea864df-ffed-444e-b472-190a8f83b552` or 8-char prefix).
+- **Expected format**: UUID format (`^[a-fA-F0-9-]+$`, allows hyphens for standard UUIDs like `2ea864df-ffed-444e-b472-190a8f83b552`).
 - **Shell metacharacter check**: If the ID contains any of `$` `` ` `` `;` `|` `>` `<` `&` `(` `)` or spaces, **REJECT it immediately**:
   - Output: `"Error: Invalid session ID from index. Aborted."`
   - **DO NOT execute any shell command** with this ID.
 - Why: A malicious or corrupt index entry could contain shell commands. This validation prevents command injection attacks.
 
-### 4. Verify Session Belongs to Current Project (Security Critical)
+### 4. Get Session Project Directory (Security Critical)
 
 - **Read the first line** of `<runtimeBase>/projects/<sanitizeCwd>/chats/<sessionId>.jsonl`
-- Parse the JSON and verify the `project` field matches the current project directory.
-- If mismatch: Output `"Error: Session belongs to another project. Aborted."` and stop.
-- If file is missing: warn "Session file missing", stop.
-- Why: Sanitized project directory names can collide between different projects. Verifying the actual project field prevents resuming a session from another project that happens to share the same sanitized directory name.
+- Handle edge cases:
+  - File missing → "Session file missing", stop.
+  - File 0 bytes (interrupted write) → "Session file empty (likely interrupted save). Aborted.", stop.
+  - First line not valid JSON (truncated) → "Session file corrupt at line 1. Aborted.", stop.
+  - JSON has no `cwd` field → "Session record missing project context. Aborted.", stop.
+- Set `<projectRoot>` = the `cwd` field value from the JSON record
+- Verify `<projectRoot>` directory exists on disk. Missing → "Error: original project directory '<projectRoot>' no longer exists. Aborted.", stop.
+
+### 5. Verify Session Belongs to Current Project (Security Critical)
+
+- Apply `sanitizeCwd(<projectRoot>)` to the cwd field value
+- Compare with current project's `<sanitizeCwd>`
+- If they don't match → "Error: Session belongs to another project. Aborted.", stop.
+- Why: sanitizeCwd collisions can occur between different projects; verifying via the actual cwd prevents cross-project resume.
 
 **Runtime base resolution** (in priority order):
 
 - `$QWEN_RUNTIME_DIR` (if set)
-- `$QWEN_PROJECTS_DIR` (if set)
 - `~/.qwen` (default fallback)
 
-### 5. Shell Command Escaping (Security Critical)
+**Note**: If user has configured `advanced.runtimeOutputDir` in settings.json, sessions are stored under that path. /chat commands cannot read settings.json (credential leak risk) and will not find those sessions.
+
+### 6. Shell Command Escaping (Security Critical)
 
 When executing the resume command, the session ID **MUST be properly escaped** to prevent shell injection:
 
-| Platform | Escaping Method                                                                                                                                                            |
-| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows  | In the `-Command` argument, escape double quotes in the ID: `"` becomes `\"`. Wrap the whole command in outer double quotes.                                               |
-| macOS    | In the `osascript` string, escape double quotes in the ID: `"` becomes `\"`. Use single quotes for the outer osascript string.                                             |
-| Linux    | Use single quotes around the ID to prevent all expansion, except for single quotes themselves (which cannot be escaped inside single quotes — use `"'"` concat if needed). |
+| Platform | Escaping Method                                  |
+| -------- | ------------------------------------------------ |
+| Windows  | Use double quotes, escape inner double quotes    |
+| macOS    | Use double-quote outer with escaped inner quotes |
+| Linux    | Use single quotes around the ID                  |
 
-### 6. Launch New Window with Project Directory (Platform-Specific)
+### 7. Launch New Window with Project Directory (Platform-Specific)
 
 **IMPORTANT: You MUST execute a shell command to launch a NEW terminal window with cd to the project directory first. DO NOT read the .jsonl file content.**
 
 The command must change to the project directory before launching qwen, otherwise the new terminal won't have access to the current project's sessions.
 
-| OS            | Terminal       | Command                                                                                           |
-| ------------- | -------------- | ------------------------------------------------------------------------------------------------- |
-| Windows       | PowerShell     | `start pwsh -NoExit -Command "cd '<projectRoot>'; qwen --resume <escapedId>"`                     |
-| Windows       | CMD (fallback) | `start cmd /k "cd /d <projectRoot> && qwen --resume <escapedId>"`                                 |
-| macOS         | Terminal.app   | `osascript -e 'tell app "Terminal" to do script "cd '<projectRoot>'; qwen --resume <escapedId>"'` |
-| Linux (GNOME) | gnome-terminal | `gnome-terminal -- bash -c "cd '<projectRoot>' && qwen --resume '<escapedId>'"`                   |
-| Linux (other) | xterm          | `xterm -e "cd '<projectRoot>' && qwen --resume '<escapedId>'"`                                    |
+| OS          | Terminal       | Command                                                                                                                                         |
+| ----------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows     | PowerShell     | `start pwsh -NoExit -Command "cd '<projectRoot>'; qwen --resume <id>"`                                                                          |
+| Windows     | CMD (fallback) | `start cmd /k "cd /d <projectRoot> && qwen --resume <id>"`                                                                                      |
+| macOS       | Terminal.app   | `osascript -e "tell app \"Terminal\" to do script \"cd '<projectRoot>' && qwen --resume <id>\""`                                                |
+| Linux       | gnome-terminal | `gnome-terminal -- bash -c "cd '<projectRoot>' && qwen --resume <id>"`                                                                          |
+| Linux       | xterm          | `xterm -e "cd '<projectRoot>' && qwen --resume <id>"`                                                                                           |
+| Linux (WSL) | CMD            | If platform is linux and /proc/version contains "Microsoft" or "WSL": use `cmd.exe /c "start cmd /k cd /d <projectRoot> && qwen --resume <id>"` |
 
-**Windows fallback logic**: Try PowerShell first (`start pwsh`). If that fails (e.g., PowerShell not installed or not in PATH), fall back to CMD (`start cmd /k`). Some Windows machines don't have PowerShell available, so CMD fallback ensures compatibility.
+**Windows fallback logic**: Try PowerShell first (`start pwsh`). If that fails (e.g., PowerShell not installed), fall back to CMD (`start cmd /k`). Some Windows machines don't have PowerShell available, so CMD fallback ensures compatibility.
 
-**Linux terminal detection**: Don't hardcode `gnome-terminal`. Use `command -v` to check available terminals in order: gnome-terminal > xterm > alacritty > kitty.
+**WSL handling**: WSL users are actually on Windows. When detecting Linux, also check `/proc/version` for "Microsoft" or "WSL". If found, treat as Windows — use Windows Terminal (`wt.exe`) or CMD to launch qwen.
+
+**Linux terminal detection**: Use `command -v` to check available terminals in order: gnome-terminal > xterm > alacritty > kitty.
 
 **You MUST run the shell command above using your shell tool. This is the core action of the resume operation.**
 
 - Why `--resume` instead of `--continue`: `--resume` takes a specific session ID; `--continue` resumes the most recent session. We know the exact ID, so `--resume` is precise.
 - Why new window: Preserves the current session context. The user can have multiple sessions open simultaneously.
 - Why cd to project directory: Session storage is project-scoped. Without cd, the new terminal starts in the user's home/default directory where the session cannot be found.
+- Why cd to projectRoot from session's cwd: The session was originally created in its own project directory. Using that cwd ensures qwen loads the correct project context.
 
-### 7. Confirm
+### 8. Confirm
 
 Output: `Session "{{name}}" resumed in new window. (ID: <sessionId>)`

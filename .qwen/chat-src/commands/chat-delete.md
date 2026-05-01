@@ -6,7 +6,7 @@ Removes the mapping between a human-readable name and a session UUID from `.qwen
 
 ## What this does NOT do
 
-It does **NOT** delete the actual session file (`~/.qwen/projects/<hash>/chats/<sessionId>.jsonl`). The session data remains on disk — only the name reference is removed.
+It does **NOT** delete the actual session file (`<runtimeBase>/projects/<sanitizeCwd>/chats/<sessionId>.jsonl`). The session data remains on disk — only the name reference is removed.
 
 ## Why this design?
 

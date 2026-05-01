@@ -10,7 +10,8 @@
 **Runtime Base Resolution** (in priority order):
 
 - `$QWEN_RUNTIME_DIR` (if set)
-- `$QWEN_PROJECTS_DIR` (if set)
 - `~/.qwen` (default fallback)
+
+**Note**: If user has configured `advanced.runtimeOutputDir` in settings.json, sessions are stored under that path. /chat commands cannot read settings.json (credential leak risk) and will not find those sessions.
 
 **Note**: `<sanitizeCwd>` is the project directory name derived from `sanitizeCwd(projectRoot)`, which replaces all non-alphanumeric characters with `-`. On Windows, the path is also normalized to lowercase before sanitization. E.g., `D:\code\my-project` → `d--code-my-project`.

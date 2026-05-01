@@ -44,8 +44,8 @@ meaningful names. This command creates the mapping so users can later resume wit
   - `<sanitizeCwd>` = `sanitizeCwd(projectRoot)`, which replaces all non-alphanumeric characters with `-`. On Windows, also lowercase the path first. E.g., `D:\code\qwen-code` → `d--code-qwen-code`
   - **runtimeBase resolution** (in priority order):
     - `$QWEN_RUNTIME_DIR` (if set)
-    - `$QWEN_PROJECTS_DIR` (if set)
     - `~/.qwen` (default fallback)
+  - **Note**: If user has configured `advanced.runtimeOutputDir` in settings.json, sessions are stored under that path. /chat commands cannot read settings.json (credential leak risk) and will not find those sessions.
 - ⚠️ **IMPORTANT**: If you think the wrong session might be saved, **resume the target session first**, then run `/chat -s`. This ensures you save the intended conversation.
 - If no `.jsonl` file is found: output `"No session found. Start a conversation first."` and stop.
 - **Why this method?**: File-based custom commands cannot access the active chat UUID directly. Using mtime is the only available approach. The explicit warning helps users correct mistakes.

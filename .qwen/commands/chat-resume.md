@@ -3,18 +3,27 @@
 1. Validate `{{name}}` (Common rules): `^[a-zA-Z0-9_.-]+$`, ≤128, ≠ `.`/`..`/`__proto__`/`constructor`/`prototype`.
 2. Look up ID in index (`.qwen/chat-index.json` in project root, NOT runtime base). Missing/not found → show list + "Session not found", stop.
 3. **Validate loaded ID**: The ID from index must match UUID format (`^[a-fA-F0-9-]+$`, allows hyphens). If ID contains any shell metacharacters (`$`, `` ` ``, `;`, `|`, `>`, `<`, `&`, `(`, `)`, spaces), reject it: "Error: Invalid session ID from index. Aborted." — **DO NOT execute any shell command with this ID**.
-4. **Verify session belongs to current project**: Read the first line of `<runtimeBase>/projects/<sanitizeCwd>/chats/<id>.jsonl`. Parse JSON and verify `project` field matches the current project directory. If mismatch → "Error: Session belongs to another project. Aborted." Missing file → warn "Session file missing", stop.
-5. Verify `<runtimeBase>/projects/<sanitizeCwd>/chats/<id>.jsonl` exists. Missing → warn "Session file missing", stop.
-6. **Execute a shell command** to launch a NEW terminal window with cd to project directory first:
-   - Windows: `start pwsh -NoExit -Command "cd '<projectRoot>'; qwen --resume <escaped_id>"` (escape `<id>` by replacing `"` with `\"`)
-   - macOS: `osascript -e 'tell app "Terminal" to do script "cd '<projectRoot>'; qwen --resume <escaped_id>"'` (escape `<id>` by replacing `"` with `\"`)
-   - Linux: detect terminal with `command -v`, then run with proper quoting: `gnome-terminal -- bash -c "cd '<projectRoot>' && qwen --resume '<escaped_id>'"` or `xterm -e "cd '<projectRoot>' && qwen --resume '<escaped_id>'"`
+4. **Get session project directory**: Read the first line of `<runtimeBase>/projects/<sanitizeCwd>/chats/<id>.jsonl`.
+   - File missing → "Session file missing", stop.
+   - File 0 bytes → "Session file empty (likely interrupted save). Aborted.", stop.
+   - First line not valid JSON → "Session file corrupt at line 1. Aborted.", stop.
+   - JSON has no `cwd` field → "Session record missing project context. Aborted.", stop.
+   - Set `<projectRoot>` = the `cwd` field value from the JSON record.
+   - Verify `<projectRoot>` directory exists on disk. Missing → "Error: original project directory '<projectRoot>' no longer exists. Aborted.", stop.
+5. **Verify session belongs to current project**: Apply `sanitizeCwd(<projectRoot>)` and compare with current project's `<sanitizeCwd>`. If they don't match → "Error: Session belongs to another project. Aborted.", stop.
+6. **Execute a shell command** to launch a NEW terminal window with cd to project directory:
+   - Windows (PowerShell): `start pwsh -NoExit -Command "cd '<projectRoot>'; qwen --resume <id>"`
+   - Windows (CMD fallback): `start cmd /k "cd /d <projectRoot> && qwen --resume <id>"` (use if PowerShell unavailable)
+   - macOS: `osascript -e "tell app \"Terminal\" to do script \"cd '<projectRoot>' && qwen --resume <id>\""`
+   - Linux (WSL): If platform is linux and `/proc/version` contains "Microsoft" or "WSL", use: `cmd.exe /c "start cmd /k cd /d <projectRoot> && qwen --resume <id>"` or prefer `wt.exe` if available
+   - Linux (native): detect terminal with `command -v` (gnome-terminal, xterm, alacritty, kitty in order), then run: `<terminal> -- bash -c "cd '<projectRoot>' && qwen --resume <id>'"`
 7. Output: `Session "{{name}}" resumed in new window. (ID: <id>)`
 
 **Runtime Base Resolution** (in priority order):
 
 - `$QWEN_RUNTIME_DIR` (if set)
-- `$QWEN_PROJECTS_DIR` (if set)
 - `~/.qwen` (default fallback)
+
+**Note**: If user has configured `advanced.runtimeOutputDir` in settings.json, sessions are stored under that path. /chat commands cannot read settings.json (credential leak risk) and will not find those sessions.
 
 **Note**: `<sanitizeCwd>` is the project directory name derived from `sanitizeCwd(projectRoot)`, which replaces all non-alphanumeric characters with `-`. On Windows, the path is also normalized to lowercase before sanitization.
