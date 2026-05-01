@@ -58,19 +58,35 @@ observability framework — Qwen Code's observability system provides:
 All telemetry behavior is controlled through your `.qwen/settings.json` file.
 These settings can be overridden by environment variables or CLI flags.
 
-| Setting        | Environment Variable           | CLI Flag                                                 | Description                                       | Values            | Default                 |
-| -------------- | ------------------------------ | -------------------------------------------------------- | ------------------------------------------------- | ----------------- | ----------------------- |
-| `enabled`      | `QWEN_TELEMETRY_ENABLED`       | `--telemetry` / `--no-telemetry`                         | Enable or disable telemetry                       | `true`/`false`    | `false`                 |
-| `target`       | `QWEN_TELEMETRY_TARGET`        | `--telemetry-target <local\|gcp>`                        | Where to send telemetry data                      | `"gcp"`/`"local"` | `"local"`               |
-| `otlpEndpoint` | `QWEN_TELEMETRY_OTLP_ENDPOINT` | `--telemetry-otlp-endpoint <URL>`                        | OTLP collector endpoint                           | URL string        | `http://localhost:4317` |
-| `otlpProtocol` | `QWEN_TELEMETRY_OTLP_PROTOCOL` | `--telemetry-otlp-protocol <grpc\|http>`                 | OTLP transport protocol                           | `"grpc"`/`"http"` | `"grpc"`                |
-| `outfile`      | `QWEN_TELEMETRY_OUTFILE`       | `--telemetry-outfile <path>`                             | Save telemetry to file (overrides `otlpEndpoint`) | file path         | -                       |
-| `logPrompts`   | `QWEN_TELEMETRY_LOG_PROMPTS`   | `--telemetry-log-prompts` / `--no-telemetry-log-prompts` | Include prompts in telemetry logs                 | `true`/`false`    | `true`                  |
-| `useCollector` | `QWEN_TELEMETRY_USE_COLLECTOR` | -                                                        | Use external OTLP collector (advanced)            | `true`/`false`    | `false`                 |
+| Setting               | Environment Variable                   | CLI Flag                                                 | Description                                          | Values            | Default                 |
+| --------------------- | -------------------------------------- | -------------------------------------------------------- | ---------------------------------------------------- | ----------------- | ----------------------- |
+| `enabled`             | `QWEN_TELEMETRY_ENABLED`               | `--telemetry` / `--no-telemetry`                         | Enable or disable telemetry                          | `true`/`false`    | `false`                 |
+| `target`              | `QWEN_TELEMETRY_TARGET`                | `--telemetry-target <local\|gcp>`                        | Where to send telemetry data                         | `"gcp"`/`"local"` | `"local"`               |
+| `otlpEndpoint`        | `QWEN_TELEMETRY_OTLP_ENDPOINT`         | `--telemetry-otlp-endpoint <URL>`                        | OTLP collector endpoint                              | URL string        | `http://localhost:4317` |
+| `otlpProtocol`        | `QWEN_TELEMETRY_OTLP_PROTOCOL`         | `--telemetry-otlp-protocol <grpc\|http>`                 | OTLP transport protocol                              | `"grpc"`/`"http"` | `"grpc"`                |
+| `otlpTracesEndpoint`  | `QWEN_TELEMETRY_OTLP_TRACES_ENDPOINT`  | -                                                        | Per-signal endpoint override for traces (HTTP only)  | URL string        | -                       |
+| `otlpLogsEndpoint`    | `QWEN_TELEMETRY_OTLP_LOGS_ENDPOINT`    | -                                                        | Per-signal endpoint override for logs (HTTP only)    | URL string        | -                       |
+| `otlpMetricsEndpoint` | `QWEN_TELEMETRY_OTLP_METRICS_ENDPOINT` | -                                                        | Per-signal endpoint override for metrics (HTTP only) | URL string        | -                       |
+| `outfile`             | `QWEN_TELEMETRY_OUTFILE`               | `--telemetry-outfile <path>`                             | Save telemetry to file (overrides `otlpEndpoint`)    | file path         | -                       |
+| `logPrompts`          | `QWEN_TELEMETRY_LOG_PROMPTS`           | `--telemetry-log-prompts` / `--no-telemetry-log-prompts` | Include prompts in telemetry logs                    | `true`/`false`    | `true`                  |
+| `useCollector`        | `QWEN_TELEMETRY_USE_COLLECTOR`         | -                                                        | Use external OTLP collector (advanced)               | `true`/`false`    | `false`                 |
 
 **Note on boolean environment variables:** For the boolean settings (`enabled`,
 `logPrompts`, `useCollector`), setting the corresponding environment variable to
 `true` or `1` will enable the feature. Any other value will disable it.
+
+**HTTP OTLP signal routing:** When using HTTP protocol (`otlpProtocol: "http"`),
+Qwen Code automatically appends signal-specific paths (`/v1/traces`, `/v1/logs`,
+`/v1/metrics`) to the base `otlpEndpoint`. For example, `http://collector:4318`
+becomes `http://collector:4318/v1/traces` for traces. If the URL already ends
+with a signal path, it is used as-is. Per-signal endpoint overrides
+(`otlpTracesEndpoint`, etc.) take precedence over the base endpoint and are used
+verbatim. gRPC protocol uses service-based routing and does not append paths.
+
+The per-signal endpoint environment variables also accept the standard
+OpenTelemetry names: `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
+`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`.
+The `QWEN_TELEMETRY_OTLP_*` variants take precedence over the `OTEL_*` variants.
 
 For detailed information about all configuration options, see the
 [Configuration Guide](./cli/configuration.md).
@@ -91,6 +107,9 @@ sent to Alibaba Cloud.
 
 1. Enable telemetry in your `.qwen/settings.json` and set the OTLP
    endpoint:
+
+   **Option A: gRPC protocol** (standard OTLP endpoint):
+
    ```json
    {
      "telemetry": {
@@ -101,6 +120,29 @@ sent to Alibaba Cloud.
      }
    }
    ```
+
+   **Option B: HTTP protocol with per-signal endpoints** (for backends
+   that use non-standard paths, e.g., `/api/otlp/traces` instead of
+   `/v1/traces`):
+
+   ```json
+   {
+     "telemetry": {
+       "enabled": true,
+       "otlpProtocol": "http",
+       "otlpTracesEndpoint": "http://<host>/<token>/api/otlp/traces",
+       "otlpLogsEndpoint": "http://<host>/<token>/api/otlp/logs",
+       "otlpMetricsEndpoint": "http://<host>/<token>/api/otlp/metrics"
+     }
+   }
+   ```
+
+   > **Note:** When using HTTP protocol with only `otlpEndpoint` (no
+   > per-signal overrides), Qwen Code appends standard OTLP paths
+   > (`/v1/traces`, `/v1/logs`, `/v1/metrics`) to the base URL. If your
+   > backend uses different paths, use per-signal endpoint overrides as
+   > shown in Option B.
+
 2. If your Alibaba Cloud endpoint requires authentication, provide OTLP
    headers through standard OpenTelemetry environment variables such as
    `OTEL_EXPORTER_OTLP_HEADERS` (or the signal-specific variants). Qwen

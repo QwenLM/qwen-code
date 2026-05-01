@@ -15,6 +15,8 @@ import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
   QwenLogger,
+  isTelemetrySdkInitialized,
+  shutdownTelemetry,
 } from '../telemetry/index.js';
 import type {
   ContentGenerator,
@@ -177,6 +179,8 @@ vi.mock('../telemetry/index.js', async (importOriginal) => {
   return {
     ...actual,
     initializeTelemetry: vi.fn(),
+    isTelemetrySdkInitialized: vi.fn(() => false),
+    shutdownTelemetry: vi.fn().mockResolvedValue(undefined),
     uiTelemetryService: {
       getLastPromptTokenCount: vi.fn(),
     },
@@ -275,6 +279,7 @@ describe('Server Config (config.ts)', () => {
   beforeEach(() => {
     // Reset mocks if necessary
     vi.clearAllMocks();
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
     vi.spyOn(QwenLogger.prototype, 'logStartSessionEvent').mockImplementation(
       async () => undefined,
     );
@@ -908,6 +913,32 @@ describe('Server Config (config.ts)', () => {
     expect(config.getTelemetryEnabled()).toBe(true);
   });
 
+  it('Config shutdown should flush telemetry when SDK is initialized', async () => {
+    const paramsWithTelemetry: ConfigParameters = {
+      ...baseParams,
+      telemetry: { enabled: true },
+    };
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(true);
+    const config = new Config(paramsWithTelemetry);
+
+    await config.shutdown();
+
+    expect(shutdownTelemetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('Config shutdown should skip telemetry shutdown before SDK initialization', async () => {
+    const paramsWithTelemetry: ConfigParameters = {
+      ...baseParams,
+      telemetry: { enabled: true },
+    };
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
+    const config = new Config(paramsWithTelemetry);
+
+    await config.shutdown();
+
+    expect(shutdownTelemetry).not.toHaveBeenCalled();
+  });
+
   it('Config constructor should set telemetry to false when provided as false', () => {
     const paramsWithTelemetry: ConfigParameters = {
       ...baseParams,
@@ -1080,6 +1111,41 @@ describe('Server Config (config.ts)', () => {
       delete paramsWithoutTelemetry.telemetry;
       const config = new Config(paramsWithoutTelemetry);
       expect(config.getTelemetryOtlpProtocol()).toBe('grpc');
+    });
+  });
+
+  describe('Per-Signal OTLP Endpoint Configuration', () => {
+    it('should return per-signal endpoints when provided', () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        telemetry: {
+          enabled: true,
+          otlpTracesEndpoint: 'http://traces:4318/v1/traces',
+          otlpLogsEndpoint: 'http://logs:4318/v1/logs',
+          otlpMetricsEndpoint: 'http://metrics:4318/v1/metrics',
+        },
+      };
+      const config = new Config(params);
+      expect(config.getTelemetryOtlpTracesEndpoint()).toBe(
+        'http://traces:4318/v1/traces',
+      );
+      expect(config.getTelemetryOtlpLogsEndpoint()).toBe(
+        'http://logs:4318/v1/logs',
+      );
+      expect(config.getTelemetryOtlpMetricsEndpoint()).toBe(
+        'http://metrics:4318/v1/metrics',
+      );
+    });
+
+    it('should return undefined when per-signal endpoints are not provided', () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        telemetry: { enabled: true },
+      };
+      const config = new Config(params);
+      expect(config.getTelemetryOtlpTracesEndpoint()).toBeUndefined();
+      expect(config.getTelemetryOtlpLogsEndpoint()).toBeUndefined();
+      expect(config.getTelemetryOtlpMetricsEndpoint()).toBeUndefined();
     });
   });
 

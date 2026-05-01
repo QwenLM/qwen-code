@@ -65,7 +65,12 @@ describe('telemetry/config helpers', () => {
         useCollector: false,
       };
       const resolved = await resolveTelemetrySettings({ settings });
-      expect(resolved).toEqual(settings);
+      expect(resolved).toEqual({
+        ...settings,
+        otlpTracesEndpoint: undefined,
+        otlpLogsEndpoint: undefined,
+        otlpMetricsEndpoint: undefined,
+      });
     });
 
     it('uses env over settings and argv over env', async () => {
@@ -102,6 +107,9 @@ describe('telemetry/config helpers', () => {
         target: TelemetryTarget.GCP,
         otlpEndpoint: 'http://env:4317',
         otlpProtocol: 'http',
+        otlpTracesEndpoint: undefined,
+        otlpLogsEndpoint: undefined,
+        otlpMetricsEndpoint: undefined,
         logPrompts: true,
         outfile: 'env.log',
         useCollector: true,
@@ -117,6 +125,9 @@ describe('telemetry/config helpers', () => {
         target: TelemetryTarget.LOCAL,
         otlpEndpoint: 'http://argv:4317',
         otlpProtocol: 'grpc',
+        otlpTracesEndpoint: undefined,
+        otlpLogsEndpoint: undefined,
+        otlpMetricsEndpoint: undefined,
         logPrompts: false,
         outfile: 'argv.log',
         useCollector: true, // from env as no argv option
@@ -149,6 +160,47 @@ describe('telemetry/config helpers', () => {
       >;
       await expect(resolveTelemetrySettings({ env })).rejects.toThrow(
         /Invalid telemetry target/i,
+      );
+    });
+
+    it('resolves per-signal endpoints from OTEL_ env vars', async () => {
+      const env = {
+        OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: 'http://traces:4318/v1/traces',
+        OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'http://logs:4318/v1/logs',
+      } as Record<string, string>;
+
+      const resolved = await resolveTelemetrySettings({ env });
+      expect(resolved.otlpTracesEndpoint).toBe('http://traces:4318/v1/traces');
+      expect(resolved.otlpLogsEndpoint).toBe('http://logs:4318/v1/logs');
+      expect(resolved.otlpMetricsEndpoint).toBeUndefined();
+    });
+
+    it('QWEN_ env vars take precedence over OTEL_ vars for per-signal endpoints', async () => {
+      const env = {
+        QWEN_TELEMETRY_OTLP_TRACES_ENDPOINT:
+          'http://qwen-traces:4318/v1/traces',
+        OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: 'http://otel-traces:4318/v1/traces',
+      } as Record<string, string>;
+
+      const resolved = await resolveTelemetrySettings({ env });
+      expect(resolved.otlpTracesEndpoint).toBe(
+        'http://qwen-traces:4318/v1/traces',
+      );
+    });
+
+    it('resolves per-signal endpoints from settings', async () => {
+      const settings = {
+        otlpTracesEndpoint: 'http://traces-settings:4318/v1/traces',
+        otlpMetricsEndpoint: 'http://metrics-settings:4318/v1/metrics',
+      };
+
+      const resolved = await resolveTelemetrySettings({ settings });
+      expect(resolved.otlpTracesEndpoint).toBe(
+        'http://traces-settings:4318/v1/traces',
+      );
+      expect(resolved.otlpLogsEndpoint).toBeUndefined();
+      expect(resolved.otlpMetricsEndpoint).toBe(
+        'http://metrics-settings:4318/v1/metrics',
       );
     });
   });

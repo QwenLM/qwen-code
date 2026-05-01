@@ -67,7 +67,9 @@ import { FileReadCache } from '../services/fileReadCache.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
+  isTelemetrySdkInitialized,
   initializeTelemetry,
+  shutdownTelemetry,
   logStartSession,
   logRipgrepFallback,
   RipgrepFallbackEvent,
@@ -217,6 +219,12 @@ export interface TelemetrySettings {
   target?: TelemetryTarget;
   otlpEndpoint?: string;
   otlpProtocol?: 'grpc' | 'http';
+  /** Per-signal endpoint override for traces (HTTP only). Used as-is without path appending. */
+  otlpTracesEndpoint?: string;
+  /** Per-signal endpoint override for logs (HTTP only). Used as-is without path appending. */
+  otlpLogsEndpoint?: string;
+  /** Per-signal endpoint override for metrics (HTTP only). Used as-is without path appending. */
+  otlpMetricsEndpoint?: string;
   logPrompts?: boolean;
   outfile?: string;
   useCollector?: boolean;
@@ -758,8 +766,11 @@ export class Config {
     this.telemetrySettings = {
       enabled: params.telemetry?.enabled ?? false,
       target: params.telemetry?.target ?? DEFAULT_TELEMETRY_TARGET,
-      otlpEndpoint: params.telemetry?.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT,
+      otlpEndpoint: params.telemetry?.otlpEndpoint,
       otlpProtocol: params.telemetry?.otlpProtocol,
+      otlpTracesEndpoint: params.telemetry?.otlpTracesEndpoint,
+      otlpLogsEndpoint: params.telemetry?.otlpLogsEndpoint,
+      otlpMetricsEndpoint: params.telemetry?.otlpMetricsEndpoint,
       logPrompts: params.telemetry?.logPrompts ?? true,
       outfile: params.telemetry?.outfile,
       useCollector: params.telemetry?.useCollector,
@@ -1636,11 +1647,12 @@ export class Config {
    * It handles the case where initialization was not completed.
    */
   async shutdown(): Promise<void> {
-    if (!this.initialized) {
-      // Nothing to clean up if not initialized
-      return;
-    }
     try {
+      if (!this.initialized) {
+        // Nothing else to clean up if not initialized.
+        return;
+      }
+
       // Finalize the current session's metadata before cleanup, then drain
       // the async write queue so no records are lost on exit.
       try {
@@ -1663,6 +1675,10 @@ export class Config {
     } catch (error) {
       // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
+    } finally {
+      if (isTelemetrySdkInitialized()) {
+        await shutdownTelemetry();
+      }
     }
   }
 
@@ -2003,12 +2019,24 @@ export class Config {
     return this.telemetrySettings.logPrompts ?? true;
   }
 
-  getTelemetryOtlpEndpoint(): string {
+  getTelemetryOtlpEndpoint(): string | undefined {
     return this.telemetrySettings.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT;
   }
 
   getTelemetryOtlpProtocol(): 'grpc' | 'http' {
     return this.telemetrySettings.otlpProtocol ?? 'grpc';
+  }
+
+  getTelemetryOtlpTracesEndpoint(): string | undefined {
+    return this.telemetrySettings.otlpTracesEndpoint;
+  }
+
+  getTelemetryOtlpLogsEndpoint(): string | undefined {
+    return this.telemetrySettings.otlpLogsEndpoint;
+  }
+
+  getTelemetryOtlpMetricsEndpoint(): string | undefined {
+    return this.telemetrySettings.otlpMetricsEndpoint;
   }
 
   getTelemetryTarget(): TelemetryTarget {
