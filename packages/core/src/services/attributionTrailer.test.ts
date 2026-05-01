@@ -33,28 +33,31 @@ const sampleNote: CommitAttributionNote = {
 
 describe('attributionTrailer', () => {
   describe('buildGitNotesCommand', () => {
-    it('should build a valid git notes command', () => {
+    it('should build a valid git notes invocation', () => {
       const cmd = buildGitNotesCommand(sampleNote);
       expect(cmd).not.toBeNull();
-      expect(cmd).toContain(
-        'git notes --ref=refs/notes/ai-attribution add -f -m',
-      );
-      expect(cmd).toContain('HEAD');
-      expect(cmd).toContain('"Qwen-Coder"');
+      expect(cmd!.command).toBe('git');
+      expect(cmd!.args.slice(0, 6)).toEqual([
+        'notes',
+        '--ref=refs/notes/ai-attribution',
+        'add',
+        '-f',
+        '-m',
+        // index 5 is the JSON note payload, asserted below
+        cmd!.args[5],
+      ]);
+      expect(cmd!.args.at(-1)).toBe('HEAD');
     });
 
-    it('should not include cd prefix', () => {
+    it('should pass the JSON note as a single argv entry (no shell quoting)', () => {
+      // The `-f` flag is at args[3]; the note JSON sits at args[5] between
+      // `-m` and `HEAD`. Returning argv (rather than a shell-quoted command
+      // string) keeps the payload off the shell parser entirely so quotes,
+      // command substitution, and platform-specific escaping cannot break
+      // it on cmd.exe / PowerShell.
       const cmd = buildGitNotesCommand(sampleNote)!;
-      expect(cmd).not.toContain('cd ');
-      expect(cmd.startsWith('git notes')).toBe(true);
-    });
-
-    it('should produce valid JSON in the note', () => {
-      const cmd = buildGitNotesCommand(sampleNote)!;
-      const match = cmd.match(/-m '(.+)' HEAD/);
-      expect(match).toBeTruthy();
-      const jsonStr = match![1].replace(/'\\''/g, "'");
-      const parsed = JSON.parse(jsonStr);
+      const noteArg = cmd.args[5]!;
+      const parsed = JSON.parse(noteArg);
       expect(parsed.version).toBe(1);
       expect(parsed.summary.aiPercent).toBe(38);
       expect(parsed.files['src/main.ts'].percent).toBe(75);
@@ -74,7 +77,10 @@ describe('attributionTrailer', () => {
       expect(buildGitNotesCommand(hugeNote)).toBeNull();
     });
 
-    it('should properly escape single quotes in JSON', () => {
+    it('should leave single quotes literal in the argv payload', () => {
+      // The previous string-based command needed bash-style quote escaping.
+      // With argv, the apostrophe stays literal — the executor passes it
+      // through to git unmolested.
       const noteWithQuotes: CommitAttributionNote = {
         ...sampleNote,
         files: {
@@ -83,7 +89,8 @@ describe('attributionTrailer', () => {
       };
       const cmd = buildGitNotesCommand(noteWithQuotes);
       expect(cmd).not.toBeNull();
-      expect(cmd).toContain("'\\''");
+      const parsed = JSON.parse(cmd!.args[5]!);
+      expect(parsed.files["it's-a-file.ts"].percent).toBe(67);
     });
   });
 

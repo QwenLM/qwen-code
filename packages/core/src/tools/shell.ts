@@ -937,31 +937,37 @@ export class ShellToolInvocation extends BaseToolInvocation<
         return; // finally block still runs for cleanup
       }
 
-      // Use a short timeout to avoid blocking the user if git notes stalls
-      const notesAbort = new AbortController();
-      const notesTimeout = setTimeout(() => notesAbort.abort(), 5000);
-      let notesExitCode: number | null = null;
-      let notesOutput = '';
-      try {
-        const handle = await ShellExecutionService.execute(
-          notesCommand,
-          cwd,
-          () => {},
-          notesAbort.signal,
-          false,
-          {},
+      // Use execFile with argv (rather than ShellExecutionService) so the
+      // JSON note isn't subjected to shell quoting at all — important on
+      // Windows where the bash-style escape used previously is invalid
+      // for cmd.exe / PowerShell. 5s timeout keeps a wedged repo from
+      // stalling the user-visible turn.
+      const { exitCode, output } = await new Promise<{
+        exitCode: number | null;
+        output: string;
+      }>((resolve) => {
+        const child = childProcess.execFile(
+          notesCommand.command,
+          notesCommand.args,
+          { cwd, timeout: 5000 },
+          (error, stdout, stderr) => {
+            const merged = (stdout || '') + (stderr || '');
+            if (error) {
+              const code =
+                typeof (error as NodeJS.ErrnoException).code === 'number'
+                  ? ((error as NodeJS.ErrnoException).code as unknown as number)
+                  : null;
+              resolve({ exitCode: code ?? 1, output: merged });
+            } else {
+              resolve({ exitCode: 0, output: merged });
+            }
+          },
         );
-        const notesResult = await handle.result;
-        notesExitCode = notesResult.exitCode;
-        notesOutput = notesResult.output;
-      } finally {
-        clearTimeout(notesTimeout);
-      }
+        child.on('error', () => {});
+      });
 
-      if (notesExitCode !== 0) {
-        debugLogger.warn(
-          `git notes exited with code ${notesExitCode}: ${notesOutput}`,
-        );
+      if (exitCode !== 0) {
+        debugLogger.warn(`git notes exited with code ${exitCode}: ${output}`);
       } else {
         debugLogger.debug(
           `Attached AI attribution note: ${note.summary.aiPercent}% AI, ${note.summary.totalFilesTouched} file(s)`,
@@ -1068,9 +1074,17 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const match = line.match(/^\s*(.+?)\s+\|\s+(\d+)/);
       if (match) {
         let filePath = match[1]!.trim();
-        // Handle rename brace notation: "{old => new}" or "dir/{old => new}"
-        // Extract the new name so the key matches --name-only output
+        // Handle rename brace notation: "{old => new}" or "dir/{old => new}".
+        // Extract the new name so the key matches --name-only output.
         filePath = filePath.replace(/\{[^}]*?=>\s*([^}]*)\}/g, '$1');
+        // Handle plain rename notation when the rename crosses directories:
+        // "old/path/file => new/path/file". Keep only the new path.
+        if (filePath.includes('=>')) {
+          const renameMatch = filePath.match(/^(.*?)\s=>\s(.*)$/);
+          if (renameMatch) {
+            filePath = renameMatch[2]!.trim();
+          }
+        }
         const changes = parseInt(match[2]!, 10);
         // Approximate chars: lines changed * avg 40 chars/line
         sizes.set(filePath, changes * 40);
@@ -1141,11 +1155,23 @@ Co-authored-by: ${gitCoAuthorSettings.name} <${gitCoAuthorSettings.email}>`;
 
   /**
    * Detect `gh pr create` commands and append AI attribution text to the
-   * PR body. Format: "🤖 Generated with Qwen Code (X% N-shotted by Qwen-Coder)"
+   * PR body. Format: "🤖 Generated with Qwen Code (N-shotted by Qwen-Coder)"
+   * when at least one user prompt has been recorded since the last commit;
+   * otherwise just "🤖 Generated with Qwen Code".
+   *
+   * Skipped on Windows: the appended text relies on bash quote-escape
+   * conventions (`\$`, `'\''`) that cmd.exe and PowerShell don't honor,
+   * so on those shells our injection could either break the user-approved
+   * `gh pr create` command or be evaluated as command substitution.
+   * Losing PR attribution on Windows is an acceptable trade for safety.
    */
   private addAttributionToPR(command: string): string {
     const ghPrPattern = /\bgh\s+pr\s+create\b/;
     if (!ghPrPattern.test(command)) {
+      return command;
+    }
+
+    if (os.platform() === 'win32') {
       return command;
     }
 

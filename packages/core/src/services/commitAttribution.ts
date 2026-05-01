@@ -371,7 +371,12 @@ export class CommitAttributionService {
       let humanChars: number;
 
       if (tracked) {
-        aiChars = tracked.aiContribution;
+        // Clamp aiChars to diffSize so aiChars+humanChars stays consistent
+        // with the committed change magnitude. Without this, long-line edits
+        // (where diffSize is `lines * 40` from --stat output) can leave
+        // aiChars > diffSize: humanChars then snaps to 0 but aiChars stays
+        // large, inflating the per-file total beyond what was committed.
+        aiChars = Math.min(tracked.aiContribution, diffSize);
         humanChars = Math.max(0, diffSize - aiChars);
       } else if (isDeleted) {
         aiChars = 0;

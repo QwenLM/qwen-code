@@ -268,6 +268,27 @@ describe('CommitAttributionService', () => {
           .generator,
       ).toBe('CustomAgent');
     });
+
+    // Long-line edits inflate the tracked AI char count (we count actual
+    // characters), but diffSize comes from `git diff --stat` which
+    // approximates each changed line as ~40 chars. Without clamping,
+    // aiChars stays large while humanChars snaps to 0, leaving
+    // aiChars+humanChars > the committed change magnitude.
+    it('should clamp aiChars to diffSize so totals stay consistent', () => {
+      const service = CommitAttributionService.getInstance();
+      // Big AI edit but small reported diff (one long-line change).
+      service.recordEdit('/project/src/big.ts', '', 'x'.repeat(1000));
+
+      const staged = makeStagedInfo(['src/big.ts'], { 'src/big.ts': 40 });
+      const note = service.generateNotePayload(staged, '/project');
+
+      const detail = note.files['src/big.ts']!;
+      expect(detail.aiChars).toBe(40);
+      expect(detail.humanChars).toBe(0);
+      // aiChars + humanChars now equals the reported diff size.
+      expect(detail.aiChars + detail.humanChars).toBe(40);
+      expect(note.summary.aiChars).toBe(40);
+    });
   });
 
   describe('generatePRAttribution', () => {

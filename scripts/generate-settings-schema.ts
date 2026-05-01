@@ -39,6 +39,7 @@ interface JsonSchemaProperty {
   default?: unknown;
   additionalProperties?: boolean | JsonSchemaProperty;
   required?: string[];
+  anyOf?: JsonSchemaProperty[];
 }
 
 function convertItemDefinitionToJsonSchema(
@@ -158,6 +159,19 @@ function convertSettingToJsonSchema(
     } else if (Array.isArray(defaultVal) && defaultVal.length > 0) {
       schema.default = defaultVal;
     }
+  }
+
+  // If the field accepts a legacy primitive shape (e.g. a boolean that was
+  // later expanded into an object), wrap with `anyOf` so existing values
+  // in users' settings.json don't trip the IDE schema validator while
+  // they wait for our migration to rewrite them on the next launch.
+  if (setting.legacyTypes && setting.legacyTypes.length > 0) {
+    const description = schema.description;
+    delete schema.description;
+    return {
+      ...(description ? { description } : {}),
+      anyOf: [...setting.legacyTypes.map((t) => ({ type: t })), schema],
+    };
   }
 
   return schema;

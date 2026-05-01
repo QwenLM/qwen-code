@@ -20,28 +20,45 @@ const GIT_NOTES_REF = 'refs/notes/ai-attribution';
 const MAX_NOTE_BYTES = 128 * 1024; // 128 KB
 
 /**
- * Escape a string for safe use inside single quotes in a shell command.
+ * argv-form git notes invocation, designed for `child_process.execFile`.
+ *
+ * We return argv rather than a shell-quoted command string because the JSON
+ * note travels as a separate argv entry — no shell quoting is needed and no
+ * shell metacharacters can be re-evaluated. This matters most on Windows
+ * where bash-style single-quote escaping (`'\''`) is invalid and would
+ * corrupt the note (or, worse, allow interpolation under PowerShell/cmd).
  */
-function shellEscapeSingleQuote(s: string): string {
-  return s.replace(/'/g, "'\\''");
+export interface GitNotesCommand {
+  command: string;
+  args: string[];
 }
 
 /**
- * Generate the git notes add command to attach attribution metadata to the
- * most recent commit. Does NOT include a cd prefix — the caller should pass
- * the working directory to the shell executor directly.
+ * Build the git notes add invocation to attach attribution metadata to the
+ * most recent commit. Caller should pass the result to a process-spawning
+ * API (`child_process.execFile`) along with a `cwd` option.
  *
  * Returns null if the serialized note exceeds MAX_NOTE_BYTES.
  */
 export function buildGitNotesCommand(
   note: CommitAttributionNote,
-): string | null {
+): GitNotesCommand | null {
   const noteJson = JSON.stringify(note);
   if (Buffer.byteLength(noteJson, 'utf-8') > MAX_NOTE_BYTES) {
     return null;
   }
-  const escaped = shellEscapeSingleQuote(noteJson);
-  return `git notes --ref=${GIT_NOTES_REF} add -f -m '${escaped}' HEAD`;
+  return {
+    command: 'git',
+    args: [
+      'notes',
+      `--ref=${GIT_NOTES_REF}`,
+      'add',
+      '-f',
+      '-m',
+      noteJson,
+      'HEAD',
+    ],
+  };
 }
 
 /**

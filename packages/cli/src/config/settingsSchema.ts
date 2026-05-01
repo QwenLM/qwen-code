@@ -78,6 +78,14 @@ export interface SettingDefinition {
   options?: readonly SettingEnumOption[];
   /** Schema for array items when type is 'array' */
   items?: SettingItemDefinition;
+  /**
+   * Primitive shapes a field accepted before it was expanded to its current
+   * type. The exported JSON Schema wraps the field in `anyOf` so values from
+   * those older shapes don't trip the IDE validator while the runtime
+   * migration is still pending. Has no runtime effect — it's purely a
+   * compatibility hint for editors.
+   */
+  legacyTypes?: readonly SettingsType[];
 }
 
 /**
@@ -368,6 +376,13 @@ const SETTINGS_SCHEMA = {
         description:
           'Attribution added to git commits and pull requests created through Qwen Code.',
         showInDialog: false,
+        // Pre-V4 settings stored this as a single boolean. The V3→V4
+        // migration rewrites those on first launch, but the IDE schema
+        // validator runs before that — accept the boolean shape so users
+        // editing settings.json in VS Code don't see a spurious warning
+        // until they run qwen once. Config.normalizeGitCoAuthor handles
+        // the boolean at runtime.
+        legacyTypes: ['boolean'],
         properties: {
           commit: {
             type: 'boolean',
