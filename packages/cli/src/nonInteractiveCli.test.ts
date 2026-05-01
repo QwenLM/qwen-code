@@ -1880,15 +1880,36 @@ describe('runNonInteractive', () => {
       (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
       setupMetricsMock();
 
+      // Spy on the registry returned by getBackgroundTaskRegistry so we can
+      // assert abortAll() is called as part of the deterministic shutdown
+      // contract for structured-output mode.
+      const abortAllSpy = vi.fn();
+      (mockConfig.getBackgroundTaskRegistry as Mock).mockReturnValue({
+        setNotificationCallback: vi.fn(),
+        setRegisterCallback: vi.fn(),
+        getAll: vi.fn().mockReturnValue([]),
+        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+        abortAll: abortAllSpy,
+      });
+
+      const writes: string[] = [];
+      processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+        writes.push(
+          typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'),
+        );
+        return true;
+      });
+
       // Same turn: the model emits structured_output FIRST, then a second
       // (hypothetical side-effecting) tool. The break must prevent the
       // second tool from running.
+      const structuredArgs = { summary: 'done' };
       const structuredCall: ServerGeminiStreamEvent = {
         type: GeminiEventType.ToolCallRequest,
         value: {
           callId: 'tool-structured',
           name: 'structured_output',
-          args: { summary: 'done' },
+          args: structuredArgs,
           isClientInitiated: false,
           prompt_id: 'prompt-id-structured',
         },
@@ -1929,6 +1950,110 @@ describe('runNonInteractive', () => {
 
       // And we should not have sent a second follow-up turn.
       expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(1);
+
+      // abortAll() must be called so any in-flight background agents are
+      // torn down before we emit the terminal result.
+      expect(abortAllSpy).toHaveBeenCalledTimes(1);
+
+      // The emitted result must carry the submitted args under `result` as
+      // the JSON-stringified payload (the headless JSON formatter encodes
+      // the structured submission so SDK consumers always see a string here,
+      // matching how text-mode `result` is also a string).
+      const result = writes
+        .join('')
+        .split('\n')
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line))
+        .flat()
+        .find(
+          (m: unknown) =>
+            typeof m === 'object' &&
+            m !== null &&
+            (m as { type?: string }).type === 'result',
+        );
+      expect(result).toBeDefined();
+      expect(result.is_error).toBe(false);
+      expect(typeof result.result).toBe('string');
+      expect(JSON.parse(result.result)).toEqual(structuredArgs);
+      // The raw object is also exposed under `structured_result` for SDK
+      // consumers that don't want to re-parse the stringified payload.
+      expect(result.structured_result).toEqual(structuredArgs);
+    });
+
+    it('keeps the session running when structured_output args fail validation so the model can retry', async () => {
+      (mockConfig.getJsonSchema as Mock).mockReturnValue({
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+        required: ['summary'],
+      });
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+
+      // First turn: model calls structured_output with invalid args (the
+      // tool returns a tool-execution error). The session must NOT terminate
+      // — `!toolResponse.error` keeps `structuredSubmission` undefined and
+      // we feed the validation failure back so the model can retry.
+      const invalidStructured: ServerGeminiStreamEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-structured-invalid',
+          name: 'structured_output',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-retry',
+        },
+      };
+      // Second turn: model retries with valid args.
+      const validStructured: ServerGeminiStreamEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-structured-valid',
+          name: 'structured_output',
+          args: { summary: 'second try' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-retry',
+        },
+      };
+
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(createStreamFromEvents([invalidStructured]))
+        .mockReturnValueOnce(createStreamFromEvents([validStructured]));
+
+      mockCoreExecuteToolCall
+        .mockResolvedValueOnce({
+          error: new Error('args failed schema validation'),
+          errorType: 'TOOL_INVALID_ARGUMENTS',
+          resultDisplay: 'missing required field: summary',
+          responseParts: [
+            { text: 'Tool error: args failed schema validation' },
+          ],
+        })
+        .mockResolvedValueOnce({
+          responseParts: [{ text: 'ok' }],
+        });
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Emit structured output',
+        'prompt-id-retry',
+      );
+
+      // Both attempts must have been executed (no early termination on the
+      // first call's error).
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(2);
+      const firstName = (
+        mockCoreExecuteToolCall.mock.calls[0][1] as { name: string }
+      ).name;
+      const secondName = (
+        mockCoreExecuteToolCall.mock.calls[1][1] as { name: string }
+      ).name;
+      expect(firstName).toBe('structured_output');
+      expect(secondName).toBe('structured_output');
+
+      // A second sendMessageStream call confirms the retry turn was issued
+      // — the failed first attempt did not short-circuit the run.
+      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
     });
 
     it('errors with non-zero exit when model emits plain text instead of structured_output', async () => {
