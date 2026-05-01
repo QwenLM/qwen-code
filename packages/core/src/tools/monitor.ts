@@ -262,20 +262,45 @@ class MonitorToolInvocation extends BaseToolInvocation<
     }
 
     entry.pid = child.pid;
+    let exited = false;
+
+    const killChildProcessGroup = (): void => {
+      if (exited || !child.pid) return;
+
+      if (process.platform === 'win32') {
+        spawn('taskkill', ['/pid', child.pid.toString(), '/f', '/t']);
+      } else {
+        try {
+          process.kill(-child.pid, 'SIGTERM');
+        } catch {
+          // process may already be dead
+        }
+        setTimeout(() => {
+          if (!exited && child.pid) {
+            try {
+              process.kill(-child.pid, 'SIGKILL');
+            } catch {
+              // ignore
+            }
+          }
+        }, 200);
+      }
+    };
+
+    // Wire abort → kill process (tree) before exposing the entry via register().
+    const abortHandler = (): void => {
+      killChildProcessGroup();
+    };
+    entryAc.signal.addEventListener('abort', abortHandler, { once: true });
+    if (entryAc.signal.aborted) {
+      abortHandler();
+    }
+
     try {
       registry.register(entry);
     } catch (err) {
-      if (child.pid) {
-        if (process.platform === 'win32') {
-          spawn('taskkill', ['/pid', child.pid.toString(), '/f', '/t']);
-        } else {
-          try {
-            process.kill(-child.pid, 'SIGTERM');
-          } catch {
-            // process may already be dead
-          }
-        }
-      }
+      abortHandler();
+      entryAc.signal.removeEventListener('abort', abortHandler);
       return {
         llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
@@ -347,33 +372,6 @@ class MonitorToolInvocation extends BaseToolInvocation<
     const stderrBuf = { value: '' };
     child.stdout?.on('data', (data: Buffer) => processLines(stdoutBuf, data));
     child.stderr?.on('data', (data: Buffer) => processLines(stderrBuf, data));
-
-    let exited = false;
-
-    // Wire abort → kill process (tree)
-    const abortHandler = (): void => {
-      if (!exited && child.pid) {
-        if (process.platform === 'win32') {
-          spawn('taskkill', ['/pid', child.pid.toString(), '/f', '/t']);
-        } else {
-          try {
-            process.kill(-child.pid, 'SIGTERM');
-          } catch {
-            // process may already be dead
-          }
-          setTimeout(() => {
-            if (!exited && child.pid) {
-              try {
-                process.kill(-child.pid, 'SIGKILL');
-              } catch {
-                // ignore
-              }
-            }
-          }, 200);
-        }
-      }
-    };
-    entryAc.signal.addEventListener('abort', abortHandler, { once: true });
 
     // Shared cleanup: flush buffers, remove abort listener, log dropped lines.
     // Called from both `exit` and `error` handlers to prevent leaks when

@@ -574,6 +574,75 @@ describe('MonitorTool', () => {
       }
     });
 
+    it('uses SIGKILL fallback if registry registration fails after spawn', async () => {
+      vi.useFakeTimers();
+      const invocation = createInvocation({
+        command: 'tail -f log',
+      });
+      const killSpy = vi
+        .spyOn(process, 'kill')
+        .mockImplementation(() => true as never);
+      const registerSpy = vi
+        .spyOn(monitorRegistry, 'register')
+        .mockImplementation(() => {
+          throw new Error('limit reached');
+        });
+
+      try {
+        await invocation.execute(new AbortController().signal);
+
+        if (process.platform === 'win32') {
+          expect(mockSpawn).toHaveBeenCalledWith('taskkill', [
+            '/pid',
+            '12345',
+            '/f',
+            '/t',
+          ]);
+        } else {
+          expect(killSpy).toHaveBeenCalledWith(-12345, 'SIGTERM');
+          await vi.advanceTimersByTimeAsync(200);
+          expect(killSpy).toHaveBeenCalledWith(-12345, 'SIGKILL');
+        }
+      } finally {
+        killSpy.mockRestore();
+        registerSpy.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it('installs the abort handler before registering the monitor', async () => {
+      const invocation = createInvocation({
+        command: 'tail -f log',
+      });
+      const killSpy = vi
+        .spyOn(process, 'kill')
+        .mockImplementation(() => true as never);
+      const registerSpy = vi
+        .spyOn(monitorRegistry, 'register')
+        .mockImplementation((entry) => {
+          entry.abortController.abort();
+          MonitorRegistry.prototype.register.call(monitorRegistry, entry);
+        });
+
+      try {
+        await invocation.execute(new AbortController().signal);
+
+        if (process.platform === 'win32') {
+          expect(mockSpawn).toHaveBeenCalledWith('taskkill', [
+            '/pid',
+            '12345',
+            '/f',
+            '/t',
+          ]);
+        } else {
+          expect(killSpy).toHaveBeenCalledWith(-12345, 'SIGTERM');
+        }
+      } finally {
+        killSpy.mockRestore();
+        registerSpy.mockRestore();
+      }
+    });
+
     it('preserves the original spawn error when startup fails synchronously', async () => {
       const invocation = createInvocation({
         command: 'tail -f log',
