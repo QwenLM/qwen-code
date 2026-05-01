@@ -197,21 +197,28 @@ export class CommitAttributionService {
    * Record an AI edit to a file.
    * Uses prefix/suffix matching for precise character-level contribution.
    * On first edit of a file, saves a session baseline of the old content.
+   *
+   * `filePath` is canonicalised via `fs.realpathSync` before being used
+   * as a key, so symlinked paths (e.g. `/var/...` ↔ `/private/var/...`
+   * on macOS) collapse to the same entry instead of silently producing
+   * two parallel records.
    */
   recordEdit(
     filePath: string,
     oldContent: string | null,
     newContent: string,
   ): void {
-    const existing = this.fileAttributions.get(filePath) || {
+    const key = realpathOrSelf(filePath);
+
+    const existing = this.fileAttributions.get(key) || {
       aiContribution: 0,
       aiCreated: false,
       contentHash: '',
     };
 
     // Save baseline on first AI touch (before AI modifies it)
-    if (!this.sessionBaselines.has(filePath) && oldContent !== null) {
-      this.sessionBaselines.set(filePath, {
+    if (!this.sessionBaselines.has(key) && oldContent !== null) {
+      this.sessionBaselines.set(key, {
         contentHash: computeContentHash(oldContent),
         mtime: Date.now(),
       });
@@ -226,7 +233,7 @@ export class CommitAttributionService {
       existing.aiCreated = true;
     }
 
-    this.fileAttributions.set(filePath, existing);
+    this.fileAttributions.set(key, existing);
   }
 
   // -----------------------------------------------------------------------
@@ -267,7 +274,9 @@ export class CommitAttributionService {
   }
 
   getFileAttribution(filePath: string): FileAttribution | undefined {
-    const attr = this.fileAttributions.get(filePath);
+    // Canonicalise so callers don't have to know about the realpath
+    // normalization happening inside `recordEdit`.
+    const attr = this.fileAttributions.get(realpathOrSelf(filePath));
     return attr ? { ...attr } : undefined;
   }
 
@@ -301,18 +310,20 @@ export class CommitAttributionService {
    * they're still credited on a later commit. Snapshots prompt
    * counters since a commit did succeed.
    *
-   * Keys must be the absolute paths used by `recordEdit` — callers
-   * are responsible for resolving repo-relative diff paths against
-   * the repo root (and following symlinks via fs.realpath where
-   * needed) before passing them in.
+   * Each input path is canonicalised via `fs.realpathSync` before the
+   * lookup, so callers can pass either the resolved repo-relative
+   * path (`path.resolve(repoRoot, rel)`) or an already-canonical
+   * absolute path — either form will match the entries written by
+   * `recordEdit`.
    */
   clearAttributedFiles(committedAbsolutePaths: Set<string>): void {
     this.promptCountAtLastCommit = this.promptCount;
     this.permissionPromptCountAtLastCommit = this.permissionPromptCount;
     this.escapeCountAtLastCommit = this.escapeCount;
     for (const p of committedAbsolutePaths) {
-      this.fileAttributions.delete(p);
-      this.sessionBaselines.delete(p);
+      const key = realpathOrSelf(p);
+      this.fileAttributions.delete(key);
+      this.sessionBaselines.delete(key);
     }
   }
 
@@ -357,11 +368,17 @@ export class CommitAttributionService {
 
     this.fileAttributions.clear();
     for (const [k, v] of Object.entries(snapshot.fileStates ?? {})) {
-      this.fileAttributions.set(k, { ...v });
+      // Re-canonicalise on restore so old snapshots (written before
+      // recordEdit started running keys through realpath) end up
+      // with the same shape as newly-recorded entries — otherwise a
+      // session resumed from a pre-fix snapshot could have two
+      // parallel records for the same file under symlink/canonical
+      // forms.
+      this.fileAttributions.set(realpathOrSelf(k), { ...v });
     }
     this.sessionBaselines.clear();
     for (const [k, v] of Object.entries(snapshot.baselines ?? {})) {
-      this.sessionBaselines.set(k, { ...v });
+      this.sessionBaselines.set(realpathOrSelf(k), { ...v });
     }
   }
 
@@ -388,17 +405,19 @@ export class CommitAttributionService {
     let totalAiChars = 0;
     let totalHumanChars = 0;
 
-    // Build lookup: relative path → tracked AI contribution. Both
-    // sides are run through realpath so symlinked /var ↔ /private/var
-    // (macOS) or other symlink mismatches don't make
-    // `path.relative` produce a `../...` key that never matches the
-    // diff output. Normalize separators to forward slashes so git
-    // paths line up on Windows.
+    // Build lookup: relative path → tracked AI contribution. Keys in
+    // `fileAttributions` are already canonical (recordEdit runs them
+    // through realpath); we only need to canonicalise `baseDir`,
+    // which comes from `git rev-parse --show-toplevel` and may be a
+    // symlink (e.g. macOS `/var` → `/private/var`). Without that
+    // canonicalisation `path.relative` would produce a `../...` key
+    // that never matches the diff output. Normalize separators to
+    // forward slashes so git paths line up on Windows.
     const canonicalBase = realpathOrSelf(baseDir);
     const aiLookup = new Map<string, FileAttribution>();
     for (const [absPath, attr] of this.fileAttributions) {
       const rel = path
-        .relative(canonicalBase, realpathOrSelf(absPath))
+        .relative(canonicalBase, absPath)
         .split(path.sep)
         .join('/');
       aiLookup.set(rel, attr);
