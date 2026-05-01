@@ -171,6 +171,15 @@ function parseGitInvocation(tokens: string[]): {
       i++;
       continue;
     }
+    // Attached-value form for `-C`: `git -C/path commit ...`. Git
+    // accepts both `-C path` (handled above by TAKES_VALUE) and the
+    // concatenated form. shell-quote tokenises the latter as a single
+    // `-Cpath` token.
+    if (t.length > 2 && t.startsWith('-C')) {
+      changesCwd = true;
+      i++;
+      continue;
+    }
     // Other long/short flag (no separate arg, e.g. --no-pager,
     // --version, --bare, -p).
     if (t.startsWith('-')) {
@@ -869,7 +878,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // movement, so it's a no-op when no commit was actually created.
     if (commitCtx.attributableInCwd) {
       const preHead = await preHeadPromise;
-      await this.attachCommitAttribution(strippedCommand, cwd, preHead);
+      await this.attachCommitAttribution(cwd, preHead);
     }
 
     let returnDisplayMessage = '';
@@ -1127,6 +1136,36 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * shell wrapper. The 2s timeout means a wedged repo can't stall the
    * post-command path.
    */
+  /**
+   * Count the commits between `preHead` (exclusive) and `HEAD`
+   * (inclusive). Returns 0 if either side is unreadable or `preHead`
+   * is null (the very first commit case is treated as a single-commit
+   * batch by the caller via the HEAD-movement check). Goes through
+   * `child_process.execFile` with argv to stay independent of the
+   * mockable `ShellExecutionService`.
+   */
+  private async countCommitsAfter(
+    cwd: string,
+    preHead: string,
+  ): Promise<number> {
+    return new Promise((resolve) => {
+      const child = childProcess.execFile(
+        'git',
+        ['rev-list', '--count', `${preHead}..HEAD`],
+        { cwd, timeout: 2000 },
+        (error, stdout) => {
+          if (error) {
+            resolve(0);
+            return;
+          }
+          const n = parseInt(String(stdout).trim(), 10);
+          resolve(Number.isFinite(n) && n > 0 ? n : 0);
+        },
+      );
+      child.on('error', () => {});
+    });
+  }
+
   private async getGitHead(cwd: string): Promise<string | null> {
     return new Promise((resolve) => {
       const child = childProcess.execFile(
@@ -1164,14 +1203,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * the Co-authored-by trailer and the git-notes payload).
    */
   private async attachCommitAttribution(
-    command: string,
     cwd: string,
     preHead: string | null,
   ): Promise<void> {
     // Caller (`execute`) gates this with `commitCtx.attributableInCwd`,
-    // so we don't re-parse here. Re-parsing would be dead work and a
-    // maintenance trap — if the two checks ever drifted, trailer
-    // injection and git-notes writes could diverge silently.
+    // so we don't re-parse the command here. Re-parsing would be dead
+    // work and a maintenance trap — if the two checks ever drifted,
+    // trailer injection and git-notes writes could diverge silently.
 
     const postHead = await this.getGitHead(cwd);
     const commitCreated = postHead !== null && postHead !== preHead;
@@ -1187,6 +1225,24 @@ export class ShellToolInvocation extends BaseToolInvocation<
         attributionService.clearAttributions(false);
       }
       return;
+    }
+
+    // Refuse to attribute when a single shell command produced more
+    // than one commit (e.g. `git commit -m a && git commit -m b`).
+    // Our singleton has no way to partition the per-file AI
+    // contribution across the individual commits, so attaching the
+    // combined note to HEAD would mis-attribute earlier commits'
+    // changes to the last one. Snapshot prompt counters and bail.
+    if (preHead !== null) {
+      const commitCount = await this.countCommitsAfter(cwd, preHead);
+      if (commitCount > 1) {
+        debugLogger.warn(
+          `Refusing AI attribution for a multi-commit shell command (` +
+            `${commitCount} commits between ${preHead.slice(0, 12)} and HEAD).`,
+        );
+        attributionService.clearAttributions(true);
+        return;
+      }
     }
 
     // A new commit landed. Even when no per-file attribution was
