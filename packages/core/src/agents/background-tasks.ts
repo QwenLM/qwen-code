@@ -173,6 +173,7 @@ export type BackgroundRegisterCallback = (entry: BackgroundTaskEntry) => void;
 
 interface BackgroundTaskCancelOptions {
   notify?: boolean;
+  persistedStatus?: Extract<BackgroundTaskStatus, 'running' | 'cancelled'>;
 }
 
 /**

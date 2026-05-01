@@ -61,10 +61,12 @@ describe('clearCommand', () => {
           getBackgroundTaskRegistry: vi.fn().mockReturnValue({
             hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
             reset: vi.fn(),
+            abortAll: mockAbortBackgroundTasks,
           }),
           getBackgroundShellRegistry: vi.fn().mockReturnValue({
             getAll: vi.fn().mockReturnValue([]),
             reset: vi.fn(),
+            abortAll: mockAbortBackgroundShells,
           }),
           startNewSession: mockStartNewSession,
           getHookSystem: mockGetHookSystem,
@@ -74,13 +76,7 @@ describe('clearCommand', () => {
           getModel: () => 'test-model',
           getToolRegistry: () => undefined,
           getApprovalMode: () => 'default',
-          getBackgroundTaskRegistry: () => ({
-            abortAll: mockAbortBackgroundTasks,
-          }),
           getMonitorRegistry: () => ({ abortAll: mockAbortMonitors }),
-          getBackgroundShellRegistry: () => ({
-            abortAll: mockAbortBackgroundShells,
-          }),
         },
       },
       session: {
@@ -282,10 +278,12 @@ describe('clearCommand', () => {
             getBackgroundTaskRegistry: vi.fn().mockReturnValue({
               hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
               reset: vi.fn(),
+              abortAll: mockAbortBackgroundTasks,
             }),
             getBackgroundShellRegistry: vi.fn().mockReturnValue({
               getAll: vi.fn().mockReturnValue([]),
               reset: vi.fn(),
+              abortAll: mockAbortBackgroundShells,
             }),
             startNewSession: mockStartNewSession,
             getGeminiClient: vi.fn().mockReturnValue({
@@ -296,13 +294,7 @@ describe('clearCommand', () => {
             getToolRegistry: vi.fn().mockReturnValue({
               getAllTools: vi.fn().mockReturnValue([]),
             }),
-            getBackgroundTaskRegistry: () => ({
-              abortAll: mockAbortBackgroundTasks,
-            }),
             getMonitorRegistry: () => ({ abortAll: mockAbortMonitors }),
-            getBackgroundShellRegistry: () => ({
-              abortAll: mockAbortBackgroundShells,
-            }),
           },
         },
         session: {
