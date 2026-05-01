@@ -314,39 +314,35 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
     });
 
     it('should handle control responses when stdin closes before replies', async () => {
+      const testFilePath = await helper.getPath('test.txt');
       await helper.createFile('test.txt', 'original content');
 
-      let canUseToolCalledResolve: () => void = () => {};
-      const canUseToolCalledPromise = new Promise<void>((resolve, reject) => {
-        canUseToolCalledResolve = resolve;
-        setTimeout(() => {
-          reject(new Error('canUseTool callback not called'));
-        }, 15000);
-      });
+      // Bounded promise with cleared timeout on settle, so success runs do
+      // not leave dangling timers in the worker.
+      const boundedPromise = (label: string, ms: number) => {
+        let resolveFn: () => void = () => {};
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const promise = new Promise<void>((resolve, reject) => {
+          resolveFn = () => {
+            if (timer !== undefined) clearTimeout(timer);
+            resolve();
+          };
+          timer = setTimeout(() => {
+            reject(new Error(`${label} timeout after ${ms}ms`));
+          }, ms);
+        });
+        return { promise, resolve: () => resolveFn() };
+      };
 
-      let inputStreamDoneResolve: () => void = () => {};
-      const inputStreamDonePromise = new Promise<void>((resolve, reject) => {
-        inputStreamDoneResolve = resolve;
-        setTimeout(() => {
-          reject(new Error('inputStreamDonePromise timeout'));
-        }, 15000);
-      });
+      const canUseToolCalled = boundedPromise(
+        'canUseTool callback not called',
+        15000,
+      );
+      const inputStreamDone = boundedPromise('inputStreamDone', 15000);
+      const firstResult = boundedPromise('firstResult', 30000);
+      const secondResult = boundedPromise('secondResult', 30000);
 
-      let firstResultResolve: () => void = () => {};
-      const firstResultPromise = new Promise<void>((resolve, reject) => {
-        firstResultResolve = resolve;
-        setTimeout(() => {
-          reject(new Error('firstResult not received within 30s'));
-        }, 30000);
-      });
-
-      let secondResultResolve: () => void = () => {};
-      const secondResultPromise = new Promise<void>((resolve, reject) => {
-        secondResultResolve = resolve;
-        setTimeout(() => {
-          reject(new Error('secondResult not received within 30s'));
-        }, 30000);
-      });
+      let secondResultMessage: unknown;
 
       async function* createPrompt(): AsyncIterable<SDKUserMessage> {
         const sessionId = crypto.randomUUID();
@@ -361,19 +357,18 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
           parent_tool_use_id: null,
         };
 
-        await firstResultPromise;
+        await firstResult.promise;
 
         yield {
           type: 'user',
           session_id: sessionId,
           message: {
             role: 'user',
-            content:
-              'Write "updated" to test.txt. Stop if any exception occurs.',
+            content: `Write "updated" to ${testFilePath}. Stop if any exception occurs.`,
           },
           parent_tool_use_id: null,
         };
-        await inputStreamDonePromise;
+        await inputStreamDone.promise;
       }
 
       const q = query({
@@ -384,14 +379,20 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
           permissionMode: 'default',
           coreTools: ['read_file', 'write_file'],
           canUseTool: async (toolName, input) => {
-            inputStreamDoneResolve();
+            // Only the write_file call against the target file constitutes
+            // the permission-control path under test. Other tool calls
+            // (e.g. read_file the model issues to look around first) are
+            // allowed silently and must not advance the timing harness.
+            const isTargetCall =
+              toolName === 'write_file' &&
+              (input as { file_path?: string }).file_path === testFilePath;
+            if (!isTargetCall) {
+              return { behavior: 'allow', updatedInput: input };
+            }
+            inputStreamDone.resolve();
             await new Promise((resolve) => setTimeout(resolve, 1000));
-            canUseToolCalledResolve();
-
-            return {
-              behavior: 'allow',
-              updatedInput: input,
-            };
+            canUseToolCalled.resolve();
+            return { behavior: 'allow', updatedInput: input };
           },
           debug: false,
         },
@@ -400,16 +401,15 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       try {
         const loop = async () => {
           let resultCount = 0;
-          for await (const _message of q) {
-            console.log(JSON.stringify(_message, null, 2));
-            // Consume messages until completion.
-            if (isSDKResultMessage(_message)) {
+          for await (const message of q) {
+            if (isSDKResultMessage(message)) {
               resultCount += 1;
               if (resultCount === 1) {
-                firstResultResolve();
+                firstResult.resolve();
               }
               if (resultCount === 2) {
-                secondResultResolve();
+                secondResultMessage = message;
+                secondResult.resolve();
                 break;
               }
             }
@@ -417,16 +417,24 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         };
 
         const loopPromise = loop();
+        // Surface loop errors as a rejection-only race partner; loop
+        // completion alone must NOT short-circuit the awaited milestones,
+        // otherwise an iterator that ends before canUseTool is invoked
+        // could mask the regression this test is meant to catch.
+        const loopError = new Promise<never>((_, reject) => {
+          loopPromise.catch(reject);
+        });
 
         await Promise.race([
           (async () => {
-            await firstResultPromise;
-            await canUseToolCalledPromise;
-            await secondResultPromise;
+            await firstResult.promise;
+            await canUseToolCalled.promise;
+            await secondResult.promise;
           })(),
-          loopPromise,
+          loopError,
         ]);
 
+        expect(secondResultMessage).toBeDefined();
         const content = await helper.readFile('test.txt');
         expect(content).toBe('original content');
       } finally {
