@@ -68,6 +68,67 @@ function truncateDisplayDescription(description: string): string {
     : description;
 }
 
+// Tag names that form the structural <task-notification> envelope. If any of
+// these appear verbatim inside untrusted monitor output (logs, server stdout,
+// etc.) and downstream rendering ever skips XML escaping, an attacker could
+// spoof a notification boundary or inject fake task metadata. We defang them
+// by inserting a zero-width space (U+200B) immediately after the `<` (or
+// `</`), which is invisible in display but breaks the tag from a parser's
+// perspective.
+const STRUCTURAL_ENVELOPE_TAGS = new Set([
+  'task-notification',
+  'task-id',
+  'tool-use-id',
+  'kind',
+  'status',
+  'event-count',
+  'summary',
+  'result',
+]);
+
+const STRUCTURAL_TAG_REGEX = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)>/g;
+
+/**
+ * Sanitize a single monitor output line before it is forwarded to the model.
+ *
+ * Two defenses, in order:
+ *   1. Strip C0 control characters (0x00–0x1F) except tab (0x09) and C1
+ *      control characters (0x80–0x9F). These can carry terminal escape
+ *      sequences, NUL bytes, or framing characters that survive
+ *      `strip-ansi` and may interfere with downstream rendering or
+ *      transport.
+ *   2. Defang structural envelope tag names (see `STRUCTURAL_ENVELOPE_TAGS`)
+ *      by inserting a zero-width space after the `<` / `</`. This is a
+ *      defense-in-depth measure: `escapeXml` in MonitorRegistry already
+ *      protects the XML structure today, but if any future emission path
+ *      forgets to escape, untrusted log content cannot spoof a
+ *      `</task-notification>` boundary or fabricate a sibling notification.
+ *
+ * Exported for unit testing.
+ */
+export function sanitizeMonitorLine(line: string): string {
+  let cleaned = '';
+  for (let i = 0; i < line.length; i++) {
+    const code = line.charCodeAt(i);
+    if (code === 0x09) {
+      cleaned += line[i];
+      continue;
+    }
+    if (code < 0x20) continue; // C0 controls (NUL, BEL, ESC, etc.)
+    if (code >= 0x80 && code <= 0x9f) continue; // C1 controls
+    cleaned += line[i];
+  }
+
+  cleaned = cleaned.replace(STRUCTURAL_TAG_REGEX, (match, slash, tagName) => {
+    if (!STRUCTURAL_ENVELOPE_TAGS.has(String(tagName).toLowerCase())) {
+      return match;
+    }
+    return slash === '/' ? `</\u200B${tagName}>` : `<\u200B${tagName}>`;
+  });
+
+  return cleaned;
+}
+
 export interface MonitorToolParams {
   command: string;
   description?: string;
@@ -273,6 +334,56 @@ class MonitorToolInvocation extends BaseToolInvocation<
     entry.pid = child.pid;
     let exited = false;
 
+    // ----- Line buffering & throttling state ---------------------------------
+    // Declared up-front (before `abortHandler`) so that the synchronous abort
+    // path — either `entryAc.signal.aborted` already true at registration
+    // time, or `registry.register()` throwing — can flush via
+    // `flushPartialLineBuffers` without hitting a TDZ ReferenceError.
+    const stdoutBuf = { value: '' };
+    const stderrBuf = { value: '' };
+    let tokenBucket = THROTTLE_BURST_SIZE;
+    let lastRefill = Date.now();
+    let droppedLines = 0;
+
+    const throttledEmit = (line: string): void => {
+      // Apply prompt-injection defenses uniformly across every emission
+      // path (live data, partial-line force-flush, cleanup flush). Empty
+      // lines after sanitization consume no throttle budget.
+      const sanitized = sanitizeMonitorLine(line);
+      if (sanitized.length === 0 || sanitized.trim().length === 0) return;
+
+      // Refill tokens
+      const now = Date.now();
+      const elapsed = now - lastRefill;
+      const newTokens = Math.floor(elapsed / THROTTLE_REFILL_INTERVAL_MS);
+      if (newTokens > 0) {
+        tokenBucket = Math.min(THROTTLE_BURST_SIZE, tokenBucket + newTokens);
+        lastRefill += newTokens * THROTTLE_REFILL_INTERVAL_MS;
+      }
+
+      if (tokenBucket > 0) {
+        tokenBucket--;
+        registry.emitEvent(monitorId, sanitized);
+      } else {
+        droppedLines++;
+      }
+    };
+
+    // Flush any buffered partial lines via the throttled path. Called from
+    // both the abort handler (before the registry settles to 'cancelled',
+    // while emitEvent still accepts events) and from `cleanup()` (which
+    // covers natural exit / error paths). Idempotent: clears each buffer
+    // after flushing.
+    const flushPartialLineBuffers = (): void => {
+      for (const buf of [stdoutBuf, stderrBuf]) {
+        const trimmed = buf.value.trim();
+        if (trimmed.length > 0) {
+          throttledEmit(trimmed);
+        }
+        buf.value = '';
+      }
+    };
+
     const killChildProcessGroup = (): void => {
       if (exited || !child.pid) return;
 
@@ -297,7 +408,13 @@ class MonitorToolInvocation extends BaseToolInvocation<
     };
 
     // Wire abort → kill process (tree) before exposing the entry via register().
+    // We also flush any buffered partial lines BEFORE the kill: by the time
+    // `cancel()` calls `settle()`, the entry status flips to 'cancelled' and
+    // `emitEvent` no-ops, so a flush deferred to the post-exit `cleanup()`
+    // would be silently dropped. Flushing here preserves the last partial
+    // line(s) the child wrote between the abort signal and process exit.
     const abortHandler = (): void => {
+      flushPartialLineBuffers();
       killChildProcessGroup();
     };
     entryAc.signal.addEventListener('abort', abortHandler, { once: true });
@@ -315,29 +432,6 @@ class MonitorToolInvocation extends BaseToolInvocation<
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
       };
     }
-
-    // Line buffering (separate per stream to avoid interleave corruption)
-    let tokenBucket = THROTTLE_BURST_SIZE;
-    let lastRefill = Date.now();
-    let droppedLines = 0;
-
-    const throttledEmit = (line: string): void => {
-      // Refill tokens
-      const now = Date.now();
-      const elapsed = now - lastRefill;
-      const newTokens = Math.floor(elapsed / THROTTLE_REFILL_INTERVAL_MS);
-      if (newTokens > 0) {
-        tokenBucket = Math.min(THROTTLE_BURST_SIZE, tokenBucket + newTokens);
-        lastRefill += newTokens * THROTTLE_REFILL_INTERVAL_MS;
-      }
-
-      if (tokenBucket > 0) {
-        tokenBucket--;
-        registry.emitEvent(monitorId, line);
-      } else {
-        droppedLines++;
-      }
-    };
 
     const processLines = (buffer: { value: string }, data: Buffer): void => {
       if (entry.status !== 'running') return;
@@ -377,25 +471,25 @@ class MonitorToolInvocation extends BaseToolInvocation<
       }
     };
 
-    const stdoutBuf = { value: '' };
-    const stderrBuf = { value: '' };
     child.stdout?.on('data', (data: Buffer) => processLines(stdoutBuf, data));
     child.stderr?.on('data', (data: Buffer) => processLines(stderrBuf, data));
 
     // Shared cleanup: flush buffers, remove abort listener, log dropped lines.
     // Called from both `exit` and `error` handlers to prevent leaks when
     // `error` fires without a subsequent `exit` (e.g. ENOENT).
+    //
+    // The flush is unconditional (no `entry.status === 'running'` guard):
+    //   - For natural exit / error paths the status is still 'running' here,
+    //     so the flush emits via the throttled path as before.
+    //   - For external cancel paths the buffers were already flushed in
+    //     `abortHandler` (so this is a no-op) but removing the guard keeps
+    //     cleanup defensive against future status-flip races.
     let cleanedUp = false;
     const cleanup = (): void => {
       if (cleanedUp) return;
       cleanedUp = true;
 
-      for (const buf of [stdoutBuf, stderrBuf]) {
-        if (buf.value.trim() && entry.status === 'running') {
-          throttledEmit(buf.value.trim());
-        }
-        buf.value = '';
-      }
+      flushPartialLineBuffers();
 
       entryAc.signal.removeEventListener('abort', abortHandler);
 

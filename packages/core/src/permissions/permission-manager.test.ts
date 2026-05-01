@@ -1146,6 +1146,50 @@ describe('PermissionManager', () => {
         }),
       ).toBe('allow');
     });
+
+    it('applies relative virtual file deny rules using the monitor cwd', async () => {
+      // Mirrors the run_shell_command coverage above: when a monitor is
+      // started with an explicit `directory` (forwarded as `cwd` via
+      // buildPermissionCheckContext), relative-path deny rules must resolve
+      // against that directory rather than the global config cwd. Without
+      // this propagation a `Read(./secret.txt)` rule could be silently
+      // bypassed by switching the monitor's working directory.
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Read(./secret.txt)'],
+          projectRoot: '/project',
+          cwd: '/project',
+        }),
+      );
+      pm2.initialize();
+
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: 'cat ./secret.txt',
+          cwd: '/project/subdir',
+        }),
+      ).toBe('deny');
+    });
+
+    it('resolves monitor virtual file allow rules relative to the explicit cwd', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Read(./subdir/secret.txt)'],
+          projectRoot: '/project',
+          cwd: '/project',
+        }),
+      );
+      pm2.initialize();
+
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: 'cat ./secret.txt',
+          cwd: '/project/subdir',
+        }),
+      ).toBe('allow');
+    });
   });
 
   describe('compound command evaluation', () => {

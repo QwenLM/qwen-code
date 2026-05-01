@@ -1500,4 +1500,29 @@ describe('detectBlockedSleepPattern', () => {
   it('returns null for empty command', () => {
     expect(detectBlockedSleepPattern('')).toBeNull();
   });
+
+  it('blocks sleep followed by a top-level shell comment', () => {
+    // Shell ignores trailing comments, so these are equivalent to
+    // standalone foreground sleeps and must not bypass the guard.
+    expect(detectBlockedSleepPattern('sleep 5 # wait')).toBe(
+      'standalone sleep 5',
+    );
+    expect(detectBlockedSleepPattern('sleep 5  #wait')).toBe(
+      'standalone sleep 5',
+    );
+    expect(detectBlockedSleepPattern('sleep 2s   # comment')).toBe(
+      'standalone sleep 2s',
+    );
+    expect(detectBlockedSleepPattern('sleep 5 && echo ok # trailing')).toBe(
+      'sleep 5 followed by: echo ok',
+    );
+  });
+
+  it('does not treat in-quoted `#` as a comment', () => {
+    // `#` inside single quotes is literal, so the suffix is not a comment
+    // and the existing separator logic still rejects it.
+    expect(
+      detectBlockedSleepPattern("sleep 5 'arg # not a comment'"),
+    ).toBeNull();
+  });
 });

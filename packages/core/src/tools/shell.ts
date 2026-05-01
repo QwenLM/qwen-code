@@ -54,11 +54,17 @@ const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
 /**
  * Detect standalone or leading `sleep N` patterns that should use Monitor
  * instead. Catches `sleep 5`, `sleep 2.5`, `sleep 2s`,
- * `sleep 5 && check`, `sleep 5; check` — but not sleep inside pipelines,
- * subshells, backgrounded commands, or scripts (those are fine).
+ * `sleep 5 && check`, `sleep 5; check`, `sleep 5 # wait` — but not sleep
+ * inside pipelines, subshells, backgrounded commands, or scripts (those are
+ * fine).
  */
 export function detectBlockedSleepPattern(command: string): string | null {
-  const trimmed = command.trim();
+  // Strip trailing shell comments first; otherwise `sleep 5 # wait` would
+  // present `# wait` as the suffix, which `getSleepSequentialSeparator`
+  // rejects (only &&/||/;/\n are recognized), letting the foreground sleep
+  // bypass the guard. Shell ignores top-level trailing comments, so for the
+  // purposes of detection they are equivalent to end-of-command.
+  const trimmed = trimTrailingShellComment(command).trim();
   if (!trimmed.startsWith('sleep')) return null;
   const afterSleep = trimmed.slice('sleep'.length);
   if (!afterSleep || !/\s/.test(afterSleep[0]!)) return null;

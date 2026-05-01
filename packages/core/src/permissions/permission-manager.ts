@@ -414,6 +414,13 @@ export class PermissionManager {
       return ctx;
     }
 
+    // Note on cwd: callers wired through `buildPermissionCheckContext`
+    // already populate `ctx.cwd` from the monitor's `directory` parameter
+    // (see permission-helpers.ts), and the spread below preserves it. That
+    // is what makes relative-path rules — including those derived from
+    // virtual shell ops in evaluateSingle() — resolve against the monitor's
+    // working directory rather than the global config cwd. Direct callers
+    // of `evaluate()` that bypass that helper must pass `cwd` themselves.
     return {
       ...ctx,
       command: normalizeMonitorCommand(ctx.command).safetyCommand,
