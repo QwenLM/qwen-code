@@ -26,6 +26,8 @@ import {
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
 } from '../index.js';
+import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { SkillTool } from '../tools/skill.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { ToolCall, WaitingToolCall } from './coreToolScheduler.js';
@@ -4401,10 +4403,16 @@ describe('extractToolFilePaths', () => {
     // Forwarding the URI as-is to the activation registry would never
     // match a project-relative skill glob (the leading `file:///`
     // never occurs inside project-relative path strings).
-    const out = extractToolFilePaths('lsp', {
-      filePath: 'file:///proj/src/App.ts',
-    });
-    expect(out).toEqual(['/proj/src/App.ts']);
+    //
+    // Construct the URI from a real absolute path via `pathToFileURL`
+    // so the test is portable across POSIX and Windows: a hand-rolled
+    // `file:///proj/...` URI throws on Windows because there's no
+    // drive letter, which Node treats as a malformed file URL.
+    const absolutePath = path.resolve('/tmp/lsp-test/src/App.ts');
+    const fileUri = pathToFileURL(absolutePath).href;
+    expect(extractToolFilePaths('lsp', { filePath: fileUri })).toEqual([
+      absolutePath,
+    ]);
   });
 
   it('drops non-file URI schemes for lsp (http://, git://, etc.)', () => {
@@ -4425,18 +4433,24 @@ describe('extractToolFilePaths', () => {
     // `callHierarchyItem.uri`, NOT the top-level `filePath`. Following
     // the call hierarchy through a project file would otherwise never
     // contribute an activation candidate.
+    //
+    // Same portability concern as the filePath URI test above: build
+    // the URI from a real absolute path via pathToFileURL so the test
+    // works on both POSIX and Windows runners.
+    const absolutePath = path.resolve('/tmp/lsp-test/src/App.ts');
+    const fileUri = pathToFileURL(absolutePath).href;
     expect(
       extractToolFilePaths('lsp', {
         method: 'incomingCalls',
-        callHierarchyItem: { uri: 'file:///proj/src/App.ts' },
+        callHierarchyItem: { uri: fileUri },
       }),
-    ).toEqual(['/proj/src/App.ts']);
-    // Plain path also accepted.
+    ).toEqual([absolutePath]);
+    // Plain absolute path also accepted.
     expect(
       extractToolFilePaths('lsp', {
-        callHierarchyItem: { uri: '/proj/src/App.ts' },
+        callHierarchyItem: { uri: absolutePath },
       }),
-    ).toEqual(['/proj/src/App.ts']);
+    ).toEqual([absolutePath]);
     // Non-file URI on the item is also dropped.
     expect(
       extractToolFilePaths('lsp', {
