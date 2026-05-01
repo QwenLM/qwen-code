@@ -3,7 +3,7 @@
  * Ported from cc-weixin/plugins/weixin/src/media.ts (download path only).
  */
 
-import { createDecipheriv } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash } from 'node:crypto';
 
 const CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c';
 
@@ -22,7 +22,7 @@ function decryptAesEcb(ciphertext: Buffer, key: Buffer): Buffer {
  *   - base64(raw 16 bytes) → images
  *   - base64(hex string of 16 bytes) → file/voice/video
  */
-function parseAesKey(aesKeyBase64: string): Buffer {
+export function parseAesKey(aesKeyBase64: string): Buffer {
   const decoded = Buffer.from(aesKeyBase64, 'base64');
   if (decoded.length === 16) {
     return decoded;
@@ -53,4 +53,15 @@ export async function downloadAndDecrypt(
   const ciphertext = Buffer.from(await resp.arrayBuffer());
   const keyBuf = parseAesKey(aesKey);
   return decryptAesEcb(ciphertext, keyBuf);
+}
+
+/** AES-128-ECB encryption for CDN upload. */
+export function encryptAesEcb(plaintext: Buffer, key: Buffer): Buffer {
+  const cipher = createCipheriv('aes-128-ecb', key, null);
+  return Buffer.concat([cipher.update(plaintext), cipher.final()]);
+}
+
+/** Compute MD5 hash of a buffer, returning hex string. */
+export function computeMd5(data: Buffer): string {
+  return createHash('md5').update(data).digest('hex');
 }

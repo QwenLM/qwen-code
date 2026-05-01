@@ -17,7 +17,7 @@ import type {
 import { loadAccount, DEFAULT_BASE_URL } from './accounts.js';
 import { startPollLoop, getContextToken } from './monitor.js';
 import type { CdnRef, FileCdnRef } from './monitor.js';
-import { sendText } from './send.js';
+import { sendText, sendImage } from './send.js';
 import { downloadAndDecrypt } from './media.js';
 import { getConfig, sendTyping } from './api.js';
 import { TypingStatus } from './types.js';
@@ -43,6 +43,22 @@ export class WeixinChannel extends ChannelBase {
   }
 
   async connect(): Promise<void> {
+    // Default channel instructions: tell the AI it can send images via WeChat
+    if (!this.config.instructions) {
+      this.config.instructions = [
+        '## WeChat Channel Capabilities',
+        '',
+        'You are communicating with users through WeChat. You CAN send images to the user.',
+        'To send an image, include it in your response using this EXACT format:',
+        '[IMAGE: 图片文件的完整绝对路径]',
+        '',
+        'Example: 如果你想发送 /tmp/cat.png 给用户, 在回复中写 [IMAGE: /tmp/cat.png]',
+        'This marker will be automatically removed from the text and the image will be uploaded and sent.',
+        'You can include multiple [IMAGE: ...] markers in one response.',
+        '',
+        'Users can also send you images, which you can see and analyze.',
+      ].join('\n');
+    }
     const account = loadAccount();
     if (!account) {
       throw new Error(
@@ -153,18 +169,72 @@ export class WeixinChannel extends ChannelBase {
       }
     }
 
+    // Always remind the AI about image-sending capability on every message
+    const IMAGE_INSTRUCTION =
+      '[WeChat Channel] 你可以通过微信发送图片。在回复中使用 [IMAGE: 文件绝对路径] 发送图片，例如 [IMAGE: /tmp/cat.png]。标记会被自动移除。';
+    envelope.text = `${IMAGE_INSTRUCTION}\n\n${envelope.text}`;
+
     await super.handleInbound(envelope);
   }
 
-  async sendMessage(chatId: string, text: string): Promise<void> {
+  async sendMessage(
+    chatId: string,
+    text: string,
+    imagePaths?: string[],
+  ): Promise<void> {
     const contextToken = getContextToken(chatId) || '';
-    await sendText({
-      to: chatId,
-      text,
-      baseUrl: this.baseUrl,
-      token: this.token,
-      contextToken,
+
+    // Parse [IMAGE: /path/to/file.png] markers from text
+    const imageRegex = /\[IMAGE:\s*([^\]]+)\]/gi;
+    const parsedImages: string[] = [];
+    let cleanedText = text.replace(imageRegex, (_, path: string) => {
+      parsedImages.push(path.trim());
+      return '';
     });
+
+    // Merge with any imagePaths from the ACP pipeline
+    const allImages = [...(imagePaths || []), ...parsedImages];
+
+    // Clean up double blank lines left by removed markers
+    cleanedText = cleanedText.replace(/\n{3,}/g, '\n\n').trim();
+
+    // Send text first if non-empty
+    if (cleanedText) {
+      await sendText({
+        to: chatId,
+        text: cleanedText,
+        baseUrl: this.baseUrl,
+        token: this.token,
+        contextToken,
+      });
+    }
+
+    // Send images
+    if (allImages.length) {
+      for (const imagePath of allImages) {
+        try {
+          await sendImage({
+            to: chatId,
+            imagePath,
+            baseUrl: this.baseUrl,
+            token: this.token,
+            contextToken,
+          });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(
+            `[Weixin:${this.name}] Failed to send image ${imagePath}: ${errMsg}\n`,
+          );
+          await sendText({
+            to: chatId,
+            text: `图片发送失败: ${errMsg}`,
+            baseUrl: this.baseUrl,
+            token: this.token,
+            contextToken,
+          });
+        }
+      }
+    }
   }
 
   disconnect(): void {
