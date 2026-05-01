@@ -29,14 +29,16 @@ The `/review` command runs a multi-stage pipeline:
 Step 1:  Determine scope (local diff / PR worktree / file)
 Step 2:  Load project review rules
 Step 3:  Run deterministic analysis (linter, typecheck)    [zero LLM cost]
-Step 4:  5 parallel review agents                          [5 LLM calls]
-           |-- Agent 1: Correctness & Security
-           |-- Agent 2: Code Quality
-           |-- Agent 3: Performance & Efficiency
-           |-- Agent 4: Undirected Audit
-           '-- Agent 5: Build & Test (runs shell commands)
+Step 4:  9 parallel review agents                          [9 LLM calls]
+           |-- Agent 1: Correctness
+           |-- Agent 2: Security
+           |-- Agent 3: Code Quality
+           |-- Agent 4: Performance & Efficiency
+           |-- Agent 5: Test Coverage
+           |-- Agent 6: Undirected Audit (3 personas: 6a/6b/6c)
+           '-- Agent 7: Build & Test (runs shell commands)
 Step 5:  Deduplicate --> Batch verify --> Aggregate         [1 LLM call]
-Step 6:  Reverse audit (find coverage gaps)                 [1 LLM call]
+Step 6:  Iterative reverse audit (1-3 rounds, gap finding) [1-3 LLM calls]
 Step 7:  Present findings + verdict
 Step 8:  Autofix (user-confirmed, optional)
 Step 9:  Post PR inline comments (if requested)
@@ -46,15 +48,17 @@ Step 11: Clean up (remove worktree + temp files)
 
 ### Review Agents
 
-| Agent                             | Focus                                                              |
-| --------------------------------- | ------------------------------------------------------------------ |
-| Agent 1: Correctness & Security   | Logic errors, null handling, race conditions, injection, XSS, SSRF |
-| Agent 2: Code Quality             | Style consistency, naming, duplication, dead code                  |
-| Agent 3: Performance & Efficiency | N+1 queries, memory leaks, unnecessary re-renders, bundle size     |
-| Agent 4: Undirected Audit         | Business logic, boundary interactions, hidden coupling             |
-| Agent 5: Build & Test             | Runs build and test commands, reports failures                     |
+| Agent                             | Focus                                                                                       |
+| --------------------------------- | ------------------------------------------------------------------------------------------- |
+| Agent 1: Correctness              | Logic errors, edge cases, null handling, race conditions, type safety                       |
+| Agent 2: Security                 | Injection, XSS, SSRF, auth bypass, sensitive data exposure                                  |
+| Agent 3: Code Quality             | Style consistency, naming, duplication, dead code                                           |
+| Agent 4: Performance & Efficiency | N+1 queries, memory leaks, unnecessary re-renders, bundle size                              |
+| Agent 5: Test Coverage            | Untested code paths in the diff, missing branch coverage, weak assertions                   |
+| Agent 6: Undirected Audit         | 3 parallel personas (attacker / 3am-oncall / maintainer) — catches cross-dimensional issues |
+| Agent 7: Build & Test             | Runs build and test commands, reports failures                                              |
 
-All agents run in parallel. Findings from Agents 1-4 are verified in a **single batch verification pass** (one agent reviews all findings at once, keeping LLM calls fixed). After verification, a **reverse audit agent** re-reads the entire diff with knowledge of all confirmed findings to catch issues that every other agent missed. Reverse audit findings skip the verification step (the agent already has full context) and are included directly as high-confidence results.
+All agents run in parallel (Agent 6 launches 3 persona variants concurrently, totaling 9 parallel tasks for same-repo reviews). Findings from Agents 1-6 are verified in a **single batch verification pass** (one agent reviews all findings at once, keeping verification cost fixed regardless of finding count). After verification, **iterative reverse audit** runs 1-3 rounds of gap-finding — each round receives the cumulative finding list from prior rounds, so successive rounds focus on whatever's left undiscovered. The loop stops as soon as a round returns "No issues found", or after 3 rounds (hard cap). Reverse audit findings skip verification (the agent already has full context) and are included as high-confidence results.
 
 ## Deterministic Analysis
 
@@ -127,8 +131,8 @@ This runs in **lightweight mode** — no worktree, no linter, no build/test, no 
 
 | Capability                                       | Same-repo | Cross-repo                    |
 | ------------------------------------------------ | --------- | ----------------------------- |
-| LLM review (Agents 1-4 + verify + reverse audit) | ✅        | ✅                            |
-| Agent 5: Build & test                            | ✅        | ❌ (no local codebase)        |
+| LLM review (Agents 1-6 + verify + iterative reverse audit) | ✅        | ✅                            |
+| Agent 7: Build & test                                      | ✅        | ❌ (no local codebase)        |
 | Deterministic analysis (linter/typecheck)        | ✅        | ❌                            |
 | Cross-file impact analysis                       | ✅        | ❌                            |
 | Autofix                                          | ✅        | ❌                            |
@@ -157,6 +161,12 @@ Or, after running `/review 123`, type `post comments` to publish findings withou
 - Nice to have findings (including linter warnings)
 - Low-confidence findings
 
+**Self-authored PRs:** GitHub does not allow you to submit `APPROVE` or `REQUEST_CHANGES` reviews on your own pull request — both fail with HTTP 422. When `/review` detects that the PR author matches the current authenticated user, it automatically downgrades the API event to `COMMENT` regardless of verdict, so the submission still succeeds. The terminal still shows the honest verdict ("Approve" / "Request changes" / "Comment") — only the GitHub-side review event is neutralized. The actual findings still appear as inline comments on specific lines, so substantive feedback is unchanged.
+
+**Re-reviewing a PR with prior Qwen Code comments:** when `/review` runs on a PR that already has previous Qwen Code review comments, it classifies them before posting new ones. Only **same-line overlap** (an existing comment on the same `(path, line)` as a new finding) prompts you to confirm — that's the case where you'd see a visual duplicate on the same code line. Comments from older commits, replied-to comments (treated as resolved), and comments that simply don't overlap with any new finding are silently skipped, with a terminal log line so you know what was filtered.
+
+**CI / build status check before APPROVE:** if the verdict is "Approve", `/review` queries the PR's check-runs and commit statuses before submitting. If any check has failed (or all checks are still pending), the API event is automatically downgraded from `APPROVE` to `COMMENT`, with the review body explaining why. Rationale: the LLM review reads code statically and cannot see runtime test failures; approving while CI is red would be misleading. The inline findings are still posted unchanged. If you want to approve anyway (e.g., a known-flaky CI failure), submit the GitHub approval manually after verifying.
+
 ## Follow-up Actions
 
 After the review, context-aware tips appear as ghost text. Press Tab to accept:
@@ -179,7 +189,7 @@ You can customize review criteria per project. `/review` reads rules from these 
 3. `AGENTS.md` — `## Code Review` section
 4. `QWEN.md` — `## Code Review` section
 
-Rules are injected into the LLM review agents (1-4) as additional criteria. For PR reviews, rules are read from the **base branch** to prevent a malicious PR from injecting bypass rules.
+Rules are injected into the LLM review agents (1-6) as additional criteria. For PR reviews, rules are read from the **base branch** to prevent a malicious PR from injecting bypass rules.
 
 Example `.qwen/review-rules.md`:
 
@@ -246,15 +256,17 @@ For large diffs (>10 modified symbols), analysis prioritizes functions with sign
 
 ## Token Efficiency
 
-The review pipeline uses a fixed number of LLM calls regardless of how many findings are produced:
+The review pipeline uses a bounded number of LLM calls regardless of how many findings are produced:
 
-| Stage                           | LLM calls  | Notes                                               |
-| ------------------------------- | ---------- | --------------------------------------------------- |
-| Deterministic analysis (Step 3) | 0          | Shell commands only                                 |
-| Review agents (Step 4)          | 5 (or 4)   | Run in parallel; Agent 5 skipped in cross-repo mode |
-| Batch verification (Step 5)     | 1          | Single agent verifies all findings at once          |
-| Reverse audit (Step 6)          | 1          | Finds coverage gaps; findings skip verification     |
-| **Total**                       | **7 or 6** | Same-repo: 7; cross-repo: 6 (no Agent 5)            |
+| Stage                            | LLM calls         | Notes                                                |
+| -------------------------------- | ----------------- | ---------------------------------------------------- |
+| Deterministic analysis (Step 3)  | 0                 | Shell commands only                                  |
+| Review agents (Step 4)           | 9 (or 8)          | Run in parallel; Agent 7 skipped in cross-repo mode  |
+| Batch verification (Step 5)      | 1                 | Single agent verifies all findings at once           |
+| Iterative reverse audit (Step 6) | 1-3               | Loops until "No issues found" or 3-round cap         |
+| **Total**                        | **11-13 (10-12)** | Same-repo: 11-13; cross-repo: 10-12 (no Agent 7)     |
+
+Most PRs converge to the lower end of the range (1 reverse audit round); the cap prevents runaway cost on pathological cases.
 
 ## What's NOT Flagged
 
