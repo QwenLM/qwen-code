@@ -5,7 +5,7 @@
  */
 
 /**
- * @fileoverview TaskStop tool — lets the model cancel a running background task.
+ * @fileoverview TaskStop tool — lets the model stop a background task.
  */
 
 import type { Config } from '../config/config.js';
@@ -48,6 +48,29 @@ class TaskStopInvocation extends BaseToolInvocation<
     const agentRegistry = this.config.getBackgroundTaskRegistry();
     const agentEntry = agentRegistry.get(taskId);
     if (agentEntry) {
+      if (agentEntry.status === 'paused') {
+        const abandoned = this.config.abandonBackgroundAgent(taskId);
+        if (!abandoned) {
+          return {
+            llmContent:
+              `Error: Background agent "${taskId}" could not be cancelled ` +
+              `from paused state.`,
+            returnDisplay: 'Task could not be cancelled.',
+            error: {
+              message: `Task could not be cancelled: ${taskId}`,
+              type: ToolErrorType.TASK_STOP_NOT_RUNNING,
+            },
+          };
+        }
+
+        const desc = agentEntry.description;
+        return {
+          llmContent:
+            `Cancelled paused background agent "${taskId}".\n` +
+            `Description: ${desc}`,
+          returnDisplay: `Cancelled: ${desc}`,
+        };
+      }
       if (agentEntry.status !== 'running') {
         return notRunningError('agent', taskId, agentEntry.status);
       }
@@ -91,6 +114,21 @@ class TaskStopInvocation extends BaseToolInvocation<
       };
     }
 
+    const monitorRegistry = this.config.getMonitorRegistry();
+    const monitorEntry = monitorRegistry.get(taskId);
+    if (monitorEntry) {
+      if (monitorEntry.status !== 'running') {
+        return notRunningError('monitor', taskId, monitorEntry.status);
+      }
+      monitorRegistry.cancel(taskId);
+      return {
+        llmContent:
+          `Cancellation requested for monitor "${taskId}".\n` +
+          `Command: ${monitorEntry.command}`,
+        returnDisplay: `Cancelled monitor: ${monitorEntry.description}`,
+      };
+    }
+
     return {
       llmContent: `Error: No background task found with ID "${taskId}".`,
       returnDisplay: 'Task not found.',
@@ -103,7 +141,7 @@ class TaskStopInvocation extends BaseToolInvocation<
 }
 
 function notRunningError(
-  kind: 'agent' | 'shell',
+  kind: 'agent' | 'shell' | 'monitor',
   taskId: string,
   status: string,
 ): ToolResult {
@@ -127,7 +165,7 @@ export class TaskStopTool extends BaseDeclarativeTool<
     super(
       TaskStopTool.Name,
       ToolDisplayNames.TASK_STOP,
-      'Cancel a running background task by its ID. The task ID is returned when the task is launched.',
+      'Stop a background task by its ID. Running agents and shells are cancelled; paused recovered agents are abandoned without resuming them.',
       Kind.Other,
       {
         type: 'object',

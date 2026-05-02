@@ -5,8 +5,14 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { diag } from '@opentelemetry/api';
 import type { Config } from '../config/config.js';
-import { initializeTelemetry, shutdownTelemetry } from './sdk.js';
+import {
+  initializeTelemetry,
+  isTelemetrySdkInitialized,
+  shutdownTelemetry,
+  resolveHttpOtlpUrl,
+} from './sdk.js';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-grpc';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-grpc';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-grpc';
@@ -27,6 +33,68 @@ vi.mock('@opentelemetry/exporter-logs-otlp-http');
 vi.mock('@opentelemetry/exporter-metrics-otlp-http');
 vi.mock('@opentelemetry/sdk-node');
 vi.mock('./gcp-exporters.js');
+vi.mock('./log-to-span-processor.js');
+
+import { LogToSpanProcessor } from './log-to-span-processor.js';
+
+describe('resolveHttpOtlpUrl', () => {
+  it('appends signal path to base collector URL', () => {
+    expect(resolveHttpOtlpUrl('http://collector:4318', 'traces')).toBe(
+      'http://collector:4318/v1/traces',
+    );
+    expect(resolveHttpOtlpUrl('http://collector:4318', 'logs')).toBe(
+      'http://collector:4318/v1/logs',
+    );
+    expect(resolveHttpOtlpUrl('http://collector:4318', 'metrics')).toBe(
+      'http://collector:4318/v1/metrics',
+    );
+  });
+
+  it('handles trailing slash in base URL', () => {
+    expect(resolveHttpOtlpUrl('http://collector:4318/', 'traces')).toBe(
+      'http://collector:4318/v1/traces',
+    );
+    expect(resolveHttpOtlpUrl('http://collector:4318/', 'logs')).toBe(
+      'http://collector:4318/v1/logs',
+    );
+  });
+
+  it('preserves explicit full signal path URL', () => {
+    expect(
+      resolveHttpOtlpUrl('http://collector:4318/v1/traces', 'traces'),
+    ).toBe('http://collector:4318/v1/traces');
+    expect(resolveHttpOtlpUrl('http://collector:4318/v1/logs', 'logs')).toBe(
+      'http://collector:4318/v1/logs',
+    );
+    expect(
+      resolveHttpOtlpUrl('http://collector:4318/v1/metrics', 'metrics'),
+    ).toBe('http://collector:4318/v1/metrics');
+  });
+
+  it('appends signal path when URL has a non-signal custom path', () => {
+    expect(
+      resolveHttpOtlpUrl('http://collector:4318/custom/prefix', 'traces'),
+    ).toBe('http://collector:4318/custom/prefix/v1/traces');
+  });
+
+  it('handles HTTPS URLs', () => {
+    expect(resolveHttpOtlpUrl('https://otel.example.com', 'logs')).toBe(
+      'https://otel.example.com/v1/logs',
+    );
+    expect(resolveHttpOtlpUrl('https://otel.example.com:4318', 'metrics')).toBe(
+      'https://otel.example.com:4318/v1/metrics',
+    );
+  });
+
+  it('preserves query strings when appending signal paths', () => {
+    expect(resolveHttpOtlpUrl('https://host/otlp?token=abc', 'traces')).toBe(
+      'https://host/otlp/v1/traces?token=abc',
+    );
+    expect(
+      resolveHttpOtlpUrl('https://host/otlp?token=abc&foo=bar', 'logs'),
+    ).toBe('https://host/otlp/v1/logs?token=abc&foo=bar');
+  });
+});
 
 describe('Telemetry SDK', () => {
   let mockConfig: Config;
@@ -37,6 +105,9 @@ describe('Telemetry SDK', () => {
       getTelemetryEnabled: () => true,
       getTelemetryOtlpEndpoint: () => 'http://localhost:4317',
       getTelemetryOtlpProtocol: () => 'grpc',
+      getTelemetryOtlpTracesEndpoint: () => undefined,
+      getTelemetryOtlpLogsEndpoint: () => undefined,
+      getTelemetryOtlpMetricsEndpoint: () => undefined,
       getTelemetryTarget: () => 'local',
       getTelemetryUseCollector: () => false,
       getTelemetryOutfile: () => undefined,
@@ -67,7 +138,7 @@ describe('Telemetry SDK', () => {
     expect(NodeSDK.prototype.start).toHaveBeenCalled();
   });
 
-  it('should use HTTP exporters when protocol is http', () => {
+  it('should use HTTP exporters with signal-specific paths when protocol is http', () => {
     vi.spyOn(mockConfig, 'getTelemetryEnabled').mockReturnValue(true);
     vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
     vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
@@ -77,13 +148,13 @@ describe('Telemetry SDK', () => {
     initializeTelemetry(mockConfig);
 
     expect(OTLPTraceExporterHttp).toHaveBeenCalledWith({
-      url: 'http://localhost:4318/',
+      url: 'http://localhost:4318/v1/traces',
     });
     expect(OTLPLogExporterHttp).toHaveBeenCalledWith({
-      url: 'http://localhost:4318/',
+      url: 'http://localhost:4318/v1/logs',
     });
     expect(OTLPMetricExporterHttp).toHaveBeenCalledWith({
-      url: 'http://localhost:4318/',
+      url: 'http://localhost:4318/v1/metrics',
     });
     expect(NodeSDK.prototype.start).toHaveBeenCalled();
   });
@@ -98,15 +169,92 @@ describe('Telemetry SDK', () => {
     );
   });
 
-  it('should parse HTTP endpoint correctly', () => {
+  it('should append signal paths to HTTP endpoint', () => {
     vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
     vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
       'https://my-collector.com',
     );
     initializeTelemetry(mockConfig);
     expect(OTLPTraceExporterHttp).toHaveBeenCalledWith(
-      expect.objectContaining({ url: 'https://my-collector.com/' }),
+      expect.objectContaining({ url: 'https://my-collector.com/v1/traces' }),
     );
+    expect(OTLPLogExporterHttp).toHaveBeenCalledWith(
+      expect.objectContaining({ url: 'https://my-collector.com/v1/logs' }),
+    );
+    expect(OTLPMetricExporterHttp).toHaveBeenCalledWith(
+      expect.objectContaining({ url: 'https://my-collector.com/v1/metrics' }),
+    );
+  });
+
+  it('should use per-signal endpoint overrides when provided', () => {
+    vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+    vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
+      'http://default-collector:4318',
+    );
+    vi.spyOn(mockConfig, 'getTelemetryOtlpTracesEndpoint').mockReturnValue(
+      'http://traces-collector:4318/v1/traces',
+    );
+
+    initializeTelemetry(mockConfig);
+
+    // Traces uses the per-signal override
+    expect(OTLPTraceExporterHttp).toHaveBeenCalledWith({
+      url: 'http://traces-collector:4318/v1/traces',
+    });
+    // Logs and metrics use the base endpoint with paths appended
+    expect(OTLPLogExporterHttp).toHaveBeenCalledWith({
+      url: 'http://default-collector:4318/v1/logs',
+    });
+    expect(OTLPMetricExporterHttp).toHaveBeenCalledWith({
+      url: 'http://default-collector:4318/v1/metrics',
+    });
+  });
+
+  it('should use per-signal overrides without base endpoint', () => {
+    vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+    vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue('');
+    vi.spyOn(mockConfig, 'getTelemetryOtlpTracesEndpoint').mockReturnValue(
+      'http://traces-host/token/api/otlp/traces',
+    );
+    vi.spyOn(mockConfig, 'getTelemetryOtlpMetricsEndpoint').mockReturnValue(
+      'http://metrics-host/token/api/otlp/metrics',
+    );
+    // logs has no override and no base endpoint
+
+    initializeTelemetry(mockConfig);
+
+    // Traces and metrics use per-signal override
+    expect(OTLPTraceExporterHttp).toHaveBeenCalledWith({
+      url: 'http://traces-host/token/api/otlp/traces',
+    });
+    expect(OTLPMetricExporterHttp).toHaveBeenCalledWith({
+      url: 'http://metrics-host/token/api/otlp/metrics',
+    });
+    // Logs falls back to LogToSpanProcessor (bridges logs → spans)
+    expect(OTLPLogExporterHttp).not.toHaveBeenCalled();
+    expect(LogToSpanProcessor).toHaveBeenCalled();
+    expect(NodeSDK.prototype.start).toHaveBeenCalled();
+  });
+
+  it('should warn and skip startup for gRPC per-signal endpoints without base endpoint', () => {
+    const diagWarnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+    try {
+      vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('grpc');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue('');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpTracesEndpoint').mockReturnValue(
+        'http://traces-host/token/api/otlp/traces',
+      );
+
+      initializeTelemetry(mockConfig);
+
+      expect(diagWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Telemetry SDK startup was skipped'),
+      );
+      expect(NodeSDK.prototype.start).not.toHaveBeenCalled();
+      expect(isTelemetrySdkInitialized()).toBe(false);
+    } finally {
+      diagWarnSpy.mockRestore();
+    }
   });
 
   it('should use OTLP exporters when target is gcp but useCollector is true', () => {
@@ -144,5 +292,35 @@ describe('Telemetry SDK', () => {
     expect(OTLPLogExporterHttp).not.toHaveBeenCalled();
     expect(OTLPMetricExporterHttp).not.toHaveBeenCalled();
     expect(NodeSDK.prototype.start).toHaveBeenCalled();
+  });
+
+  it('should not register async process shutdown handlers', () => {
+    const processOnSpy = vi.spyOn(process, 'on');
+    try {
+      initializeTelemetry(mockConfig);
+
+      expect(processOnSpy).not.toHaveBeenCalledWith(
+        'SIGTERM',
+        expect.any(Function),
+      );
+      expect(processOnSpy).not.toHaveBeenCalledWith(
+        'SIGINT',
+        expect.any(Function),
+      );
+      expect(processOnSpy).not.toHaveBeenCalledWith(
+        'exit',
+        expect.any(Function),
+      );
+    } finally {
+      processOnSpy.mockRestore();
+    }
+  });
+
+  it('should mark telemetry uninitialized after shutdown', async () => {
+    initializeTelemetry(mockConfig);
+
+    await shutdownTelemetry();
+
+    expect(isTelemetrySdkInitialized()).toBe(false);
   });
 });

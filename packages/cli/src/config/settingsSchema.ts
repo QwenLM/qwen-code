@@ -287,6 +287,17 @@ const SETTINGS_SCHEMA = {
     mergeStrategy: MergeStrategy.SHALLOW_MERGE,
   },
 
+  proxy: {
+    type: 'string',
+    label: 'Proxy',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: undefined as string | undefined,
+    description:
+      'Proxy URL for CLI HTTP requests. Takes precedence over proxy environment variables when --proxy is not provided.',
+    showInDialog: false,
+  },
+
   general: {
     type: 'object',
     label: 'General',

@@ -21,10 +21,9 @@ const KIND_NAMES = {
 } as const;
 
 /**
- * Pill label: counts running entries grouped by kind while any are
- * running ("1 shell, 2 local agents"), and once everything has terminated
- * switches to a "done" form so the pill still invites reopening the
- * dialog to inspect final state ("3 done").
+ * Pill label: prefer live running counts, then paused resumable agent counts;
+ * once everything is terminal, switch to a generic "done" form so the pill
+ * still invites reopening the dialog to inspect final state.
  */
 export function getPillLabel(entries: readonly DialogEntry[]): string {
   if (entries.length === 0) return '';
@@ -32,6 +31,15 @@ export function getPillLabel(entries: readonly DialogEntry[]): string {
   const running = entries.filter((e) => e.status === 'running');
   if (running.length > 0) {
     return groupAndFormat(running);
+  }
+  const pausedAgents = entries.filter(
+    (e): e is Extract<DialogEntry, { kind: 'agent' }> =>
+      e.kind === 'agent' && e.status === 'paused',
+  );
+  if (pausedAgents.length > 0) {
+    return pausedAgents.length === 1
+      ? '1 local agent paused'
+      : `${pausedAgents.length} local agents paused`;
   }
   // All terminal — collapse into a single tally; per-kind detail isn't
   // useful at this point and would clutter the footer.

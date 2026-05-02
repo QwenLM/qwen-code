@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useState } from 'react';
 import { act } from '@testing-library/react';
 import { render } from 'ink-testing-library';
-import type { BackgroundTaskEntry, Config } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
 import { BackgroundTasksDialog } from './BackgroundTasksDialog.js';
 import {
   BackgroundTaskViewProvider,
@@ -17,6 +17,7 @@ import {
 } from '../../contexts/BackgroundTaskViewContext.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import {
+  type AgentDialogEntry,
   useBackgroundTaskView,
   type DialogEntry,
 } from '../../hooks/useBackgroundTaskView.js';
@@ -38,7 +39,7 @@ vi.mock('../../hooks/useKeypress.js', () => ({
 const mockedUseBackgroundTaskView = vi.mocked(useBackgroundTaskView);
 const mockedUseKeypress = vi.mocked(useKeypress);
 
-function entry(overrides: Partial<BackgroundTaskEntry> = {}): DialogEntry {
+function entry(overrides: Partial<AgentDialogEntry> = {}): DialogEntry {
   return {
     kind: 'agent',
     agentId: 'a',
@@ -58,6 +59,8 @@ interface ProbeHandle {
 
 interface Harness {
   cancel: ReturnType<typeof vi.fn>;
+  resume: ReturnType<typeof vi.fn>;
+  abandon: ReturnType<typeof vi.fn>;
   setEntries: (next: readonly DialogEntry[]) => void;
   pressKey: (key: { name?: string; sequence?: string }) => void;
   call: (fn: () => void) => void;
@@ -73,6 +76,8 @@ function setup(initial: readonly DialogEntry[]): Harness {
   });
 
   const cancel = vi.fn();
+  const resume = vi.fn();
+  const abandon = vi.fn();
   // Stub registry that resolves `.get(agentId)` against the current entries
   // snapshot — the dialog now re-reads agent entries via `.get()` to pick up
   // live activity/stats mutations the snapshot misses.
@@ -88,6 +93,8 @@ function setup(initial: readonly DialogEntry[]): Harness {
         return match;
       },
     }),
+    resumeBackgroundAgent: resume,
+    abandonBackgroundAgent: abandon,
   } as unknown as Config;
 
   const handle: { current: ProbeHandle | null } = { current: null };
@@ -127,6 +134,8 @@ function setup(initial: readonly DialogEntry[]): Harness {
 
   return {
     cancel,
+    resume,
+    abandon,
     setEntries(next) {
       handlers.length = 0;
       currentEntries = next;
@@ -215,5 +224,70 @@ describe('BackgroundTasksDialog', () => {
 
     h.setEntries([]);
     expect(h.probe.current!.state.selectedIndex).toBe(0);
+  });
+
+  it('resumes a paused task with the r key', () => {
+    const paused = entry({ agentId: 'a', status: 'paused' });
+    const h = setup([paused]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.pressKey({ sequence: 'r' });
+
+    expect(h.resume).toHaveBeenCalledWith('a');
+  });
+
+  it('abandons a paused task with the x key', () => {
+    const paused = entry({ agentId: 'a', status: 'paused' });
+    const h = setup([paused]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.pressKey({ sequence: 'x' });
+
+    expect(h.abandon).toHaveBeenCalledWith('a');
+  });
+
+  it('does not resume blocked paused tasks and surfaces the blocked reason', () => {
+    const blocked = entry({
+      agentId: 'a',
+      status: 'paused',
+      resumeBlockedReason: 'Legacy fork bootstrap transcript is missing.',
+    });
+    const h = setup([blocked]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    expect(h.lastFrame()).not.toContain('r resume');
+    expect(h.lastFrame()).toContain('x abandon');
+
+    h.pressKey({ sequence: 'r' });
+    expect(h.resume).not.toHaveBeenCalled();
+
+    h.call(() => h.probe.current!.actions.enterDetail());
+    const detailFrame = h.lastFrame();
+    expect(detailFrame).toContain('Resume blocked');
+    expect(detailFrame).toContain(
+      'Legacy fork bootstrap transcript is missing.',
+    );
+    expect(detailFrame).not.toContain('r resume');
+  });
+
+  it('still allows resume for paused tasks that only have a stale error', () => {
+    const paused = entry({
+      agentId: 'a',
+      status: 'paused',
+      error: 'Temporary resume setup failed.',
+    });
+    const h = setup([paused]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    expect(h.lastFrame()).toContain('r resume');
+
+    h.pressKey({ sequence: 'r' });
+    expect(h.resume).toHaveBeenCalledWith('a');
+
+    h.call(() => h.probe.current!.actions.enterDetail());
+    const detailFrame = h.lastFrame();
+    expect(detailFrame).toContain('Error');
+    expect(detailFrame).toContain('Temporary resume setup failed.');
+    expect(detailFrame).toContain('r resume');
   });
 });

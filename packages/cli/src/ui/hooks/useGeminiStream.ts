@@ -2216,6 +2216,15 @@ export const useGeminiStream = (
     }>
   >([]);
   const [notificationTrigger, setNotificationTrigger] = useState(0);
+  const notificationQueueSessionIdRef = useRef(sessionStates.sessionId);
+
+  useEffect(() => {
+    if (notificationQueueSessionIdRef.current === sessionStates.sessionId) {
+      return;
+    }
+    notificationQueueSessionIdRef.current = sessionStates.sessionId;
+    notificationQueueRef.current = [];
+  }, [sessionStates.sessionId]);
 
   // Start the cron scheduler on mount, stop on unmount.
   // Cron fires enqueue onto the shared notification queue.
@@ -2243,6 +2252,22 @@ export const useGeminiStream = (
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundTaskRegistry();
+    registry.setNotificationCallback((displayText, modelText) => {
+      notificationQueueRef.current.push({
+        displayText,
+        modelText,
+        sendMessageType: SendMessageType.Notification,
+      });
+      setNotificationTrigger((n) => n + 1);
+    });
+    return () => {
+      registry.setNotificationCallback(undefined);
+    };
+  }, [config]);
+
+  // Register monitor notification callback onto the shared queue.
+  useEffect(() => {
+    const registry = config.getMonitorRegistry();
     registry.setNotificationCallback((displayText, modelText) => {
       notificationQueueRef.current.push({
         displayText,
