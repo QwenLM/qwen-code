@@ -16,8 +16,11 @@ if not "%QWEN_INSTALL_VERSION%"=="" set "VERSION=%QWEN_INSTALL_VERSION%"
 set "NPM_REGISTRY=https://registry.npmmirror.com"
 if not "%QWEN_NPM_REGISTRY%"=="" set "NPM_REGISTRY=%QWEN_NPM_REGISTRY%"
 set "INSTALL_BASE=%LOCALAPPDATA%\qwen-code"
+if not "%QWEN_INSTALL_ROOT%"=="" set "INSTALL_BASE=%QWEN_INSTALL_ROOT%"
 set "INSTALL_DIR=%INSTALL_BASE%\qwen-code"
+if not "%QWEN_INSTALL_LIB_DIR%"=="" set "INSTALL_DIR=%QWEN_INSTALL_LIB_DIR%"
 set "INSTALL_BIN_DIR=%INSTALL_BASE%\bin"
+if not "%QWEN_INSTALL_BIN_DIR%"=="" set "INSTALL_BIN_DIR=%QWEN_INSTALL_BIN_DIR%"
 
 :parse_args
 if "%~1"=="" goto end_parse
@@ -164,6 +167,7 @@ if !STANDALONE_STATUS! EQU 2 (
     exit /b 0
 )
 
+echo WARNING: Standalone install failed. Retry with --method npm to use npm, or --method standalone to debug the standalone failure.
 exit /b !STANDALONE_STATUS!
 
 :usage
@@ -216,8 +220,20 @@ echo ERROR: --mirror must be github or aliyun.
 exit /b 1
 
 :validate_mirror_ok
+call :ValidateHttpsUrl "!BASE_URL!" "--base-url"
+if %ERRORLEVEL% NEQ 0 exit /b 1
+
 call :ValidateSource
 exit /b %ERRORLEVEL%
+
+:ValidateHttpsUrl
+set "URL_VALUE=%~1"
+set "URL_OPTION=%~2"
+if "!URL_VALUE!"=="" exit /b 0
+if /i "!URL_VALUE:~0,8!"=="https://" exit /b 0
+
+echo ERROR: !URL_OPTION! must start with https://
+exit /b 1
 
 :ValidateSource
 if "!SOURCE!"=="unknown" exit /b 0
@@ -268,15 +284,20 @@ set "STANDALONE_BASE_URL=https://github.com/QwenLM/qwen-code/releases/download/!
 exit /b 0
 
 :UrlExists
-set "CHECK_URL=%~1"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$request = [Net.WebRequest]::Create('%CHECK_URL%'); $request.Method = 'HEAD'; try { $response = $request.GetResponse(); $response.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
-exit /b %ERRORLEVEL%
+set "QWEN_CHECK_URL=%~1"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$request = [Net.WebRequest]::Create($env:QWEN_CHECK_URL); $request.Method = 'HEAD'; try { $response = $request.GetResponse(); $response.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
+set "PS_STATUS=%ERRORLEVEL%"
+set "QWEN_CHECK_URL="
+exit /b %PS_STATUS%
 
 :DownloadFile
-set "DOWNLOAD_URL=%~1"
-set "DOWNLOAD_DEST=%~2"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; (New-Object Net.WebClient).DownloadFile('%DOWNLOAD_URL%', '%DOWNLOAD_DEST%')"
-exit /b %ERRORLEVEL%
+set "QWEN_DOWNLOAD_URL=%~1"
+set "QWEN_DOWNLOAD_DEST=%~2"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; (New-Object Net.WebClient).DownloadFile($env:QWEN_DOWNLOAD_URL, $env:QWEN_DOWNLOAD_DEST)"
+set "PS_STATUS=%ERRORLEVEL%"
+set "QWEN_DOWNLOAD_URL="
+set "QWEN_DOWNLOAD_DEST="
+exit /b %PS_STATUS%
 
 :VerifyChecksum
 set "ARCHIVE_FILE=%~1"
@@ -284,13 +305,12 @@ set "CHECKSUM_SOURCE=%~2"
 set "ARCHIVE_NAME=%~3"
 set "CHECKSUM_FILE=!CHECKSUM_SOURCE!"
 set "TEMP_CHECKSUM="
-set "REQUIRE_CHECKSUM=0"
+set "REQUIRE_CHECKSUM=1"
 
 if "!CHECKSUM_FILE!"=="" (
     for %%I in ("!ARCHIVE_FILE!") do set "CHECKSUM_FILE=%%~dpISHA256SUMS"
 ) else (
-    echo !CHECKSUM_FILE!| findstr /R /C:"^https*://" >nul
-    if !ERRORLEVEL! EQU 0 (
+    if /i "!CHECKSUM_FILE:~0,8!"=="https://" (
         set "REQUIRE_CHECKSUM=1"
         set "TEMP_CHECKSUM=%TEMP%\qwen-code-checksums-%RANDOM%%RANDOM%.txt"
         call :DownloadFile "!CHECKSUM_FILE!" "!TEMP_CHECKSUM!"
@@ -305,7 +325,7 @@ if "!CHECKSUM_FILE!"=="" (
 
 if not exist "!CHECKSUM_FILE!" (
     if "!REQUIRE_CHECKSUM!"=="1" (
-        echo ERROR: SHA256SUMS not found; cannot verify remote archive.
+        echo ERROR: SHA256SUMS not found; cannot verify archive.
         exit /b 1
     )
     echo WARNING: SHA256SUMS not found; skipping checksum verification.
@@ -336,7 +356,7 @@ if not "!TEMP_CHECKSUM!"=="" del /F /Q "!TEMP_CHECKSUM!" >nul 2>&1
 
 if "!ACTUAL_HASH!"=="" (
     if "!REQUIRE_CHECKSUM!"=="1" (
-        echo ERROR: Could not calculate SHA-256 checksum for remote archive.
+        echo ERROR: Could not calculate SHA-256 checksum for archive.
         exit /b 1
     )
     echo WARNING: Could not calculate SHA-256 checksum; skipping checksum verification.
@@ -405,10 +425,21 @@ if !ERRORLEVEL! NEQ 0 (
 
 set "EXTRACT_DIR=!TEMP_DIR!\extract"
 mkdir "!EXTRACT_DIR!" >nul 2>&1
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath '%ARCHIVE_FILE%' -DestinationPath '%EXTRACT_DIR%' -Force"
-if !ERRORLEVEL! NEQ 0 (
+set "QWEN_ARCHIVE_FILE=!ARCHIVE_FILE!"
+set "QWEN_EXTRACT_DIR=!EXTRACT_DIR!"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath $env:QWEN_ARCHIVE_FILE -DestinationPath $env:QWEN_EXTRACT_DIR -Force"
+set "PS_STATUS=!ERRORLEVEL!"
+set "QWEN_ARCHIVE_FILE="
+set "QWEN_EXTRACT_DIR="
+if !PS_STATUS! NEQ 0 (
     if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
     echo ERROR: Failed to extract standalone archive.
+    exit /b 1
+)
+
+call :RejectArchiveLinks "!EXTRACT_DIR!"
+if !ERRORLEVEL! NEQ 0 (
+    if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
     exit /b 1
 )
 
@@ -426,9 +457,28 @@ if not exist "!EXTRACT_DIR!\qwen-code\node\node.exe" (
 
 if not exist "!INSTALL_BASE!" mkdir "!INSTALL_BASE!"
 if not exist "!INSTALL_BIN_DIR!" mkdir "!INSTALL_BIN_DIR!"
+for %%I in ("!INSTALL_DIR!") do set "INSTALL_PARENT=%%~dpI"
+if not exist "!INSTALL_PARENT!" mkdir "!INSTALL_PARENT!"
 
 set "NEW_INSTALL_DIR=!INSTALL_DIR!.new"
 set "OLD_INSTALL_DIR=!INSTALL_DIR!.old"
+
+call :EnsureManagedInstallDir "!INSTALL_DIR!"
+if !ERRORLEVEL! NEQ 0 (
+    if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
+    exit /b 1
+)
+call :EnsureManagedInstallDir "!NEW_INSTALL_DIR!"
+if !ERRORLEVEL! NEQ 0 (
+    if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
+    exit /b 1
+)
+call :EnsureManagedInstallDir "!OLD_INSTALL_DIR!"
+if !ERRORLEVEL! NEQ 0 (
+    if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
+    exit /b 1
+)
+
 if exist "!NEW_INSTALL_DIR!" rmdir /S /Q "!NEW_INSTALL_DIR!" >nul 2>&1
 if exist "!OLD_INSTALL_DIR!" rmdir /S /Q "!OLD_INSTALL_DIR!" >nul 2>&1
 move /Y "!EXTRACT_DIR!\qwen-code" "!NEW_INSTALL_DIR!" >nul
@@ -438,7 +488,14 @@ if !ERRORLEVEL! NEQ 0 (
     exit /b 1
 )
 
-if exist "!INSTALL_DIR!" move /Y "!INSTALL_DIR!" "!OLD_INSTALL_DIR!" >nul
+if exist "!INSTALL_DIR!" (
+    move /Y "!INSTALL_DIR!" "!OLD_INSTALL_DIR!" >nul
+    if !ERRORLEVEL! NEQ 0 (
+        if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
+        echo ERROR: Failed to back up existing install at !INSTALL_DIR!.
+        exit /b 1
+    )
+)
 move /Y "!NEW_INSTALL_DIR!" "!INSTALL_DIR!" >nul
 if !ERRORLEVEL! NEQ 0 (
     if exist "!OLD_INSTALL_DIR!" move /Y "!OLD_INSTALL_DIR!" "!INSTALL_DIR!" >nul
@@ -461,6 +518,23 @@ if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
 echo SUCCESS: Qwen Code standalone archive installed successfully.
 echo INFO: Installed to !INSTALL_DIR!
 exit /b 0
+
+:RejectArchiveLinks
+set "QWEN_EXTRACT_DIR=%~1"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$item = Get-ChildItem -LiteralPath $env:QWEN_EXTRACT_DIR -Recurse -Force | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 } | Select-Object -First 1; if ($item) { exit 1 }"
+set "PS_STATUS=%ERRORLEVEL%"
+set "QWEN_EXTRACT_DIR="
+if %PS_STATUS% NEQ 0 echo ERROR: Archive contains symlinks or reparse points; refusing to install.
+exit /b %PS_STATUS%
+
+:EnsureManagedInstallDir
+set "MANAGED_DIR=%~1"
+if not exist "!MANAGED_DIR!" exit /b 0
+if exist "!MANAGED_DIR!\manifest.json" exit /b 0
+
+echo ERROR: !MANAGED_DIR! exists but is not a Qwen Code standalone install.
+echo ERROR: Refusing to overwrite it. Move or remove it manually, then rerun the installer.
+exit /b 1
 
 :RequireNode
 where node >nul 2>&1

@@ -2,7 +2,7 @@
 
 /**
  * @license
- * Copyright 2025 Qwen
+ * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -342,6 +342,12 @@ function writeSha256Sums(outDir) {
         (entry.endsWith('.tar.gz') || entry.endsWith('.zip')),
     )
     .sort();
+
+  if (entries.length === 0) {
+    fail(
+      `No qwen-code archives found in ${outDir}; refusing to write empty SHA256SUMS.`,
+    );
+  }
 
   const lines = entries.map((entry) => {
     const filePath = path.join(outDir, entry);

@@ -86,9 +86,14 @@ ARCHIVE_PATH="${QWEN_INSTALL_ARCHIVE:-}"
 VERSION="${QWEN_INSTALL_VERSION:-latest}"
 NPM_REGISTRY="${QWEN_NPM_REGISTRY:-https://registry.npmmirror.com}"
 INSTALL_ROOT="${QWEN_INSTALL_ROOT:-${HOME:-}/.local}"
-INSTALL_LIB_PARENT="${QWEN_INSTALL_LIB_PARENT:-${INSTALL_ROOT}/lib}"
+if [[ -n "${QWEN_INSTALL_LIB_DIR:-}" ]]; then
+    INSTALL_LIB_DIR="${QWEN_INSTALL_LIB_DIR}"
+    INSTALL_LIB_PARENT="$(dirname "${INSTALL_LIB_DIR}")"
+else
+    INSTALL_LIB_PARENT="${QWEN_INSTALL_LIB_PARENT:-${INSTALL_ROOT}/lib}"
+    INSTALL_LIB_DIR="${INSTALL_LIB_PARENT}/qwen-code"
+fi
 INSTALL_BIN_DIR="${QWEN_INSTALL_BIN_DIR:-${INSTALL_ROOT}/bin}"
-INSTALL_LIB_DIR="${QWEN_INSTALL_LIB_DIR:-${INSTALL_LIB_PARENT}/qwen-code}"
 
 validate_source() {
     if [[ "${SOURCE}" == "unknown" ]]; then
@@ -100,6 +105,22 @@ validate_source() {
     fi
 
     log_error "--source may only contain letters, numbers, dot, underscore, or dash."
+    exit 1
+}
+
+validate_https_url() {
+    local value="$1"
+    local option_name="$2"
+
+    if [[ -z "${value}" ]]; then
+        return 0
+    fi
+
+    if [[ "${value}" == https://* ]]; then
+        return 0
+    fi
+
+    log_error "${option_name} must start with https://"
     exit 1
 }
 
@@ -124,6 +145,7 @@ validate_options() {
             ;;
     esac
 
+    validate_https_url "${BASE_URL}" "--base-url"
     validate_source
 }
 
@@ -158,6 +180,7 @@ while [[ $# -gt 0 ]]; do
                 log_error "--base-url requires a value"
                 exit 1
             fi
+            validate_https_url "$2" "--base-url"
             BASE_URL="$2"
             shift 2
             ;;
@@ -467,12 +490,10 @@ verify_checksum() {
     local archive_name="$3"
     local checksum_file="${checksum_source}"
     local temp_checksum=""
-    local checksum_required="false"
 
     if [[ -z "${checksum_file}" ]]; then
         checksum_file="$(dirname "${archive_path}")/SHA256SUMS"
     elif [[ "${checksum_file}" == http://* || "${checksum_file}" == https://* ]]; then
-        checksum_required="true"
         temp_checksum="$(mktemp)"
         if ! download_file "${checksum_file}" "${temp_checksum}"; then
             rm -f "${temp_checksum}"
@@ -483,35 +504,24 @@ verify_checksum() {
     fi
 
     if [[ ! -f "${checksum_file}" ]]; then
-        if [[ "${checksum_required}" == "true" ]]; then
-            log_error "SHA256SUMS not found; cannot verify remote archive."
-            return 1
-        fi
-        log_warning "SHA256SUMS not found; skipping checksum verification."
-        return 0
+        rm -f "${temp_checksum}"
+        log_error "SHA256SUMS not found; cannot verify archive."
+        return 1
     fi
 
     local expected
     expected=$(grep -E "(^|[[:space:]])[*]?${archive_name}$" "${checksum_file}" | awk '{print $1}' | head -n 1)
     if [[ -z "${expected}" ]]; then
         rm -f "${temp_checksum}"
-        if [[ "${checksum_required}" == "true" ]]; then
-            log_error "Checksum entry for ${archive_name} not found."
-            return 1
-        fi
-        log_warning "Checksum entry for ${archive_name} not found; skipping checksum verification."
-        return 0
+        log_error "Checksum entry for ${archive_name} not found."
+        return 1
     fi
 
     local actual
     if ! actual=$(sha256_file "${archive_path}"); then
         rm -f "${temp_checksum}"
-        if [[ "${checksum_required}" == "true" ]]; then
-            log_error "No SHA-256 utility found; cannot verify remote archive."
-            return 1
-        fi
-        log_warning "No SHA-256 utility found; skipping checksum verification."
-        return 0
+        log_error "No SHA-256 utility found; cannot verify archive."
+        return 1
     fi
 
     rm -f "${temp_checksum}"
@@ -546,6 +556,29 @@ extract_archive() {
             return 1
             ;;
     esac
+
+    local symlink_entry
+    symlink_entry=$(find "${destination}" -type l -print -quit)
+    if [[ -n "${symlink_entry}" ]]; then
+        log_error "Archive contains symlinks; refusing to install."
+        return 1
+    fi
+}
+
+ensure_managed_install_dir() {
+    local install_dir="$1"
+
+    if [[ ! -e "${install_dir}" ]]; then
+        return 0
+    fi
+
+    if [[ -f "${install_dir}/manifest.json" ]]; then
+        return 0
+    fi
+
+    log_error "${install_dir} exists but is not a Qwen Code standalone install."
+    log_error "Refusing to overwrite it. Move or remove it manually, then rerun the installer."
+    return 1
 }
 
 install_standalone() {
@@ -608,13 +641,13 @@ install_standalone() {
         return 1
     fi
 
-    if [[ ! -x "${extract_dir}/qwen-code/bin/qwen" ]]; then
+    if [[ ! -f "${extract_dir}/qwen-code/bin/qwen" || -L "${extract_dir}/qwen-code/bin/qwen" || ! -x "${extract_dir}/qwen-code/bin/qwen" ]]; then
         log_error "Archive does not contain qwen-code/bin/qwen."
         rm -rf "${temp_dir}"
         return 1
     fi
 
-    if [[ ! -x "${extract_dir}/qwen-code/node/bin/node" ]]; then
+    if [[ ! -f "${extract_dir}/qwen-code/node/bin/node" || -L "${extract_dir}/qwen-code/node/bin/node" || ! -x "${extract_dir}/qwen-code/node/bin/node" ]]; then
         log_error "Archive does not contain executable qwen-code/node/bin/node."
         rm -rf "${temp_dir}"
         return 1
@@ -624,6 +657,12 @@ install_standalone() {
 
     local new_install_dir="${INSTALL_LIB_DIR}.new"
     local old_install_dir="${INSTALL_LIB_DIR}.old"
+    if ! ensure_managed_install_dir "${INSTALL_LIB_DIR}" ||
+        ! ensure_managed_install_dir "${new_install_dir}" ||
+        ! ensure_managed_install_dir "${old_install_dir}"; then
+        rm -rf "${temp_dir}"
+        return 1
+    fi
     rm -rf "${new_install_dir}" "${old_install_dir}"
     mv "${extract_dir}/qwen-code" "${new_install_dir}"
 
@@ -752,6 +791,7 @@ main() {
                     install_npm
                     print_final_instructions "$(get_npm_global_bin)"
                 else
+                    log_warning "Standalone install failed. Retry with --method npm to use npm, or --method standalone to debug the standalone failure."
                     exit "${standalone_status}"
                 fi
             fi

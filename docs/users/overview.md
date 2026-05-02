@@ -31,7 +31,7 @@ powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou
 > immediately available on PATH. If the installation fails, please refer to
 > [Manual Installation](./quickstart#manual-installation) in the Quickstart
 > guide. For offline installation, download a release archive and run the
-> installer with `--archive PATH`.
+> installer with `--archive PATH`; keep `SHA256SUMS` next to the archive.
 
 ### Start using Qwen Code:
 

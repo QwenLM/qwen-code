@@ -14,8 +14,9 @@ Run from the repository root after `npm run bundle && npm run prepare:package`.
 
 1. Build a standalone archive for the current target with a local Node.js
    archive.
-2. Create a temporary `HOME`.
-3. Run:
+2. Keep the generated `SHA256SUMS` next to the archive.
+3. Create a temporary `HOME`.
+4. Run:
 
    ```bash
    HOME="$tmp_home" bash scripts/installation/install-qwen-with-source.sh \
@@ -24,11 +25,13 @@ Run from the repository root after `npm run bundle && npm run prepare:package`.
      --source github
    ```
 
-4. Expected:
+5. Expected:
    - `$tmp_home/.local/lib/qwen-code` exists.
    - `$tmp_home/.local/bin/qwen` exists and is executable.
    - `$tmp_home/.qwen/source.json` contains `{"source":"github"}`.
    - Installer does not write `.bashrc`, `.zshrc`, `.npmrc`, or npm prefix.
+   - Installer rejects the same archive after tampering with its contents.
+   - Installer rejects the archive if `SHA256SUMS` is missing.
 
 ### Unix npm Fallback
 
@@ -74,7 +77,7 @@ For a release candidate:
 
 1. Download `SHA256SUMS` and all archives from GitHub Release.
 2. Verify checksums locally.
-3. Sync the same files to OSS/CDN.
+3. Sync the same files to OSS/CDN under both `vX.Y.Z/` and `latest/`.
 4. Download one archive from GitHub and one from OSS/CDN.
 5. Confirm byte-identical checksums.
 6. Run installer with:

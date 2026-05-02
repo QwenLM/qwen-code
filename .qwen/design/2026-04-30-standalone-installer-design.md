@@ -80,6 +80,9 @@ existing ESM bundle without requiring a user-managed Node.js installation.
    user install directory, and expose `qwen`.
 5. If the archive does not exist, fall back to npm.
 
+Local `--archive` installs also require a `SHA256SUMS` file next to the archive.
+This keeps offline installs deterministic without trusting an unchecked tarball.
+
 `--method standalone` follows the same standalone path, but a missing or failed
 standalone asset is fatal.
 
@@ -120,11 +123,14 @@ https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code/vX.Y.Z
 ```
 
 All mirrors must serve byte-identical artifacts and the same `SHA256SUMS`.
+Aliyun OSS/CDN does not have GitHub's `releases/latest/download` redirect, so
+release publishing must maintain both `vX.Y.Z/` and `latest/` directories.
 
 ## Safety
 
 - Remote standalone installs require checksum verification.
-- Local archive installs do not require network access.
+- Local archive installs do not require network access, but they still require
+  an adjacent `SHA256SUMS` file.
 - The installer only deletes temporary extraction directories and the previous
   managed standalone install directory.
 - npm fallback does not change npm prefix, npmrc, or PATH.

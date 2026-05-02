@@ -424,6 +424,11 @@ jobs:
 
           ls -la dist/standalone
           cat dist/standalone/SHA256SUMS
+          archive_count="$(grep -c '^[0-9a-f]' dist/standalone/SHA256SUMS)"
+          if [[ "${archive_count}" -ne 5 ]]; then
+            echo "::error::Expected 5 standalone checksums, found ${archive_count}"
+            exit 1
+          fi
 
       - name: 'Publish @qwen-code/qwen-code'
         working-directory: 'dist'

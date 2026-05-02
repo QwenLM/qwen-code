@@ -38,8 +38,8 @@ powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou
 >
 > It's recommended to restart your terminal after installation if `qwen` is not
 > immediately available on PATH. For offline installation, download a release
-> archive such as `qwen-code-linux-x64.tar.gz` or `qwen-code-win-x64.zip`, then
-> run the installer with `--archive PATH`.
+> archive such as `qwen-code-linux-x64.tar.gz` or `qwen-code-win-x64.zip` plus
+> `SHA256SUMS`, then run the installer with `--archive PATH`.
 
 ### Manual Installation
 

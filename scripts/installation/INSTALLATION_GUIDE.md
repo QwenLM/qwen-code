@@ -56,7 +56,7 @@ The default method is `detect`:
 
 1. Detect the current platform.
 2. Try to download and install the matching standalone archive.
-3. Verify the archive with `SHA256SUMS` when available.
+3. Verify the archive with `SHA256SUMS`.
 4. Fall back to npm if the standalone archive is not available.
 
 You can force a method:
@@ -98,6 +98,7 @@ bash install-qwen-with-source.sh --method npm --registry https://registry.npmjs.
 bash install-qwen-with-source.sh --mirror aliyun
 
 # Install an offline archive
+# SHA256SUMS must be in the same directory.
 bash install-qwen-with-source.sh --archive ./qwen-code-linux-x64.tar.gz
 ```
 
@@ -125,6 +126,7 @@ REM Use the Aliyun standalone mirror
 install-qwen-with-source.bat --mirror aliyun
 
 REM Install an offline archive
+REM SHA256SUMS must be in the same directory.
 install-qwen-with-source.bat --archive qwen-code-win-x64.zip
 ```
 
@@ -132,6 +134,9 @@ Standalone installs to:
 
 - Runtime: `%LOCALAPPDATA%\qwen-code\qwen-code`
 - Shim: `%LOCALAPPDATA%\qwen-code\bin\qwen.cmd`
+
+Override with `QWEN_INSTALL_ROOT`, `QWEN_INSTALL_LIB_DIR`, or
+`QWEN_INSTALL_BIN_DIR` when needed.
 
 Restart the terminal if `qwen` is not immediately available on PATH.
 
@@ -157,7 +162,12 @@ Environment variables:
 - `QWEN_NPM_REGISTRY`
 
 Use `--base-url` for private mirrors. The URL must contain
-`qwen-code-<target>` archives and `SHA256SUMS` in the same directory.
+`qwen-code-<target>` archives and `SHA256SUMS` in the same directory. Custom
+base URLs must use `https://`.
+
+For Aliyun OSS/CDN, release publishing must upload byte-identical artifacts to
+both the versioned directory, for example `v0.16.0/`, and the `latest/`
+directory used by the default installer path.
 
 ## Supported Source Values
 
