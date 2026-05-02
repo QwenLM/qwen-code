@@ -815,6 +815,42 @@ describe('AnthropicContentConverter', () => {
       });
     });
 
+    it('preserves thinking-only assistant turns rather than emit empty content (Anthropic rejects content: [])', () => {
+      // A turn whose only blocks are thinking/redacted_thinking can occur
+      // when a previous round was cut off by max_tokens before any text or
+      // tool_use was emitted. Stripping unconditionally would leave
+      // `content: []`, which Anthropic API rejects, and dropping the message
+      // would break user/assistant alternation. Keep the original blocks
+      // instead — DeepSeek empirically tolerates the residual mismatch.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'pondering',
+                  thought: true,
+                  thoughtSignature: 'sig',
+                },
+              ],
+            },
+            { role: 'user', parts: [{ text: 'Continue' }] },
+          ],
+        },
+        { stripAssistantThinking: true },
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'pondering', signature: 'sig' },
+        ],
+      });
+    });
+
     it('strips thinking blocks from assistant turns when stripAssistantThinking is set', () => {
       // suggestionGenerator / forkedAgent path: history has real thought
       // parts but the side-query disables thinking. The converter must drop

@@ -577,6 +577,15 @@ export class AnthropicContentConverter {
    * Used by DeepSeek when thinking mode is off but session history still
    * has `thought: true` parts — keeps the request body in sync with the
    * absent top-level `thinking` config.
+   *
+   * If stripping would leave an assistant message with no content blocks
+   * (a thinking-only turn, e.g. one cut off by max_tokens before any text
+   * or tool_use was emitted), we keep the original blocks. An empty
+   * `content: []` is rejected by the Anthropic API, and dropping the
+   * message would break the required user/assistant alternation. DeepSeek
+   * empirically tolerates the residual `thinking-block + no-thinking-config`
+   * shape (verified against api.deepseek.com/anthropic), so leaving it as
+   * an unaltered passthrough is the safer fallback.
    */
   private stripThinkingFromAssistantMessages(
     messages: AnthropicMessageParam[],
@@ -589,6 +598,7 @@ export class AnthropicContentConverter {
         const t = (block as { type?: string }).type;
         return t !== 'thinking' && t !== 'redacted_thinking';
       });
+      if (filtered.length === 0) continue;
       if (filtered.length !== message.content.length) {
         message.content = filtered;
       }
