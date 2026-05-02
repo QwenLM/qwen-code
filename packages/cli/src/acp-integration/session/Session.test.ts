@@ -560,6 +560,40 @@ describe('Session', () => {
       });
     });
 
+    it('honors explicit no-input override for built-in commands with subCommands', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'doctor',
+          description: 'Run installation and environment diagnostics',
+          kind: 'built-in',
+          acceptsInput: false,
+          subCommands: [
+            {
+              name: 'memory',
+              description: 'Show current process memory diagnostics',
+              kind: 'built-in',
+            },
+          ],
+        },
+      ]);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            {
+              name: 'doctor',
+              description: 'Run installation and environment diagnostics',
+              input: null,
+            },
+          ],
+        },
+      });
+    });
+
     it('attaches available skills to available_commands_update metadata', async () => {
       getAvailableCommandsSpy.mockResolvedValueOnce([
         {

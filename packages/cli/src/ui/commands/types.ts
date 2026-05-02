@@ -363,6 +363,12 @@ export interface SlashCommand {
   argumentHint?: string;
 
   /**
+   * Whether command-picker clients should wait for additional user input before
+   * submitting this command. Defaults are inferred from command metadata.
+   */
+  acceptsInput?: boolean;
+
+  /**
    * Describes when to use this command — injected into the model-visible
    * description for modelInvocable commands.
    */

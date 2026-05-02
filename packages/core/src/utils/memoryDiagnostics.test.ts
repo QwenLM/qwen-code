@@ -26,8 +26,8 @@ describe('collectMemoryDiagnostics', () => {
         total_heap_size_executable: 0,
         total_physical_size: 2_000,
         used_heap_size: 1_600,
-        malloced_memory: 100,
-        peak_malloced_memory: 200,
+        malloced_memory: 4_000,
+        peak_malloced_memory: 4_500,
         does_zap_garbage: 0,
         number_of_native_contexts: 2,
         number_of_detached_contexts: 1,
@@ -88,8 +88,8 @@ describe('collectMemoryDiagnostics', () => {
         heapSizeLimit: 2_000,
         totalHeapSize: 2_000,
         usedHeapSize: 1_600,
-        mallocedMemory: 100,
-        peakMallocedMemory: 200,
+        mallocedMemory: 4_000,
+        peakMallocedMemory: 4_500,
         detachedContexts: 1,
         nativeContexts: 2,
       },
@@ -254,6 +254,40 @@ describe('collectMemoryDiagnostics', () => {
     expect(diagnostics.analysis.risks).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ type: 'active-requests' }),
+      ]),
+    );
+  });
+
+  it('does not flag native pressure from normal RSS overhead alone', async () => {
+    const diagnostics = await collectMemoryDiagnostics({
+      memoryUsage: () => ({
+        heapUsed: 5 * 1024 * 1024,
+        heapTotal: 8 * 1024 * 1024,
+        rss: 50 * 1024 * 1024,
+        external: 10,
+        arrayBuffers: 5,
+      }),
+      heapStatistics: () => ({
+        heap_size_limit: 512 * 1024 * 1024,
+        total_heap_size: 8 * 1024 * 1024,
+        total_heap_size_executable: 0,
+        total_physical_size: 8 * 1024 * 1024,
+        used_heap_size: 5 * 1024 * 1024,
+        malloced_memory: 512 * 1024,
+        peak_malloced_memory: 1024 * 1024,
+        does_zap_garbage: 0,
+        number_of_native_contexts: 1,
+        number_of_detached_contexts: 0,
+        total_available_size: 500 * 1024 * 1024,
+        total_global_handles_size: 0,
+        used_global_handles_size: 0,
+        external_memory: 10,
+      }),
+    });
+
+    expect(diagnostics.analysis.risks).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'native-memory-pressure' }),
       ]),
     );
   });

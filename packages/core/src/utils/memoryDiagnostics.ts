@@ -254,12 +254,11 @@ function analyzeMemoryDiagnostics(
     });
   }
 
-  const nativeMemory =
-    diagnostics.memoryUsage.rss - diagnostics.memoryUsage.heapUsed;
+  const nativeMemory = diagnostics.v8HeapStats.mallocedMemory;
   if (nativeMemory > diagnostics.memoryUsage.heapUsed * 2) {
     risks.push({
       type: 'native-memory-pressure',
-      message: `Native memory (${nativeMemory} bytes) is more than 2× heap used (${diagnostics.memoryUsage.heapUsed} bytes).`,
+      message: `Native malloced memory (${nativeMemory} bytes) is more than 2× heap used (${diagnostics.memoryUsage.heapUsed} bytes).`,
     });
   }
 

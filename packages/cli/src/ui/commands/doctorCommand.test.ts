@@ -711,6 +711,17 @@ describe('doctorCommand', () => {
     );
   });
 
+  it('should render small memory values without rounding to zero MiB', async () => {
+    const result = await getMemoryCommand().action!(mockContext, '');
+
+    expect(result?.type === 'message' ? result.content : '').toContain(
+      'heapUsed: 1.0 KB',
+    );
+    expect(result?.type === 'message' ? result.content : '').not.toContain(
+      '0.00 MiB',
+    );
+  });
+
   it('should register memory as a real doctor subcommand', () => {
     expect(doctorCommand.subCommands?.map((command) => command.name)).toContain(
       'memory',

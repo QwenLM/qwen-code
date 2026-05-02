@@ -21,6 +21,7 @@ import {
   collectMemoryDiagnostics,
   type MemoryDiagnostics,
 } from '@qwen-code/qwen-code-core';
+import { formatMemoryUsage } from '../utils/formatters.js';
 
 const MEMORY_SUBCOMMAND = 'memory';
 const DOCTOR_SUBCOMMANDS = [MEMORY_SUBCOMMAND] as const;
@@ -258,12 +259,12 @@ function formatMemoryDiagnostics(diagnostics: MemoryDiagnostics): string {
     'Memory Diagnostics',
     `timestamp: ${diagnostics.timestamp}`,
     `uptimeSeconds: ${diagnostics.uptimeSeconds.toFixed(1)}`,
-    `heapUsed: ${formatBytes(diagnostics.memoryUsage.heapUsed)}`,
-    `heapTotal: ${formatBytes(diagnostics.memoryUsage.heapTotal)}`,
-    `rss: ${formatBytes(diagnostics.memoryUsage.rss)}`,
-    `external: ${formatBytes(diagnostics.memoryUsage.external)}`,
-    `arrayBuffers: ${formatBytes(diagnostics.memoryUsage.arrayBuffers)}`,
-    `v8HeapLimit: ${formatBytes(diagnostics.v8HeapStats.heapSizeLimit)}`,
+    `heapUsed: ${formatMemoryUsage(diagnostics.memoryUsage.heapUsed)}`,
+    `heapTotal: ${formatMemoryUsage(diagnostics.memoryUsage.heapTotal)}`,
+    `rss: ${formatMemoryUsage(diagnostics.memoryUsage.rss)}`,
+    `external: ${formatMemoryUsage(diagnostics.memoryUsage.external)}`,
+    `arrayBuffers: ${formatMemoryUsage(diagnostics.memoryUsage.arrayBuffers)}`,
+    `v8HeapLimit: ${formatMemoryUsage(diagnostics.v8HeapStats.heapSizeLimit)}`,
     `activeHandles: ${diagnostics.activeHandles}`,
     `activeRequests: ${diagnostics.activeRequests}`,
     `openFileDescriptors: ${diagnostics.openFileDescriptors ?? 'unavailable'}`,
@@ -271,8 +272,4 @@ function formatMemoryDiagnostics(diagnostics: MemoryDiagnostics): string {
     risks,
     `recommendation: ${diagnostics.analysis.recommendation}`,
   ].join('\n');
-}
-
-function formatBytes(bytes: number): string {
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MiB`;
 }
