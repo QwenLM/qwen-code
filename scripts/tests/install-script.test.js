@@ -923,6 +923,8 @@ function runWindowsCommand(command, env = {}) {
       ...env,
     },
     stdio: 'pipe',
+    // cmd.exe parses the command string itself; preserve quoted paths.
+    windowsVerbatimArguments: true,
   });
 }
 
