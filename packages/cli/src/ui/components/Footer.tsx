@@ -13,6 +13,7 @@ import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { AutoAcceptIndicator } from './AutoAcceptIndicator.js';
 import { ShellModeIndicator } from './ShellModeIndicator.js';
 import { BackgroundTasksPill } from './background-view/BackgroundTasksPill.js';
+import { MCPHealthPill } from './mcp/MCPHealthPill.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 
 import { useStatusLine } from '../hooks/useStatusLine.js';
@@ -177,6 +178,7 @@ export const Footer: React.FC = () => {
         <Box flexDirection="row" flexShrink={1}>
           <Text wrap="truncate">{leftBottomContent}</Text>
           <BackgroundTasksPill />
+          <MCPHealthPill />
         </Box>
       </Box>
 
