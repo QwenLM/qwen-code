@@ -11,13 +11,20 @@
    - Set `<projectRoot>` = the `cwd` field value from the JSON record.
    - Verify `<projectRoot>` directory exists on disk. Missing → "Error: original project directory '<projectRoot>' no longer exists. Aborted.", stop.
 5. **Verify session belongs to current project**: Apply `sanitizeCwd(<projectRoot>)` and compare with current project's `<sanitizeCwd>`. If they don't match → "Error: Session belongs to another project. Aborted.", stop.
-6. **Execute a shell command** to launch a NEW terminal window with cd to project directory:
+
+   **Limitation note**: chat-resume uses sanitizeCwd for project comparison. The core SessionService uses SHA-256 hash (getProjectHash). sanitizeCwd may have collisions for unusual paths, but this is a known limitation of file-based commands.
+
+6. **Validate projectRoot for shell safety**: If <projectRoot> contains any shell metacharacters (`$`, `` ` ``, `;`, `|`, `>`, `<`, `&`, `(`, `)`, spaces), reject: "Error: Session path contains unsafe characters. Aborted."
+   - For Windows: also check for `^` and `%`
+7. **Execute a shell command** to launch a NEW terminal window with cd to project directory:
    - Windows (PowerShell): `start pwsh -NoExit -Command "cd '<projectRoot>'; qwen --resume <id>"`
-   - Windows (CMD fallback): `start cmd /k "cd /d <projectRoot> && qwen --resume <id>"` (use if PowerShell unavailable)
-   - macOS: `osascript -e "tell app \"Terminal\" to do script \"cd '<projectRoot>' && qwen --resume <id>\""`
-   - Linux (WSL): If platform is linux and `/proc/version` contains "Microsoft" or "WSL", use: `cmd.exe /c "start cmd /k cd /d <projectRoot> && qwen --resume <id>"` or prefer `wt.exe` if available
-   - Linux (native): detect terminal with `command -v` (gnome-terminal, xterm, alacritty, kitty in order), then run: `<terminal> -- bash -c "cd '<projectRoot>' && qwen --resume <id>'"`
-7. Output: `Session "{{name}}" resumed in new window. (ID: <id>)`
+   - Windows (CMD fallback): `start cmd /k "cd /d \"<projectRoot>\" && qwen --resume <id>"` (use if PowerShell unavailable)
+   - macOS: `osascript -e "tell app \"Terminal\" to do script \"cd '$(echo "<projectRoot>" | sed "s/'/\\\\'/g")' && qwen --resume <id>\""`
+   - Linux (WSL): If platform is linux and `/proc/version` contains "Microsoft" or "WSL":
+     - Convert path: Run `wslpath -w "<projectRoot>"` to get Windows path
+     - Use: `cmd.exe /c "start cmd /k cd /d \"<windowsPath>\" && qwen --resume <id>"` or prefer `wt.exe -d "<windowsPath>" -- qwen.exe --resume <id>"`
+   - Linux (native): detect terminal with `command -v` (gnome-terminal, xterm, alacritty, kitty in order), then run: `<terminal> -- bash -c "cd '<projectRoot>' && qwen --resume <id>"`
+8. Output: `Session "{{name}}" resumed in new window. (ID: <id>)`
 
 **Runtime Base Resolution** (in priority order):
 

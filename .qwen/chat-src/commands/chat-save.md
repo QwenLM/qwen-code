@@ -50,7 +50,15 @@ meaningful names. This command creates the mapping so users can later resume wit
 - If no `.jsonl` file is found: output `"No session found. Start a conversation first."` and stop.
 - **Why this method?**: File-based custom commands cannot access the active chat UUID directly. Using mtime is the only available approach. The explicit warning helps users correct mistakes.
 
-### 5. Write to Index
+### 5. Verify Session Belongs to Current Project
+
+- **Read the first line** of the selected `.jsonl` file
+- If JSON has no `cwd` field → skip verification (legacy session, allow save)
+- Apply `sanitizeCwd(<cwd>)` and compare with current project's `<sanitizeCwd>`
+- If they don't match → output `"Error: Selected session belongs to another project. Aborted. Please resume the session from its original project first."` and stop
+- Why: Without this check, when sanitizeCwd collides across different project paths, chat-save could store a session ID from a different project. Then chat-resume would reject it with "Session belongs to another project."
+
+### 6. Write to Index
 
 - Add or update the entry: `{"{{name}}": "<uuid>"}`
 - Write back to `.qwen/chat-index.json` with 2-space indent formatting.

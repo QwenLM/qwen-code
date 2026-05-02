@@ -52,7 +52,8 @@ Same rules as `chat-save.md`:
 - Apply `sanitizeCwd(<projectRoot>)` to the cwd field value
 - Compare with current project's `<sanitizeCwd>`
 - If they don't match → "Error: Session belongs to another project. Aborted.", stop.
-- Why: sanitizeCwd collisions can occur between different projects; verifying via the actual cwd prevents cross-project resume.
+
+**Limitation note**: chat-resume uses `sanitizeCwd()` for project comparison. The core SessionService uses SHA-256 hash (`getProjectHash()`) for all project-ownership checks. `sanitizeCwd()` is not collision-resistant — two different paths can produce the same sanitized form (e.g., `/home/a-b/c` and `/home/a/b-c` both become `home-a-b-c`). This is a known limitation of file-based commands.
 
 **Runtime base resolution** (in priority order):
 
@@ -61,34 +62,43 @@ Same rules as `chat-save.md`:
 
 **Note**: If user has configured `advanced.runtimeOutputDir` in settings.json, sessions are stored under that path. /chat commands cannot read settings.json (credential leak risk) and will not find those sessions.
 
-### 6. Shell Command Escaping (Security Critical)
+### 6. Validate projectRoot for Shell Safety (Security Critical)
 
-When executing the resume command, the session ID **MUST be properly escaped** to prevent shell injection:
+Before executing any shell command, validate `<projectRoot>`:
 
-| Platform | Escaping Method                                  |
-| -------- | ------------------------------------------------ |
-| Windows  | Use double quotes, escape inner double quotes    |
-| macOS    | Use double-quote outer with escaped inner quotes |
-| Linux    | Use single quotes around the ID                  |
+- **POSIX platforms** (macOS, Linux): If `<projectRoot>` contains `$`, `` ` ``, `;`, `|`, `>`, `<`, `&`, `(`, `)`, or spaces → "Error: Session path contains unsafe characters. Aborted."
+- **Windows**: If `<projectRoot>` contains `$`, `` ` ``, `;`, `|`, `>`, `<`, `&`, `(`, `)`, spaces, `^`, or `%` → "Error: Session path contains unsafe characters. Aborted."
 
-### 7. Launch New Window with Project Directory (Platform-Specific)
+Why: The session ID is validated but `<projectRoot>` from the cwd field could contain shell metacharacters (e.g., path with spaces or single quotes). Without this check, commands could fail or behave unexpectedly.
+
+### 7. Shell Command Escaping (Security Critical)
+
+When executing the resume command, paths **MUST be properly escaped**:
+
+| Platform | Escaping Method                                                  |
+| -------- | ---------------------------------------------------------------- | ------------------- |
+| Windows  | Use double quotes around paths, escape inner quotes              |
+| macOS    | Use single quotes, escape internal single quotes via `$(echo ... | sed "s/'/\\\\'/g")` |
+| Linux    | Use single quotes around paths                                   |
+
+### 8. Launch New Window with Project Directory (Platform-Specific)
 
 **IMPORTANT: You MUST execute a shell command to launch a NEW terminal window with cd to the project directory first. DO NOT read the .jsonl file content.**
 
 The command must change to the project directory before launching qwen, otherwise the new terminal won't have access to the current project's sessions.
 
-| OS          | Terminal       | Command                                                                                                                                         |
-| ----------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows     | PowerShell     | `start pwsh -NoExit -Command "cd '<projectRoot>'; qwen --resume <id>"`                                                                          |
-| Windows     | CMD (fallback) | `start cmd /k "cd /d <projectRoot> && qwen --resume <id>"`                                                                                      |
-| macOS       | Terminal.app   | `osascript -e "tell app \"Terminal\" to do script \"cd '<projectRoot>' && qwen --resume <id>\""`                                                |
-| Linux       | gnome-terminal | `gnome-terminal -- bash -c "cd '<projectRoot>' && qwen --resume <id>"`                                                                          |
-| Linux       | xterm          | `xterm -e "cd '<projectRoot>' && qwen --resume <id>"`                                                                                           |
-| Linux (WSL) | CMD            | If platform is linux and /proc/version contains "Microsoft" or "WSL": use `cmd.exe /c "start cmd /k cd /d <projectRoot> && qwen --resume <id>"` |
+| OS          | Terminal       | Command                                                                                                                                                                                                                                                                                                |
+| ----------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------- |
+| Windows     | PowerShell     | `start pwsh -NoExit -Command "cd '<projectRoot>'; qwen --resume <id>"`                                                                                                                                                                                                                                 |
+| Windows     | CMD (fallback) | `start cmd /k "cd /d \"<projectRoot>\" && qwen --resume <id>"`                                                                                                                                                                                                                                         |
+| macOS       | Terminal.app   | `osascript -e "tell app \"Terminal\" to do script \"cd '$(echo "<projectRoot>"                                                                                                                                                                                                                         | sed "s/'/\\\\'/g")' && qwen --resume <id>\""` |
+| Linux       | gnome-terminal | `gnome-terminal -- bash -c "cd '<projectRoot>' && qwen --resume <id>"`                                                                                                                                                                                                                                 |
+| Linux       | xterm          | `xterm -e "cd '<projectRoot>' && qwen --resume <id>"`                                                                                                                                                                                                                                                  |
+| Linux (WSL) | CMD            | If platform is linux and /proc/version contains "Microsoft" or "WSL": First convert Linux path to Windows path using `wslpath -w "<projectRoot>"`, then use `cmd.exe /c "start cmd /k cd /d \"<windowsPath>\" && qwen --resume <id>"` or prefer `wt.exe -d "<windowsPath>" -- qwen.exe --resume <id>"` |
 
 **Windows fallback logic**: Try PowerShell first (`start pwsh`). If that fails (e.g., PowerShell not installed), fall back to CMD (`start cmd /k`). Some Windows machines don't have PowerShell available, so CMD fallback ensures compatibility.
 
-**WSL handling**: WSL users are actually on Windows. When detecting Linux, also check `/proc/version` for "Microsoft" or "WSL". If found, treat as Windows — use Windows Terminal (`wt.exe`) or CMD to launch qwen.
+**WSL handling**: WSL users are actually on Windows. The JSONL file stores the Linux-native path (e.g., `/home/user/project`). When resuming in WSL, you must convert the path to Windows format first using `wslpath -w`, otherwise `cd /d` will fail with "The system cannot find the path specified."
 
 **Linux terminal detection**: Use `command -v` to check available terminals in order: gnome-terminal > xterm > alacritty > kitty.
 
@@ -99,6 +109,6 @@ The command must change to the project directory before launching qwen, otherwis
 - Why cd to project directory: Session storage is project-scoped. Without cd, the new terminal starts in the user's home/default directory where the session cannot be found.
 - Why cd to projectRoot from session's cwd: The session was originally created in its own project directory. Using that cwd ensures qwen loads the correct project context.
 
-### 8. Confirm
+### 9. Confirm
 
 Output: `Session "{{name}}" resumed in new window. (ID: <sessionId>)`

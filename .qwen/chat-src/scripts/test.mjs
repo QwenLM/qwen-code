@@ -75,7 +75,9 @@ for (const f of FILES) totalProd += fs.readFileSync(path.join(PROD_DIR, f), 'utf
 const tokens = Math.round(totalProd * 0.35);
 console.log(`  Production: ${totalProd} chars ≈ ${tokens} tokens`);
 console.log(`  Note: Budget increased to 14000 to accommodate security rules, WSL detection, cwd-based project verification, correct shell quoting, and CMD fallback`);
+console.log(`  Hard limit: 15000 chars. If approaching limit, remove verbose explanations or consolidate duplicate content.`);
 assert(totalProd < 14000, 'Total < 14000 chars');
+assert(totalProd < 15000, 'Total below hard limit (15000 chars)');
 
 // ── [5] Source logic completeness ──────────────────────────────────
 console.log('\n[5] Source file logic completeness');
@@ -170,6 +172,16 @@ assert(prodAll.includes('osascript') || prodAll.includes('Terminal'), 'Productio
 assert(prodAll.includes('gnome-terminal') || prodAll.includes('xterm'), 'Production has Linux command');
 assert(srcAll.includes('"name"') || srcAll.includes('"name":') || srcAll.includes('{"name"'), 'Source documents flat index format');
 assert(prodAll.includes('yes/no') || prodAll.includes('yes') || prodAll.includes('no'), 'Production uses yes/no confirmation');
+
+// ── [8.5] New feature keyword assertions ─────────────────────────────
+console.log('\n[8.5] New feature keyword presence');
+assert(prodAll.includes('malformed') || prodAll.includes('corrupt'), 'Production has malformed JSON handling');
+assert(prodAll.includes('WSL') || prodAll.includes('/proc/version'), 'Production has WSL detection');
+assert(prodAll.includes('cwd') && prodAll.includes('project'), 'Production has cwd-based project verification');
+assert(prodAll.includes('Unexpected token') || prodAll.includes('token'), 'Production has argument validation');
+assert(prodAll.includes('runtimeBase') || prodAll.includes('QWEN_RUNTIME_DIR'), 'Production has runtimeBase resolution');
+assert(prodAll.includes('wslpath') || prodAll.includes('-w'), 'Production has WSL path conversion');
+assert(prodAll.includes('unsafe') || prodAll.includes('metacharacter'), 'Production has path safety validation');
 
 // ── [9] Design doc completeness ─────────────────────────────────────
 console.log('\n[9] Design document (CHAT-DESIGN.md)');
