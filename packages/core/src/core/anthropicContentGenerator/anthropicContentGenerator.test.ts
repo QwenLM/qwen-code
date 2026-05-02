@@ -494,6 +494,139 @@ describe('AnthropicContentGenerator', () => {
     });
   });
 
+  // https://github.com/QwenLM/qwen-code/issues/3786 — DeepSeek's
+  // anthropic-compatible API rejects subsequent requests when any prior
+  // assistant turn omits a thinking block while thinking mode is on.
+  describe('DeepSeek anthropic-compatible provider', () => {
+    it('injects empty thinking blocks on prior assistant turns when baseUrl points to api.deepseek.com', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'deepseek-v4-pro',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'deepseek-v4-pro',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.deepseek.com/anthropic',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          { role: 'model', parts: [{ text: 'Hello!' }] },
+          { role: 'user', parts: [{ text: 'How are you?' }] },
+        ],
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const messages = (anthropicRequest as { messages: unknown[] }).messages;
+
+      // Assistant turn should now have an empty thinking block prepended.
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '', signature: '' },
+          { type: 'text', text: 'Hello!' },
+        ],
+      });
+    });
+
+    it('detects deepseek by model name even when baseUrl is different', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'deepseek-v4-pro',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'deepseek-v4-pro',
+          apiKey: 'test-key',
+          baseUrl: 'https://my-proxy.example.com/anthropic',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          { role: 'model', parts: [{ text: 'Hello!' }] },
+          { role: 'user', parts: [{ text: 'How are you?' }] },
+        ],
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const messages = (anthropicRequest as { messages: unknown[] }).messages;
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '', signature: '' },
+          { type: 'text', text: 'Hello!' },
+        ],
+      });
+    });
+
+    it('does not inject empty thinking blocks for non-deepseek providers', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          { role: 'model', parts: [{ text: 'Hello!' }] },
+          { role: 'user', parts: [{ text: 'How are you?' }] },
+        ],
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const messages = (anthropicRequest as { messages: unknown[] }).messages;
+
+      // No thinking block injected for non-deepseek providers.
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Hello!' }],
+      });
+    });
+  });
+
   describe('countTokens', () => {
     it('counts tokens using the request tokenizer', async () => {
       const { AnthropicContentGenerator } = await importGenerator();

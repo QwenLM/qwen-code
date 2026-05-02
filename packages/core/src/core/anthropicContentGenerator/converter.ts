@@ -35,15 +35,18 @@ export class AnthropicContentConverter {
   private model: string;
   private schemaCompliance: SchemaComplianceMode;
   private enableCacheControl: boolean;
+  private ensureAssistantThinking: boolean;
 
   constructor(
     model: string,
     schemaCompliance: SchemaComplianceMode = 'auto',
     enableCacheControl: boolean = true,
+    ensureAssistantThinking: boolean = false,
   ) {
     this.model = model;
     this.schemaCompliance = schemaCompliance;
     this.enableCacheControl = enableCacheControl;
+    this.ensureAssistantThinking = ensureAssistantThinking;
   }
 
   convertGeminiRequestToAnthropic(request: GenerateContentParameters): {
@@ -57,6 +60,10 @@ export class AnthropicContentConverter {
     );
 
     this.processContents(request.contents, messages);
+
+    if (this.ensureAssistantThinking) {
+      this.applyEmptyThinkingToAssistantMessages(messages);
+    }
 
     // Add cache_control to enable prompt caching (if enabled)
     const system = this.enableCacheControl
@@ -542,6 +549,44 @@ export class AnthropicContentConverter {
         cache_control: { type: 'ephemeral' },
       },
     ];
+  }
+
+  /**
+   * DeepSeek's anthropic-compatible API rejects follow-up requests when any
+   * prior assistant turn omits a thinking block while thinking mode is on,
+   * returning HTTP 400 ("The content[].thinking in the thinking mode must be
+   * passed back to the API."). The model can legitimately return a turn
+   * without thinking content, so inject an empty thinking block whenever one
+   * is missing. https://github.com/QwenLM/qwen-code/issues/3786
+   */
+  private applyEmptyThinkingToAssistantMessages(
+    messages: AnthropicMessageParam[],
+  ): void {
+    for (const message of messages) {
+      if (message.role !== 'assistant') continue;
+
+      const blocks: AnthropicContentBlockParam[] =
+        typeof message.content === 'string'
+          ? [{ type: 'text', text: message.content }]
+          : Array.isArray(message.content)
+            ? message.content
+            : [];
+
+      const hasThinking = blocks.some(
+        (block) =>
+          (block as { type?: string }).type === 'thinking' ||
+          (block as { type?: string }).type === 'redacted_thinking',
+      );
+
+      if (!hasThinking) {
+        const emptyThinking = {
+          type: 'thinking',
+          thinking: '',
+          signature: '',
+        } as unknown as AnthropicContentBlockParam;
+        message.content = [emptyThinking, ...blocks];
+      }
+    }
   }
 
   /**

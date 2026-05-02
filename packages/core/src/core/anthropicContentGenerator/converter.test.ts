@@ -647,6 +647,185 @@ describe('AnthropicContentConverter', () => {
     });
   });
 
+  // https://github.com/QwenLM/qwen-code/issues/3786 — DeepSeek's
+  // anthropic-compatible API rejects subsequent requests when any prior
+  // assistant turn omits a thinking block while thinking mode is on. The
+  // converter must inject empty thinking blocks when missing.
+  describe('ensureAssistantThinking', () => {
+    let deepseekConverter: AnthropicContentConverter;
+
+    beforeEach(() => {
+      deepseekConverter = new AnthropicContentConverter(
+        'deepseek-v4-pro',
+        'auto',
+        false,
+        true,
+      );
+    });
+
+    it('injects an empty thinking block on assistant turns missing one', () => {
+      const { messages } = deepseekConverter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          { role: 'model', parts: [{ text: 'Hello!' }] },
+        ],
+      });
+
+      expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: '', signature: '' },
+            { type: 'text', text: 'Hello!' },
+          ],
+        },
+      ]);
+    });
+
+    it('injects an empty thinking block on tool-calling assistant turns missing one', () => {
+      const { messages } = deepseekConverter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'List files' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-1',
+                  name: 'glob',
+                  args: { pattern: '**/*.md' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '', signature: '' },
+          {
+            type: 'tool_use',
+            id: 'call-1',
+            name: 'glob',
+            input: { pattern: '**/*.md' },
+          },
+        ],
+      });
+    });
+
+    it('preserves existing thinking blocks on assistant turns', () => {
+      const { messages } = deepseekConverter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              { text: 'Let me think', thought: true, thoughtSignature: 'sig' },
+              { text: 'Hello!' },
+            ],
+          },
+        ],
+      });
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'Let me think', signature: 'sig' },
+          { type: 'text', text: 'Hello!' },
+        ],
+      });
+    });
+
+    it('does not modify user messages', () => {
+      const { messages } = deepseekConverter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [{ role: 'user', parts: [{ text: 'Hi' }] }],
+      });
+
+      expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+      ]);
+    });
+
+    it('does nothing when option is disabled (default)', () => {
+      const defaultConverter = new AnthropicContentConverter(
+        'deepseek-v4-pro',
+        'auto',
+        false,
+      );
+
+      const { messages } = defaultConverter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          { role: 'model', parts: [{ text: 'Hello!' }] },
+        ],
+      });
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Hello!' }],
+      });
+    });
+
+    it('injects thinking blocks on every prior assistant turn in a multi-turn history', () => {
+      const { messages } = deepseekConverter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Q1' }] },
+          { role: 'model', parts: [{ text: 'A1' }] },
+          { role: 'user', parts: [{ text: 'Q2' }] },
+          { role: 'model', parts: [{ text: 'A2' }] },
+          { role: 'user', parts: [{ text: 'Q3' }] },
+        ],
+      });
+
+      expect(messages[1]).toMatchObject({ role: 'assistant' });
+      expect(messages[3]).toMatchObject({ role: 'assistant' });
+      expect((messages[1] as { content: unknown[] }).content[0]).toEqual({
+        type: 'thinking',
+        thinking: '',
+        signature: '',
+      });
+      expect((messages[3] as { content: unknown[] }).content[0]).toEqual({
+        type: 'thinking',
+        thinking: '',
+        signature: '',
+      });
+    });
+
+    it('treats existing redacted_thinking blocks as satisfying the requirement', () => {
+      // redacted_thinking blocks come back from the response converter as
+      // { text: '', thought: true } (no thoughtSignature). When converted to
+      // Anthropic format they become { type: 'thinking', thinking: '' }, which
+      // already counts as a thinking block — so we should not prepend another.
+      const { messages } = deepseekConverter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ text: '', thought: true }, { text: 'Hello!' }],
+          },
+        ],
+      });
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '' },
+          { type: 'text', text: 'Hello!' },
+        ],
+      });
+    });
+  });
+
   describe('convertGeminiToolsToAnthropic', () => {
     it('converts Tool.functionDeclarations to Anthropic tools and runs schema conversion', async () => {
       const tools = [

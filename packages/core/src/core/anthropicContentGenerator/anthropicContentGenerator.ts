@@ -39,6 +39,23 @@ import {
 
 const debugLogger = createDebugLogger('ANTHROPIC');
 
+/**
+ * DeepSeek's anthropic-compatible API rejects requests in thinking mode that
+ * omit a thinking block on prior assistant turns. Detect by base URL or model
+ * name so the converter can inject empty thinking blocks where missing.
+ * https://github.com/QwenLM/qwen-code/issues/3786
+ */
+function isDeepSeekAnthropicProvider(
+  contentGeneratorConfig: ContentGeneratorConfig,
+): boolean {
+  const baseUrl = (contentGeneratorConfig.baseUrl ?? '').toLowerCase();
+  if (baseUrl.includes('api.deepseek.com')) {
+    return true;
+  }
+  const model = (contentGeneratorConfig.model ?? '').toLowerCase();
+  return model.includes('deepseek');
+}
+
 type StreamingBlockState = {
   type: string;
   id?: string;
@@ -84,6 +101,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       contentGeneratorConfig.model,
       contentGeneratorConfig.schemaCompliance,
       contentGeneratorConfig.enableCacheControl,
+      isDeepSeekAnthropicProvider(contentGeneratorConfig),
     );
   }
 
