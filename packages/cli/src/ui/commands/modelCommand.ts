@@ -92,6 +92,24 @@ export const modelCommand: SlashCommand = {
       };
     }
 
+    const contentGeneratorConfig = config.getContentGeneratorConfig();
+    if (!contentGeneratorConfig) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Content generator configuration not available.'),
+      };
+    }
+
+    const authType = contentGeneratorConfig.authType;
+    if (!authType) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Authentication type not available.'),
+      };
+    }
+
     // Handle modelName argument: immediately switch to the provided model
     if (args !== '' && context.executionMode === 'interactive') {
       const modelName = args.trim().split(' ')[0];
@@ -111,31 +129,21 @@ export const modelCommand: SlashCommand = {
           modelName,
         );
         await config.setModel(modelName);
-        await config.setModel(modelName);
-        return {
-          type: 'message',
-          messageType: 'info',
-          content: t('Model') + ': ' + modelName,
-        };
+
+        if (config.getModelsConfig().hasModel(authType, modelName)) {
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: t('Model') + ': ' + modelName,
+          };
+        } else {
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: t('Model') + ': ' + modelName + ' (not in model registry)',
+          };
+        }
       }
-    }
-
-    const contentGeneratorConfig = config.getContentGeneratorConfig();
-    if (!contentGeneratorConfig) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Content generator configuration not available.'),
-      };
-    }
-
-    const authType = contentGeneratorConfig.authType;
-    if (!authType) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Authentication type not available.'),
-      };
     }
 
     // Non-interactive/ACP: set model if an arg was provided, otherwise show current model
