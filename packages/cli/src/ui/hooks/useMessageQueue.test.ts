@@ -202,6 +202,24 @@ describe('useMessageQueue', () => {
       expect(result.current.messageQueue).toEqual(['/data foo', 'world']);
     });
 
+    it('drains shell-metacharacter slash-like prompts as plain text', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('hello');
+        result.current.addMessage('/$HOME');
+        result.current.addMessage('world');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue();
+      });
+
+      expect(drained).toEqual(['hello', '/$HOME', 'world']);
+      expect(result.current.messageQueue).toEqual([]);
+    });
+
     it('returns an empty array when the queue contains only slash commands', () => {
       const { result } = renderHook(() => useMessageQueue());
 

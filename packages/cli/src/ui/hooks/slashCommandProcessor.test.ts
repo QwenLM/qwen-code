@@ -984,6 +984,30 @@ describe('useSlashCommandProcessor', () => {
       expect(mockAddItem).not.toHaveBeenCalled();
     });
 
+    it('should return false for slash-prefixed shell-metacharacter input', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => expect(result.current.slashCommands).toBeDefined());
+
+      const envResult = await act(async () =>
+        result.current.handleSlashCommand('/$HOME'),
+      );
+      const bangResult = await act(async () =>
+        result.current.handleSlashCommand('/!important'),
+      );
+      const pipeResult = await act(async () =>
+        result.current.handleSlashCommand('/|pipe'),
+      );
+      const semicolonResult = await act(async () =>
+        result.current.handleSlashCommand('/;comment'),
+      );
+
+      expect(envResult).toBe(false);
+      expect(bangResult).toBe(false);
+      expect(pipeResult).toBe(false);
+      expect(semicolonResult).toBe(false);
+      expect(mockAddItem).not.toHaveBeenCalled();
+    });
+
     it('should handle `?` as a command prefix', async () => {
       const action = vi.fn();
       const command = createTestCommand({ name: 'help', action });

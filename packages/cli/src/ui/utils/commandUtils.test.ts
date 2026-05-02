@@ -143,6 +143,20 @@ describe('commandUtils', () => {
       expect(looksLikeCommandName('my command')).toBe(false);
       expect(looksLikeCommandName('path\\to')).toBe(false);
     });
+
+    it('should return false for shell-metacharacter tokens', () => {
+      expect(looksLikeCommandName('$HOME')).toBe(false);
+      expect(looksLikeCommandName('!important')).toBe(false);
+      expect(looksLikeCommandName('|pipe')).toBe(false);
+      expect(looksLikeCommandName(';comment')).toBe(false);
+      expect(looksLikeCommandName('`cmd`')).toBe(false);
+      expect(looksLikeCommandName('~user')).toBe(false);
+      expect(looksLikeCommandName('cmd&next')).toBe(false);
+      expect(looksLikeCommandName('<tag>')).toBe(false);
+      expect(looksLikeCommandName('(group)')).toBe(false);
+      expect(looksLikeCommandName('{json}')).toBe(false);
+      expect(looksLikeCommandName('100%')).toBe(false);
+    });
   });
 
   describe('isSlashCommand', () => {
@@ -176,6 +190,13 @@ describe('commandUtils', () => {
       expect(isSlashCommand('/?')).toBe(true);
       expect(isSlashCommand('/接口实现')).toBe(true);
       expect(isSlashCommand('/文档 查看内容')).toBe(true);
+    });
+
+    it('should return false for slash-prefixed shell-metacharacter tokens', () => {
+      expect(isSlashCommand('/$HOME')).toBe(false);
+      expect(isSlashCommand('/!important')).toBe(false);
+      expect(isSlashCommand('/|pipe')).toBe(false);
+      expect(isSlashCommand('/;comment')).toBe(false);
     });
 
     it('should return false when query does not start with /', () => {
