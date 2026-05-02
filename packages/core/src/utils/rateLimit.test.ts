@@ -257,4 +257,21 @@ describe('rate-limit retry diagnostics', () => {
       }),
     ).toBe(300_000);
   });
+
+  it('should read Retry-After from response headers', () => {
+    const error = Object.assign(new Error('Too many requests'), {
+      status: 429,
+      response: {
+        headers: { 'retry-after': '180' },
+      },
+    });
+
+    expect(
+      getRateLimitRetryDelayMs(1, {
+        initialDelayMs: 60_000,
+        maxDelayMs: 300_000,
+        error,
+      }),
+    ).toBe(180_000);
+  });
 });

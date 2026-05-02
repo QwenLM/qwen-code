@@ -264,7 +264,9 @@ function getRawErrorMessage(error: unknown): string | null {
 }
 
 function getRetryAfterDelayMs(error: unknown): number | null {
-  const value = getHeaderValue(error, 'retry-after');
+  const value =
+    getHeaderValue(error, 'retry-after') ??
+    getResponseHeaderValue(error, 'retry-after');
   if (value === null) return null;
 
   const seconds = Number(value);
@@ -299,8 +301,31 @@ function getHeaderValue(error: unknown, headerName: string): string | null {
   return null;
 }
 
+function getResponseHeaderValue(
+  error: unknown,
+  headerName: string,
+): string | null {
+  if (!hasResponseHeaders(error)) return null;
+  return getHeaderValue(error.response, headerName);
+}
+
 function hasHeaders(error: unknown): error is {
   headers: { get?: (name: string) => unknown } | Record<string, unknown>;
 } {
   return typeof error === 'object' && error !== null && 'headers' in error;
+}
+
+function hasResponseHeaders(error: unknown): error is {
+  response: {
+    headers: { get?: (name: string) => unknown } | Record<string, unknown>;
+  };
+} {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'response' in error &&
+    typeof error.response === 'object' &&
+    error.response !== null &&
+    'headers' in error.response
+  );
 }
