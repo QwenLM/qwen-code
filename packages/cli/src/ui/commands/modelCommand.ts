@@ -18,7 +18,9 @@ export const modelCommand: SlashCommand = {
   name: 'model',
   completionPriority: 100,
   get description() {
-    return t('Switch the model for this session (--fast for suggestion model)');
+    return t(
+      'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately). ',
+    );
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
