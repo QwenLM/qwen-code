@@ -218,6 +218,49 @@ describe('AnthropicContentGenerator', () => {
       expect(headers['anthropic-beta']).toBeUndefined();
     });
 
+    it('merges user-supplied customHeaders[anthropic-beta] with computed flags (no overwrite)', async () => {
+      // Users configure additional Anthropic beta flags via customHeaders.
+      // The per-request override must add to that list, not replace it.
+      const headers = await callOnce({
+        ...baseConfig,
+        reasoning: { effort: 'medium' },
+        customHeaders: { 'anthropic-beta': 'experimental-x,experimental-y' },
+      });
+      const beta = headers['anthropic-beta'] ?? '';
+      expect(beta.split(',')).toEqual(
+        expect.arrayContaining([
+          'experimental-x',
+          'experimental-y',
+          'interleaved-thinking-2025-05-14',
+          'effort-2025-11-24',
+        ]),
+      );
+    });
+
+    it('passes user-supplied customHeaders[anthropic-beta] through even when no thinking/effort is enabled', async () => {
+      const headers = await callOnce({
+        ...baseConfig,
+        reasoning: false,
+        customHeaders: { 'anthropic-beta': 'experimental-x' },
+      });
+      expect(headers['anthropic-beta']).toBe('experimental-x');
+    });
+
+    it('dedupes beta flags so duplicates from customHeaders are not repeated', async () => {
+      const headers = await callOnce({
+        ...baseConfig,
+        reasoning: { effort: 'medium' },
+        customHeaders: {
+          'anthropic-beta': 'interleaved-thinking-2025-05-14',
+        },
+      });
+      const beta = headers['anthropic-beta'] ?? '';
+      const occurrences = beta
+        .split(',')
+        .filter((f) => f.trim() === 'interleaved-thinking-2025-05-14');
+      expect(occurrences).toHaveLength(1);
+    });
+
     it('omits beta header when per-request thinkingConfig.includeThoughts=false', async () => {
       // Even though the global reasoning config sets effort, the per-request
       // opt-out drops both `thinking` and `output_config` from the body — and

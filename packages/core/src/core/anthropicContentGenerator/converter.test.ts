@@ -919,12 +919,13 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
-    it('replaces a non-compliant thinking block (no signature field) with a synthetic one', () => {
+    it('normalizes a non-compliant thinking block (no signature field) on a tool-use turn', () => {
       // A part `{ text: '', thought: true }` (e.g. round-tripped from a
       // `redacted_thinking` response that lost its `data` field via the
       // Gemini Part representation) converts to a thinking block without a
-      // `signature` field. That shape is not spec-compliant, so the injector
-      // drops it and prepends a synthetic block with `signature: ''`.
+      // `signature` field. The cleanup adds an empty signature in place;
+      // because the normalized block now satisfies the requirement, Step 2
+      // does not prepend a synthetic.
       const { messages } = converter.convertGeminiRequestToAnthropic(
         {
           model: 'models/test',
@@ -988,11 +989,14 @@ describe('AnthropicContentConverter', () => {
       });
     });
 
-    it('drops non-compliant thinking blocks from plain-text assistant turns even when no tool_use is present', () => {
-      // A `redacted_thinking` round-tripped through Gemini-Part comes back as
-      // `{ type: 'thinking', thinking: '' }` with no signature. On a
-      // plain-text turn there is nothing to inject (no tool_use), but the
-      // bad block is still non-compliant and should be cleaned up.
+    it('normalizes non-compliant thinking blocks (adds empty signature) on plain-text turns', () => {
+      // A part `{ thought: true, text: '...' }` (the normal shape from
+      // OpenAI/Gemini/agent-runtime where users may switch providers
+      // mid-session, or a `redacted_thinking` round-tripped through Gemini-
+      // Part) converts to `{ type: 'thinking', thinking: '...' }` without
+      // signature. The cleanup adds an empty signature in place to make the
+      // block spec-compliant while preserving the original thinking text.
+      // No synthetic is prepended on a plain-text turn (no tool_use).
       const { messages } = converter.convertGeminiRequestToAnthropic(
         {
           model: 'models/test',
@@ -1000,18 +1004,26 @@ describe('AnthropicContentConverter', () => {
             { role: 'user', parts: [{ text: 'Hi' }] },
             {
               role: 'model',
-              parts: [{ text: '', thought: true }, { text: 'Hello!' }],
+              parts: [
+                { text: 'cross-provider thoughts', thought: true },
+                { text: 'Hello!' },
+              ],
             },
           ],
         },
         enableThinking,
       );
 
-      // Bad thinking block dropped; remaining text passes through. No
-      // synthetic prepended because the turn has no tool_use.
       expect(messages[1]).toEqual({
         role: 'assistant',
-        content: [{ type: 'text', text: 'Hello!' }],
+        content: [
+          {
+            type: 'thinking',
+            thinking: 'cross-provider thoughts',
+            signature: '',
+          },
+          { type: 'text', text: 'Hello!' },
+        ],
       });
     });
 

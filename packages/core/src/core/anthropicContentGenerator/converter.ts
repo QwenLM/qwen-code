@@ -643,16 +643,43 @@ export class AnthropicContentConverter {
             ? message.content
             : [];
 
-      // Step 1: Drop non-compliant thinking blocks (no `signature` field) on
-      // every assistant turn, not just tool-use ones. Plain-text turns can
-      // carry these too — e.g. when `redacted_thinking` round-trips through
-      // the Gemini Part representation, losing its `data` payload along the
-      // way. Empirically DeepSeek tolerates the residual shape, but
-      // normalizing keeps the wire message spec-correct.
-      const cleanedBlocks = blocks.filter((block) => {
+      // Step 1: Normalize non-compliant `thinking` blocks (missing the
+      // required `signature` field) by setting `signature: ''` in place. This
+      // shape commonly arrives from other generators (OpenAI/Gemini/agent-
+      // runtime emit `{ thought: true }` parts with no signature) when users
+      // switch providers mid-session, or from `redacted_thinking` blocks that
+      // lost their `data` field through the Gemini-Part round trip. Adding an
+      // empty signature preserves the original thinking text instead of
+      // dropping the block — DeepSeek currently accepts empty signatures, so
+      // this keeps the wire shape spec-compliant without losing history.
+      let modified = false;
+      const normalizedBlocks = blocks.map((block) => {
         const b = block as { type?: string; signature?: unknown };
-        return !(b.type === 'thinking' && typeof b.signature !== 'string');
+        if (b.type === 'thinking' && typeof b.signature !== 'string') {
+          modified = true;
+          return {
+            ...(block as object),
+            signature: '',
+          } as unknown as AnthropicContentBlockParam;
+        }
+        return block;
       });
+      if (modified) {
+        message.content = normalizedBlocks;
+      }
+
+      // Step 2: On tool-use turns still lacking any thinking block, prepend
+      // a synthetic empty one (the issue #3786 trigger).
+      const hasToolUse = normalizedBlocks.some(
+        (block) => (block as { type?: string }).type === 'tool_use',
+      );
+      if (!hasToolUse) continue;
+
+      const hasThinking = normalizedBlocks.some((block) => {
+        const t = (block as { type?: string }).type;
+        return t === 'thinking' || t === 'redacted_thinking';
+      });
+      if (hasThinking) continue;
 
       // DeepSeek currently accepts an empty `signature` for synthetic
       // thinking blocks. The `signature` field is an opaque token in the
@@ -664,34 +691,7 @@ export class AnthropicContentConverter {
         thinking: '',
         signature: '',
       } as unknown as AnthropicContentBlockParam;
-
-      // If cleanup would leave `content: []` (Anthropic API rejects) — i.e.
-      // the whole turn was non-compliant thinking blocks — replace with a
-      // synthetic empty thinking block so the message stays non-empty AND
-      // spec-compliant.
-      if (cleanedBlocks.length === 0) {
-        message.content = [emptyThinking];
-        continue;
-      }
-      if (cleanedBlocks.length !== blocks.length) {
-        message.content = cleanedBlocks;
-      }
-
-      // Step 2: On tool-use turns missing a compliant thinking block,
-      // prepend an empty synthetic. This is the issue #3786 trigger.
-      const hasToolUse = cleanedBlocks.some(
-        (block) => (block as { type?: string }).type === 'tool_use',
-      );
-      if (!hasToolUse) continue;
-
-      const hasCompliantThinking = cleanedBlocks.some((block) => {
-        const t = (block as { type?: string }).type;
-        // Any thinking block remaining here passed Step 1's signature check.
-        return t === 'thinking' || t === 'redacted_thinking';
-      });
-      if (hasCompliantThinking) continue;
-
-      message.content = [emptyThinking, ...cleanedBlocks];
+      message.content = [emptyThinking, ...normalizedBlocks];
     }
   }
 

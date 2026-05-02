@@ -205,18 +205,35 @@ export class AnthropicContentGenerator implements ContentGenerator {
    * body. Keeps the header consistent with the body even when a per-request
    * `thinkingConfig.includeThoughts: false` opt-out drops `thinking` /
    * `output_config` after the constructor has already run.
+   *
+   * User-supplied `customHeaders['anthropic-beta']` flags are merged in (and
+   * deduped) so the per-request override doesn't wipe out the existing
+   * customHeaders escape hatch for unrelated beta features.
    */
   private buildPerRequestHeaders(
     anthropicRequest: MessageCreateParamsWithThinking,
   ): Record<string, string> | undefined {
     const betas: string[] = [];
+
+    const userBeta =
+      this.contentGeneratorConfig.customHeaders?.['anthropic-beta'];
+    if (typeof userBeta === 'string' && userBeta) {
+      for (const flag of userBeta.split(',')) {
+        const trimmed = flag.trim();
+        if (trimmed) betas.push(trimmed);
+      }
+    }
+
     if (anthropicRequest.thinking) {
       betas.push('interleaved-thinking-2025-05-14');
     }
     if (anthropicRequest.output_config) {
       betas.push('effort-2025-11-24');
     }
-    return betas.length > 0 ? { 'anthropic-beta': betas.join(',') } : undefined;
+
+    if (betas.length === 0) return undefined;
+    const unique = Array.from(new Set(betas));
+    return { 'anthropic-beta': unique.join(',') };
   }
 
   private async buildRequest(
