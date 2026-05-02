@@ -444,8 +444,12 @@ class MonitorToolInvocation extends BaseToolInvocation<
     } catch (err) {
       abortHandler();
       entryAc.signal.removeEventListener('abort', abortHandler);
-      (child.stdout as NodeJS.ReadableStream | null)?.destroy?.();
-      (child.stderr as NodeJS.ReadableStream | null)?.destroy?.();
+      (
+        child.stdout as { destroy?: () => void } | null | undefined
+      )?.destroy?.();
+      (
+        child.stderr as { destroy?: () => void } | null | undefined
+      )?.destroy?.();
       child.removeAllListeners();
       return {
         llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,

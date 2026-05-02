@@ -23,6 +23,7 @@ function createEntry(overrides: Partial<MonitorEntry> = {}): MonitorEntry {
     lastEventTime: 0,
     maxEvents: 1000,
     idleTimeoutMs: 300_000,
+    droppedLines: 0,
     ...overrides,
   };
 }

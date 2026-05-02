@@ -226,6 +226,7 @@ describe('TaskStopTool', () => {
         lastEventTime: 0,
         maxEvents: 100,
         idleTimeoutMs: 300_000,
+        droppedLines: 0,
       });
 
       const result = await tool.validateBuildAndExecute(
@@ -253,6 +254,7 @@ describe('TaskStopTool', () => {
         lastEventTime: 0,
         maxEvents: 100,
         idleTimeoutMs: 300_000,
+        droppedLines: 0,
       });
       monitorRegistry.complete('mon_done', 0);
 
