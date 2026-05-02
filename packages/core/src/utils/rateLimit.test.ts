@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { isRateLimitError } from './rateLimit.js';
+import {
+  getRateLimitErrorDetails,
+  getRateLimitRetryDelayMs,
+  isRateLimitError,
+} from './rateLimit.js';
 import type { StructuredError } from '../core/turn.js';
 import type { HttpError } from './retry.js';
 
@@ -135,5 +139,77 @@ describe('isRateLimitError — return shape', () => {
       'id:1\nevent:error\n:HTTP_STATUS/429\ndata:{"request_id":"70acdc21-a546-489a-b5d6-650df970a4ef","code":"Throttling.AllocationQuota","message":"Allocated quota exceeded, please increase your quota limit."}',
     );
     expect(isRateLimitError(error)).toBe(true);
+  });
+});
+
+describe('rate-limit retry diagnostics', () => {
+  it('should extract structured details from SSE-embedded rate-limit errors', () => {
+    const error = new Error(
+      'id:1\nevent:error\n:HTTP_STATUS/429\ndata:{"request_id":"70acdc21-a546-489a-b5d6-650df970a4ef","code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"}',
+    );
+
+    expect(getRateLimitErrorDetails(error)).toEqual({
+      statusCode: 429,
+      providerCode: 'Throttling.AllocationQuota',
+      providerMessage: 'Allocated quota exceeded',
+      requestId: '70acdc21-a546-489a-b5d6-650df970a4ef',
+      transport: 'sse',
+    });
+  });
+
+  it('should extract structured details from HTTP-shaped rate-limit errors', () => {
+    const error = Object.assign(new Error('Too many requests'), {
+      status: 429,
+      error: {
+        code: 'rate_limit_exceeded',
+        message: 'Rate limit exceeded',
+      },
+    });
+
+    expect(getRateLimitErrorDetails(error)).toEqual({
+      statusCode: 429,
+      providerCode: 'rate_limit_exceeded',
+      providerMessage: 'Rate limit exceeded',
+      transport: 'http',
+    });
+  });
+
+  it('should extract nested JSON provider details from error messages', () => {
+    const error = new Error(
+      '{"error":{"code":"429","message":"Throttling: TPM limit reached"}}',
+    );
+
+    expect(getRateLimitErrorDetails(error)).toEqual({
+      providerCode: '429',
+      providerMessage: 'Throttling: TPM limit reached',
+      transport: 'unknown',
+    });
+  });
+
+  it('should increase retry delay by attempt and cap at the maximum', () => {
+    expect(
+      getRateLimitRetryDelayMs(0, {
+        initialDelayMs: 60_000,
+        maxDelayMs: 300_000,
+      }),
+    ).toBe(60_000);
+    expect(
+      getRateLimitRetryDelayMs(1, {
+        initialDelayMs: 60_000,
+        maxDelayMs: 300_000,
+      }),
+    ).toBe(60_000);
+    expect(
+      getRateLimitRetryDelayMs(2, {
+        initialDelayMs: 60_000,
+        maxDelayMs: 300_000,
+      }),
+    ).toBe(120_000);
+    expect(
+      getRateLimitRetryDelayMs(10, {
+        initialDelayMs: 60_000,
+        maxDelayMs: 300_000,
+      }),
+    ).toBe(300_000);
   });
 });

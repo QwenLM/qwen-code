@@ -1541,6 +1541,97 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('should increase delay across repeated streamed rate-limit errors', async () => {
+      vi.useFakeTimers();
+
+      try {
+        const firstError = new StreamContentError(
+          'id:1\nevent:error\n:HTTP_STATUS/429\ndata:{"request_id":"req-1","code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"}',
+        );
+        const secondError = new StreamContentError(
+          'id:2\nevent:error\n:HTTP_STATUS/429\ndata:{"request_id":"req-2","code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"}',
+        );
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              throw firstError;
+
+              yield {} as GenerateContentResponse;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              throw secondError;
+
+              yield {} as GenerateContentResponse;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: { parts: [{ text: 'Recovered after backoff' }] },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-streamed-rate-limit-backoff',
+        );
+
+        const iterator = stream[Symbol.asyncIterator]();
+        const retryInfos: Array<
+          NonNullable<
+            Extract<StreamEvent, { type: StreamEventType.RETRY }>['retryInfo']
+          >
+        > = [];
+
+        const first = await iterator.next();
+        expect(first.value.type).toBe(StreamEventType.RETRY);
+        retryInfos.push(first.value.retryInfo!);
+
+        let nextPromise = iterator.next();
+        await vi.advanceTimersByTimeAsync(60_000);
+        await nextPromise;
+
+        const second = await iterator.next();
+        expect(second.value.type).toBe(StreamEventType.RETRY);
+        retryInfos.push(second.value.retryInfo!);
+
+        nextPromise = iterator.next();
+        await vi.advanceTimersByTimeAsync(120_000);
+        await nextPromise;
+
+        const events: StreamEvent[] = [];
+        for (;;) {
+          const next = await iterator.next();
+          if (next.done) break;
+          events.push(next.value);
+        }
+
+        expect(retryInfos.map((info) => info.delayMs)).toEqual([
+          60_000, 120_000,
+        ]);
+        expect(
+          events.some(
+            (e) =>
+              e.type === StreamEventType.CHUNK &&
+              e.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Recovered after backoff',
+          ),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     describe('API error retry behavior', () => {
       beforeEach(() => {
         // Use a more direct mock for retry testing
