@@ -65,6 +65,24 @@ function entry(overrides: Partial<AgentDialogEntry> = {}): DialogEntry {
   } as DialogEntry;
 }
 
+function monitorEntry(overrides: Partial<DialogEntry> = {}): DialogEntry {
+  return {
+    kind: 'monitor',
+    monitorId: 'mon-1',
+    command: 'tail -f app.log',
+    description: 'watch app logs',
+    status: 'running',
+    startTime: 0,
+    abortController: new AbortController(),
+    eventCount: 0,
+    lastEventTime: 0,
+    maxEvents: 1000,
+    idleTimeoutMs: 300_000,
+    droppedLines: 0,
+    ...overrides,
+  } as DialogEntry;
+}
+
 interface ProbeHandle {
   actions: ReturnType<typeof useBackgroundTaskViewActions>;
   state: ReturnType<typeof useBackgroundTaskViewState>;
@@ -75,6 +93,7 @@ interface Harness {
   cancel: ReturnType<typeof vi.fn>;
   resume: ReturnType<typeof vi.fn>;
   abandon: ReturnType<typeof vi.fn>;
+  monitorCancel: ReturnType<typeof vi.fn>;
   setEntries: (next: readonly DialogEntry[]) => void;
   pressKey: (key: { name?: string; sequence?: string }) => void;
   call: (fn: () => void) => void;
@@ -110,6 +129,14 @@ function setup(initial: readonly DialogEntry[]): Harness {
     }),
     getMonitorRegistry: () => ({
       cancel: monitorCancel,
+      // Resolve `.get(monitorId)` against the snapshot so the dialog's
+      // `selectedEntry` re-resolution path works for monitor kind too.
+      get: (id: string) => {
+        const match = currentEntries.find(
+          (e) => e.kind === 'monitor' && e.monitorId === id,
+        );
+        return match;
+      },
     }),
     resumeBackgroundAgent: resume,
     abandonBackgroundAgent: abandon,
@@ -154,6 +181,7 @@ function setup(initial: readonly DialogEntry[]): Harness {
     cancel,
     resume,
     abandon,
+    monitorCancel,
     setEntries(next) {
       handlers.length = 0;
       currentEntries = next;
@@ -209,6 +237,25 @@ describe('BackgroundTasksDialog', () => {
     h.setEntries([{ ...running, status: 'cancelled' }]);
 
     expect(h.probe.current!.state.dialogMode).toBe('list');
+  });
+
+  it('routes monitor cancel via monitorRegistry.cancel(monitorId)', () => {
+    // Pin the monitor-cancel branch in `cancelSelected` — flipping it to
+    // anything else (e.g. shell's `requestCancel`) would silently break,
+    // since neither task_stop nor the dialog-test mocks fail loudly on
+    // the wrong method name.
+    const mon = monitorEntry({ monitorId: 'mon-zzz', status: 'running' });
+    const h = setup([mon]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+
+    h.pressKey({ sequence: 'x' });
+    expect(h.monitorCancel).toHaveBeenCalledWith('mon-zzz');
+    // Agent registry's cancel must NOT be called for a monitor entry —
+    // belt-and-braces guard against the kind switch falling through.
+    expect(h.cancel).not.toHaveBeenCalled();
   });
 
   it('keeps detail mode when an already-terminal entry is opened (no spurious fallback)', () => {

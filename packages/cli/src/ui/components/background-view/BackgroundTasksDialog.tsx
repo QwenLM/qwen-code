@@ -530,6 +530,16 @@ const MonitorDetailBody: React.FC<{
   if (entry.droppedLines > 0) {
     dimSubtitleParts.push(`${entry.droppedLines} dropped`);
   }
+  if (entry.exitCode !== undefined) {
+    dimSubtitleParts.push(`exit ${entry.exitCode}`);
+  }
+
+  // `entry.error` is set on `failed` (spawn error) and on `completed`
+  // when the monitor was auto-stopped (max events / idle timeout). Worth
+  // surfacing whenever it exists, regardless of terminal status.
+  const hasError = Boolean(entry.error);
+  const errorIsFailure = entry.status === 'failed';
+  const errorColor = errorIsFailure ? theme.status.error : theme.status.warning;
 
   return (
     <MaxSizedBox
@@ -560,6 +570,22 @@ const MonitorDetailBody: React.FC<{
       <Box>
         <Text wrap="truncate-end">{entry.command}</Text>
       </Box>
+
+      {hasError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={errorColor}>
+              {errorIsFailure ? 'Error' : 'Stopped because'}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={errorColor} wrap="wrap">
+              {entry.error}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
     </MaxSizedBox>
   );
 };
@@ -613,15 +639,30 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
 
   const selectedEntry = useMemo(() => {
     const fromSnapshot = entries[selectedIndex] ?? null;
-    if (!fromSnapshot || fromSnapshot.kind !== 'agent') return fromSnapshot;
-    // Re-read the agent from the registry so detail-body fields the
-    // registry mutates between status transitions (recentActivities,
-    // stats) are fresh. The shallow spread inside useBackgroundTaskView
-    // captures `recentActivities` at refresh time, and `appendActivity`
-    // reassigns `entry.recentActivities = next` on the registry object —
-    // so the snapshot's reference is detached after the first activity.
-    const live = config.getBackgroundTaskRegistry().get(fromSnapshot.agentId);
-    return live ? { ...live, kind: 'agent' as const } : fromSnapshot;
+    if (!fromSnapshot) return fromSnapshot;
+    // Re-read the entry from the registry on each activityTick so
+    // detail-body fields the registry mutates between status transitions
+    // are fresh. The snapshot in useBackgroundTaskView only refreshes on
+    // statusChange (so the pill / AppContainer don't churn under heavy
+    // tool / event traffic), so for the detail view we have to re-resolve
+    // explicitly:
+    //   - agent: `recentActivities` is reassigned by `appendActivity`,
+    //     which fires `activityChange` (subscribed below).
+    //   - monitor: `eventCount` / `droppedLines` are mutated by
+    //     `emitEvent`, which intentionally does NOT fire `statusChange`
+    //     to avoid per-event refresh churn. The 1s wall-clock tick below
+    //     drives the recompute instead.
+    // Shells don't mutate detail-visible fields between statusChange
+    // events, so the snapshot stays correct for them.
+    if (fromSnapshot.kind === 'agent') {
+      const live = config.getBackgroundTaskRegistry().get(fromSnapshot.agentId);
+      return live ? { ...live, kind: 'agent' as const } : fromSnapshot;
+    }
+    if (fromSnapshot.kind === 'monitor') {
+      const live = config.getMonitorRegistry().get(fromSnapshot.monitorId);
+      return live ? { ...live, kind: 'monitor' as const } : fromSnapshot;
+    }
+    return fromSnapshot;
     // activityTick is a dep on purpose: the registry mutation is invisible
     // to useMemo otherwise and we need to recompute on each activity.
     // eslint-disable-next-line react-hooks/exhaustive-deps

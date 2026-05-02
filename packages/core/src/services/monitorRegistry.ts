@@ -76,6 +76,16 @@ export interface MonitorEntry {
   idleTimeoutMs: number;
   idleTimer?: ReturnType<typeof setTimeout>;
   droppedLines: number;
+  /** Exit code from the underlying process, when known. */
+  exitCode?: number;
+  /**
+   * Reason for terminal status, when one exists. Mirrors
+   * `BackgroundShellEntry.error`. Populated for `failed` (spawn error)
+   * and for `completed` via the max-events auto-stop path. Surfaced in
+   * the dialog's `MonitorDetailBody` so users opening the detail view
+   * after termination see why the monitor stopped.
+   */
+  error?: string;
 }
 
 export interface MonitorNotificationMeta {
@@ -94,8 +104,19 @@ export type MonitorNotificationCallback = (
 export type MonitorRegisterCallback = (entry: MonitorEntry) => void;
 
 /**
- * Fires on every status transition (running → terminal). Symmetric with
- * `BackgroundTaskRegistry.setStatusChangeCallback` and
+ * Fires on any change to the registry's contents that a snapshot
+ * subscriber needs to observe — concretely: `register()` (nothing →
+ * running), `settle()` (running → terminal: complete / fail / cancel /
+ * emitEvent's auto-stop at maxEvents / idle timeout), and `reset()`
+ * (mass clear, fired with no entry).
+ *
+ * Does NOT fire on `emitEvent` per se — per-event registry mutations
+ * (eventCount / droppedLines) are deliberately excluded so the footer
+ * pill and AppContainer don't churn under heavy event traffic. The
+ * dialog's detail view re-resolves selected monitor entries from the
+ * registry directly when it needs live counters.
+ *
+ * Symmetric with `BackgroundTaskRegistry.setStatusChangeCallback` and
  * `BackgroundShellRegistry.setStatusChangeCallback` so the same UI hook
  * can subscribe to all three registries.
  */
@@ -165,6 +186,10 @@ export class MonitorRegistry {
       debugLogger.info(
         `Monitor ${monitorId} reached max events (${entry.maxEvents}), stopping`,
       );
+      // Persist the reason so the dialog's detail view can surface it
+      // after the monitor terminates (the chat-history notification is
+      // separate and not visible from /tasks dialog reopens).
+      entry.error = 'Max events reached';
       this.settle(entry, 'completed');
       entry.abortController.abort();
       this.emitTerminalNotification(entry, 'Max events reached');
@@ -176,6 +201,7 @@ export class MonitorRegistry {
     const entry = this.monitors.get(monitorId);
     if (!entry || entry.status !== 'running') return;
 
+    if (exitCode !== null) entry.exitCode = exitCode;
     this.settle(entry, 'completed');
     debugLogger.info(
       `Monitor completed: ${monitorId} (exit ${exitCode}, ${entry.eventCount} events)`,
@@ -191,6 +217,7 @@ export class MonitorRegistry {
     const entry = this.monitors.get(monitorId);
     if (!entry || entry.status !== 'running') return;
 
+    entry.error = error;
     this.settle(entry, 'failed');
     debugLogger.info(`Monitor failed: ${monitorId}: ${error}`);
     this.emitTerminalNotification(entry, error);
@@ -314,6 +341,9 @@ export class MonitorRegistry {
         );
         entry.abortController.abort();
         if (entry.status !== 'running') return;
+        // Same rationale as the max-events branch in `emitEvent`: persist
+        // the reason so the dialog detail view can show it after settle.
+        entry.error = 'Idle timeout';
         this.settle(entry, 'completed');
         this.emitTerminalNotification(entry, 'Idle timeout');
       }
