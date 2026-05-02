@@ -43,7 +43,7 @@ describe('buildPermissionCheckContext', () => {
     });
   });
 
-  it('canonicalizes wrapped monitor commands for permission matching', () => {
+  it('returns raw monitor command — normalization is PM responsibility', () => {
     expect(
       buildPermissionCheckContext(
         'monitor',
@@ -55,12 +55,12 @@ describe('buildPermissionCheckContext', () => {
       ),
     ).toMatchObject({
       toolName: 'monitor',
-      command: `FOO="bar baz" tail -f ./app.log`,
+      command: String.raw`FOO="bar baz" /bin/bash --noprofile -c 'tail -f ./app.log &'`,
       cwd: '/project/subdir',
     });
   });
 
-  it('keeps wrapper suffix commands in monitor permission context', () => {
+  it('returns raw monitor command with suffix — normalization is PM responsibility', () => {
     expect(
       buildPermissionCheckContext(
         'monitor',
@@ -71,7 +71,7 @@ describe('buildPermissionCheckContext', () => {
       ),
     ).toMatchObject({
       toolName: 'monitor',
-      command: 'tail -f ./app.log && rm -rf /tmp/owned',
+      command: `/bin/bash -c 'tail -f ./app.log' && rm -rf /tmp/owned`,
     });
   });
 });

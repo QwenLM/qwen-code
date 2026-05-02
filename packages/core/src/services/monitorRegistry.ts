@@ -75,6 +75,7 @@ export interface MonitorEntry {
   maxEvents: number;
   idleTimeoutMs: number;
   idleTimer?: ReturnType<typeof setTimeout>;
+  droppedLines: number;
 }
 
 export interface MonitorNotificationMeta {
@@ -186,8 +187,8 @@ export class MonitorRegistry {
     const entry = this.monitors.get(monitorId);
     if (!entry || entry.status !== 'running') return;
 
-    entry.abortController.abort();
     this.settle(entry, 'cancelled');
+    entry.abortController.abort();
     debugLogger.info(`Monitor cancelled: ${monitorId}`);
     if (options.notify !== false) {
       this.emitTerminalNotification(entry);
@@ -269,11 +270,12 @@ export class MonitorRegistry {
         debugLogger.info(
           `Monitor ${entry.monitorId} idle timeout (${entry.idleTimeoutMs}ms), stopping`,
         );
-        entry.abortController.abort();
         this.settle(entry, 'completed');
+        entry.abortController.abort();
         this.emitTerminalNotification(entry, 'Idle timeout');
       }
     }, entry.idleTimeoutMs);
+    entry.idleTimer.unref();
   }
 
   private clearIdleTimer(entry: MonitorEntry): void {
@@ -334,8 +336,14 @@ export class MonitorRegistry {
           ? 'failed'
           : 'was cancelled';
 
-    const desc = this.truncateDescription(entry.description);
-    const displayLine = `Monitor "${desc}" ${statusText}. (${entry.eventCount} events)`;
+    const desc = stripDisplayControlChars(
+      this.truncateDescription(entry.description),
+    );
+    const droppedSuffix =
+      entry.droppedLines > 0
+        ? `, ${entry.droppedLines} lines dropped due to throttling`
+        : '';
+    const displayLine = `Monitor "${desc}" ${statusText}. (${entry.eventCount} events${droppedSuffix})`;
 
     const xmlParts: string[] = [
       '<task-notification>',
@@ -348,7 +356,7 @@ export class MonitorRegistry {
       '<kind>monitor</kind>',
       `<status>${escapeXml(entry.status)}</status>`,
       `<event-count>${entry.eventCount}</event-count>`,
-      `<summary>Monitor "${escapeXml(desc)}" ${statusText}. Total events: ${entry.eventCount}.</summary>`,
+      `<summary>Monitor "${escapeXml(desc)}" ${statusText}. Total events: ${entry.eventCount}.${entry.droppedLines > 0 ? ` ${entry.droppedLines} lines dropped due to throttling.` : ''}</summary>`,
     );
     if (detail) {
       xmlParts.push(`<result>${escapeXml(detail)}</result>`);

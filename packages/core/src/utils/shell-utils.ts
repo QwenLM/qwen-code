@@ -339,19 +339,46 @@ export function getCommandRoots(command: string): string[] {
 }
 
 export function stripShellWrapper(command: string): string {
-  const pattern = /^\s*(?:sh|bash|zsh|cmd.exe)\s+(?:\/c|-c)\s+/;
-  const match = command.match(pattern);
-  if (match) {
-    let newCommand = command.substring(match[0].length).trim();
-    if (
-      (newCommand.startsWith('"') && newCommand.endsWith('"')) ||
-      (newCommand.startsWith("'") && newCommand.endsWith("'"))
-    ) {
-      newCommand = newCommand.substring(1, newCommand.length - 1);
-    }
-    return newCommand;
+  const trimmed = command.trim();
+  let rest = trimmed;
+
+  // Skip leading env assignments (e.g. `FOO=bar bash -c '...'`)
+  while (true) {
+    const token = takeLeadingToken(rest);
+    if (!token || !isEnvAssignmentToken(token.token)) break;
+    rest = token.rest;
   }
-  return command.trim();
+
+  // Check for a known shell wrapper (bash, sh, zsh, cmd.exe — with or
+  // without absolute path like /bin/bash or /usr/bin/zsh).
+  const wrapperToken = takeLeadingToken(rest);
+  if (!wrapperToken || !isKnownMonitorWrapperToken(wrapperToken.token)) {
+    return trimmed;
+  }
+  rest = wrapperToken.rest;
+
+  // Consume wrapper flags (e.g. -e, -x, -o pipefail, -lc) until we
+  // hit the -c / /c command marker.
+  while (true) {
+    const token = takeLeadingToken(rest);
+    if (!token) return trimmed;
+
+    if (isMonitorCommandMarker(wrapperToken.token, token.token)) {
+      const commandToken = takeLeadingToken(token.rest);
+      if (!commandToken) return trimmed;
+      const { value: innerCommand } = stripSymmetricQuotes(commandToken.token);
+      const suffix = commandToken.rest.trim();
+      return suffix ? `${innerCommand} ${suffix}` : innerCommand || trimmed;
+    }
+
+    // Non-flag token (doesn't start with `-` or `/`) — not a wrapper.
+    const normalized = getNormalizedShellToken(token.token);
+    if (!normalized.startsWith('-') && !normalized.startsWith('/')) {
+      return trimmed;
+    }
+
+    rest = token.rest;
+  }
 }
 
 /**

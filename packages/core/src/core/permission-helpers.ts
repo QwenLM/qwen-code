@@ -21,7 +21,6 @@ import type {
 } from '../tools/tools.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { buildPermissionRules } from '../permissions/rule-parser.js';
-import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Context building
@@ -40,10 +39,9 @@ export function buildPermissionCheckContext(
 ): PermissionCheckContext {
   const rawCommand =
     'command' in toolParams ? String(toolParams['command']) : undefined;
-  const command =
-    rawCommand !== undefined && toolName === 'monitor'
-      ? normalizeMonitorCommand(rawCommand).safetyCommand
-      : rawCommand;
+  // Monitor command normalization is handled by
+  // PermissionManager.normalizePermissionContext — single point of truth.
+  const command = rawCommand;
   const cwd =
     typeof toolParams['directory'] === 'string'
       ? path.isAbsolute(toolParams['directory'])

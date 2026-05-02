@@ -506,6 +506,35 @@ describe('stripShellWrapper', () => {
   it('should not strip anything if no wrapper is present', async () => {
     expect(stripShellWrapper('ls -l')).toEqual('ls -l');
   });
+
+  it('should strip absolute-path wrapper /bin/bash -c', async () => {
+    expect(stripShellWrapper("/bin/bash -c 'sleep 5'")).toEqual('sleep 5');
+    expect(stripShellWrapper('/usr/bin/zsh -c "ls -l"')).toEqual('ls -l');
+  });
+
+  it('should strip combined flags like -lc', async () => {
+    expect(stripShellWrapper("bash -lc 'sleep 5'")).toEqual('sleep 5');
+    expect(stripShellWrapper("bash -ec 'sleep 5'")).toEqual('sleep 5');
+  });
+
+  it('should strip env-prefixed wrapper', async () => {
+    expect(stripShellWrapper("FOO=bar bash -c 'sleep 5'")).toEqual('sleep 5');
+    expect(stripShellWrapper("A=1 B=2 /bin/bash -c 'sleep 5'")).toEqual(
+      'sleep 5',
+    );
+  });
+
+  it('should strip single-dash wrapper flags before -c', async () => {
+    expect(stripShellWrapper("bash -e -c 'sleep 5'")).toEqual('sleep 5');
+  });
+
+  it('does not strip -o with separate argument (ambiguous)', async () => {
+    // "pipefail" is a non-flag token so the parser bails — this is
+    // intentional since `-o` args are indistinguishable from subcommands.
+    expect(stripShellWrapper("bash -o pipefail -c 'sleep 5'")).toEqual(
+      "bash -o pipefail -c 'sleep 5'",
+    );
+  });
 });
 
 describe('stripTrailingBackgroundAmp', () => {

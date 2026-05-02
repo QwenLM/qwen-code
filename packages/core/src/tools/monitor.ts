@@ -268,7 +268,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
         'Stripped trailing & from monitor command — monitor lifecycle handles backgrounding',
       );
     }
-    const description = this.params.description || command;
+    const description = sanitizeMonitorLine(this.params.description || command);
     const displayDescription = truncateDisplayDescription(description);
     const maxEvents = Math.min(
       this.params.max_events ?? DEFAULT_MAX_EVENTS,
@@ -307,6 +307,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       lastEventTime: 0,
       maxEvents,
       idleTimeoutMs,
+      droppedLines: 0,
     };
 
     // Spawn the process
@@ -334,6 +335,10 @@ class MonitorToolInvocation extends BaseToolInvocation<
     entry.pid = child.pid;
     let exited = false;
 
+    // Absorb async spawn errors (ENOENT, EACCES, etc.) during the window
+    // before the real error handler is attached at the end of this method.
+    child.on('error', () => {});
+
     // ----- Line buffering & throttling state ---------------------------------
     // Declared up-front (before `abortHandler`) so that the synchronous abort
     // path — either `entryAc.signal.aborted` already true at registration
@@ -343,7 +348,6 @@ class MonitorToolInvocation extends BaseToolInvocation<
     const stderrBuf = { value: '' };
     let tokenBucket = THROTTLE_BURST_SIZE;
     let lastRefill = Date.now();
-    let droppedLines = 0;
 
     const throttledEmit = (line: string): void => {
       // Apply prompt-injection defenses uniformly across every emission
@@ -365,7 +369,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
         tokenBucket--;
         registry.emitEvent(monitorId, sanitized);
       } else {
-        droppedLines++;
+        entry.droppedLines++;
       }
     };
 
@@ -388,19 +392,32 @@ class MonitorToolInvocation extends BaseToolInvocation<
       if (exited || !child.pid) return;
 
       if (process.platform === 'win32') {
-        spawn('taskkill', ['/pid', child.pid.toString(), '/f', '/t']);
+        const tk = spawn(
+          'taskkill',
+          ['/pid', child.pid.toString(), '/f', '/t'],
+          { stdio: 'ignore' },
+        );
+        tk.on('error', (err) =>
+          debugLogger.warn(
+            `Monitor taskkill failed for pid ${child.pid}: ${getErrorMessage(err)}`,
+          ),
+        );
       } else {
         try {
           process.kill(-child.pid, 'SIGTERM');
-        } catch {
-          // process may already be dead
+        } catch (err) {
+          debugLogger.warn(
+            `Monitor ${monitorId} SIGTERM failed (pid=${child.pid}): ${getErrorMessage(err)}`,
+          );
         }
         setTimeout(() => {
           if (!exited && child.pid) {
             try {
               process.kill(-child.pid, 'SIGKILL');
-            } catch {
-              // ignore
+            } catch (err) {
+              debugLogger.warn(
+                `Monitor ${monitorId} SIGKILL escalation failed (pid=${child.pid}): ${getErrorMessage(err)}`,
+              );
             }
           }
         }, 200).unref?.();
@@ -427,6 +444,9 @@ class MonitorToolInvocation extends BaseToolInvocation<
     } catch (err) {
       abortHandler();
       entryAc.signal.removeEventListener('abort', abortHandler);
+      (child.stdout as NodeJS.ReadableStream | null)?.destroy?.();
+      (child.stderr as NodeJS.ReadableStream | null)?.destroy?.();
+      child.removeAllListeners();
       return {
         llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
@@ -493,9 +513,9 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
       entryAc.signal.removeEventListener('abort', abortHandler);
 
-      if (droppedLines > 0) {
+      if (entry.droppedLines > 0) {
         debugLogger.info(
-          `Monitor ${monitorId} dropped ${droppedLines} lines due to throttling`,
+          `Monitor ${monitorId} dropped ${entry.droppedLines} lines due to throttling`,
         );
       }
     };

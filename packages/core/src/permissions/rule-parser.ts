@@ -128,7 +128,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
 };
 
 /**
- * Shell tool canonical names.
+ * Shell tool canonical names.  "Bash" / "Monitor" rules each resolve to
+ * their own canonical name, but `toolMatchesRuleToolName` also lets an
+ * existing Bash allow rule cover Monitor (so `Bash(git status)` also allows
+ * `Monitor(git status)`).  The reverse does not hold — a Monitor rule only
+ * covers monitor, not shell.
  */
 const SHELL_TOOL_NAMES = new Set(['run_shell_command', 'monitor']);
 
@@ -210,11 +214,10 @@ export function toolMatchesRuleToolName(
   if (ruleToolName === 'edit' && EDIT_TOOLS.has(contextToolName)) {
     return true;
   }
-  // "Bash" (run_shell_command) → covers all SHELL_TOOL_NAMES (including monitor)
-  if (
-    ruleToolName === 'run_shell_command' &&
-    SHELL_TOOL_NAMES.has(contextToolName)
-  ) {
+  // "Bash" (run_shell_command) → also covers monitor so that existing
+  // `Bash(...)` allow rules are not silently bypassed by switching to
+  // the monitor tool.  Monitor-only rules do NOT cover shell.
+  if (ruleToolName === 'run_shell_command' && contextToolName === 'monitor') {
     return true;
   }
   return false;

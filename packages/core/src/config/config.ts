@@ -1659,7 +1659,7 @@ export class Config {
       }
 
       this.backgroundTaskRegistry.abortAll();
-      this.monitorRegistry.abortAll();
+      this.monitorRegistry.abortAll({ notify: false });
       this.backgroundShellRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
