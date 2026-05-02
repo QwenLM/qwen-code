@@ -520,8 +520,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
     shellExecutionConfig?: ShellExecutionConfig,
     setPidCallback?: (pid: number) => void,
   ): Promise<ToolResult> {
-    const strippedCommand = stripShellWrapper(this.params.command);
-
     if (signal.aborted) {
       return {
         llmContent: 'Command was cancelled by user before it could start.',
@@ -544,7 +542,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     }
 
     // Add co-author to git commit commands
-    const processedCommand = this.addCoAuthorToGitCommit(strippedCommand);
+    const processedCommand = this.addCoAuthorToGitCommit(
+      this.params.command.trim(),
+    );
     const commandToExecute = processedCommand;
     const cwd = this.params.directory || this.config.getTargetDir();
 
@@ -738,8 +738,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     signal: AbortSignal,
     shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<ToolResult> {
-    const strippedCommand = stripShellWrapper(this.params.command);
-    const processedCommand = this.addCoAuthorToGitCommit(strippedCommand);
+    const processedCommand = this.addCoAuthorToGitCommit(
+      this.params.command.trim(),
+    );
     const cwd = this.params.directory || this.config.getTargetDir();
 
     // Output goes under the project temp dir (which `ReadFileTool`

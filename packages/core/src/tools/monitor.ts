@@ -37,6 +37,7 @@ import {
   detectCommandSubstitution,
   getCommandRoot,
   getShellConfiguration,
+  hasUnsafeMonitorBackgroundOperator,
   normalizeMonitorCommand as normalizeMonitorShellCommand,
   splitCommands,
 } from '../utils/shell-utils.js';
@@ -504,8 +505,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
     child.stderr?.on('data', (data: Buffer) => processLines(stderrBuf, data));
 
     // Shared cleanup: flush buffers, remove abort listener, log dropped lines.
-    // Called from both `exit` and `error` handlers to prevent leaks when
-    // `error` fires without a subsequent `exit` (e.g. ENOENT).
+    // Called from `close` after stdio streams drain, and from `error` when no
+    // close event is guaranteed (e.g. ENOENT).
     //
     // The flush is unconditional (no `entry.status === 'running'` guard):
     //   - For natural exit / error paths the status is still 'running' here,
@@ -529,10 +530,13 @@ class MonitorToolInvocation extends BaseToolInvocation<
       }
     };
 
-    const onExit = (code: number | null, sig: NodeJS.Signals | null): void => {
-      exited = true;
-      cleanup();
+    let exitResult: { code: number | null; sig: NodeJS.Signals | null } | null =
+      null;
 
+    const settleFromExit = (
+      code: number | null,
+      sig: NodeJS.Signals | null,
+    ): void => {
       if (entry.status !== 'running') return; // already settled
 
       if (entryAc.signal.aborted) {
@@ -546,6 +550,19 @@ class MonitorToolInvocation extends BaseToolInvocation<
       }
     };
 
+    const onExit = (code: number | null, sig: NodeJS.Signals | null): void => {
+      exited = true;
+      exitResult = { code, sig };
+    };
+
+    const onClose = (code: number | null, sig: NodeJS.Signals | null): void => {
+      exited = true;
+      cleanup();
+
+      const result = exitResult ?? { code, sig };
+      settleFromExit(result.code, result.sig);
+    };
+
     const onError = (err: Error): void => {
       exited = true;
       cleanup();
@@ -555,6 +572,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
     };
 
     child.on('exit', onExit);
+    child.on('close', onClose);
     child.on('error', onError);
     child.removeListener('error', captureEarlySpawnError);
 
@@ -649,6 +667,9 @@ export class MonitorTool extends BaseDeclarativeTool<
       !normalizeMonitorShellCommand(params.command).analysisCommand
     ) {
       return 'Command cannot be empty.';
+    }
+    if (hasUnsafeMonitorBackgroundOperator(params.command)) {
+      return 'Monitor commands must not contain non-final top-level background operators. Remove "&" and let the monitor manage process lifetime.';
     }
     if (params.max_events !== undefined) {
       if (

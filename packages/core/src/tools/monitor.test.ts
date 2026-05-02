@@ -134,12 +134,14 @@ function createMockChild(): ChildProcess & {
   stdout: Readable;
   stderr: Readable;
   _emitExit: (code: number | null, signal?: string | null) => void;
+  _emitClose: (code: number | null, signal?: string | null) => void;
   _emitError: (err: Error) => void;
 } {
   const child = new EventEmitter() as unknown as ChildProcess & {
     stdout: Readable;
     stderr: Readable;
     _emitExit: (code: number | null, signal?: string | null) => void;
+    _emitClose: (code: number | null, signal?: string | null) => void;
     _emitError: (err: Error) => void;
   };
   // Use Object.defineProperty to bypass readonly on the mock
@@ -155,6 +157,9 @@ function createMockChild(): ChildProcess & {
 
   child._emitExit = (code, signal = null) => {
     child.emit('exit', code, signal);
+  };
+  child._emitClose = (code, signal = null) => {
+    child.emit('close', code, signal);
   };
   child._emitError = (err) => {
     child.emit('error', err);
@@ -495,6 +500,27 @@ describe('MonitorTool', () => {
     it('rejects commands that normalize to empty after stripping trailing &', () => {
       expect(validate({ command: '&' })).toBe('Command cannot be empty.');
       expect(validate({ command: '  &  ' })).toBe('Command cannot be empty.');
+    });
+
+    it('rejects non-final top-level background operators', () => {
+      const message =
+        'Monitor commands must not contain non-final top-level background operators. Remove "&" and let the monitor manage process lifetime.';
+
+      expect(validate({ command: 'tail -f app.log & # watch' })).toBe(message);
+      expect(validate({ command: 'tail -f app.log & echo ready' })).toBe(
+        message,
+      );
+      expect(
+        validate({ command: "bash -c 'tail -f app.log & echo ready'" }),
+      ).toBe(message);
+      expect(
+        validate({ command: "bash -c 'tail -f app.log' & echo ready" }),
+      ).toBe(message);
+    });
+
+    it('accepts final trailing ampersands that monitor normalization strips', () => {
+      expect(validate({ command: 'tail -f app.log &' })).toBeNull();
+      expect(validate({ command: "bash -c 'tail -f app.log &'" })).toBeNull();
     });
 
     it('rejects non-absolute directory', () => {
@@ -883,7 +909,7 @@ describe('MonitorTool', () => {
       expect(callback).toHaveBeenCalledOnce();
     });
 
-    it('settles registry on process exit', async () => {
+    it('waits for stdio close before settling registry after process exit', async () => {
       const invocation = createInvocation({
         command: 'echo done',
       });
@@ -891,10 +917,32 @@ describe('MonitorTool', () => {
       await invocation.execute(new AbortController().signal);
       mockChild._emitExit(0);
 
+      expect(monitorRegistry.getRunning()).toHaveLength(1);
+      mockChild._emitClose(0);
+
       const entry = monitorRegistry.getRunning();
       expect(entry).toHaveLength(0);
       const all = monitorRegistry.getAll();
       expect(all[0].status).toBe('completed');
+    });
+
+    it('drains stdout emitted after exit before completing', async () => {
+      const callback = vi.fn();
+      monitorRegistry.setNotificationCallback(callback);
+      const invocation = createInvocation({
+        command: 'echo done',
+      });
+
+      await invocation.execute(new AbortController().signal);
+      mockChild._emitExit(0);
+      mockChild.stdout.emit('data', Buffer.from('final line\n'));
+      mockChild._emitClose(0);
+
+      expect(callback).toHaveBeenCalledTimes(2);
+      const [, eventModelText] = callback.mock.calls[0] as [string, string];
+      const [, terminalModelText] = callback.mock.calls[1] as [string, string];
+      expect(eventModelText).toContain('final line');
+      expect(terminalModelText).toContain('<status>completed</status>');
     });
 
     it('settles as failed on non-zero exit', async () => {
@@ -904,6 +952,7 @@ describe('MonitorTool', () => {
 
       await invocation.execute(new AbortController().signal);
       mockChild._emitExit(1);
+      mockChild._emitClose(1);
 
       const all = monitorRegistry.getAll();
       expect(all[0].status).toBe('failed');
@@ -928,6 +977,7 @@ describe('MonitorTool', () => {
 
       await invocation.execute(new AbortController().signal);
       mockChild._emitExit(null, 'SIGTERM');
+      mockChild._emitClose(null, 'SIGTERM');
 
       const all = monitorRegistry.getAll();
       expect(all[0].status).toBe('failed');

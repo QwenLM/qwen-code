@@ -399,6 +399,109 @@ export function stripTrailingBackgroundAmp(command: string): string {
   return trimmed.slice(0, -1).trimEnd();
 }
 
+export function hasNonFinalTopLevelBackgroundOperator(
+  command: string,
+): boolean {
+  let quote: '"' | "'" | '' = '';
+  let escaped = false;
+  let inBackticks = false;
+  let commandSubstitutionDepth = 0;
+
+  const previousNonWhitespace = (index: number): string | undefined => {
+    for (let i = index - 1; i >= 0; i--) {
+      const char = command[i];
+      if (char !== undefined && !/\s/.test(char)) return char;
+    }
+    return undefined;
+  };
+
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i]!;
+
+    if (quote === "'") {
+      if (char === "'") quote = '';
+      continue;
+    }
+
+    if (quote === '"') {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        quote = '';
+      }
+      continue;
+    }
+
+    if (inBackticks) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '`') {
+        inBackticks = false;
+      }
+      continue;
+    }
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+
+    if (char === '`') {
+      inBackticks = true;
+      continue;
+    }
+
+    if (
+      (char === '$' || char === '<' || char === '>') &&
+      command[i + 1] === '('
+    ) {
+      commandSubstitutionDepth++;
+      i++;
+      continue;
+    }
+
+    if (char === ')' && commandSubstitutionDepth > 0) {
+      commandSubstitutionDepth--;
+      continue;
+    }
+
+    if (char !== '&' || commandSubstitutionDepth > 0) {
+      continue;
+    }
+
+    const next = command[i + 1];
+    const previous = previousNonWhitespace(i);
+    if (
+      next === '&' ||
+      next === '>' ||
+      previous === '&' ||
+      previous === '>' ||
+      previous === '<' ||
+      previous === '|'
+    ) {
+      continue;
+    }
+
+    return command.slice(i + 1).trim().length > 0;
+  }
+
+  return false;
+}
+
 interface ParsedMonitorShellWrapper {
   wrapperTokens?: string[];
   innerCommand: string;
@@ -718,6 +821,14 @@ export function normalizeMonitorCommand(
     spawnCommand,
     strippedTrailingAmp,
   };
+}
+
+export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
+  const { innerCommand, innerArgsSuffix } = parseMonitorShellWrapper(command);
+  return (
+    hasNonFinalTopLevelBackgroundOperator(innerCommand) ||
+    hasNonFinalTopLevelBackgroundOperator(innerArgsSuffix ?? '')
+  );
 }
 
 /**

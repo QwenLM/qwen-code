@@ -11,6 +11,8 @@ import {
   escapeShellArg,
   getCommandRoots,
   getShellConfiguration,
+  hasNonFinalTopLevelBackgroundOperator,
+  hasUnsafeMonitorBackgroundOperator,
   isCommandAllowed,
   isCommandNeedsPermission,
   normalizeMonitorCommand,
@@ -559,6 +561,56 @@ describe('stripTrailingBackgroundAmp', () => {
     expect(stripTrailingBackgroundAmp('sleep 5 & echo done')).toBe(
       'sleep 5 & echo done',
     );
+  });
+});
+
+describe('hasNonFinalTopLevelBackgroundOperator', () => {
+  it('detects top-level background operators followed by more syntax', () => {
+    expect(
+      hasNonFinalTopLevelBackgroundOperator('tail -f app.log & echo ok'),
+    ).toBe(true);
+    expect(
+      hasNonFinalTopLevelBackgroundOperator('tail -f app.log & # watch'),
+    ).toBe(true);
+  });
+
+  it('ignores final, logical, escaped, quoted, and redirection ampersands', () => {
+    expect(hasNonFinalTopLevelBackgroundOperator('tail -f app.log &')).toBe(
+      false,
+    );
+    expect(hasNonFinalTopLevelBackgroundOperator('echo hi && echo ok')).toBe(
+      false,
+    );
+    expect(hasNonFinalTopLevelBackgroundOperator('echo foo \\& echo ok')).toBe(
+      false,
+    );
+    expect(hasNonFinalTopLevelBackgroundOperator(`printf '&' && echo ok`)).toBe(
+      false,
+    );
+    expect(hasNonFinalTopLevelBackgroundOperator('echo hi &> out')).toBe(false);
+    expect(hasNonFinalTopLevelBackgroundOperator('echo hi 2>&1')).toBe(false);
+  });
+});
+
+describe('hasUnsafeMonitorBackgroundOperator', () => {
+  it('detects unsafe backgrounding inside shell wrapper scripts and suffixes', () => {
+    expect(
+      hasUnsafeMonitorBackgroundOperator(
+        "bash -c 'tail -f app.log & echo ready'",
+      ),
+    ).toBe(true);
+    expect(
+      hasUnsafeMonitorBackgroundOperator(
+        "bash -c 'tail -f app.log' & echo ready",
+      ),
+    ).toBe(true);
+  });
+
+  it('allows final trailing ampersands that normalization strips', () => {
+    expect(hasUnsafeMonitorBackgroundOperator('tail -f app.log &')).toBe(false);
+    expect(
+      hasUnsafeMonitorBackgroundOperator("bash -c 'tail -f app.log &'"),
+    ).toBe(false);
   });
 });
 

@@ -576,6 +576,47 @@ describe('ShellTool', () => {
       );
     });
 
+    it('preserves shell wrapper environment and flags during foreground execution', async () => {
+      const command = `FOO=bar bash -e -c 'echo "$FOO"; false; echo bad'`;
+      const invocation = shellTool.build({
+        command,
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution();
+
+      await promise;
+
+      expect(mockShellExecutionService).toHaveBeenCalledWith(
+        command,
+        expect.any(String),
+        expect.any(Function),
+        expect.any(AbortSignal),
+        false,
+        {},
+      );
+    });
+
+    it('preserves shell wrapper environment and flags during background execution', async () => {
+      const command = `FOO=bar bash -e -c 'echo "$FOO"; sleep 10'`;
+      const invocation = shellTool.build({
+        command,
+        is_background: true,
+      });
+
+      await invocation.execute(mockAbortSignal);
+
+      expect(mockShellExecutionService).toHaveBeenCalledWith(
+        command,
+        expect.any(String),
+        expect.any(Function),
+        expect.any(AbortSignal),
+        false,
+        {},
+        { streamStdout: true },
+      );
+    });
+
     it('should use the provided directory as cwd', async () => {
       (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
         createMockWorkspaceContext('/test/dir'),
