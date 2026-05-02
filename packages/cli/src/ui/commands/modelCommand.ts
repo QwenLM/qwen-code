@@ -93,32 +93,31 @@ export const modelCommand: SlashCommand = {
     }
 
     // Handle modelName argument: immediately switch to the provided model
-    if (
-      args !== '' &&
-      !args.startsWith('--fast') &&
-      context.executionMode === 'interactive'
-    ) {
-      // Use first argument only, avoids later syntax confusion and/or use of model names with spaces
-      if (!settings) {
+    if (args !== '' && context.executionMode === 'interactive') {
+      const modelName = args.trim().split(' ')[0];
+      if (modelName.trim()) {
+        // Use first argument only, avoids later syntax confusion and/or use of model names with spaces
+        // Ignore argument if it is empty, e.g. to avoid confusion with trailing whitespace
+        if (!settings) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t('Settings service not available.'),
+          };
+        }
+        settings.setValue(
+          getPersistScopeForModelSelection(settings),
+          'model.name',
+          modelName,
+        );
+        await config.setModel(modelName);
+        await config.setModel(modelName);
         return {
           type: 'message',
-          messageType: 'error',
-          content: t('Settings service not available.'),
+          messageType: 'info',
+          content: t('Model') + ': ' + modelName,
         };
       }
-      const modelName = args.trim().split(' ')[0];
-      settings.setValue(
-        getPersistScopeForModelSelection(settings),
-        'model.name',
-        modelName,
-      );
-      await config.setModel(modelName);
-      await config.setModel(modelName);
-      return {
-        type: 'message',
-        messageType: 'info',
-        content: t('Model') + ': ' + modelName,
-      };
     }
 
     const contentGeneratorConfig = config.getContentGeneratorConfig();
@@ -141,8 +140,8 @@ export const modelCommand: SlashCommand = {
 
     // Non-interactive/ACP: set model if an arg was provided, otherwise show current model
     if (context.executionMode !== 'interactive') {
-      const modelName = args.trim();
-      if (modelName) {
+      const modelName = args.trim().split(' ')[0];
+      if (modelName.trim()) {
         // /model <model-id> — set the main model
         if (!settings) {
           return {
