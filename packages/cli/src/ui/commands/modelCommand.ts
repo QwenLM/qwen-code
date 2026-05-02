@@ -14,6 +14,18 @@ import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 
+// Get an aray of the available model IDs as strings
+function getAvailableModelIds(context: CommandContext) {
+  const { services } = context;
+  const { config } = services;
+  if (!config) {
+    return [];
+  }
+  const availableModels = config.getAvailableModels();
+  // Convert AvailableModel[] to string[] on AvailableModel.id
+  return availableModels.map((model) => model.id);
+}
+
 export const modelCommand: SlashCommand = {
   name: 'model',
   completionPriority: 100,
@@ -34,8 +46,12 @@ export const modelCommand: SlashCommand = {
           ),
         },
       ];
+    } else {
+      // Include model IDs matching the partial argument
+      return getAvailableModelIds(_context).filter((id) =>
+        id.startsWith(partialArg),
+      );
     }
-    return null;
   },
   action: async (
     context: CommandContext,
