@@ -964,6 +964,33 @@ describe('AnthropicContentConverter', () => {
       });
     });
 
+    it('drops non-compliant thinking blocks from plain-text assistant turns even when no tool_use is present', () => {
+      // A `redacted_thinking` round-tripped through Gemini-Part comes back as
+      // `{ type: 'thinking', thinking: '' }` with no signature. On a
+      // plain-text turn there is nothing to inject (no tool_use), but the
+      // bad block is still non-compliant and should be cleaned up.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [{ text: '', thought: true }, { text: 'Hello!' }],
+            },
+          ],
+        },
+        enableThinking,
+      );
+
+      // Bad thinking block dropped; remaining text passes through. No
+      // synthetic prepended because the turn has no tool_use.
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Hello!' }],
+      });
+    });
+
     it('injects on mixed text+tool_use assistant turns missing thinking', () => {
       // Common shape: model says something, then calls a tool. With no
       // thinking, this is still a tool-use turn that needs the synthetic.

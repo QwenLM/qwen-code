@@ -643,27 +643,37 @@ export class AnthropicContentConverter {
             ? message.content
             : [];
 
-      const hasToolUse = blocks.some(
-        (block) => (block as { type?: string }).type === 'tool_use',
-      );
-      if (!hasToolUse) continue;
-
-      // A redacted_thinking block satisfies the requirement on its own.
-      // A thinking block satisfies it only when it carries a signature
-      // field — otherwise it's a non-compliant artefact of the Gemini-Part
-      // round trip and should be dropped before we inject our synthetic.
-      const hasCompliantThinking = blocks.some((block) => {
-        const b = block as { type?: string; signature?: unknown };
-        if (b.type === 'redacted_thinking') return true;
-        if (b.type === 'thinking') return typeof b.signature === 'string';
-        return false;
-      });
-      if (hasCompliantThinking) continue;
-
+      // Step 1: Drop non-compliant thinking blocks (no `signature` field) on
+      // every assistant turn, not just tool-use ones. Plain-text turns can
+      // carry these too — e.g. when `redacted_thinking` round-trips through
+      // the Gemini Part representation, losing its `data` payload along the
+      // way. Empirically DeepSeek tolerates the residual shape, but
+      // normalizing keeps the wire message spec-correct.
       const cleanedBlocks = blocks.filter((block) => {
         const b = block as { type?: string; signature?: unknown };
         return !(b.type === 'thinking' && typeof b.signature !== 'string');
       });
+
+      // Avoid emitting `content: []` (Anthropic API rejects). If cleanup
+      // would empty the message, leave the original blocks in place.
+      if (cleanedBlocks.length === 0) continue;
+      if (cleanedBlocks.length !== blocks.length) {
+        message.content = cleanedBlocks;
+      }
+
+      // Step 2: On tool-use turns missing a compliant thinking block,
+      // prepend an empty synthetic. This is the issue #3786 trigger.
+      const hasToolUse = cleanedBlocks.some(
+        (block) => (block as { type?: string }).type === 'tool_use',
+      );
+      if (!hasToolUse) continue;
+
+      const hasCompliantThinking = cleanedBlocks.some((block) => {
+        const t = (block as { type?: string }).type;
+        // Any thinking block remaining here passed Step 1's signature check.
+        return t === 'thinking' || t === 'redacted_thinking';
+      });
+      if (hasCompliantThinking) continue;
 
       // DeepSeek currently accepts an empty `signature` for synthetic
       // thinking blocks. The `signature` field is an opaque token in the

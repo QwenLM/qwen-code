@@ -863,7 +863,10 @@ describe('AnthropicContentGenerator', () => {
 
     it('does not inject when request sets thinkingConfig.includeThoughts=false', async () => {
       // Same concern as above but for the per-request override used by
-      // suggestionGenerator / forkedAgent / ArenaManager.
+      // suggestionGenerator / forkedAgent / ArenaManager. Both the top-level
+      // `thinking` field AND the reasoning-shaped `output_config` must be
+      // suppressed — leaving either behind reintroduces the protocol
+      // mismatch this gate is designed to avoid.
       const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue({
         id: 'msg-1',
@@ -897,6 +900,9 @@ describe('AnthropicContentGenerator', () => {
 
       expect(anthropicRequest).toEqual(
         expect.not.objectContaining({ thinking: expect.anything() }),
+      );
+      expect(anthropicRequest).toEqual(
+        expect.not.objectContaining({ output_config: expect.anything() }),
       );
       expect(messages[1]).toEqual(toolOnlyAssistant);
     });
