@@ -102,7 +102,7 @@ describe('python sdk get-release-version', () => {
     execSyncMock.mockImplementation(makeExecSyncMock());
   });
 
-  it('returns same-channel previous release tags for preview and nightly', async () => {
+  it('returns empty previousReleaseTag for preview and nightly releases', async () => {
     fetchMock.mockResolvedValue(
       makeResponse({
         json: {
