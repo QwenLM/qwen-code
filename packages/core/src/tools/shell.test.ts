@@ -1414,6 +1414,65 @@ describe('ShellTool', () => {
         expect(observed).not.toContain('Co-authored-by:');
       });
 
+      // `--message` is git's documented long alias for `-m`. Without
+      // explicit handling the trailer would be silently skipped on
+      // commits that use the long form.
+      it('should add co-author for git commit --message "..."', async () => {
+        const command = 'git commit --message "Test commit"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      it('should add co-author for git commit --message="..."', async () => {
+        const command = 'git commit --message="Test commit"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
       it('should add co-author when git commit is prefixed with sudo', async () => {
         const command = 'sudo git commit -m "Test"';
         const invocation = shellTool.build({ command, is_background: false });
@@ -1659,6 +1718,36 @@ describe('ShellTool', () => {
         const observed = mockShellExecutionService.mock.calls[0][0];
         expect(observed).toBe(command);
         expect(observed).not.toContain('Generated with Qwen Code');
+      });
+
+      // `-b` is gh's documented short alias for `--body`. Without
+      // explicit handling the rewrite would silently miss it.
+      it('should append attribution to gh pr create -b "..." (short form)', async () => {
+        const command = 'gh pr create --title "x" -b "Summary"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Generated with Qwen Code'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
       });
 
       it('should append attribution to gh pr create --body when pr enabled', async () => {

@@ -27,7 +27,14 @@ const EXCLUDED_FILENAMES = new Set([
   'npm-shrinkwrap.json',
 ]);
 
-// File extension patterns (case-insensitive)
+// File extension patterns (case-insensitive). Note: `.d.ts` is NOT
+// listed here — `.d.ts` files are commonly authored by hand
+// (declaration files for projects without TS sources, ambient module
+// declarations, asset shims like `*.d.ts` for `import './x.svg'`),
+// and treating every one as generated would silently drop AI edits
+// to those files. Auto-generated `.d.ts` (e.g. `tsc --declaration`
+// output) tends to live under `/dist/`, `/build/`, or `/out/`,
+// which are already covered by `EXCLUDED_DIRECTORIES`.
 const EXCLUDED_EXTENSIONS = new Set([
   '.lock',
   '.min.js',
@@ -37,7 +44,6 @@ const EXCLUDED_EXTENSIONS = new Set([
   '.bundle.css',
   '.generated.ts',
   '.generated.js',
-  '.d.ts',
 ]);
 
 // Directory patterns that indicate generated/vendored content

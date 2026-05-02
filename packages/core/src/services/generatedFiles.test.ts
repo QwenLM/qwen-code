@@ -27,8 +27,21 @@ describe('isGeneratedFile', () => {
     expect(isGeneratedFile('src/.next/cache.js')).toBe(true);
   });
 
-  it('should exclude TypeScript declaration files', () => {
-    expect(isGeneratedFile('types/index.d.ts')).toBe(true);
+  // `.d.ts` files are commonly authored by hand (declaration files
+  // for projects without TS sources, ambient module declarations,
+  // asset shims like `*.d.ts` for `import './x.svg'`); the prior
+  // blanket exclusion silently dropped AI edits to those files.
+  // Auto-generated `.d.ts` (e.g. `tsc --declaration` output) tends
+  // to live under `/dist/` etc. and is still excluded by the
+  // directory rules.
+  it('should NOT exclude hand-authored TypeScript declaration files', () => {
+    expect(isGeneratedFile('types/index.d.ts')).toBe(false);
+    expect(isGeneratedFile('src/assets.d.ts')).toBe(false);
+  });
+
+  it('should still exclude .d.ts emitted into build directories', () => {
+    expect(isGeneratedFile('dist/index.d.ts')).toBe(true);
+    expect(isGeneratedFile('build/types.d.ts')).toBe(true);
   });
 
   it('should exclude generated code files', () => {

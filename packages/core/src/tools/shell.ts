@@ -324,6 +324,29 @@ function parseGhInvocation(tokens: string[]): string[] {
 }
 
 /**
+ * Detect whether the attributable `git commit` invocation in
+ * `command` carries the `--amend` flag. Used so attachCommitAttribution
+ * can switch the diff range from `HEAD~1..HEAD` (the amended commit
+ * vs its parent — too broad for amend) to `HEAD@{1}..HEAD` (the
+ * actual amend delta).
+ */
+function isAmendCommit(command: string): boolean {
+  for (const sub of splitCommands(command)) {
+    const tokens = tokeniseSegment(sub);
+    if (!tokens || tokens[0] !== 'git') continue;
+    const { subcommand } = parseGitInvocation(tokens);
+    if (subcommand !== 'commit') continue;
+    if (
+      tokens.includes('--amend') ||
+      tokens.some((t) => t.startsWith('--amend='))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Locate the character range of the *first* attributable
  * `git commit` invocation in the (potentially compound) command, or
  * `null` if none is attributable in the current cwd. The range
@@ -993,7 +1016,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // movement, so it's a no-op when no commit was actually created.
     if (commitCtx.attributableInCwd) {
       const preHead = await preHeadPromise;
-      await this.attachCommitAttribution(cwd, preHead);
+      // `git commit --amend` rewrites HEAD in place, so the diff
+      // `HEAD~1..HEAD` would span the entire amended commit (parent →
+      // amended), not just what this amend changed. Detect the flag
+      // so getCommittedFileInfo can switch to `HEAD@{1}..HEAD` and
+      // attribute only the actual amend delta.
+      const isAmend = isAmendCommit(strippedCommand);
+      await this.attachCommitAttribution(cwd, preHead, isAmend);
     } else if (commitCtx.hasCommit) {
       // A `cd subdir && git commit` (or `git -C ... commit`) ran a
       // commit we can't attribute, but our cwd's HEAD may still have
@@ -1345,6 +1374,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
   private async attachCommitAttribution(
     cwd: string,
     preHead: string | null,
+    isAmend: boolean,
   ): Promise<void> {
     // Caller (`execute`) gates this with `commitCtx.attributableInCwd`,
     // so we don't re-parse the command here. Re-parsing would be dead
@@ -1416,7 +1446,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     try {
       // Analyze the just-committed files by diffing HEAD against its parent.
       // The commit already happened, so we diff HEAD~1..HEAD instead of --cached.
-      const stagedInfo = await this.getCommittedFileInfo(cwd);
+      const stagedInfo = await this.getCommittedFileInfo(cwd, isAmend);
 
       // Pass the actual model name (e.g. `qwen3-coder-plus`) rather than the
       // co-author display label so the note's `generator` field reflects
@@ -1522,7 +1552,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * Get information about files in the most recent commit by diffing
    * HEAD against its parent (HEAD~1). Falls back to empty info on error.
    */
-  private async getCommittedFileInfo(cwd: string): Promise<StagedFileInfo> {
+  private async getCommittedFileInfo(
+    cwd: string,
+    isAmend: boolean,
+  ): Promise<StagedFileInfo> {
     const empty: StagedFileInfo = {
       files: [],
       diffSizes: new Map(),
@@ -1561,19 +1594,46 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // attribution for any file outside it.
       const repoRoot = repoRootOutput.trim();
 
-      // For the initial commit (no parent), use diff-tree --root
-      // since `git diff --root` isn't valid for porcelain diff.
-      const diffArgs = hasParent
-        ? {
-            name: 'diff --name-only HEAD~1 HEAD',
-            status: 'diff --name-status HEAD~1 HEAD',
-            numstat: 'diff --numstat HEAD~1 HEAD',
-          }
-        : {
-            name: 'diff-tree --root --no-commit-id -r --name-only HEAD',
-            status: 'diff-tree --root --no-commit-id -r --name-status HEAD',
-            numstat: 'diff-tree --root --no-commit-id -r --numstat HEAD',
-          };
+      // Choose the diff range:
+      // - amend: `HEAD@{1}..HEAD` — the actual amend delta. The
+      //   pre-amend HEAD is in the reflog and points at the original
+      //   commit; diffing against the *amended* HEAD captures only
+      //   what changed in this amend operation, not the entire commit
+      //   contents (which `HEAD~1..HEAD` would falsely include).
+      // - has parent: `HEAD~1..HEAD` — standard parent diff.
+      // - root commit: `diff-tree --root` against the empty tree.
+      let diffArgs: { name: string; status: string; numstat: string };
+      if (isAmend) {
+        // Verify HEAD@{1} actually exists; reflogs can be GC'd.
+        const hasReflog =
+          (await runGit('rev-parse --verify HEAD@{1}')).length > 0;
+        if (!hasReflog) {
+          // Without a pre-amend snapshot we can't compute the amend
+          // delta; emitting `HEAD~1..HEAD` would over-attribute.
+          debugLogger.warn(
+            'getCommittedFileInfo: --amend with empty reflog; skipping ' +
+              'attribution note (cannot determine amend delta).',
+          );
+          return empty;
+        }
+        diffArgs = {
+          name: 'diff --name-only HEAD@{1} HEAD',
+          status: 'diff --name-status HEAD@{1} HEAD',
+          numstat: 'diff --numstat HEAD@{1} HEAD',
+        };
+      } else if (hasParent) {
+        diffArgs = {
+          name: 'diff --name-only HEAD~1 HEAD',
+          status: 'diff --name-status HEAD~1 HEAD',
+          numstat: 'diff --numstat HEAD~1 HEAD',
+        };
+      } else {
+        diffArgs = {
+          name: 'diff-tree --root --no-commit-id -r --name-only HEAD',
+          status: 'diff-tree --root --no-commit-id -r --name-status HEAD',
+          numstat: 'diff-tree --root --no-commit-id -r --numstat HEAD',
+        };
+      }
       const [nameOutput, statusOutput, numstatOutput] = await Promise.all([
         runGit(diffArgs.name),
         runGit(diffArgs.status),
@@ -1670,14 +1730,25 @@ export class ShellToolInvocation extends BaseToolInvocation<
     //   [^"\\]       matches any char except double-quote and backslash
     //   \\.          matches escape sequences like \" or \\
     //   (?:...|...)* matches normal chars or escapes, repeated
-    const doubleQuotePattern = /(-[a-zA-Z]*m\s*)"((?:[^"\\]|\\.)*)"/g;
+    // Match both the short form (`-m`, `-am`, combined short flags)
+    // and git's long alias `--message` (with optional `=` separator:
+    // `--message="..."`). Inner alternation is non-capturing so the
+    // existing `[full, prefix, body]` destructure still applies.
+    const FLAG_PREFIX = `(?:-[a-zA-Z]*m|--message)\\s*=?\\s*`;
+    const doubleQuotePattern = new RegExp(
+      `(${FLAG_PREFIX})"((?:[^"\\\\]|\\\\.)*)"`,
+      'g',
+    );
     // Bash single quotes can't be escaped, so apostrophes inside a
     // single-quoted message use the close-escape-reopen form `'\''`
     // (e.g. `git commit -m 'don'\''t'`). The negative lookahead leaves
     // those alone — rewriting them correctly needs a real shell parser
     // and a wrong rewrite would mid-insert the trailer and break the
     // command's quoting.
-    const singleQuotePattern = /(-[a-zA-Z]*m\s*)'([^']*)'(?!\\'')/g;
+    const singleQuotePattern = new RegExp(
+      `(${FLAG_PREFIX})'([^']*)'(?!\\\\'')`,
+      'g',
+    );
     const segment = command.slice(segmentRange.start, segmentRange.end);
     // Git concatenates multiple `-m` values with a blank line, so the
     // co-author trailer has to land in the *last* `-m` value to be
@@ -1815,16 +1886,24 @@ export class ShellToolInvocation extends BaseToolInvocation<
         ? `\n\n🤖 Generated with Qwen Code (${shots}-shotted by ${generator})`
         : `\n\n🤖 Generated with Qwen Code`;
 
-    // Append to --body "..." or --body '...'
-    // Accept both space and `=` between flag and value: `gh pr create
-    // --body "..."` and `gh pr create --body="..."` are both valid.
-    const bodyDoublePattern = /(--body[\s=]+)"((?:[^"\\]|\\.)*)"/;
+    // Match both the long form `--body` and the short alias `-b`
+    // (documented in `gh pr create --help`), with either space or
+    // `=` separator: `--body "..."`, `--body="..."`, `-b "..."`,
+    // `-b="..."`. The `\b` after `-b` is intentional — without it
+    // we'd also match the start of `-body` (a typo) which the user
+    // didn't intend; a real `-b` flag is followed by whitespace or
+    // `=`. Inner alternation is non-capturing so the existing
+    // `[full, prefix, body]` destructure stays intact.
+    const BODY_FLAG = `(?:--body|-b)[\\s=]+`;
+    const bodyDoublePattern = new RegExp(
+      `(${BODY_FLAG})"((?:[^"\\\\]|\\\\.)*)"`,
+    );
     // Bash apostrophes inside a single-quoted body use the
     // close-escape-reopen form `'\''`. The inner alternation matches
     // either a non-apostrophe character or that escape sequence as a
     // whole, so the trailer lands at the true end of the body rather
     // than after only the first quoted segment.
-    const bodySinglePattern = /(--body[\s=]+)'((?:[^']|'\\'')*)'/;
+    const bodySinglePattern = new RegExp(`(${BODY_FLAG})'((?:[^']|'\\\\'')*)'`);
     const bodyDoubleMatch = command.match(bodyDoublePattern);
     const bodySingleMatch = command.match(bodySinglePattern);
     const bodyMatch = bodyDoubleMatch ?? bodySingleMatch;
