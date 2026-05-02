@@ -29,7 +29,10 @@ import {
 } from '../services/fileSystemService.js';
 import type { LineEnding } from '../services/fileSystemService.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
-import { checkPriorRead } from './priorReadEnforcement.js';
+import {
+  checkPriorRead,
+  PriorReadEnforcementError,
+} from './priorReadEnforcement.js';
 import { ReadFileTool } from './read-file.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { logFileOperation } from '../telemetry/loggers.js';
@@ -331,7 +334,15 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     }
 
     if (editData.error) {
-      throw new Error(`Edit error: ${editData.error.display}`);
+      // The error type from `calculateEdit` includes the new
+      // prior-read codes (EDIT_REQUIRES_PRIOR_READ /
+      // FILE_CHANGED_SINCE_READ). Wrap in PriorReadEnforcementError
+      // so coreToolScheduler surfaces the correct ToolErrorType
+      // instead of UNHANDLED_EXCEPTION.
+      throw new PriorReadEnforcementError(
+        `Edit error: ${editData.error.display}`,
+        editData.error.type,
+      );
     }
 
     const fileName = path.basename(this.params.file_path);

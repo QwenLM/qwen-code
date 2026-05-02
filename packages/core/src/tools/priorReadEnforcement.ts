@@ -10,6 +10,26 @@ import { ToolErrorType } from './tool-error.js';
 import { ToolNames } from './tool-names.js';
 
 /**
+ * Error thrown by `getConfirmationDetails()` when prior-read enforcement
+ * rejects a request before any diff is rendered. Carries the structured
+ * `ToolErrorType` so the tool scheduler can surface it as the right
+ * tool error code (`EDIT_REQUIRES_PRIOR_READ` /
+ * `FILE_CHANGED_SINCE_READ`) instead of the generic
+ * `UNHANDLED_EXCEPTION` that any plain `Error` would otherwise become.
+ *
+ * Caught by `coreToolScheduler` via the `errorType` instance field.
+ */
+export class PriorReadEnforcementError extends Error {
+  override readonly name = 'PriorReadEnforcementError';
+  constructor(
+    message: string,
+    readonly errorType: ToolErrorType,
+  ) {
+    super(message);
+  }
+}
+
+/**
  * Result of checking whether a tool that mutates an existing file is
  * cleared to proceed based on the session FileReadCache.
  *
@@ -54,9 +74,13 @@ export type PriorReadVerb = 'editing' | 'overwriting';
  * a slice or a structured proxy of the file, not the bytes a
  * prospective edit would mutate.
  *
- * Stat failures are intentionally non-blocking — the existing write
- * path will surface a richer error than a synthetic "you must read
- * first" message.
+ * Stat policy: `ENOENT` means the path disappeared between the
+ * caller's `fileExists` check and now — a disappearance race that is
+ * harmless for our purposes (the downstream write will resurface the
+ * absence as its own error). Any other stat error (`EACCES`, `EBUSY`,
+ * NFS hiccup, …) is fail-closed: returning `ok: true` would re-open
+ * the blind-write path the helper exists to block, since a transient
+ * stat failure does not imply the subsequent read/write will fail.
  *
  * Note on `recordWrite` interaction: when a tool *creates* a file via
  * Edit (`old_string === ''`) or WriteFile (new path), the FileReadCache
@@ -74,8 +98,29 @@ export async function checkPriorRead(
   let stats: fs.Stats;
   try {
     stats = await fs.promises.stat(filePath);
-  } catch {
-    return { ok: true };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code === 'ENOENT') {
+      // Disappearance race vs the caller's fileExists check. Let the
+      // downstream write path surface the absence — synthesising a
+      // "you must read first" message here would be misleading.
+      return { ok: true };
+    }
+    // Any other stat failure: fail closed. We cannot prove the file
+    // has been read; treating that as approval would silently bypass
+    // enforcement on transient metadata errors that don't prevent
+    // the subsequent write from succeeding.
+    const raw =
+      `Could not stat ${filePath} to verify prior read (${code ?? 'unknown error'}). ` +
+      `Re-read with the ${ToolNames.READ_FILE} tool, then retry ${verb} it.`;
+    const verbDisplay =
+      verb === 'editing' ? 'editing this file' : 'overwriting this file';
+    return {
+      ok: false,
+      type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
+      rawMessage: raw,
+      displayMessage: `cannot verify prior read of ${filePath}; re-run ${ToolNames.READ_FILE} before ${verbDisplay}.`,
+    };
   }
   const status = cache.check(stats);
   if (
@@ -99,8 +144,32 @@ export async function checkPriorRead(
       displayMessage: `file changed since last read; re-run ${ToolNames.READ_FILE} first.`,
     };
   }
-  // unknown OR fresh-but-partial / non-cacheable: require a fresh
-  // full text read.
+  // Differentiate "fresh but the recorded read was non-cacheable"
+  // (binary / image / audio / video / PDF / notebook) from "no /
+  // partial read at all". Telling the model to "re-read with read_file"
+  // for a binary file would loop forever because that read would
+  // also leave `lastReadCacheable === false`.
+  if (
+    status.state === 'fresh' &&
+    status.entry.lastReadAt !== undefined &&
+    status.entry.lastReadWasFull &&
+    !status.entry.lastReadCacheable
+  ) {
+    const raw =
+      `File ${filePath} is a binary / image / audio / video / PDF / ` +
+      `notebook payload that the ${ToolNames.READ_FILE} tool returns ` +
+      `as a structured value rather than as plain text. The Edit / ` +
+      `WriteFile tools cannot mutate that payload safely — re-reading ` +
+      `it would not change this. Use a different mechanism (e.g. shell ` +
+      `tool with a binary-aware writer) if you need to overwrite it.`;
+    return {
+      ok: false,
+      type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
+      rawMessage: raw,
+      displayMessage: `non-text payload; cannot ${verb} via this tool.`,
+    };
+  }
+  // unknown OR fresh-but-partial: require a fresh full text read.
   const raw =
     `File ${filePath} has not been fully read in this session. ` +
     `Use the ${ToolNames.READ_FILE} tool first (without offset / limit ` +

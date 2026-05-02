@@ -35,7 +35,10 @@ import type { LineEnding } from '../services/fileSystemService.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
-import { checkPriorRead } from './priorReadEnforcement.js';
+import {
+  checkPriorRead,
+  PriorReadEnforcementError,
+} from './priorReadEnforcement.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type {
   ModifiableDeclarativeTool,
@@ -133,7 +136,12 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         'overwriting',
       );
       if (!decision.ok) {
-        throw new Error(decision.rawMessage);
+        // Surface the structured ToolErrorType through scheduler.
+        // A plain `throw new Error` would hit the scheduler's catch
+        // block and be reported as UNHANDLED_EXCEPTION — losing the
+        // EDIT_REQUIRES_PRIOR_READ / FILE_CHANGED_SINCE_READ contract
+        // for any flow that requires confirmation.
+        throw new PriorReadEnforcementError(decision.rawMessage, decision.type);
       }
     }
     if (fileExists) {

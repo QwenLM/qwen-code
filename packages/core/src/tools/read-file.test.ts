@@ -733,9 +733,21 @@ describe('ReadFileTool', () => {
           // Slow path returned the actual content (not a placeholder).
           expect(typeof result.llmContent).toBe('string');
           expect(result.llmContent).not.toMatch(/unchanged since/);
-          // The cache must contain the auto-memory file's entry so a
-          // subsequent EditTool / WriteFileTool call sees `fresh`.
-          expect(fileReadCache.check(fs.statSync(memFile)).state).toBe('fresh');
+          // The cache must contain the auto-memory file's entry, AND
+          // the entry must be in a shape that satisfies prior-read
+          // enforcement on Edit / WriteFile (fresh + lastReadAt set +
+          // full + cacheable). Asserting only `fresh` would let a
+          // future regression that records auto-memory reads as
+          // partial/non-cacheable slip through silently — those reads
+          // would still report fresh but enforcement would reject
+          // every follow-up Edit.
+          const status = fileReadCache.check(fs.statSync(memFile));
+          expect(status.state).toBe('fresh');
+          if (status.state === 'fresh') {
+            expect(status.entry.lastReadAt).toBeDefined();
+            expect(status.entry.lastReadWasFull).toBe(true);
+            expect(status.entry.lastReadCacheable).toBe(true);
+          }
         } finally {
           if (previousLocal === undefined) {
             delete process.env['QWEN_CODE_MEMORY_LOCAL'];

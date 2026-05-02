@@ -1006,6 +1006,14 @@ describe('EditTool', () => {
         })
         .execute(abortSignal);
       expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+      // Telling the model to re-read with read_file would loop the
+      // agent forever: a binary/image/PDF read also leaves
+      // lastReadCacheable=false. The message must explain the dead
+      // end instead of asking for another read.
+      expect(result.error?.message).toMatch(
+        /binary \/ image \/ audio \/ video \/ PDF \/ notebook payload/,
+      );
+      expect(result.error?.message).not.toMatch(/Use the read_file tool first/);
     });
 
     it('does not let an unread file be probed via NO_OCCURRENCE_FOUND', async () => {
@@ -1154,6 +1162,28 @@ describe('EditTool', () => {
       const result = await tool.build(params).execute(abortSignal);
       expect(result.error).toBeUndefined();
       expect(fs.readFileSync(filePath, 'utf8')).toBe('modified');
+    });
+
+    it('attaches a structured ToolErrorType when getConfirmationDetails rejects', async () => {
+      // Without an `errorType` field on the thrown Error, the tool
+      // scheduler reports every confirmation-time rejection as
+      // UNHANDLED_EXCEPTION — losing the EDIT_REQUIRES_PRIOR_READ /
+      // FILE_CHANGED_SINCE_READ contract this PR introduces.
+      fs.writeFileSync(filePath, 'unread content', 'utf8');
+      const invocation = tool.build({
+        file_path: filePath,
+        old_string: 'unread',
+        new_string: 'modified',
+      });
+      let caught: unknown;
+      try {
+        await invocation.getConfirmationDetails(abortSignal);
+      } catch (err) {
+        caught = err;
+      }
+      expect((caught as { errorType?: string })?.errorType).toBe(
+        ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
+      );
     });
   });
 

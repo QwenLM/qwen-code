@@ -855,6 +855,53 @@ describe('WriteFileTool', () => {
       fs.unlinkSync(filePath);
     });
 
+    it('attaches a structured ToolErrorType when getConfirmationDetails rejects', async () => {
+      // The thrown error must carry `errorType` so the scheduler
+      // surfaces EDIT_REQUIRES_PRIOR_READ instead of
+      // UNHANDLED_EXCEPTION on approval-required flows.
+      const filePath = path.join(rootDir, 'enforce-confirm-type.txt');
+      fs.writeFileSync(filePath, 'unread current bytes', 'utf-8');
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'replacement content',
+      });
+      let caught: unknown;
+      try {
+        await invocation.getConfirmationDetails(abortSignal);
+      } catch (err) {
+        caught = err;
+      }
+      expect((caught as { errorType?: string })?.errorType).toBe(
+        ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
+      );
+      fs.unlinkSync(filePath);
+    });
+
+    it('rejects a write with a stat failure other than ENOENT (fail-closed)', async () => {
+      // checkPriorRead must NOT default to ok:true when stat fails
+      // for reasons other than disappearance race (EACCES, EBUSY,
+      // NFS hiccup, ...). Doing so reopens the blind-write path on
+      // transient metadata errors.
+      const filePath = path.join(rootDir, 'enforce-stat-fail.txt');
+      fs.writeFileSync(filePath, 'untouched', 'utf-8');
+      const statSpy = vi
+        .spyOn(fs.promises, 'stat')
+        .mockRejectedValueOnce(
+          Object.assign(new Error('EACCES'), { code: 'EACCES' }),
+        );
+
+      const result = await tool
+        .build({ file_path: filePath, content: 'clobber' })
+        .execute(abortSignal);
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+      expect(result.error?.message).toMatch(/Could not stat .*\(EACCES\)/);
+      // File untouched.
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('untouched');
+
+      statSpy.mockRestore();
+      fs.unlinkSync(filePath);
+    });
+
     it('rejects a write when the file has been modified since the last read', async () => {
       const filePath = path.join(rootDir, 'enforce-stale.txt');
       fs.writeFileSync(filePath, 'one', 'utf-8');
