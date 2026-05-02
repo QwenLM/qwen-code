@@ -33,21 +33,38 @@ vi.mock('@qwen-code/webui', async () => {
       );
     };
 
+  const isAgentExec = (toolCall: { rawOutput?: { type?: string } }) =>
+    toolCall.rawOutput?.type === 'task_execution';
+
+  const agentComponent = renderLabel('agent');
+  const genericComponent = renderLabel('generic');
+  const readComponent = renderLabel('read');
+  const shellComponent = renderLabel('shell');
+
   return {
     shouldShowToolCall: () => true,
-    isAgentExecutionToolCall: (toolCall: { rawOutput?: { type?: string } }) =>
-      toolCall.rawOutput?.type === 'task_execution',
-    GenericToolCall: renderLabel('generic'),
+    isAgentExecutionToolCall: isAgentExec,
+    GenericToolCall: genericComponent,
     ThinkToolCall: renderLabel('think'),
     SaveMemoryToolCall: renderLabel('memory'),
     EditToolCall: renderLabel('edit'),
     WriteToolCall: renderLabel('write'),
     SearchToolCall: renderLabel('search'),
     UpdatedPlanToolCall: renderLabel('plan'),
-    ShellToolCall: renderLabel('shell'),
-    ReadToolCall: renderLabel('read'),
+    ShellToolCall: shellComponent,
+    ReadToolCall: readComponent,
     WebFetchToolCall: renderLabel('web'),
-    AgentToolCall: renderLabel('agent'),
+    AgentToolCall: agentComponent,
+    getToolCallComponent: (toolCall: {
+      kind: string;
+      rawOutput?: { type?: string };
+    }) => {
+      if (isAgentExec(toolCall)) return agentComponent;
+      const kind = toolCall.kind.toLowerCase();
+      if (kind === 'read' || kind === 'read_file') return readComponent;
+      if (kind === 'execute' || kind === 'bash') return shellComponent;
+      return genericComponent;
+    },
   };
 });
 

@@ -130,7 +130,7 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
 /**
  * Shell tool canonical names. These use command-style rule specifiers.
  */
-const SHELL_TOOL_NAMES = new Set(['run_shell_command', 'monitor']);
+export const SHELL_TOOL_NAMES = new Set(['run_shell_command', 'monitor']);
 
 /**
  * File-reading tools — "Read" rules apply to all of these (best-effort).

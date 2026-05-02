@@ -15,6 +15,10 @@ import {
 import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItem } from '../types.js';
+import {
+  hasBlockingBackgroundWork,
+  resetBackgroundStateForSessionSwitch,
+} from '../utils/backgroundWorkUtils.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
@@ -44,23 +48,6 @@ export interface UseResumeCommandResult {
 
 const BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE =
   "Stop the current session's running background tasks before resuming another session.";
-
-function hasBlockingBackgroundWork(config: Config): boolean {
-  return (
-    config.getBackgroundTaskRegistry().hasUnfinalizedTasks() ||
-    config.getMonitorRegistry().getRunning().length > 0 ||
-    config
-      .getBackgroundShellRegistry()
-      .getAll()
-      .some((entry) => entry.status === 'running')
-  );
-}
-
-function resetBackgroundStateForSessionSwitch(config: Config): void {
-  config.getBackgroundTaskRegistry().reset();
-  config.getMonitorRegistry().reset();
-  config.getBackgroundShellRegistry().reset();
-}
 
 export function useResumeCommand(
   options?: UseResumeCommandOptions,

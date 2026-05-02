@@ -983,6 +983,30 @@ describe('MonitorTool', () => {
       expect(all[0].status).toBe('failed');
     });
 
+    it('settles as completed when exit and close both report null code and null signal', async () => {
+      const callback = vi.fn();
+      monitorRegistry.setNotificationCallback(callback);
+
+      const invocation = createInvocation({
+        command: 'some-cmd',
+      });
+
+      await invocation.execute(new AbortController().signal);
+      mockChild._emitExit(null, null);
+      mockChild._emitClose(null, null);
+
+      const all = monitorRegistry.getAll();
+      expect(all[0].status).toBe('completed');
+      // Terminal notification should not include a result tag (exitCode is null)
+      const terminalCall = callback.mock.calls.find(
+        (args) =>
+          typeof args[1] === 'string' &&
+          (args[1] as string).includes('<status>completed</status>'),
+      );
+      expect(terminalCall).toBeDefined();
+      expect(terminalCall![1]).not.toContain('<result>');
+    });
+
     it('does not kill monitor on turn signal abort', async () => {
       const turnAc = new AbortController();
       const invocation = createInvocation({

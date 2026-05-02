@@ -201,9 +201,13 @@ class MonitorToolInvocation extends BaseToolInvocation<
       let isReadOnly = false;
       try {
         isReadOnly = await isShellCommandReadOnlyAST(sub);
-      } catch {
+      } catch (e) {
         // Conservative fallback: if AST analysis fails, keep the sub-command
         // in the confirmation scope instead of accidentally dropping it.
+        debugLogger.warn(
+          'AST read-only check failed for monitor sub-command, falling back to ask:',
+          e,
+        );
       }
 
       if (isReadOnly) {
@@ -364,10 +368,16 @@ class MonitorToolInvocation extends BaseToolInvocation<
       // Refill tokens
       const now = Date.now();
       const elapsed = now - lastRefill;
-      const newTokens = Math.floor(elapsed / THROTTLE_REFILL_INTERVAL_MS);
-      if (newTokens > 0) {
-        tokenBucket = Math.min(THROTTLE_BURST_SIZE, tokenBucket + newTokens);
-        lastRefill += newTokens * THROTTLE_REFILL_INTERVAL_MS;
+      if (elapsed < 0) {
+        // Clock went backwards (suspend/resume, NTP); reset to avoid
+        // starving the bucket until the clock catches up.
+        lastRefill = now;
+      } else {
+        const newTokens = Math.floor(elapsed / THROTTLE_REFILL_INTERVAL_MS);
+        if (newTokens > 0) {
+          tokenBucket = Math.min(THROTTLE_BURST_SIZE, tokenBucket + newTokens);
+          lastRefill += newTokens * THROTTLE_REFILL_INTERVAL_MS;
+        }
       }
 
       if (tokenBucket > 0) {
