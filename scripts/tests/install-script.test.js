@@ -126,6 +126,10 @@ describe('installation scripts', () => {
     expect(script).toContain(':InstallNpm');
     expect(script).toContain(':VerifyChecksum');
     expect(script).toContain('SHA256SUMS not found; cannot verify archive');
+    expect(script).toContain('tokens=1,2');
+    expect(script).toContain('CHECKSUM_NAME');
+    expect(script).toContain('if "!CHECKSUM_NAME!"=="!ARCHIVE_NAME!"');
+    expect(script).not.toContain('findstr /C:"!ARCHIVE_NAME!"');
     expect(script).toContain('qwen-code-win-x64.zip');
     expect(script).toContain('Expand-Archive');
     expect(script).toContain('$env:QWEN_DOWNLOAD_URL');
@@ -171,18 +175,11 @@ describe('standalone release packaging', () => {
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
     try {
-      const fakeRuntimeDir = path.join(tmpDir, 'not-node');
-      mkdirSync(fakeRuntimeDir, { recursive: true });
-      writeFileSync(path.join(fakeRuntimeDir, 'README.txt'), 'not node\n');
-      const fakeRuntimeArchive = path.join(tmpDir, 'bad-runtime.tar.gz');
-      execFileSync(
-        'tar',
-        ['-czf', fakeRuntimeArchive, '-C', tmpDir, 'not-node'],
-        {
-          env: { ...process.env, LC_ALL: 'C' },
-          stdio: 'ignore',
-        },
-      );
+      const target = process.platform === 'win32' ? 'win-x64' : 'linux-x64';
+      const fakeRuntimeArchive =
+        process.platform === 'win32'
+          ? createBadWindowsNodeArchive(tmpDir)
+          : createBadUnixNodeArchive(tmpDir);
 
       expect(() =>
         execFileSync(
@@ -190,7 +187,7 @@ describe('standalone release packaging', () => {
           [
             'scripts/create-standalone-package.js',
             '--target',
-            'linux-x64',
+            target,
             '--node-archive',
             fakeRuntimeArchive,
             '--out-dir',
@@ -200,7 +197,7 @@ describe('standalone release packaging', () => {
           ],
           { stdio: 'pipe' },
         ),
-      ).toThrow(/Node.js runtime for linux-x64 must contain/);
+      ).toThrow(/Node\.js runtime for .* must contain/);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
       if (createdDist) {
@@ -252,7 +249,7 @@ describe('standalone release packaging', () => {
         rmSync('dist', { recursive: true, force: true });
       }
     }
-  });
+  }, 30_000);
 
   itOnUnix('dereferences safe Node.js runtime symlinks', () => {
     const createdDist = ensureMinimalDist();
@@ -629,6 +626,29 @@ function createFakeNodeArchive(tmpDir, options = {}) {
       stdio: 'ignore',
     },
   );
+  return archive;
+}
+
+function createBadUnixNodeArchive(tmpDir) {
+  const fakeRuntimeDir = path.join(tmpDir, 'not-node');
+  mkdirSync(fakeRuntimeDir, { recursive: true });
+  writeFileSync(path.join(fakeRuntimeDir, 'README.txt'), 'not node\n');
+
+  const archive = path.join(tmpDir, 'bad-runtime.tar.gz');
+  execFileSync('tar', ['-czf', archive, '-C', tmpDir, 'not-node'], {
+    env: { ...process.env, LC_ALL: 'C' },
+    stdio: 'ignore',
+  });
+  return archive;
+}
+
+function createBadWindowsNodeArchive(tmpDir) {
+  const fakeRuntimeDir = path.join(tmpDir, 'not-node');
+  mkdirSync(fakeRuntimeDir, { recursive: true });
+  writeFileSync(path.join(fakeRuntimeDir, 'README.txt'), 'not node\n');
+
+  const archive = path.join(tmpDir, 'bad-runtime.zip');
+  createZipForTest(archive, tmpDir, path.basename(fakeRuntimeDir));
   return archive;
 }
 

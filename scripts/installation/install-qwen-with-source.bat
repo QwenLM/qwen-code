@@ -325,8 +325,13 @@ if not exist "!CHECKSUM_FILE!" (
 )
 
 set "EXPECTED_HASH="
-for /f "tokens=1" %%H in ('findstr /C:"!ARCHIVE_NAME!" "!CHECKSUM_FILE!"') do (
-    if "!EXPECTED_HASH!"=="" set "EXPECTED_HASH=%%H"
+for /f "usebackq tokens=1,2" %%H in ("!CHECKSUM_FILE!") do (
+    set "CHECKSUM_HASH=%%H"
+    set "CHECKSUM_NAME=%%I"
+    if "!CHECKSUM_NAME:~0,1!"=="*" set "CHECKSUM_NAME=!CHECKSUM_NAME:~1!"
+    if "!CHECKSUM_NAME!"=="!ARCHIVE_NAME!" (
+        if "!EXPECTED_HASH!"=="" set "EXPECTED_HASH=!CHECKSUM_HASH!"
+    )
 )
 
 if "!EXPECTED_HASH!"=="" (
