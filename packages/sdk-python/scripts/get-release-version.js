@@ -137,9 +137,17 @@ async function getAllVersionsFromPyPI() {
   }
 
   const payload = await response.json();
-  return Object.keys(payload.releases ?? {}).filter(
-    (version) => parseVersion(version) !== null,
-  );
+  const releases = payload.releases ?? {};
+  return Object.keys(releases).filter((version) => {
+    if (parseVersion(version) === null) {
+      return false;
+    }
+    const files = releases[version];
+    if (Array.isArray(files) && files.length > 0) {
+      return !files.every((file) => file.yanked === true);
+    }
+    return true;
+  });
 }
 
 function getCurrentPackageBaseVersion() {
@@ -231,12 +239,14 @@ function getGitShortHash() {
 
 function validateVersion(version, format, name) {
   const versionRegex = {
-    stable: /^\d+\.\d+\.\d+$/,
-    preview: /^\d+\.\d+\.\d+-preview\.\d+$/,
+    'X.Y.Z': /^\d+\.\d+\.\d+$/,
+    'X.Y.Z-preview.N': /^\d+\.\d+\.\d+-preview\.\d+$/,
   };
 
   if (!versionRegex[format]?.test(version)) {
-    throw new Error(`Invalid ${name}: ${version}`);
+    throw new Error(
+      `Invalid ${name}: ${version}. Must be in ${format} format.`,
+    );
   }
 }
 
@@ -298,7 +308,11 @@ function getNightlyVersion(versions) {
 function getPreviewVersion(args, versions) {
   if (args.preview_version_override) {
     const overrideVersion = args.preview_version_override.replace(/^v/, '');
-    validateVersion(overrideVersion, 'preview', 'preview_version_override');
+    validateVersion(
+      overrideVersion,
+      'X.Y.Z-preview.N',
+      'preview_version_override',
+    );
     const match = overrideVersion.match(/^(\d+\.\d+\.\d+)-preview\.(\d+)$/);
     if (!match) {
       throw new Error(`Invalid preview override: ${overrideVersion}`);
@@ -321,7 +335,7 @@ function getPreviewVersion(args, versions) {
 function getStableVersion(args, versions) {
   if (args.stable_version_override) {
     const overrideVersion = args.stable_version_override.replace(/^v/, '');
-    validateVersion(overrideVersion, 'stable', 'stable_version_override');
+    validateVersion(overrideVersion, 'X.Y.Z', 'stable_version_override');
     return {
       releaseVersion: overrideVersion,
       packageVersion: overrideVersion,
@@ -338,6 +352,11 @@ function getStableVersion(args, versions) {
   const latestStable = getLatestStableVersion(versions);
 
   if (latestPrerelease) {
+    if (latestPrerelease.source !== 'preview') {
+      console.error(
+        `Stable release ${latestPrerelease.baseVersion} derived from ${latestPrerelease.source} (no preview release found with this base version).`,
+      );
+    }
     if (
       latestStable &&
       compareVersions(latestPrerelease.baseVersion, latestStable) < 0

@@ -700,4 +700,26 @@ describe('python sdk get-release-version', () => {
       publishChannel: 'latest',
     });
   });
+
+  it('ignores fully yanked PyPI versions', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.1.0': [{ yanked: true }],
+            '0.0.9': [{}],
+          },
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'stable' })).resolves.toMatchObject({
+      releaseTag: 'v0.1.0',
+      releaseVersion: '0.1.0',
+      packageVersion: '0.1.0',
+      previousReleaseTag: 'v0.0.9',
+    });
+  });
 });

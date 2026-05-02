@@ -34,7 +34,7 @@ on:
         default: false
 
 concurrency:
-  group: '${{ github.workflow }}'
+  group: '${{ github.workflow }}-${{ github.event.inputs.create_nightly_release == ''true'' && ''nightly'' || github.event.inputs.create_preview_release == ''true'' && ''preview'' || ''stable'' }}'
   cancel-in-progress: false
 
 jobs:
@@ -58,12 +58,20 @@ jobs:
           CREATE_PREVIEW_RELEASE: '${{ github.event.inputs.create_preview_release }}'
           DRY_RUN_INPUT: '${{ github.event.inputs.dry_run }}'
           FORCE_SKIP_TESTS: '${{ github.event.inputs.force_skip_tests }}'
+          MANUAL_VERSION: '${{ inputs.version }}'
           REQUESTED_REF: '${{ github.event.inputs.ref || github.sha }}'
           WORKFLOW_REF: '${{ github.ref }}'
         run: |
           if [[ "${CREATE_NIGHTLY_RELEASE}" == "true" && "${CREATE_PREVIEW_RELEASE}" == "true" ]]; then
             echo "create_nightly_release and create_preview_release cannot both be true" >&2
             exit 1
+          fi
+
+          if [[ -n "${MANUAL_VERSION}" ]]; then
+            if [[ ! "${MANUAL_VERSION}" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-preview\.[0-9]+)?$ ]]; then
+              echo "Invalid version format: ${MANUAL_VERSION}" >&2
+              exit 1
+            fi
           fi
 
           case "${WORKFLOW_REF}" in
@@ -152,12 +160,23 @@ jobs:
           fi
 
           VERSION_JSON=$(node packages/sdk-python/scripts/get-release-version.js "${VERSION_ARGS[@]}")
-          RELEASE_TAG=$(echo "$VERSION_JSON" | jq -r .releaseTag)
-          RELEASE_VERSION=$(echo "$VERSION_JSON" | jq -r .releaseVersion)
-          PACKAGE_VERSION=$(echo "$VERSION_JSON" | jq -r .packageVersion)
-          PUBLISH_CHANNEL=$(echo "$VERSION_JSON" | jq -r .publishChannel)
-          PREVIOUS_RELEASE_TAG=$(echo "$VERSION_JSON" | jq -r .previousReleaseTag)
-          RESUME_EXISTING_RELEASE=$(echo "$VERSION_JSON" | jq -r .resumeExistingRelease)
+
+          extract_field() {
+            local value
+            value=$(echo "$VERSION_JSON" | jq -r ".$1")
+            if [[ -z "${value}" || "${value}" == "null" ]]; then
+              echo "Failed to extract $1 from version JSON: ${VERSION_JSON}" >&2
+              exit 1
+            fi
+            echo "${value}"
+          }
+
+          RELEASE_TAG=$(extract_field releaseTag)
+          RELEASE_VERSION=$(extract_field releaseVersion)
+          PACKAGE_VERSION=$(extract_field packageVersion)
+          PUBLISH_CHANNEL=$(extract_field publishChannel)
+          PREVIOUS_RELEASE_TAG=$(extract_field previousReleaseTag)
+          RESUME_EXISTING_RELEASE=$(extract_field resumeExistingRelease)
 
           echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
           echo "RELEASE_VERSION=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
@@ -309,9 +328,9 @@ jobs:
             echo "HAS_PERSISTED_SOURCE=true" >> "${GITHUB_OUTPUT}"
             echo "RELEASE_TARGET_SHA=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
             if [[ "${REMOTE_BRANCH_EXISTS}" == "true" ]]; then
-              git push origin "${BRANCH_NAME}" --follow-tags
+              git push origin "${BRANCH_NAME}"
             else
-              git push --set-upstream origin "${BRANCH_NAME}" --follow-tags
+              git push --set-upstream origin "${BRANCH_NAME}"
             fi
           fi
 
@@ -387,7 +406,18 @@ jobs:
           } > "${NOTES_FILE}"
 
           if [[ -n "${PREVIOUS_RELEASE_TAG}" ]]; then
-            PREVIOUS_NOTES=$(gh release view "sdk-python-${PREVIOUS_RELEASE_TAG}" --json body -q '.body' 2>/dev/null || echo 'See commit history for changes.')
+            PREVIOUS_NOTES=$(gh release view "sdk-python-${PREVIOUS_RELEASE_TAG}" --json body -q '.body' 2>&1) || {
+              ERR_MSG="${PREVIOUS_NOTES}"
+              case "${ERR_MSG}" in
+                *"release not found"*|*"Not Found"*|*"HTTP 404"*)
+                  PREVIOUS_NOTES='See commit history for changes.'
+                  ;;
+                *)
+                  echo "::warning::Failed to fetch previous release notes: ${ERR_MSG}"
+                  PREVIOUS_NOTES='See commit history for changes.'
+                  ;;
+              esac
+            }
             printf '%s\n' "${PREVIOUS_NOTES}" >> "${NOTES_FILE}"
           else
             echo "See commit history for changes." >> "${NOTES_FILE}"
@@ -449,12 +479,37 @@ jobs:
 
       - name: 'Create issue on failure'
         if: |-
-          ${{ failure() && steps.vars.outputs.is_dry_run == 'false' }}
+          ${{ failure() && github.event.inputs.dry_run != 'true' }}
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           RELEASE_TAG: "${{ steps.version.outputs.RELEASE_TAG || 'N/A' }}"
+          PACKAGE_VERSION: "${{ steps.version.outputs.PACKAGE_VERSION || 'N/A' }}"
+          PUBLISH_CHANNEL: "${{ steps.version.outputs.PUBLISH_CHANNEL || 'N/A' }}"
+          RESUME_EXISTING_RELEASE: "${{ steps.version.outputs.RESUME_EXISTING_RELEASE || 'N/A' }}"
+          BRANCH_NAME: "${{ steps.release_branch.outputs.BRANCH_NAME || 'N/A' }}"
+          HAS_PERSISTED_SOURCE: "${{ steps.persist_source.outputs.HAS_PERSISTED_SOURCE || 'N/A' }}"
+          RELEASE_TARGET_SHA: "${{ steps.persist_source.outputs.RELEASE_TARGET_SHA || 'N/A' }}"
+          PR_URL: "${{ steps.pr.outputs.PR_URL || 'N/A' }}"
           DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |
+          BODY=$(cat <<BODY
+          The Python SDK release workflow failed.
+
+          | Field | Value |
+          |-------|-------|
+          | Release Tag | \`${RELEASE_TAG}\` |
+          | Package Version | \`${PACKAGE_VERSION}\` |
+          | Publish Channel | \`${PUBLISH_CHANNEL}\` |
+          | Resume Existing | \`${RESUME_EXISTING_RELEASE}\` |
+          | Release Branch | \`${BRANCH_NAME}\` |
+          | Persisted Source | \`${HAS_PERSISTED_SOURCE}\` |
+          | Target SHA | \`${RELEASE_TARGET_SHA}\` |
+          | PR URL | ${PR_URL} |
+
+          See the full run for details: ${DETAILS_URL}
+          BODY
+          )
           gh issue create \
+            --repo "${GITHUB_REPOSITORY}" \
             --title "Python SDK release failed for ${RELEASE_TAG} on $(date +'%Y-%m-%d')" \
-            --body "The Python SDK release workflow failed. See the full run for details: ${DETAILS_URL}"
+            --body "${BODY}"
