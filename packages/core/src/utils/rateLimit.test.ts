@@ -212,4 +212,49 @@ describe('rate-limit retry diagnostics', () => {
       }),
     ).toBe(300_000);
   });
+
+  it('should use Retry-After as a minimum delay when it is longer than exponential backoff', () => {
+    const error = Object.assign(new Error('Too many requests'), {
+      status: 429,
+      headers: { 'retry-after': '180' },
+    });
+
+    expect(
+      getRateLimitRetryDelayMs(1, {
+        initialDelayMs: 60_000,
+        maxDelayMs: 300_000,
+        error,
+      }),
+    ).toBe(180_000);
+  });
+
+  it('should keep exponential backoff when Retry-After is shorter', () => {
+    const error = Object.assign(new Error('Too many requests'), {
+      status: 429,
+      headers: { 'retry-after': '30' },
+    });
+
+    expect(
+      getRateLimitRetryDelayMs(2, {
+        initialDelayMs: 60_000,
+        maxDelayMs: 300_000,
+        error,
+      }),
+    ).toBe(120_000);
+  });
+
+  it('should cap long Retry-After values at the maximum delay', () => {
+    const error = Object.assign(new Error('Too many requests'), {
+      status: 429,
+      headers: { 'retry-after': '600' },
+    });
+
+    expect(
+      getRateLimitRetryDelayMs(1, {
+        initialDelayMs: 60_000,
+        maxDelayMs: 300_000,
+        error,
+      }),
+    ).toBe(300_000);
+  });
 });

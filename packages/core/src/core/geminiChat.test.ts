@@ -1225,7 +1225,7 @@ describe('GeminiChat', async () => {
       }
     });
 
-    it('should retry on TPM throttling StreamContentError with fixed delay', async () => {
+    it('should retry on TPM throttling StreamContentError with initial delay', async () => {
       vi.useFakeTimers();
 
       try {
@@ -1296,6 +1296,81 @@ describe('GeminiChat', async () => {
           ),
         ).toBe(true);
         expect(mockLogContentRetry).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should use Retry-After delay for streamed rate-limit errors', async () => {
+      vi.useFakeTimers();
+
+      try {
+        const retryAfterError = Object.assign(
+          new StreamContentError(
+            '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+          ),
+          {
+            status: 429,
+            headers: { 'retry-after': '180' },
+          },
+        );
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              throw retryAfterError;
+
+              yield {} as GenerateContentResponse;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Success after Retry-After' }],
+                    },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-retry-after',
+        );
+
+        const iterator = stream[Symbol.asyncIterator]();
+        const first = await iterator.next();
+        expect(first.value.type).toBe(StreamEventType.RETRY);
+        expect(first.value.retryInfo?.delayMs).toBe(180_000);
+
+        const secondPromise = iterator.next();
+        await vi.advanceTimersByTimeAsync(180_000);
+        await secondPromise;
+
+        const events: StreamEvent[] = [];
+        for (;;) {
+          const next = await iterator.next();
+          if (next.done) break;
+          events.push(next.value);
+        }
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.some(
+            (e) =>
+              e.type === StreamEventType.CHUNK &&
+              e.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Success after Retry-After',
+          ),
+        ).toBe(true);
       } finally {
         vi.useRealTimers();
       }

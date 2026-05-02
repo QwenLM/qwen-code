@@ -38,6 +38,7 @@ export interface RateLimitErrorDetails {
 export interface RateLimitRetryDelayOptions {
   initialDelayMs: number;
   maxDelayMs: number;
+  error?: unknown;
 }
 
 /**
@@ -58,6 +59,10 @@ export function isRateLimitError(
   return false;
 }
 
+/**
+ * Extracts structured diagnostic fields from known HTTP and SSE rate-limit
+ * error shapes without changing retryability decisions.
+ */
 export function getRateLimitErrorDetails(
   error: unknown,
 ): RateLimitErrorDetails {
@@ -86,6 +91,13 @@ export function getRateLimitErrorDetails(
   };
 }
 
+/**
+ * Calculates the stream-side rate-limit retry delay.
+ *
+ * Retry-After is treated as a provider-supplied minimum wait, but the final
+ * delay is still capped by maxDelayMs so an interactive session cannot be
+ * parked indefinitely by an oversized header.
+ */
 export function getRateLimitRetryDelayMs(
   attempt: number,
   options: RateLimitRetryDelayOptions,
@@ -93,7 +105,12 @@ export function getRateLimitRetryDelayMs(
   const normalizedAttempt = Math.max(1, attempt);
   const exponentialDelayMs =
     options.initialDelayMs * Math.pow(2, normalizedAttempt - 1);
-  return Math.min(exponentialDelayMs, options.maxDelayMs);
+  const retryAfterMs = getRetryAfterDelayMs(options.error);
+  const delayMs =
+    retryAfterMs === null
+      ? exponentialDelayMs
+      : Math.max(exponentialDelayMs, retryAfterMs);
+  return Math.min(delayMs, options.maxDelayMs);
 }
 
 /**
@@ -223,6 +240,8 @@ function getJsonPayloads(error: unknown): unknown[] {
     }
   }
 
+  if (payloads.length > 0) return payloads;
+
   const jsonStart = message.indexOf('{');
   const jsonEnd = message.lastIndexOf('}');
   if (jsonStart !== -1 && jsonEnd > jsonStart) {
@@ -242,4 +261,46 @@ function getRawErrorMessage(error: unknown): string | null {
   if (error instanceof Error) return error.message;
   if (typeof error === 'string') return error;
   return null;
+}
+
+function getRetryAfterDelayMs(error: unknown): number | null {
+  const value = getHeaderValue(error, 'retry-after');
+  if (value === null) return null;
+
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return seconds * 1000;
+  }
+
+  const retryAtMs = Date.parse(value);
+  if (!Number.isFinite(retryAtMs)) return null;
+
+  const delayMs = retryAtMs - Date.now();
+  return delayMs > 0 ? delayMs : 0;
+}
+
+function getHeaderValue(error: unknown, headerName: string): string | null {
+  if (!hasHeaders(error)) return null;
+
+  const { headers } = error;
+  if (typeof headers.get === 'function') {
+    const value = headers.get(headerName);
+    return typeof value === 'string' ? value : null;
+  }
+
+  if (typeof headers !== 'object' || headers === null) return null;
+
+  const lowerHeaderName = headerName.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== lowerHeaderName) continue;
+    return typeof value === 'string' ? value : null;
+  }
+
+  return null;
+}
+
+function hasHeaders(error: unknown): error is {
+  headers: { get?: (name: string) => unknown } | Record<string, unknown>;
+} {
+  return typeof error === 'object' && error !== null && 'headers' in error;
 }

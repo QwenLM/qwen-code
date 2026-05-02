@@ -438,10 +438,10 @@ export class GeminiChat {
             const isRateLimit = isRateLimitError(error, extraRetryErrorCodes);
             if (isRateLimit && rateLimitRetryCount < maxRateLimitRetries) {
               rateLimitRetryCount++;
-              const delayMs = getRateLimitRetryDelayMs(
-                rateLimitRetryCount,
-                RATE_LIMIT_RETRY_OPTIONS,
-              );
+              const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
+                ...RATE_LIMIT_RETRY_OPTIONS,
+                error,
+              });
               const message = parseAndFormatApiError(
                 error instanceof Error ? error.message : String(error),
               );
