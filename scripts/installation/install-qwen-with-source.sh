@@ -551,6 +551,9 @@ extract_archive() {
         *.tar.gz|*.tgz)
             tar -xzf "${archive_path}" -C "${destination}"
             ;;
+        *.tar.xz)
+            tar -xf "${archive_path}" -C "${destination}"
+            ;;
         *)
             log_error "Unsupported archive format: ${archive_path}"
             return 1
@@ -558,7 +561,7 @@ extract_archive() {
     esac
 
     local symlink_entry
-    symlink_entry=$(find "${destination}" -type l -print -quit)
+    symlink_entry=$(find "${destination}" -type l -print | sed -n '1p')
     if [[ -n "${symlink_entry}" ]]; then
         log_error "Archive contains symlinks; refusing to install."
         return 1

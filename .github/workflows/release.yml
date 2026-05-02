@@ -391,6 +391,32 @@ jobs:
           mkdir -p "${RUNTIME_DIR}"
           curl -fsSL "${NODE_DIST_URL}/SHASUMS256.txt" -o "${RUNTIME_DIR}/SHASUMS256.txt"
 
+          verify_node_checksum() {
+            local checksum_line="$1"
+
+            if command -v sha256sum >/dev/null 2>&1; then
+              printf '%s\n' "${checksum_line}" | (cd "${RUNTIME_DIR}" && sha256sum -c -)
+              return
+            fi
+
+            if command -v shasum >/dev/null 2>&1; then
+              local expected
+              local archive_name
+              local actual
+              expected="$(printf '%s\n' "${checksum_line}" | awk '{ print $1 }')"
+              archive_name="$(printf '%s\n' "${checksum_line}" | awk '{ print $2 }')"
+              actual="$(shasum -a 256 "${RUNTIME_DIR}/${archive_name}" | awk '{ print $1 }')"
+              if [[ "${expected}" != "${actual}" ]]; then
+                echo "::error::Checksum verification failed for ${archive_name}"
+                exit 1
+              fi
+              return
+            fi
+
+            echo "::error::No SHA-256 utility found to verify Node.js runtime"
+            exit 1
+          }
+
           download_node() {
             local qwen_target="$1"
             local node_target="$2"
@@ -408,7 +434,7 @@ jobs:
               echo "::error::Node.js SHASUMS256.txt does not list ${archive_name}"
               exit 1
             fi
-            printf '%s\n' "${checksum_line}" | (cd "${RUNTIME_DIR}" && sha256sum -c -)
+            verify_node_checksum "${checksum_line}"
             npm run package:standalone -- \
               --target "${qwen_target}" \
               --node-archive "${archive}" \

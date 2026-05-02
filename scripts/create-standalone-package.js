@@ -228,7 +228,7 @@ function copyRuntimeAssets(packageRoot) {
 
 function extractNodeArchive(nodeArchive, extractDir) {
   if (nodeArchive.endsWith('.zip')) {
-    run('unzip', ['-q', nodeArchive, '-d', extractDir]);
+    extractZipArchive(nodeArchive, extractDir);
     return;
   }
 
@@ -246,6 +246,31 @@ function extractNodeArchive(nodeArchive, extractDir) {
   );
 }
 
+function extractZipArchive(nodeArchive, extractDir) {
+  if (process.platform === 'win32') {
+    run(
+      'powershell',
+      [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        'Expand-Archive -LiteralPath $env:QWEN_NODE_ARCHIVE -DestinationPath $env:QWEN_EXTRACT_DIR -Force',
+      ],
+      {
+        env: {
+          ...process.env,
+          QWEN_NODE_ARCHIVE: nodeArchive,
+          QWEN_EXTRACT_DIR: extractDir,
+        },
+      },
+    );
+    return;
+  }
+
+  run('unzip', ['-q', nodeArchive, '-d', extractDir]);
+}
+
 function copyExtractedNode(extractDir, nodeDir) {
   const entries = fs
     .readdirSync(extractDir)
@@ -260,10 +285,89 @@ function copyExtractedNode(extractDir, nodeDir) {
       ? path.join(extractDir, entries[0])
       : extractDir;
 
-  fs.cpSync(sourceRoot, nodeDir, {
-    recursive: true,
-    verbatimSymlinks: true,
-  });
+  assertSymlinksStayInside(sourceRoot);
+  copyDereferenced(sourceRoot, nodeDir);
+  assertNoSymlinks(nodeDir, 'Copied Node.js runtime still contains symlinks.');
+}
+
+function copyDereferenced(source, destination) {
+  const stat = fs.statSync(source);
+
+  if (stat.isDirectory()) {
+    fs.mkdirSync(destination, { recursive: true });
+    fs.chmodSync(destination, stat.mode);
+    for (const entry of fs.readdirSync(source)) {
+      copyDereferenced(path.join(source, entry), path.join(destination, entry));
+    }
+    return;
+  }
+
+  if (stat.isFile()) {
+    fs.copyFileSync(source, destination);
+    fs.chmodSync(destination, stat.mode);
+    return;
+  }
+
+  fail(`Unsupported Node.js runtime entry type: ${source}`);
+}
+
+function assertSymlinksStayInside(root) {
+  const realRoot = fs.realpathSync(root);
+
+  for (const entry of walkDirectory(root)) {
+    if (!fs.lstatSync(entry).isSymbolicLink()) {
+      continue;
+    }
+
+    const target = fs.readlinkSync(entry);
+    const resolvedTarget = path.resolve(path.dirname(entry), target);
+    let realTarget;
+    try {
+      realTarget = fs.realpathSync(resolvedTarget);
+    } catch {
+      fail(
+        `Node.js runtime symlink points to a missing target: ${path.relative(
+          root,
+          entry,
+        )} -> ${target}`,
+      );
+    }
+
+    if (!isPathInside(realRoot, realTarget)) {
+      fail(
+        `Node.js runtime symlink escapes the archive: ${path.relative(
+          root,
+          entry,
+        )} -> ${target}`,
+      );
+    }
+  }
+}
+
+function assertNoSymlinks(root, message) {
+  for (const entry of walkDirectory(root)) {
+    if (fs.lstatSync(entry).isSymbolicLink()) {
+      fail(`${message} First symlink: ${path.relative(root, entry)}`);
+    }
+  }
+}
+
+function* walkDirectory(root) {
+  for (const entry of fs.readdirSync(root)) {
+    const fullPath = path.join(root, entry);
+    yield fullPath;
+    if (fs.lstatSync(fullPath).isDirectory()) {
+      yield* walkDirectory(fullPath);
+    }
+  }
+}
+
+function isPathInside(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return (
+    relative === '' ||
+    (!relative.startsWith('..') && !path.isAbsolute(relative))
+  );
 }
 
 function validateNodeRuntime(target, nodeDir) {
@@ -326,11 +430,36 @@ function writeManifest(packageRoot, manifest) {
 
 function createArchive(outputExtension, outputPath, cwd) {
   if (outputExtension === 'zip') {
-    run('zip', ['-qr', outputPath, 'qwen-code'], { cwd });
+    createZipArchive(outputPath, cwd);
     return;
   }
 
   run('tar', ['-czf', outputPath, '-C', cwd, 'qwen-code']);
+}
+
+function createZipArchive(outputPath, cwd) {
+  if (process.platform === 'win32') {
+    run(
+      'powershell',
+      [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        'Compress-Archive -LiteralPath $env:QWEN_PACKAGE_ROOT -DestinationPath $env:QWEN_OUTPUT_PATH -Force',
+      ],
+      {
+        env: {
+          ...process.env,
+          QWEN_PACKAGE_ROOT: path.join(cwd, 'qwen-code'),
+          QWEN_OUTPUT_PATH: outputPath,
+        },
+      },
+    );
+    return;
+  }
+
+  run('zip', ['-qr', outputPath, 'qwen-code'], { cwd });
 }
 
 function writeSha256Sums(outDir) {

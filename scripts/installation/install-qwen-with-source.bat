@@ -285,7 +285,7 @@ exit /b 0
 
 :UrlExists
 set "QWEN_CHECK_URL=%~1"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$request = [Net.WebRequest]::Create($env:QWEN_CHECK_URL); $request.Method = 'HEAD'; try { $response = $request.GetResponse(); $response.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $request = [Net.WebRequest]::Create($env:QWEN_CHECK_URL); $request.Method = 'HEAD'; try { $response = $request.GetResponse(); $response.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_CHECK_URL="
 exit /b %PS_STATUS%
