@@ -100,7 +100,7 @@ export const modelCommand: SlashCommand = {
     ) {
       //Use first argument only, avoids later synatx confusion and/or use of model names with spaces
       const modelName = args.trim().split(' ')[0];
-      config.setModel(modelName);
+      await config.setModel(modelName);
       return {
         type: 'message',
         messageType: 'info',
