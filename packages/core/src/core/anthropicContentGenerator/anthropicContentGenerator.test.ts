@@ -246,6 +246,34 @@ describe('AnthropicContentGenerator', () => {
       expect(headers['anthropic-beta']).toBe('experimental-x');
     });
 
+    it('does not leak customHeaders[anthropic-beta] (any casing) into defaultHeaders', async () => {
+      // The per-request path owns anthropic-beta. If we also copied a
+      // mixed-case `Anthropic-Beta` from customHeaders into defaultHeaders,
+      // the wire request would carry two physical headers for the same
+      // logical name — one mixed-case (verbatim from defaultHeaders) and one
+      // lowercase (from the per-request override). SDK behavior on duplicate
+      // headers with different casings is undefined.
+      const { AnthropicContentGenerator } = await importGenerator();
+      void new AnthropicContentGenerator(
+        {
+          ...baseConfig,
+          customHeaders: {
+            'Anthropic-Beta': 'user-flag',
+            'X-Other': 'kept',
+          },
+        },
+        mockConfig,
+      );
+      const defaultHeaders = (anthropicState.constructorOptions?.[
+        'defaultHeaders'
+      ] || {}) as Record<string, string>;
+      expect(defaultHeaders['Anthropic-Beta']).toBeUndefined();
+      expect(defaultHeaders['anthropic-beta']).toBeUndefined();
+      expect(defaultHeaders['ANTHROPIC-BETA']).toBeUndefined();
+      // Unrelated customHeaders are still passed through.
+      expect(defaultHeaders['X-Other']).toBe('kept');
+    });
+
     it('honors customHeaders[anthropic-beta] under mixed-case keys (Anthropic-Beta / ANTHROPIC-BETA)', async () => {
       // HTTP header names are case-insensitive; Anthropic SDK lower-cases
       // headers when merging. Make sure our merge logic also matches

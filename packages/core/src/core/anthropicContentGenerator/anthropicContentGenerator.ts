@@ -191,13 +191,22 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // Beta headers are computed per-request in buildPerRequestHeaders so they
     // stay in sync with what the request body actually carries — see #3788
     // review feedback. Constructor headers carry only User-Agent and any
-    // user-supplied custom headers.
+    // user-supplied custom headers EXCEPT anthropic-beta (any casing): the
+    // per-request path owns that header, and copying it into defaultHeaders
+    // would cause two physical headers on the wire (one mixed-case, one
+    // lowercase) when the per-request override fires.
     const version = this.cliConfig.getCliVersion() || 'unknown';
     const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
     const { customHeaders } = this.contentGeneratorConfig;
 
     const headers: Record<string, string> = { 'User-Agent': userAgent };
-    return customHeaders ? { ...headers, ...customHeaders } : headers;
+    if (customHeaders) {
+      for (const [key, value] of Object.entries(customHeaders)) {
+        if (key.toLowerCase() === 'anthropic-beta') continue;
+        headers[key] = value;
+      }
+    }
+    return headers;
   }
 
   /**
