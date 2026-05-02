@@ -1315,6 +1315,75 @@ describe('ShellTool', () => {
         expect(observed).toMatch(/-m\s+"Title"\s/);
       });
 
+      // Concern: a literal `-m '...'` *inside* a quoted commit
+      // message body could be picked up by the regex as if it were a
+      // real later argument, splicing the trailer mid-message and
+      // breaking the command's quoting.
+      it('should not be fooled by a literal -m token inside the quoted message body', async () => {
+        const command =
+          'git commit -m "docs mention -m \'flag\' for completeness"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        // The original message body must be preserved end-to-end —
+        // no trailer spliced before its closing quote.
+        expect(observed).toContain(
+          "-m \"docs mention -m 'flag' for completeness",
+        );
+        // The trailer must land AFTER the original body, just before
+        // the message's outer closing quote.
+        expect(observed).toMatch(
+          /docs mention -m 'flag' for completeness\s+Co-authored-by:[^"]+"/s,
+        );
+      });
+
+      // Concern: a later `git tag -m "..."` in the same compound
+      // command could be mistaken for the commit message because the
+      // regex was matching across the whole command string.
+      it('should target the commit message, not a later git tag -m in the same chain', async () => {
+        const command =
+          'git commit -m "fix" && git tag -a v1 -m "release notes"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        // The trailer is appended to the commit message body...
+        expect(observed).toMatch(/git commit -m "fix\s+Co-authored-by:[^"]+"/s);
+        // ...and the later `git tag -m` is left exactly as the user
+        // wrote it.
+        expect(observed).toContain('git tag -a v1 -m "release notes"');
+        // The tag annotation must not have a trailer spliced in.
+        const tagMatch = observed.match(/git tag .*-m "([^"]*)"/);
+        expect(tagMatch?.[1]).toBe('release notes');
+      });
+
       it('should add co-author when git commit is prefixed with sudo', async () => {
         const command = 'sudo git commit -m "Test"';
         const invocation = shellTool.build({ command, is_background: false });

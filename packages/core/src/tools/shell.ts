@@ -127,21 +127,6 @@ function tokeniseSegment(segment: string): string[] | null {
   if (tokens[i] === 'sudo' || tokens[i] === 'command') {
     const wrapper = tokens[i];
     i++;
-    const sudoFlagsWithValue = new Set([
-      '-u',
-      '-g',
-      '-h',
-      '-D',
-      '-r',
-      '-t',
-      '-C',
-      '--user',
-      '--group',
-      '--host',
-      '--chdir',
-      '--role',
-      '--type',
-    ]);
     while (i < tokens.length && tokens[i]!.startsWith('-')) {
       const flag = tokens[i]!;
       i++;
@@ -149,7 +134,7 @@ function tokeniseSegment(segment: string): string[] | null {
       // `command`'s flag-only options we leave i alone.
       if (
         wrapper === 'sudo' &&
-        sudoFlagsWithValue.has(flag) &&
+        SUDO_FLAGS_WITH_VALUE.has(flag) &&
         i < tokens.length
       ) {
         i++;
@@ -158,6 +143,22 @@ function tokeniseSegment(segment: string): string[] | null {
   }
   return tokens.slice(i);
 }
+
+const SUDO_FLAGS_WITH_VALUE = new Set([
+  '-u',
+  '-g',
+  '-h',
+  '-D',
+  '-r',
+  '-t',
+  '-C',
+  '--user',
+  '--group',
+  '--host',
+  '--chdir',
+  '--role',
+  '--type',
+]);
 
 /**
  * Walk a `git ...` token sequence past git's global flags
@@ -169,31 +170,31 @@ function tokeniseSegment(segment: string): string[] | null {
  * `changesCwd` is true when any of the consumed flags would relocate
  * the working directory (`-C`, `--git-dir`, `--work-tree`).
  */
+// Two-token global flags whose second token is consumed as a value.
+const GIT_GLOBAL_FLAGS_TAKES_VALUE = new Set([
+  '-c',
+  '-C',
+  '--git-dir',
+  '--work-tree',
+  '--namespace',
+  '--exec-path',
+  '--config-env',
+  '--super-prefix',
+  '--list-cmds',
+]);
+// Flags whose presence shifts cwd interpretation.
+const GIT_GLOBAL_FLAGS_SHIFTS_CWD = new Set(['-C', '--git-dir', '--work-tree']);
+
 function parseGitInvocation(tokens: string[]): {
   subcommand: string | undefined;
   changesCwd: boolean;
 } {
-  // Two-token global flags whose second token is consumed as a value.
-  const TAKES_VALUE = new Set([
-    '-c',
-    '-C',
-    '--git-dir',
-    '--work-tree',
-    '--namespace',
-    '--exec-path',
-    '--config-env',
-    '--super-prefix',
-    '--list-cmds',
-  ]);
-  // Flags whose presence shifts cwd interpretation.
-  const SHIFTS_CWD = new Set(['-C', '--git-dir', '--work-tree']);
-
   let i = 1; // skip 'git'
   let changesCwd = false;
   while (i < tokens.length) {
     const t = tokens[i]!;
-    if (TAKES_VALUE.has(t)) {
-      if (SHIFTS_CWD.has(t)) changesCwd = true;
+    if (GIT_GLOBAL_FLAGS_TAKES_VALUE.has(t)) {
+      if (GIT_GLOBAL_FLAGS_SHIFTS_CWD.has(t)) changesCwd = true;
       i += 2;
       continue;
     }
@@ -295,12 +296,13 @@ function gitCommitContext(command: string): {
  * `parseGitInvocation`: a fixed-position check at index 1 misses
  * `gh --repo owner/repo pr create ...`, which is a common form.
  */
+const GH_GLOBAL_FLAGS_TAKES_VALUE = new Set(['--repo', '-R', '--hostname']);
+
 function parseGhInvocation(tokens: string[]): string[] {
-  const TAKES_VALUE = new Set(['--repo', '-R', '--hostname']);
   let i = 1; // skip 'gh'
   while (i < tokens.length) {
     const t = tokens[i]!;
-    if (TAKES_VALUE.has(t)) {
+    if (GH_GLOBAL_FLAGS_TAKES_VALUE.has(t)) {
       i += 2;
       continue;
     }
@@ -319,6 +321,46 @@ function parseGhInvocation(tokens: string[]): string[] {
     return tokens.slice(i);
   }
   return [];
+}
+
+/**
+ * Locate the character range of the *first* attributable
+ * `git commit` invocation in the (potentially compound) command, or
+ * `null` if none is attributable in the current cwd. The range
+ * covers the segment as `splitCommands` tokenised it — i.e. just
+ * the `git commit ...` part, NOT later `&& git tag -m ...` or
+ * earlier `git status &&` segments.
+ *
+ * Used by `addCoAuthorToGitCommit` to scope the `-m` regex rewrite
+ * so a later `git tag -m "..."` (different sub-command in the same
+ * compound) can't be mistaken for the commit message.
+ */
+function findAttributableCommitSegment(
+  command: string,
+): { start: number; end: number } | null {
+  let cursor = 0;
+  let cwdShifted = false;
+  for (const sub of splitCommands(command)) {
+    const start = command.indexOf(sub, cursor);
+    if (start < 0) continue;
+    const end = start + sub.length;
+    cursor = end;
+    const tokens = tokeniseSegment(sub);
+    if (!tokens || tokens.length === 0) continue;
+    const program = tokens[0]!;
+    if (program === 'cd') {
+      if (!cwdShifted) cwdShifted = true;
+      continue;
+    }
+    if (program === 'git') {
+      const { subcommand, changesCwd } = parseGitInvocation(tokens);
+      if (subcommand === 'commit' && !cwdShifted && !changesCwd) {
+        return { start, end };
+      }
+      if (changesCwd && !cwdShifted) cwdShifted = true;
+    }
+  }
+  return null;
 }
 
 /**
@@ -1570,7 +1612,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // (with the trailer mid-string) back to the executor. The stricter
     // `attributableInCwd` is what we want here: only inject the
     // trailer when we're confident the commit lands in our cwd.
-    if (!gitCommitContext(command).attributableInCwd) {
+    const segmentRange = findAttributableCommitSegment(command);
+    if (!segmentRange) {
       return command;
     }
 
@@ -1580,6 +1623,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // The regex tolerates `-m"msg"` shorthand (no space) — bash accepts
     // both `-m foo` and `-mfoo`, and we shouldn't silently skip the
     // shorthand form.
+    //
+    // The regex is scoped to the actual `git commit` segment (not the
+    // whole compound command) so a later `git tag -a v1 -m "..."` in
+    // the same chain can't be mistaken for the commit message.
     //
     // Pattern breakdown:
     //   -[a-zA-Z]*m  matches -m, -am, -nm, etc. (combined short flags)
@@ -1595,6 +1642,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // and a wrong rewrite would mid-insert the trailer and break the
     // command's quoting.
     const singleQuotePattern = /(-[a-zA-Z]*m\s*)'([^']*)'(?!\\'')/g;
+    const segment = command.slice(segmentRange.start, segmentRange.end);
     // Git concatenates multiple `-m` values with a blank line, so the
     // co-author trailer has to land in the *last* `-m` value to be
     // recognised by `git interpret-trailers`. matchAll → take the
@@ -1606,26 +1654,44 @@ export class ShellToolInvocation extends BaseToolInvocation<
       for (const m of matches) result = m;
       return result;
     };
-    const doubleMatch = lastMatch(command.matchAll(doubleQuotePattern));
-    const singleMatch = lastMatch(command.matchAll(singleQuotePattern));
-    // Pick whichever match appears LAST in the command string,
-    // regardless of quote style. For `-m "Title" -m 'Body'`, a
-    // simple `doubleMatch ?? singleMatch` would target the title
-    // (last double match) and bury the trailer in the wrong field —
-    // git interpret-trailers only recognises a trailer at the end
-    // of the final `-m` value.
-    const match =
-      doubleMatch && singleMatch
-        ? (doubleMatch.index ?? 0) > (singleMatch.index ?? 0)
-          ? doubleMatch
-          : singleMatch
-        : (doubleMatch ?? singleMatch);
+    const doubleMatch = lastMatch(segment.matchAll(doubleQuotePattern));
+    const singleMatch = lastMatch(segment.matchAll(singleQuotePattern));
+
+    // Pick whichever match appears LAST in the segment, regardless of
+    // quote style — but reject any candidate that's nested inside the
+    // other's range. For `git commit -m "docs mention -m 'flag'"` the
+    // single-quoted `-m 'flag'` lives INSIDE the double-quoted real
+    // message; without a nesting check the later (inner) `-m` would
+    // win and the trailer would be spliced into the body text.
+    const matchRange = (m: RegExpMatchArray | null) =>
+      m ? { start: m.index ?? 0, end: (m.index ?? 0) + m[0].length } : null;
+    const isInside = (
+      inner: RegExpMatchArray | null,
+      outer: RegExpMatchArray | null,
+    ): boolean => {
+      const i = matchRange(inner);
+      const o = matchRange(outer);
+      return !!(i && o && i.start >= o.start && i.end <= o.end);
+    };
+    let match: RegExpMatchArray | null;
+    if (doubleMatch && singleMatch) {
+      if (isInside(singleMatch, doubleMatch)) {
+        match = doubleMatch;
+      } else if (isInside(doubleMatch, singleMatch)) {
+        match = singleMatch;
+      } else {
+        match =
+          (doubleMatch.index ?? 0) > (singleMatch.index ?? 0)
+            ? doubleMatch
+            : singleMatch;
+      }
+    } else {
+      match = doubleMatch ?? singleMatch;
+    }
     const quote = match === doubleMatch ? '"' : "'";
 
     // Escape the configured name/email for the surrounding quote
-    // style — has to follow the actually-selected match, not just
-    // whether a double-quoted -m exists somewhere earlier (a later
-    // single-quoted -m wins on index comparison above).
+    // style — has to follow the actually-selected match.
     const escape =
       match === doubleMatch
         ? escapeForBashDoubleQuote
@@ -1639,16 +1705,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const newMessage = existingMessage + coAuthor;
       const replacement = prefix + quote + newMessage + quote;
 
-      // Use match.index + slice (rather than indexOf) so multiple
-      // `-m` flags don't collide — we want the position of the
-      // *last* match, not the first occurrence of a string that
-      // could appear earlier in the command.
-      const idx = match.index ?? command.indexOf(fullMatch);
-      if (idx >= 0) {
+      // Splice the modified segment back into the original command,
+      // preserving everything outside the commit segment exactly as
+      // the caller had it.
+      const matchStart = (match.index ?? 0) + segmentRange.start;
+      if (matchStart >= segmentRange.start) {
         return (
-          command.slice(0, idx) +
+          command.slice(0, matchStart) +
           replacement +
-          command.slice(idx + fullMatch.length)
+          command.slice(matchStart + fullMatch.length)
         );
       }
     }
