@@ -40,10 +40,12 @@ import {
 const debugLogger = createDebugLogger('ANTHROPIC');
 
 /**
- * DeepSeek's anthropic-compatible API rejects requests in thinking mode that
- * omit a thinking block on prior assistant turns. Detect by base URL hostname
- * or model name so the converter can inject empty thinking blocks where
- * missing. https://github.com/QwenLM/qwen-code/issues/3786
+ * DeepSeek's anthropic-compatible API rejects requests in thinking mode when
+ * a prior assistant turn carrying `tool_use` omits a thinking block.
+ * Plain-text assistant turns without thinking are accepted unchanged. Detect
+ * the provider by base URL hostname or model name so the converter can inject
+ * empty thinking blocks on the affected turns.
+ * https://github.com/QwenLM/qwen-code/issues/3786
  */
 function isDeepSeekAnthropicProvider(
   contentGeneratorConfig: ContentGeneratorConfig,

@@ -648,9 +648,11 @@ describe('AnthropicContentConverter', () => {
   });
 
   // https://github.com/QwenLM/qwen-code/issues/3786 — DeepSeek's
-  // anthropic-compatible API rejects subsequent requests when any prior
-  // assistant turn omits a thinking block while thinking mode is on. The
-  // converter must inject empty thinking blocks when the caller asks.
+  // anthropic-compatible API rejects requests in thinking mode when a prior
+  // assistant turn carrying `tool_use` omits a thinking block. Plain-text
+  // assistant turns without thinking are accepted unchanged, so the converter
+  // injects an empty thinking block only on tool-use turns when the caller
+  // opts in.
   describe('ensureAssistantThinking', () => {
     const enableThinking = { ensureAssistantThinking: true };
 

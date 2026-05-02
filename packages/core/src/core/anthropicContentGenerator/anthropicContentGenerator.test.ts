@@ -495,8 +495,9 @@ describe('AnthropicContentGenerator', () => {
   });
 
   // https://github.com/QwenLM/qwen-code/issues/3786 — DeepSeek's
-  // anthropic-compatible API rejects subsequent requests when any prior
-  // assistant turn omits a thinking block while thinking mode is on.
+  // anthropic-compatible API rejects requests in thinking mode when a prior
+  // assistant turn carrying `tool_use` omits a thinking block. Plain-text
+  // assistant turns without thinking are accepted unchanged.
   describe('DeepSeek anthropic-compatible provider', () => {
     // Helper: tool-use assistant turn missing thinking — the only shape that
     // actually triggers DeepSeek's HTTP 400.
