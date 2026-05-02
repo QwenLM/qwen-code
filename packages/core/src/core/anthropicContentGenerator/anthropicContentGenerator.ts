@@ -39,6 +39,35 @@ import {
 
 const debugLogger = createDebugLogger('ANTHROPIC');
 
+/**
+ * DeepSeek's anthropic-compatible API rejects requests in thinking mode when
+ * a prior assistant turn carrying `tool_use` omits a thinking block.
+ * Plain-text assistant turns without thinking are accepted unchanged. Detect
+ * the provider by base URL hostname or model name so the converter can inject
+ * empty thinking blocks on the affected turns.
+ * https://github.com/QwenLM/qwen-code/issues/3786
+ */
+function isDeepSeekAnthropicProvider(
+  contentGeneratorConfig: ContentGeneratorConfig,
+): boolean {
+  const baseUrl = contentGeneratorConfig.baseUrl ?? '';
+  if (baseUrl) {
+    try {
+      const hostname = new URL(baseUrl).hostname.toLowerCase();
+      if (
+        hostname === 'api.deepseek.com' ||
+        hostname.endsWith('.api.deepseek.com')
+      ) {
+        return true;
+      }
+    } catch {
+      // Invalid URL — fall through to model-name detection.
+    }
+  }
+  const model = (contentGeneratorConfig.model ?? '').toLowerCase();
+  return model.includes('deepseek');
+}
+
 type StreamingBlockState = {
   type: string;
   id?: string;
@@ -91,8 +120,10 @@ export class AnthropicContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
   ): Promise<GenerateContentResponse> {
     const anthropicRequest = await this.buildRequest(request);
+    const headers = this.buildPerRequestHeaders(anthropicRequest);
     const response = (await this.client.messages.create(anthropicRequest, {
       signal: request.config?.abortSignal,
+      ...(headers ? { headers } : {}),
     })) as Message;
 
     return this.converter.convertAnthropicResponseToGemini(response);
@@ -102,6 +133,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const anthropicRequest = await this.buildRequest(request);
+    const headers = this.buildPerRequestHeaders(anthropicRequest);
     const streamingRequest: MessageCreateParamsStreaming & {
       thinking?: { type: 'enabled'; budget_tokens: number };
     } = {
@@ -113,6 +145,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       streamingRequest as MessageCreateParamsStreaming,
       {
         signal: request.config?.abortSignal,
+        ...(headers ? { headers } : {}),
       },
     )) as AsyncIterable<RawMessageStreamEvent>;
 
@@ -155,47 +188,123 @@ export class AnthropicContentGenerator implements ContentGenerator {
   }
 
   private buildHeaders(): Record<string, string> {
+    // Beta headers are computed per-request in buildPerRequestHeaders so they
+    // stay in sync with what the request body actually carries — see #3788
+    // review feedback. Constructor headers carry only User-Agent and any
+    // user-supplied custom headers EXCEPT anthropic-beta (any casing): the
+    // per-request path owns that header, and copying it into defaultHeaders
+    // would cause two physical headers on the wire (one mixed-case, one
+    // lowercase) when the per-request override fires.
     const version = this.cliConfig.getCliVersion() || 'unknown';
     const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
     const { customHeaders } = this.contentGeneratorConfig;
 
-    const betas: string[] = [];
-    const reasoning = this.contentGeneratorConfig.reasoning;
+    const headers: Record<string, string> = { 'User-Agent': userAgent };
+    if (customHeaders) {
+      for (const [key, value] of Object.entries(customHeaders)) {
+        if (key.toLowerCase() === 'anthropic-beta') continue;
+        headers[key] = value;
+      }
+    }
+    return headers;
+  }
 
-    // Interleaved thinking is used when we send the `thinking` field.
-    if (reasoning !== false) {
-      betas.push('interleaved-thinking-2025-05-14');
+  /**
+   * Compute `anthropic-beta` from the actual fields present in the request
+   * body. Keeps the header consistent with the body even when a per-request
+   * `thinkingConfig.includeThoughts: false` opt-out drops `thinking` /
+   * `output_config` after the constructor has already run.
+   *
+   * User-supplied `customHeaders['anthropic-beta']` flags are merged in (and
+   * deduped) so the per-request override doesn't wipe out the existing
+   * customHeaders escape hatch for unrelated beta features. The lookup is
+   * case-insensitive — HTTP header names are case-insensitive by spec, so a
+   * user-configured `Anthropic-Beta` or `ANTHROPIC-BETA` is honored too.
+   */
+  private buildPerRequestHeaders(
+    anthropicRequest: MessageCreateParamsWithThinking,
+  ): Record<string, string> | undefined {
+    const betas: string[] = [];
+
+    for (const flag of this.collectCustomBetaFlags()) {
+      betas.push(flag);
     }
 
-    // Effort (beta) is enabled when reasoning.effort is set.
-    if (reasoning !== false && reasoning?.effort !== undefined) {
+    if (anthropicRequest.thinking) {
+      betas.push('interleaved-thinking-2025-05-14');
+    }
+    if (anthropicRequest.output_config) {
       betas.push('effort-2025-11-24');
     }
 
-    const headers: Record<string, string> = {
-      'User-Agent': userAgent,
-    };
+    if (betas.length === 0) return undefined;
+    const unique = Array.from(new Set(betas));
+    return { 'anthropic-beta': unique.join(',') };
+  }
 
-    if (betas.length) {
-      headers['anthropic-beta'] = betas.join(',');
+  /**
+   * Read every customHeaders entry whose key (case-insensitively) is
+   * `anthropic-beta` and yield the comma-separated flags from each. Multiple
+   * matching entries are concatenated; later ones may produce duplicates
+   * which the caller dedupes.
+   */
+  private collectCustomBetaFlags(): string[] {
+    const customHeaders = this.contentGeneratorConfig.customHeaders;
+    if (!customHeaders) return [];
+
+    const flags: string[] = [];
+    for (const [key, value] of Object.entries(customHeaders)) {
+      if (key.toLowerCase() !== 'anthropic-beta') continue;
+      if (typeof value !== 'string' || !value) continue;
+      for (const flag of value.split(',')) {
+        const trimmed = flag.trim();
+        if (trimmed) flags.push(trimmed);
+      }
     }
-
-    return customHeaders ? { ...headers, ...customHeaders } : headers;
+    return flags;
   }
 
   private async buildRequest(
     request: GenerateContentParameters,
   ): Promise<MessageCreateParamsWithThinking> {
-    const { system, messages } =
-      this.converter.convertGeminiRequestToAnthropic(request);
+    const sampling = this.buildSamplingParameters(request);
+    const thinking = this.buildThinkingConfig(request);
+    const outputConfig = this.buildOutputConfig(request);
+
+    // Compute per-request: `Config.setModel()` mutates contentGeneratorConfig
+    // in place, so a constructor-time cache could go stale on a runtime
+    // model switch. The detector is cheap (URL parse + string compare).
+    const isDeepSeek = isDeepSeekAnthropicProvider(this.contentGeneratorConfig);
+
+    // On DeepSeek the converter must keep history aligned with the top-level
+    // `thinking` parameter to avoid HTTP 400:
+    //   - thinking on  → inject empty thinking on tool_use turns missing one
+    //                    (issue #3786 trigger)
+    //   - thinking off → strip pre-existing thinking blocks from assistant
+    //                    history so a request without `thinking` config
+    //                    doesn't ship stray thinking blocks. Matters for
+    //                    code paths that pass `includeThoughts: false`
+    //                    against a session whose history already contains
+    //                    `thought: true` parts (suggestionGenerator /
+    //                    ArenaManager / forkedAgent).
+    const deepseekThinkingOn = isDeepSeek && !!thinking;
+    const stripAssistantThinking = isDeepSeek && !thinking;
+
+    const { system, messages } = this.converter.convertGeminiRequestToAnthropic(
+      request,
+      {
+        // Both run together: normalization fills missing signatures so the
+        // injection pass treats those blocks as already-present, and the
+        // injection adds a synthetic block on tool_use turns lacking one.
+        normalizeAssistantThinkingSignature: deepseekThinkingOn,
+        injectThinkingOnToolUseTurns: deepseekThinkingOn,
+        stripAssistantThinking,
+      },
+    );
 
     const tools = request.config?.tools
       ? await this.converter.convertGeminiToolsToAnthropic(request.config.tools)
       : undefined;
-
-    const sampling = this.buildSamplingParameters(request);
-    const thinking = this.buildThinkingConfig(request);
-    const outputConfig = this.buildOutputConfig();
 
     return {
       model: this.contentGeneratorConfig.model,
@@ -291,9 +400,16 @@ export class AnthropicContentGenerator implements ContentGenerator {
     };
   }
 
-  private buildOutputConfig():
-    | { effort: 'low' | 'medium' | 'high' }
-    | undefined {
+  private buildOutputConfig(
+    request: GenerateContentParameters,
+  ): { effort: 'low' | 'medium' | 'high' } | undefined {
+    // Honor per-request opt-out so side queries (suggestionGenerator,
+    // ArenaManager, forkedAgent) don't leak a reasoning-shaped output_config
+    // alongside an absent top-level `thinking` parameter.
+    if (request.config?.thinkingConfig?.includeThoughts === false) {
+      return undefined;
+    }
+
     const reasoning = this.contentGeneratorConfig.reasoning;
     if (reasoning === false || reasoning === undefined) {
       return undefined;
