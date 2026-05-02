@@ -250,6 +250,7 @@ export class MonitorRegistry {
   }
 
   reset(): void {
+    if (this.monitors.size === 0) return;
     for (const entry of this.monitors.values()) {
       this.clearIdleTimer(entry);
       if (entry.status === 'running') {
@@ -257,6 +258,12 @@ export class MonitorRegistry {
       }
     }
     this.monitors.clear();
+    // Notify subscribers that the registry's contents changed wholesale
+    // — without this, the dialog snapshot in `useBackgroundTaskView`
+    // would keep rendering the now-cleared rows until an unrelated
+    // register/settle event happens. Mirrors BackgroundShellRegistry /
+    // BackgroundTaskRegistry's reset paths.
+    this.fireStatusChange();
   }
 
   // --- Internal helpers ---

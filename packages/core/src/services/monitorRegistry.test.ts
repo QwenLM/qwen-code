@@ -664,5 +664,22 @@ describe('MonitorRegistry', () => {
       ).not.toThrow();
       expect(registry.get('a')).toBeDefined();
     });
+
+    it('fires once on reset() so dialog snapshots clear stale rows', () => {
+      registry.register(createEntry({ monitorId: 'a' }));
+      registry.register(createEntry({ monitorId: 'b' }));
+      const cb = vi.fn();
+      registry.setStatusChangeCallback(cb);
+      registry.reset();
+      expect(cb).toHaveBeenCalledTimes(1);
+      expect(registry.getAll()).toEqual([]);
+    });
+
+    it('reset() on an empty registry does not fire statusChange', () => {
+      const cb = vi.fn();
+      registry.setStatusChangeCallback(cb);
+      registry.reset();
+      expect(cb).not.toHaveBeenCalled();
+    });
   });
 });
