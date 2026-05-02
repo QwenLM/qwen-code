@@ -91,6 +91,7 @@ export async function collectMemoryDiagnostics(
   options: MemoryDiagnosticsOptions = {},
 ): Promise<MemoryDiagnostics> {
   const now = options.now ?? (() => new Date());
+  const platform = options.platform ?? process.platform;
   const memoryUsage = options.memoryUsage?.() ?? process.memoryUsage();
   const heapStatistics = options.heapStatistics?.() ?? v8.getHeapStatistics();
   const resourceUsage = options.resourceUsage?.() ?? process.resourceUsage();
@@ -107,6 +108,11 @@ export async function collectMemoryDiagnostics(
     ),
   );
 
+  // process.resourceUsage().maxRSS is in kilobytes on Linux but bytes on
+  // macOS/Windows. Normalise to bytes for a consistent diagnostic unit.
+  const maxRSSBytes =
+    platform === 'linux' ? resourceUsage.maxRSS * 1024 : resourceUsage.maxRSS;
+
   const diagnostics: MemoryDiagnostics = {
     timestamp: now().toISOString(),
     sessionId: options.sessionId,
@@ -116,7 +122,7 @@ export async function collectMemoryDiagnostics(
     v8HeapStats: mapHeapStats(heapStatistics),
     v8HeapSpaces,
     resourceUsage: {
-      maxRSS: resourceUsage.maxRSS * 1024,
+      maxRSS: maxRSSBytes,
       userCPUTime: resourceUsage.userCPUTime,
       systemCPUTime: resourceUsage.systemCPUTime,
     },
@@ -124,7 +130,7 @@ export async function collectMemoryDiagnostics(
     activeRequests: getActiveRequestsCount(options.activeRequests),
     openFileDescriptors,
     smapsRollup,
-    platform: options.platform ?? process.platform,
+    platform,
     nodeVersion: options.nodeVersion ?? process.version,
     analysis: {
       risks: [],
@@ -253,7 +259,7 @@ function analyzeMemoryDiagnostics(
   if (nativeMemory > diagnostics.memoryUsage.heapUsed * 2) {
     risks.push({
       type: 'native-memory-pressure',
-      message: `Native memory is ${nativeMemory} bytes, larger than heapUsed.`,
+      message: `Native memory (${nativeMemory} bytes) is more than 2× heap used (${diagnostics.memoryUsage.heapUsed} bytes).`,
     });
   }
 
