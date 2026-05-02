@@ -194,6 +194,12 @@ export function BackgroundTaskViewProvider({
       case 'monitor':
         config.getMonitorRegistry().cancel(target.monitorId);
         break;
+      default: {
+        const _exhaustive: never = target;
+        throw new Error(
+          `cancelSelected: unknown DialogEntry kind: ${JSON.stringify(_exhaustive)}`,
+        );
+      }
     }
   }, [config, entries, selectedIndex]);
 

@@ -115,6 +115,12 @@ function rowLabel(entry: DialogEntry): string {
       return `[shell] ${entry.command}`;
     case 'monitor':
       return `[monitor] ${entry.description}`;
+    default: {
+      const _exhaustive: never = entry;
+      throw new Error(
+        `rowLabel: unknown DialogEntry kind: ${JSON.stringify(_exhaustive)}`,
+      );
+    }
   }
 }
 
@@ -273,6 +279,12 @@ const DetailBody: React.FC<{
           maxWidth={maxWidth}
         />
       );
+    default: {
+      const _exhaustive: never = entry;
+      throw new Error(
+        `DetailBody: unknown DialogEntry kind: ${JSON.stringify(_exhaustive)}`,
+      );
+    }
   }
 };
 

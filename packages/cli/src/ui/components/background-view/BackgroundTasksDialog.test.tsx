@@ -36,6 +36,12 @@ vi.mock('../../hooks/useBackgroundTaskView.js', () => ({
         return entry.shellId;
       case 'monitor':
         return entry.monitorId;
+      default: {
+        const _exhaustive: never = entry;
+        throw new Error(
+          `entryId: unknown DialogEntry kind: ${JSON.stringify(_exhaustive)}`,
+        );
+      }
     }
   },
 }));
