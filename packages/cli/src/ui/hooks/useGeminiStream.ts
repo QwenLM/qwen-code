@@ -699,10 +699,12 @@ export const useGeminiStream = (
         // the queue drain, so skip the user-message history item to avoid
         // a duplicate `> …` line. Preprocessing (@/slash/shell) still runs.
         if (submitType !== SendMessageType.Cron) {
-          addItem(
-            { type: MessageType.USER, text: trimmedQuery },
-            userMessageTimestamp,
-          );
+          const userHistoryItem = {
+            type: 'user',
+            text: trimmedQuery,
+            sentToModel: true,
+          } satisfies HistoryItemWithoutId;
+          addItem(userHistoryItem, userMessageTimestamp);
         }
 
         // Handle @-commands (which might involve tool calls)

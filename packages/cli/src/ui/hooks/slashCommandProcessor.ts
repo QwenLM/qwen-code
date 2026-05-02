@@ -92,7 +92,7 @@ function isKnownTopLevelCommandToken(
   );
 }
 
-interface SlashCommandProcessorActions {
+export interface SlashCommandProcessorActions {
   openAuthDialog: () => void;
   openArenaDialog?: (type: Exclude<ArenaDialogType, null>) => void;
   openThemeDialog: () => void;
@@ -139,6 +139,7 @@ export const useSlashCommandProcessor = (
   isConfigInitialized: boolean,
   logger: Logger | null,
   setSessionName?: (name: string | null) => void,
+  updateItem?: UseHistoryManagerReturn['updateItem'],
 ) => {
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
@@ -476,6 +477,8 @@ export const useSlashCommandProcessor = (
         // with arguments is ambiguous with root-level paths such as
         // "/data foo", so let the model handle it instead of reporting
         // "Unknown command" and dropping the user's content.
+        // A single unknown "/token" still reports "Unknown command" so likely
+        // command typos remain visible instead of silently going to the model.
         if (
           commandParts.length > 1 &&
           !isKnownTopLevelCommandToken(firstToken, commands)
@@ -503,8 +506,9 @@ export const useSlashCommandProcessor = (
       abortControllerRef.current = abortController;
 
       const userMessageTimestamp = Date.now();
+      let invocationItemId: number | undefined;
       if (!isBtwCommand(trimmed)) {
-        addItemWithRecording(
+        invocationItemId = addItemWithRecording(
           { type: MessageType.USER, text: trimmed },
           userMessageTimestamp,
         );
@@ -694,6 +698,9 @@ export const useSlashCommandProcessor = (
                   return { type: 'handled' };
 
                 case 'submit_prompt':
+                  if (invocationItemId !== undefined) {
+                    updateItem?.(invocationItemId, { sentToModel: true });
+                  }
                   return {
                     type: 'submit_prompt',
                     content: result.content,
@@ -881,6 +888,7 @@ export const useSlashCommandProcessor = (
       setSessionShellAllowlist,
       setIsProcessing,
       setConfirmationRequest,
+      updateItem,
     ],
   );
 

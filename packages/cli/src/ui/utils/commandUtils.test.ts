@@ -129,6 +129,11 @@ describe('commandUtils', () => {
       expect(looksLikeCommandName('?')).toBe(true);
     });
 
+    it('should return false for embedded query-style question marks', () => {
+      expect(looksLikeCommandName('help?format=json')).toBe(false);
+      expect(looksLikeCommandName('cmd?')).toBe(false);
+    });
+
     it('should return false for empty string', () => {
       expect(looksLikeCommandName('')).toBe(false);
     });
@@ -190,6 +195,10 @@ describe('commandUtils', () => {
       expect(isSlashCommand('/?')).toBe(true);
       expect(isSlashCommand('/接口实现')).toBe(true);
       expect(isSlashCommand('/文档 查看内容')).toBe(true);
+    });
+
+    it('should return false for query-style slash tokens', () => {
+      expect(isSlashCommand('/help?format=json')).toBe(false);
     });
 
     it('should return false for slash-prefixed shell-metacharacter tokens', () => {

@@ -762,6 +762,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isConfigInitialized,
     logger,
     setSessionName,
+    historyManager.updateItem,
   );
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage
@@ -1141,10 +1142,12 @@ export const AppContainer = (props: AppContainerProps) => {
                       .filter(Boolean)
                       .join('');
                     if (text) {
-                      historyManager.addItem(
-                        { type: 'user' as const, text },
-                        now,
-                      );
+                      const userHistoryItem = {
+                        type: 'user',
+                        text,
+                        sentToModel: true,
+                      } satisfies HistoryItemWithoutId;
+                      historyManager.addItem(userHistoryItem, now);
                     }
                   }
                   // functionResponse parts are rendered as part of the tool_group below

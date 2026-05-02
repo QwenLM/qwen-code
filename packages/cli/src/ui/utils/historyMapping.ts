@@ -15,6 +15,7 @@ import type { Content } from '@google/genai';
  */
 export function isRealUserTurn(item: HistoryItem): boolean {
   if (item.type !== 'user' || !item.text) return false;
+  if (item.sentToModel !== undefined) return item.sentToModel;
   return !item.text.startsWith('/') && !item.text.startsWith('?');
 }
 

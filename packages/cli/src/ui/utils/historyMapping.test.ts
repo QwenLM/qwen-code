@@ -39,8 +39,17 @@ function startupPair(): [Content, Content] {
   ];
 }
 
-function userItem(id: number, text = `prompt ${id}`): HistoryItem {
-  return { type: 'user', id, text } as HistoryItem;
+function userItem(
+  id: number,
+  text = `prompt ${id}`,
+  sentToModel?: boolean,
+): HistoryItem {
+  return {
+    type: 'user',
+    id,
+    text,
+    ...(sentToModel === undefined ? {} : { sentToModel }),
+  } as HistoryItem;
 }
 
 function geminiItem(id: number): HistoryItem {
@@ -110,6 +119,27 @@ describe('computeApiTruncationIndex', () => {
         userContent('prompt 5'),
         modelContent('response 5'),
       ];
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+    });
+
+    it('counts slash-prefixed prompts that were sent to the model', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'hello'),
+        geminiItem(2),
+        userItem(3, '/data foo', true),
+        geminiItem(4),
+        userItem(5, 'world'),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        userContent('hello'),
+        modelContent('response 1'),
+        userContent('/data foo'),
+        modelContent('response 2'),
+        userContent('world'),
+        modelContent('response 3'),
+      ];
+
       expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
     });
   });
@@ -231,6 +261,11 @@ describe('isRealUserTurn', () => {
     expect(isRealUserTurn(userItem(1, '/help'))).toBe(false);
     expect(isRealUserTurn(userItem(1, '/rewind'))).toBe(false);
     expect(isRealUserTurn(userItem(1, '/stats'))).toBe(false);
+  });
+
+  it('uses explicit sentToModel metadata for slash-prefixed prompts', () => {
+    expect(isRealUserTurn(userItem(1, '/data foo', true))).toBe(true);
+    expect(isRealUserTurn(userItem(1, '/help', false))).toBe(false);
   });
 
   it('returns false for ? commands', () => {

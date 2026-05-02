@@ -202,6 +202,30 @@ describe('useMessageQueue', () => {
       expect(result.current.messageQueue).toEqual(['/data foo', 'world']);
     });
 
+    it('preserves order across drain, pop, and drain cycles', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('hello');
+        result.current.addMessage('/model');
+        result.current.addMessage('world');
+      });
+
+      let firstDrain: string[] = [];
+      let segment: string | null = null;
+      let secondDrain: string[] = [];
+      act(() => {
+        firstDrain = result.current.drainQueue();
+        segment = result.current.popNextSegment();
+        secondDrain = result.current.drainQueue();
+      });
+
+      expect(firstDrain).toEqual(['hello']);
+      expect(segment).toBe('/model');
+      expect(secondDrain).toEqual(['world']);
+      expect(result.current.messageQueue).toEqual([]);
+    });
+
     it('drains shell-metacharacter slash-like prompts as plain text', () => {
       const { result } = renderHook(() => useMessageQueue());
 

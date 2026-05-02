@@ -42,8 +42,9 @@ export const isAtCommand = (query: string): boolean =>
  * Checks if a string looks like a valid slash command name.
  * Command names may contain Unicode letters/numbers/marks and the punctuation
  * used by built-in, MCP-style, extension-qualified, and filename-derived
- * commands. Tokens with shell metacharacters or path separators are treated as
- * regular text instead.
+ * commands, including "+" and "=". The bare "?" help alias is accepted
+ * explicitly, while embedded "?" query-style tokens, path separators, and
+ * shell operators are treated as regular text instead.
  *
  * @param name The potential command name to check (without the leading '/').
  * @returns True if the name matches the command name pattern, false otherwise.
@@ -52,7 +53,10 @@ export const looksLikeCommandName = (name: string): boolean => {
   if (!name) {
     return false;
   }
-  return /^[\p{L}\p{N}\p{M}:._?@#\-+=]+$/u.test(name);
+  if (name === '?') {
+    return true;
+  }
+  return /^[\p{L}\p{N}\p{M}:._@#\-+=]+$/u.test(name);
 };
 
 /**
@@ -61,6 +65,11 @@ export const looksLikeCommandName = (name: string): boolean => {
  * - Code comments starting with '//' or '/*'
  * - File paths where the first token contains non-command characters
  *   (e.g. '/api/endpoint', '/Users/name/path')
+ *
+ * This is an optimistic lexical check for UI routing and completion. The
+ * slash command processor still resolves the token against loaded commands and
+ * aliases before deciding whether to handle the input locally or let it fall
+ * through to the model.
  *
  * @param query The input query string.
  * @returns True if the query looks like an '/' command, false otherwise.

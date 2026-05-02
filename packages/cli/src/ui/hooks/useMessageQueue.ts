@@ -51,6 +51,11 @@ export function useMessageQueue(): UseMessageQueueReturn {
     return current.join('\n\n');
   }, []);
 
+  /**
+   * Drains only the leading plain-text segment. If a slash command is queued,
+   * later messages stay queued so the app can pop and process the command
+   * before draining subsequent text, preserving the user's input order.
+   */
   const drainQueue = useCallback((): string[] => {
     const current = queueRef.current;
     if (current.length === 0) return [];

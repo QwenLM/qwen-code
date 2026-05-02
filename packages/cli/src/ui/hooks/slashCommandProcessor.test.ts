@@ -6,7 +6,10 @@
 
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { useSlashCommandProcessor } from './slashCommandProcessor.js';
+import {
+  useSlashCommandProcessor,
+  type SlashCommandProcessorActions,
+} from './slashCommandProcessor.js';
 import type {
   CommandContext,
   ConfirmShellCommandsActionReturn,
@@ -26,9 +29,7 @@ import {
   makeFakeConfig,
 } from '@qwen-code/qwen-code-core';
 
-type SlashCommandProcessorActionsArg = Parameters<
-  typeof useSlashCommandProcessor
->[11];
+type SlashCommandProcessorActionsArg = SlashCommandProcessorActions;
 
 const { logSlashCommand } = vi.hoisted(() => ({
   logSlashCommand: vi.fn(),
@@ -111,6 +112,7 @@ function createTestCommand(
 
 describe('useSlashCommandProcessor', () => {
   const mockAddItem = vi.fn();
+  const mockUpdateItem = vi.fn();
   const mockClearItems = vi.fn();
   const mockLoadHistory = vi.fn();
   const mockOpenThemeDialog = vi.fn();
@@ -154,6 +156,7 @@ describe('useSlashCommandProcessor', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockAddItem.mockReturnValue(1);
     vi.mocked(BuiltinCommandLoader).mockClear();
     mockBuiltinLoadCommands.mockResolvedValue([]);
     mockFileLoadCommands.mockResolvedValue([]);
@@ -189,6 +192,8 @@ describe('useSlashCommandProcessor', () => {
         new Map(), // extensionsUpdateState
         true, // isConfigInitialized
         null, // logger
+        undefined, // setSessionName
+        mockUpdateItem,
       ),
     );
 
@@ -614,6 +619,7 @@ describe('useSlashCommandProcessor', () => {
         { type: MessageType.USER, text: '/filecmd' },
         expect.any(Number),
       );
+      expect(mockUpdateItem).toHaveBeenCalledWith(1, { sentToModel: true });
     });
 
     it('should handle "submit_prompt" action returned from a mcp-based command', async () => {
@@ -646,6 +652,7 @@ describe('useSlashCommandProcessor', () => {
         { type: MessageType.USER, text: '/mcpcmd' },
         expect.any(Number),
       );
+      expect(mockUpdateItem).toHaveBeenCalledWith(1, { sentToModel: true });
     });
   });
 
