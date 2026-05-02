@@ -99,7 +99,20 @@ export const modelCommand: SlashCommand = {
       context.executionMode === 'interactive'
     ) {
       //Use first argument only, avoids later synatx confusion and/or use of model names with spaces
+      if (!settings) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Settings service not available.'),
+        };
+      }
       const modelName = args.trim().split(' ')[0];
+      settings.setValue(
+        getPersistScopeForModelSelection(settings),
+        'model.name',
+        modelName,
+      );
+      await config.setModel(modelName);
       await config.setModel(modelName);
       return {
         type: 'message',
