@@ -80,10 +80,16 @@ export interface MonitorEntry {
   exitCode?: number;
   /**
    * Reason for terminal status, when one exists. Mirrors
-   * `BackgroundShellEntry.error`. Populated for `failed` (spawn error)
-   * and for `completed` via the max-events auto-stop path. Surfaced in
-   * the dialog's `MonitorDetailBody` so users opening the detail view
-   * after termination see why the monitor stopped.
+   * `BackgroundShellEntry.error`. Populated for:
+   *   - `failed` — spawn error (passed to `fail(monitorId, error)`).
+   *   - `completed` via auto-stop — currently `'Max events reached'`
+   *     from `emitEvent` and `'Idle timeout'` from the idle timer; any
+   *     future auto-stop reason should populate this field too so the
+   *     detail view stays a complete record of why the monitor stopped.
+   * Not populated for `cancelled` (no semantic reason — the user / agent
+   * just asked to stop) or for `completed` via natural process exit
+   * (the `exitCode` field carries that signal instead).
+   * Surfaced in the dialog's `MonitorDetailBody`.
    */
   error?: string;
 }

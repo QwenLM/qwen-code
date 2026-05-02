@@ -110,8 +110,11 @@ function rowLabel(entry: DialogEntry): string {
     case 'shell':
       // Shell / monitor prefixes mirror the dialog's "section" visual hint
       // without needing per-kind section headers (which would complicate
-      // the windowing math). The command/description is plain text and
-      // already truncated by the row renderer's MaxSizedBox.
+      // the windowing math). Long commands / descriptions wrap (ListBody
+      // renders rows with plain `<Text>`, no truncation helper), which
+      // is acceptable for the dialog's information-density profile —
+      // adding `wrap="truncate-end"` here would hide context the user
+      // explicitly opened the dialog to see.
       return `[shell] ${entry.command}`;
     case 'monitor':
       return `[monitor] ${entry.description}`;
