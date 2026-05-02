@@ -304,7 +304,11 @@ function parseGhInvocation(tokens: string[]): string[] {
       i += 2;
       continue;
     }
-    if (t.startsWith('--repo=') || t.startsWith('--hostname=')) {
+    if (
+      t.startsWith('--repo=') ||
+      t.startsWith('--hostname=') ||
+      t.startsWith('-R=')
+    ) {
       i++;
       continue;
     }
@@ -1362,10 +1366,22 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // Capture the absolute paths actually included in this commit so
       // the finally block can do a partial clear: files the AI edited
       // but the user didn't `git add` should still be tracked for a
-      // later commit. Resolved against `baseDir` because diff paths
-      // are repo-root-relative.
+      // later commit.
+      //
+      // Canonicalise via the repo root rather than each leaf: deleted
+      // files don't exist at this point so `fs.realpathSync` on the
+      // leaf would fail. Realpath the directory once (which still
+      // exists) and resolve repo-relative paths against the canonical
+      // root — the resulting absolute path matches the canonical key
+      // recordEdit stored even when the file has since been deleted.
+      let canonicalBase: string;
+      try {
+        canonicalBase = fs.realpathSync(baseDir);
+      } catch {
+        canonicalBase = baseDir;
+      }
       committedAbsolutePaths = new Set(
-        stagedInfo.files.map((rel) => path.resolve(baseDir, rel)),
+        stagedInfo.files.map((rel) => path.resolve(canonicalBase, rel)),
       );
 
       const note = attributionService.generateNotePayload(
@@ -1592,15 +1608,28 @@ export class ShellToolInvocation extends BaseToolInvocation<
     };
     const doubleMatch = lastMatch(command.matchAll(doubleQuotePattern));
     const singleMatch = lastMatch(command.matchAll(singleQuotePattern));
-    const match = doubleMatch ?? singleMatch;
-    const quote = doubleMatch ? '"' : "'";
+    // Pick whichever match appears LAST in the command string,
+    // regardless of quote style. For `-m "Title" -m 'Body'`, a
+    // simple `doubleMatch ?? singleMatch` would target the title
+    // (last double match) and bury the trailer in the wrong field —
+    // git interpret-trailers only recognises a trailer at the end
+    // of the final `-m` value.
+    const match =
+      doubleMatch && singleMatch
+        ? (doubleMatch.index ?? 0) > (singleMatch.index ?? 0)
+          ? doubleMatch
+          : singleMatch
+        : (doubleMatch ?? singleMatch);
+    const quote = match === doubleMatch ? '"' : "'";
 
-    // Escape the configured name/email for the surrounding quote style.
-    // Without this, a name like `Bot $(rm -rf /)` would be evaluated as
-    // command substitution when the shell parses the rewritten command.
-    const escape = doubleMatch
-      ? escapeForBashDoubleQuote
-      : escapeForBashSingleQuote;
+    // Escape the configured name/email for the surrounding quote
+    // style — has to follow the actually-selected match, not just
+    // whether a double-quoted -m exists somewhere earlier (a later
+    // single-quoted -m wins on index comparison above).
+    const escape =
+      match === doubleMatch
+        ? escapeForBashDoubleQuote
+        : escapeForBashSingleQuote;
     const escapedName = escape(gitCoAuthorSettings.name ?? '');
     const escapedEmail = escape(gitCoAuthorSettings.email ?? '');
     const coAuthor = `\n\nCo-authored-by: ${escapedName} <${escapedEmail}>`;

@@ -27,13 +27,17 @@ const {
 } = workspacesSettings;
 
 /**
- * Integration tests for settings migration chain (V1 -> V2 -> V3)
+ * Integration tests for settings migration chain (V1 -> V2 -> V3 -> V4)
  *
  * These tests verify that:
- * 1. V1 settings are automatically migrated to V3 on CLI startup
- * 2. V2 settings are automatically migrated to V3 on CLI startup
- * 3. V3 settings remain unchanged
+ * 1. V1 settings are automatically migrated to V4 on CLI startup
+ * 2. V2 settings are automatically migrated to V4 on CLI startup
+ * 3. V3 settings are automatically migrated to V4 on CLI startup
  * 4. Migration is idempotent (running multiple times produces same result)
+ *
+ * The numeric assertions use the literal `4` to match
+ * `SETTINGS_VERSION`; bump that constant and the literal together
+ * when adding a future migration.
  */
 describe('settings-migration', () => {
   let rig: TestRig;
@@ -77,7 +81,7 @@ describe('settings-migration', () => {
   };
 
   describe('V1 settings migration', () => {
-    it('should migrate V1 settings to V3 on CLI startup', async () => {
+    it('should migrate V1 settings forward through the chain on CLI startup', async () => {
       rig.setup('v1-to-v3-migration');
 
       // Write V1 settings directly (overwrites the one created by setup)
@@ -94,7 +98,7 @@ describe('settings-migration', () => {
       // Read migrated settings
       const migratedSettings = readSettingsFile(rig);
 
-      // Verify migration to V3
+      // Verify migration to V4 (current SETTINGS_VERSION)
       expect(migratedSettings['$version']).toBe(4);
       expect(migratedSettings['ui']).toEqual({
         theme: 'dark',
@@ -161,7 +165,7 @@ describe('settings-migration', () => {
       // Read migrated settings
       const migratedSettings = readSettingsFile(rig);
 
-      // Should be migrated to V3
+      // Should be migrated to V4
       expect(migratedSettings['$version']).toBe(4);
       // Legacy string values for ui/general should be preserved as-is (user data)
       expect(migratedSettings['ui']).toBe('legacy-ui-string');
@@ -209,7 +213,7 @@ describe('settings-migration', () => {
   });
 
   describe('V2 settings migration', () => {
-    it('should migrate V2 settings to V3 on CLI startup', async () => {
+    it('should migrate V2 settings forward through the chain on CLI startup', async () => {
       rig.setup('v2-to-v3-migration');
 
       // Write V2 settings directly (overwrites the one created by setup)
@@ -225,7 +229,7 @@ describe('settings-migration', () => {
       // Read migrated settings
       const migratedSettings = readSettingsFile(rig);
 
-      // Verify migration to V3
+      // Verify migration to V4 (current SETTINGS_VERSION)
       expect(migratedSettings['$version']).toBe(4);
 
       // Verify disable* -> enable* conversion with inversion
@@ -302,7 +306,7 @@ describe('settings-migration', () => {
       // Read migrated settings
       const migratedSettings = readSettingsFile(rig);
 
-      // Should be updated to V3 version
+      // Should be updated to V4 version
       expect(migratedSettings['$version']).toBe(4);
       // Other settings should remain unchanged
       expect(migratedSettings['ui']).toEqual({ theme: 'dark' });
@@ -335,7 +339,7 @@ describe('settings-migration', () => {
       expect(migratedSettings['customOnlyKey']).toBe('value');
     });
 
-    it('should coerce valid string booleans and remove invalid deprecated keys while bumping V2 to V3', async () => {
+    it('should coerce valid string booleans and remove invalid deprecated keys while bumping V2 forward through the chain', async () => {
       rig.setup('v2-non-boolean-disable-values-migration');
 
       // Cover both coercible string booleans and invalid non-boolean values:

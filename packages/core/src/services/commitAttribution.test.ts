@@ -4,7 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+
+// Stub `fs.realpathSync` so the symlink-aware tests below can simulate
+// macOS-style `/var` ↔ `/private/var` mapping without needing a real
+// symlink in the filesystem. Other tests don't touch realpath, so the
+// pass-through default keeps them unaffected.
+vi.mock('node:fs', async () => {
+  const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+  return { ...actual, realpathSync: vi.fn(actual.realpathSync) };
+});
+
+import * as fs from 'node:fs';
 import {
   CommitAttributionService,
   computeCharContribution,
@@ -280,6 +291,103 @@ describe('CommitAttributionService', () => {
       // aiChars + humanChars now equals the reported diff size.
       expect(detail.aiChars + detail.humanChars).toBe(40);
       expect(note.summary.aiChars).toBe(40);
+    });
+  });
+
+  // The service realpath's file paths at every entry/exit point so a
+  // symlinked vs canonical absolute path collapses to one entry. This
+  // matters most on macOS (`/var` → `/private/var`), where edit.ts
+  // can record a path under one form while git rev-parse reports the
+  // other — without canonicalisation, the lookup never matches and
+  // AI attribution silently zeroes out.
+  describe('symlink-aware path canonicalisation', () => {
+    beforeEach(() => {
+      // Map any /var/... input to /private/var/... (the macOS-ism).
+      // Anything else passes through unchanged.
+      vi.mocked(fs.realpathSync).mockImplementation(((input: unknown) => {
+        const s = String(input);
+        if (s.startsWith('/var/')) return s.replace('/var/', '/private/var/');
+        if (s === '/var') return '/private/var';
+        return s;
+      }) as unknown as typeof fs.realpathSync);
+    });
+    afterEach(() => {
+      vi.mocked(fs.realpathSync).mockReset();
+    });
+
+    it('records and looks up under the canonical path', () => {
+      const service = CommitAttributionService.getInstance();
+      service.recordEdit('/var/repo/src/main.ts', '', 'x'.repeat(50));
+
+      // Lookup with EITHER form should work — the service canonicalises
+      // both write and read.
+      expect(service.getFileAttribution('/var/repo/src/main.ts')).toBeDefined();
+      expect(
+        service.getFileAttribution('/private/var/repo/src/main.ts'),
+      ).toBeDefined();
+    });
+
+    it('matches diff paths when baseDir is the symlinked form', () => {
+      const service = CommitAttributionService.getInstance();
+      service.recordEdit('/var/repo/src/main.ts', '', 'x'.repeat(80));
+
+      // generateNotePayload receives the symlinked baseDir; the loop
+      // canonicalises it before computing path.relative against the
+      // (already-canonical) keys.
+      const staged = makeStagedInfo(['src/main.ts'], { 'src/main.ts': 80 });
+      const note = service.generateNotePayload(staged, '/var/repo');
+
+      expect(note.files['src/main.ts']!.aiChars).toBe(80);
+      expect(note.files['src/main.ts']!.percent).toBe(100);
+    });
+
+    it('clearAttributedFiles deletes by canonical key without realpath-ing the leaf', () => {
+      const service = CommitAttributionService.getInstance();
+      service.recordEdit('/var/repo/src/deleted.ts', '', 'will be removed');
+      expect(
+        service.getFileAttribution('/var/repo/src/deleted.ts'),
+      ).toBeDefined();
+
+      // Caller composes paths against a canonical baseDir (mirrors
+      // attachCommitAttribution's pattern), so the leaf doesn't need
+      // to exist for the delete to find the right key.
+      service.clearAttributedFiles(
+        new Set(['/private/var/repo/src/deleted.ts']),
+      );
+      expect(
+        service.getFileAttribution('/var/repo/src/deleted.ts'),
+      ).toBeUndefined();
+    });
+
+    it('canonicalises keys on snapshot restore', () => {
+      const service = CommitAttributionService.getInstance();
+      service.restoreFromSnapshot({
+        type: 'attribution-snapshot',
+        surface: 'cli',
+        // Snapshot written before the canonicalisation fix could carry
+        // either form; restore should normalise to canonical.
+        fileStates: {
+          '/var/repo/src/legacy.ts': {
+            aiContribution: 99,
+            aiCreated: false,
+            contentHash: 'abc',
+          },
+        },
+        baselines: {},
+        promptCount: 0,
+        promptCountAtLastCommit: 0,
+        permissionPromptCount: 0,
+        permissionPromptCountAtLastCommit: 0,
+        escapeCount: 0,
+        escapeCountAtLastCommit: 0,
+      });
+
+      // Lookup under the canonical form succeeds even though the
+      // snapshot wrote the symlink form.
+      expect(
+        service.getFileAttribution('/private/var/repo/src/legacy.ts')!
+          .aiContribution,
+      ).toBe(99);
     });
   });
 });

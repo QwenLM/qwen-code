@@ -310,20 +310,20 @@ export class CommitAttributionService {
    * they're still credited on a later commit. Snapshots prompt
    * counters since a commit did succeed.
    *
-   * Each input path is canonicalised via `fs.realpathSync` before the
-   * lookup, so callers can pass either the resolved repo-relative
-   * path (`path.resolve(repoRoot, rel)`) or an already-canonical
-   * absolute path — either form will match the entries written by
-   * `recordEdit`.
+   * Inputs must already be canonical absolute paths. The caller
+   * should resolve repo-relative diff entries against a canonical
+   * (realpath'd) repo root rather than realpathing each leaf — at
+   * cleanup time the leaf for a just-deleted file no longer exists,
+   * so per-leaf `fs.realpathSync` would fail and fall back to a
+   * non-canonical path that misses the stored canonical key.
    */
   clearAttributedFiles(committedAbsolutePaths: Set<string>): void {
     this.promptCountAtLastCommit = this.promptCount;
     this.permissionPromptCountAtLastCommit = this.permissionPromptCount;
     this.escapeCountAtLastCommit = this.escapeCount;
     for (const p of committedAbsolutePaths) {
-      const key = realpathOrSelf(p);
-      this.fileAttributions.delete(key);
-      this.sessionBaselines.delete(key);
+      this.fileAttributions.delete(p);
+      this.sessionBaselines.delete(p);
     }
   }
 
