@@ -22,6 +22,7 @@ if not "%QWEN_INSTALL_LIB_DIR%"=="" set "INSTALL_DIR=%QWEN_INSTALL_LIB_DIR%"
 set "INSTALL_BIN_DIR=%INSTALL_BASE%\bin"
 if not "%QWEN_INSTALL_BIN_DIR%"=="" set "INSTALL_BIN_DIR=%QWEN_INSTALL_BIN_DIR%"
 
+REM Parse flags before any network or filesystem work.
 :parse_args
 if "%~1"=="" goto end_parse
 if /i "%~1"=="--source" (
@@ -134,6 +135,7 @@ if /i not "!METHOD!"=="standalone" echo INFO: npm registry: !NPM_REGISTRY!
 if not "!SOURCE!"=="unknown" echo INFO: Installation source: !SOURCE!
 echo.
 
+REM Dispatch after validation; detect falls back to npm only when unavailable.
 if /i "!METHOD!"=="standalone" (
     call :InstallStandalone
     if !ERRORLEVEL! NEQ 0 exit /b !ERRORLEVEL!
@@ -372,6 +374,7 @@ exit /b 0
 set "TEMP_DIR="
 set "CHECKSUM_SOURCE="
 
+REM Resolve the archive from a local file or from the configured release mirror.
 if not "!ARCHIVE_PATH!"=="" (
     set "ARCHIVE_FILE=!ARCHIVE_PATH!"
     for %%I in ("!ARCHIVE_FILE!") do set "ARCHIVE_NAME=%%~nxI"
@@ -414,12 +417,14 @@ if "!TEMP_DIR!"=="" (
     mkdir "!TEMP_DIR!" >nul 2>&1
 )
 
+REM Verify integrity before extraction or changing the install directory.
 call :VerifyChecksum "!ARCHIVE_FILE!" "!CHECKSUM_SOURCE!" "!ARCHIVE_NAME!"
 if !ERRORLEVEL! NEQ 0 (
     if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
     exit /b 1
 )
 
+REM Extract into a temporary directory, then validate required entry points.
 set "EXTRACT_DIR=!TEMP_DIR!\extract"
 mkdir "!EXTRACT_DIR!" >nul 2>&1
 set "QWEN_ARCHIVE_FILE=!ARCHIVE_FILE!"
@@ -457,6 +462,7 @@ if not exist "!INSTALL_BIN_DIR!" mkdir "!INSTALL_BIN_DIR!"
 for %%I in ("!INSTALL_DIR!") do set "INSTALL_PARENT=%%~dpI"
 if not exist "!INSTALL_PARENT!" mkdir "!INSTALL_PARENT!"
 
+REM Stage into .new and keep .old so failed upgrades can roll back.
 set "NEW_INSTALL_DIR=!INSTALL_DIR!.new"
 set "OLD_INSTALL_DIR=!INSTALL_DIR!.old"
 

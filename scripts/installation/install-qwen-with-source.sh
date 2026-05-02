@@ -221,6 +221,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Validate all user-supplied options before doing network or filesystem work.
 validate_options
 
 print_header() {
@@ -591,6 +592,7 @@ install_standalone() {
     local checksum_source=""
     local temp_dir=""
 
+    # Resolve the archive from a local file or from the configured release mirror.
     if [[ -n "${ARCHIVE_PATH}" ]]; then
         archive_path="${ARCHIVE_PATH}"
         archive_name="$(basename "${archive_path}")"
@@ -633,11 +635,13 @@ install_standalone() {
         temp_dir=$(mktemp -d)
     fi
 
+    # Verify integrity before extraction or changing the install directory.
     if ! verify_checksum "${archive_path}" "${checksum_source}" "${archive_name}"; then
         rm -rf "${temp_dir}"
         return 1
     fi
 
+    # Extract into a temporary directory, then validate required entry points.
     local extract_dir="${temp_dir}/extract"
     if ! extract_archive "${archive_path}" "${extract_dir}"; then
         rm -rf "${temp_dir}"
@@ -658,6 +662,7 @@ install_standalone() {
 
     mkdir -p "${INSTALL_LIB_PARENT}" "${INSTALL_BIN_DIR}"
 
+    # Stage into .new and keep .old so failed upgrades can roll back.
     local new_install_dir="${INSTALL_LIB_DIR}.new"
     local old_install_dir="${INSTALL_LIB_DIR}.old"
     if ! ensure_managed_install_dir "${INSTALL_LIB_DIR}" ||
@@ -785,6 +790,7 @@ main() {
             print_final_instructions "$(get_npm_global_bin)"
             ;;
         detect)
+            # Try the standalone archive first; fall back only when unavailable.
             if install_standalone; then
                 print_final_instructions "${INSTALL_BIN_DIR}"
             else

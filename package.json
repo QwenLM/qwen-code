@@ -65,6 +65,7 @@
     "prepare": "husky && npm run build && npm run bundle",
     "prepare:package": "node scripts/prepare-package.js",
     "package:standalone": "node scripts/create-standalone-package.js",
+    "package:standalone:release": "node scripts/build-standalone-release.js",
     "release:version": "node scripts/version.js",
     "telemetry": "node scripts/telemetry.js",
     "check:lockfile": "node scripts/check-lockfile.js",

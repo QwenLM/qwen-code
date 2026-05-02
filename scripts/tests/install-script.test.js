@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -157,9 +157,14 @@ describe('standalone release packaging', () => {
     expect(packageJson.scripts['package:standalone']).toBe(
       'node scripts/create-standalone-package.js',
     );
+    expect(packageJson.scripts['package:standalone:release']).toBe(
+      'node scripts/build-standalone-release.js',
+    );
     expect(existsSync('scripts/create-standalone-package.js')).toBe(true);
+    expect(existsSync('scripts/build-standalone-release.js')).toBe(true);
 
     const packageScript = readScript('scripts/create-standalone-package.js');
+    expect(packageScript).toContain('Copyright 2025 Qwen Team');
     expect(packageScript).toContain("'bundled/qc-helper/docs'");
     expect(packageScript).toContain("path.join(packageRoot, 'package.json')");
     expect(packageScript).toContain('validateNodeRuntime');
@@ -168,6 +173,27 @@ describe('standalone release packaging', () => {
     expect(packageScript).toContain('refusing to write empty SHA256SUMS');
     expect(packageScript).toContain('Expand-Archive');
     expect(packageScript).toContain('Compress-Archive');
+
+    const releaseScript = readScript('scripts/build-standalone-release.js');
+    expect(releaseScript).toContain('Copyright 2025 Qwen Team');
+    expect(releaseScript).toContain('https://nodejs.org/dist/v${nodeVersion}');
+    expect(releaseScript).toContain('SHASUMS256.txt');
+    expect(releaseScript).toContain('verifyNodeArchive');
+    expect(releaseScript).toContain('EXPECTED_ARCHIVE_COUNT = 5');
+    expect(releaseScript).toContain('expectedArchiveNames');
+    expect(releaseScript).toContain('qwen-code-${qwenTarget}');
+    expect(releaseScript).toContain('scripts/create-standalone-package.js');
+  });
+
+  it('loads the standalone release packaging helper', () => {
+    const output = execFileSync(
+      process.execPath,
+      ['scripts/build-standalone-release.js', '--help'],
+      { encoding: 'utf8' },
+    );
+
+    expect(output).toContain('package:standalone:release');
+    expect(output).toContain('--node-version VERSION');
   });
 
   it('rejects a runtime archive without a Node executable', () => {
@@ -315,17 +341,18 @@ describe('standalone release packaging', () => {
   it('uploads standalone archives during release', () => {
     const workflow = readScript('.github/workflows/release.yml');
 
-    expect(workflow).toContain('set -euo pipefail');
-    expect(workflow).toContain('SHASUMS256.txt');
-    expect(workflow).toContain('$2 == name');
-    expect(workflow).toContain('does not list ${archive_name}');
-    expect(workflow).toContain('verify_node_checksum()');
-    expect(workflow).toContain('sha256sum -c -');
-    expect(workflow).toContain('shasum -a 256');
-    expect(workflow).toContain('Expected 5 standalone checksums');
-    expect(workflow).toContain('npm run package:standalone');
+    expect(workflow).toContain('npm run package:standalone:release --');
+    expect(workflow).not.toContain('verify_node_checksum()');
+    expect(workflow).not.toContain('download_node()');
     expect(workflow).toContain('dist/standalone/qwen-code-*');
     expect(workflow).toContain('dist/standalone/SHA256SUMS');
+  });
+
+  it('does not whitelist internal planning documents in gitignore', () => {
+    const gitignore = readScript('.gitignore');
+
+    expect(gitignore).not.toContain('!.qwen/design/');
+    expect(gitignore).not.toContain('!.qwen/e2e-tests/');
   });
 
   it('documents optional native module parity for standalone installs', () => {
