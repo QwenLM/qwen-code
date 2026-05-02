@@ -415,6 +415,30 @@ describe('python sdk get-release-version', () => {
     });
   });
 
+  it('prefers nightly base over preview when nightly is higher for stable releases', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.1.0': [{}],
+            '0.1.1rc0': [{}],
+            '0.2.0.dev20260429010101': [{}],
+          },
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'stable' })).resolves.toMatchObject({
+      releaseTag: 'v0.2.0',
+      releaseVersion: '0.2.0',
+      packageVersion: '0.2.0',
+      previousReleaseTag: 'v0.1.0',
+      publishChannel: 'latest',
+    });
+  });
+
   it('fails instead of patch-bumping a stable release derived from preview when its tag already exists', async () => {
     fetchMock.mockResolvedValue(
       makeResponse({

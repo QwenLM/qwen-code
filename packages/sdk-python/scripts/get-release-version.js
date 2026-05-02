@@ -190,7 +190,7 @@ function incrementPatchVersion(version) {
   return `${parsed.major}.${parsed.minor}.${parsed.patch + 1}`;
 }
 
-function getNextPatchBaseVersion(versions) {
+function getNextBaseVersion(versions) {
   const stableBaseline = sortDescending([
     ...versions.filter((version) => parseVersion(version)?.stage === 'stable'),
     getCurrentPackageBaseVersion(),
@@ -284,7 +284,7 @@ async function getReleaseState({ packageVersion, releaseTag }, versions) {
 }
 
 function getNightlyVersion(versions) {
-  const baseVersion = getNextPatchBaseVersion(versions);
+  const baseVersion = getNextBaseVersion(versions);
   const timestamp = getUtcTimestamp();
   const gitShortHash = getGitShortHash();
 
@@ -310,7 +310,7 @@ function getPreviewVersion(args, versions) {
     };
   }
 
-  const baseVersion = getNextPatchBaseVersion(versions);
+  const baseVersion = getNextBaseVersion(versions);
   return {
     releaseVersion: `${baseVersion}-preview.0`,
     packageVersion: `${baseVersion}rc0`,
@@ -377,40 +377,21 @@ function getConflictSources(releaseState) {
   return sources.length > 0 ? sources.join(', ') : 'unknown release state';
 }
 
-function bumpVersion(versionData, type) {
-  if (type === 'preview') {
-    const match = versionData.releaseVersion.match(
-      /^(\d+\.\d+\.\d+)-preview\.(\d+)$/,
+function bumpVersion(versionData) {
+  const match = versionData.releaseVersion.match(
+    /^(\d+\.\d+\.\d+)-preview\.(\d+)$/,
+  );
+  if (!match) {
+    throw new Error(
+      `Cannot bump preview version: ${versionData.releaseVersion}`,
     );
-    if (!match) {
-      throw new Error(
-        `Cannot bump preview version: ${versionData.releaseVersion}`,
-      );
-    }
-    const nextNumber = Number(match[2]) + 1;
-    return {
-      ...versionData,
-      releaseVersion: `${match[1]}-preview.${nextNumber}`,
-      packageVersion: `${match[1]}rc${nextNumber}`,
-    };
   }
-
-  if (type === 'stable') {
-    const parsed = parseVersion(versionData.packageVersion);
-    if (!parsed) {
-      throw new Error(
-        `Cannot bump stable version: ${versionData.packageVersion}`,
-      );
-    }
-    const nextVersion = `${parsed.major}.${parsed.minor}.${parsed.patch + 1}`;
-    return {
-      ...versionData,
-      releaseVersion: nextVersion,
-      packageVersion: nextVersion,
-    };
-  }
-
-  throw new Error(`Nightly version conflict for ${versionData.packageVersion}`);
+  const nextNumber = Number(match[2]) + 1;
+  return {
+    ...versionData,
+    releaseVersion: `${match[1]}-preview.${nextNumber}`,
+    packageVersion: `${match[1]}rc${nextNumber}`,
+  };
 }
 
 async function getVersion(options = {}) {
@@ -514,7 +495,13 @@ async function getVersion(options = {}) {
       );
     }
 
-    versionData = bumpVersion(versionData, type);
+    if (type === 'nightly') {
+      throw new Error(
+        `Nightly version conflict for ${versionData.packageVersion}`,
+      );
+    }
+
+    versionData = bumpVersion(versionData);
   }
 
   const previousVersion =
