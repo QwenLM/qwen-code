@@ -355,4 +355,96 @@ describe('BackgroundTasksDialog', () => {
     expect(detailFrame).toContain('Temporary resume setup failed.');
     expect(detailFrame).toContain('r resume');
   });
+
+  describe('MonitorDetailBody render branches', () => {
+    function openMonitorDetail(monitorOverrides: Partial<DialogEntry> = {}) {
+      const mon = monitorEntry({
+        monitorId: 'mon-z',
+        description: 'watch app logs',
+        command: 'tail -f app.log',
+        ...monitorOverrides,
+      });
+      const h = setup([mon]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      return h.lastFrame() ?? '';
+    }
+
+    it('renders title from description and shows Command block', () => {
+      const f = openMonitorDetail();
+      expect(f).toContain('Monitor');
+      expect(f).toContain('watch app logs');
+      expect(f).toContain('Command');
+      expect(f).toContain('tail -f app.log');
+    });
+
+    it('renders pid when defined, omits when undefined', () => {
+      expect(
+        openMonitorDetail({ pid: 4242 } as Partial<DialogEntry>),
+      ).toContain('pid 4242');
+      expect(openMonitorDetail()).not.toContain('pid ');
+    });
+
+    it('uses singular "1 event" / plural "N events"', () => {
+      const f1 = openMonitorDetail({ eventCount: 1 } as Partial<DialogEntry>);
+      expect(f1).toContain('1 event');
+      // Guard against false positive — substring "1 event" also matches "1 events".
+      expect(f1).not.toContain('1 events');
+
+      const f5 = openMonitorDetail({ eventCount: 5 } as Partial<DialogEntry>);
+      expect(f5).toContain('5 events');
+    });
+
+    it('renders droppedLines only when > 0', () => {
+      expect(
+        openMonitorDetail({ droppedLines: 0 } as Partial<DialogEntry>),
+      ).not.toContain('dropped');
+      expect(
+        openMonitorDetail({ droppedLines: 3 } as Partial<DialogEntry>),
+      ).toContain('3 dropped');
+    });
+
+    it('renders exitCode in subtitle when defined', () => {
+      expect(
+        openMonitorDetail({
+          status: 'completed',
+          exitCode: 0,
+        } as Partial<DialogEntry>),
+      ).toContain('exit 0');
+      expect(
+        openMonitorDetail({
+          status: 'completed',
+          exitCode: 1,
+        } as Partial<DialogEntry>),
+      ).toContain('exit 1');
+    });
+
+    it('renders Error block for failed status', () => {
+      const f = openMonitorDetail({
+        status: 'failed',
+        error: 'spawn ENOENT',
+      } as Partial<DialogEntry>);
+      expect(f).toContain('Error');
+      expect(f).toContain('spawn ENOENT');
+      // The auto-stop label must not appear on a `failed` entry — the
+      // two error-block branches share a render slot, so a regression
+      // collapsing them would silently swap the user-facing wording.
+      expect(f).not.toContain('Stopped because');
+    });
+
+    it('renders "Stopped because" block for completed with auto-stop reason', () => {
+      const f = openMonitorDetail({
+        status: 'completed',
+        error: 'Max events reached',
+      } as Partial<DialogEntry>);
+      expect(f).toContain('Stopped because');
+      expect(f).toContain('Max events reached');
+    });
+
+    it('omits the error block entirely when error is undefined', () => {
+      const f = openMonitorDetail({ status: 'completed' });
+      expect(f).not.toContain('Error');
+      expect(f).not.toContain('Stopped because');
+    });
+  });
 });
