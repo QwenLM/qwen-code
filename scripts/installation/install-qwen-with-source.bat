@@ -171,6 +171,14 @@ echo WARNING: Standalone install failed. Retry with --method npm to use npm, or 
 exit /b !STANDALONE_STATUS!
 
 :usage
+call :PrintUsage
+exit /b 0
+
+:usage_error
+call :PrintUsage
+exit /b 1
+
+:PrintUsage
 echo Qwen Code Installer
 echo.
 echo Usage: install-qwen-with-source.bat [OPTIONS]
@@ -187,22 +195,6 @@ echo   --registry REGISTRY      npm registry to use.
 echo                            Defaults to QWEN_NPM_REGISTRY or https://registry.npmmirror.com
 echo   -h, --help               Show this help message.
 exit /b 0
-
-:usage_error
-echo Qwen Code Installer
-echo.
-echo Usage: install-qwen-with-source.bat [OPTIONS]
-echo.
-echo Options:
-echo   -s, --source SOURCE      Record the installation source.
-echo   --method METHOD          Install method: detect, standalone, or npm.
-echo   --mirror MIRROR          Standalone archive mirror: github or aliyun.
-echo   --base-url URL           Override standalone archive base URL.
-echo   --archive PATH           Install from a local standalone archive.
-echo   --version VERSION        Standalone release version. Defaults to latest.
-echo   --registry REGISTRY      npm registry to use.
-echo   -h, --help               Show this help message.
-exit /b 1
 
 :ValidateOptions
 if "!METHOD!"=="" set "METHOD=detect"

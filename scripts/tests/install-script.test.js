@@ -23,6 +23,8 @@ const crypto = await vi.importActual('node:crypto');
 const { tmpdir } = await vi.importActual('node:os');
 const path = await vi.importActual('node:path');
 const readScript = (path) => readFileSync(path, 'utf8');
+// These E2E cases execute the Unix shell installer and POSIX symlink behavior.
+// Windows batch behavior is covered by static checks plus win-x64 packaging.
 const itOnUnix = process.platform === 'win32' ? it.skip : it;
 
 describe('installation scripts', () => {
@@ -98,6 +100,7 @@ describe('installation scripts', () => {
     expect(script).not.toContain('echo INFO: Installation source: %SOURCE%');
     expect(script).not.toMatch(/^\s*call\s+qwen\s*$/m);
     expect(script).toContain(':ValidateSource');
+    expect(script).toContain(':PrintUsage');
     expect(script).toContain('findstr /R');
     expect(script).toContain(
       '--source may only contain letters, numbers, dot, underscore, or dash',

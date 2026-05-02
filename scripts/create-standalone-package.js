@@ -285,6 +285,9 @@ function copyExtractedNode(extractDir, nodeDir) {
       ? path.join(extractDir, entries[0])
       : extractDir;
 
+  // Official Unix Node.js archives include internal npm/npx symlinks.
+  // The installer rejects symlinks in final archives, so keep safe internal
+  // targets by copying their referents and reject any symlink that escapes.
   assertSymlinksStayInside(sourceRoot);
   copyDereferenced(sourceRoot, nodeDir);
   assertNoSymlinks(nodeDir, 'Copied Node.js runtime still contains symlinks.');
