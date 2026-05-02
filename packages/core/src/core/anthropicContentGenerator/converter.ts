@@ -33,14 +33,14 @@ type AnthropicContentBlockParam = Anthropic.ContentBlockParam;
 
 export interface ConvertGeminiRequestToAnthropicOptions {
   /**
-   * On assistant turns containing `tool_use` but lacking a compliant thinking
-   * block (i.e. a `thinking` block with a `signature` field, or a
-   * `redacted_thinking` block), prepend a synthetic empty thinking block and
-   * drop any non-compliant `thinking` block already present. Required by
-   * DeepSeek's anthropic-compatible API when thinking mode is enabled.
-   * Must be gated on the same per-request condition that emits the top-level
-   * `thinking` config so disabled-thinking requests don't ship stray
-   * thinking blocks. https://github.com/QwenLM/qwen-code/issues/3786
+   * On every assistant turn, normalize any `thinking` block that lacks the
+   * required `signature` field by filling it with `signature: ''` (preserving
+   * the original `thinking` text). On assistant turns containing `tool_use`
+   * with no thinking block at all, prepend a synthetic empty thinking block.
+   * Required by DeepSeek's anthropic-compatible API when thinking mode is
+   * enabled. Must be gated on the same per-request condition that emits the
+   * top-level `thinking` config so disabled-thinking requests don't ship
+   * stray thinking blocks. https://github.com/QwenLM/qwen-code/issues/3786
    */
   ensureThinkingOnToolUseTurns?: boolean;
   /**
@@ -625,9 +625,11 @@ export class AnthropicContentConverter {
    * Edge case: a `thinking` block round-tripped through Gemini Part format
    * may come back without its `signature` field (e.g. when the upstream
    * block was `redacted_thinking`, whose `data` field doesn't survive the
-   * `{ thought: true }` representation). Such blocks are not spec-compliant,
-   * so we drop them here and let the synthetic injection take over rather
-   * than treat them as already-satisfying the requirement.
+   * `{ thought: true }` representation, or when the conversation history
+   * was recorded by a non-Anthropic generator that only sets
+   * `thought: true`). Such blocks are not spec-compliant, so we normalize
+   * them in place by filling in `signature: ''` — preserving the original
+   * thinking text rather than discarding it.
    * https://github.com/QwenLM/qwen-code/issues/3786
    */
   private applyEmptyThinkingToToolUseTurns(

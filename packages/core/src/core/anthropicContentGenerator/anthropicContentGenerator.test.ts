@@ -271,6 +271,39 @@ describe('AnthropicContentGenerator', () => {
       );
       expect(headers['anthropic-beta']).toBeUndefined();
     });
+
+    it('also sends the computed beta header on streaming requests', async () => {
+      // generateContentStream() goes through a separate code path from
+      // generateContent(); make sure the per-request header attaches there
+      // too so streaming Anthropic/DeepSeek requests stay consistent.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* () {
+          yield { type: 'message_stop' };
+        })(),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        { ...baseConfig, reasoning: { effort: 'medium' } },
+        mockConfig,
+      );
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hi',
+      } as unknown as GenerateContentParameters);
+      // Drain the stream so create() has been called.
+      for await (const _chunk of stream) {
+        void _chunk;
+      }
+
+      const [, options] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const headers = ((options as { headers?: Record<string, string> })
+        ?.headers || {}) as Record<string, string>;
+      expect(headers['anthropic-beta']).toContain(
+        'interleaved-thinking-2025-05-14',
+      );
+      expect(headers['anthropic-beta']).toContain('effort-2025-11-24');
+    });
   });
 
   describe('generateContent', () => {
