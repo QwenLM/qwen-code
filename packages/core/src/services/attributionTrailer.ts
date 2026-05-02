@@ -16,8 +16,18 @@ import type { CommitAttributionNote } from './commitAttribution.js';
 
 const GIT_NOTES_REF = 'refs/notes/ai-attribution';
 
-/** Maximum byte length for the -m argument to avoid shell ARG_MAX limits. */
-const MAX_NOTE_BYTES = 128 * 1024; // 128 KB
+/**
+ * Maximum byte length for the JSON note. Sized for the most
+ * restrictive ARG_MAX in the wild: Windows' `CreateProcess`
+ * lpCommandLine is capped around 32,768 UTF-16 chars including the
+ * git executable path, the other argv entries, and separators, so
+ * the note itself has to fit in that minus a safety margin (~2 KB)
+ * for everything else. Linux/macOS ARG_MAX is much larger; sizing
+ * for Windows just means we cap earlier on those platforms — the
+ * note is meant to be small metadata, not a payload, so the limit
+ * is rarely the binding constraint.
+ */
+const MAX_NOTE_BYTES = 30 * 1024; // 30 KB
 
 /**
  * argv-form git notes invocation, designed for `child_process.execFile`.

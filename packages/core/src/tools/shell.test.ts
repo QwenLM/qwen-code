@@ -1138,6 +1138,72 @@ describe('ShellTool', () => {
       });
 
       // `cd ..` could escape the repo root — conservative shift.
+      // Embedded `..` traversal — `cd foo/../../escape` — could
+      // escape the repo just as much as a leading `..`, so the
+      // heuristic must reject it. Without this the trailer would
+      // be appended to a commit landing in a different repo.
+      it('should NOT add co-author for cd with embedded .. (escapes via traversal)', async () => {
+        const command = 'cd foo/../../escape && git commit -m "Test"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.not.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // `env` is a shell wrapper like `sudo`/`command`, with the
+      // additional twist that it accepts `KEY=VALUE` argv entries
+      // before the program. Without explicit handling, the regex
+      // would see `KEY=VALUE` as the program name and skip
+      // attribution entirely.
+      it('should add co-author when git commit is wrapped in env KEY=VAL', async () => {
+        const command =
+          'env GIT_COMMITTER_DATE=now git commit -m "Test commit"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
       it('should NOT add co-author for cd .. && git commit (could escape repo)', async () => {
         const command = 'cd .. && git commit -m "Test commit"';
         const invocation = shellTool.build({ command, is_background: false });

@@ -123,20 +123,34 @@ function tokeniseSegment(segment: string): string[] | null {
   // argv slot, so without explicitly knowing which take values we'd
   // leave e.g. `user` standing in for the program in
   // `sudo -u user git commit ...`. `command` doesn't take any flag
-  // values but its `-p`/`-v`/`-V` are flag-only.
-  if (tokens[i] === 'sudo' || tokens[i] === 'command') {
+  // values. `env` accepts both flags (`-i`, `-S`, `-u name`) AND
+  // `KEY=VALUE` argv entries before the program — both need
+  // skipping so `env GIT_COMMITTER_DATE=now git commit ...` resolves
+  // to `git`.
+  if (tokens[i] === 'sudo' || tokens[i] === 'command' || tokens[i] === 'env') {
     const wrapper = tokens[i];
     i++;
     while (i < tokens.length && tokens[i]!.startsWith('-')) {
       const flag = tokens[i]!;
       i++;
       // Only sudo has value-taking flags in this allowlist; for
-      // `command`'s flag-only options we leave i alone.
+      // `command` and `env`'s flag-only options we leave i alone.
+      // (`env -u NAME` also takes a value, but skipping the
+      // following KEY=VALUE block below covers it implicitly.)
       if (
         wrapper === 'sudo' &&
         SUDO_FLAGS_WITH_VALUE.has(flag) &&
         i < tokens.length
       ) {
+        i++;
+      }
+    }
+    // `env` puts KEY=VALUE pairs between its flags and the real
+    // program, so skip those too. Doing this only after the wrapper
+    // detection (rather than universally) avoids accidentally
+    // consuming what the user actually wrote.
+    if (wrapper === 'env') {
+      while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]!)) {
         i++;
       }
     }
@@ -360,6 +374,12 @@ function cdTargetMayChangeRepo(tokens: string[]): boolean {
   // `..`, `../..`, `..\\foo` etc. could escape the repo root.
   if (target === '..') return true;
   if (target.startsWith('../') || target.startsWith('..\\')) return true;
+  // Embedded parent-dir traversal can also escape: `foo/../../escape`,
+  // `./..`, `nested/..`, etc. Catching `/..` and `\..` anywhere in
+  // the path covers both POSIX and Windows separators without
+  // false-positiving on legitimate names that happen to contain `..`
+  // (which only escape when followed by a separator).
+  if (target.includes('/..') || target.includes('\\..')) return true;
   // `-` is bash's "previous directory" — could be anywhere.
   if (target === '-') return true;
   return false;
@@ -407,7 +427,18 @@ function findAttributableCommitSegment(
   let cwdShifted = false;
   for (const sub of splitCommands(command)) {
     const start = command.indexOf(sub, cursor);
-    if (start < 0) continue;
+    if (start < 0) {
+      // splitCommands strips line continuations (`\<newline>`) and
+      // some whitespace, so the trimmed segment text may not appear
+      // verbatim in the original command. Log so a multi-line
+      // command silently dropping its trailer is at least visible
+      // when QWEN_DEBUG_LOG_FILE is set.
+      debugLogger.warn(
+        `findAttributableCommitSegment: cannot map segment "${sub.slice(0, 60)}" ` +
+          `back to the original command (likely line-continuation / whitespace mismatch).`,
+      );
+      continue;
+    }
     const end = start + sub.length;
     cursor = end;
     const tokens = tokeniseSegment(sub);
@@ -446,7 +477,13 @@ function findGhPrCreateSegment(
   let cursor = 0;
   for (const sub of splitCommands(command)) {
     const start = command.indexOf(sub, cursor);
-    if (start < 0) continue;
+    if (start < 0) {
+      debugLogger.warn(
+        `findGhPrCreateSegment: cannot map segment "${sub.slice(0, 60)}" ` +
+          `back to the original command (likely line-continuation / whitespace mismatch).`,
+      );
+      continue;
+    }
     const end = start + sub.length;
     cursor = end;
     const tokens = tokeniseSegment(sub);
