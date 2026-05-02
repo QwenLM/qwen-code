@@ -259,12 +259,19 @@ export class AnthropicContentGenerator implements ContentGenerator {
     //                    against a session whose history already contains
     //                    `thought: true` parts (suggestionGenerator /
     //                    ArenaManager / forkedAgent).
-    const ensureThinkingOnToolUseTurns = isDeepSeek && !!thinking;
+    const deepseekThinkingOn = isDeepSeek && !!thinking;
     const stripAssistantThinking = isDeepSeek && !thinking;
 
     const { system, messages } = this.converter.convertGeminiRequestToAnthropic(
       request,
-      { ensureThinkingOnToolUseTurns, stripAssistantThinking },
+      {
+        // Both run together: normalization fills missing signatures so the
+        // injection pass treats those blocks as already-present, and the
+        // injection adds a synthetic block on tool_use turns lacking one.
+        normalizeAssistantThinkingSignature: deepseekThinkingOn,
+        injectThinkingOnToolUseTurns: deepseekThinkingOn,
+        stripAssistantThinking,
+      },
     );
 
     const tools = request.config?.tools

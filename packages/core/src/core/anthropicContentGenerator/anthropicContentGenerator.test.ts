@@ -272,6 +272,50 @@ describe('AnthropicContentGenerator', () => {
       expect(headers['anthropic-beta']).toBeUndefined();
     });
 
+    it('keeps customHeaders + User-Agent in defaultHeaders while sending computed anthropic-beta per-request', async () => {
+      // The per-request override must NOT replace existing defaultHeaders
+      // (User-Agent and unrelated customHeaders entries) — it should only
+      // contribute the computed `anthropic-beta` flags. Defends against a
+      // future regression where headers might be set via a path that wipes
+      // out the constructor-time defaults.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+      const generator = new AnthropicContentGenerator(
+        {
+          ...baseConfig,
+          reasoning: { effort: 'medium' },
+          customHeaders: { 'X-Custom': 'v1' },
+        },
+        mockConfig,
+      );
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hi',
+      } as unknown as GenerateContentParameters);
+
+      // defaultHeaders carries User-Agent and customHeaders (not beta).
+      const defaultHeaders = (anthropicState.constructorOptions?.[
+        'defaultHeaders'
+      ] || {}) as Record<string, string>;
+      expect(defaultHeaders['User-Agent']).toContain('QwenCode/1.2.3');
+      expect(defaultHeaders['X-Custom']).toBe('v1');
+      expect(defaultHeaders['anthropic-beta']).toBeUndefined();
+
+      // Per-request headers carry only the computed beta flags.
+      const [, options] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const reqHeaders = ((options as { headers?: Record<string, string> })
+        ?.headers || {}) as Record<string, string>;
+      expect(reqHeaders['User-Agent']).toBeUndefined();
+      expect(reqHeaders['X-Custom']).toBeUndefined();
+      expect(reqHeaders['anthropic-beta']).toContain(
+        'interleaved-thinking-2025-05-14',
+      );
+    });
+
     it('also sends the computed beta header on streaming requests', async () => {
       // generateContentStream() goes through a separate code path from
       // generateContent(); make sure the per-request header attaches there

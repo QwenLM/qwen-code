@@ -653,8 +653,13 @@ describe('AnthropicContentConverter', () => {
   // assistant turns without thinking are accepted unchanged, so the converter
   // injects an empty thinking block only on tool-use turns when the caller
   // opts in.
-  describe('ensureThinkingOnToolUseTurns', () => {
-    const enableThinking = { ensureThinkingOnToolUseTurns: true };
+  describe('thinking-mode injection + normalization (DeepSeek thinking on)', () => {
+    // The two options paired together replicate the DeepSeek "thinking on"
+    // behavior wired in AnthropicContentGenerator.buildRequest.
+    const enableThinking = {
+      normalizeAssistantThinkingSignature: true,
+      injectThinkingOnToolUseTurns: true,
+    };
 
     it('does not inject on plain-text assistant turns (DeepSeek tolerates them)', () => {
       // Verified against api.deepseek.com/anthropic: plain-text assistant
@@ -911,7 +916,7 @@ describe('AnthropicContentConverter', () => {
         },
       ];
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (converter as any).applyEmptyThinkingToToolUseTurns(messages);
+      (converter as any).injectEmptyThinkingOnToolUseTurns(messages);
 
       expect(messages[0].content).toEqual([
         { type: 'redacted_thinking', data: 'opaque' },
