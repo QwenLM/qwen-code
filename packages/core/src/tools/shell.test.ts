@@ -1384,6 +1384,36 @@ describe('ShellTool', () => {
         expect(tagMatch?.[1]).toBe('release notes');
       });
 
+      // The tool description recommends `git commit -m "$(cat <<'EOF'
+      // ... EOF)"` for multi-line messages. The body contains nested
+      // `"` from interior shell tokens — the regex would match only
+      // up to the first interior quote and splice the trailer
+      // mid-substitution, breaking the command. Bail explicitly.
+      it('should NOT rewrite -m bodies that contain $(...) command substitution', async () => {
+        const command =
+          'git commit -m "$(cat <<\'EOF\'\nfix: title\n\ndetails\nEOF\n)"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        // The original command must reach the executor unchanged.
+        expect(observed).toBe(command);
+        expect(observed).not.toContain('Co-authored-by:');
+      });
+
       it('should add co-author when git commit is prefixed with sudo', async () => {
         const command = 'sudo git commit -m "Test"';
         const invocation = shellTool.build({ command, is_background: false });
@@ -1575,6 +1605,62 @@ describe('ShellTool', () => {
     });
 
     describe('addAttributionToPR', () => {
+      // `gh pr new` is a documented alias for `gh pr create`. Without
+      // explicit alias handling the rewrite silently misses it.
+      it('should append attribution to `gh pr new --body "..."` (alias form)', async () => {
+        const command = 'gh pr new --title "x" --body "Summary"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Generated with Qwen Code'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // Same `$(...)` bailout as addCoAuthorToGitCommit: a heredoc
+      // body must not have the trailer spliced in mid-substitution.
+      it('should NOT rewrite --body that contains $(...) command substitution', async () => {
+        const command =
+          'gh pr create --title "x" --body "$(cat <<\'EOF\'\nSummary\nEOF\n)"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        expect(observed).toBe(command);
+        expect(observed).not.toContain('Generated with Qwen Code');
+      });
+
       it('should append attribution to gh pr create --body when pr enabled', async () => {
         const command = 'gh pr create --title "x" --body "Summary"';
         const invocation = shellTool.build({ command, is_background: false });

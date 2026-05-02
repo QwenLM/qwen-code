@@ -185,12 +185,10 @@ describe('CommitAttributionService', () => {
       service.recordEdit('/project/f.ts', null, 'hello');
       service.incrementPromptCount();
       service.incrementPromptCount();
-      service.incrementPermissionPromptCount();
 
       const snapshot = service.toSnapshot();
       expect(snapshot.type).toBe('attribution-snapshot');
       expect(snapshot.promptCount).toBe(2);
-      expect(snapshot.permissionPromptCount).toBe(1);
       expect(Object.keys(snapshot.fileStates)).toHaveLength(1);
 
       // Restore into a fresh instance

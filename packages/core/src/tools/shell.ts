@@ -373,7 +373,10 @@ function looksLikeGhPrCreate(command: string): boolean {
     const tokens = tokeniseSegment(sub);
     if (!tokens || tokens[0] !== 'gh') continue;
     const rest = parseGhInvocation(tokens);
-    if (rest[0] === 'pr' && rest[1] === 'create') return true;
+    // `gh pr new` is the documented alias for `gh pr create`. Detect
+    // both so attribution doesn't silently miss the alias form.
+    if (rest[0] === 'pr' && (rest[1] === 'create' || rest[1] === 'new'))
+      return true;
   }
   return false;
 }
@@ -854,7 +857,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // and so attribution still runs after a `git commit && cd ..`
     // chain (which would have failed an "any cd anywhere" gate).
     const commitCtx = gitCommitContext(strippedCommand);
-    const preHeadPromise: Promise<string | null> = commitCtx.attributableInCwd
+    // Capture preHead whenever ANY git commit was attempted in the
+    // chain — even non-attributable ones — so the post-command branch
+    // can detect HEAD movement and clear stale singleton state.
+    // Without this, `cd subdir && git commit` (a real same-repo
+    // commit) would skip attribution AND fail to clear pending
+    // attributions, leaking them into the next foreground commit.
+    const preHeadPromise: Promise<string | null> = commitCtx.hasCommit
       ? this.getGitHead(cwd)
       : Promise.resolve(null);
 
@@ -985,6 +994,20 @@ export class ShellToolInvocation extends BaseToolInvocation<
     if (commitCtx.attributableInCwd) {
       const preHead = await preHeadPromise;
       await this.attachCommitAttribution(cwd, preHead);
+    } else if (commitCtx.hasCommit) {
+      // A `cd subdir && git commit` (or `git -C ... commit`) ran a
+      // commit we can't attribute, but our cwd's HEAD may still have
+      // moved (subdir is the same repo). If it did, the singleton's
+      // pending per-file attributions just got consumed by that
+      // commit — clear them so they don't leak into the next
+      // foreground commit. If HEAD didn't move (commit landed in a
+      // genuinely different repo), leave the entries alone.
+      const preHead = await preHeadPromise;
+      const postHead = await this.getGitHead(cwd);
+      if (postHead !== null && postHead !== preHead) {
+        const svc = CommitAttributionService.getInstance();
+        if (svc.hasAttributions()) svc.clearAttributions(true);
+      }
     }
 
     let returnDisplayMessage = '';
@@ -1571,8 +1594,21 @@ export class ShellToolInvocation extends BaseToolInvocation<
         }
       }
 
-      // Get diff sizes from numstat output
+      // Get diff sizes from numstat output. Bail if `--numstat`
+      // returned nothing while `--name-only` succeeded — that's the
+      // partial-failure signal for `Promise.all`, and writing a note
+      // anyway would force every file's diffSize to 0, then
+      // generateNotePayload would clamp aiChars to 0 and emit a
+      // structurally valid but factually wrong all-zero attribution.
       const diffSizes = parseNumstat(numstatOutput);
+      if (diffSizes.size === 0) {
+        debugLogger.warn(
+          'getCommittedFileInfo: --numstat returned empty while ' +
+            '--name-only listed files; skipping attribution note to ' +
+            'avoid emitting all-zero AI percentages.',
+        );
+        return empty;
+      }
 
       return {
         files,
@@ -1702,6 +1738,21 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     if (match) {
       const [fullMatch, prefix, existingMessage] = match;
+
+      // Bail on `$(...)` command substitution inside the captured
+      // body: our regex's `(?:[^"\\]|\\.)*` body group stops at the
+      // first interior `"`, so a heredoc-style
+      // `git commit -m "$(cat <<'HEREDOC' ... HEREDOC)"` (which the
+      // tool description recommends for multi-line messages) would
+      // be matched only up to the first inner `"`, then the trailer
+      // would be spliced into the middle of the command
+      // substitution and break the shell command. Recognising
+      // `$(` is enough — if it's there we can't safely rewrite
+      // without a real shell parser.
+      if (existingMessage.includes('$(')) {
+        return command;
+      }
+
       const newMessage = existingMessage + coAuthor;
       const replacement = prefix + quote + newMessage + quote;
 
@@ -1781,6 +1832,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     if (bodyMatch) {
       const [fullMatch, prefix, existingBody] = bodyMatch;
+      // Same `$(...)` bailout as addCoAuthorToGitCommit: a heredoc-
+      // style body (`gh pr create --body "$(cat <<'EOF' ... EOF)"`)
+      // contains nested `"` that our regex's `(?:[^"\\]|\\.)*` body
+      // group can't span — the match would terminate at the first
+      // interior quote and the splice would land mid-substitution,
+      // corrupting the user-approved command.
+      if (existingBody.includes('$(')) {
+        return command;
+      }
       // Escape the appended text for the surrounding quote style.
       // Without this, a configured generator name containing `"`, `$`, a
       // backtick, or `'` would either break the user-approved `gh pr

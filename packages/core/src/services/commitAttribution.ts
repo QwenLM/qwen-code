@@ -112,10 +112,17 @@ export interface AttributionSnapshot {
   baselines: Record<string, FileBaseline>;
   promptCount: number;
   promptCountAtLastCommit: number;
-  permissionPromptCount: number;
-  permissionPromptCountAtLastCommit: number;
-  escapeCount: number;
-  escapeCountAtLastCommit: number;
+  /**
+   * Reserved fields for future permission-prompt and escape counters.
+   * Currently unused in production; pre-fix snapshots may carry them
+   * with non-zero values, so the restore path tolerates them but the
+   * service no longer exposes increment methods until a real counter
+   * use case lands.
+   */
+  permissionPromptCount?: number;
+  permissionPromptCountAtLastCommit?: number;
+  escapeCount?: number;
+  escapeCountAtLastCommit?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -237,19 +244,11 @@ export class CommitAttributionService {
   }
 
   // -----------------------------------------------------------------------
-  // Prompt / permission counting
+  // Prompt counting
   // -----------------------------------------------------------------------
 
   incrementPromptCount(): void {
     this.promptCount++;
-  }
-
-  incrementPermissionPromptCount(): void {
-    this.permissionPromptCount++;
-  }
-
-  incrementEscapeCount(): void {
-    this.escapeCount++;
   }
 
   getPromptCount(): number {
