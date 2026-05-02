@@ -48,9 +48,12 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    * follow-up requests fail with HTTP 400 ("The content[].thinking in the
    * thinking mode must be passed back to the API.").
    *
-   * Pair with `normalizeAssistantThinkingSignature` so that signature-less
-   * blocks are seen as missing (and therefore replaced by the synthetic with
-   * a valid signature) rather than as already-satisfying.
+   * Pair with `normalizeAssistantThinkingSignature` so that any
+   * signature-less `thinking` block already present is normalized (filled
+   * with `signature: ''`) before this pass runs. After normalization the
+   * block has a valid `signature` and is treated as already-satisfying, so
+   * no synthetic block is prepended and the original thinking text is
+   * preserved on the wire.
    *
    * Must be gated on the same per-request condition that emits the
    * top-level `thinking` config so disabled-thinking requests don't ship
@@ -678,8 +681,9 @@ export class AnthropicContentConverter {
    * to avoid bloating replay history with synthetic blocks for turns the
    * API already accepts.
    *
-   * Should be paired with `fillMissingThinkingSignatures` so that
-   * round-tripped non-compliant `thinking` blocks aren't mistaken for
+   * Should be paired with `fillMissingThinkingSignatures` running first
+   * so that signature-less `thinking` blocks become compliant in place
+   * (preserving their original text), and this pass then sees them as
    * already-satisfying. https://github.com/QwenLM/qwen-code/issues/3786
    */
   private injectEmptyThinkingOnToolUseTurns(

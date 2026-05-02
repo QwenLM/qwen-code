@@ -653,7 +653,7 @@ describe('AnthropicContentConverter', () => {
   // assistant turns without thinking are accepted unchanged, so the converter
   // injects an empty thinking block only on tool-use turns when the caller
   // opts in.
-  describe('thinking-mode injection + normalization (DeepSeek thinking on)', () => {
+  describe('DeepSeek thinking-mode normalization, injection, and stripping', () => {
     // The two options paired together replicate the DeepSeek "thinking on"
     // behavior wired in AnthropicContentGenerator.buildRequest.
     const enableThinking = {
@@ -898,6 +898,26 @@ describe('AnthropicContentConverter', () => {
         role: 'assistant',
         content: [{ type: 'tool_use', id: 't1', name: 'tool', input: {} }],
       });
+    });
+
+    it('strips redacted_thinking blocks too when stripAssistantThinking is set', () => {
+      // The strip path must cover both `thinking` and `redacted_thinking`.
+      // processContent doesn't synthesize redacted_thinking from Gemini parts,
+      // so reach into the private helper directly with a constructed message.
+      const messages = [
+        {
+          role: 'assistant' as const,
+          content: [
+            { type: 'redacted_thinking', data: 'opaque' },
+            { type: 'text', text: 'Hello!' },
+            { type: 'thinking', thinking: 'reasoning', signature: 'sig' },
+          ],
+        },
+      ];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (converter as any).stripThinkingFromAssistantMessages(messages);
+
+      expect(messages[0].content).toEqual([{ type: 'text', text: 'Hello!' }]);
     });
 
     it('treats a redacted_thinking block as already-satisfying (no synthetic injection)', () => {
