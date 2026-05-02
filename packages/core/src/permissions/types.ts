@@ -87,6 +87,11 @@ export interface PermissionCheckContext {
    */
   command?: string;
   /**
+   * Effective working directory for shell-like tools when resolving
+   * relative virtual file operations extracted from the command.
+   */
+  cwd?: string;
+  /**
    * The file path being accessed (only for Read / Edit / Write tools).
    * Should be an absolute path for matching against path patterns.
    */

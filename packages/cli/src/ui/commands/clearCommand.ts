@@ -19,6 +19,7 @@ import {
 function hasBlockingBackgroundWork(config: Config): boolean {
   return (
     config.getBackgroundTaskRegistry().hasUnfinalizedTasks() ||
+    config.getMonitorRegistry().getRunning().length > 0 ||
     config
       .getBackgroundShellRegistry()
       .getAll()
@@ -27,8 +28,9 @@ function hasBlockingBackgroundWork(config: Config): boolean {
 }
 
 function resetBackgroundStateForSessionSwitch(config: Config): void {
-  (config.getBackgroundTaskRegistry() as unknown as { reset(): void }).reset();
-  (config.getBackgroundShellRegistry() as unknown as { reset(): void }).reset();
+  config.getBackgroundTaskRegistry().reset();
+  config.getMonitorRegistry().reset();
+  config.getBackgroundShellRegistry().reset();
 }
 
 export const clearCommand: SlashCommand = {
@@ -65,7 +67,13 @@ export const clearCommand: SlashCommand = {
           config.getDebugLogger().warn(`SessionEnd hook failed: ${err}`);
         });
 
+      // Abort old-session async work before creating the new session so
+      // cancellation notifications cannot leak across the reset boundary.
+      config.getBackgroundTaskRegistry().abortAll({ notify: false });
+      config.getMonitorRegistry().abortAll({ notify: false });
+      config.getBackgroundShellRegistry().abortAll();
       resetBackgroundStateForSessionSwitch(config);
+
       const newSessionId = config.startNewSession();
 
       // Reset UI telemetry metrics for the new session

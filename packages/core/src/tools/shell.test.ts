@@ -24,6 +24,8 @@ vi.mock('crypto');
 
 import { isCommandAllowed } from '../utils/shell-utils.js';
 import { ShellTool } from './shell.js';
+import { detectBlockedSleepPattern } from './shell.js';
+import { stripShellWrapper } from '../utils/shell-utils.js';
 import { type Config } from '../config/config.js';
 import {
   type ShellExecutionResult,
@@ -571,6 +573,47 @@ describe('ShellTool', () => {
         expect.any(AbortSignal),
         false,
         {},
+      );
+    });
+
+    it('preserves shell wrapper environment and flags during foreground execution', async () => {
+      const command = `FOO=bar bash -e -c 'echo "$FOO"; false; echo bad'`;
+      const invocation = shellTool.build({
+        command,
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution();
+
+      await promise;
+
+      expect(mockShellExecutionService).toHaveBeenCalledWith(
+        command,
+        expect.any(String),
+        expect.any(Function),
+        expect.any(AbortSignal),
+        false,
+        {},
+      );
+    });
+
+    it('preserves shell wrapper environment and flags during background execution', async () => {
+      const command = `FOO=bar bash -e -c 'echo "$FOO"; sleep 10'`;
+      const invocation = shellTool.build({
+        command,
+        is_background: true,
+      });
+
+      await invocation.execute(mockAbortSignal);
+
+      expect(mockShellExecutionService).toHaveBeenCalledWith(
+        command,
+        expect.any(String),
+        expect.any(Function),
+        expect.any(AbortSignal),
+        false,
+        {},
+        { streamStdout: true },
       );
     });
 
@@ -1183,6 +1226,26 @@ describe('ShellTool', () => {
       expect(details.permissionRules).toEqual(['Bash(git commit *)']);
     });
 
+    it('should pass the invocation directory to permission-manager command checks', async () => {
+      const pm = {
+        isCommandAllowed: vi.fn().mockResolvedValue('ask'),
+      } as unknown as PermissionManager;
+      (mockConfig.getPermissionManager as Mock).mockReturnValue(pm);
+
+      const invocation = shellTool.build({
+        command: 'git commit -m "msg"',
+        directory: '/test/dir/subdir',
+        is_background: false,
+      });
+
+      await invocation.getConfirmationDetails(new AbortController().signal);
+
+      expect(pm.isCommandAllowed).toHaveBeenCalledWith(
+        'git commit -m "msg"',
+        '/test/dir/subdir',
+      );
+    });
+
     it('should throw an error if validation fails', async () => {
       expect(() =>
         shellTool.build({ command: '', is_background: false }),
@@ -1331,7 +1394,7 @@ describe('ShellTool', () => {
     it('should handle timeout vs user cancellation correctly', async () => {
       const userAbortController = new AbortController();
       const invocation = shellTool.build({
-        command: 'sleep 10',
+        command: 'long-running-command',
         is_background: false,
         timeout: 5000,
       });
@@ -1412,5 +1475,122 @@ describe('ShellTool', () => {
         {},
       );
     });
+  });
+});
+
+describe('detectBlockedSleepPattern', () => {
+  it('blocks standalone sleep >= 2s', () => {
+    expect(detectBlockedSleepPattern('sleep 5')).toBe('standalone sleep 5');
+    expect(detectBlockedSleepPattern('sleep 10')).toBe('standalone sleep 10');
+    expect(detectBlockedSleepPattern('sleep 2.5')).toBe('standalone sleep 2.5');
+    expect(detectBlockedSleepPattern('sleep 2s')).toBe('standalone sleep 2s');
+    expect(detectBlockedSleepPattern('sleep 2000ms')).toBe(
+      'standalone sleep 2000ms',
+    );
+    expect(detectBlockedSleepPattern('sleep 3m')).toBe('standalone sleep 3m');
+  });
+
+  it('blocks sleep followed by another command', () => {
+    expect(detectBlockedSleepPattern('sleep 5 && curl http://localhost')).toBe(
+      'sleep 5 followed by: curl http://localhost',
+    );
+    expect(detectBlockedSleepPattern('sleep 3; echo done')).toBe(
+      'sleep 3 followed by: echo done',
+    );
+    expect(detectBlockedSleepPattern('sleep 2.5 || echo done')).toBe(
+      'sleep 2.5 followed by: echo done',
+    );
+    expect(detectBlockedSleepPattern('sleep 2s\necho done')).toBe(
+      'sleep 2s followed by: echo done',
+    );
+  });
+
+  it('allows sleep < 2s', () => {
+    expect(detectBlockedSleepPattern('sleep 1')).toBeNull();
+    expect(detectBlockedSleepPattern('sleep 0')).toBeNull();
+  });
+
+  it('allows sleep durations below 2 seconds', () => {
+    expect(detectBlockedSleepPattern('sleep 0.5')).toBeNull();
+    expect(detectBlockedSleepPattern('sleep 1.5')).toBeNull();
+    expect(detectBlockedSleepPattern('sleep 1500ms')).toBeNull();
+  });
+
+  it('allows sleep not as first subcommand', () => {
+    expect(detectBlockedSleepPattern('echo hello && sleep 5')).toBeNull();
+  });
+
+  it('allows non-sleep commands', () => {
+    expect(detectBlockedSleepPattern('cat file.txt')).toBeNull();
+    expect(detectBlockedSleepPattern('npm run dev')).toBeNull();
+  });
+
+  it('allows sleep in pipelines', () => {
+    expect(detectBlockedSleepPattern('sleep 5 | cat')).toBeNull();
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 10 | while read line; do echo $line; done',
+      ),
+    ).toBeNull();
+  });
+
+  it('allows backgrounded sleep (bare &)', () => {
+    expect(detectBlockedSleepPattern('sleep 5 & echo done')).toBeNull();
+    expect(detectBlockedSleepPattern('sleep 10 & wait')).toBeNull();
+  });
+
+  it('returns null for empty command', () => {
+    expect(detectBlockedSleepPattern('')).toBeNull();
+  });
+
+  it('blocks sleep followed by a top-level shell comment', () => {
+    // Shell ignores trailing comments, so these are equivalent to
+    // standalone foreground sleeps and must not bypass the guard.
+    expect(detectBlockedSleepPattern('sleep 5 # wait')).toBe(
+      'standalone sleep 5',
+    );
+    expect(detectBlockedSleepPattern('sleep 5  #wait')).toBe(
+      'standalone sleep 5',
+    );
+    expect(detectBlockedSleepPattern('sleep 2s   # comment')).toBe(
+      'standalone sleep 2s',
+    );
+    expect(detectBlockedSleepPattern('sleep 5 && echo ok # trailing')).toBe(
+      'sleep 5 followed by: echo ok',
+    );
+  });
+
+  it('does not treat in-quoted `#` as a comment', () => {
+    // `#` inside single quotes is literal, so the suffix is not a comment
+    // and the existing separator logic still rejects it.
+    expect(
+      detectBlockedSleepPattern("sleep 5 'arg # not a comment'"),
+    ).toBeNull();
+  });
+
+  it('blocks wrapped foreground sleep when paired with stripShellWrapper', () => {
+    // This mirrors the shell validator call site: the foreground sleep
+    // guard runs on `stripShellWrapper(params.command)`, so `bash -c` and
+    // sibling wrappers cannot route around the block by hiding the sleep
+    // inside a `-c` script.
+    expect(
+      detectBlockedSleepPattern(stripShellWrapper("bash -c 'sleep 5'")),
+    ).toBe('standalone sleep 5');
+    expect(
+      detectBlockedSleepPattern(stripShellWrapper("sh -c 'sleep 10'")),
+    ).toBe('standalone sleep 10');
+    expect(
+      detectBlockedSleepPattern(stripShellWrapper("zsh -c 'sleep 2s'")),
+    ).toBe('standalone sleep 2s');
+    expect(
+      detectBlockedSleepPattern(
+        stripShellWrapper("bash -c 'sleep 5 && curl http://localhost'"),
+      ),
+    ).toBe('sleep 5 followed by: curl http://localhost');
+
+    // A wrapped sleep < 2s is still allowed.
+    expect(
+      detectBlockedSleepPattern(stripShellWrapper("bash -c 'sleep 1'")),
+    ).toBeNull();
   });
 });

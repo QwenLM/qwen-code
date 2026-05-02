@@ -1035,16 +1035,8 @@ export async function loadCliConfig(
   // to preserve the original behaviour where "ShellTool", "Shell", and
   // "run_shell_command" are all accepted as the same tool.
   const isExplicitlyAllowed = (toolName: ToolName): boolean => {
-    const name = toolName as string;
     // 1. Check permissions.allow / allowedTools rules.
-    if (
-      mergedAllow.some((rule) => {
-        const openParen = rule.indexOf('(');
-        const ruleName =
-          openParen === -1 ? rule.trim() : rule.substring(0, openParen).trim();
-        return ruleName === name;
-      })
-    ) {
+    if (mergedAllow.some((rule) => isToolEnabled(toolName, [rule], []))) {
       return true;
     }
     // 2. Check coreTools whitelist (with alias matching).
@@ -1078,12 +1070,14 @@ export async function loadCliConfig(
       case ApprovalMode.DEFAULT:
         // Deny all write/execute tools unless explicitly allowed.
         denyUnlessAllowed(ToolNames.SHELL as ToolName);
+        denyUnlessAllowed(ToolNames.MONITOR as ToolName);
         denyUnlessAllowed(ToolNames.EDIT as ToolName);
         denyUnlessAllowed(ToolNames.WRITE_FILE as ToolName);
         break;
       case ApprovalMode.AUTO_EDIT:
-        // Only shell requires a prompt in auto-edit mode.
+        // Shell-like execute tools still require a prompt in auto-edit mode.
         denyUnlessAllowed(ToolNames.SHELL as ToolName);
+        denyUnlessAllowed(ToolNames.MONITOR as ToolName);
         break;
       case ApprovalMode.YOLO:
         // No extra denials for YOLO mode.

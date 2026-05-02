@@ -345,31 +345,54 @@ describe('BackgroundTaskRegistry', () => {
     expect(callback).toHaveBeenCalledTimes(2);
   });
 
-  it('persists shutdown interruption as running sidecar state', () => {
-    const patchSpy = vi
-      .spyOn(transcript, 'patchAgentMeta')
-      .mockImplementation(() => undefined);
+  it('abortAll({ notify: false }) suppresses terminal notifications from old tasks', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+
+    registry.register({
+      agentId: 'a',
+      description: 'agent a',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    registry.abortAll({ notify: false });
+
+    expect(registry.get('a')!.status).toBe('cancelled');
+    expect(registry.hasUnfinalizedTasks()).toBe(false);
+    expect(callback).not.toHaveBeenCalled();
+
+    registry.complete('a', 'late result');
+    registry.finalizeCancelled('a', 'late partial');
+
+    expect(callback).not.toHaveBeenCalled();
+    expect(registry.get('a')!.status).toBe('cancelled');
+    expect(registry.get('a')!.result).toBeUndefined();
+  });
+
+  it('abortAll({ notify: false }) suppresses pending fallback notifications', () => {
+    vi.useFakeTimers();
     try {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
       registry.register({
         agentId: 'a',
         description: 'agent a',
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
-        metaPath: '/tmp/a.meta.json',
       });
 
-      registry.abortAll();
+      registry.cancel('a');
+      registry.abortAll({ notify: false });
+      vi.runAllTimers();
 
-      expect(patchSpy).toHaveBeenCalledWith(
-        '/tmp/a.meta.json',
-        expect.objectContaining({
-          status: 'running',
-          lastError: undefined,
-        }),
-      );
+      expect(callback).not.toHaveBeenCalled();
+      expect(registry.hasUnfinalizedTasks()).toBe(false);
     } finally {
-      patchSpy.mockRestore();
+      vi.useRealTimers();
     }
   });
 
