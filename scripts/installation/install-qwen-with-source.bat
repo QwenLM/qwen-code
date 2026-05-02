@@ -347,9 +347,11 @@ if "!EXPECTED_HASH!"=="" (
 )
 
 set "ACTUAL_HASH="
-for /f "tokens=1" %%H in ('certutil -hashfile "!ARCHIVE_FILE!" SHA256 ^| findstr /R /C:"^[0-9A-Fa-f][0-9A-Fa-f]"') do (
+set "QWEN_HASH_FILE=!ARCHIVE_FILE!"
+for /f "delims=" %%H in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; (Get-FileHash -Algorithm SHA256 -LiteralPath $env:QWEN_HASH_FILE).Hash" 2^>nul') do (
     if "!ACTUAL_HASH!"=="" set "ACTUAL_HASH=%%H"
 )
+set "QWEN_HASH_FILE="
 
 if not "!TEMP_CHECKSUM!"=="" del /F /Q "!TEMP_CHECKSUM!" >nul 2>&1
 

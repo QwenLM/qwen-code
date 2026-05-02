@@ -127,10 +127,12 @@ describe('installation scripts', () => {
     expect(script).toContain(':InstallNpm');
     expect(script).toContain(':VerifyChecksum');
     expect(script).toContain('SHA256SUMS not found; cannot verify archive');
+    expect(script).toContain('Get-FileHash -Algorithm SHA256');
     expect(script).toContain('tokens=1,2');
     expect(script).toContain('CHECKSUM_NAME');
     expect(script).toContain('if "!CHECKSUM_NAME!"=="!ARCHIVE_NAME!"');
     expect(script).not.toContain('findstr /C:"!ARCHIVE_NAME!"');
+    expect(script).not.toContain('certutil -hashfile');
     expect(script).toContain('qwen-code-win-x64.zip');
     expect(script).toContain('Expand-Archive');
     expect(script).toContain('$env:QWEN_DOWNLOAD_URL');
