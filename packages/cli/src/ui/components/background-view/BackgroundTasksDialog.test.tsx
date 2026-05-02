@@ -28,8 +28,16 @@ vi.mock('../../hooks/useBackgroundTaskView.js', () => ({
   // Re-export the helper so Dialog renderers can still resolve it under the
   // mocked module. Inline impl keeps the test independent of the hook
   // module while preserving the discriminator-based id contract.
-  entryId: (entry: DialogEntry): string =>
-    entry.kind === 'agent' ? entry.agentId : entry.shellId,
+  entryId: (entry: DialogEntry): string => {
+    switch (entry.kind) {
+      case 'agent':
+        return entry.agentId;
+      case 'shell':
+        return entry.shellId;
+      case 'monitor':
+        return entry.monitorId;
+    }
+  },
 }));
 
 vi.mock('../../hooks/useKeypress.js', () => ({
@@ -78,6 +86,7 @@ function setup(initial: readonly DialogEntry[]): Harness {
   const cancel = vi.fn();
   const resume = vi.fn();
   const abandon = vi.fn();
+  const monitorCancel = vi.fn();
   // Stub registry that resolves `.get(agentId)` against the current entries
   // snapshot — the dialog now re-reads agent entries via `.get()` to pick up
   // live activity/stats mutations the snapshot misses.
@@ -92,6 +101,9 @@ function setup(initial: readonly DialogEntry[]): Harness {
         );
         return match;
       },
+    }),
+    getMonitorRegistry: () => ({
+      cancel: monitorCancel,
     }),
     resumeBackgroundAgent: resume,
     abandonBackgroundAgent: abandon,

@@ -27,6 +27,7 @@ import {
   ToolDisplayNames,
   ToolNames,
   type BackgroundTaskEntry,
+  type MonitorEntry,
 } from '@qwen-code/qwen-code-core';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import {
@@ -103,14 +104,18 @@ function terminalStatusPresentation(
 }
 
 function rowLabel(entry: DialogEntry): string {
-  if (entry.kind === 'agent') {
-    return buildBackgroundEntryLabel(entry, { includePrefix: false });
+  switch (entry.kind) {
+    case 'agent':
+      return buildBackgroundEntryLabel(entry, { includePrefix: false });
+    case 'shell':
+      // Shell / monitor prefixes mirror the dialog's "section" visual hint
+      // without needing per-kind section headers (which would complicate
+      // the windowing math). The command/description is plain text and
+      // already truncated by the row renderer's MaxSizedBox.
+      return `[shell] ${entry.command}`;
+    case 'monitor':
+      return `[monitor] ${entry.description}`;
   }
-  // Shell row: `[shell] <command>`. Prefix mirrors the dialog's "section"
-  // visual hint without needing per-kind section headers (which would
-  // complicate the windowing math). The command itself is plain text and
-  // already truncated by the row renderer's MaxSizedBox.
-  return `[shell] ${entry.command}`;
 }
 
 function elapsedFor(entry: { startTime: number; endTime?: number }): string {
@@ -242,12 +247,34 @@ const DetailBody: React.FC<{
   entry: DialogEntry;
   maxHeight: number;
   maxWidth: number;
-}> = ({ entry, maxHeight, maxWidth }) =>
-  entry.kind === 'agent' ? (
-    <AgentDetailBody entry={entry} maxHeight={maxHeight} maxWidth={maxWidth} />
-  ) : (
-    <ShellDetailBody entry={entry} maxHeight={maxHeight} maxWidth={maxWidth} />
-  );
+}> = ({ entry, maxHeight, maxWidth }) => {
+  switch (entry.kind) {
+    case 'agent':
+      return (
+        <AgentDetailBody
+          entry={entry}
+          maxHeight={maxHeight}
+          maxWidth={maxWidth}
+        />
+      );
+    case 'shell':
+      return (
+        <ShellDetailBody
+          entry={entry}
+          maxHeight={maxHeight}
+          maxWidth={maxWidth}
+        />
+      );
+    case 'monitor':
+      return (
+        <MonitorDetailBody
+          entry={entry}
+          maxHeight={maxHeight}
+          maxWidth={maxWidth}
+        />
+      );
+  }
+};
 
 const AgentDetailBody: React.FC<{
   entry: AgentDialogEntry;
@@ -469,6 +496,58 @@ const ShellDetailBody: React.FC<{
           </Box>
         </Fragment>
       )}
+    </MaxSizedBox>
+  );
+};
+
+const MonitorDetailBody: React.FC<{
+  entry: MonitorEntry;
+  maxHeight: number;
+  maxWidth: number;
+}> = ({ entry, maxHeight, maxWidth }) => {
+  const title = `Monitor › ${entry.description}`;
+
+  const terminal = terminalStatusPresentation(entry.status);
+  const dimSubtitleParts: string[] = [elapsedFor(entry)];
+  if (entry.pid !== undefined) {
+    dimSubtitleParts.push(`pid ${entry.pid}`);
+  }
+  dimSubtitleParts.push(
+    `${entry.eventCount} event${entry.eventCount === 1 ? '' : 's'}`,
+  );
+  if (entry.droppedLines > 0) {
+    dimSubtitleParts.push(`${entry.droppedLines} dropped`);
+  }
+
+  return (
+    <MaxSizedBox
+      maxHeight={maxHeight}
+      maxWidth={maxWidth}
+      overflowDirection="bottom"
+    >
+      <Box>
+        <Text bold color={theme.text.accent}>
+          {title}
+        </Text>
+      </Box>
+      <Box>
+        {terminal && (
+          <Text color={terminal.color}>
+            {`${terminal.icon} ${STATUS_VERBS[entry.status]} · `}
+          </Text>
+        )}
+        <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
+      </Box>
+
+      <Box />
+      <Box>
+        <Text bold dimColor>
+          Command
+        </Text>
+      </Box>
+      <Box>
+        <Text wrap="truncate-end">{entry.command}</Text>
+      </Box>
     </MaxSizedBox>
   );
 };

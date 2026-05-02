@@ -93,6 +93,14 @@ export type MonitorNotificationCallback = (
 
 export type MonitorRegisterCallback = (entry: MonitorEntry) => void;
 
+/**
+ * Fires on every status transition (running → terminal). Symmetric with
+ * `BackgroundTaskRegistry.setStatusChangeCallback` and
+ * `BackgroundShellRegistry.setStatusChangeCallback` so the same UI hook
+ * can subscribe to all three registries.
+ */
+export type MonitorStatusChangeCallback = (entry?: MonitorEntry) => void;
+
 interface MonitorCancelOptions {
   notify?: boolean;
 }
@@ -101,6 +109,7 @@ export class MonitorRegistry {
   private readonly monitors = new Map<string, MonitorEntry>();
   private notificationCallback?: MonitorNotificationCallback;
   private registerCallback?: MonitorRegisterCallback;
+  private statusChangeCallback?: MonitorStatusChangeCallback;
 
   register(entry: MonitorEntry): void {
     if (this.getRunning().length >= MAX_CONCURRENT_MONITORS) {
@@ -119,6 +128,11 @@ export class MonitorRegistry {
         debugLogger.error('Failed to emit register callback:', error);
       }
     }
+    // Mirror BackgroundTaskRegistry / BackgroundShellRegistry: registration
+    // is a status transition (nothing → running) so subscribers that only
+    // care about "what's in the registry now" can subscribe to a single
+    // callback and see new entries the same way they see status changes.
+    this.fireStatusChange(entry);
   }
 
   /**
@@ -218,6 +232,16 @@ export class MonitorRegistry {
     this.registerCallback = cb;
   }
 
+  /**
+   * Subscribe to status transitions (register + every running → terminal
+   * settle). Single-subscriber on purpose — the dialog hook is the only
+   * consumer in the codebase, and a list would invite drift in
+   * error-handling.
+   */
+  setStatusChangeCallback(cb: MonitorStatusChangeCallback | undefined): void {
+    this.statusChangeCallback = cb;
+  }
+
   abortAll(options: MonitorCancelOptions = {}): void {
     for (const entry of Array.from(this.monitors.values())) {
       this.cancel(entry.monitorId, options);
@@ -245,6 +269,16 @@ export class MonitorRegistry {
     entry.endTime = Date.now();
     this.clearIdleTimer(entry);
     this.pruneTerminalEntries();
+    this.fireStatusChange(entry);
+  }
+
+  private fireStatusChange(entry?: MonitorEntry): void {
+    if (!this.statusChangeCallback) return;
+    try {
+      this.statusChangeCallback(entry);
+    } catch (error) {
+      debugLogger.error('statusChange callback failed:', error);
+    }
   }
 
   private pruneTerminalEntries(): void {
