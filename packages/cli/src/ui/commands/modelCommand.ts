@@ -92,6 +92,22 @@ export const modelCommand: SlashCommand = {
       };
     }
 
+    //Handle modelName argument: immediately switch to the provided model
+    if (
+      args !== '' &&
+      !args.startsWith('--fast') &&
+      context.executionMode === 'interactive'
+    ) {
+      //Use first argument only, avoids later synatx confusion and/or use of model names with spaces
+      const modelName = args.trim().split(' ')[0];
+      config.setModel(modelName);
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t('Model') + ': ' + modelName,
+      };
+    }
+
     const contentGeneratorConfig = config.getContentGeneratorConfig();
     if (!contentGeneratorConfig) {
       return {
