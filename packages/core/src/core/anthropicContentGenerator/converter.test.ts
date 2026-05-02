@@ -654,7 +654,10 @@ describe('AnthropicContentConverter', () => {
   describe('ensureAssistantThinking', () => {
     const enableThinking = { ensureAssistantThinking: true };
 
-    it('injects an empty thinking block on assistant turns missing one', () => {
+    it('does not inject on plain-text assistant turns (DeepSeek tolerates them)', () => {
+      // Verified against api.deepseek.com/anthropic: plain-text assistant
+      // turns without thinking are accepted. Avoid bloating replay history
+      // with synthetic blocks the API does not require.
       const { messages } = converter.convertGeminiRequestToAnthropic(
         {
           model: 'models/test',
@@ -666,21 +669,10 @@ describe('AnthropicContentConverter', () => {
         enableThinking,
       );
 
-      expect(messages).toEqual([
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: 'Hi', cache_control: { type: 'ephemeral' } },
-          ],
-        },
-        {
-          role: 'assistant',
-          content: [
-            { type: 'thinking', thinking: '', signature: '' },
-            { type: 'text', text: 'Hello!' },
-          ],
-        },
-      ]);
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Hello!' }],
+      });
     });
 
     it('injects an empty thinking block on tool-calling assistant turns missing one', () => {
@@ -720,12 +712,12 @@ describe('AnthropicContentConverter', () => {
       });
     });
 
-    it('preserves existing thinking blocks on assistant turns', () => {
+    it('preserves existing thinking blocks on tool-use assistant turns', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic(
         {
           model: 'models/test',
           contents: [
-            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'user', parts: [{ text: 'Run tool' }] },
             {
               role: 'model',
               parts: [
@@ -734,7 +726,7 @@ describe('AnthropicContentConverter', () => {
                   thought: true,
                   thoughtSignature: 'sig',
                 },
-                { text: 'Hello!' },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
               ],
             },
           ],
@@ -746,7 +738,7 @@ describe('AnthropicContentConverter', () => {
         role: 'assistant',
         content: [
           { type: 'thinking', thinking: 'Let me think', signature: 'sig' },
-          { type: 'text', text: 'Hello!' },
+          { type: 'tool_use', id: 't1', name: 'tool', input: {} },
         ],
       });
     });
@@ -785,16 +777,23 @@ describe('AnthropicContentConverter', () => {
       });
     });
 
-    it('injects thinking blocks on every prior assistant turn in a multi-turn history', () => {
+    it('injects thinking blocks on every tool-using assistant turn in a multi-turn history', () => {
+      const toolUse = (id: string) => ({
+        functionCall: { id, name: 'tool', args: {} },
+      });
+      const toolResult = (id: string) => ({
+        functionResponse: { id, name: 'tool', response: { output: 'ok' } },
+      });
+
       const { messages } = converter.convertGeminiRequestToAnthropic(
         {
           model: 'models/test',
           contents: [
             { role: 'user', parts: [{ text: 'Q1' }] },
-            { role: 'model', parts: [{ text: 'A1' }] },
-            { role: 'user', parts: [{ text: 'Q2' }] },
-            { role: 'model', parts: [{ text: 'A2' }] },
-            { role: 'user', parts: [{ text: 'Q3' }] },
+            { role: 'model', parts: [toolUse('t1')] },
+            { role: 'user', parts: [toolResult('t1')] },
+            { role: 'model', parts: [toolUse('t2')] },
+            { role: 'user', parts: [toolResult('t2')] },
           ],
         },
         enableThinking,
@@ -814,7 +813,7 @@ describe('AnthropicContentConverter', () => {
       });
     });
 
-    it('does not inject a duplicate thinking block when one already exists (even without signature)', () => {
+    it('does not inject a duplicate thinking block when one already exists on a tool-use turn', () => {
       // A part `{ text: '', thought: true }` (e.g. from a redacted_thinking
       // response or a turn whose thinking stream had no content) converts to
       // a `{ type: 'thinking', thinking: '' }` block without a signature. The
@@ -823,10 +822,13 @@ describe('AnthropicContentConverter', () => {
         {
           model: 'models/test',
           contents: [
-            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'user', parts: [{ text: 'Run tool' }] },
             {
               role: 'model',
-              parts: [{ text: '', thought: true }, { text: 'Hello!' }],
+              parts: [
+                { text: '', thought: true },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
             },
           ],
         },
@@ -837,7 +839,7 @@ describe('AnthropicContentConverter', () => {
         role: 'assistant',
         content: [
           { type: 'thinking', thinking: '' },
-          { type: 'text', text: 'Hello!' },
+          { type: 'tool_use', id: 't1', name: 'tool', input: {} },
         ],
       });
     });

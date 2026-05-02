@@ -563,12 +563,18 @@ export class AnthropicContentConverter {
   }
 
   /**
-   * DeepSeek's anthropic-compatible API rejects follow-up requests when any
-   * prior assistant turn omits a thinking block while thinking mode is on,
-   * returning HTTP 400 ("The content[].thinking in the thinking mode must be
-   * passed back to the API."). The model can legitimately return a turn
-   * without thinking content, so inject an empty thinking block whenever one
-   * is missing. https://github.com/QwenLM/qwen-code/issues/3786
+   * DeepSeek's anthropic-compatible API rejects follow-up requests when an
+   * assistant turn carrying `tool_use` omits a thinking block while thinking
+   * mode is on, returning HTTP 400 ("The content[].thinking in the thinking
+   * mode must be passed back to the API."). The model can legitimately
+   * return a tool round without thinking content, so inject an empty thinking
+   * block when one is missing.
+   *
+   * Live verification against api.deepseek.com/anthropic confirmed the
+   * trigger is specific to tool_use turns — plain-text assistant turns
+   * without thinking are accepted unchanged. We mirror that boundary here to
+   * avoid bloating replay history with synthetic blocks for turns the API
+   * already accepts. https://github.com/QwenLM/qwen-code/issues/3786
    */
   private applyEmptyThinkingToAssistantMessages(
     messages: AnthropicMessageParam[],
@@ -583,25 +589,29 @@ export class AnthropicContentConverter {
             ? message.content
             : [];
 
+      const hasToolUse = blocks.some(
+        (block) => (block as { type?: string }).type === 'tool_use',
+      );
+      if (!hasToolUse) continue;
+
       const hasThinking = blocks.some(
         (block) =>
           (block as { type?: string }).type === 'thinking' ||
           (block as { type?: string }).type === 'redacted_thinking',
       );
+      if (hasThinking) continue;
 
-      if (!hasThinking) {
-        // DeepSeek currently accepts an empty `signature` for synthetic
-        // thinking blocks. The `signature` field is an opaque token in the
-        // Anthropic spec, so this is a workaround — if DeepSeek tightens
-        // validation in the future, we may need to switch to
-        // `redacted_thinking` or another approach.
-        const emptyThinking = {
-          type: 'thinking',
-          thinking: '',
-          signature: '',
-        } as unknown as AnthropicContentBlockParam;
-        message.content = [emptyThinking, ...blocks];
-      }
+      // DeepSeek currently accepts an empty `signature` for synthetic
+      // thinking blocks. The `signature` field is an opaque token in the
+      // Anthropic spec, so this is a workaround — if DeepSeek tightens
+      // validation in the future, we may need to switch to
+      // `redacted_thinking` or another approach.
+      const emptyThinking = {
+        type: 'thinking',
+        thinking: '',
+        signature: '',
+      } as unknown as AnthropicContentBlockParam;
+      message.content = [emptyThinking, ...blocks];
     }
   }
 
