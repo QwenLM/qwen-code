@@ -895,6 +895,30 @@ describe('AnthropicContentConverter', () => {
       });
     });
 
+    it('treats a redacted_thinking block as already-satisfying (no synthetic injection)', () => {
+      // redacted_thinking has no `signature` field by spec — its `data` is
+      // the opaque token. Distinct from a non-compliant `thinking` block
+      // missing its required signature. The injector must leave redacted
+      // turns alone. processContent doesn't synthesize redacted_thinking
+      // from Gemini parts, so reach into the private helper directly.
+      const messages = [
+        {
+          role: 'assistant' as const,
+          content: [
+            { type: 'redacted_thinking', data: 'opaque' },
+            { type: 'tool_use', id: 't1', name: 'tool', input: {} },
+          ],
+        },
+      ];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (converter as any).applyEmptyThinkingToToolUseTurns(messages);
+
+      expect(messages[0].content).toEqual([
+        { type: 'redacted_thinking', data: 'opaque' },
+        { type: 'tool_use', id: 't1', name: 'tool', input: {} },
+      ]);
+    });
+
     it('replaces a non-compliant thinking block (no signature field) with a synthetic one', () => {
       // A part `{ text: '', thought: true }` (e.g. round-tripped from a
       // `redacted_thinking` response that lost its `data` field via the
