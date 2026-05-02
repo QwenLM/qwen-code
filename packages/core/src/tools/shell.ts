@@ -391,19 +391,31 @@ function cdTargetMayChangeRepo(tokens: string[]): boolean {
  * can switch the diff range from `HEAD~1..HEAD` (the amended commit
  * vs its parent — too broad for amend) to `HEAD@{1}..HEAD` (the
  * actual amend delta).
+ *
+ * Only the *first* commit segment that runs in the same cwd as the
+ * shell tool counts. `git -C ../other commit --amend && git commit -m x`
+ * must not flip the diff range for the second (fresh) commit, since
+ * `HEAD@{1}` belongs to the inner repo there, not ours.
  */
 function isAmendCommit(command: string): boolean {
+  let cwdShifted = false;
   for (const sub of splitCommands(command)) {
     const tokens = tokeniseSegment(sub);
-    if (!tokens || tokens[0] !== 'git') continue;
-    const { subcommand } = parseGitInvocation(tokens);
-    if (subcommand !== 'commit') continue;
-    if (
-      tokens.includes('--amend') ||
-      tokens.some((t) => t.startsWith('--amend='))
-    ) {
-      return true;
+    if (!tokens || tokens.length === 0) continue;
+    const program = tokens[0]!;
+    if (program === 'cd') {
+      if (!cwdShifted && cdTargetMayChangeRepo(tokens)) cwdShifted = true;
+      continue;
     }
+    if (program !== 'git') continue;
+    const { subcommand, changesCwd } = parseGitInvocation(tokens);
+    if (subcommand === 'commit' && !cwdShifted && !changesCwd) {
+      return (
+        tokens.includes('--amend') ||
+        tokens.some((t) => t.startsWith('--amend='))
+      );
+    }
+    if (changesCwd && !cwdShifted) cwdShifted = true;
   }
   return false;
 }
