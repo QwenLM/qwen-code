@@ -95,10 +95,7 @@ export const modelCommand: SlashCommand = {
     // Handle modelName argument: immediately switch to the provided model
     if (
       args !== '' &&
-    if (
-      args !== '' &&
-      context.executionMode === 'interactive'
-    ) {
+      !args.startsWith('--fast') &&
       context.executionMode === 'interactive'
     ) {
       // Use first argument only, avoids later syntax confusion and/or use of model names with spaces
