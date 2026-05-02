@@ -92,7 +92,7 @@ export const modelCommand: SlashCommand = {
       };
     }
 
-    //Handle modelName argument: immediately switch to the provided model
+    // Handle modelName argument: immediately switch to the provided model
     if (
       args !== '' &&
     if (
