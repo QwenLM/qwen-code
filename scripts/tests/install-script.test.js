@@ -24,8 +24,9 @@ const { tmpdir } = await vi.importActual('node:os');
 const path = await vi.importActual('node:path');
 const readScript = (path) => readFileSync(path, 'utf8');
 // These E2E cases execute the Unix shell installer and POSIX symlink behavior.
-// Windows batch behavior is covered by static checks plus win-x64 packaging.
+// Windows batch behavior has separate Windows-only E2E coverage below.
 const itOnUnix = process.platform === 'win32' ? it.skip : it;
+const itOnWindows = process.platform === 'win32' ? it : it.skip;
 
 describe('installation scripts', () => {
   it('keeps the Linux/macOS installer lightweight', () => {
@@ -608,6 +609,61 @@ describe('Linux/macOS installer end-to-end', () => {
   );
 });
 
+describe('Windows installer end-to-end', () => {
+  itOnWindows(
+    'installs a local standalone archive with checksum verification',
+    () => {
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+      try {
+        const archive = createFakeWindowsStandaloneArchive(tmpDir);
+        const installRoot = path.join(tmpDir, 'install');
+        const home = path.join(tmpDir, 'home');
+        runWindowsInstaller(archive, installRoot, home);
+
+        expect(existsSync(path.join(installRoot, 'bin', 'qwen.cmd'))).toBe(
+          true,
+        );
+        expect(
+          existsSync(path.join(installRoot, 'qwen-code', 'node', 'node.exe')),
+        ).toBe(true);
+        expect(readScript(path.join(home, '.qwen', 'source.json'))).toContain(
+          '"source": "smoke"',
+        );
+
+        const version = runWindowsCommand(
+          `"${path.join(installRoot, 'bin', 'qwen.cmd')}" --version`,
+          { USERPROFILE: home },
+        )
+          .toString()
+          .trim();
+        expect(version).toBe('0.0.0-smoke');
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itOnWindows('rejects a tampered local archive', () => {
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+    try {
+      const archive = createFakeWindowsStandaloneArchive(tmpDir);
+      appendFileSync(archive, 'tamper');
+
+      expect(() =>
+        runWindowsInstaller(
+          archive,
+          path.join(tmpDir, 'install'),
+          path.join(tmpDir, 'home'),
+        ),
+      ).toThrow(/Checksum verification failed/);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
 function ensureMinimalDist() {
   if (existsSync('dist')) {
     return false;
@@ -686,6 +742,29 @@ function createFakeWindowsNodeArchive(tmpDir) {
 
   const archive = path.join(tmpDir, 'node-v20.0.0-win-x64.zip');
   createZipForTest(archive, tmpDir, path.basename(fakeNodeDir));
+  return archive;
+}
+
+function createFakeWindowsStandaloneArchive(tmpDir) {
+  const packageRoot = path.join(tmpDir, 'qwen-code');
+  const outDir = path.join(tmpDir, 'out');
+  mkdirSync(path.join(packageRoot, 'bin'), { recursive: true });
+  mkdirSync(path.join(packageRoot, 'node'), { recursive: true });
+  mkdirSync(outDir, { recursive: true });
+
+  writeFileSync(
+    path.join(packageRoot, 'bin', 'qwen.cmd'),
+    ['@echo off', 'echo 0.0.0-smoke', ''].join('\r\n'),
+  );
+  writeFileSync(path.join(packageRoot, 'node', 'node.exe'), 'fake node.exe\n');
+  writeFileSync(
+    path.join(packageRoot, 'manifest.json'),
+    JSON.stringify({ name: '@qwen-code/qwen-code' }),
+  );
+
+  const archive = path.join(outDir, 'qwen-code-win-x64.zip');
+  createZipForTest(archive, tmpDir, path.basename(packageRoot));
+  writeChecksumFile(outDir, path.basename(archive));
   return archive;
 }
 
@@ -800,6 +879,55 @@ function runUnixInstaller(archive, installRoot, home, method = 'standalone') {
       ].join('\n'),
     );
   }
+}
+
+function runWindowsInstaller(
+  archive,
+  installRoot,
+  home,
+  method = 'standalone',
+) {
+  mkdirSync(home, { recursive: true });
+  try {
+    return runWindowsCommand(
+      [
+        `"${path.resolve('scripts/installation/install-qwen-with-source.bat')}"`,
+        '--method',
+        method,
+        '--archive',
+        `"${archive}"`,
+        '--source',
+        'smoke',
+      ].join(' '),
+      {
+        USERPROFILE: home,
+        QWEN_INSTALL_ROOT: installRoot,
+      },
+    );
+  } catch (error) {
+    const processError = error;
+    throw new Error(
+      [
+        processError.message,
+        processError.stdout?.toString() || '',
+        processError.stderr?.toString() || '',
+      ].join('\n'),
+    );
+  }
+}
+
+function runWindowsCommand(command, env = {}) {
+  return execFileSync(
+    process.env.ComSpec || 'cmd.exe',
+    ['/d', '/s', '/c', command],
+    {
+      env: {
+        ...process.env,
+        ...env,
+      },
+      stdio: 'pipe',
+    },
+  );
 }
 
 function createSymlinkStandaloneArchive(tmpDir) {
