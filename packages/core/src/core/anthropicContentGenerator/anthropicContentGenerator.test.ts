@@ -246,6 +246,32 @@ describe('AnthropicContentGenerator', () => {
       expect(headers['anthropic-beta']).toBe('experimental-x');
     });
 
+    it('honors customHeaders[anthropic-beta] under mixed-case keys (Anthropic-Beta / ANTHROPIC-BETA)', async () => {
+      // HTTP header names are case-insensitive; Anthropic SDK lower-cases
+      // headers when merging. Make sure our merge logic also matches
+      // case-insensitively so the user-configured beta flag isn't silently
+      // overwritten by the per-request value.
+      const headersUpper = await callOnce({
+        ...baseConfig,
+        reasoning: { effort: 'medium' },
+        customHeaders: { 'ANTHROPIC-BETA': 'experimental-x' },
+      });
+      expect(headersUpper['anthropic-beta']).toContain('experimental-x');
+      expect(headersUpper['anthropic-beta']).toContain(
+        'interleaved-thinking-2025-05-14',
+      );
+
+      const headersTitle = await callOnce({
+        ...baseConfig,
+        reasoning: { effort: 'medium' },
+        customHeaders: { 'Anthropic-Beta': 'experimental-y' },
+      });
+      expect(headersTitle['anthropic-beta']).toContain('experimental-y');
+      expect(headersTitle['anthropic-beta']).toContain(
+        'interleaved-thinking-2025-05-14',
+      );
+    });
+
     it('dedupes beta flags so duplicates from customHeaders are not repeated', async () => {
       const headers = await callOnce({
         ...baseConfig,

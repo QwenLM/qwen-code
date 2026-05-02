@@ -208,20 +208,17 @@ export class AnthropicContentGenerator implements ContentGenerator {
    *
    * User-supplied `customHeaders['anthropic-beta']` flags are merged in (and
    * deduped) so the per-request override doesn't wipe out the existing
-   * customHeaders escape hatch for unrelated beta features.
+   * customHeaders escape hatch for unrelated beta features. The lookup is
+   * case-insensitive — HTTP header names are case-insensitive by spec, so a
+   * user-configured `Anthropic-Beta` or `ANTHROPIC-BETA` is honored too.
    */
   private buildPerRequestHeaders(
     anthropicRequest: MessageCreateParamsWithThinking,
   ): Record<string, string> | undefined {
     const betas: string[] = [];
 
-    const userBeta =
-      this.contentGeneratorConfig.customHeaders?.['anthropic-beta'];
-    if (typeof userBeta === 'string' && userBeta) {
-      for (const flag of userBeta.split(',')) {
-        const trimmed = flag.trim();
-        if (trimmed) betas.push(trimmed);
-      }
+    for (const flag of this.collectCustomBetaFlags()) {
+      betas.push(flag);
     }
 
     if (anthropicRequest.thinking) {
@@ -234,6 +231,28 @@ export class AnthropicContentGenerator implements ContentGenerator {
     if (betas.length === 0) return undefined;
     const unique = Array.from(new Set(betas));
     return { 'anthropic-beta': unique.join(',') };
+  }
+
+  /**
+   * Read every customHeaders entry whose key (case-insensitively) is
+   * `anthropic-beta` and yield the comma-separated flags from each. Multiple
+   * matching entries are concatenated; later ones may produce duplicates
+   * which the caller dedupes.
+   */
+  private collectCustomBetaFlags(): string[] {
+    const customHeaders = this.contentGeneratorConfig.customHeaders;
+    if (!customHeaders) return [];
+
+    const flags: string[] = [];
+    for (const [key, value] of Object.entries(customHeaders)) {
+      if (key.toLowerCase() !== 'anthropic-beta') continue;
+      if (typeof value !== 'string' || !value) continue;
+      for (const flag of value.split(',')) {
+        const trimmed = flag.trim();
+        if (trimmed) flags.push(trimmed);
+      }
+    }
+    return flags;
   }
 
   private async buildRequest(
