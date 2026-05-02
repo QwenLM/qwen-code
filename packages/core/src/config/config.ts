@@ -61,12 +61,16 @@ import { PermissionManager } from '../permissions/permission-manager.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
+import { MonitorRegistry } from '../services/monitorRegistry.js';
+import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
+  isTelemetrySdkInitialized,
   initializeTelemetry,
+  shutdownTelemetry,
   logStartSession,
   logRipgrepFallback,
   RipgrepFallbackEvent,
@@ -216,6 +220,12 @@ export interface TelemetrySettings {
   target?: TelemetryTarget;
   otlpEndpoint?: string;
   otlpProtocol?: 'grpc' | 'http';
+  /** Per-signal endpoint override for traces (HTTP only). Used as-is without path appending. */
+  otlpTracesEndpoint?: string;
+  /** Per-signal endpoint override for logs (HTTP only). Used as-is without path appending. */
+  otlpLogsEndpoint?: string;
+  /** Per-signal endpoint override for metrics (HTTP only). Used as-is without path appending. */
+  otlpMetricsEndpoint?: string;
   logPrompts?: boolean;
   outfile?: string;
   useCollector?: boolean;
@@ -555,6 +565,8 @@ export class Config {
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
   private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
+  private readonly monitorRegistry = new MonitorRegistry();
+  private backgroundAgentResumeService?: BackgroundAgentResumeService;
   private readonly backgroundShellRegistry = new BackgroundShellRegistry();
   // Field initializer runs once on the parent Config; child Configs
   // built via Object.create(parent) intentionally do NOT pick this up
@@ -756,8 +768,11 @@ export class Config {
     this.telemetrySettings = {
       enabled: params.telemetry?.enabled ?? false,
       target: params.telemetry?.target ?? DEFAULT_TELEMETRY_TARGET,
-      otlpEndpoint: params.telemetry?.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT,
+      otlpEndpoint: params.telemetry?.otlpEndpoint,
       otlpProtocol: params.telemetry?.otlpProtocol,
+      otlpTracesEndpoint: params.telemetry?.otlpTracesEndpoint,
+      otlpLogsEndpoint: params.telemetry?.otlpLogsEndpoint,
+      otlpMetricsEndpoint: params.telemetry?.otlpMetricsEndpoint,
       logPrompts: params.telemetry?.logPrompts ?? true,
       outfile: params.telemetry?.outfile,
       useCollector: params.telemetry?.useCollector,
@@ -1634,11 +1649,12 @@ export class Config {
    * It handles the case where initialization was not completed.
    */
   async shutdown(): Promise<void> {
-    if (!this.initialized) {
-      // Nothing to clean up if not initialized
-      return;
-    }
     try {
+      if (!this.initialized) {
+        // Nothing else to clean up if not initialized.
+        return;
+      }
+
       // Finalize the current session's metadata before cleanup, then drain
       // the async write queue so no records are lost on exit.
       try {
@@ -1655,12 +1671,17 @@ export class Config {
       }
 
       this.backgroundTaskRegistry.abortAll();
+      this.monitorRegistry.abortAll({ notify: false });
       this.backgroundShellRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
     } catch (error) {
       // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
+    } finally {
+      if (isTelemetrySdkInitialized()) {
+        await shutdownTelemetry();
+      }
     }
   }
 
@@ -2001,12 +2022,24 @@ export class Config {
     return this.telemetrySettings.logPrompts ?? true;
   }
 
-  getTelemetryOtlpEndpoint(): string {
+  getTelemetryOtlpEndpoint(): string | undefined {
     return this.telemetrySettings.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT;
   }
 
   getTelemetryOtlpProtocol(): 'grpc' | 'http' {
     return this.telemetrySettings.otlpProtocol ?? 'grpc';
+  }
+
+  getTelemetryOtlpTracesEndpoint(): string | undefined {
+    return this.telemetrySettings.otlpTracesEndpoint;
+  }
+
+  getTelemetryOtlpLogsEndpoint(): string | undefined {
+    return this.telemetrySettings.otlpLogsEndpoint;
+  }
+
+  getTelemetryOtlpMetricsEndpoint(): string | undefined {
+    return this.telemetrySettings.otlpMetricsEndpoint;
   }
 
   getTelemetryTarget(): TelemetryTarget {
@@ -2535,6 +2568,47 @@ export class Config {
     return this.backgroundTaskRegistry;
   }
 
+  getMonitorRegistry(): MonitorRegistry {
+    return this.monitorRegistry;
+  }
+
+  getBackgroundAgentResumeService(): BackgroundAgentResumeService {
+    if (!this.backgroundAgentResumeService) {
+      this.backgroundAgentResumeService = new BackgroundAgentResumeService(
+        this,
+      );
+    }
+    return this.backgroundAgentResumeService;
+  }
+
+  async loadPausedBackgroundAgents(
+    sessionId: string = this.getSessionId(),
+  ): Promise<
+    ReadonlyArray<import('../agents/background-tasks.js').BackgroundTaskEntry>
+  > {
+    return this.getBackgroundAgentResumeService().loadPausedBackgroundAgents(
+      sessionId,
+    );
+  }
+
+  async resumeBackgroundAgent(
+    agentId: string,
+    initialMessage?: string,
+  ): Promise<
+    import('../agents/background-tasks.js').BackgroundTaskEntry | undefined
+  > {
+    return this.getBackgroundAgentResumeService().resumeBackgroundAgent(
+      agentId,
+      initialMessage,
+    );
+  }
+
+  abandonBackgroundAgent(agentId: string): boolean {
+    return this.getBackgroundAgentResumeService().abandonBackgroundAgent(
+      agentId,
+    );
+  }
+
   getBackgroundShellRegistry(): BackgroundShellRegistry {
     return this.backgroundShellRegistry;
   }
@@ -2828,6 +2902,12 @@ export class Config {
         return new CronDeleteTool(this);
       });
     }
+
+    // Register monitor tool
+    await registerLazy(ToolNames.MONITOR, async () => {
+      const { MonitorTool } = await import('../tools/monitor.js');
+      return new MonitorTool(this);
+    });
 
     if (!options?.skipDiscovery) {
       await registry.discoverAllTools();

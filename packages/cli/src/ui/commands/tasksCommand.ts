@@ -4,13 +4,44 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { BackgroundShellEntry } from '@qwen-code/qwen-code-core';
+import {
+  buildBackgroundEntryLabel,
+  type BackgroundShellEntry,
+  type BackgroundTaskEntry,
+} from '@qwen-code/qwen-code-core';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { formatDuration } from '../utils/formatters.js';
 
-function statusLabel(entry: BackgroundShellEntry): string {
+type AgentTaskEntry = BackgroundTaskEntry & {
+  kind: 'agent';
+  resumeBlockedReason?: string;
+};
+
+type ShellTaskEntry = BackgroundShellEntry & { kind: 'shell' };
+
+type TaskEntry = AgentTaskEntry | ShellTaskEntry;
+
+function statusLabel(entry: TaskEntry): string {
+  if (entry.kind === 'agent') {
+    switch (entry.status) {
+      case 'completed':
+        return 'completed';
+      case 'failed':
+        return `failed: ${entry.error ?? 'unknown error'}`;
+      case 'cancelled':
+        return 'cancelled';
+      case 'paused':
+        return entry.resumeBlockedReason
+          ? `paused (resume blocked): ${entry.resumeBlockedReason}`
+          : 'paused';
+      case 'running':
+      default:
+        return 'running';
+    }
+  }
+
   switch (entry.status) {
     case 'completed':
       return `completed (exit ${entry.exitCode ?? '?'})`;
@@ -21,8 +52,23 @@ function statusLabel(entry: BackgroundShellEntry): string {
     case 'running':
       return 'running';
     default:
-      return entry.status;
+      return 'running';
   }
+}
+
+function taskLabel(entry: TaskEntry): string {
+  if (entry.kind === 'agent') {
+    return buildBackgroundEntryLabel(entry);
+  }
+  return entry.command;
+}
+
+function taskId(entry: TaskEntry): string {
+  return entry.kind === 'agent' ? entry.agentId : entry.shellId;
+}
+
+function taskOutputPath(entry: TaskEntry): string | undefined {
+  return entry.kind === 'agent' ? entry.outputFile : entry.outputPath;
 }
 
 export const tasksCommand: SlashCommand = {
@@ -42,31 +88,44 @@ export const tasksCommand: SlashCommand = {
       };
     }
 
-    const entries = config.getBackgroundShellRegistry().getAll();
+    const agentEntries: AgentTaskEntry[] = config
+      .getBackgroundTaskRegistry()
+      .getAll()
+      .map((entry) => ({ ...entry, kind: 'agent' as const }));
+    const shellEntries: ShellTaskEntry[] = config
+      .getBackgroundShellRegistry()
+      .getAll()
+      .map((entry) => ({ ...entry, kind: 'shell' as const }));
+    const entries = [...agentEntries, ...shellEntries].sort(
+      (a, b) => a.startTime - b.startTime,
+    );
 
     if (entries.length === 0) {
       return {
         type: 'message' as const,
         messageType: 'info' as const,
-        content: 'No background shells.',
+        content: 'No background tasks.',
       };
     }
 
     const now = Date.now();
-    const lines: string[] = [
-      `Background shells (${entries.length} total)`,
-      '',
-    ];
+    const lines: string[] = [`Background tasks (${entries.length} total)`, ''];
     for (const entry of entries) {
       const endTime = entry.endTime ?? now;
       const runtime = formatDuration(endTime - entry.startTime, {
         hideTrailingZeros: true,
       });
-      const pidPart = entry.pid !== undefined ? ` pid=${entry.pid}` : '';
+      const pidPart =
+        entry.kind === 'shell' && entry.pid !== undefined
+          ? ` pid=${entry.pid}`
+          : '';
       lines.push(
-        `[${entry.shellId}] ${statusLabel(entry)}  ${runtime}${pidPart}  ${entry.command}`,
+        `[${taskId(entry)}] ${statusLabel(entry)}  ${runtime}${pidPart}  ${taskLabel(entry)}`,
       );
-      lines.push(`            output: ${entry.outputPath}`);
+      const outputPath = taskOutputPath(entry);
+      if (outputPath) {
+        lines.push(`            output: ${outputPath}`);
+      }
     }
 
     return {
