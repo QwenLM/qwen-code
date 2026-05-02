@@ -98,7 +98,7 @@ export const modelCommand: SlashCommand = {
       !args.startsWith('--fast') &&
       context.executionMode === 'interactive'
     ) {
-      //Use first argument only, avoids later synatx confusion and/or use of model names with spaces
+      // Use first argument only, avoids later syntax confusion and/or use of model names with spaces
       if (!settings) {
         return {
           type: 'message',
