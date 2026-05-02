@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { SlashCommand } from './types.js';
+import type { CommandContext, SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import type { HistoryItemDoctor } from '../types.js';
 import { runDoctorChecks } from '../../utils/doctorChecks.js';
@@ -17,6 +17,10 @@ import {
   writeMemoryHeapSnapshot,
 } from '../../utils/memoryDiagnostics.js';
 import { t } from '../../i18n/index.js';
+import {
+  collectMemoryDiagnostics,
+  type MemoryDiagnostics,
+} from '@qwen-code/qwen-code-core';
 
 const MEMORY_SUBCOMMAND = 'memory';
 const DOCTOR_SUBCOMMANDS = [MEMORY_SUBCOMMAND] as const;
@@ -217,4 +221,58 @@ export const doctorCommand: SlashCommand = {
       }
     }
   },
+  subCommands: [
+    {
+      name: 'memory',
+      get description() {
+        return t('Show current process memory diagnostics');
+      },
+      kind: CommandKind.BUILT_IN,
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+      action: memoryDoctorAction,
+    },
+  ],
 };
+
+async function memoryDoctorAction(_context: CommandContext, args = '') {
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
+  const diagnostics = await collectMemoryDiagnostics();
+  return {
+    type: 'message' as const,
+    messageType: 'info' as const,
+    content: tokens.includes('--json')
+      ? JSON.stringify(diagnostics, null, 2)
+      : formatMemoryDiagnostics(diagnostics),
+  };
+}
+
+function formatMemoryDiagnostics(diagnostics: MemoryDiagnostics): string {
+  const risks =
+    diagnostics.analysis.risks.length > 0
+      ? diagnostics.analysis.risks
+          .map((risk) => `  - ${risk.type}: ${risk.message}`)
+          .join('\n')
+      : '  none';
+
+  return [
+    'Memory Diagnostics',
+    `timestamp: ${diagnostics.timestamp}`,
+    `uptimeSeconds: ${diagnostics.uptimeSeconds.toFixed(1)}`,
+    `heapUsed: ${formatBytes(diagnostics.memoryUsage.heapUsed)}`,
+    `heapTotal: ${formatBytes(diagnostics.memoryUsage.heapTotal)}`,
+    `rss: ${formatBytes(diagnostics.memoryUsage.rss)}`,
+    `external: ${formatBytes(diagnostics.memoryUsage.external)}`,
+    `arrayBuffers: ${formatBytes(diagnostics.memoryUsage.arrayBuffers)}`,
+    `v8HeapLimit: ${formatBytes(diagnostics.v8HeapStats.heapSizeLimit)}`,
+    `activeHandles: ${diagnostics.activeHandles}`,
+    `activeRequests: ${diagnostics.activeRequests}`,
+    `openFileDescriptors: ${diagnostics.openFileDescriptors ?? 'unavailable'}`,
+    'risks:',
+    risks,
+    `recommendation: ${diagnostics.analysis.recommendation}`,
+  ].join('\n');
+}
+
+function formatBytes(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MiB`;
+}
