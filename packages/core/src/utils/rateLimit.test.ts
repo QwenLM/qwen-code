@@ -157,6 +157,15 @@ describe('rate-limit retry diagnostics', () => {
     });
   });
 
+  it('should ignore non-object SSE JSON payloads in diagnostics', () => {
+    const error = new Error('id:1\nevent:error\n:HTTP_STATUS/429\ndata:null');
+
+    expect(getRateLimitErrorDetails(error)).toEqual({
+      statusCode: 429,
+      transport: 'sse',
+    });
+  });
+
   it('should extract structured details from HTTP-shaped rate-limit errors', () => {
     const error = Object.assign(new Error('Too many requests'), {
       status: 429,

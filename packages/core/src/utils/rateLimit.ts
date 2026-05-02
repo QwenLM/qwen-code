@@ -177,6 +177,8 @@ interface ProviderErrorPayload {
 
 function getProviderErrorPayload(error: unknown): ProviderErrorPayload | null {
   for (const payload of getJsonPayloads(error)) {
+    if (typeof payload !== 'object' || payload === null) continue;
+
     const direct = payload as {
       code?: unknown;
       message?: unknown;
