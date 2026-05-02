@@ -496,7 +496,7 @@ describe('stripShellWrapper', () => {
   });
 
   it('should strip zsh -c without quotes', async () => {
-    expect(stripShellWrapper('zsh -c ls -l')).toEqual('ls -l');
+    expect(stripShellWrapper('zsh -c ls -l')).toEqual('ls');
   });
 
   it('should strip cmd.exe /c', async () => {
@@ -528,12 +528,15 @@ describe('stripShellWrapper', () => {
     expect(stripShellWrapper("bash -e -c 'sleep 5'")).toEqual('sleep 5');
   });
 
-  it('does not strip -o with separate argument (ambiguous)', async () => {
-    // "pipefail" is a non-flag token so the parser bails — this is
-    // intentional since `-o` args are indistinguishable from subcommands.
+  it('should consume shell options with separate operands before -c', async () => {
     expect(stripShellWrapper("bash -o pipefail -c 'sleep 5'")).toEqual(
-      "bash -o pipefail -c 'sleep 5'",
+      'sleep 5',
     );
+    expect(stripShellWrapper("bash +o posix -c 'sleep 5'")).toEqual('sleep 5');
+  });
+
+  it('does not append bash -c positional argv to the executable command', async () => {
+    expect(stripShellWrapper("bash -c 'echo ok' 'sleep 5'")).toEqual('echo ok');
   });
 });
 
@@ -583,6 +586,19 @@ describe('normalizeMonitorCommand', () => {
       safetyCommand: 'tail -f /tmp/app.log',
       spawnCommand: `/bin/bash --noprofile -c 'tail -f /tmp/app.log'`,
       strippedTrailingAmp: true,
+    });
+  });
+
+  it('unwraps shell wrappers with option operands for safety analysis', () => {
+    expect(
+      normalizeMonitorCommand(
+        `/bin/bash -o pipefail -c 'echo $(cat secret.txt)'`,
+      ),
+    ).toEqual({
+      analysisCommand: 'echo $(cat secret.txt)',
+      safetyCommand: 'echo $(cat secret.txt)',
+      spawnCommand: `/bin/bash -o pipefail -c 'echo $(cat secret.txt)'`,
+      strippedTrailingAmp: false,
     });
   });
 

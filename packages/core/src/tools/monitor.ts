@@ -335,9 +335,13 @@ class MonitorToolInvocation extends BaseToolInvocation<
     entry.pid = child.pid;
     let exited = false;
 
-    // Absorb async spawn errors (ENOENT, EACCES, etc.) during the window
+    // Capture async spawn errors (ENOENT, EACCES, etc.) during the window
     // before the real error handler is attached at the end of this method.
-    child.on('error', () => {});
+    let earlySpawnError: Error | undefined;
+    const captureEarlySpawnError = (err: Error): void => {
+      earlySpawnError ??= err;
+    };
+    child.on('error', captureEarlySpawnError);
 
     // ----- Line buffering & throttling state ---------------------------------
     // Declared up-front (before `abortHandler`) so that the synchronous abort
@@ -450,7 +454,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
       (
         child.stderr as { destroy?: () => void } | null | undefined
       )?.destroy?.();
-      child.removeAllListeners();
+      child.removeListener('error', captureEarlySpawnError);
+      child.on('error', () => {});
       return {
         llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
@@ -524,7 +529,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       }
     };
 
-    child.on('exit', (code, sig) => {
+    const onExit = (code: number | null, sig: NodeJS.Signals | null): void => {
       exited = true;
       cleanup();
 
@@ -539,15 +544,27 @@ class MonitorToolInvocation extends BaseToolInvocation<
       } else {
         registry.complete(monitorId, code);
       }
-    });
+    };
 
-    child.on('error', (err) => {
+    const onError = (err: Error): void => {
       exited = true;
       cleanup();
       if (entry.status === 'running') {
         registry.fail(monitorId, getErrorMessage(err));
       }
-    });
+    };
+
+    child.on('exit', onExit);
+    child.on('error', onError);
+    child.removeListener('error', captureEarlySpawnError);
+
+    if (earlySpawnError) {
+      onError(earlySpawnError);
+      return {
+        llmContent: `Monitor failed to start: ${getErrorMessage(earlySpawnError)}`,
+        returnDisplay: `Monitor failed: ${getErrorMessage(earlySpawnError)}`,
+      };
+    }
 
     return {
       llmContent:

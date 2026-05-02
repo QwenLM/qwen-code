@@ -128,11 +128,7 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
 };
 
 /**
- * Shell tool canonical names.  "Bash" / "Monitor" rules each resolve to
- * their own canonical name, but `toolMatchesRuleToolName` also lets an
- * existing Bash allow rule cover Monitor (so `Bash(git status)` also allows
- * `Monitor(git status)`).  The reverse does not hold — a Monitor rule only
- * covers monitor, not shell.
+ * Shell tool canonical names. These use command-style rule specifiers.
  */
 const SHELL_TOOL_NAMES = new Set(['run_shell_command', 'monitor']);
 
@@ -198,6 +194,7 @@ export function getSpecifierKind(canonicalToolName: string): SpecifierKind {
  * "Read" → resolves to "read_file", but also covers grep_search, glob, list_directory
  * "Edit" → resolves to "edit", but also covers write_file
  * "Bash" → resolves to "run_shell_command", but also covers monitor
+ * "Monitor" → resolves to "monitor" only; it does not cover shell
  */
 export function toolMatchesRuleToolName(
   ruleToolName: string,

@@ -367,17 +367,21 @@ export function stripShellWrapper(command: string): string {
       const commandToken = takeLeadingToken(token.rest);
       if (!commandToken) return trimmed;
       const { value: innerCommand } = stripSymmetricQuotes(commandToken.token);
-      const suffix = commandToken.rest.trim();
-      return suffix ? `${innerCommand} ${suffix}` : innerCommand || trimmed;
+      return innerCommand || trimmed;
     }
 
-    // Non-flag token (doesn't start with `-` or `/`) — not a wrapper.
+    // Non-wrapper-option token — not a wrapper.
     const normalized = getNormalizedShellToken(token.token);
-    if (!normalized.startsWith('-') && !normalized.startsWith('/')) {
+    if (!isShellWrapperFlagToken(normalized)) {
       return trimmed;
     }
 
     rest = token.rest;
+    if (shellWrapperFlagConsumesOperand(token.token)) {
+      const operandToken = takeLeadingToken(rest);
+      if (!operandToken) return trimmed;
+      rest = operandToken.rest;
+    }
   }
 }
 
@@ -567,6 +571,19 @@ function isKnownMonitorWrapperToken(token: string): boolean {
   );
 }
 
+function isShellWrapperFlagToken(normalizedToken: string): boolean {
+  return (
+    normalizedToken.startsWith('-') ||
+    normalizedToken.startsWith('/') ||
+    normalizedToken === '+o'
+  );
+}
+
+function shellWrapperFlagConsumesOperand(token: string): boolean {
+  const normalized = getNormalizedShellToken(token);
+  return normalized === '-o' || normalized === '+o';
+}
+
 function isMonitorCommandMarker(wrapperToken: string, token: string): boolean {
   const base = getShellWrapperBase(wrapperToken);
   const normalized = getNormalizedShellToken(token);
@@ -633,7 +650,7 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
     }
 
     const normalized = getNormalizedShellToken(token.token);
-    if (!normalized.startsWith('-') && !normalized.startsWith('/')) {
+    if (!isShellWrapperFlagToken(normalized)) {
       return {
         innerCommand: trimmed,
         innerQuote: '',
@@ -642,6 +659,17 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
 
     wrapperTokens.push(token.token);
     rest = token.rest;
+    if (shellWrapperFlagConsumesOperand(token.token)) {
+      const operandToken = takeLeadingToken(rest);
+      if (!operandToken) {
+        return {
+          innerCommand: trimmed,
+          innerQuote: '',
+        };
+      }
+      wrapperTokens.push(operandToken.token);
+      rest = operandToken.rest;
+    }
   }
 }
 
@@ -656,6 +684,10 @@ export function normalizeMonitorCommand(
   const rawInnerArgsSuffix = innerArgsSuffix?.trim() ?? '';
   const normalizedInnerArgsSuffix =
     stripTrailingBackgroundAmp(rawInnerArgsSuffix);
+  // Permission safety focuses on command text that the shell may expand or
+  // execute: leading env assignments, the -c script, and argv suffixes. Wrapper
+  // flags are preserved in spawnCommand, but are not converted into Bash(...)
+  // command-rule surface.
   const safetyParts = [
     ...(wrapperTokens ? leadingEnvTokens : []),
     analysisCommand,

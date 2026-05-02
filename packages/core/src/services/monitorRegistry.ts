@@ -187,8 +187,9 @@ export class MonitorRegistry {
     const entry = this.monitors.get(monitorId);
     if (!entry || entry.status !== 'running') return;
 
-    this.settle(entry, 'cancelled');
     entry.abortController.abort();
+    if (entry.status !== 'running') return;
+    this.settle(entry, 'cancelled');
     debugLogger.info(`Monitor cancelled: ${monitorId}`);
     if (options.notify !== false) {
       this.emitTerminalNotification(entry);
@@ -270,12 +271,13 @@ export class MonitorRegistry {
         debugLogger.info(
           `Monitor ${entry.monitorId} idle timeout (${entry.idleTimeoutMs}ms), stopping`,
         );
-        this.settle(entry, 'completed');
         entry.abortController.abort();
+        if (entry.status !== 'running') return;
+        this.settle(entry, 'completed');
         this.emitTerminalNotification(entry, 'Idle timeout');
       }
     }, entry.idleTimeoutMs);
-    entry.idleTimer.unref();
+    entry.idleTimer.unref?.();
   }
 
   private clearIdleTimer(entry: MonitorEntry): void {
@@ -359,7 +361,9 @@ export class MonitorRegistry {
       `<summary>Monitor "${escapeXml(desc)}" ${statusText}. Total events: ${entry.eventCount}.${entry.droppedLines > 0 ? ` ${entry.droppedLines} lines dropped due to throttling.` : ''}</summary>`,
     );
     if (detail) {
-      xmlParts.push(`<result>${escapeXml(detail)}</result>`);
+      xmlParts.push(
+        `<result>${escapeXml(stripDisplayControlChars(detail))}</result>`,
+      );
     }
     xmlParts.push('</task-notification>');
 

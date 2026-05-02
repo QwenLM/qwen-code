@@ -713,11 +713,14 @@ describe('MonitorTool', () => {
           expect(mockSpawn).toHaveBeenCalledWith(
             'taskkill',
             ['/pid', '12345', '/f', '/t'],
-            { stdio: 'ignore' },
+            expect.objectContaining({ stdio: 'ignore' }),
           );
         } else {
           expect(killSpy).toHaveBeenCalledWith(-12345, 'SIGTERM');
         }
+        expect(() => {
+          mockChild._emitError(new Error('late cleanup error'));
+        }).not.toThrow();
         expect(monitorRegistry.getAll()).toHaveLength(0);
       } finally {
         killSpy.mockRestore();
@@ -746,7 +749,7 @@ describe('MonitorTool', () => {
           expect(mockSpawn).toHaveBeenCalledWith(
             'taskkill',
             ['/pid', '12345', '/f', '/t'],
-            { stdio: 'ignore' },
+            expect.objectContaining({ stdio: 'ignore' }),
           );
         } else {
           expect(killSpy).toHaveBeenCalledWith(-12345, 'SIGTERM');
@@ -781,7 +784,7 @@ describe('MonitorTool', () => {
           expect(mockSpawn).toHaveBeenCalledWith(
             'taskkill',
             ['/pid', '12345', '/f', '/t'],
-            { stdio: 'ignore' },
+            expect.objectContaining({ stdio: 'ignore' }),
           );
         } else {
           expect(killSpy).toHaveBeenCalledWith(-12345, 'SIGTERM');
@@ -819,6 +822,30 @@ describe('MonitorTool', () => {
       } finally {
         registerSpy.mockRestore();
       }
+    });
+
+    it('replays spawn errors emitted before the late handler is attached', async () => {
+      const callback = vi.fn();
+      monitorRegistry.setNotificationCallback(callback);
+      monitorRegistry.setRegisterCallback(() => {
+        mockChild._emitError(new Error('spawn ENOENT'));
+      });
+      const invocation = createInvocation({
+        command: 'nonexistent',
+      });
+
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toContain('Monitor failed to start');
+      expect(result.llmContent).toContain('spawn ENOENT');
+      expect(result.returnDisplay).toContain('spawn ENOENT');
+      const all = monitorRegistry.getAll();
+      expect(all).toHaveLength(1);
+      expect(all[0].status).toBe('failed');
+      expect(callback).toHaveBeenCalledOnce();
+      const [, modelText] = callback.mock.calls[0] as [string, string];
+      expect(modelText).toContain('<status>failed</status>');
+      expect(modelText).toContain('spawn ENOENT');
     });
 
     it('emits events on stdout lines', async () => {

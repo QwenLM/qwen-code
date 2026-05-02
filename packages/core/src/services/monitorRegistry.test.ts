@@ -124,6 +124,31 @@ describe('MonitorRegistry', () => {
     expect(ac.signal.aborted).toBe(true);
   });
 
+  it('lets cancel abort handlers flush partial output before settling', () => {
+    const ac = new AbortController();
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+    registry.register(createEntry({ abortController: ac }));
+    ac.signal.addEventListener(
+      'abort',
+      () => {
+        registry.emitEvent('mon-1', 'last partial line');
+      },
+      { once: true },
+    );
+
+    registry.cancel('mon-1');
+
+    const entry = registry.get('mon-1')!;
+    expect(entry.status).toBe('cancelled');
+    expect(entry.eventCount).toBe(1);
+    expect(callback).toHaveBeenCalledTimes(2);
+    const [, eventModelText] = callback.mock.calls[0] as [string, string];
+    const [, terminalModelText] = callback.mock.calls[1] as [string, string];
+    expect(eventModelText).toContain('last partial line');
+    expect(terminalModelText).toContain('<status>cancelled</status>');
+  });
+
   it('supports silent cancellation without terminal notification', () => {
     const callback = vi.fn();
     registry.setNotificationCallback(callback);
@@ -272,6 +297,36 @@ describe('MonitorRegistry', () => {
     expect(modelText).toContain('Idle timeout');
   });
 
+  it('lets idle-timeout abort handlers flush partial output before settling', () => {
+    const ac = new AbortController();
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+    registry.register(
+      createEntry({
+        idleTimeoutMs: 5000,
+        abortController: ac,
+      }),
+    );
+    ac.signal.addEventListener(
+      'abort',
+      () => {
+        registry.emitEvent('mon-1', 'idle partial line');
+      },
+      { once: true },
+    );
+
+    vi.advanceTimersByTime(5001);
+
+    const entry = registry.get('mon-1')!;
+    expect(entry.status).toBe('completed');
+    expect(entry.eventCount).toBe(1);
+    expect(callback).toHaveBeenCalledTimes(2);
+    const [, eventModelText] = callback.mock.calls[0] as [string, string];
+    const [, terminalModelText] = callback.mock.calls[1] as [string, string];
+    expect(eventModelText).toContain('idle partial line');
+    expect(terminalModelText).toContain('Idle timeout');
+  });
+
   it('resets idle timer on emitEvent', () => {
     const ac = new AbortController();
     registry.register(
@@ -385,6 +440,20 @@ describe('MonitorRegistry', () => {
     expect(displayText).toContain('mid');
     expect(displayText).toContain('after');
     expect(displayText).toContain('end');
+  });
+
+  it('strips control characters from terminal detail XML', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+    registry.register(createEntry());
+
+    registry.fail('mon-1', 'before\x00mid\x1B[31mafter\u0085end');
+
+    const [, modelText] = callback.mock.calls[0] as [string, string];
+    expect(modelText).toContain('<result>beforemid[31mafterend</result>');
+    expect(modelText).not.toContain('\x00');
+    expect(modelText).not.toContain('\x1B');
+    expect(modelText).not.toContain('\u0085');
   });
 
   it('propagates toolUseId in notification XML and meta', () => {

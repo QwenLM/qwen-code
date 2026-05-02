@@ -57,9 +57,9 @@ function hasBlockingBackgroundWork(config: Config): boolean {
 }
 
 function resetBackgroundStateForSessionSwitch(config: Config): void {
-  (config.getBackgroundTaskRegistry() as unknown as { reset(): void }).reset();
-  (config.getMonitorRegistry() as unknown as { reset(): void }).reset();
-  (config.getBackgroundShellRegistry() as unknown as { reset(): void }).reset();
+  config.getBackgroundTaskRegistry().reset();
+  config.getMonitorRegistry().reset();
+  config.getBackgroundShellRegistry().reset();
 }
 
 export function useResumeCommand(
