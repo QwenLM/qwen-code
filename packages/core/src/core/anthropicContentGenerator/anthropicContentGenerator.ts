@@ -86,7 +86,6 @@ type MessageCreateParamsWithThinking = MessageCreateParamsNonStreaming & {
 export class AnthropicContentGenerator implements ContentGenerator {
   private client: Anthropic;
   private converter: AnthropicContentConverter;
-  private readonly isDeepSeekProvider: boolean;
 
   constructor(
     private contentGeneratorConfig: ContentGeneratorConfig,
@@ -114,9 +113,6 @@ export class AnthropicContentGenerator implements ContentGenerator {
       contentGeneratorConfig.model,
       contentGeneratorConfig.schemaCompliance,
       contentGeneratorConfig.enableCacheControl,
-    );
-    this.isDeepSeekProvider = isDeepSeekAnthropicProvider(
-      contentGeneratorConfig,
     );
   }
 
@@ -223,17 +219,28 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const thinking = this.buildThinkingConfig(request);
     const outputConfig = this.buildOutputConfig();
 
-    // Only ask the converter to inject empty thinking blocks when both the
-    // provider needs them AND this request actually enables thinking mode.
-    // Otherwise we'd ship thinking blocks without the top-level `thinking`
-    // parameter — a protocol violation that DeepSeek rejects with a different
-    // 400. Matters for code paths that pass `includeThoughts: false`
-    // (suggestionGenerator / ArenaManager / forkedAgent).
-    const ensureAssistantThinking = this.isDeepSeekProvider && !!thinking;
+    // Compute per-request: `Config.setModel()` mutates contentGeneratorConfig
+    // in place, so a constructor-time cache could go stale on a runtime
+    // model switch. The detector is cheap (URL parse + string compare).
+    const isDeepSeek = isDeepSeekAnthropicProvider(this.contentGeneratorConfig);
+
+    // On DeepSeek the converter must keep history aligned with the top-level
+    // `thinking` parameter to avoid HTTP 400:
+    //   - thinking on  → inject empty thinking on tool_use turns missing one
+    //                    (issue #3786 trigger)
+    //   - thinking off → strip pre-existing thinking blocks from assistant
+    //                    history so a request without `thinking` config
+    //                    doesn't ship stray thinking blocks. Matters for
+    //                    code paths that pass `includeThoughts: false`
+    //                    against a session whose history already contains
+    //                    `thought: true` parts (suggestionGenerator /
+    //                    ArenaManager / forkedAgent).
+    const ensureAssistantThinking = isDeepSeek && !!thinking;
+    const stripAssistantThinking = isDeepSeek && !thinking;
 
     const { system, messages } = this.converter.convertGeminiRequestToAnthropic(
       request,
-      { ensureAssistantThinking },
+      { ensureAssistantThinking, stripAssistantThinking },
     );
 
     const tools = request.config?.tools

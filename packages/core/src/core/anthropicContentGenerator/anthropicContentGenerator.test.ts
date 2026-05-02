@@ -753,6 +753,114 @@ describe('AnthropicContentGenerator', () => {
       expect(messages[1]).toEqual(toolOnlyAssistant);
     });
 
+    it('strips real thought parts from assistant history when reasoning is disabled', async () => {
+      // suggestionGenerator / forkedAgent path: the top-level `thinking`
+      // parameter is dropped, but the session history may still carry
+      // `thought: true` parts that the converter would otherwise replay as
+      // thinking blocks — same protocol mismatch the gate is meant to avoid.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'deepseek-v4-pro',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'deepseek-v4-pro',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.deepseek.com/anthropic',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: false,
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              { text: 'real reasoning', thought: true, thoughtSignature: 's1' },
+              { text: 'Hello!' },
+            ],
+          },
+          { role: 'user', parts: [{ text: 'Bye' }] },
+        ],
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const messages = (anthropicRequest as { messages: unknown[] }).messages;
+
+      expect(anthropicRequest).toEqual(
+        expect.not.objectContaining({ thinking: expect.anything() }),
+      );
+      // Existing thinking block dropped — no protocol mismatch.
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Hello!' }],
+      });
+    });
+
+    it('reflects runtime model changes (no stale provider cache)', async () => {
+      // Config.setModel() mutates contentGeneratorConfig.model in place. A
+      // generator constructed against a non-DeepSeek model must start
+      // injecting thinking blocks once the model is switched to DeepSeek
+      // without re-creating the generator.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+
+      const config: ContentGeneratorConfig = {
+        model: 'claude-test',
+        apiKey: 'test-key',
+        baseUrl: 'https://example.invalid',
+        timeout: 10_000,
+        maxRetries: 2,
+        samplingParams: { max_tokens: 500 },
+        schemaCompliance: 'auto',
+      };
+
+      const generator = new AnthropicContentGenerator(config, mockConfig);
+
+      // Initial model isn't DeepSeek — no injection.
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: toolUseConversation,
+      } as unknown as GenerateContentParameters);
+      let [req] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(
+        (req as { messages: unknown[] }).messages[1] as { content: unknown },
+      ).toEqual(toolOnlyAssistant);
+
+      // Hot-update the model in place, mimicking Config.setModel().
+      config.model = 'deepseek-chat';
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: toolUseConversation,
+      } as unknown as GenerateContentParameters);
+      [req] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(
+        (req as { messages: unknown[] }).messages[1] as { content: unknown },
+      ).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '', signature: '' },
+          { type: 'tool_use', id: 't1', name: 'tool', input: {} },
+        ],
+      });
+    });
+
     it('does not inject when request sets thinkingConfig.includeThoughts=false', async () => {
       // Same concern as above but for the per-request override used by
       // suggestionGenerator / forkedAgent / ArenaManager.

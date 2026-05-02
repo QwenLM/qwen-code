@@ -33,13 +33,20 @@ type AnthropicContentBlockParam = Anthropic.ContentBlockParam;
 
 export interface ConvertGeminiRequestToAnthropicOptions {
   /**
-   * Inject an empty thinking block on assistant turns missing one. Required by
-   * DeepSeek's anthropic-compatible API when thinking mode is enabled — must
-   * be gated on the same per-request condition that sends the top-level
-   * `thinking` config so disabled-thinking requests don't ship stray thinking
-   * blocks. https://github.com/QwenLM/qwen-code/issues/3786
+   * Inject an empty thinking block on tool-use assistant turns missing one.
+   * Required by DeepSeek's anthropic-compatible API when thinking mode is
+   * enabled. Must be gated on the same per-request condition that emits the
+   * top-level `thinking` config so disabled-thinking requests don't ship
+   * stray thinking blocks. https://github.com/QwenLM/qwen-code/issues/3786
    */
   ensureAssistantThinking?: boolean;
+  /**
+   * Strip thinking and redacted_thinking blocks from assistant messages.
+   * Used to keep DeepSeek requests consistent when thinking mode is off but
+   * session history still carries `thought: true` parts (e.g. side-queries
+   * spawned with `thinkingConfig.includeThoughts: false`).
+   */
+  stripAssistantThinking?: boolean;
 }
 
 export class AnthropicContentConverter {
@@ -72,6 +79,9 @@ export class AnthropicContentConverter {
 
     this.processContents(request.contents, messages);
 
+    if (options.stripAssistantThinking) {
+      this.stripThinkingFromAssistantMessages(messages);
+    }
     if (options.ensureAssistantThinking) {
       this.applyEmptyThinkingToAssistantMessages(messages);
     }
@@ -560,6 +570,29 @@ export class AnthropicContentConverter {
         cache_control: { type: 'ephemeral' },
       },
     ];
+  }
+
+  /**
+   * Remove thinking and redacted_thinking blocks from assistant messages.
+   * Used by DeepSeek when thinking mode is off but session history still
+   * has `thought: true` parts — keeps the request body in sync with the
+   * absent top-level `thinking` config.
+   */
+  private stripThinkingFromAssistantMessages(
+    messages: AnthropicMessageParam[],
+  ): void {
+    for (const message of messages) {
+      if (message.role !== 'assistant') continue;
+      if (!Array.isArray(message.content)) continue;
+
+      const filtered = message.content.filter((block) => {
+        const t = (block as { type?: string }).type;
+        return t !== 'thinking' && t !== 'redacted_thinking';
+      });
+      if (filtered.length !== message.content.length) {
+        message.content = filtered;
+      }
+    }
   }
 
   /**

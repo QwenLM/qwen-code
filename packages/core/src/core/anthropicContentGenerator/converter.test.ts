@@ -815,6 +815,50 @@ describe('AnthropicContentConverter', () => {
       });
     });
 
+    it('strips thinking blocks from assistant turns when stripAssistantThinking is set', () => {
+      // suggestionGenerator / forkedAgent path: history has real thought
+      // parts but the side-query disables thinking. The converter must drop
+      // those blocks so the outgoing request matches the absent top-level
+      // `thinking` config.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'reasoning',
+                  thought: true,
+                  thoughtSignature: 'sig',
+                },
+                { text: 'Hello!' },
+              ],
+            },
+            {
+              role: 'model',
+              parts: [
+                { text: 'more reasoning', thought: true },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+          ],
+        },
+        { stripAssistantThinking: true },
+      );
+
+      // Both assistant turns have their thinking blocks removed.
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Hello!' }],
+      });
+      expect(messages[2]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 't1', name: 'tool', input: {} }],
+      });
+    });
+
     it('does not inject a duplicate thinking block when one already exists on a tool-use turn', () => {
       // A part `{ text: '', thought: true }` (e.g. from a redacted_thinking
       // response or a turn whose thinking stream had no content) converts to
