@@ -41,16 +41,26 @@ const debugLogger = createDebugLogger('ANTHROPIC');
 
 /**
  * DeepSeek's anthropic-compatible API rejects requests in thinking mode that
- * omit a thinking block on prior assistant turns. Detect by base URL or model
- * name so the converter can inject empty thinking blocks where missing.
- * https://github.com/QwenLM/qwen-code/issues/3786
+ * omit a thinking block on prior assistant turns. Detect by base URL hostname
+ * or model name so the converter can inject empty thinking blocks where
+ * missing. https://github.com/QwenLM/qwen-code/issues/3786
  */
 function isDeepSeekAnthropicProvider(
   contentGeneratorConfig: ContentGeneratorConfig,
 ): boolean {
-  const baseUrl = (contentGeneratorConfig.baseUrl ?? '').toLowerCase();
-  if (baseUrl.includes('api.deepseek.com')) {
-    return true;
+  const baseUrl = contentGeneratorConfig.baseUrl ?? '';
+  if (baseUrl) {
+    try {
+      const hostname = new URL(baseUrl).hostname.toLowerCase();
+      if (
+        hostname === 'api.deepseek.com' ||
+        hostname.endsWith('.api.deepseek.com')
+      ) {
+        return true;
+      }
+    } catch {
+      // Invalid URL — fall through to model-name detection.
+    }
   }
   const model = (contentGeneratorConfig.model ?? '').toLowerCase();
   return model.includes('deepseek');
@@ -74,6 +84,7 @@ type MessageCreateParamsWithThinking = MessageCreateParamsNonStreaming & {
 export class AnthropicContentGenerator implements ContentGenerator {
   private client: Anthropic;
   private converter: AnthropicContentConverter;
+  private readonly isDeepSeekProvider: boolean;
 
   constructor(
     private contentGeneratorConfig: ContentGeneratorConfig,
@@ -101,7 +112,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
       contentGeneratorConfig.model,
       contentGeneratorConfig.schemaCompliance,
       contentGeneratorConfig.enableCacheControl,
-      isDeepSeekAnthropicProvider(contentGeneratorConfig),
+    );
+    this.isDeepSeekProvider = isDeepSeekAnthropicProvider(
+      contentGeneratorConfig,
     );
   }
 
@@ -204,16 +217,26 @@ export class AnthropicContentGenerator implements ContentGenerator {
   private async buildRequest(
     request: GenerateContentParameters,
   ): Promise<MessageCreateParamsWithThinking> {
-    const { system, messages } =
-      this.converter.convertGeminiRequestToAnthropic(request);
+    const sampling = this.buildSamplingParameters(request);
+    const thinking = this.buildThinkingConfig(request);
+    const outputConfig = this.buildOutputConfig();
+
+    // Only ask the converter to inject empty thinking blocks when both the
+    // provider needs them AND this request actually enables thinking mode.
+    // Otherwise we'd ship thinking blocks without the top-level `thinking`
+    // parameter — a protocol violation that DeepSeek rejects with a different
+    // 400. Matters for code paths that pass `includeThoughts: false`
+    // (suggestionGenerator / ArenaManager / forkedAgent).
+    const ensureAssistantThinking = this.isDeepSeekProvider && !!thinking;
+
+    const { system, messages } = this.converter.convertGeminiRequestToAnthropic(
+      request,
+      { ensureAssistantThinking },
+    );
 
     const tools = request.config?.tools
       ? await this.converter.convertGeminiToolsToAnthropic(request.config.tools)
       : undefined;
-
-    const sampling = this.buildSamplingParameters(request);
-    const thinking = this.buildThinkingConfig(request);
-    const outputConfig = this.buildOutputConfig();
 
     return {
       model: this.contentGeneratorConfig.model,

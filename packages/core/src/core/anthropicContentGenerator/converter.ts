@@ -31,25 +31,36 @@ type AnthropicToolParam = Anthropic.Tool & {
 };
 type AnthropicContentBlockParam = Anthropic.ContentBlockParam;
 
+export interface ConvertGeminiRequestToAnthropicOptions {
+  /**
+   * Inject an empty thinking block on assistant turns missing one. Required by
+   * DeepSeek's anthropic-compatible API when thinking mode is enabled — must
+   * be gated on the same per-request condition that sends the top-level
+   * `thinking` config so disabled-thinking requests don't ship stray thinking
+   * blocks. https://github.com/QwenLM/qwen-code/issues/3786
+   */
+  ensureAssistantThinking?: boolean;
+}
+
 export class AnthropicContentConverter {
   private model: string;
   private schemaCompliance: SchemaComplianceMode;
   private enableCacheControl: boolean;
-  private ensureAssistantThinking: boolean;
 
   constructor(
     model: string,
     schemaCompliance: SchemaComplianceMode = 'auto',
     enableCacheControl: boolean = true,
-    ensureAssistantThinking: boolean = false,
   ) {
     this.model = model;
     this.schemaCompliance = schemaCompliance;
     this.enableCacheControl = enableCacheControl;
-    this.ensureAssistantThinking = ensureAssistantThinking;
   }
 
-  convertGeminiRequestToAnthropic(request: GenerateContentParameters): {
+  convertGeminiRequestToAnthropic(
+    request: GenerateContentParameters,
+    options: ConvertGeminiRequestToAnthropicOptions = {},
+  ): {
     system?: Anthropic.TextBlockParam[] | string;
     messages: AnthropicMessageParam[];
   } {
@@ -61,7 +72,7 @@ export class AnthropicContentConverter {
 
     this.processContents(request.contents, messages);
 
-    if (this.ensureAssistantThinking) {
+    if (options.ensureAssistantThinking) {
       this.applyEmptyThinkingToAssistantMessages(messages);
     }
 
@@ -579,6 +590,11 @@ export class AnthropicContentConverter {
       );
 
       if (!hasThinking) {
+        // DeepSeek currently accepts an empty `signature` for synthetic
+        // thinking blocks. The `signature` field is an opaque token in the
+        // Anthropic spec, so this is a workaround — if DeepSeek tightens
+        // validation in the future, we may need to switch to
+        // `redacted_thinking` or another approach.
         const emptyThinking = {
           type: 'thinking',
           thinking: '',
