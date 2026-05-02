@@ -33,13 +33,16 @@ type AnthropicContentBlockParam = Anthropic.ContentBlockParam;
 
 export interface ConvertGeminiRequestToAnthropicOptions {
   /**
-   * Inject an empty thinking block on tool-use assistant turns missing one.
-   * Required by DeepSeek's anthropic-compatible API when thinking mode is
-   * enabled. Must be gated on the same per-request condition that emits the
-   * top-level `thinking` config so disabled-thinking requests don't ship
-   * stray thinking blocks. https://github.com/QwenLM/qwen-code/issues/3786
+   * On assistant turns containing `tool_use` but lacking a compliant thinking
+   * block (i.e. a `thinking` block with a `signature` field, or a
+   * `redacted_thinking` block), prepend a synthetic empty thinking block and
+   * drop any non-compliant `thinking` block already present. Required by
+   * DeepSeek's anthropic-compatible API when thinking mode is enabled.
+   * Must be gated on the same per-request condition that emits the top-level
+   * `thinking` config so disabled-thinking requests don't ship stray
+   * thinking blocks. https://github.com/QwenLM/qwen-code/issues/3786
    */
-  ensureAssistantThinking?: boolean;
+  ensureThinkingOnToolUseTurns?: boolean;
   /**
    * Strip thinking and redacted_thinking blocks from assistant messages.
    * Used to keep DeepSeek requests consistent when thinking mode is off but
@@ -82,8 +85,8 @@ export class AnthropicContentConverter {
     if (options.stripAssistantThinking) {
       this.stripThinkingFromAssistantMessages(messages);
     }
-    if (options.ensureAssistantThinking) {
-      this.applyEmptyThinkingToAssistantMessages(messages);
+    if (options.ensureThinkingOnToolUseTurns) {
+      this.applyEmptyThinkingToToolUseTurns(messages);
     }
 
     // Add cache_control to enable prompt caching (if enabled)
@@ -617,9 +620,17 @@ export class AnthropicContentConverter {
    * trigger is specific to tool_use turns — plain-text assistant turns
    * without thinking are accepted unchanged. We mirror that boundary here to
    * avoid bloating replay history with synthetic blocks for turns the API
-   * already accepts. https://github.com/QwenLM/qwen-code/issues/3786
+   * already accepts.
+   *
+   * Edge case: a `thinking` block round-tripped through Gemini Part format
+   * may come back without its `signature` field (e.g. when the upstream
+   * block was `redacted_thinking`, whose `data` field doesn't survive the
+   * `{ thought: true }` representation). Such blocks are not spec-compliant,
+   * so we drop them here and let the synthetic injection take over rather
+   * than treat them as already-satisfying the requirement.
+   * https://github.com/QwenLM/qwen-code/issues/3786
    */
-  private applyEmptyThinkingToAssistantMessages(
+  private applyEmptyThinkingToToolUseTurns(
     messages: AnthropicMessageParam[],
   ): void {
     for (const message of messages) {
@@ -637,12 +648,22 @@ export class AnthropicContentConverter {
       );
       if (!hasToolUse) continue;
 
-      const hasThinking = blocks.some(
-        (block) =>
-          (block as { type?: string }).type === 'thinking' ||
-          (block as { type?: string }).type === 'redacted_thinking',
-      );
-      if (hasThinking) continue;
+      // A redacted_thinking block satisfies the requirement on its own.
+      // A thinking block satisfies it only when it carries a signature
+      // field — otherwise it's a non-compliant artefact of the Gemini-Part
+      // round trip and should be dropped before we inject our synthetic.
+      const hasCompliantThinking = blocks.some((block) => {
+        const b = block as { type?: string; signature?: unknown };
+        if (b.type === 'redacted_thinking') return true;
+        if (b.type === 'thinking') return typeof b.signature === 'string';
+        return false;
+      });
+      if (hasCompliantThinking) continue;
+
+      const cleanedBlocks = blocks.filter((block) => {
+        const b = block as { type?: string; signature?: unknown };
+        return !(b.type === 'thinking' && typeof b.signature !== 'string');
+      });
 
       // DeepSeek currently accepts an empty `signature` for synthetic
       // thinking blocks. The `signature` field is an opaque token in the
@@ -654,7 +675,7 @@ export class AnthropicContentConverter {
         thinking: '',
         signature: '',
       } as unknown as AnthropicContentBlockParam;
-      message.content = [emptyThinking, ...blocks];
+      message.content = [emptyThinking, ...cleanedBlocks];
     }
   }
 

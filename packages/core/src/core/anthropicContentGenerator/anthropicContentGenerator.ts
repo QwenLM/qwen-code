@@ -217,7 +217,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
   ): Promise<MessageCreateParamsWithThinking> {
     const sampling = this.buildSamplingParameters(request);
     const thinking = this.buildThinkingConfig(request);
-    const outputConfig = this.buildOutputConfig();
+    const outputConfig = this.buildOutputConfig(request);
 
     // Compute per-request: `Config.setModel()` mutates contentGeneratorConfig
     // in place, so a constructor-time cache could go stale on a runtime
@@ -235,12 +235,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
     //                    against a session whose history already contains
     //                    `thought: true` parts (suggestionGenerator /
     //                    ArenaManager / forkedAgent).
-    const ensureAssistantThinking = isDeepSeek && !!thinking;
+    const ensureThinkingOnToolUseTurns = isDeepSeek && !!thinking;
     const stripAssistantThinking = isDeepSeek && !thinking;
 
     const { system, messages } = this.converter.convertGeminiRequestToAnthropic(
       request,
-      { ensureAssistantThinking, stripAssistantThinking },
+      { ensureThinkingOnToolUseTurns, stripAssistantThinking },
     );
 
     const tools = request.config?.tools
@@ -341,9 +341,16 @@ export class AnthropicContentGenerator implements ContentGenerator {
     };
   }
 
-  private buildOutputConfig():
-    | { effort: 'low' | 'medium' | 'high' }
-    | undefined {
+  private buildOutputConfig(
+    request: GenerateContentParameters,
+  ): { effort: 'low' | 'medium' | 'high' } | undefined {
+    // Honor per-request opt-out so side queries (suggestionGenerator,
+    // ArenaManager, forkedAgent) don't leak a reasoning-shaped output_config
+    // alongside an absent top-level `thinking` parameter.
+    if (request.config?.thinkingConfig?.includeThoughts === false) {
+      return undefined;
+    }
+
     const reasoning = this.contentGeneratorConfig.reasoning;
     if (reasoning === false || reasoning === undefined) {
       return undefined;

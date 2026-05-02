@@ -653,8 +653,8 @@ describe('AnthropicContentConverter', () => {
   // assistant turns without thinking are accepted unchanged, so the converter
   // injects an empty thinking block only on tool-use turns when the caller
   // opts in.
-  describe('ensureAssistantThinking', () => {
-    const enableThinking = { ensureAssistantThinking: true };
+  describe('ensureThinkingOnToolUseTurns', () => {
+    const enableThinking = { ensureThinkingOnToolUseTurns: true };
 
     it('does not inject on plain-text assistant turns (DeepSeek tolerates them)', () => {
       // Verified against api.deepseek.com/anthropic: plain-text assistant
@@ -895,11 +895,12 @@ describe('AnthropicContentConverter', () => {
       });
     });
 
-    it('does not inject a duplicate thinking block when one already exists on a tool-use turn', () => {
-      // A part `{ text: '', thought: true }` (e.g. from a redacted_thinking
-      // response or a turn whose thinking stream had no content) converts to
-      // a `{ type: 'thinking', thinking: '' }` block without a signature. The
-      // injector should leave it alone rather than prepend a second one.
+    it('replaces a non-compliant thinking block (no signature field) with a synthetic one', () => {
+      // A part `{ text: '', thought: true }` (e.g. round-tripped from a
+      // `redacted_thinking` response that lost its `data` field via the
+      // Gemini Part representation) converts to a thinking block without a
+      // `signature` field. That shape is not spec-compliant, so the injector
+      // drops it and prepends a synthetic block with `signature: ''`.
       const { messages } = converter.convertGeminiRequestToAnthropic(
         {
           model: 'models/test',
@@ -920,8 +921,75 @@ describe('AnthropicContentConverter', () => {
       expect(messages[1]).toEqual({
         role: 'assistant',
         content: [
-          { type: 'thinking', thinking: '' },
+          { type: 'thinking', thinking: '', signature: '' },
           { type: 'tool_use', id: 't1', name: 'tool', input: {} },
+        ],
+      });
+    });
+
+    it('preserves an existing compliant thinking block on a tool-use turn', () => {
+      // A thinking block with a real `signature` field is fully compliant —
+      // the injector must not duplicate it.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Run tool' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'real thinking',
+                  thought: true,
+                  thoughtSignature: 'real-sig',
+                },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+          ],
+        },
+        enableThinking,
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          {
+            type: 'thinking',
+            thinking: 'real thinking',
+            signature: 'real-sig',
+          },
+          { type: 'tool_use', id: 't1', name: 'tool', input: {} },
+        ],
+      });
+    });
+
+    it('injects on mixed text+tool_use assistant turns missing thinking', () => {
+      // Common shape: model says something, then calls a tool. With no
+      // thinking, this is still a tool-use turn that needs the synthetic.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Look this up' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'Let me check that' },
+                { functionCall: { id: 't1', name: 'lookup', args: {} } },
+              ],
+            },
+          ],
+        },
+        enableThinking,
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '', signature: '' },
+          { type: 'text', text: 'Let me check that' },
+          { type: 'tool_use', id: 't1', name: 'lookup', input: {} },
         ],
       });
     });
