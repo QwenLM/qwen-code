@@ -632,7 +632,7 @@ describe('Windows installer end-to-end', () => {
         );
 
         const version = runWindowsCommand(
-          `"${path.join(installRoot, 'bin', 'qwen.cmd')}" --version`,
+          `call "${path.join(installRoot, 'bin', 'qwen.cmd')}" --version`,
           { USERPROFILE: home },
         )
           .toString()
@@ -891,7 +891,7 @@ function runWindowsInstaller(
   try {
     return runWindowsCommand(
       [
-        `"${path.resolve('scripts/installation/install-qwen-with-source.bat')}"`,
+        `call "${path.resolve('scripts/installation/install-qwen-with-source.bat')}"`,
         '--method',
         method,
         '--archive',
@@ -917,17 +917,13 @@ function runWindowsInstaller(
 }
 
 function runWindowsCommand(command, env = {}) {
-  return execFileSync(
-    process.env.ComSpec || 'cmd.exe',
-    ['/d', '/s', '/c', command],
-    {
-      env: {
-        ...process.env,
-        ...env,
-      },
-      stdio: 'pipe',
+  return execFileSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', command], {
+    env: {
+      ...process.env,
+      ...env,
     },
-  );
+    stdio: 'pipe',
+  });
 }
 
 function createSymlinkStandaloneArchive(tmpDir) {
