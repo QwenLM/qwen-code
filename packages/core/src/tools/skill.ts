@@ -17,6 +17,18 @@ import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 
 const debugLogger = createDebugLogger('SKILL');
 
+/**
+ * Escape characters that have special meaning in XML so that user-supplied
+ * skill fields (description, whenToUse) cannot inject tags into the
+ * <available_skills> block that is sent to the model.
+ */
+function escapeXml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 export interface SkillParams {
   skill: string;
 }
@@ -169,12 +181,13 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     const allSkillEntries: string[] = [];
 
     for (const skill of this.availableSkills) {
+      const descText = `${escapeXml(skill.description)}${skill.whenToUse ? ` — ${escapeXml(skill.whenToUse)}` : ''} (${skill.level})`;
       allSkillEntries.push(`<skill>
 <name>
 ${skill.name}
 </name>
 <description>
-${skill.description}${skill.whenToUse ? ` — ${skill.whenToUse}` : ''} (${skill.level})
+${descText}
 </description>
 <location>
 ${skill.level}
@@ -188,7 +201,7 @@ ${skill.level}
 ${cmd.name}
 </name>
 <description>
-${cmd.description}
+${escapeXml(cmd.description)}
 </description>
 </skill>`);
     }

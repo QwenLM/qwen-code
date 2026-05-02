@@ -423,5 +423,18 @@ Use hooks.`,
       const result = reg.matchAndConsume('src/foo.ts');
       expect(result).toContain('Strict.');
     });
+
+    it('activates on dotfiles when glob covers them (dot: true semantics)', () => {
+      // **/*.yml must match .github/workflows/ci.yml, .prettierrc.yml, etc.
+      // Regression: previously picomatch used { dot: false } so hidden paths
+      // were silently excluded.
+      const reg = new ConditionalRulesRegistry(
+        [rule('/r/yml.md', ['**/*.yml'], 'YAML rule.')],
+        '/project',
+      );
+      expect(
+        reg.matchAndConsume('/project/.github/workflows/ci.yml'),
+      ).toContain('YAML rule.');
+    });
   });
 });

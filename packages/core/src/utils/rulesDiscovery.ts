@@ -238,7 +238,7 @@ export class ConditionalRulesRegistry {
     this.projectRoot = projectRoot;
     this.compiledRules = rules.map((rule) => ({
       rule,
-      matchers: (rule.paths ?? []).map((p) => picomatch(p, { dot: false })),
+      matchers: (rule.paths ?? []).map((p) => picomatch(p, { dot: true })),
     }));
     logger.debug(
       `ConditionalRulesRegistry created with ${rules.length} rule(s)`,

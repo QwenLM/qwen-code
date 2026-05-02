@@ -146,6 +146,33 @@ describe('SkillTool', () => {
       );
     });
 
+    it('should XML-escape description and whenToUse fields', async () => {
+      // A crafted description containing XML-special characters must not
+      // inject raw tags into the <available_skills> block.
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue([
+        {
+          name: 'xss-skill',
+          description: 'Skill <b>bold</b> & more',
+          whenToUse: 'When <script> tags > nothing',
+          level: 'project',
+          filePath: '/project/.qwen/skills/xss-skill/SKILL.md',
+          body: 'Body text.',
+        },
+      ]);
+      const tool = new SkillTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(tool.description).toContain(
+        'Skill &lt;b&gt;bold&lt;/b&gt; &amp; more',
+      );
+      expect(tool.description).toContain(
+        'When &lt;script&gt; tags &gt; nothing',
+      );
+      // Raw tags must not appear
+      expect(tool.description).not.toContain('<b>');
+      expect(tool.description).not.toContain('<script>');
+    });
+
     it('should handle empty skills list gracefully', async () => {
       vi.mocked(mockSkillManager.listSkills).mockResolvedValue([]);
 
