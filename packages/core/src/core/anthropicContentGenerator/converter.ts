@@ -654,9 +654,25 @@ export class AnthropicContentConverter {
         return !(b.type === 'thinking' && typeof b.signature !== 'string');
       });
 
-      // Avoid emitting `content: []` (Anthropic API rejects). If cleanup
-      // would empty the message, leave the original blocks in place.
-      if (cleanedBlocks.length === 0) continue;
+      // DeepSeek currently accepts an empty `signature` for synthetic
+      // thinking blocks. The `signature` field is an opaque token in the
+      // Anthropic spec, so this is a workaround — if DeepSeek tightens
+      // validation in the future, we may need to switch to
+      // `redacted_thinking` or another approach.
+      const emptyThinking = {
+        type: 'thinking',
+        thinking: '',
+        signature: '',
+      } as unknown as AnthropicContentBlockParam;
+
+      // If cleanup would leave `content: []` (Anthropic API rejects) — i.e.
+      // the whole turn was non-compliant thinking blocks — replace with a
+      // synthetic empty thinking block so the message stays non-empty AND
+      // spec-compliant.
+      if (cleanedBlocks.length === 0) {
+        message.content = [emptyThinking];
+        continue;
+      }
       if (cleanedBlocks.length !== blocks.length) {
         message.content = cleanedBlocks;
       }
@@ -675,16 +691,6 @@ export class AnthropicContentConverter {
       });
       if (hasCompliantThinking) continue;
 
-      // DeepSeek currently accepts an empty `signature` for synthetic
-      // thinking blocks. The `signature` field is an opaque token in the
-      // Anthropic spec, so this is a workaround — if DeepSeek tightens
-      // validation in the future, we may need to switch to
-      // `redacted_thinking` or another approach.
-      const emptyThinking = {
-        type: 'thinking',
-        thinking: '',
-        signature: '',
-      } as unknown as AnthropicContentBlockParam;
       message.content = [emptyThinking, ...cleanedBlocks];
     }
   }

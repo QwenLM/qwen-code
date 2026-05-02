@@ -148,71 +148,86 @@ describe('AnthropicContentGenerator', () => {
 
     const headers = (anthropicState.constructorOptions?.['defaultHeaders'] ||
       {}) as Record<string, string>;
+    // Beta headers moved out of defaultHeaders — see PR #3788 review feedback.
+    // Only User-Agent and customHeaders remain at construction time.
     expect(headers['User-Agent']).toContain('QwenCode/1.2.3');
-    expect(headers['anthropic-beta']).toContain('effort-2025-11-24');
     expect(headers['X-Custom']).toBe('1');
-  });
-
-  it('adds the effort beta header when reasoning.effort is set', async () => {
-    const { AnthropicContentGenerator } = await importGenerator();
-    void new AnthropicContentGenerator(
-      {
-        model: 'claude-test',
-        apiKey: 'test-key',
-        baseUrl: 'https://example.invalid',
-        timeout: 10_000,
-        maxRetries: 2,
-        samplingParams: {},
-        schemaCompliance: 'auto',
-        reasoning: { effort: 'medium' },
-      },
-      mockConfig,
-    );
-
-    const headers = (anthropicState.constructorOptions?.['defaultHeaders'] ||
-      {}) as Record<string, string>;
-    expect(headers['anthropic-beta']).toContain('effort-2025-11-24');
-  });
-
-  it('does not add the effort beta header when reasoning.effort is not set', async () => {
-    const { AnthropicContentGenerator } = await importGenerator();
-    void new AnthropicContentGenerator(
-      {
-        model: 'claude-test',
-        apiKey: 'test-key',
-        baseUrl: 'https://example.invalid',
-        timeout: 10_000,
-        maxRetries: 2,
-        samplingParams: {},
-        schemaCompliance: 'auto',
-      },
-      mockConfig,
-    );
-
-    const headers = (anthropicState.constructorOptions?.['defaultHeaders'] ||
-      {}) as Record<string, string>;
-    expect(headers['anthropic-beta']).not.toContain('effort-2025-11-24');
-  });
-
-  it('omits the anthropic beta header when reasoning is disabled', async () => {
-    const { AnthropicContentGenerator } = await importGenerator();
-    void new AnthropicContentGenerator(
-      {
-        model: 'claude-test',
-        apiKey: 'test-key',
-        baseUrl: 'https://example.invalid',
-        timeout: 10_000,
-        maxRetries: 2,
-        samplingParams: {},
-        schemaCompliance: 'auto',
-        reasoning: false,
-      },
-      mockConfig,
-    );
-
-    const headers = (anthropicState.constructorOptions?.['defaultHeaders'] ||
-      {}) as Record<string, string>;
     expect(headers['anthropic-beta']).toBeUndefined();
+  });
+
+  // Per-request header behavior moved into the generateContent describe
+  // block below — see "anthropic-beta header" cases.
+
+  // Per-request anthropic-beta is computed from the actual fields present
+  // in the request body (rather than the constructor-time reasoning config),
+  // so the wire shape stays consistent when a per-request opt-out drops
+  // `thinking` / `output_config`. See PR #3788 review feedback.
+  describe('per-request anthropic-beta header', () => {
+    const baseConfig: ContentGeneratorConfig = {
+      model: 'claude-test',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.invalid',
+      timeout: 10_000,
+      maxRetries: 2,
+      samplingParams: { max_tokens: 100 },
+      schemaCompliance: 'auto',
+    };
+
+    async function callOnce(
+      config: ContentGeneratorConfig,
+      requestConfig?: object,
+    ) {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+      const generator = new AnthropicContentGenerator(config, mockConfig);
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hi',
+        ...(requestConfig ? { config: requestConfig } : {}),
+      } as unknown as GenerateContentParameters);
+      const [, options] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      return ((options as { headers?: Record<string, string> })?.headers ||
+        {}) as Record<string, string>;
+    }
+
+    it('sends interleaved-thinking + effort beta when both are present in the body', async () => {
+      const headers = await callOnce({
+        ...baseConfig,
+        reasoning: { effort: 'medium' },
+      });
+      expect(headers['anthropic-beta']).toContain(
+        'interleaved-thinking-2025-05-14',
+      );
+      expect(headers['anthropic-beta']).toContain('effort-2025-11-24');
+    });
+
+    it('sends only interleaved-thinking when effort is not set', async () => {
+      const headers = await callOnce({
+        ...baseConfig,
+        // No reasoning config: thinking defaults to enabled, no effort.
+      });
+      expect(headers['anthropic-beta']).toBe('interleaved-thinking-2025-05-14');
+    });
+
+    it('omits beta header when reasoning is disabled (no thinking, no effort)', async () => {
+      const headers = await callOnce({ ...baseConfig, reasoning: false });
+      expect(headers['anthropic-beta']).toBeUndefined();
+    });
+
+    it('omits beta header when per-request thinkingConfig.includeThoughts=false', async () => {
+      // Even though the global reasoning config sets effort, the per-request
+      // opt-out drops both `thinking` and `output_config` from the body — and
+      // the beta header must follow.
+      const headers = await callOnce(
+        { ...baseConfig, reasoning: { effort: 'medium' } },
+        { thinkingConfig: { includeThoughts: false } },
+      );
+      expect(headers['anthropic-beta']).toBeUndefined();
+    });
   });
 
   describe('generateContent', () => {

@@ -120,8 +120,10 @@ export class AnthropicContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
   ): Promise<GenerateContentResponse> {
     const anthropicRequest = await this.buildRequest(request);
+    const headers = this.buildPerRequestHeaders(anthropicRequest);
     const response = (await this.client.messages.create(anthropicRequest, {
       signal: request.config?.abortSignal,
+      ...(headers ? { headers } : {}),
     })) as Message;
 
     return this.converter.convertAnthropicResponseToGemini(response);
@@ -131,6 +133,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const anthropicRequest = await this.buildRequest(request);
+    const headers = this.buildPerRequestHeaders(anthropicRequest);
     const streamingRequest: MessageCreateParamsStreaming & {
       thinking?: { type: 'enabled'; budget_tokens: number };
     } = {
@@ -142,6 +145,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       streamingRequest as MessageCreateParamsStreaming,
       {
         signal: request.config?.abortSignal,
+        ...(headers ? { headers } : {}),
       },
     )) as AsyncIterable<RawMessageStreamEvent>;
 
@@ -184,32 +188,35 @@ export class AnthropicContentGenerator implements ContentGenerator {
   }
 
   private buildHeaders(): Record<string, string> {
+    // Beta headers are computed per-request in buildPerRequestHeaders so they
+    // stay in sync with what the request body actually carries — see #3788
+    // review feedback. Constructor headers carry only User-Agent and any
+    // user-supplied custom headers.
     const version = this.cliConfig.getCliVersion() || 'unknown';
     const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
     const { customHeaders } = this.contentGeneratorConfig;
 
-    const betas: string[] = [];
-    const reasoning = this.contentGeneratorConfig.reasoning;
+    const headers: Record<string, string> = { 'User-Agent': userAgent };
+    return customHeaders ? { ...headers, ...customHeaders } : headers;
+  }
 
-    // Interleaved thinking is used when we send the `thinking` field.
-    if (reasoning !== false) {
+  /**
+   * Compute `anthropic-beta` from the actual fields present in the request
+   * body. Keeps the header consistent with the body even when a per-request
+   * `thinkingConfig.includeThoughts: false` opt-out drops `thinking` /
+   * `output_config` after the constructor has already run.
+   */
+  private buildPerRequestHeaders(
+    anthropicRequest: MessageCreateParamsWithThinking,
+  ): Record<string, string> | undefined {
+    const betas: string[] = [];
+    if (anthropicRequest.thinking) {
       betas.push('interleaved-thinking-2025-05-14');
     }
-
-    // Effort (beta) is enabled when reasoning.effort is set.
-    if (reasoning !== false && reasoning?.effort !== undefined) {
+    if (anthropicRequest.output_config) {
       betas.push('effort-2025-11-24');
     }
-
-    const headers: Record<string, string> = {
-      'User-Agent': userAgent,
-    };
-
-    if (betas.length) {
-      headers['anthropic-beta'] = betas.join(',');
-    }
-
-    return customHeaders ? { ...headers, ...customHeaders } : headers;
+    return betas.length > 0 ? { 'anthropic-beta': betas.join(',') } : undefined;
   }
 
   private async buildRequest(
