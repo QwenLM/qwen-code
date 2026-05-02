@@ -263,10 +263,21 @@ function gitCommitContext(command: string): {
     const program = tokens[0]!;
 
     if (program === 'cd') {
-      // A cd before any commit makes later in-chain commits unsafe to
-      // attribute (might land in a different repo). A cd after the
-      // commit doesn't matter for the commit we already saw.
-      if (!hasCommit) cwdShifted = true;
+      // A cd before any commit might redirect a later `git commit` into
+      // a different repo. A cd AFTER the commit doesn't matter for the
+      // commit we already saw.
+      //
+      // A heuristic relaxation: relative cd targets that don't escape
+      // upward (no `..`, no absolute path, no env-var/$home expansion)
+      // almost always stay within the same repo. The very common
+      // `cd subdir && git commit -m "..."` flow is the motivating case
+      // — same repo, same toplevel, attribution is still safe. Only
+      // mark as shifted when the target *could* land us in a different
+      // repo. We can't be 100% certain without running `git rev-parse
+      // --show-toplevel` after the cd, which would require a synchronous
+      // fs/exec call that the rest of this walk avoids — the heuristic
+      // covers the common case and stays conservative on the rest.
+      if (!hasCommit && cdTargetMayChangeRepo(tokens)) cwdShifted = true;
       continue;
     }
 
@@ -324,6 +335,37 @@ function parseGhInvocation(tokens: string[]): string[] {
 }
 
 /**
+ * Heuristic: does this `cd` invocation potentially redirect us into
+ * a different repository? Used by `gitCommitContext` to decide
+ * whether a subsequent `git commit` in the same chain is still
+ * attributable in our cwd.
+ *
+ * Returns true (conservative — assume shift) when the target is
+ * absolute, escapes upward (`..`), goes to `$HOME` / `~`, contains an
+ * env-var (we can't resolve it statically), or is missing entirely
+ * (`cd` alone goes to `$HOME`). Plain relative paths like `cd src`,
+ * `cd ./packages/foo`, or `cd subdir/nested` are treated as in-repo.
+ */
+function cdTargetMayChangeRepo(tokens: string[]): boolean {
+  // tokens[0] is 'cd'. The next non-flag token is the target.
+  let i = 1;
+  while (i < tokens.length && tokens[i]!.startsWith('-')) i++;
+  const target = tokens[i];
+  // `cd` with no argument goes to $HOME.
+  if (target === undefined) return true;
+  if (target.startsWith('/')) return true;
+  if (target.startsWith('~')) return true;
+  // Env-var reference (e.g. `$HOME`, `$REPO`) — can't resolve here.
+  if (target.includes('$')) return true;
+  // `..`, `../..`, `..\\foo` etc. could escape the repo root.
+  if (target === '..') return true;
+  if (target.startsWith('../') || target.startsWith('..\\')) return true;
+  // `-` is bash's "previous directory" — could be anywhere.
+  if (target === '-') return true;
+  return false;
+}
+
+/**
  * Detect whether the attributable `git commit` invocation in
  * `command` carries the `--amend` flag. Used so attachCommitAttribution
  * can switch the diff range from `HEAD~1..HEAD` (the amended commit
@@ -372,7 +414,10 @@ function findAttributableCommitSegment(
     if (!tokens || tokens.length === 0) continue;
     const program = tokens[0]!;
     if (program === 'cd') {
-      if (!cwdShifted) cwdShifted = true;
+      // Mirror gitCommitContext's cd heuristic: relative paths that
+      // don't escape upward are treated as in-repo, so
+      // `cd subdir && git commit ...` still finds the segment.
+      if (!cwdShifted && cdTargetMayChangeRepo(tokens)) cwdShifted = true;
       continue;
     }
     if (program === 'git') {
@@ -387,21 +432,31 @@ function findAttributableCommitSegment(
 }
 
 /**
- * Detect whether `command` invokes `gh pr create` at the top level —
- * same shell-aware shape as `gitCommitContext` so quoted text like
- * `echo "gh pr create --body ..."` doesn't trip the rewrite path.
+ * Locate the character range of the `gh pr create` (or alias
+ * `gh pr new`) segment in a potentially compound command. Used by
+ * `addAttributionToPR` so the `--body`/`-b` rewrite is scoped to
+ * just that segment — without scoping, a command like
+ * `curl -b "session=abc" && gh pr create --body "summary"` would
+ * have the regex match `curl`'s `-b` cookie flag and inject
+ * attribution there.
  */
-function looksLikeGhPrCreate(command: string): boolean {
+function findGhPrCreateSegment(
+  command: string,
+): { start: number; end: number } | null {
+  let cursor = 0;
   for (const sub of splitCommands(command)) {
+    const start = command.indexOf(sub, cursor);
+    if (start < 0) continue;
+    const end = start + sub.length;
+    cursor = end;
     const tokens = tokeniseSegment(sub);
     if (!tokens || tokens[0] !== 'gh') continue;
     const rest = parseGhInvocation(tokens);
-    // `gh pr new` is the documented alias for `gh pr create`. Detect
-    // both so attribution doesn't silently miss the alias form.
-    if (rest[0] === 'pr' && (rest[1] === 'create' || rest[1] === 'new'))
-      return true;
+    if (rest[0] === 'pr' && (rest[1] === 'create' || rest[1] === 'new')) {
+      return { start, end };
+    }
   }
-  return false;
+  return null;
 }
 
 /** Approximate characters per text line for the diff-size estimate. */
@@ -1411,13 +1466,21 @@ export class ShellToolInvocation extends BaseToolInvocation<
       preHead !== null
         ? await this.countCommitsAfter(cwd, preHead)
         : await this.countCommitsFromRoot(cwd);
-    if (commitCount > 1) {
-      debugLogger.warn(
-        `Refusing AI attribution for a multi-commit shell command ` +
-          `(${commitCount} commits since ${
-            preHead ? preHead.slice(0, 12) : 'repo root'
-          }).`,
-      );
+    // commitCreated has already established that HEAD moved, so we
+    // expect exactly 1 commit. Anything else is suspicious:
+    // - >1: actual multi-commit chain we can't partition
+    // - 0:  rev-list errored / timed out — could not verify, so
+    //   we'd otherwise silently attribute as a single commit even
+    //   though the count is unknown
+    // Bail in either case.
+    if (commitCount !== 1) {
+      const reason =
+        commitCount === 0
+          ? 'commit count unavailable (rev-list failed) ' +
+            'after HEAD moved — refusing to assume single commit'
+          : `multi-commit shell command (${commitCount} commits since ` +
+            `${preHead ? preHead.slice(0, 12) : 'repo root'})`;
+      debugLogger.warn(`Refusing AI attribution: ${reason}.`);
       attributionService.clearAttributions(true);
       return;
     }
@@ -1861,7 +1924,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // Shell-aware detection — a raw regex would falsely match quoted
     // text such as `echo "gh pr create --body \"x\""` and rewrite a
     // command that wasn't actually creating a PR.
-    if (!looksLikeGhPrCreate(command)) {
+    const ghSegment = findGhPrCreateSegment(command);
+    if (!ghSegment) {
       return command;
     }
 
@@ -1889,11 +1953,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // Match both the long form `--body` and the short alias `-b`
     // (documented in `gh pr create --help`), with either space or
     // `=` separator: `--body "..."`, `--body="..."`, `-b "..."`,
-    // `-b="..."`. The `\b` after `-b` is intentional — without it
-    // we'd also match the start of `-body` (a typo) which the user
-    // didn't intend; a real `-b` flag is followed by whitespace or
-    // `=`. Inner alternation is non-capturing so the existing
+    // `-b="..."`. Inner alternation is non-capturing so the existing
     // `[full, prefix, body]` destructure stays intact.
+    //
+    // Run the regex against just the gh segment, NOT the full
+    // command. Otherwise a compound like
+    // `curl -b "session=abc" && gh pr create --body "summary"` would
+    // have the body regex match `curl`'s `-b` cookie flag and inject
+    // attribution into the cookie value, corrupting the curl call.
     const BODY_FLAG = `(?:--body|-b)[\\s=]+`;
     const bodyDoublePattern = new RegExp(
       `(${BODY_FLAG})"((?:[^"\\\\]|\\\\.)*)"`,
@@ -1904,8 +1971,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // whole, so the trailer lands at the true end of the body rather
     // than after only the first quoted segment.
     const bodySinglePattern = new RegExp(`(${BODY_FLAG})'((?:[^']|'\\\\'')*)'`);
-    const bodyDoubleMatch = command.match(bodyDoublePattern);
-    const bodySingleMatch = command.match(bodySinglePattern);
+    const segment = command.slice(ghSegment.start, ghSegment.end);
+    const bodyDoubleMatch = segment.match(bodyDoublePattern);
+    const bodySingleMatch = segment.match(bodySinglePattern);
     const bodyMatch = bodyDoubleMatch ?? bodySingleMatch;
     const bodyQuote = bodyDoubleMatch ? '"' : "'";
 
@@ -1928,10 +1996,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
         ? escapeForBashDoubleQuote(attribution)
         : escapeForBashSingleQuote(attribution);
       const newBody = existingBody + escapedAttribution;
-      // Use indexOf + slice instead of String.replace() to avoid
-      // special replacement patterns ($&, $1, etc.) in user content
-      const idx = command.indexOf(fullMatch);
-      if (idx >= 0) {
+      // Splice the modified segment back into the original command,
+      // offsetting the in-segment match index by the segment start.
+      const idx = (bodyMatch.index ?? 0) + ghSegment.start;
+      if (idx >= ghSegment.start) {
         const replacement = prefix + bodyQuote + newBody + bodyQuote;
         return (
           command.slice(0, idx) +

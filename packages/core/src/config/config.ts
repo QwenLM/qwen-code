@@ -127,6 +127,7 @@ import {
 import { getAutoMemoryRoot } from '../memory/paths.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
 import { MemoryManager } from '../memory/manager.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
 
 import {
   ModelsConfig,
@@ -1387,6 +1388,12 @@ export class Config {
     // constructed via Object.create — those should clear their own
     // cache, not the parent's.
     this.getFileReadCache().clear();
+    // The commit-attribution singleton accumulates per-file AI edits
+    // and a session-scoped prompt counter — both stop being meaningful
+    // when the session resets. Without this, pending attributions
+    // from the previous session could attach to a commit in the new
+    // one, and the "N-shotted" PR label would span sessions.
+    CommitAttributionService.resetInstance();
     if (this.initialized) {
       logStartSession(this, new StartSessionEvent(this));
     }

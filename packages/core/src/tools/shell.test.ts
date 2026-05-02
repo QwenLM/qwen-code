@@ -1102,6 +1102,70 @@ describe('ShellTool', () => {
         );
       });
 
+      // `cd subdir && git commit` (relative cd that doesn't escape
+      // upward) is a very common workflow — entering a subdirectory
+      // before committing. The cd target stays inside the same repo,
+      // so attribution should still apply. The earlier blanket
+      // "any cd shifts cwd" gate broke this; the heuristic now only
+      // marks shifted on absolute paths, `..`-prefixed paths, env-var
+      // expansions, etc.
+      it('should add co-author for cd subdir && git commit (relative same-repo)', async () => {
+        const command = 'cd src && git commit -m "Test commit"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // `cd ..` could escape the repo root — conservative shift.
+      it('should NOT add co-author for cd .. && git commit (could escape repo)', async () => {
+        const command = 'cd .. && git commit -m "Test commit"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.not.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
       // A cd that comes AFTER an in-cwd commit doesn't invalidate the
       // commit's attribution — the commit already landed in our repo.
       it('should add co-author when cd comes AFTER git commit', async () => {
@@ -1722,6 +1786,38 @@ describe('ShellTool', () => {
 
       // `-b` is gh's documented short alias for `--body`. Without
       // explicit handling the rewrite would silently miss it.
+      // `curl -b "session=abc" && gh pr create --body "summary"` —
+      // without segment scoping the body regex would match curl's
+      // `-b` cookie flag (since it's the same `-b "..."` shape) and
+      // inject attribution into the cookie value, breaking curl.
+      it('should NOT match -b in earlier non-gh segments of a compound', async () => {
+        const command =
+          'curl -b "session=abc" https://example.com && gh pr create --title "x" --body "summary"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        // curl's -b cookie value must be exactly preserved.
+        expect(observed).toContain('curl -b "session=abc"');
+        // The trailer should land in gh's --body, not in curl's -b.
+        expect(observed).toMatch(
+          /gh pr create --title "x" --body "summary[\s\S]*Generated with Qwen Code"/,
+        );
+      });
+
       it('should append attribution to gh pr create -b "..." (short form)', async () => {
         const command = 'gh pr create --title "x" -b "Summary"';
         const invocation = shellTool.build({ command, is_background: false });
