@@ -710,12 +710,11 @@ describe('MonitorTool', () => {
         expect(result.llmContent).toContain('Monitor failed to start');
         expect(result.returnDisplay).toContain('limit reached');
         if (process.platform === 'win32') {
-          expect(mockSpawn).toHaveBeenCalledWith('taskkill', [
-            '/pid',
-            '12345',
-            '/f',
-            '/t',
-          ]);
+          expect(mockSpawn).toHaveBeenCalledWith(
+            'taskkill',
+            ['/pid', '12345', '/f', '/t'],
+            { stdio: 'ignore' },
+          );
         } else {
           expect(killSpy).toHaveBeenCalledWith(-12345, 'SIGTERM');
         }
@@ -744,12 +743,11 @@ describe('MonitorTool', () => {
         await invocation.execute(new AbortController().signal);
 
         if (process.platform === 'win32') {
-          expect(mockSpawn).toHaveBeenCalledWith('taskkill', [
-            '/pid',
-            '12345',
-            '/f',
-            '/t',
-          ]);
+          expect(mockSpawn).toHaveBeenCalledWith(
+            'taskkill',
+            ['/pid', '12345', '/f', '/t'],
+            { stdio: 'ignore' },
+          );
         } else {
           expect(killSpy).toHaveBeenCalledWith(-12345, 'SIGTERM');
           await vi.advanceTimersByTimeAsync(200);
@@ -780,12 +778,11 @@ describe('MonitorTool', () => {
         await invocation.execute(new AbortController().signal);
 
         if (process.platform === 'win32') {
-          expect(mockSpawn).toHaveBeenCalledWith('taskkill', [
-            '/pid',
-            '12345',
-            '/f',
-            '/t',
-          ]);
+          expect(mockSpawn).toHaveBeenCalledWith(
+            'taskkill',
+            ['/pid', '12345', '/f', '/t'],
+            { stdio: 'ignore' },
+          );
         } else {
           expect(killSpy).toHaveBeenCalledWith(-12345, 'SIGTERM');
         }
