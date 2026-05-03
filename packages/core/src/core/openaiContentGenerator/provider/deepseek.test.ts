@@ -363,6 +363,67 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
       expect(r['reasoning_effort']).toBeUndefined();
       expect(r['reasoning']).toBeUndefined();
     });
+
+    it('does NOT translate reasoning_effort on a non-DeepSeek hostname (model-name fallback only)', () => {
+      // The provider class is selected by `isDeepSeekProvider`, which
+      // matches the broader hostname-OR-model rule (covers sglang/vllm
+      // self-hosting DeepSeek models). But the DeepSeek-specific
+      // `reasoning_effort` body shape only ships on actual DeepSeek
+      // hostnames; otherwise a strict OpenAI-compat backend would see
+      // an unexpected request shape change. Content flattening still
+      // runs (it's a model-format constraint, not a wire-shape one).
+      const selfHostedConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://my-sglang.example.com:8000/v1',
+        model: 'deepseek-v4-pro',
+      } as ContentGeneratorConfig;
+      const selfHostedProvider = new DeepSeekOpenAICompatibleProvider(
+        selfHostedConfig,
+        mockCliConfig,
+      );
+
+      const originalRequest = {
+        model: 'deepseek-v4-pro',
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'text', text: 'hi' }],
+          },
+        ],
+        reasoning: { effort: 'max' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = selfHostedProvider.buildRequest(
+        originalRequest,
+        userPromptId,
+      );
+      const r = result as unknown as Record<string, unknown>;
+
+      // reasoning_effort NOT injected, nested reasoning preserved verbatim.
+      expect(r['reasoning_effort']).toBeUndefined();
+      expect(r['reasoning']).toEqual({ effort: 'max' });
+      // Content flattening still ran.
+      expect((result.messages?.[0] as { content: unknown }).content).toBe('hi');
+    });
+  });
+
+  describe('isDeepSeekHostname', () => {
+    it('matches api.deepseek.com baseUrls', () => {
+      expect(
+        DeepSeekOpenAICompatibleProvider.isDeepSeekHostname({
+          baseUrl: 'https://api.deepseek.com/v1',
+        } as ContentGeneratorConfig),
+      ).toBe(true);
+    });
+
+    it('does NOT match a self-hosted host even when model name is deepseek', () => {
+      expect(
+        DeepSeekOpenAICompatibleProvider.isDeepSeekHostname({
+          baseUrl: 'https://my-sglang.example.com:8000/v1',
+          model: 'deepseek-v4-pro',
+        } as ContentGeneratorConfig),
+      ).toBe(false);
+    });
   });
 
   describe('getDefaultGenerationConfig', () => {

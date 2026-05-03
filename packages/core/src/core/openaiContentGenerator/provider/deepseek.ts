@@ -22,8 +22,7 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   static isDeepSeekProvider(
     contentGeneratorConfig: ContentGeneratorConfig,
   ): boolean {
-    const baseUrl = contentGeneratorConfig.baseUrl ?? '';
-    if (baseUrl.toLowerCase().includes('api.deepseek.com')) {
+    if (this.isDeepSeekHostname(contentGeneratorConfig)) {
       return true;
     }
 
@@ -37,6 +36,23 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   }
 
   /**
+   * Hostname-only check used to decide whether `reasoning.effort` should be
+   * rewritten into DeepSeek's flat `reasoning_effort` body parameter. The
+   * broader `isDeepSeekProvider` falls back to model-name matching to cover
+   * self-hosted deployments (sglang/vllm/ollama) — that fallback is right
+   * for content-part flattening (a model-format constraint) but trusting
+   * it for the body-shape rewrite would push a DeepSeek extension at
+   * strict OpenAI-compat backends that may not accept it. Keep the two
+   * decisions separated.
+   */
+  static isDeepSeekHostname(
+    contentGeneratorConfig: ContentGeneratorConfig,
+  ): boolean {
+    const baseUrl = contentGeneratorConfig.baseUrl ?? '';
+    return baseUrl.toLowerCase().includes('api.deepseek.com');
+  }
+
+  /**
    * DeepSeek's API requires message content to be a plain string, not an
    * array of content parts. Flatten any text-part arrays into joined
    * strings; non-text parts (image_url, audio, …) are replaced with a
@@ -44,7 +60,9 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
    * goes through with a textual breadcrumb rather than silently dropping
    * the part or raising mid-conversation. Also translate the standard
    * `reasoning.effort` config into DeepSeek's flat `reasoning_effort`
-   * body parameter.
+   * body parameter — but only on actual DeepSeek hostnames, since the
+   * model-name fallback above can match self-hosted/strict OpenAI-compat
+   * backends that don't accept the DeepSeek extension.
    */
   override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
@@ -52,7 +70,11 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   ): OpenAI.Chat.ChatCompletionCreateParams {
     const baseRequest = super.buildRequest(request, userPromptId);
 
-    const reshaped = translateReasoningEffort(baseRequest);
+    const reshaped = DeepSeekOpenAICompatibleProvider.isDeepSeekHostname(
+      this.contentGeneratorConfig,
+    )
+      ? translateReasoningEffort(baseRequest)
+      : baseRequest;
     if (!reshaped.messages?.length) {
       return reshaped;
     }
