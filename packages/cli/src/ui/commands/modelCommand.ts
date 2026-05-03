@@ -31,8 +31,6 @@ export const modelCommand: SlashCommand = {
   completionPriority: 100,
   get description() {
     return t(
-      'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).',
-    );
       'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately). ',
     );
   },
