@@ -50,6 +50,35 @@ const debugLogger = createDebugLogger('SHELL');
 
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
+/**
+ * Wall-clock duration above which a foreground bash command earns a
+ * "consider re-running with is_background: true" advisory in the LLM-
+ * facing tool result. Half the default 120s timeout — long enough that
+ * normal `npm install` / `pytest` runs don't trigger it, short enough
+ * that a hung-but-still-streaming process surfaces the suggestion before
+ * it gets killed by the timeout. Hint is advisory, not corrective: the
+ * command's own result is unchanged.
+ */
+const LONG_RUNNING_FOREGROUND_THRESHOLD_MS = 60000;
+
+/**
+ * Format the long-run advisory appended to long foreground commands.
+ * Exported so tests and any future consumer (e.g. an alternative
+ * renderer) can render the same text without duplicating the threshold
+ * logic.
+ */
+export function buildLongRunningForegroundHint(elapsedMs: number): string {
+  const seconds = Math.round(elapsedMs / 1000);
+  return (
+    `Note: this foreground command ran for ${seconds}s. ` +
+    `For long-running processes (build watchers, dev servers, soak ` +
+    `tests, polling loops), prefer re-running with ` +
+    `\`is_background: true\` so the agent isn't blocked while the ` +
+    `command runs. The output stays inspectable via /tasks (text), the ` +
+    `interactive Background tasks dialog (footer pill + Enter), and ` +
+    `the on-disk output file.`
+  );
+}
 
 /**
  * Detect standalone or leading `sleep N` patterns that should use Monitor
@@ -554,6 +583,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let totalLines = 0;
     let totalBytes = 0;
 
+    // Bracket the spawn → settle wall-clock so the result builder below
+    // can decide whether to append the long-run advisory. Mirrors the
+    // background path's `entry.startTime` capture (line ~781) and is the
+    // only added side state for the foreground long-run hint feature.
+    const executionStartTime = Date.now();
+
     const { result: resultPromise, pid } = await ShellExecutionService.execute(
       commandToExecute,
       cwd,
@@ -664,6 +699,18 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `Signal: ${result.signal ?? '(none)'}`,
         `Process Group PGID: ${result.pid ?? '(none)'}`,
       ].join('\n');
+
+      // Long-run advisory: only on the non-aborted branch. Timeout /
+      // user-cancel paths (the `if (result.aborted)` arm above) already
+      // surface the duration via their own message and benefit nothing
+      // from a "should have been background" reminder — the agent
+      // already knows the command didn't complete. Fires for both
+      // successful and error completions because the advice is the same
+      // ("next time, background it") in both cases.
+      const elapsedMs = Date.now() - executionStartTime;
+      if (elapsedMs >= LONG_RUNNING_FOREGROUND_THRESHOLD_MS) {
+        llmContent += `\n\n${buildLongRunningForegroundHint(elapsedMs)}`;
+      }
     }
 
     let returnDisplayMessage = '';

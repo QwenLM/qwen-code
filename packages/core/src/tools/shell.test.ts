@@ -785,6 +785,89 @@ describe('ShellTool', () => {
       });
     });
 
+    describe('long-running foreground hint', () => {
+      // Phase D part (a) — auto-bg advisory. Threshold currently 60_000ms;
+      // tests use vi fake timers to drive the wall-clock past it without
+      // actually sleeping. Hint must fire on success AND error completions
+      // (advice is the same), suppress on user-cancel / timeout (their own
+      // messaging is enough), and never fire on the background path
+      // (returns before the threshold by construction).
+      beforeEach(() => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+      });
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it('appends the long-run hint when a foreground command runs ≥ 60s', async () => {
+        const invocation = shellTool.build({
+          command: 'pytest -q',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        // Advance the wall-clock past the 60s threshold.
+        await vi.advanceTimersByTimeAsync(60_000);
+        resolveShellExecution({ output: 'all green', exitCode: 0 });
+        const result = await promise;
+        expect(result.llmContent).toContain('this foreground command ran for 60s');
+        expect(result.llmContent).toContain('is_background: true');
+        expect(result.llmContent).toContain('/tasks');
+      });
+
+      it('omits the hint when a foreground command finishes under threshold', async () => {
+        const invocation = shellTool.build({
+          command: 'echo hi',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(5_000);
+        resolveShellExecution({ output: 'hi', exitCode: 0 });
+        const result = await promise;
+        expect(result.llmContent).not.toContain('foreground command ran for');
+        expect(result.llmContent).not.toContain('is_background: true');
+      });
+
+      it('appends the hint when a long-running foreground command exits with error', async () => {
+        // Non-aborted but failed completions still benefit — the agent
+        // got blocked for >60s on something that errored, "next time
+        // background it" is exactly the right advice.
+        const invocation = shellTool.build({
+          command: 'flaky.sh',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(75_000);
+        resolveShellExecution({
+          output: '',
+          exitCode: 1,
+          error: new Error('exit 1'),
+        });
+        const result = await promise;
+        expect(result.llmContent).toContain('Exit Code: 1');
+        expect(result.llmContent).toContain('this foreground command ran for 75s');
+      });
+
+      it('omits the hint on aborted commands (timeout / user-cancel paths surface their own messaging)', async () => {
+        // `tail -f` (not `sleep N`) so the sleep-interception validator
+        // doesn't reject the command at build-time before we even reach
+        // the long-run hint logic.
+        const invocation = shellTool.build({
+          command: 'tail -f /tmp/never.log',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(120_000);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          aborted: true,
+        });
+        const result = await promise;
+        expect(result.llmContent).toContain('Command was cancelled');
+        expect(result.llmContent).not.toContain('foreground command ran for');
+      });
+    });
+
     describe('addCoAuthorToGitCommit', () => {
       it('should add co-author to git commit with double quotes', async () => {
         const command = 'git commit -m "Initial commit"';
