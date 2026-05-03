@@ -424,6 +424,47 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
         } as ContentGeneratorConfig),
       ).toBe(false);
     });
+
+    it('matches subdomains of api.deepseek.com', () => {
+      expect(
+        DeepSeekOpenAICompatibleProvider.isDeepSeekHostname({
+          baseUrl: 'https://us.api.deepseek.com/v1',
+        } as ContentGeneratorConfig),
+      ).toBe(true);
+    });
+
+    it('rejects hostile hostnames that contain api.deepseek.com as a substring', () => {
+      // Naive substring matching would let an attacker route requests
+      // through e.g. `api.deepseek.com.evil.com` and inject the
+      // DeepSeek-only `reasoning_effort` body parameter into a
+      // non-DeepSeek backend. Parse with `new URL` and match the
+      // hostname exactly to block this.
+      for (const baseUrl of [
+        'https://api.deepseek.com.evil.com/v1',
+        'https://evil.com/api.deepseek.com/v1',
+        'https://api.deepseek.comevil.com/v1',
+        'https://api-deepseek-com.example.com/v1',
+      ]) {
+        expect(
+          DeepSeekOpenAICompatibleProvider.isDeepSeekHostname({
+            baseUrl,
+          } as ContentGeneratorConfig),
+        ).toBe(false);
+      }
+    });
+
+    it('treats invalid URLs as non-DeepSeek', () => {
+      expect(
+        DeepSeekOpenAICompatibleProvider.isDeepSeekHostname({
+          baseUrl: 'not-a-url',
+        } as ContentGeneratorConfig),
+      ).toBe(false);
+      expect(
+        DeepSeekOpenAICompatibleProvider.isDeepSeekHostname({
+          baseUrl: '',
+        } as ContentGeneratorConfig),
+      ).toBe(false);
+    });
   });
 
   describe('getDefaultGenerationConfig', () => {

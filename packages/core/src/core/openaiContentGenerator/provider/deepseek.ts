@@ -44,12 +44,28 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
    * it for the body-shape rewrite would push a DeepSeek extension at
    * strict OpenAI-compat backends that may not accept it. Keep the two
    * decisions separated.
+   *
+   * Parses the baseUrl with `new URL(...)` and matches the hostname
+   * against `api.deepseek.com` (and its subdomains) exactly — a naive
+   * substring check would false-positive on hostile hosts like
+   * `https://api.deepseek.com.evil.com/v1`. Invalid URLs are treated as
+   * non-DeepSeek. Mirrors `isDeepSeekAnthropicHostname` on the Anthropic
+   * side.
    */
   static isDeepSeekHostname(
     contentGeneratorConfig: ContentGeneratorConfig,
   ): boolean {
     const baseUrl = contentGeneratorConfig.baseUrl ?? '';
-    return baseUrl.toLowerCase().includes('api.deepseek.com');
+    if (!baseUrl) return false;
+    try {
+      const hostname = new URL(baseUrl).hostname.toLowerCase();
+      return (
+        hostname === 'api.deepseek.com' ||
+        hostname.endsWith('.api.deepseek.com')
+      );
+    } catch {
+      return false;
+    }
   }
 
   /**

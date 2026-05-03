@@ -103,10 +103,11 @@ export type ContentGeneratorConfig = {
         // reasoning tier — currently DeepSeek's `reasoning_effort` (see
         // https://api-docs.deepseek.com/zh-cn/api/create-chat-completion).
         // Real Anthropic only accepts low/medium/high; the Anthropic
-        // generator clamps 'max' down to 'high' (with a debug log) when
-        // the baseURL doesn't look like a DeepSeek-compatible endpoint,
-        // so configurations targeting DeepSeek don't 400 when the same
-        // auth profile is reused against api.anthropic.com.
+        // generator clamps 'max' down to 'high' (logged once per generator
+        // via debugLogger.warn) when the baseURL doesn't look like a
+        // DeepSeek-compatible endpoint, so configurations targeting
+        // DeepSeek don't 400 when the same auth profile is reused against
+        // api.anthropic.com.
         effort?: 'low' | 'medium' | 'high' | 'max';
         budget_tokens?: number;
       };
