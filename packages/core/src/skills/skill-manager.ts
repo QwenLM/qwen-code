@@ -70,7 +70,11 @@ export function watcherIgnored(
  */
 export class SkillManager {
   private skillsCache: Map<SkillLevel, SkillConfig[]> | null = null;
-  private readonly changeListeners: Set<() => void> = new Set();
+  // Listeners may be sync or async; the type matches `addChangeListener`
+  // so future async listeners get checked instead of relying on the
+  // `Promise.resolve().then(listener)` runtime adapter to swallow the
+  // mismatch silently.
+  private readonly changeListeners: Set<() => void | Promise<void>> = new Set();
   private parseErrors: Map<string, SkillError> = new Map();
   private readonly watchers: Map<string, FSWatcher> = new Map();
   private watchStarted = false;
@@ -918,10 +922,27 @@ export class SkillManager {
 
           const skillDir = path.join(baseDir, entry.name);
 
-          // For symlinks, verify the target is a directory
+          // For symlinks, verify the target (a) resolves to a directory
+          // and (b) stays within `baseDir`. Without the scope check, a
+          // symlink anywhere in the skills tree could pull in arbitrary
+          // on-disk content as a "skill" — and skills can ship hooks
+          // that invoke shell commands, so this is a code-execution
+          // vector. Realpath resolution + prefix check kept in lockstep
+          // with the same guard in `skill-load.ts`.
           if (isSymlink) {
             try {
-              const targetStat = await fs.stat(skillDir);
+              const realPath = await fs.realpath(skillDir);
+              const resolvedBase = path.resolve(baseDir);
+              if (
+                realPath !== resolvedBase &&
+                !realPath.startsWith(resolvedBase + path.sep)
+              ) {
+                debugLogger.warn(
+                  `Skipping symlink ${entry.name} that escapes ${baseDir}`,
+                );
+                return null;
+              }
+              const targetStat = await fs.stat(realPath);
               if (!targetStat.isDirectory()) {
                 debugLogger.warn(
                   `Skipping symlink ${entry.name} that does not point to a directory`,

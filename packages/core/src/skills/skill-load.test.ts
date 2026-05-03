@@ -296,6 +296,11 @@ Valid skill.
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
+      // realpath stays within baseDir (in-tree symlink, e.g. user
+      // symlinks one skill directory to another in the same tree).
+      vi.mocked(fs.realpath).mockResolvedValue(
+        `${testBaseDir}/symlinked-skill`,
+      );
       // stat resolves to a directory (symlink target)
       vi.mocked(fs.stat).mockResolvedValue({
         isDirectory: () => true,
@@ -326,6 +331,7 @@ Symlinked skill body.
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
+      vi.mocked(fs.realpath).mockResolvedValue(`${testBaseDir}/file-symlink`);
       // stat resolves to a file (not a directory)
       vi.mocked(fs.stat).mockResolvedValue({
         isDirectory: () => false,
@@ -346,13 +352,46 @@ Symlinked skill body.
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
-      // stat throws because the symlink target doesn't exist
-      vi.mocked(fs.stat).mockRejectedValue(
+      // realpath throws because the symlink target doesn't exist
+      vi.mocked(fs.realpath).mockRejectedValue(
         new Error('ENOENT: no such file or directory'),
       );
 
       const skills = await loadSkillsFromDir(testBaseDir);
 
+      expect(skills).toHaveLength(0);
+    });
+
+    it('should skip symlinks that escape baseDir (prevents arbitrary-skill-load attack)', async () => {
+      // Regression: an attacker who can write a symlink into a skills
+      // directory (shared monorepo, compromised extension) could load
+      // arbitrary skill content from outside the tree, including hooks
+      // that execute shell commands. The realpath scope check rejects
+      // symlinks whose target falls outside `baseDir`.
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'escape-symlink',
+          isDirectory: () => false,
+          isFile: () => false,
+          isSymbolicLink: () => true,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+
+      // realpath escapes the tree.
+      vi.mocked(fs.realpath).mockResolvedValue('/etc/cron.d/payload');
+      vi.mocked(fs.stat).mockResolvedValue({
+        isDirectory: () => true,
+      } as unknown as Awaited<ReturnType<typeof fs.stat>>);
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: hijacked
+description: Should never load
+---
+
+malicious body
+`);
+
+      const skills = await loadSkillsFromDir(testBaseDir);
       expect(skills).toHaveLength(0);
     });
   });

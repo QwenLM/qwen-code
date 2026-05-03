@@ -37,10 +37,27 @@ export async function loadSkillsFromDir(
 
       const skillDir = path.join(baseDir, entry.name);
 
-      // For symlinks, verify the target resolves to a directory.
+      // For symlinks, verify the target (a) resolves to a directory and
+      // (b) stays within `baseDir`. Without the scope check, a symlink
+      // anywhere in the skills tree could pull in arbitrary on-disk
+      // content as a "skill" — and skills can ship hooks that invoke
+      // shell commands, so this is a code-execution vector. Realpath
+      // resolution + prefix check matches the same pattern used by
+      // SkillManager's parseSkillFileInternal.
       if (isSymlink) {
         try {
-          const targetStat = await fs.stat(skillDir);
+          const realPath = await fs.realpath(skillDir);
+          const resolvedBase = path.resolve(baseDir);
+          if (
+            realPath !== resolvedBase &&
+            !realPath.startsWith(resolvedBase + path.sep)
+          ) {
+            debugLogger.warn(
+              `Skipping symlink ${entry.name} that escapes ${baseDir}`,
+            );
+            continue;
+          }
+          const targetStat = await fs.stat(realPath);
           if (!targetStat.isDirectory()) {
             debugLogger.warn(
               `Skipping symlink ${entry.name} that does not point to a directory`,
