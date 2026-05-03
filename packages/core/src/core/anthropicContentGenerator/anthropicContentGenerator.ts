@@ -429,7 +429,23 @@ export class AnthropicContentGenerator implements ContentGenerator {
       return undefined;
     }
 
-    return { effort: reasoning.effort };
+    // 'max' is a DeepSeek-specific extension; real Anthropic accepts only
+    // low/medium/high. Clamp on non-DeepSeek anthropic-compatible providers
+    // so configurations targeting DeepSeek don't 400 when the user later
+    // switches the same auth profile to a stricter Anthropic backend.
+    let effort = reasoning.effort;
+    if (
+      effort === 'max' &&
+      !isDeepSeekAnthropicProvider(this.contentGeneratorConfig)
+    ) {
+      debugLogger.warn(
+        "reasoning.effort='max' is a DeepSeek extension; clamping to 'high' " +
+          'for non-DeepSeek anthropic provider to avoid HTTP 400.',
+      );
+      effort = 'high';
+    }
+
+    return { effort };
   }
 
   private async *processStream(

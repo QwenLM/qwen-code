@@ -523,6 +523,43 @@ describe('AnthropicContentGenerator', () => {
       );
     });
 
+    it("clamps effort: 'max' to 'high' on a non-DeepSeek anthropic provider", async () => {
+      // 'max' is a DeepSeek extension; real Anthropic only accepts
+      // low/medium/high. Clamp so a config targeting DeepSeek doesn't 400
+      // when reused against a stricter Anthropic backend.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ output_config: { effort: 'high' } }),
+      );
+    });
+
     it('omits thinking when request.config.thinkingConfig.includeThoughts is false', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue({

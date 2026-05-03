@@ -481,6 +481,57 @@ When using a raw model via `--model gpt-4` (not from modelProviders, creates a R
 
 The merge strategy for `modelProviders` itself is REPLACE: the entire `modelProviders` from project settings will override the corresponding section in user settings, rather than merging the two.
 
+## Reasoning / thinking configuration
+
+The optional `reasoning` field under `generationConfig` controls how aggressively the model reasons before responding. It is plumbed through every supported provider — set it once and the converter for each protocol does the right thing.
+
+```jsonc
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "deepseek-v4-pro",
+        "name": "DeepSeek V4 Pro",
+        "baseUrl": "https://api.deepseek.com/v1",
+        "envKey": "DEEPSEEK_API_KEY",
+        "generationConfig": {
+          // The four-tier scale:
+          //   'low'    | 'medium' — server-mapped to 'high' on DeepSeek
+          //   'high'   — default reasoning intensity
+          //   'max'    — DeepSeek-specific extra-strong tier
+          // Or set `false` to disable reasoning entirely.
+          "reasoning": { "effort": "max" },
+        },
+      },
+    ],
+  },
+}
+```
+
+### Per-provider behavior
+
+| Protocol / provider                          | Wire shape                                                           | Notes                                                                                                                                                                                                                                                                                    |
+| -------------------------------------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **OpenAI / DeepSeek** (`api.deepseek.com`)   | Flat `reasoning_effort: <effort>` body parameter                     | `'low'`/`'medium'` map to `'high'` and `'xhigh'` to `'max'` client-side, mirroring DeepSeek's [server-side back-compat](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion). Top-level overrides via `samplingParams.reasoning_effort` or `extra_body.reasoning_effort` win. |
+| **OpenAI** (other compatible servers)        | `reasoning: { effort, ... }` passed through verbatim                 | Set via `samplingParams` (e.g. `samplingParams.reasoning_effort` for GPT-5/o-series) when the provider expects a different shape.                                                                                                                                                        |
+| **Anthropic** (real `api.anthropic.com`)     | `output_config: { effort }` plus the `effort-2025-11-24` beta header | Real Anthropic accepts `'low'`/`'medium'`/`'high'` only. `'max'` is **clamped to `'high'`** with a debug log; if you want max effort, switch the baseURL to a DeepSeek-compatible endpoint that supports it.                                                                             |
+| **Anthropic** (`api.deepseek.com/anthropic`) | Same `output_config: { effort }` + beta header                       | `'max'` is passed through unchanged.                                                                                                                                                                                                                                                     |
+| **Gemini** (`@google/genai`)                 | `thinkingConfig: { includeThoughts: true, thinkingLevel }`           | `'low'` → `LOW`, `'high'`/`'max'` → `HIGH`, others → `THINKING_LEVEL_UNSPECIFIED` (Gemini has no `MAX` tier).                                                                                                                                                                            |
+
+### `reasoning: false`
+
+Setting `reasoning: false` (the literal boolean) explicitly disables thinking on every provider — useful for cheap side queries that don't benefit from reasoning. This is honored at the request level too via `request.config.thinkingConfig.includeThoughts: false` for one-off calls (e.g. suggestion generation).
+
+### `budget_tokens`
+
+You can pin an exact thinking-token budget by including `budget_tokens` alongside `effort`:
+
+```jsonc
+"reasoning": { "effort": "high", "budget_tokens": 50000 }
+```
+
+For Anthropic this becomes `thinking.budget_tokens`. For OpenAI/DeepSeek the field is preserved but currently ignored by the server — `reasoning_effort` is the load-bearing knob.
+
 ## Provider Models vs Runtime Models
 
 Qwen Code distinguishes between two types of model configurations:

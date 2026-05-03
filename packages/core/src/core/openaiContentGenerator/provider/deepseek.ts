@@ -141,10 +141,14 @@ function translateReasoningEffort(
     typeof next['reasoning_effort'] !== 'string' ||
     !next['reasoning_effort']
   ) {
-    next['reasoning_effort'] =
-      nestedEffort === 'low' || nestedEffort === 'medium'
-        ? 'high'
-        : nestedEffort;
+    // Backward-compat mapping per the doc: low/medium → high, xhigh → max.
+    // Surface it client-side so logs reflect the wire value the server will
+    // actually act on (the server does the same mapping if we passed the
+    // raw value through, but explicit is better for observability).
+    let normalized = nestedEffort;
+    if (normalized === 'low' || normalized === 'medium') normalized = 'high';
+    else if (normalized === 'xhigh') normalized = 'max';
+    next['reasoning_effort'] = normalized;
   }
 
   // Strip the nested form so we don't ship both shapes on the wire.

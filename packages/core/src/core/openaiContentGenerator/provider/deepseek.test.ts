@@ -294,6 +294,19 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
       expect(r['reasoning']).toBeUndefined();
     });
 
+    it("maps backward-compat 'xhigh' effort to 'max' (DeepSeek doc behavior)", () => {
+      const originalRequest = {
+        model: 'deepseek-v4-pro',
+        messages: [{ role: 'user', content: 'hi' }],
+        reasoning: { effort: 'xhigh' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(originalRequest, userPromptId);
+      const r = result as unknown as Record<string, unknown>;
+
+      expect(r['reasoning_effort']).toBe('max');
+    });
+
     it('maps backward-compat `low`/`medium` effort to `high` (DeepSeek doc behavior)', () => {
       for (const effort of ['low', 'medium'] as const) {
         const originalRequest = {
