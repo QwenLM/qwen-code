@@ -390,6 +390,26 @@ describe('MonitorTool', () => {
         'Monitor(tail -f /tmp/app.log)',
       ]);
     });
+
+    it('keeps sub-command in confirmation scope when AST read-only check fails', async () => {
+      mockIsShellCommandReadOnlyAST.mockRejectedValueOnce(
+        new Error('AST parse failure'),
+      );
+
+      const invocation = createInvocation({
+        command: 'tail -f /tmp/app.log',
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as ToolCallConfirmationDetails & {
+        permissionRules?: string[];
+      };
+
+      // Sub-command should still be in confirmation scope (not dropped)
+      expect(details.permissionRules).toBeDefined();
+      expect(details.permissionRules!.length).toBeGreaterThan(0);
+    });
   });
 
   describe('getDefaultPermission', () => {
@@ -1246,6 +1266,41 @@ describe('MonitorTool', () => {
         );
 
         expect(callback).toHaveBeenCalledTimes(5);
+      } finally {
+        monitorRegistry.abortAll({ notify: false });
+        vi.useRealTimers();
+      }
+    });
+
+    it('recovers token bucket when clock moves backwards (suspend/resume)', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(0);
+        const callback = vi.fn();
+        monitorRegistry.setNotificationCallback(callback);
+
+        const invocation = createInvocation({ command: 'noisy-cmd' });
+        await invocation.execute(new AbortController().signal);
+
+        // Burn the entire burst.
+        mockChild.stdout.emit('data', Buffer.from('l1\nl2\nl3\nl4\nl5\n'));
+        expect(callback).toHaveBeenCalledTimes(5);
+
+        // Advance time to t=2000ms, then emit a line to update lastRefill.
+        vi.setSystemTime(2000);
+        mockChild.stdout.emit('data', Buffer.from('l6\n'));
+        expect(callback).toHaveBeenCalledTimes(6);
+
+        // Simulate clock going backwards (e.g. system suspend/resume).
+        vi.setSystemTime(1000);
+
+        // Without the clock-drift guard, elapsed would be negative,
+        // starving the bucket until the clock catches up past 2000ms.
+        // With the guard, lastRefill resets and the bucket refills
+        // normally from the new (earlier) timestamp.
+        vi.setSystemTime(3000); // 2s after the reset point
+        mockChild.stdout.emit('data', Buffer.from('l7\n'));
+        expect(callback).toHaveBeenCalledTimes(7);
       } finally {
         monitorRegistry.abortAll({ notify: false });
         vi.useRealTimers();

@@ -371,6 +371,9 @@ class MonitorToolInvocation extends BaseToolInvocation<
       if (elapsed < 0) {
         // Clock went backwards (suspend/resume, NTP); reset to avoid
         // starving the bucket until the clock catches up.
+        debugLogger.warn(
+          `Monitor ${monitorId}: clock moved backwards by ${-elapsed}ms, resetting refill timestamp`,
+        );
         lastRefill = now;
       } else {
         const newTokens = Math.floor(elapsed / THROTTLE_REFILL_INTERVAL_MS);
