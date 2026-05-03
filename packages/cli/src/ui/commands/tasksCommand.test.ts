@@ -328,9 +328,13 @@ describe('tasksCommand', () => {
     // A monitor whose description / error contain raw ANSI escape codes
     // (e.g. `\x1b[2J` clear-screen, `\x1b[31m...` colour) must not reach
     // the terminal verbatim — a malicious tool description or spawn
-    // error otherwise could corrupt display. `escapeAnsiCtrlCodes`
-    // converts them to literal `[...]` sequences that render as
-    // text instead of being interpreted by the terminal.
+    // error otherwise could corrupt display. `escapeAnsiCtrlCodes` runs
+    // each ESC byte through JSON.stringify slice-trim, producing the
+    // literal six-char sequence `\u001b` (backslash-u-0-0-1-b) while
+    // the rest of the CSI body (`[2J`, `[31m`) stays intact as printable
+    // text. The assertions below pin both halves: no raw `\x1b` bytes
+    // survive, and the visible `\u001b[...]` form appears as proof the
+    // sanitizer ran rather than dropping the chars.
     getMonitors.mockReturnValue([
       monitorEntry({
         monitorId: 'mon_evil',

@@ -229,11 +229,16 @@ export const tasksCommand: SlashCommand = {
     // Defense in depth: registry entries carry user-supplied / process-
     // supplied strings (description, command, error from spawn / settle).
     // A maliciously-crafted value containing raw ANSI escape sequences
-    // could otherwise reach the terminal verbatim and corrupt display.
-    // `escapeAnsiCtrlCodes` is a no-op when the string has no control
-    // chars, so wrapping the joined output is cheap and covers every
-    // field — including any future kind's fields — without per-site
-    // sanitization sprawl.
+    // (CSI / OSC / SGR — anything starting with ESC, the kind matched
+    // by `ansi-regex`) could otherwise reach the terminal verbatim and
+    // corrupt display. `escapeAnsiCtrlCodes` is scoped to those
+    // sequences only — it does NOT escape isolated C0/C1 control bytes
+    // like BEL, BS, or VT; if those become a concern we'd need to
+    // layer `node:util`'s `stripVTControlCharacters` on top. For the
+    // common case (no escape sequences present) the helper is a no-op
+    // and returns the original string. Wrapping the joined output once
+    // covers every field — including any future kind's fields —
+    // without per-site sanitization sprawl.
     return {
       type: 'message' as const,
       messageType: 'info' as const,
