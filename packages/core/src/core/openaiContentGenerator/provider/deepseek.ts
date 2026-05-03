@@ -39,24 +39,28 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   /**
    * DeepSeek's API requires message content to be a plain string, not an
    * array of content parts. Flatten any text-part arrays into joined strings
-   * and reject non-text parts that DeepSeek cannot handle.
+   * and reject non-text parts that DeepSeek cannot handle. Also translate
+   * the standard `reasoning.effort` config into DeepSeek's flat
+   * `reasoning_effort` body parameter.
    */
   override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     const baseRequest = super.buildRequest(request, userPromptId);
-    if (!baseRequest.messages?.length) {
-      return baseRequest;
+
+    const reshaped = translateReasoningEffort(baseRequest);
+    if (!reshaped.messages?.length) {
+      return reshaped;
     }
 
-    const messages = baseRequest.messages.map((message) => {
+    const messages = reshaped.messages.map((message) => {
       const flattened = flattenContentParts(message);
       return ensureReasoningContentOnToolCalls(flattened);
     });
 
     return {
-      ...baseRequest,
+      ...reshaped,
       messages,
     };
   }
@@ -105,6 +109,52 @@ function flattenContentParts(
     ...message,
     content: text,
   } as OpenAI.Chat.ChatCompletionMessageParam;
+}
+
+// DeepSeek's chat-completions endpoint accepts a flat `reasoning_effort`
+// body parameter (Possible values: high, max — see
+// https://api-docs.deepseek.com/zh-cn/api/create-chat-completion). The
+// standard qwen-code config shape is `reasoning: { effort, ... }` which gets
+// passed through verbatim by the OpenAI pipeline. Translate to the flat
+// shape DeepSeek expects so user-configured effort levels actually take
+// effect; otherwise the nested `reasoning` object is ignored and the server
+// silently defaults to `high`. Backward-compatible mapping per the doc:
+// low / medium → high (the API does this anyway, but we surface it
+// explicitly so logs / dashboards are accurate).
+function translateReasoningEffort(
+  request: OpenAI.Chat.ChatCompletionCreateParams,
+): OpenAI.Chat.ChatCompletionCreateParams {
+  // The SDK type narrows reasoning_effort to 'low'|'medium'|'high', but
+  // DeepSeek extends it with 'max'. Treat the request as a loose record
+  // here so we can set 'max' without fighting the upstream union.
+  const r = request as unknown as Record<string, unknown>;
+  const nested = r['reasoning'] as { effort?: unknown } | undefined;
+  const nestedEffort = nested?.effort;
+  if (typeof nestedEffort !== 'string' || !nestedEffort) {
+    return request;
+  }
+
+  const next: Record<string, unknown> = { ...r };
+  // Don't clobber an already-set top-level reasoning_effort (user override
+  // via samplingParams or extra_body).
+  if (
+    typeof next['reasoning_effort'] !== 'string' ||
+    !next['reasoning_effort']
+  ) {
+    next['reasoning_effort'] =
+      nestedEffort === 'low' || nestedEffort === 'medium'
+        ? 'high'
+        : nestedEffort;
+  }
+
+  // Strip the nested form so we don't ship both shapes on the wire.
+  if (nested && Object.keys(nested).length === 1) {
+    delete next['reasoning'];
+  } else if (nested) {
+    const { effort: _drop, ...rest } = nested as Record<string, unknown>;
+    next['reasoning'] = rest;
+  }
+  return next as unknown as OpenAI.Chat.ChatCompletionCreateParams;
 }
 
 // DeepSeek's thinking mode requires reasoning_content to be replayed on every

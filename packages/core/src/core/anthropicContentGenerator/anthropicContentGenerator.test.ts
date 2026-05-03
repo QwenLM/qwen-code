@@ -484,6 +484,45 @@ describe('AnthropicContentGenerator', () => {
       expect(convertResponseSpy).toHaveBeenCalledTimes(1);
     });
 
+    // DeepSeek extends reasoning_effort with a 'max' tier; the Anthropic
+    // converter passes it through to output_config.effort and bumps the
+    // thinking budget accordingly.
+    it("passes effort: 'max' through to output_config and bumps thinking budget", async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'deepseek-v4-pro',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'deepseek-v4-pro',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({
+          output_config: { effort: 'max' },
+          thinking: { type: 'enabled', budget_tokens: 128_000 },
+        }),
+      );
+    });
+
     it('omits thinking when request.config.thinkingConfig.includeThoughts is false', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue({

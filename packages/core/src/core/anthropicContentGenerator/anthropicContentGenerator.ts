@@ -79,8 +79,9 @@ type StreamingBlockState = {
 type MessageCreateParamsWithThinking = MessageCreateParamsNonStreaming & {
   thinking?: { type: 'enabled'; budget_tokens: number };
   // Anthropic beta feature: output_config.effort (requires beta header effort-2025-11-24)
-  // This is not yet represented in the official SDK types we depend on.
-  output_config?: { effort: 'low' | 'medium' | 'high' };
+  // This is not yet represented in the official SDK types we depend on. The
+  // 'max' tier is a DeepSeek extension (see contentGenerator.ts comment).
+  output_config?: { effort: 'low' | 'medium' | 'high' | 'max' };
 };
 
 export class AnthropicContentGenerator implements ContentGenerator {
@@ -391,8 +392,17 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
     const effort = reasoning?.effort;
     // When using interleaved thinking with tools, this budget token limit is the entire context window(200k tokens).
+    // 'max' is the DeepSeek-specific extra-strong tier; bump the budget
+    // accordingly so any client-side budgeting matches the spirit of the
+    // server-side label.
     const budgetTokens =
-      effort === 'low' ? 16_000 : effort === 'high' ? 64_000 : 32_000;
+      effort === 'low'
+        ? 16_000
+        : effort === 'max'
+          ? 128_000
+          : effort === 'high'
+            ? 64_000
+            : 32_000;
 
     return {
       type: 'enabled',
@@ -402,7 +412,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
   private buildOutputConfig(
     request: GenerateContentParameters,
-  ): { effort: 'low' | 'medium' | 'high' } | undefined {
+  ): { effort: 'low' | 'medium' | 'high' | 'max' } | undefined {
     // Honor per-request opt-out so side queries (suggestionGenerator,
     // ArenaManager, forkedAgent) don't leak a reasoning-shaped output_config
     // alongside an absent top-level `thinking` parameter.

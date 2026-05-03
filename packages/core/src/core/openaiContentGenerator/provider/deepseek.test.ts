@@ -261,6 +261,95 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
       };
       expect(assistant.reasoning_content).toBe('');
     });
+
+    // https://api-docs.deepseek.com/zh-cn/api/create-chat-completion —
+    // DeepSeek expects a flat `reasoning_effort` body parameter (high/max);
+    // the standard `reasoning: { effort }` shape from the OpenAI pipeline
+    // would otherwise be ignored.
+    it('translates `reasoning.effort` into top-level `reasoning_effort`', () => {
+      const originalRequest = {
+        model: 'deepseek-v4-pro',
+        messages: [{ role: 'user', content: 'hi' }],
+        reasoning: { effort: 'max' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(originalRequest, userPromptId);
+      const r = result as unknown as Record<string, unknown>;
+
+      expect(r['reasoning_effort']).toBe('max');
+      expect(r['reasoning']).toBeUndefined();
+    });
+
+    it('passes through `reasoning_effort: high` unchanged', () => {
+      const originalRequest = {
+        model: 'deepseek-v4-pro',
+        messages: [{ role: 'user', content: 'hi' }],
+        reasoning: { effort: 'high' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(originalRequest, userPromptId);
+      const r = result as unknown as Record<string, unknown>;
+
+      expect(r['reasoning_effort']).toBe('high');
+      expect(r['reasoning']).toBeUndefined();
+    });
+
+    it('maps backward-compat `low`/`medium` effort to `high` (DeepSeek doc behavior)', () => {
+      for (const effort of ['low', 'medium'] as const) {
+        const originalRequest = {
+          model: 'deepseek-v4-pro',
+          messages: [{ role: 'user', content: 'hi' }],
+          reasoning: { effort },
+        } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+        const result = provider.buildRequest(originalRequest, userPromptId);
+        const r = result as unknown as Record<string, unknown>;
+        expect(r['reasoning_effort']).toBe('high');
+      }
+    });
+
+    it('preserves an explicitly set top-level `reasoning_effort` (no clobber)', () => {
+      const originalRequest = {
+        model: 'deepseek-v4-pro',
+        messages: [{ role: 'user', content: 'hi' }],
+        reasoning_effort: 'max',
+        reasoning: { effort: 'high' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(originalRequest, userPromptId);
+      const r = result as unknown as Record<string, unknown>;
+
+      // Top-level value wins; nested shape is stripped to avoid sending both.
+      expect(r['reasoning_effort']).toBe('max');
+      expect(r['reasoning']).toBeUndefined();
+    });
+
+    it('keeps the rest of the `reasoning` object when only `effort` is stripped', () => {
+      const originalRequest = {
+        model: 'deepseek-v4-pro',
+        messages: [{ role: 'user', content: 'hi' }],
+        reasoning: { effort: 'max', budget_tokens: 50_000 },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(originalRequest, userPromptId);
+      const r = result as unknown as Record<string, unknown>;
+
+      expect(r['reasoning_effort']).toBe('max');
+      expect(r['reasoning']).toEqual({ budget_tokens: 50_000 });
+    });
+
+    it('leaves a request without `reasoning.effort` untouched', () => {
+      const originalRequest = {
+        model: 'deepseek-v4-pro',
+        messages: [{ role: 'user', content: 'hi' }],
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(originalRequest, userPromptId);
+      const r = result as unknown as Record<string, unknown>;
+
+      expect(r['reasoning_effort']).toBeUndefined();
+      expect(r['reasoning']).toBeUndefined();
+    });
   });
 
   describe('getDefaultGenerationConfig', () => {
