@@ -585,30 +585,55 @@ malicious body
   describe('parsePathsField content validation', () => {
     it('rejects absolute path entries (project-relative only)', async () => {
       const { parsePathsField } = await import('./types.js');
+      // POSIX absolute (leading slash)
       expect(() => parsePathsField({ paths: ['/etc/passwd'] })).toThrow(
         /looks absolute/,
       );
+      // Windows UNC (leading backslash, normalized to /)
       expect(() => parsePathsField({ paths: ['\\\\server\\share'] })).toThrow(
+        /looks absolute/,
+      );
+      // Windows drive letter (regression: previously slipped through
+      // because the leading-slash check missed `C:\\` shapes).
+      expect(() => parsePathsField({ paths: ['C:\\repo\\src\\**'] })).toThrow(
+        /looks absolute/,
+      );
+      expect(() => parsePathsField({ paths: ['D:/repo/src/**'] })).toThrow(
         /looks absolute/,
       );
     });
 
-    it('rejects parent-dir-escape patterns', async () => {
+    it('rejects parent-dir-escape patterns (including embedded `..` segments)', async () => {
       const { parsePathsField } = await import('./types.js');
+      // Direct prefix
       expect(() => parsePathsField({ paths: ['../*.ts'] })).toThrow(
         /escapes the project root/,
       );
       expect(() => parsePathsField({ paths: ['..'] })).toThrow(
         /escapes the project root/,
       );
+      // `./../` shape (regression: previous check only saw the `./`
+      // prefix and missed the embedded `..`).
+      expect(() => parsePathsField({ paths: ['./../*.ts'] })).toThrow(
+        /escapes the project root/,
+      );
+      // Embedded `..` segment in the middle
+      expect(() => parsePathsField({ paths: ['src/../../**'] })).toThrow(
+        /escapes the project root/,
+      );
+      // Backslash-separated `..` (Windows-shaped)
+      expect(() => parsePathsField({ paths: ['..\\secret\\*.ts'] })).toThrow(
+        /escapes the project root/,
+      );
     });
 
-    it('still accepts in-project relative globs', async () => {
+    it('still accepts in-project relative globs (including dotfile-prefixed)', async () => {
       const { parsePathsField } = await import('./types.js');
-      expect(parsePathsField({ paths: ['src/**/*.ts', '**/*.tsx'] })).toEqual([
-        'src/**/*.ts',
-        '**/*.tsx',
-      ]);
+      expect(
+        parsePathsField({ paths: ['src/**/*.ts', '**/*.tsx', '..bar/foo'] }),
+      ).toEqual(['src/**/*.ts', '**/*.tsx', '..bar/foo']);
+      // The segment-based check is exact (`seg === '..'`), so a real
+      // filename starting with two dots like `..bar` is NOT rejected.
     });
   });
 

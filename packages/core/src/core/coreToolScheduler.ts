@@ -292,7 +292,32 @@ export function extractToolFilePaths(
   // gating only on the canonical name closes the alias-bypass hole.
   const canonical =
     (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
-  if (!FS_PATH_TOOL_NAMES.has(canonical)) return [];
+  if (!FS_PATH_TOOL_NAMES.has(canonical)) {
+    // Surface allowlist gaps at debug level when a non-FS tool's input
+    // *looks* path-shaped: we silently skip path activation for it, but
+    // the field naming suggests it might be a real FS tool that just
+    // hasn't been added to FS_PATH_TOOL_NAMES yet (or an MCP tool whose
+    // input convention legitimately reuses these field names — both are
+    // worth the debug breadcrumb when chasing "why didn't my path-gated
+    // skill activate?"). Cheap object-property reads, only fires when
+    // the user has DEBUG=tool-scheduler enabled, no production noise.
+    if (toolInput && typeof toolInput === 'object') {
+      const obj = toolInput as Record<string, unknown>;
+      if (
+        typeof obj['file_path'] === 'string' ||
+        typeof obj['filePath'] === 'string' ||
+        typeof obj['path'] === 'string' ||
+        Array.isArray(obj['paths'])
+      ) {
+        debugLogger.debug(
+          `Tool "${toolName}" (canonical "${canonical}") has path-like input fields ` +
+            `but is not in FS_PATH_TOOL_NAMES — path-gated skills / conditional rules ` +
+            `will not see its paths. If this is a filesystem tool, add it to the allowlist.`,
+        );
+      }
+    }
+    return [];
+  }
   if (!toolInput || typeof toolInput !== 'object') return [];
   const obj = toolInput as Record<string, unknown>;
   const out: string[] = [];

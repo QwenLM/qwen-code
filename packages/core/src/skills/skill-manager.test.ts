@@ -933,6 +933,85 @@ Review content`);
 
       expect(listener).not.toHaveBeenCalled();
     });
+
+    it('awaits async listeners before resolving', async () => {
+      // Regression: notifyChangeListeners must await the Promises returned
+      // by listeners (e.g. SkillTool.refreshSkills) before resolving — the
+      // <system-reminder> envelope is emitted off the resolution of
+      // matchAndActivateByPath, and announcing a skill before
+      // SkillTool.setTools() finishes leaves the model unable to invoke
+      // the just-activated skill.
+      let resolveListener: () => void = () => {};
+      const listenerSettled = new Promise<void>((resolve) => {
+        resolveListener = resolve;
+      });
+      let listenerObserved = false;
+      manager.addChangeListener(() =>
+        listenerSettled.then(() => {
+          listenerObserved = true;
+        }),
+      );
+
+      vi.mocked(fs.readdir).mockResolvedValue(
+        [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+      );
+
+      // Refresh kicks off the listener; without await semantics it would
+      // race ahead.
+      const refreshDone = manager.refreshCache();
+      // Give microtasks one tick so the listener's outer Promise enters
+      // its `.then` callback (still parked on `listenerSettled`).
+      await Promise.resolve();
+      expect(listenerObserved).toBe(false);
+
+      resolveListener();
+      await refreshDone;
+      expect(listenerObserved).toBe(true);
+    });
+
+    it('isolates listener throws via allSettled — siblings still run', async () => {
+      // Regression: a single buggy listener (e.g. a third-party hook
+      // throwing during refresh) must not stop the other listeners or
+      // make refreshCache itself reject. allSettled preserves this; if
+      // someone swaps it back to Promise.all the throw propagates and
+      // every subsequent listener silently dies.
+      const throwing = vi.fn(() => {
+        throw new Error('listener exploded');
+      });
+      const sibling = vi.fn();
+      manager.addChangeListener(throwing);
+      manager.addChangeListener(sibling);
+
+      vi.mocked(fs.readdir).mockResolvedValue(
+        [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+      );
+
+      await expect(manager.refreshCache()).resolves.toBeUndefined();
+      expect(throwing).toHaveBeenCalled();
+      expect(sibling).toHaveBeenCalled();
+    });
+
+    it('isolates async listener rejections — siblings still run', async () => {
+      // Same property as the sync-throw case but via a rejected Promise:
+      // the wrapper `Promise.resolve().then(listener)` flips both shapes
+      // into the same Promise pipeline, but it's worth pinning explicitly
+      // because a refactor that special-cases sync throws could
+      // accidentally regress the async branch.
+      const asyncRejector = vi.fn(() =>
+        Promise.reject(new Error('async fail')),
+      );
+      const sibling = vi.fn();
+      manager.addChangeListener(asyncRejector);
+      manager.addChangeListener(sibling);
+
+      vi.mocked(fs.readdir).mockResolvedValue(
+        [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+      );
+
+      await expect(manager.refreshCache()).resolves.toBeUndefined();
+      expect(asyncRejector).toHaveBeenCalled();
+      expect(sibling).toHaveBeenCalled();
+    });
   });
 
   describe('conditional skill activation', () => {

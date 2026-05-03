@@ -121,9 +121,32 @@ export class SkillManager {
    * still lets the others finish.
    */
   private async notifyChangeListeners(): Promise<void> {
+    // Cap each listener at 30s. Without this, a hung listener (e.g.
+    // `SkillTool.refreshSkills` → `setTools()` blocked on a network
+    // call inside the gemini client) would permanently stall
+    // `matchAndActivateByPaths` and `refreshCache`. The activation
+    // registry itself has already been mutated synchronously in the
+    // caller, so dropping a slow listener after the timeout is the
+    // best-effort behavior — the listener can still finish later, it
+    // just no longer holds up the activation reminder.
+    const TIMEOUT_MS = 30_000;
+    const withTimeout = (p: Promise<unknown>): Promise<unknown> =>
+      Promise.race([
+        p,
+        new Promise((_, reject) => {
+          const id = setTimeout(
+            () => reject(new Error(`listener timeout after ${TIMEOUT_MS}ms`)),
+            TIMEOUT_MS,
+          );
+          // Don't keep the event loop alive solely for this timer.
+          if (typeof id === 'object' && id !== null && 'unref' in id) {
+            (id as { unref: () => void }).unref();
+          }
+        }),
+      ]);
     const results = await Promise.allSettled(
       Array.from(this.changeListeners).map((listener) =>
-        Promise.resolve().then(listener),
+        withTimeout(Promise.resolve().then(listener)),
       ),
     );
     for (const result of results) {
