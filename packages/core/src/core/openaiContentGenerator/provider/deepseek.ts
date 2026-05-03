@@ -38,10 +38,13 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
 
   /**
    * DeepSeek's API requires message content to be a plain string, not an
-   * array of content parts. Flatten any text-part arrays into joined strings
-   * and reject non-text parts that DeepSeek cannot handle. Also translate
-   * the standard `reasoning.effort` config into DeepSeek's flat
-   * `reasoning_effort` body parameter.
+   * array of content parts. Flatten any text-part arrays into joined
+   * strings; non-text parts (image_url, audio, …) are replaced with a
+   * `[Unsupported content type: <type>]` placeholder so the request still
+   * goes through with a textual breadcrumb rather than silently dropping
+   * the part or raising mid-conversation. Also translate the standard
+   * `reasoning.effort` config into DeepSeek's flat `reasoning_effort`
+   * body parameter.
    */
   override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
@@ -151,7 +154,11 @@ function translateReasoningEffort(
     next['reasoning_effort'] = normalized;
   }
 
-  // Strip the nested form so we don't ship both shapes on the wire.
+  // Drop only the duplicated `effort` key from the nested form so we don't
+  // ship two competing values for the same knob. Other keys inside
+  // `reasoning` (e.g. an extra_body-injected `budget_tokens`) stay
+  // intact — they're orthogonal data the server can ignore or honor on
+  // its own, and silently swallowing them here would be a surprise.
   if (nested && Object.keys(nested).length === 1) {
     delete next['reasoning'];
   } else if (nested) {
