@@ -13,21 +13,10 @@ import type { SkillConfig } from '../skills/types.js';
 import { logSkillLaunch, SkillLaunchEvent } from '../telemetry/index.js';
 import path from 'path';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { escapeXml } from '../utils/xml.js';
 import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 
 const debugLogger = createDebugLogger('SKILL');
-
-/**
- * Escape characters that have special meaning in XML so that user-supplied
- * skill fields (description, whenToUse) cannot inject tags into the
- * <available_skills> block that is sent to the model.
- */
-function escapeXml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
 
 export interface SkillParams {
   skill: string;
@@ -182,9 +171,15 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
 
     for (const skill of this.availableSkills) {
       const descText = `${escapeXml(skill.description)}${skill.whenToUse ? ` — ${escapeXml(skill.whenToUse)}` : ''} (${skill.level})`;
+      // Escape `skill.name` defensively. File-based skills loaded
+      // through `parseSkillContent` go through `validateSkillName` (a
+      // charset whitelist that already excludes `<>&`), but extension
+      // skills come in via `extension.skills` (skill-manager.ts:827)
+      // and bypass that validator entirely. A crafted extension name
+      // would otherwise inject raw tags into <available_skills>.
       allSkillEntries.push(`<skill>
 <name>
-${skill.name}
+${escapeXml(skill.name)}
 </name>
 <description>
 ${descText}

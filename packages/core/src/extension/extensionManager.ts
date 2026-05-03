@@ -1370,8 +1370,20 @@ export class ExtensionManager {
     }
     // Hierarchical memory refresh is now awaited too — the previous
     // fire-and-forget defeated the rest of the function's "wait until
-    // refresh is done" contract.
-    await this.config.refreshHierarchicalMemory();
+    // refresh is done" contract. Wrap in try/catch so a transient
+    // failure doesn't propagate up to `enableExtension` /
+    // `installExtension` callers, which have already mutated their
+    // `isActive`/`installed` flags by the time refreshMemory is
+    // invoked. A failed memory refresh leaves stale memory but should
+    // not back out the surrounding extension transition.
+    try {
+      await this.config.refreshHierarchicalMemory();
+    } catch (err) {
+      debugLogger.error(
+        'refreshMemory: refreshHierarchicalMemory failed:',
+        err,
+      );
+    }
   }
 
   async refreshTools(): Promise<void> {

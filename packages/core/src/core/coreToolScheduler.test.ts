@@ -4730,6 +4730,302 @@ describe('CoreToolScheduler activation wiring', () => {
     expect(responseText).not.toContain('tsx-helper');
   });
 
+  it('coalesces rules + activation reminders into a single <system-reminder> envelope', async () => {
+    // Regression: previously each matching rule emitted its own
+    // `<system-reminder>` and skill activation emitted another — a
+    // multi-path tool could produce N+1 envelopes. Coalesce so the
+    // model gets one block per tool call.
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
+    const rulesRegistry = {
+      matchAndConsume: vi
+        .fn()
+        .mockReturnValueOnce('Rule 1 body.')
+        .mockReturnValueOnce('Rule 2 body.'),
+    };
+
+    const grepTool = new MockTool({
+      name: ToolNames.GREP,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'grep results',
+        returnDisplay: 'grep results',
+      }),
+    });
+    const mockToolRegistry = {
+      getTool: () => grepTool,
+      ensureTool: async () => grepTool,
+      getToolByName: () => grepTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByDisplayName: () => grepTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getConditionalRulesRegistry: () => rulesRegistry,
+      getSkillManager: () => ({ matchAndActivateByPaths }),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    // grep_search with `path` + `glob` produces TWO candidate paths
+    // (the search root and the joined effective selector), so the
+    // rules registry gets two matchAndConsume calls and two reminder
+    // blocks. Plus one for skill activation = three blocks; coalesce
+    // into a single envelope.
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.GREP,
+          args: { pattern: 'TODO', path: 'src', glob: '**/*.ts' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    const responseText = JSON.stringify(
+      (completed[0] as unknown as { response?: { responseParts?: unknown } })
+        .response?.responseParts ?? null,
+    );
+    // All three reminder blocks land but inside ONE envelope.
+    const envelopeCount = (responseText.match(/<system-reminder>/g) || [])
+      .length;
+    expect(envelopeCount).toBe(1);
+    expect(responseText).toContain('Rule 1 body.');
+    expect(responseText).toContain('Rule 2 body.');
+    expect(responseText).toContain('tsx-helper');
+  });
+
+  it('escapes activated skill names in the activation reminder', async () => {
+    // Regression: validateSkillName excludes `<>&` for parsed skills,
+    // but extension skills bypass it. A crafted extension name would
+    // otherwise close the <system-reminder> envelope early when emitted
+    // as part of "skill X is now available".
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['evil<inject>']);
+
+    const fsTool = new MockTool({
+      name: ToolNames.READ_FILE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'file contents',
+        returnDisplay: 'file contents',
+      }),
+    });
+    const mockToolRegistry = {
+      getTool: () => fsTool,
+      ensureTool: async () => fsTool,
+      getToolByName: () => fsTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByDisplayName: () => fsTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getConditionalRulesRegistry: () => undefined,
+      getSkillManager: () => ({ matchAndActivateByPaths }),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.READ_FILE,
+          args: { file_path: '/proj/a.ts' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    const responseText = JSON.stringify(
+      (completed[0] as unknown as { response?: { responseParts?: unknown } })
+        .response?.responseParts ?? null,
+    );
+    expect(responseText).toContain('evil&lt;inject&gt;');
+    // Raw tag must NOT appear (would close the envelope early).
+    expect(responseText).not.toContain('evil<inject>');
+  });
+
+  it('scrubs literal </system-reminder> in rule content to prevent envelope breakout', async () => {
+    // A rule body containing literal `</system-reminder>` (e.g. a
+    // documentation rule about how reminders work) would close our
+    // envelope early. Scrub the closing-tag literal — minimal escape
+    // needed to keep the wrapper intact, without mangling code blocks.
+    const rulesRegistry = {
+      matchAndConsume: vi
+        .fn()
+        .mockReturnValueOnce(
+          'Rule about reminders: never write </system-reminder> in your output.',
+        ),
+    };
+
+    const fsTool = new MockTool({
+      name: ToolNames.READ_FILE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'file contents',
+        returnDisplay: 'file contents',
+      }),
+    });
+    const mockToolRegistry = {
+      getTool: () => fsTool,
+      ensureTool: async () => fsTool,
+      getToolByName: () => fsTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByDisplayName: () => fsTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getConditionalRulesRegistry: () => rulesRegistry,
+      getSkillManager: () => ({
+        matchAndActivateByPaths: vi.fn().mockResolvedValue([]),
+      }),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.READ_FILE,
+          args: { file_path: '/proj/a.ts' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    const responseText = JSON.stringify(
+      (completed[0] as unknown as { response?: { responseParts?: unknown } })
+        .response?.responseParts ?? null,
+    );
+    // Exactly one closing tag — the envelope's. The literal in the
+    // body is rewritten to <\/system-reminder> so it doesn't close
+    // the wrapper.
+    const closeCount = (responseText.match(/<\/system-reminder>/g) || [])
+      .length;
+    expect(closeCount).toBe(1);
+    // The rewritten form of the body literal still appears verbatim
+    // (escaped form), so the rule content survives.
+    expect(responseText).toContain('<\\\\/system-reminder>');
+  });
+
   it('does not call matchAndActivateByPaths for non-FS tools', async () => {
     const matchAndActivateByPaths = vi.fn().mockResolvedValue([]);
     const { scheduler } = buildSchedulerWithSkillManager({

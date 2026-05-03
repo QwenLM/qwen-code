@@ -107,13 +107,27 @@ export class SkillManager {
    * downstream tool descriptions are refreshed, eliminating the race where
    * a system-reminder announces a skill before the model can actually see
    * it in `<available_skills>`.
+   *
+   * Listeners run in parallel via `Promise.allSettled`. They're
+   * independent reads (each rebuilds its own derived state from the
+   * shared registry); serializing them used to make `matchAndActivateByPaths`
+   * scale linearly with the number of registered listeners — a real
+   * cost since per-subagent SkillTool instances each register one.
+   * `allSettled` (not `Promise.all`) so a single listener throwing
+   * still lets the others finish.
    */
   private async notifyChangeListeners(): Promise<void> {
-    for (const listener of this.changeListeners) {
-      try {
-        await listener();
-      } catch (error) {
-        debugLogger.warn('Skill change listener threw an error:', error);
+    const results = await Promise.allSettled(
+      Array.from(this.changeListeners).map((listener) =>
+        Promise.resolve().then(listener),
+      ),
+    );
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        debugLogger.warn(
+          'Skill change listener threw an error:',
+          result.reason,
+        );
       }
     }
   }

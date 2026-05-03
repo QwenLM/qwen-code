@@ -173,6 +173,27 @@ describe('SkillTool', () => {
       expect(tool.description).not.toContain('<script>');
     });
 
+    it('should XML-escape skill.name (defends against extension-skill bypass)', async () => {
+      // Regression: file-based skill names go through validateSkillName,
+      // but extension skills come in via extension.skills (skill-manager
+      // line 827) and bypass that validator. A crafted extension name
+      // would otherwise inject raw tags into <available_skills>.
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue([
+        {
+          name: 'evil<inject>',
+          description: 'Innocent description',
+          level: 'extension',
+          filePath: '/ext/skills/evil/SKILL.md',
+          body: 'Body.',
+        },
+      ]);
+      const tool = new SkillTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(tool.description).toContain('evil&lt;inject&gt;');
+      expect(tool.description).not.toContain('evil<inject>');
+    });
+
     it('should XML-escape modelInvocableCommands name (bypasses validateSkillName)', async () => {
       // file-based skill names go through `validateSkillName` (regex
       // whitelist) at parse time. Command names from

@@ -49,6 +49,7 @@ import type {
 } from '@google/genai';
 import { fileURLToPath } from 'node:url';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { escapeXml } from '../utils/xml.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
@@ -1900,16 +1901,20 @@ export class CoreToolScheduler {
           const rulesRegistry = this.config.getConditionalRulesRegistry();
           const skillManager = this.config.getSkillManager();
 
+          // Collect every reminder block produced by this tool call, then
+          // emit them as a single `<system-reminder>` envelope at the end.
+          // The previous version emitted one envelope per matching rule
+          // PLUS one for skill activation — a multi-path tool could
+          // produce N+1 envelopes, diluting the model's attention. One
+          // wrapper / one append also lets us share the breakout-prevention
+          // sanitization step (closing-tag scrub) in one place.
+          const reminderBlocks: string[] = [];
+
           for (const candidatePath of candidatePaths) {
             // Inject conditional rules at most once per session per rule
             // file. The registry tracks dedup internally.
             const rulesCtx = rulesRegistry?.matchAndConsume(candidatePath);
-            if (rulesCtx) {
-              content = appendAdditionalContext(
-                content,
-                `<system-reminder>\n${rulesCtx}\n</system-reminder>`,
-              );
-            }
+            if (rulesCtx) reminderBlocks.push(rulesCtx);
           }
 
           // Skill activation runs in a single batch over all candidate
@@ -1918,7 +1923,7 @@ export class CoreToolScheduler {
           // exactly once for this tool call, regardless of how many
           // paths produced new activations. The await is load-bearing:
           // matchAndActivateByPaths only resolves after the listener
-          // chain settles, so the system-reminder we append below
+          // chain settles, so the activation reminder we append below
           // never lands in a turn where <available_skills> is still
           // stale.
           const activatedSkills =
@@ -1933,12 +1938,33 @@ export class CoreToolScheduler {
             // SkillTool to the model.
             const hasSkillTool = !!this.toolRegistry.getTool(ToolNames.SKILL);
             if (hasSkillTool) {
-              const names = activatedSkills.join(', ');
-              content = appendAdditionalContext(
-                content,
-                `<system-reminder>\nThe following skill(s) are now available via the Skill tool based on the file you just accessed: ${names}. Use them if relevant to the task.\n</system-reminder>`,
+              // Escape skill names defensively: validateSkillName already
+              // excludes `<>&` for parsed file-based skills, but
+              // extension skills (extension.skills array) bypass that
+              // validator. A crafted extension name would otherwise
+              // close the <system-reminder> envelope early.
+              const names = activatedSkills.map(escapeXml).join(', ');
+              reminderBlocks.push(
+                `The following skill(s) are now available via the Skill tool based on the file you just accessed: ${names}. Use them if relevant to the task.`,
               );
             }
+          }
+
+          if (reminderBlocks.length > 0) {
+            // Final closing-tag scrub on the joined body — defense in
+            // depth against rules whose markdown body contains a
+            // literal `</system-reminder>` sequence (which would
+            // otherwise close our envelope mid-content). Full XML
+            // escaping would mangle code blocks in rule bodies; the
+            // targeted scrub is the minimum needed to keep the
+            // envelope intact.
+            const body = reminderBlocks
+              .join('\n\n')
+              .replace(/<\/system-reminder>/gi, '<\\/system-reminder>');
+            content = appendAdditionalContext(
+              content,
+              `<system-reminder>\n${body}\n</system-reminder>`,
+            );
           }
         }
 
