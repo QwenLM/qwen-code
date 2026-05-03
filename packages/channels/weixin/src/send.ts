@@ -3,7 +3,9 @@
  */
 
 import { randomBytes, randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { resolve, extname } from 'node:path';
 import { sendMessage, getUploadUrl, uploadToCdn } from './api.js';
 import { MessageType, MessageState, MessageItemType } from './types.js';
 import { encryptAesEcb, computeMd5 } from './media.js';
@@ -31,6 +33,109 @@ export function markdownToPlainText(text: string): string {
     .trim();
 }
 
+// ── Image path validation ─────────────────────────────────────────
+
+const ALLOWED_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
+const MAX_IMAGE_SIZE = 20 * 1024 * 1024; // 20 MB
+
+/** Image magic bytes → MIME type mapping. */
+export function detectImageMime(data: Buffer): string {
+  if (
+    data[0] === 0x89 &&
+    data[1] === 0x50 &&
+    data[2] === 0x4e &&
+    data[3] === 0x47
+  ) {
+    return 'image/png';
+  }
+  if (data[0] === 0x47 && data[1] === 0x49 && data[2] === 0x46) {
+    return 'image/gif';
+  }
+  if (
+    data[0] === 0x52 &&
+    data[1] === 0x49 &&
+    data[2] === 0x46 &&
+    data[3] === 0x46
+  ) {
+    return 'image/webp';
+  }
+  // Default to JPEG; all others are rejected by extension whitelist
+  return 'image/jpeg';
+}
+
+/**
+ * Validate and resolve an image path before reading.
+ *
+ * Security: prevents AI-controlled [IMAGE: ...] markers from reading
+ * arbitrary files by enforcing directory allowlist, extension allowlist,
+ * size cap, and magic-byte verification.
+ *
+ * @param imagePath  Raw path from the AI response.
+ * @param workspaceDirs  Additional directories to allow (typically the cwd).
+ * @returns Resolved absolute realpath if valid.
+ */
+export function validateImagePath(
+  imagePath: string,
+  workspaceDirs: string[] = [],
+): string {
+  const resolved = resolve(imagePath);
+  const ext = extname(resolved).toLowerCase();
+
+  if (!ALLOWED_EXTS.has(ext)) {
+    throw new Error(`Image extension not allowed: ${ext} (path: ${resolved})`);
+  }
+
+  const real: string = (() => {
+    try {
+      return realpathSync(resolved);
+    } catch {
+      throw new Error(`Image file not found: ${resolved}`);
+    }
+  })();
+
+  const st = statSync(real);
+  if (!st.isFile()) {
+    throw new Error(`Not a regular file: ${real}`);
+  }
+  if (st.size > MAX_IMAGE_SIZE) {
+    throw new Error(
+      `Image too large: ${st.size} bytes (max ${MAX_IMAGE_SIZE})`,
+    );
+  }
+
+  // Build the allowlist: /tmp/ (and macOS real /private/tmp/), os.tmpdir(),
+  // plus workspace directories passed by the caller.
+  const ALLOWED_DIRS = [
+    '/tmp/',
+    '/private/tmp/',
+    tmpdir() + '/',
+    ...workspaceDirs.map((d) => resolve(d) + '/'),
+  ];
+
+  if (!ALLOWED_DIRS.some((dir) => real.startsWith(dir))) {
+    throw new Error(`Image path outside allowed directories: ${real}`);
+  }
+
+  // Verify magic bytes match the extension
+  const head = readFileSync(real, { flag: 'r' });
+  const mime = detectImageMime(head);
+  const extToExpectedMime: Record<string, string> = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+  };
+  const expected = extToExpectedMime[ext];
+  if (mime !== expected) {
+    throw new Error(
+      `Image type mismatch: ext=${ext} expects ${expected} but got ${mime}`,
+    );
+  }
+
+  return real;
+}
+
 /** Send a text message */
 export async function sendText(params: {
   to: string;
@@ -55,7 +160,7 @@ export async function sendText(params: {
 
 /**
  * Send an image message via the four-step CDN upload flow:
- *   1. Read file, compute rawsize + MD5; generate random AES key + filekey
+ *   1. Validate path + read file, compute rawsize + MD5; generate AES key + filekey
  *   2. Request upload URL via getuploadurl
  *   3. AES-128-ECB encrypt + POST upload to CDN; extract x-encrypted-param
  *   4. Send message with image_item referencing the CDN media
@@ -66,11 +171,16 @@ export async function sendImage(params: {
   baseUrl: string;
   token: string;
   contextToken: string;
+  /** Workspace directories to allow for image paths. */
+  workspaceDirs?: string[];
 }): Promise<void> {
-  const { to, imagePath, baseUrl, token, contextToken } = params;
+  const { to, imagePath, baseUrl, token, contextToken, workspaceDirs } = params;
 
-  // Step 1: read file, compute metadata + generate random identifiers
-  const fileBuffer = readFileSync(imagePath);
+  // Step 1 (security): validate and resolve the image path
+  const resolvedPath = validateImagePath(imagePath, workspaceDirs);
+
+  // Step 2: read file, compute metadata + generate random identifiers
+  const fileBuffer = readFileSync(resolvedPath);
   const rawsize = fileBuffer.length;
   const rawfilemd5 = computeMd5(fileBuffer);
 
@@ -101,8 +211,8 @@ export async function sendImage(params: {
   const cdnEncryptParam = await uploadToCdn(uploadParam, filekey, encrypted);
 
   // Step 4: send message with image_item using CDN's x-encrypted-param
-  // aes_key in sendmessage should be base64(hex string) per protocol
-  const aesKeyBase64 = Buffer.from(aesKeyHex, 'ascii').toString('base64');
+  // aes_key: base64(raw 16 bytes) for images per protocol
+  const aesKeyBase64 = aesKeyBytes.toString('base64');
 
   await sendMessage(baseUrl, token, {
     to_user_id: to,

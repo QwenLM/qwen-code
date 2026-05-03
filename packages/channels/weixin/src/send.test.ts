@@ -1,28 +1,52 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { markdownToPlainText } from './send.js';
 
 const {
   mockReadFileSync,
+  mockStatSync,
+  mockRealpathSync,
   mockGetUploadUrl,
   mockUploadToCdn,
   mockSendMessage,
   mockRandomBytes,
 } = vi.hoisted(() => ({
   mockReadFileSync: vi.fn(),
+  mockStatSync: vi.fn(),
+  mockRealpathSync: vi.fn((p: string) => p),
   mockGetUploadUrl: vi.fn(),
   mockUploadToCdn: vi.fn(),
   mockSendMessage: vi.fn(),
   mockRandomBytes: vi.fn((size: number) => Buffer.alloc(size, 0x42)),
 }));
 
-vi.mock('node:fs', () => ({
-  readFileSync: mockReadFileSync,
+// PNG magic bytes: 89 50 4E 47 0D 0A 1A 0A
+const PNG_HEADER = Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+]);
+
+vi.mock('node:os', () => ({
+  tmpdir: () => '/tmp',
 }));
 
-vi.mock('node:crypto', () => ({
-  randomBytes: mockRandomBytes,
-  randomUUID: () => 'test-uuid',
+vi.mock('node:fs', () => ({
+  readFileSync: mockReadFileSync,
+  statSync: mockStatSync,
+  realpathSync: mockRealpathSync,
 }));
+
+vi.mock('node:path', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:path')>();
+  return { ...actual };
+});
+
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:crypto')>();
+  return {
+    ...actual,
+    randomBytes: mockRandomBytes,
+    randomUUID: () => 'test-uuid',
+  };
+});
 
 vi.mock('./api.js', () => ({
   sendMessage: mockSendMessage,
@@ -30,10 +54,9 @@ vi.mock('./api.js', () => ({
   uploadToCdn: mockUploadToCdn,
 }));
 
-vi.mock('./media.js', () => ({
-  encryptAesEcb: vi.fn((data: Buffer) => data),
-  computeMd5: vi.fn(() => 'd41d8cd98f00b204e9800998ecf8427e'),
-}));
+// Use real encryptAesEcb / computeMd5 so tests catch padding mismatches.
+const { encryptAesEcb, computeMd5 } =
+  await vi.importActual<typeof import('./media.js')>('./media.js');
 
 const { sendImage } = await import('./send.js');
 
@@ -124,24 +147,40 @@ describe('sendImage', () => {
     baseUrl: 'https://api.example.com',
     token: 'token-abc',
     contextToken: 'ctx-456',
+    workspaceDirs: ['/home/user/project'],
   };
 
-  const fakeImageData = Buffer.from('fake-image-bytes');
+  const fakeImageData = Buffer.concat([
+    PNG_HEADER,
+    Buffer.from('fake-image-bytes'),
+  ]);
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // statSync: must be a regular file under file size limit
+    mockStatSync.mockReturnValue({
+      isFile: () => true,
+      size: fakeImageData.length,
+    } as unknown as ReturnType<(typeof import('node:fs'))['statSync']>);
+    // realpathSync: identity pass-through (default mock)
+    // readFileSync: returns PNG-headed data for MIME check + full read
+    mockReadFileSync.mockReturnValue(fakeImageData);
   });
 
   it('completes the four-step upload and send flow', async () => {
-    mockReadFileSync.mockReturnValue(fakeImageData);
     mockGetUploadUrl.mockResolvedValue('upload-param-value');
     mockUploadToCdn.mockResolvedValue('cdn-encrypt-param');
     mockSendMessage.mockResolvedValue(undefined);
 
     await sendImage(defaultParams);
 
-    // Step 1: read file
-    expect(mockReadFileSync).toHaveBeenCalledWith('/tmp/test.png');
+    // Step 1: validateImagePath calls readFileSync for MIME check,
+    // then sendImage calls readFileSync for full file read.
+    expect(mockReadFileSync).toHaveBeenCalledTimes(2);
+    expect(mockReadFileSync).toHaveBeenNthCalledWith(1, '/tmp/test.png', {
+      flag: 'r',
+    });
+    expect(mockReadFileSync).toHaveBeenNthCalledWith(2, '/tmp/test.png');
 
     // Step 2: get upload URL called with correct params
     const encryptedSize = Math.ceil((fakeImageData.length + 1) / 16) * 16;
@@ -153,23 +192,22 @@ describe('sendImage', () => {
       'user-123',
       expectedFilekey,
       fakeImageData.length,
-      'd41d8cd98f00b204e9800998ecf8427e',
+      computeMd5(fakeImageData),
       encryptedSize,
       expectedAesKeyHex,
     );
 
-    // Step 3: upload to CDN (uploadToCdn takes urlOrParam, filekey, encryptedData)
+    // Step 3: upload to CDN (with real encryptAesEcb output)
+    const aesKeyBytes = Buffer.alloc(16, 0x42);
+    const expectedEncrypted = encryptAesEcb(fakeImageData, aesKeyBytes);
     expect(mockUploadToCdn).toHaveBeenCalledWith(
       'upload-param-value',
       expectedFilekey,
-      fakeImageData,
+      expectedEncrypted,
     );
 
     // Step 4: send message with image_item using CDN's x-encrypted-param
-    const expectedAesKeyBase64 = Buffer.from(
-      '42424242424242424242424242424242',
-      'ascii',
-    ).toString('base64');
+    const expectedAesKeyBase64 = aesKeyBytes.toString('base64');
     expect(mockSendMessage).toHaveBeenCalledWith(
       'https://api.example.com',
       'token-abc',

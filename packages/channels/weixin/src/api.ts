@@ -12,6 +12,69 @@ import type {
   BaseInfo,
 } from './types.js';
 
+// ── Error handling ────────────────────────────────────────────────
+
+/** Structured error from WeChat iLink Bot API. */
+export class WeixinApiError extends Error {
+  /** HTTP status code (0 if network/timeout error). */
+  status: number;
+  /** API-level return code (ret field in response body). */
+  ret?: number;
+  /** API-level error code (errcode field in response body). */
+  errcode?: number;
+
+  constructor(message: string, status: number, ret?: number, errcode?: number) {
+    super(message);
+    this.name = 'WeixinApiError';
+    this.status = status;
+    this.ret = ret;
+    this.errcode = errcode;
+  }
+}
+
+/** Errors that are safe to retry (transient / network). */
+function isRetryableError(err: unknown): boolean {
+  if (err instanceof WeixinApiError) {
+    // Session expired — not retryable (needs re-login)
+    if (err.errcode === -14) return false;
+    // API-level transient errors (system busy, rate limit)
+    if (err.errcode === -1 || err.errcode === 45011) return true;
+    // Client errors (4xx except 429) — not retryable
+    if (err.status >= 400 && err.status < 500) return err.status === 429;
+    // Server errors (5xx) or network errors (status 0) — retryable
+    return err.status === 0 || err.status >= 500;
+  }
+  if (err instanceof TypeError || (err as NodeJS.ErrnoException).code) {
+    // Network errors (fetch TypeError, ECONNRESET, ETIMEDOUT, etc.)
+    return true;
+  }
+  return false;
+}
+
+/** Exponential backoff retry wrapper. */
+async function retryWithBackoff<T>(
+  fn: (attempt: number) => Promise<T>,
+  maxRetries = 3,
+  baseDelayMs = 1000,
+): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    try {
+      return await fn(attempt);
+    } catch (err: unknown) {
+      lastError = err;
+      if (attempt > maxRetries || !isRetryableError(err)) {
+        throw err;
+      }
+      const delay = baseDelayMs * Math.pow(2, attempt - 1);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+
+  throw lastError;
+}
+
 // iLink Bot API protocol version we are compatible with.
 // Used both in the request body (base_info.channel_version) and in the
 // iLink-App-ClientVersion header (encoded as 0x00MMNNPP).
@@ -74,7 +137,26 @@ async function post<T>(
       signal: controller.signal,
     });
     if (!resp.ok) {
-      throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+      // Try to parse the API error body for ret/errcode/errmsg
+      let ret: number | undefined;
+      let errcode: number | undefined;
+      let errmsg: string | undefined;
+      try {
+        const errBody = (await resp.json()) as {
+          ret?: number;
+          errcode?: number;
+          errmsg?: string;
+        };
+        ret = errBody.ret;
+        errcode = errBody.errcode;
+        errmsg = errBody.errmsg;
+      } catch {
+        // ignore parse errors — use status-based message
+      }
+      const message = errmsg
+        ? `WeChat API error (HTTP ${resp.status}, ret=${ret}, errcode=${errcode}): ${errmsg}`
+        : `WeChat API error (HTTP ${resp.status})`;
+      throw new WeixinApiError(message, resp.status, ret, errcode);
     }
     return (await resp.json()) as T;
   } finally {
@@ -116,7 +198,22 @@ export async function sendMessage(
   msg: SendMessageReq['msg'],
 ): Promise<void> {
   const body: SendMessageReq = { msg, base_info: baseInfo() };
-  await post(baseUrl, '/ilink/bot/sendmessage', body, token);
+
+  await retryWithBackoff(async (_attempt) => {
+    const resp = await post<{
+      ret?: number;
+      errcode?: number;
+      errmsg?: string;
+    }>(baseUrl, '/ilink/bot/sendmessage', body, token);
+    if (resp.ret !== undefined && resp.ret !== 0) {
+      throw new WeixinApiError(
+        `sendMessage failed: ret=${resp.ret} errcode=${resp.errcode} ${resp.errmsg || ''}`,
+        200,
+        resp.ret,
+        resp.errcode,
+      );
+    }
+  });
 }
 
 export async function getConfig(
@@ -188,54 +285,106 @@ export async function getUploadUrl(
     aeskey: aeskeyHex,
     base_info: baseInfo(),
   };
-  const resp = await post<GetUploadUrlResp>(
-    baseUrl,
-    '/ilink/bot/getuploadurl',
-    body,
-    token,
-  );
 
-  // upload_full_url: CDN upload URL with all params embedded
-  if (resp.upload_full_url) {
-    return resp.upload_full_url;
-  }
+  return retryWithBackoff(async (_attempt) => {
+    const resp = await post<GetUploadUrlResp>(
+      baseUrl,
+      '/ilink/bot/getuploadurl',
+      body,
+      token,
+    );
 
-  // upload_param: CDN upload params only (must construct URL with filekey)
-  if (resp.upload_param) {
-    return resp.upload_param;
-  }
+    // Check API-level error first
+    if (resp.ret !== undefined && resp.ret !== 0) {
+      throw new WeixinApiError(
+        `getuploadurl failed: ret=${resp.ret} errcode=${undefined} errmsg=${resp.errmsg || '(none)'}`,
+        200,
+        resp.ret,
+      );
+    }
 
-  throw new Error(
-    `getuploadurl failed: ret=${resp.ret} errmsg=${resp.errmsg || '(none)'}`,
-  );
+    // upload_full_url: CDN upload URL with all params embedded
+    if (resp.upload_full_url) {
+      return resp.upload_full_url;
+    }
+
+    // upload_param: CDN upload params only (must construct URL with filekey)
+    if (resp.upload_param) {
+      return resp.upload_param;
+    }
+
+    throw new WeixinApiError(
+      `getuploadurl returned no URL: ret=${resp.ret} errmsg=${resp.errmsg || '(none)'}`,
+      200,
+      resp.ret,
+    );
+  });
 }
 
 /** Upload encrypted media to CDN.
- *  If urlOrParam is a full URL, use it directly.
+ *  If urlOrParam is a full URL, use it directly (host must match).
  *  If it's just a param, construct the URL. */
 export async function uploadToCdn(
   urlOrParam: string,
   filekey: string,
   encryptedData: Buffer,
 ): Promise<string> {
-  const url = urlOrParam.startsWith('http')
-    ? urlOrParam
-    : `https://novac2c.cdn.weixin.qq.com/c2c/upload?encrypted_query_param=${encodeURIComponent(urlOrParam)}&filekey=${encodeURIComponent(filekey)}`;
+  const CDN_HOST = 'novac2c.cdn.weixin.qq.com';
 
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/octet-stream' },
-    body: encryptedData,
+  let url: string;
+  if (urlOrParam.startsWith('https://')) {
+    const parsed = new URL(urlOrParam);
+    if (parsed.hostname !== CDN_HOST) {
+      throw new Error(`CDN upload URL has unexpected host: ${parsed.hostname}`);
+    }
+    url = urlOrParam;
+  } else if (urlOrParam.startsWith('http://')) {
+    throw new Error('CDN upload URL must use HTTPS');
+  } else {
+    url = `https://${CDN_HOST}/c2c/upload?encrypted_query_param=${encodeURIComponent(urlOrParam)}&filekey=${encodeURIComponent(filekey)}`;
+  }
+
+  return retryWithBackoff(async (_attempt) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 40000);
+
+    try {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: encryptedData,
+        signal: controller.signal,
+      });
+      if (!resp.ok) {
+        // Try to extract error details from CDN response
+        let cdnErrMsg: string | undefined;
+        try {
+          const errBody = (await resp.json()) as {
+            errmsg?: string;
+            ret?: number;
+          };
+          cdnErrMsg = errBody.errmsg;
+        } catch {
+          // ignore
+        }
+        throw new WeixinApiError(
+          cdnErrMsg
+            ? `CDN upload failed: HTTP ${resp.status} — ${cdnErrMsg}`
+            : `CDN upload failed: HTTP ${resp.status}`,
+          resp.status,
+        );
+      }
+      // Extract x-encrypted-param from response header
+      const encryptParam = resp.headers.get('x-encrypted-param');
+      if (!encryptParam) {
+        throw new WeixinApiError(
+          'CDN upload succeeded but missing x-encrypted-param header',
+          resp.status,
+        );
+      }
+      return encryptParam;
+    } finally {
+      clearTimeout(timeout);
+    }
   });
-  if (!resp.ok) {
-    throw new Error(`CDN upload failed: HTTP ${resp.status}`);
-  }
-  // Extract x-encrypted-param from response header
-  const encryptParam = resp.headers.get('x-encrypted-param');
-  if (!encryptParam) {
-    throw new Error(
-      'CDN upload succeeded but missing x-encrypted-param header',
-    );
-  }
-  return encryptParam;
 }
