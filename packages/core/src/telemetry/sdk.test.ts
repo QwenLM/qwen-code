@@ -136,6 +136,9 @@ describe('Telemetry SDK', () => {
       compression: 'gzip',
     });
     expect(NodeSDK.prototype.start).toHaveBeenCalled();
+    expect(NodeSDK).toHaveBeenCalledWith(
+      expect.objectContaining({ autoDetectResources: false }),
+    );
   });
 
   it('should use HTTP exporters with signal-specific paths when protocol is http', () => {
@@ -157,6 +160,9 @@ describe('Telemetry SDK', () => {
       url: 'http://localhost:4318/v1/metrics',
     });
     expect(NodeSDK.prototype.start).toHaveBeenCalled();
+    expect(NodeSDK).toHaveBeenCalledWith(
+      expect.objectContaining({ autoDetectResources: false }),
+    );
   });
 
   it('should parse gRPC endpoint correctly', () => {
@@ -292,6 +298,9 @@ describe('Telemetry SDK', () => {
     expect(OTLPLogExporterHttp).not.toHaveBeenCalled();
     expect(OTLPMetricExporterHttp).not.toHaveBeenCalled();
     expect(NodeSDK.prototype.start).toHaveBeenCalled();
+    expect(NodeSDK).toHaveBeenCalledWith(
+      expect.objectContaining({ autoDetectResources: false }),
+    );
   });
 
   it('should not register async process shutdown handlers', () => {
