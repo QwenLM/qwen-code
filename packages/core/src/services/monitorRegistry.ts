@@ -194,8 +194,8 @@ export class MonitorRegistry {
       );
       // Persist the reason so the dialog's detail view can surface it
       // after the monitor terminates (the chat-history notification is
-      // separate and not visible after reopening the Background tasks
-      // dialog or from `/tasks` listings).
+      // separate and not visible in later Background tasks dialog
+      // reopens or `/tasks` listings).
       entry.error = 'Max events reached';
       this.settle(entry, 'completed');
       entry.abortController.abort();
