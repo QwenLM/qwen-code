@@ -211,6 +211,9 @@ export class GeminiClient {
     // FileReadCache would still record those reads, so the retry's
     // re-issued Read could hit the file_unchanged placeholder while
     // the model has nothing to fall back on. Clear to be safe.
+    debugLogger.debug(
+      '[FILE_READ_CACHE] clear after stripOrphanedUserEntriesFromHistory',
+    );
     this.config.getFileReadCache().clear();
   }
 
@@ -221,6 +224,7 @@ export class GeminiClient {
     // Without clearing, a follow-up Read of an unchanged file would
     // return the file_unchanged placeholder for bytes that no longer
     // exist in the new history.
+    debugLogger.debug('[FILE_READ_CACHE] clear after setHistory');
     this.config.getFileReadCache().clear();
     this.forceFullIdeContext = true;
   }
@@ -230,6 +234,9 @@ export class GeminiClient {
     // Truncation can drop prior read_file results past keepCount while
     // the FileReadCache still records those reads — same staleness
     // risk as setHistory. Clear to force re-emission.
+    debugLogger.debug(
+      `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount})`,
+    );
     this.config.getFileReadCache().clear();
     this.forceFullIdeContext = true;
   }
@@ -253,6 +260,7 @@ export class GeminiClient {
     // read_file tool results the FileReadCache still tracks are no
     // longer in history, so a follow-up Read would serve a placeholder
     // pointing at content the model can no longer retrieve.
+    debugLogger.debug('[FILE_READ_CACHE] clear after resetChat');
     this.config.getFileReadCache().clear();
     await this.startChat();
   }
@@ -723,6 +731,7 @@ export class GeminiClient {
         // bytes the model can no longer retrieve from history. Drop the
         // cache so post-microcompaction Reads re-emit the bytes,
         // mirroring the post-compaction clear in tryCompressChat.
+        debugLogger.debug('[FILE_READ_CACHE] clear after microcompaction');
         this.config.getFileReadCache().clear();
         const m = mcResult.meta;
         debugLogger.debug(
@@ -1196,6 +1205,7 @@ export class GeminiClient {
         // placeholder pointing at content the model can no longer
         // retrieve from its own context. Clear the cache so post-
         // compaction Reads re-emit the bytes.
+        debugLogger.debug('[FILE_READ_CACHE] clear after tryCompressChat');
         this.config.getFileReadCache().clear();
         uiTelemetryService.setLastPromptTokenCount(info.newTokenCount);
         this.forceFullIdeContext = true;
