@@ -204,8 +204,11 @@ function incrementPatchVersion(version) {
 }
 
 function getNextBaseVersion(versions) {
+  const stableVersions = versions.filter(
+    (version) => parseVersion(version)?.stage === 'stable',
+  );
   const stableBaseline = sortDescending([
-    ...versions.filter((version) => parseVersion(version)?.stage === 'stable'),
+    ...stableVersions,
     getCurrentPackageBaseVersion(),
   ])[0];
   const latestPrereleaseBase = sortDescending(
@@ -217,9 +220,15 @@ function getNextBaseVersion(versions) {
 
   if (
     latestPrereleaseBase &&
-    compareVersions(latestPrereleaseBase, stableBaseline) > 0
+    compareVersions(latestPrereleaseBase, stableBaseline) >= 0
   ) {
     return latestPrereleaseBase;
+  }
+
+  // On first release (no stable versions on PyPI), use the pyproject.toml
+  // version directly instead of incrementing it.
+  if (stableVersions.length === 0) {
+    return stableBaseline;
   }
 
   return incrementPatchVersion(stableBaseline);
@@ -502,8 +511,8 @@ async function getVersion(options = {}) {
         `GitHub release ${TAG_PREFIX}v${versionData.releaseVersion} already exists.`,
       );
     } else if (releaseState.gitTagExists) {
-      console.error(
-        `Git tag ${TAG_PREFIX}v${versionData.releaseVersion} already exists.`,
+      console.log(
+        `::warning::Orphan git tag ${TAG_PREFIX}v${versionData.releaseVersion} exists without a PyPI version or GitHub release. Skipping to next version slot.`,
       );
     } else if (releaseState.packageVersionExistsOnPyPI) {
       console.error(

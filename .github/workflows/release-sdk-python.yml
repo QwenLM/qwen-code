@@ -276,6 +276,7 @@ jobs:
           RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
           RESUME_EXISTING_RELEASE: '${{ steps.version.outputs.RESUME_EXISTING_RELEASE }}'
         run: |
+          set -euo pipefail
           BRANCH_NAME="release/sdk-python/${RELEASE_TAG}"
           VERSIONED_PYPROJECT="$(mktemp)"
           cp packages/sdk-python/pyproject.toml "${VERSIONED_PYPROJECT}"
@@ -313,6 +314,7 @@ jobs:
           REMOTE_BRANCH_EXISTS: '${{ steps.release_branch.outputs.REMOTE_BRANCH_EXISTS }}'
           RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
         run: |
+          set -euo pipefail
           git add packages/sdk-python/pyproject.toml
           if git diff --staged --quiet; then
             echo "No version changes to commit"
@@ -367,6 +369,7 @@ jobs:
           IS_NIGHTLY: '${{ steps.vars.outputs.is_nightly }}'
           IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
         run: |
+          set -euo pipefail
           TAG_NAME="sdk-python-${RELEASE_TAG}"
 
           if [[ "${IS_NIGHTLY}" == "true" || "${IS_PREVIEW}" == "true" ]]; then
@@ -431,6 +434,7 @@ jobs:
         env:
           BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
         run: |
+          set -euo pipefail
           if git ls-remote --exit-code --heads origin "${BRANCH_NAME}" >/dev/null 2>&1; then
             if ! git push origin --delete "${BRANCH_NAME}"; then
               echo "::warning::Failed to delete prerelease release branch ${BRANCH_NAME}; release already exists, so remove the branch manually if it still exists."
@@ -486,6 +490,7 @@ jobs:
           PR_URL: "${{ steps.pr.outputs.PR_URL || 'N/A' }}"
           DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |
+          set -euo pipefail
           BODY=$(cat <<BODY
           The Python SDK release workflow failed.
 

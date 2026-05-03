@@ -248,6 +248,15 @@ describe('python sdk get-release-version', () => {
   });
 
   it('fails if GitHub release lookup errors for reasons other than not found', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.1.0': [{}],
+          },
+        },
+      }),
+    );
     const authError = new Error('HTTP 403 rate limited');
     execSyncMock.mockImplementation(
       makeExecSyncMock({
@@ -265,6 +274,15 @@ describe('python sdk get-release-version', () => {
   });
 
   it('fails closed when unrelated lowercase not-found errors occur', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.1.0': [{}],
+          },
+        },
+      }),
+    );
     execSyncMock.mockImplementation(
       makeExecSyncMock({
         releases: {
@@ -798,6 +816,86 @@ describe('python sdk get-release-version', () => {
     ).rejects.toThrow(
       'Requested stable release 0.5.0 already exists on PyPI, GitHub releases.',
     );
+  });
+
+  it('uses pyproject.toml version for first preview release when PyPI has no versions', async () => {
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'preview' })).resolves.toMatchObject({
+      releaseTag: 'v0.1.0-preview.0',
+      releaseVersion: '0.1.0-preview.0',
+      packageVersion: '0.1.0rc0',
+    });
+  });
+
+  it('uses pyproject.toml version for first nightly release when PyPI has no versions', async () => {
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'nightly' })).resolves.toMatchObject({
+      releaseTag: 'v0.1.0-nightly.20260430031516.abc1234',
+      releaseVersion: '0.1.0-nightly.20260430031516.abc1234',
+      packageVersion: '0.1.0.dev20260430031516',
+    });
+  });
+
+  it('continues the prerelease base when it equals the stable baseline', async () => {
+    readFileSyncMock.mockReturnValue('version = "0.2.0"\n');
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.1.0': [{}],
+            '0.2.0rc0': [{}],
+          },
+        },
+      }),
+    );
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        releases: {
+          'sdk-python-v0.2.0-preview.0': 'sdk-python-v0.2.0-preview.0',
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'preview' })).resolves.toMatchObject({
+      releaseVersion: '0.2.0-preview.1',
+      packageVersion: '0.2.0rc1',
+    });
+  });
+
+  it('emits a warning when skipping a preview slot due to an orphan git tag', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.1.0': [{}],
+          },
+        },
+      }),
+    );
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        tags: {
+          'sdk-python-v0.1.1-preview.0': 'sdk-python-v0.1.1-preview.0',
+        },
+      }),
+    );
+
+    const consoleSpy = vi.spyOn(console, 'log');
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'preview' })).resolves.toMatchObject({
+      releaseVersion: '0.1.1-preview.1',
+      packageVersion: '0.1.1rc1',
+    });
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining('::warning::Orphan git tag'),
+    );
+    consoleSpy.mockRestore();
   });
 
   it('excludes current release from previousReleaseTag on resume', async () => {
