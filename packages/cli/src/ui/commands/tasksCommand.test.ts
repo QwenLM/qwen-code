@@ -74,6 +74,12 @@ describe('tasksCommand', () => {
     getShells = vi.fn().mockReturnValue([]);
     getAgents = vi.fn().mockReturnValue([]);
     getMonitors = vi.fn().mockReturnValue([]);
+    // Override createMockCommandContext's `'interactive'` default so the
+    // hint-suppression tests below see the expected default-no-hint
+    // behaviour. The `shows the dialog hint only in interactive mode`
+    // and `acp mode` tests rebind their own context with the mode they
+    // care about; the rest don't assert on the hint so this default
+    // doesn't affect their expectations.
     context = createMockCommandContext({
       executionMode: 'non_interactive',
       services: {
@@ -324,34 +330,37 @@ describe('tasksCommand', () => {
     expect(result.content).toContain('Background tasks (1 total)');
   });
 
-  it('escapes ANSI control sequences embedded in entry fields', async () => {
-    // A monitor whose description / error contain raw ANSI escape codes
-    // (e.g. `\x1b[2J` clear-screen, `\x1b[31m...` colour) must not reach
-    // the terminal verbatim — a malicious tool description or spawn
-    // error otherwise could corrupt display. `escapeAnsiCtrlCodes` runs
-    // each ESC byte through JSON.stringify slice-trim, producing the
-    // literal six-char sequence `\u001b` (backslash-u-0-0-1-b) while
-    // the rest of the CSI body (`[2J`, `[31m`) stays intact as printable
-    // text. The assertions below pin both halves: no raw `\x1b` bytes
-    // survive, and the visible `\u001b[...]` form appears as proof the
-    // sanitizer ran rather than dropping the chars.
+  it('strips ANSI escape sequences and bare C0 control bytes from entry fields', async () => {
+    // A monitor whose description / command / error contain raw ANSI
+    // escape codes or bare C0 control bytes (BEL 0x07 audible bell,
+    // BS 0x08 cursor backspace, FF 0x0C form-feed, ...) must not reach
+    // the terminal verbatim - a malicious tool description or spawn
+    // error could otherwise corrupt display, move the cursor, or beep.
+    // `stripUnsafeCharacters` removes both classes (ANSI sequences via
+    // strip-ansi, isolated control bytes via the C0/C1 filter) while
+    // preserving TAB / CR / LF needed for line breaks.
     getMonitors.mockReturnValue([
       monitorEntry({
         monitorId: 'mon_evil',
-        description: 'bad \x1b[2Jthing',
+        description: 'bad \x1b[2Jthing\x07', // ANSI clear-screen + BEL
         status: 'failed',
-        error: 'spawn \x1b[31mENOENT\x1b[0m',
+        error: 'spawn \x1b[31mENOENT\x1b[0m\x08\x08', // ANSI colour + 2 BS
         eventCount: 0,
       }),
     ]);
     const result = await tasksCommand.action!(context, '');
     if (!result || result.type !== 'message') throw new Error('no result');
-    // No raw ESC byte in the output.
-    expect(result.content).not.toContain('\x1b');
-    // The escaped form (literal backslash-u-001b) should appear, proving
-    // the sanitizer ran rather than dropping the chars.
-    expect(result.content).toContain('\\u001b[2J');
-    expect(result.content).toContain('\\u001b[31m');
+    // No raw control bytes survive.
+    expect(result.content).not.toContain('\x1b'); // ESC
+    expect(result.content).not.toContain('\x07'); // BEL
+    expect(result.content).not.toContain('\x08'); // BS
+    // Surrounding printable text is preserved so the user still gets a
+    // useful (just safe) message.
+    expect(result.content).toContain('bad thing');
+    expect(result.content).toContain('spawn ENOENT');
+    // TAB / CR / LF stay through - the sanitizer must not eat the line
+    // breaks that separate task entries.
+    expect(result.content).toContain('\n');
   });
 
   it('merges all three kinds and orders them by startTime', async () => {

@@ -14,7 +14,7 @@ import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { formatDuration } from '../utils/formatters.js';
-import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
+import { stripUnsafeCharacters } from '../utils/textUtils.js';
 
 type AgentTaskEntry = BackgroundTaskEntry & {
   kind: 'agent';
@@ -41,8 +41,13 @@ function statusLabel(entry: TaskEntry): string {
             ? `paused (resume blocked): ${entry.resumeBlockedReason}`
             : 'paused';
         case 'running':
-        default:
           return 'running';
+        default: {
+          const _exhaustive: never = entry.status;
+          throw new Error(
+            `statusLabel(agent): unknown status: ${JSON.stringify(_exhaustive)}`,
+          );
+        }
       }
     case 'shell':
       switch (entry.status) {
@@ -54,8 +59,12 @@ function statusLabel(entry: TaskEntry): string {
           return 'cancelled';
         case 'running':
           return 'running';
-        default:
-          return 'running';
+        default: {
+          const _exhaustive: never = entry.status;
+          throw new Error(
+            `statusLabel(shell): unknown status: ${JSON.stringify(_exhaustive)}`,
+          );
+        }
       }
     case 'monitor': {
       // Append eventCount as a glanceable signal for activity. error (set
@@ -72,8 +81,12 @@ function statusLabel(entry: TaskEntry): string {
           return `cancelled (${events})`;
         case 'running':
           return `running (${events})`;
-        default:
-          return `running (${events})`;
+        default: {
+          const _exhaustive: never = entry.status;
+          throw new Error(
+            `statusLabel(monitor): unknown status: ${JSON.stringify(_exhaustive)}`,
+          );
+        }
       }
     }
     default: {
@@ -228,21 +241,22 @@ export const tasksCommand: SlashCommand = {
 
     // Defense in depth: registry entries carry user-supplied / process-
     // supplied strings (description, command, error from spawn / settle).
-    // A maliciously-crafted value containing raw ANSI escape sequences
-    // (CSI / OSC / SGR — anything starting with ESC, the kind matched
-    // by `ansi-regex`) could otherwise reach the terminal verbatim and
-    // corrupt display. `escapeAnsiCtrlCodes` is scoped to those
-    // sequences only — it does NOT escape isolated C0/C1 control bytes
-    // like BEL, BS, or VT; if those become a concern we'd need to
-    // layer `node:util`'s `stripVTControlCharacters` on top. For the
-    // common case (no escape sequences present) the helper is a no-op
-    // and returns the original string. Wrapping the joined output once
-    // covers every field — including any future kind's fields —
-    // without per-site sanitization sprawl.
+    // A maliciously-crafted value could otherwise reach the terminal
+    // verbatim and corrupt display via:
+    //   - ANSI escape sequences (CSI / OSC / SGR — start with ESC)
+    //   - bare C0 control bytes (BEL 0x07 audible bell, BS 0x08 cursor
+    //     back, VT 0x0B, FF 0x0C, …)
+    //   - C1 control bytes (0x80–0x9F)
+    //   - VT control sequences
+    // `stripUnsafeCharacters` (textUtils.ts) handles all four classes in
+    // one pass while preserving TAB / CR / LF that we genuinely need
+    // for line breaks and tabular formatting. Wrapping the joined
+    // output once covers every field — including any future kind's
+    // fields — without per-site sanitization sprawl.
     return {
       type: 'message' as const,
       messageType: 'info' as const,
-      content: escapeAnsiCtrlCodes(lines.join('\n')),
+      content: stripUnsafeCharacters(lines.join('\n')),
     };
   },
 };
