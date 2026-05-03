@@ -324,6 +324,32 @@ describe('tasksCommand', () => {
     expect(result.content).toContain('Background tasks (1 total)');
   });
 
+  it('escapes ANSI control sequences embedded in entry fields', async () => {
+    // A monitor whose description / error contain raw ANSI escape codes
+    // (e.g. `\x1b[2J` clear-screen, `\x1b[31m...` colour) must not reach
+    // the terminal verbatim — a malicious tool description or spawn
+    // error otherwise could corrupt display. `escapeAnsiCtrlCodes`
+    // converts them to literal `[...]` sequences that render as
+    // text instead of being interpreted by the terminal.
+    getMonitors.mockReturnValue([
+      monitorEntry({
+        monitorId: 'mon_evil',
+        description: 'bad \x1b[2Jthing',
+        status: 'failed',
+        error: 'spawn \x1b[31mENOENT\x1b[0m',
+        eventCount: 0,
+      }),
+    ]);
+    const result = await tasksCommand.action!(context, '');
+    if (!result || result.type !== 'message') throw new Error('no result');
+    // No raw ESC byte in the output.
+    expect(result.content).not.toContain('\x1b');
+    // The escaped form (literal backslash-u-001b) should appear, proving
+    // the sanitizer ran rather than dropping the chars.
+    expect(result.content).toContain('\\u001b[2J');
+    expect(result.content).toContain('\\u001b[31m');
+  });
+
   it('merges all three kinds and orders them by startTime', async () => {
     const now = Date.now();
     getAgents.mockReturnValue([

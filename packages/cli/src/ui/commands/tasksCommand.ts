@@ -14,6 +14,7 @@ import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { formatDuration } from '../utils/formatters.js';
+import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
 
 type AgentTaskEntry = BackgroundTaskEntry & {
   kind: 'agent';
@@ -225,10 +226,18 @@ export const tasksCommand: SlashCommand = {
       }
     }
 
+    // Defense in depth: registry entries carry user-supplied / process-
+    // supplied strings (description, command, error from spawn / settle).
+    // A maliciously-crafted value containing raw ANSI escape sequences
+    // could otherwise reach the terminal verbatim and corrupt display.
+    // `escapeAnsiCtrlCodes` is a no-op when the string has no control
+    // chars, so wrapping the joined output is cheap and covers every
+    // field — including any future kind's fields — without per-site
+    // sanitization sprawl.
     return {
       type: 'message' as const,
       messageType: 'info' as const,
-      content: lines.join('\n'),
+      content: escapeAnsiCtrlCodes(lines.join('\n')),
     };
   },
 };
