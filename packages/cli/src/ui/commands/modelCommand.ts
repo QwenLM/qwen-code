@@ -14,7 +14,7 @@ import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 
-// Get an aray of the available model IDs as strings
+// Get an array of the available model IDs as strings
 function getAvailableModelIds(context: CommandContext) {
   const { services } = context;
   const { config } = services;
