@@ -789,14 +789,14 @@ describe('InputPrompt', () => {
     stdin.write('\u001B[B');
     await wait();
 
-    expect(props.buffer.setText).toHaveBeenLastCalledWith('/export md ');
+    expect(props.buffer.setText).toHaveBeenLastCalledWith('/export md');
     expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
     expect(props.onSubmit).not.toHaveBeenCalled();
 
     stdin.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('/export md ');
+    expect(props.onSubmit).toHaveBeenCalledWith('/export md');
     unmount();
   });
 
@@ -823,8 +823,8 @@ describe('InputPrompt', () => {
     stdin.write('\u001B[B');
     await wait();
 
-    expect(props.buffer.setText).toHaveBeenNthCalledWith(2, '/export md ');
-    expect(props.buffer.setText).toHaveBeenNthCalledWith(3, '/export json ');
+    expect(props.buffer.setText).toHaveBeenNthCalledWith(2, '/export md');
+    expect(props.buffer.setText).toHaveBeenNthCalledWith(3, '/export json');
     expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
     unmount();
   });
@@ -904,6 +904,156 @@ describe('InputPrompt', () => {
     expect(output).toContain('json');
     expect(output).toContain('jsonl');
     expect(output).toContain('Export Markdown');
+    unmount();
+  });
+
+  it('should not clobber manually edited buffer when arrow is pressed after export fill', async () => {
+    // Regression for PR #3701 review: exportCompletionSelectionIndexRef
+    // leaked across buffer edits, so arrow keys would overwrite user-typed
+    // text after the user moved away from an "/export <fmt>" input.
+    mockedUseCommandCompletion.mockImplementation((buffer) => {
+      const isExportRoot = buffer.text.trim() === '/export';
+      return {
+        ...mockCommandCompletion,
+        showSuggestions: isExportRoot,
+        suggestions: isExportRoot
+          ? [
+              { label: 'html', value: 'html' },
+              { label: 'md', value: 'md' },
+              { label: 'json', value: 'json' },
+              { label: 'jsonl', value: 'jsonl' },
+            ]
+          : [],
+        activeSuggestionIndex: 0,
+        isPerfectMatch: isExportRoot,
+      };
+    });
+    props.slashCommands = [
+      ...mockSlashCommands,
+      {
+        name: 'export',
+        kind: CommandKind.BUILT_IN,
+        description: 'Export session',
+        action: vi.fn(),
+        subCommands: [
+          {
+            name: 'html',
+            kind: CommandKind.BUILT_IN,
+            description: 'Export HTML',
+            action: vi.fn(),
+          },
+          {
+            name: 'md',
+            kind: CommandKind.BUILT_IN,
+            description: 'Export Markdown',
+            action: vi.fn(),
+          },
+          {
+            name: 'json',
+            kind: CommandKind.BUILT_IN,
+            description: 'Export JSON',
+            action: vi.fn(),
+          },
+          {
+            name: 'jsonl',
+            kind: CommandKind.BUILT_IN,
+            description: 'Export JSONL',
+            action: vi.fn(),
+          },
+        ],
+      },
+    ];
+
+    const TestHarness = () => {
+      const buffer = useTextBuffer({
+        initialText: '/export',
+        viewport: { width: 80, height: 20 },
+        isValidPath: () => false,
+        onChange: () => {},
+      });
+      return <InputPrompt {...props} buffer={buffer} />;
+    };
+
+    const { stdin, lastFrame, unmount } = renderWithProviders(<TestHarness />);
+    await wait();
+
+    // Phase 1 + 2: Down fills "/export md".
+    stdin.write('\u001B[B');
+    await wait();
+    expect(stripAnsi(lastFrame() ?? '')).toContain('/export md');
+
+    // User clears buffer and types a different command manually.
+    stdin.write('\u0015'); // Ctrl+U: clear line
+    await wait();
+    stdin.write('/help');
+    await wait();
+    const afterEditFrame = stripAnsi(lastFrame() ?? '');
+    expect(afterEditFrame).toContain('/help');
+
+    // Pressing Down now must NOT overwrite "/help" with an export format.
+    stdin.write('\u001B[B');
+    await wait();
+    const afterArrowFrame = stripAnsi(lastFrame() ?? '');
+    expect(afterArrowFrame).toContain('/help');
+    expect(afterArrowFrame).not.toMatch(/\/export\s+(html|md|json|jsonl)/);
+    unmount();
+  });
+
+  it('should autocomplete on Enter when user arrow-navigated a perfect-match suggestion list', async () => {
+    // Regression for PR #3701 review: the isPerfectMatch + navigated + Enter
+    // branch was not covered by tests.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'show', value: 'show' },
+        { label: 'add', value: 'add' },
+        { label: 'refresh', value: 'refresh' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+    });
+    props.buffer.setText('/memory');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    // Arrow-navigate so completionSelectionWasNavigatedRef flips to true.
+    stdin.write('\u001B[B');
+    await wait();
+    expect(mockCommandCompletion.navigateDown).toHaveBeenCalled();
+
+    // Enter should autocomplete the active suggestion, NOT submit the raw buffer.
+    stdin.write('\r');
+    await wait();
+
+    expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should submit directly on Enter for a perfect match without prior arrow navigation', async () => {
+    // Control: with no arrow navigation, Enter on a perfect match must submit.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'show', value: 'show' },
+        { label: 'add', value: 'add' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+    });
+    props.buffer.setText('/memory');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\r');
+    await wait();
+
+    expect(props.onSubmit).toHaveBeenCalledWith('/memory');
+    expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
     unmount();
   });
 
