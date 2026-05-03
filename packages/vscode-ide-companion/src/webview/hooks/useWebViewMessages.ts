@@ -203,6 +203,23 @@ export function resetConversationState({
   });
 }
 
+function indexUserMessagesForEditRewind(messages: WebViewMessageBase[]): {
+  messages: WebViewMessageBase[];
+  nextTurnIndex: number;
+} {
+  let nextTurnIndex = 0;
+  const indexedMessages = messages.map((entry) => {
+    if (entry.role !== 'user') {
+      return entry;
+    }
+    const indexed = { ...entry, turnIndex: nextTurnIndex };
+    nextTurnIndex += 1;
+    return indexed;
+  });
+
+  return { messages: indexedMessages, nextTurnIndex };
+}
+
 /**
  * WebView message handling Hook
  * Handles all messages from VSCode Extension uniformly
@@ -562,17 +579,10 @@ export const useWebViewMessages = ({
 
         case 'conversationLoaded': {
           const conversation = message.data as Conversation;
-          let nextTurnIndex = 0;
-          const indexedMessages = (
-            conversation.messages as WebViewMessageBase[]
-          ).map((entry) => {
-            if (entry.role !== 'user') {
-              return entry;
-            }
-            const indexed = { ...entry, turnIndex: nextTurnIndex };
-            nextTurnIndex += 1;
-            return indexed;
-          });
+          const { messages: indexedMessages, nextTurnIndex } =
+            indexUserMessagesForEditRewind(
+              conversation.messages as WebViewMessageBase[],
+            );
           userTurnCounterRef.current = nextTurnIndex;
           clearInsightState();
           clearImageResolutions();
@@ -1090,12 +1100,16 @@ export const useWebViewMessages = ({
           }
           if (message.data.messages) {
             clearImageResolutions();
-            handlers.messageHandling.setMessages(
-              materializeMessages(
+            const { messages: indexedMessages, nextTurnIndex } =
+              indexUserMessagesForEditRewind(
                 message.data.messages as WebViewMessageBase[],
-              ),
+              );
+            userTurnCounterRef.current = nextTurnIndex;
+            handlers.messageHandling.setMessages(
+              materializeMessages(indexedMessages),
             );
           } else {
+            userTurnCounterRef.current = 0;
             handlers.messageHandling.clearMessages();
           }
 

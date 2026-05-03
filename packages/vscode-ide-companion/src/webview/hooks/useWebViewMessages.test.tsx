@@ -25,7 +25,7 @@ vi.mock('./useVSCode.js', () => ({
 vi.mock('./useImage.js', () => ({
   useImageResolution: () => ({
     materializeMessages: <T,>(messages: T) => messages,
-    materializeMessage: <T,>(message: T) => message,
+    materializeMessage: <T,>(message: T) => [message],
     mergeResolvedImages: <T,>(messages: T) => messages,
     clearImageResolutions: mockClearImageResolutions,
   }),
@@ -56,6 +56,7 @@ function renderHookHarness(overrides?: {
       setNextCursor: vi.fn(),
       setHasMore: vi.fn(),
       setIsLoading: vi.fn(),
+      setIsSwitchingSession: vi.fn(),
     },
     fileContext: {
       setActiveFileName: vi.fn(),
@@ -257,6 +258,65 @@ describe('useWebViewMessages', () => {
     );
     expect(rendered.handlers.setPlanEntries).toHaveBeenCalledWith([]);
     expect(rendered.setUsageStats).toHaveBeenCalledWith(undefined);
+  });
+
+  it('indexes user turns after switching to a persisted session', () => {
+    const rendered = renderHookHarness();
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'qwenSessionSwitched',
+            data: {
+              sessionId: 'conversation-2',
+              session: { title: 'Persisted Session' },
+              messages: [
+                { role: 'user', content: 'persisted first', timestamp: 10 },
+                { role: 'assistant', content: 'reply', timestamp: 20 },
+                { role: 'user', content: 'persisted second', timestamp: 30 },
+              ],
+            },
+          },
+        }),
+      );
+    });
+
+    expect(rendered.handlers.messageHandling.setMessages).toHaveBeenCalledWith([
+      {
+        role: 'user',
+        content: 'persisted first',
+        timestamp: 10,
+        turnIndex: 0,
+      },
+      { role: 'assistant', content: 'reply', timestamp: 20 },
+      {
+        role: 'user',
+        content: 'persisted second',
+        timestamp: 30,
+        turnIndex: 1,
+      },
+    ]);
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'message',
+            data: { role: 'user', content: 'next', timestamp: 40 },
+          },
+        }),
+      );
+    });
+
+    expect(rendered.handlers.messageHandling.addMessage).toHaveBeenCalledWith({
+      role: 'user',
+      content: 'next',
+      timestamp: 40,
+      turnIndex: 2,
+    });
   });
 
   it('clears the generic waiting state when insight progress starts', () => {
