@@ -62,4 +62,25 @@ describe('isGeneratedFile', () => {
     expect(isGeneratedFile('package.json')).toBe(false);
     expect(isGeneratedFile('src/components/Button.tsx')).toBe(false);
   });
+
+  // Segment-boundary check: project dirs that *contain* a reserved
+  // word as a substring (e.g. `my-dist`, `xbuild`, `prebuild`) must
+  // not be caught by the directory rule.
+  it('should NOT exclude dirs that merely substring-match a reserved name', () => {
+    expect(isGeneratedFile('my-dist/file.ts')).toBe(false);
+    expect(isGeneratedFile('xbuild/core.ts')).toBe(false);
+    expect(isGeneratedFile('rebuild/notes.md')).toBe(false);
+    expect(isGeneratedFile('preout/x.ts')).toBe(false);
+    // The filename itself isn't subject to the directory rule.
+    expect(isGeneratedFile('src/dist.ts')).toBe(false);
+  });
+
+  // `.lock` is no longer a blanket exclusion — only the explicit
+  // EXCLUDED_FILENAMES (yarn.lock etc.) are dropped.
+  it('should NOT exclude unknown .lock files (only well-known ones)', () => {
+    expect(isGeneratedFile('config/feature.lock')).toBe(false);
+    expect(isGeneratedFile('terraform/.terraform.lock.hcl')).toBe(false);
+    // Sanity: known lockfiles still excluded.
+    expect(isGeneratedFile('yarn.lock')).toBe(true);
+  });
 });

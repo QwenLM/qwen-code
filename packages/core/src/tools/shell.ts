@@ -1709,7 +1709,22 @@ export class ShellToolInvocation extends BaseToolInvocation<
         canonicalBase = baseDir;
       }
       committedAbsolutePaths = new Set(
-        stagedInfo.files.map((rel) => path.resolve(canonicalBase, rel)),
+        stagedInfo.files.map((rel) => {
+          const resolved = path.resolve(canonicalBase, rel);
+          // recordEdit canonicalises *every* component via realpathSync,
+          // so a file that lives behind an intermediate symlink (e.g.
+          // `repo/symlinked-dir/file.ts` where `symlinked-dir` -> elsewhere)
+          // gets stored under the realpath of the leaf. canonicalising
+          // only the base wouldn't follow the inner symlink and the lookup
+          // miss would silently zero attribution + leak the entry past
+          // commit. Try realpath on the full resolved path and fall back
+          // to the unresolved form if the file no longer exists (deletion).
+          try {
+            return fs.realpathSync(resolved);
+          } catch {
+            return resolved;
+          }
+        }),
       );
 
       const note = attributionService.generateNotePayload(
@@ -2134,18 +2149,41 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const BODY_FLAG = `(?:--body|-b)[\\s=]+`;
     const bodyDoublePattern = new RegExp(
       `(${BODY_FLAG})"((?:[^"\\\\]|\\\\.)*)"`,
+      'g',
     );
     // Bash apostrophes inside a single-quoted body use the
     // close-escape-reopen form `'\''`. The inner alternation matches
     // either a non-apostrophe character or that escape sequence as a
     // whole, so the trailer lands at the true end of the body rather
     // than after only the first quoted segment.
-    const bodySinglePattern = new RegExp(`(${BODY_FLAG})'((?:[^']|'\\\\'')*)'`);
+    const bodySinglePattern = new RegExp(
+      `(${BODY_FLAG})'((?:[^']|'\\\\'')*)'`,
+      'g',
+    );
     const segment = command.slice(ghSegment.start, ghSegment.end);
-    const bodyDoubleMatch = segment.match(bodyDoublePattern);
-    const bodySingleMatch = segment.match(bodySinglePattern);
-    const bodyMatch = bodyDoubleMatch ?? bodySingleMatch;
-    const bodyQuote = bodyDoubleMatch ? '"' : "'";
+    // gh ignores all but the last `--body`/`-b` flag, so the trailer
+    // has to land in the final occurrence to actually appear in the PR.
+    // matchAll → take the last match for each quote style, then pick
+    // whichever sits later in the segment (mirrors addCoAuthorToGitCommit).
+    const lastMatch = <T extends RegExpMatchArray>(
+      matches: IterableIterator<T>,
+    ): T | null => {
+      let result: T | null = null;
+      for (const m of matches) result = m;
+      return result;
+    };
+    const bodyDoubleMatch = lastMatch(segment.matchAll(bodyDoublePattern));
+    const bodySingleMatch = lastMatch(segment.matchAll(bodySinglePattern));
+    let bodyMatch: RegExpMatchArray | null;
+    if (bodyDoubleMatch && bodySingleMatch) {
+      bodyMatch =
+        (bodyDoubleMatch.index ?? 0) > (bodySingleMatch.index ?? 0)
+          ? bodyDoubleMatch
+          : bodySingleMatch;
+    } else {
+      bodyMatch = bodyDoubleMatch ?? bodySingleMatch;
+    }
+    const bodyQuote = bodyMatch === bodyDoubleMatch ? '"' : "'";
 
     if (bodyMatch) {
       const [fullMatch, prefix, existingBody] = bodyMatch;
@@ -2162,9 +2200,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // Without this, a configured generator name containing `"`, `$`, a
       // backtick, or `'` would either break the user-approved `gh pr
       // create` command or, worse, be interpreted as command substitution.
-      const escapedAttribution = bodyDoubleMatch
-        ? escapeForBashDoubleQuote(attribution)
-        : escapeForBashSingleQuote(attribution);
+      const escapedAttribution =
+        bodyMatch === bodyDoubleMatch
+          ? escapeForBashDoubleQuote(attribution)
+          : escapeForBashSingleQuote(attribution);
       const newBody = existingBody + escapedAttribution;
       // Splice the modified segment back into the original command,
       // offsetting the in-segment match index by the segment start.

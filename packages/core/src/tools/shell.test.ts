@@ -1983,6 +1983,38 @@ describe('ShellTool', () => {
         );
       });
 
+      // gh CLI uses the *last* `--body` flag when multiple are
+      // provided. Splicing into the first one would silently drop
+      // attribution. Mirrors the matchAll/last-match behaviour in
+      // addCoAuthorToGitCommit.
+      it('should target the LAST --body when gh pr create has multiple', async () => {
+        const command =
+          'gh pr create --title "x" --body "ignored" --body "real summary"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+
+        const calls = mockShellExecutionService.mock.calls;
+        const cmd = calls[calls.length - 1]?.[0] as string;
+        expect(cmd).toMatch(
+          /--body "ignored" --body "real summary[\s\S]*Generated with Qwen Code/,
+        );
+        // The trailer must NOT be inside the first --body.
+        expect(cmd).not.toMatch(
+          /--body "ignored[\s\S]*Generated with Qwen Code[\s\S]*" --body/,
+        );
+      });
+
       // `gh --repo owner/repo pr create` shifts pr/create past the
       // fixed `tokens[1]/tokens[2]` slots; a literal-position check
       // misses these forms.

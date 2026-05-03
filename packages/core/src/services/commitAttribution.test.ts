@@ -374,10 +374,6 @@ describe('CommitAttributionService', () => {
         baselines: {},
         promptCount: 0,
         promptCountAtLastCommit: 0,
-        permissionPromptCount: 0,
-        permissionPromptCountAtLastCommit: 0,
-        escapeCount: 0,
-        escapeCountAtLastCommit: 0,
       });
 
       // Lookup under the canonical form succeeds even though the

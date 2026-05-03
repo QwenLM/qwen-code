@@ -708,9 +708,15 @@ export class GeminiClient {
           });
       }
 
-      // Track prompt count for commit attribution (skip cron — not user-initiated)
+      // Track prompt count for commit attribution. Only the user typing a
+      // fresh prompt should bump the counter — `ToolResult` (tool-call
+      // continuation), `Retry`, `Hook`, `Cron`, and `Notification` are all
+      // model-driven or background-driven re-entries of the same logical
+      // turn. Counting them inflates the "N-shotted" label in the PR
+      // attribution trailer (one user message becomes "10-shotted" when it
+      // triggered ten tool calls).
       const attributionService = CommitAttributionService.getInstance();
-      if (messageType !== SendMessageType.Cron) {
+      if (messageType === SendMessageType.UserQuery) {
         attributionService.incrementPromptCount();
       }
 

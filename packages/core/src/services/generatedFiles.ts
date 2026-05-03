@@ -36,7 +36,6 @@ const EXCLUDED_FILENAMES = new Set([
 // output) tends to live under `/dist/`, `/build/`, or `/out/`,
 // which are already covered by `EXCLUDED_DIRECTORIES`.
 const EXCLUDED_EXTENSIONS = new Set([
-  '.lock',
   '.min.js',
   '.min.css',
   '.min.html',
@@ -46,29 +45,35 @@ const EXCLUDED_EXTENSIONS = new Set([
   '.generated.js',
 ]);
 
-// Directory patterns that indicate generated/vendored content
-const EXCLUDED_DIRECTORIES = [
-  '/dist/',
-  '/build/',
-  '/out/',
-  '/output/',
-  '/node_modules/',
-  '/vendor/',
-  '/vendored/',
-  '/third_party/',
-  '/third-party/',
-  '/external/',
-  '/.next/',
-  '/.nuxt/',
-  '/.svelte-kit/',
-  '/coverage/',
-  '/__pycache__/',
-  '/.tox/',
-  '/venv/',
-  '/.venv/',
-  '/target/release/',
-  '/target/debug/',
-];
+// Directory segments that indicate generated/vendored content. Compared
+// against path segments (split on `/`) rather than substrings, so a
+// project dir named `my-dist` or `xbuild` doesn't get caught by a
+// `/dist/` substring match and silently drop AI attribution.
+const EXCLUDED_DIRECTORY_SEGMENTS = new Set([
+  'dist',
+  'build',
+  'out',
+  'output',
+  'node_modules',
+  'vendor',
+  'vendored',
+  'third_party',
+  'third-party',
+  'external',
+  '.next',
+  '.nuxt',
+  '.svelte-kit',
+  'coverage',
+  '__pycache__',
+  '.tox',
+  'venv',
+  '.venv',
+]);
+
+// Multi-segment directory patterns that need contiguous matches
+// (e.g. `target/release` and `target/debug` for Rust — `target` alone
+// is too noisy as it's a common app name too).
+const EXCLUDED_DIRECTORY_PATH_SUFFIXES = ['target/release', 'target/debug'];
 
 // Filename patterns using regex for more complex matching
 const EXCLUDED_FILENAME_PATTERNS = [
@@ -118,8 +123,20 @@ export function isGeneratedFile(filePath: string): boolean {
   }
 
   const normalizedPathLower = normalizedPath.toLowerCase();
-  for (const dir of EXCLUDED_DIRECTORIES) {
-    if (normalizedPathLower.includes(dir)) {
+  // Segment-boundary check: split on `/` and test each segment against
+  // EXCLUDED_DIRECTORY_SEGMENTS so `/repo/my-dist/file.ts` (a literal
+  // dir name) doesn't get caught by the `dist` rule the way a naïve
+  // `.includes('/dist/')` substring match could appear to suggest.
+  const segments = normalizedPathLower.split('/').filter(Boolean);
+  // The last segment is the filename — directory rules only apply to
+  // intermediate path components.
+  for (const seg of segments.slice(0, -1)) {
+    if (EXCLUDED_DIRECTORY_SEGMENTS.has(seg)) {
+      return true;
+    }
+  }
+  for (const suffix of EXCLUDED_DIRECTORY_PATH_SUFFIXES) {
+    if (normalizedPathLower.includes(`/${suffix}/`)) {
       return true;
     }
   }

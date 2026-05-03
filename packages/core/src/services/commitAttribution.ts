@@ -104,25 +104,24 @@ export interface StagedFileInfo {
   repoRoot?: string;
 }
 
+/**
+ * On-disk schema version for AttributionSnapshot. Bump when the shape
+ * changes incompatibly so restoreFromSnapshot can refuse / migrate
+ * stale payloads instead of silently producing NaN counters or
+ * mismatched key shapes.
+ */
+export const ATTRIBUTION_SNAPSHOT_VERSION = 1;
+
 /** Serializable snapshot for session persistence. */
 export interface AttributionSnapshot {
   type: 'attribution-snapshot';
+  /** Schema version; absent on pre-versioning snapshots, treated as 1. */
+  version?: number;
   surface: string;
   fileStates: Record<string, FileAttribution>;
   baselines: Record<string, FileBaseline>;
   promptCount: number;
   promptCountAtLastCommit: number;
-  /**
-   * Reserved fields for future permission-prompt and escape counters.
-   * Currently unused in production; pre-fix snapshots may carry them
-   * with non-zero values, so the restore path tolerates them but the
-   * service no longer exposes increment methods until a real counter
-   * use case lands.
-   */
-  permissionPromptCount?: number;
-  permissionPromptCountAtLastCommit?: number;
-  escapeCount?: number;
-  escapeCountAtLastCommit?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +155,40 @@ export function computeContentHash(content: string): string {
   return createHash('sha256').update(content).digest('hex');
 }
 
+/**
+ * Defensive coercions for restoring snapshot fields. A snapshot can
+ * arrive with `undefined` / wrong-type fields if the on-disk JSON was
+ * partially written or pre-dates the current schema; without coercion
+ * they would flow through `Math.min(undefined, n) === NaN` into the
+ * git-notes payload.
+ */
+function sanitiseCount(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0;
+}
+
+function sanitiseAttribution(v: unknown): FileAttribution {
+  const obj = (v ?? {}) as Partial<FileAttribution>;
+  return {
+    aiContribution: sanitiseCount(obj.aiContribution),
+    aiCreated: typeof obj.aiCreated === 'boolean' ? obj.aiCreated : false,
+    contentHash: typeof obj.contentHash === 'string' ? obj.contentHash : '',
+  };
+}
+
+function sanitiseBaseline(v: unknown): FileBaseline {
+  const obj = (v ?? {}) as Partial<FileBaseline>;
+  return {
+    contentHash: typeof obj.contentHash === 'string' ? obj.contentHash : '',
+    mtime: sanitiseCount(obj.mtime),
+  };
+}
+
+/**
+ * Surface label embedded in the git-notes payload. Defaults to `'cli'`
+ * for the qwen-code CLI; embedders (IDE extensions, SDK consumers) can
+ * override by setting `QWEN_CODE_ENTRYPOINT` before construction so the
+ * note records where the contribution was authored.
+ */
 export function getClientSurface(): string {
   return process.env['QWEN_CODE_ENTRYPOINT'] ?? 'cli';
 }
@@ -177,10 +210,6 @@ export class CommitAttributionService {
   // -- Prompt counting --
   private promptCount: number = 0;
   private promptCountAtLastCommit: number = 0;
-  private permissionPromptCount: number = 0;
-  private permissionPromptCountAtLastCommit: number = 0;
-  private escapeCount: number = 0;
-  private escapeCountAtLastCommit: number = 0;
 
   private constructor() {}
 
@@ -295,8 +324,6 @@ export class CommitAttributionService {
   clearAttributions(commitSucceeded: boolean = true): void {
     if (commitSucceeded) {
       this.promptCountAtLastCommit = this.promptCount;
-      this.permissionPromptCountAtLastCommit = this.permissionPromptCount;
-      this.escapeCountAtLastCommit = this.escapeCount;
     }
     this.fileAttributions.clear();
     this.sessionBaselines.clear();
@@ -318,8 +345,6 @@ export class CommitAttributionService {
    */
   clearAttributedFiles(committedAbsolutePaths: Set<string>): void {
     this.promptCountAtLastCommit = this.promptCount;
-    this.permissionPromptCountAtLastCommit = this.permissionPromptCount;
-    this.escapeCountAtLastCommit = this.escapeCount;
     for (const p of committedAbsolutePaths) {
       this.fileAttributions.delete(p);
       this.sessionBaselines.delete(p);
@@ -342,28 +367,42 @@ export class CommitAttributionService {
     }
     return {
       type: 'attribution-snapshot',
+      version: ATTRIBUTION_SNAPSHOT_VERSION,
       surface: this.surface,
       fileStates,
       baselines,
       promptCount: this.promptCount,
       promptCountAtLastCommit: this.promptCountAtLastCommit,
-      permissionPromptCount: this.permissionPromptCount,
-      permissionPromptCountAtLastCommit: this.permissionPromptCountAtLastCommit,
-      escapeCount: this.escapeCount,
-      escapeCountAtLastCommit: this.escapeCountAtLastCommit,
     };
   }
 
   /** Restore state from a persisted snapshot. */
   restoreFromSnapshot(snapshot: AttributionSnapshot): void {
+    // Future schema bumps land here. Treat absent `version` as 1
+    // (the schema in production at the time this field was added) so
+    // existing on-disk snapshots restore cleanly.
+    const snapshotVersion = snapshot.version ?? 1;
+    if (snapshotVersion !== ATTRIBUTION_SNAPSHOT_VERSION) {
+      // Don't trust a stale shape — its fields may have moved or
+      // changed semantics. Reset to a fresh state rather than
+      // splice incompatible data.
+      this.fileAttributions.clear();
+      this.sessionBaselines.clear();
+      this.surface = getClientSurface();
+      this.promptCount = 0;
+      this.promptCountAtLastCommit = 0;
+      return;
+    }
+
     this.surface = snapshot.surface ?? getClientSurface();
-    this.promptCount = snapshot.promptCount ?? 0;
-    this.promptCountAtLastCommit = snapshot.promptCountAtLastCommit ?? 0;
-    this.permissionPromptCount = snapshot.permissionPromptCount ?? 0;
-    this.permissionPromptCountAtLastCommit =
-      snapshot.permissionPromptCountAtLastCommit ?? 0;
-    this.escapeCount = snapshot.escapeCount ?? 0;
-    this.escapeCountAtLastCommit = snapshot.escapeCountAtLastCommit ?? 0;
+    // A corrupted or partially-written snapshot can leave numeric
+    // counters as `undefined`; without coercion, downstream
+    // `Math.min(undefined, n)` produces NaN that flows into the
+    // git-notes payload. Coerce per-field with a typed default.
+    this.promptCount = sanitiseCount(snapshot.promptCount);
+    this.promptCountAtLastCommit = sanitiseCount(
+      snapshot.promptCountAtLastCommit,
+    );
 
     this.fileAttributions.clear();
     for (const [k, v] of Object.entries(snapshot.fileStates ?? {})) {
@@ -373,11 +412,11 @@ export class CommitAttributionService {
       // session resumed from a pre-fix snapshot could have two
       // parallel records for the same file under symlink/canonical
       // forms.
-      this.fileAttributions.set(realpathOrSelf(k), { ...v });
+      this.fileAttributions.set(realpathOrSelf(k), sanitiseAttribution(v));
     }
     this.sessionBaselines.clear();
     for (const [k, v] of Object.entries(snapshot.baselines ?? {})) {
-      this.sessionBaselines.set(realpathOrSelf(k), { ...v });
+      this.sessionBaselines.set(realpathOrSelf(k), sanitiseBaseline(v));
     }
   }
 
