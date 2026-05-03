@@ -355,10 +355,10 @@ export class ContentGenerationPipeline {
       }
       // Also strip reasoning config — extra_body could inject it, overriding
       // buildReasoningConfig's decision to return {} for disabled thinking.
-      // Includes the flat `reasoning_effort` (DeepSeek-style) which the
-      // DeepSeek provider's translateReasoningEffort may have produced from
-      // an extra_body-injected nested `reasoning` after this branch already
-      // ran during the same buildRequest pass.
+      // The provider hook (e.g. DeepSeekOpenAICompatibleProvider.buildRequest
+      // → translateReasoningEffort) runs earlier in this same pass and may
+      // have flattened the nested `reasoning` into a top-level
+      // `reasoning_effort`, so we strip both shapes here.
       if ('reasoning' in typed) {
         delete typed['reasoning'];
       }

@@ -483,7 +483,7 @@ The merge strategy for `modelProviders` itself is REPLACE: the entire `modelProv
 
 ## Reasoning / thinking configuration
 
-The optional `reasoning` field under `generationConfig` controls how aggressively the model reasons before responding. It is plumbed through every supported provider — set it once and the converter for each protocol does the right thing.
+The optional `reasoning` field under `generationConfig` controls how aggressively the model reasons before responding. The Anthropic and Gemini converters always honor it. The OpenAI-compatible pipeline honors it **unless** `generationConfig.samplingParams` is set — see the "Interaction with `samplingParams`" caveat below.
 
 ```jsonc
 {
@@ -521,6 +521,16 @@ The optional `reasoning` field under `generationConfig` controls how aggressivel
 ### `reasoning: false`
 
 Setting `reasoning: false` (the literal boolean) explicitly disables thinking on every provider — useful for cheap side queries that don't benefit from reasoning. This is honored at the request level too via `request.config.thinkingConfig.includeThoughts: false` for one-off calls (e.g. suggestion generation).
+
+### Interaction with `samplingParams` (OpenAI-compatible only)
+
+> [!warning]
+>
+> When `generationConfig.samplingParams` is set on an OpenAI-compatible provider, the pipeline ships those keys to the wire **verbatim** and skips the separate `reasoning` injection entirely. So a config like `{ samplingParams: { temperature: 0.5 }, reasoning: { effort: 'max' } }` will silently drop the reasoning field on OpenAI/DeepSeek requests.
+>
+> If you set `samplingParams`, include the reasoning knob inside it directly — for DeepSeek that's `samplingParams.reasoning_effort`, for GPT-5/o-series it's `samplingParams.reasoning_effort` (their flat field) or `samplingParams.reasoning` (the nested object). For OpenRouter and other providers the field name varies; consult the provider docs.
+>
+> The Anthropic and Gemini converters are unaffected — they always read `reasoning.effort` directly regardless of `samplingParams`.
 
 ### `budget_tokens`
 
