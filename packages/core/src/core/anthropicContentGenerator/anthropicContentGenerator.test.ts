@@ -610,6 +610,50 @@ describe('AnthropicContentGenerator', () => {
       );
     });
 
+    it("preserves explicit budget_tokens even when effort: 'max' is clamped", async () => {
+      // User-supplied budget_tokens is an escape hatch: it bypasses the
+      // effort-based ladder unconditionally, including the 'max' clamp.
+      // So `{ effort: 'max', budget_tokens: 128_000 }` against real
+      // api.anthropic.com lands as `output_config.effort: 'high'`
+      // (clamped — the effort enum would otherwise 400) but
+      // `thinking.budget_tokens: 128_000` (preserved verbatim — the
+      // server accepts any int within the model's context window).
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max', budget_tokens: 128_000 },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({
+          output_config: { effort: 'high' },
+          thinking: { type: 'enabled', budget_tokens: 128_000 },
+        }),
+      );
+    });
+
     it('omits thinking when request.config.thinkingConfig.includeThoughts is false', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue({

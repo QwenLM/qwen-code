@@ -452,6 +452,17 @@ export class AnthropicContentGenerator implements ContentGenerator {
       return undefined;
     }
 
+    // Explicit budget_tokens is an escape hatch from the effort ladder:
+    // honor exactly what the user asked for. This deliberately does NOT
+    // re-clamp the value to track the (possibly clamped) effort label —
+    // a user who set `{ effort: 'max', budget_tokens: 128_000 }` against
+    // real api.anthropic.com will see `output_config.effort: 'high'`
+    // (clamped) but `thinking.budget_tokens: 128_000` (preserved). That
+    // wire-shape mismatch is intentional: the clamp protects against
+    // unknown-enum 400s on the effort field, but the budget field is
+    // just an integer the server accepts within its context window, so
+    // an explicit override stays explicit. The default ladder below is
+    // what stays consistent with the clamped effort.
     if (reasoning?.budget_tokens !== undefined) {
       return {
         type: 'enabled',
