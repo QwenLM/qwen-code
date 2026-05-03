@@ -79,13 +79,20 @@ function statusLabel(entry: TaskEntry): string {
 }
 
 function taskLabel(entry: TaskEntry): string {
-  if (entry.kind === 'agent') {
-    return buildBackgroundEntryLabel(entry);
+  switch (entry.kind) {
+    case 'agent':
+      return buildBackgroundEntryLabel(entry);
+    case 'shell':
+      return entry.command;
+    case 'monitor':
+      return entry.description;
+    default: {
+      const _exhaustive: never = entry;
+      throw new Error(
+        `taskLabel: unknown TaskEntry kind: ${JSON.stringify(_exhaustive)}`,
+      );
+    }
   }
-  if (entry.kind === 'shell') {
-    return entry.command;
-  }
-  return entry.description;
 }
 
 function taskId(entry: TaskEntry): string {
@@ -168,7 +175,9 @@ export const tasksCommand: SlashCommand = {
     // dialog to point at and the noise just clutters their output.
     if (context.executionMode === 'interactive') {
       lines.push(
-        'Tip: Ctrl+T opens the interactive Background tasks dialog with detail view + live updates.',
+        t(
+          'Tip: Ctrl+T opens the interactive Background tasks dialog with detail view + live updates.',
+        ),
         '',
       );
     }

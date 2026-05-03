@@ -239,6 +239,21 @@ describe('tasksCommand', () => {
     expect(result.content).not.toContain('output: ');
   });
 
+  it('renders cancelled monitor with eventCount suffix', async () => {
+    getMonitors.mockReturnValue([
+      monitorEntry({
+        monitorId: 'mon_cancel',
+        description: 'tail noisy log',
+        status: 'cancelled',
+        eventCount: 3,
+        endTime: Date.now() - 200,
+      }),
+    ]);
+    const result = await tasksCommand.action!(context, '');
+    if (!result || result.type !== 'message') throw new Error('no result');
+    expect(result.content).toContain('[mon_cancel] cancelled (3 events)');
+  });
+
   it('singular form: "1 event" not "1 events"', async () => {
     getMonitors.mockReturnValue([
       monitorEntry({ monitorId: 'mon_one', eventCount: 1 }),
@@ -273,6 +288,28 @@ describe('tasksCommand', () => {
     if (!withHint || withHint.type !== 'message') throw new Error('no result');
     expect(withHint.content).toContain('Ctrl+T');
     expect(withHint.content).toContain('Background tasks (1 total)');
+  });
+
+  it('suppresses the Ctrl+T hint in acp mode (no dialog to point at)', async () => {
+    // ACP / IDE-bridge consumers (Zed, etc.) have no TTY for the
+    // dialog — same suppression rationale as non_interactive. Pinning
+    // this so a future regression that switches to `!== 'non_interactive'`
+    // (which would wrongly show the hint to ACP) fails loudly.
+    getShells.mockReturnValue([entry({ shellId: 'bg_x' })]);
+    const acpCtx = createMockCommandContext({
+      executionMode: 'acp',
+      services: {
+        config: {
+          getBackgroundShellRegistry: () => ({ getAll: getShells }),
+          getBackgroundTaskRegistry: () => ({ getAll: getAgents }),
+          getMonitorRegistry: () => ({ getAll: getMonitors }),
+        },
+      },
+    } as unknown as Parameters<typeof createMockCommandContext>[0]);
+    const result = await tasksCommand.action!(acpCtx, '');
+    if (!result || result.type !== 'message') throw new Error('no result');
+    expect(result.content).not.toContain('Ctrl+T');
+    expect(result.content).toContain('Background tasks (1 total)');
   });
 
   it('merges all three kinds and orders them by startTime', async () => {
