@@ -6,9 +6,9 @@
 
 /**
  * Tracks background shell processes spawned via the `shell` tool with
- * `is_background: true`. Each entry holds the metadata the agent and the
- * `/tasks` slash command need to query, observe, or terminate a running
- * background shell.
+ * `is_background: true`. Each entry holds the metadata the agent, the
+ * interactive Background tasks dialog, and the `/tasks` slash command
+ * need to query, observe, or terminate a running background shell.
  *
  * State machine: register → running → { completed | failed | cancelled }.
  * Transitions out of running are one-shot: complete/fail/cancel become
@@ -28,7 +28,7 @@ export type BackgroundShellStatus =
   | 'cancelled';
 
 export interface BackgroundShellEntry {
-  /** Stable id used by the model and the `/tasks` UI. */
+  /** Stable id used by the model, the Background tasks dialog, and `/tasks`. */
   shellId: string;
   /** The user-supplied command, after any pre-processing the tool applies. */
   command: string;

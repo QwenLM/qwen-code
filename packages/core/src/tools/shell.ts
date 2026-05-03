@@ -862,7 +862,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `id: ${shellId}\n` +
         pidLine +
         `output file: ${outputPath}\n` +
-        `Use the /tasks command to list and inspect background shells, or Read the output file directly.`,
+        `To inspect: /tasks (text listing, works in any mode) or the interactive Background tasks dialog (focus the footer pill, then Enter — has detail view + live updates). Read the output file directly for raw content.`,
       returnDisplay: `Background shell ${shellId} started${pid !== undefined ? ` (pid ${pid})` : ''}.`,
     };
   }

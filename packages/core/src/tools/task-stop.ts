@@ -92,7 +92,8 @@ class TaskStopInvocation extends BaseToolInvocation<
     // Background shell registry (Phase B). Settles asynchronously when the
     // child process exits in response to the AbortController; the registry
     // entry's terminal state (`cancelled`) and final exit code/output stay
-    // observable via `/tasks` and the on-disk output file.
+    // observable via `/tasks` (text), the interactive Background tasks
+    // dialog (footer pill + Enter), and the on-disk output file.
     const shellRegistry = this.config.getBackgroundShellRegistry();
     const shellEntry = shellRegistry.get(taskId);
     if (shellEntry) {
@@ -107,7 +108,7 @@ class TaskStopInvocation extends BaseToolInvocation<
       return {
         llmContent:
           `Cancellation requested for background shell "${taskId}". ` +
-          `Final status will be visible via /tasks once the process drains; ` +
+          `Final status will be visible via /tasks (text) or the interactive Background tasks dialog (footer pill + Enter) once the process drains; ` +
           `captured output remains at ${shellEntry.outputPath}.\n` +
           `Command: ${shellEntry.command}`,
         returnDisplay: `Cancelled shell: ${shellEntry.command}`,
