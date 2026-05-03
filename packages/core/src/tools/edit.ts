@@ -484,7 +484,14 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       // This last guard tightens the window from "post-read →
       // writeTextFile (unbounded)" to "stat → writeTextFile (two
       // syscalls)".
-      if (!editData.isNewFile && !this.config.getFileReadCacheDisabled()) {
+      //
+      // Run unconditionally (not gated on `editData.isNewFile`):
+      // `isNewFile` was decided back in calculateEdit, but a file
+      // could be created in the gap between then and now and a
+      // confirmation-pending Edit would otherwise clobber it
+      // without enforcement. ENOENT inside checkPriorRead returns
+      // ok:true so genuine new-file creation is unaffected.
+      if (!this.config.getFileReadCacheDisabled()) {
         const writeDecision = await checkPriorRead(
           this.config.getFileReadCache(),
           this.params.file_path,

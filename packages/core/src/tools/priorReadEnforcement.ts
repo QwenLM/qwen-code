@@ -148,11 +148,29 @@ export async function checkPriorRead(
   // ("call read_file first" → "read_file says directory") would be
   // a real regression vs the pre-PR behaviour.
   //
-  // Other non-regular files fall through to cache.check(): they
-  // will report `unknown` (no entry can exist because read_file
-  // rejects them) and enforcement will reject before any I/O.
+  // Non-regular non-directory paths (FIFO / socket / character /
+  // block device) get a dedicated rejection: read_file rejects
+  // them as "not a regular file" with no recovery, so telling the
+  // model to "call read_file first" would loop forever. The
+  // dedicated message tells the model the path cannot be edited
+  // via Edit / WriteFile at all and to use a different tool.
   if (stats.isDirectory()) {
     return { ok: true };
+  }
+  if (!stats.isFile()) {
+    const verbBare = verb === 'editing' ? 'edit' : 'overwrite';
+    const raw =
+      `${filePath} is a FIFO / socket / character or block device. ` +
+      `The Edit / WriteFile tools only operate on regular files; ` +
+      `the ${ToolNames.READ_FILE} tool also rejects these targets. ` +
+      `Use a different mechanism (e.g. shell tool with the appropriate ` +
+      `command) if you need to ${verbBare} this path.`;
+    return {
+      ok: false,
+      type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
+      rawMessage: raw,
+      displayMessage: `special file; cannot ${verbBare} via this tool.`,
+    };
   }
   const status = cache.check(stats);
   if (

@@ -345,7 +345,15 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     // ran before mkdirSync / encoding detection; we re-stat here so
     // an external mutation that lands in the gap between those
     // operations and the writeTextFile below is caught.
-    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+    //
+    // Run unconditionally (not gated on `fileExists`): if the path
+    // was absent during the earlier checkPriorRead but a different
+    // process creates it before this writeTextFile, the gated form
+    // would skip enforcement and silently overwrite a pre-existing
+    // file the model never read. ENOENT inside checkPriorRead
+    // returns ok:true so the genuine new-file creation path is
+    // unchanged.
+    if (!this.config.getFileReadCacheDisabled()) {
       const writeDecision = await checkPriorRead(
         this.config.getFileReadCache(),
         file_path,
