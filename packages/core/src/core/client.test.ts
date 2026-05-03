@@ -506,6 +506,106 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
+  describe('microcompaction FileReadCache invalidation', () => {
+    function makeReadFileResponses(count: number): Content[] {
+      const out: Content[] = [];
+      for (let i = 0; i < count; i++) {
+        out.push({
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'read_file',
+                args: { file_path: `/x/${i}.ts` },
+              },
+            },
+          ],
+        });
+        out.push({
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: `content of ${i}` },
+              },
+            },
+          ],
+        });
+      }
+      return out;
+    }
+
+    beforeEach(() => {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+    });
+
+    it('clears the cache after microcompaction strips old read_file results', async () => {
+      // Default test fixture: toolResultsThresholdMinutes = 60,
+      // toolResultsNumToKeep = 5. Six read_file results + a 90-minute
+      // idle gap means the oldest one gets cleared, so the if-meta
+      // branch in sendMessageStream fires and must invalidate the cache.
+      const cacheClear = vi.fn();
+      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+        clear: cacheClear,
+      } as unknown as ReturnType<Config['getFileReadCache']>);
+
+      const history = makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-mc-clear-1',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).toHaveBeenCalled();
+      expect(cacheClear).toHaveBeenCalled();
+    });
+
+    it('does not clear the cache when the idle gap is below the threshold', async () => {
+      const cacheClear = vi.fn();
+      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+        clear: cacheClear,
+      } as unknown as ReturnType<Config['getFileReadCache']>);
+
+      const history = makeReadFileResponses(6);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory: vi.fn(),
+      } as unknown as GeminiChat;
+      // Recent activity — microcompaction must not fire.
+      client['lastApiCompletionTimestamp'] = Date.now() - 30 * 1000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-mc-clear-2',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(cacheClear).not.toHaveBeenCalled();
+    });
+  });
+
   describe('tryCompressChat', () => {
     const mockGetHistory = vi.fn();
 

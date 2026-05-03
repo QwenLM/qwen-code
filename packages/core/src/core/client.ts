@@ -694,6 +694,15 @@ export class GeminiClient {
       );
       if (mcResult.meta) {
         this.getChat().setHistory(mcResult.history);
+        // Microcompaction replaces old read_file / shell / glob / grep /
+        // edit / write_file tool outputs with a placeholder, but the
+        // FileReadCache still records the prior full Reads as "seen in
+        // this conversation". A follow-up Read of an unchanged file
+        // would then return the file_unchanged placeholder pointing at
+        // bytes the model can no longer retrieve from history. Drop the
+        // cache so post-microcompaction Reads re-emit the bytes,
+        // mirroring the post-compaction clear in tryCompressChat.
+        this.config.getFileReadCache().clear();
         const m = mcResult.meta;
         debugLogger.debug(
           `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
