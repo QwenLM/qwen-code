@@ -584,4 +584,102 @@ describe('MonitorRegistry', () => {
       registry.register(createEntry({ monitorId: 'mon-new' })),
     ).not.toThrow();
   });
+
+  describe('setStatusChangeCallback', () => {
+    it('fires once on register (nothing → running)', () => {
+      const cb = vi.fn();
+      registry.setStatusChangeCallback(cb);
+      registry.register(createEntry({ monitorId: 'a' }));
+      expect(cb).toHaveBeenCalledTimes(1);
+      expect(cb.mock.calls[0]?.[0]).toMatchObject({
+        monitorId: 'a',
+        status: 'running',
+      });
+    });
+
+    it('fires on every running → terminal transition (complete / fail / cancel)', () => {
+      const cb = vi.fn();
+      registry.register(createEntry({ monitorId: 'a' }));
+      registry.register(createEntry({ monitorId: 'b' }));
+      registry.register(createEntry({ monitorId: 'c' }));
+      registry.setStatusChangeCallback(cb);
+
+      registry.complete('a', 0);
+      registry.fail('b', 'oops');
+      registry.cancel('c');
+
+      expect(cb).toHaveBeenCalledTimes(3);
+      expect(cb.mock.calls[0]?.[0]).toMatchObject({
+        monitorId: 'a',
+        status: 'completed',
+      });
+      expect(cb.mock.calls[1]?.[0]).toMatchObject({
+        monitorId: 'b',
+        status: 'failed',
+      });
+      expect(cb.mock.calls[2]?.[0]).toMatchObject({
+        monitorId: 'c',
+        status: 'cancelled',
+      });
+    });
+
+    it('does not fire on non-status events (emitEvent without auto-stop)', () => {
+      registry.register(createEntry({ monitorId: 'a', maxEvents: 10 }));
+      const cb = vi.fn();
+      registry.setStatusChangeCallback(cb);
+      registry.emitEvent('a', 'log line 1');
+      registry.emitEvent('a', 'log line 2');
+      expect(cb).not.toHaveBeenCalled();
+    });
+
+    it('fires when emitEvent auto-stops at maxEvents (settle path)', () => {
+      registry.register(createEntry({ monitorId: 'a', maxEvents: 2 }));
+      const cb = vi.fn();
+      registry.setStatusChangeCallback(cb);
+      registry.emitEvent('a', 'line 1');
+      registry.emitEvent('a', 'line 2'); // this hits maxEvents, settle('completed')
+      expect(cb).toHaveBeenCalledTimes(1);
+      expect(cb.mock.calls[0]?.[0]).toMatchObject({
+        monitorId: 'a',
+        status: 'completed',
+      });
+    });
+
+    it('clearing the callback stops further notifications', () => {
+      const cb = vi.fn();
+      registry.setStatusChangeCallback(cb);
+      registry.register(createEntry({ monitorId: 'a' }));
+      registry.setStatusChangeCallback(undefined);
+      registry.complete('a', 0);
+      expect(cb).toHaveBeenCalledTimes(1); // register only
+    });
+
+    it('callback failure does not poison the registry', () => {
+      const cb = vi.fn(() => {
+        throw new Error('subscriber blew up');
+      });
+      registry.setStatusChangeCallback(cb);
+      expect(() =>
+        registry.register(createEntry({ monitorId: 'a' })),
+      ).not.toThrow();
+      expect(registry.get('a')).toBeDefined();
+    });
+
+    it('fires once on reset() so dialog snapshots clear stale rows', () => {
+      registry.register(createEntry({ monitorId: 'a' }));
+      registry.register(createEntry({ monitorId: 'b' }));
+      const cb = vi.fn();
+      registry.setStatusChangeCallback(cb);
+      registry.reset();
+      expect(cb).toHaveBeenCalledTimes(1);
+      expect(registry.getAll()).toEqual([]);
+    });
+
+    it('reset() on an empty registry does not fire statusChange', () => {
+      const cb = vi.fn();
+      registry.setStatusChangeCallback(cb);
+      registry.reset();
+      expect(cb).not.toHaveBeenCalled();
+    });
+  });
 });
