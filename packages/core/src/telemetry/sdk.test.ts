@@ -136,6 +136,9 @@ describe('Telemetry SDK', () => {
       compression: 'gzip',
     });
     expect(NodeSDK.prototype.start).toHaveBeenCalled();
+    expect(NodeSDK).toHaveBeenCalledWith(
+      expect.objectContaining({ autoDetectResources: false }),
+    );
   });
 
   it('should use HTTP exporters with signal-specific paths when protocol is http', () => {
