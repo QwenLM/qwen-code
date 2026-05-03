@@ -8,12 +8,13 @@
  */
 
 import { shouldShowToolCall, getToolCallComponent } from '@qwen-code/webui';
+import type { FC } from 'react';
 import type { BaseToolCallProps } from '@qwen-code/webui';
 
 /**
  * Main tool call component that routes to specialized implementations
  */
-export const ToolCallRouter: React.FC<BaseToolCallProps> = ({
+export const ToolCallRouter: FC<BaseToolCallProps> = ({
   toolCall,
   isFirst,
   isLast,

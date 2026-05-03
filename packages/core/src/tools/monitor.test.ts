@@ -1273,37 +1273,52 @@ describe('MonitorTool', () => {
     });
 
     it('recovers token bucket when clock moves backwards (suspend/resume)', async () => {
-      vi.useFakeTimers();
+      const realDateNow = Date.now;
+      let mockTime = 0;
+      Date.now = () => mockTime;
       try {
-        vi.setSystemTime(0);
+        mockTime = 0;
         const callback = vi.fn();
         monitorRegistry.setNotificationCallback(callback);
 
         const invocation = createInvocation({ command: 'noisy-cmd' });
         await invocation.execute(new AbortController().signal);
 
-        // Burn the entire burst.
+        // Burn the entire burst at t=0.
         mockChild.stdout.emit('data', Buffer.from('l1\nl2\nl3\nl4\nl5\n'));
         expect(callback).toHaveBeenCalledTimes(5);
 
-        // Advance time to t=2000ms, then emit a line to update lastRefill.
-        vi.setSystemTime(2000);
-        mockChild.stdout.emit('data', Buffer.from('l6\n'));
-        expect(callback).toHaveBeenCalledTimes(6);
+        // Advance to t=5000, drain 5 refilled tokens, then confirm bucket
+        // is empty by emitting a line that gets dropped.
+        mockTime = 5000;
+        mockChild.stdout.emit('data', Buffer.from('l6\nl7\nl8\nl9\nl10\n'));
+        expect(callback).toHaveBeenCalledTimes(10);
+        mockChild.stdout.emit('data', Buffer.from('l11\n'));
+        expect(callback).toHaveBeenCalledTimes(10); // l11 dropped
 
-        // Simulate clock going backwards (e.g. system suspend/resume).
-        vi.setSystemTime(1000);
+        // Simulate clock going backwards (suspend/resume, NTP rollback).
+        // At this point lastRefill=5000. Setting time to 2000 makes
+        // elapsed = 2000-5000 = -3000. Without the guard, the bucket
+        // stays starved. With the guard, lastRefill resets to 2000.
+        mockTime = 2000;
 
-        // Without the clock-drift guard, elapsed would be negative,
-        // starving the bucket until the clock catches up past 2000ms.
-        // With the guard, lastRefill resets and the bucket refills
-        // normally from the new (earlier) timestamp.
-        vi.setSystemTime(3000); // 2s after the reset point
-        mockChild.stdout.emit('data', Buffer.from('l7\n'));
-        expect(callback).toHaveBeenCalledTimes(7);
+        // Emit while clock is in the past — guard has just reset
+        // lastRefill to 2000, so elapsed = 0, no refill, bucket still 0.
+        // l12a is dropped (confirming bucket is empty after the reset).
+        mockChild.stdout.emit('data', Buffer.from('l12a\n'));
+        expect(callback).toHaveBeenCalledTimes(10);
+
+        // Advance 1s past the reset point — one token refills.
+        mockTime = 3000;
+        mockChild.stdout.emit('data', Buffer.from('l12b\n'));
+        expect(callback).toHaveBeenCalledTimes(11);
+
+        // This final assertion is the regression check: without the guard,
+        // lastRefill would still be 5000, elapsed = 3000-5000 = -2000,
+        // and l12b would be dropped (callback still 10).
       } finally {
+        Date.now = realDateNow;
         monitorRegistry.abortAll({ notify: false });
-        vi.useRealTimers();
       }
     });
   });
