@@ -206,15 +206,31 @@ export class GeminiClient {
 
   private stripOrphanedUserEntriesFromHistory() {
     this.getChat().stripOrphanedUserEntriesFromHistory();
+    // Stripped trailing user entries can include read_file
+    // functionResponses from a failed-then-retried request. The
+    // FileReadCache would still record those reads, so the retry's
+    // re-issued Read could hit the file_unchanged placeholder while
+    // the model has nothing to fall back on. Clear to be safe.
+    this.config.getFileReadCache().clear();
   }
 
   setHistory(history: Content[]) {
     this.getChat().setHistory(history);
+    // Replacing history wholesale drops any prior read_file tool
+    // results the FileReadCache still believes the model has seen.
+    // Without clearing, a follow-up Read of an unchanged file would
+    // return the file_unchanged placeholder for bytes that no longer
+    // exist in the new history.
+    this.config.getFileReadCache().clear();
     this.forceFullIdeContext = true;
   }
 
   truncateHistory(keepCount: number) {
     this.getChat().truncateHistory(keepCount);
+    // Truncation can drop prior read_file results past keepCount while
+    // the FileReadCache still records those reads — same staleness
+    // risk as setHistory. Clear to force re-emission.
+    this.config.getFileReadCache().clear();
     this.forceFullIdeContext = true;
   }
 
@@ -233,6 +249,11 @@ export class GeminiClient {
   async resetChat(): Promise<void> {
     this.surfacedRelevantAutoMemoryPaths.clear();
     this.lastApiCompletionTimestamp = null;
+    // startChat() rewrites the chat to its initial state. Any prior
+    // read_file tool results the FileReadCache still tracks are no
+    // longer in history, so a follow-up Read would serve a placeholder
+    // pointing at content the model can no longer retrieve.
+    this.config.getFileReadCache().clear();
     await this.startChat();
   }
 
@@ -694,8 +715,8 @@ export class GeminiClient {
       );
       if (mcResult.meta) {
         this.getChat().setHistory(mcResult.history);
-        // Microcompaction replaces old read_file / shell / glob / grep /
-        // edit / write_file tool outputs with a placeholder, but the
+        // Microcompaction replaces old compactable tool outputs
+        // (including read_file) with a placeholder, but the
         // FileReadCache still records the prior full Reads as "seen in
         // this conversation". A follow-up Read of an unchanged file
         // would then return the file_unchanged placeholder pointing at

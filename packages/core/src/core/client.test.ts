@@ -457,6 +457,78 @@ describe('Gemini Client (client.ts)', () => {
       expect(newHistory.length).toBe(initialHistory.length);
       expect(JSON.stringify(newHistory)).not.toContain('some old message');
     });
+
+    it('clears the FileReadCache so post-reset Reads re-emit content', async () => {
+      const cacheClear = vi.fn();
+      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+        clear: cacheClear,
+      } as unknown as ReturnType<Config['getFileReadCache']>);
+
+      await client.resetChat();
+
+      expect(cacheClear).toHaveBeenCalled();
+    });
+  });
+
+  describe('history mutation invalidates FileReadCache', () => {
+    it('setHistory clears the cache', () => {
+      const cacheClear = vi.fn();
+      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+        clear: cacheClear,
+      } as unknown as ReturnType<Config['getFileReadCache']>);
+      client['chat'] = {
+        setHistory: vi.fn(),
+      } as unknown as GeminiChat;
+
+      client.setHistory([{ role: 'user', parts: [{ text: 'replaced' }] }]);
+
+      expect(cacheClear).toHaveBeenCalled();
+    });
+
+    it('truncateHistory clears the cache', () => {
+      const cacheClear = vi.fn();
+      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+        clear: cacheClear,
+      } as unknown as ReturnType<Config['getFileReadCache']>);
+      client['chat'] = {
+        truncateHistory: vi.fn(),
+      } as unknown as GeminiChat;
+
+      client.truncateHistory(2);
+
+      expect(cacheClear).toHaveBeenCalled();
+    });
+
+    it('retry strips orphaned trailing user entries and clears the cache', async () => {
+      const cacheClear = vi.fn();
+      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+        clear: cacheClear,
+      } as unknown as ReturnType<Config['getFileReadCache']>);
+      const stripOrphanedUserEntriesFromHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        stripOrphanedUserEntriesFromHistory,
+      } as unknown as GeminiChat;
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'retry' }],
+        new AbortController().signal,
+        'prompt-retry-1',
+        { type: SendMessageType.Retry },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(stripOrphanedUserEntriesFromHistory).toHaveBeenCalled();
+      expect(cacheClear).toHaveBeenCalled();
+    });
   });
 
   describe('thinking block idle cleanup and latch', () => {
