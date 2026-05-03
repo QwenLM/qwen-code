@@ -526,7 +526,9 @@ describe('AnthropicContentGenerator', () => {
     it("clamps effort: 'max' to 'high' on a non-DeepSeek anthropic provider", async () => {
       // 'max' is a DeepSeek extension; real Anthropic only accepts
       // low/medium/high. Clamp so a config targeting DeepSeek doesn't 400
-      // when reused against a stricter Anthropic backend.
+      // when reused against a stricter Anthropic backend. The thinking
+      // budget must also drop from the 'max' tier (128K) to the 'high'
+      // tier (64K) so the effort label and the budget stay consistent.
       const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue({
         id: 'anthropic-1',
@@ -556,7 +558,10 @@ describe('AnthropicContentGenerator', () => {
       const [anthropicRequest] =
         anthropicState.lastCreateArgs as AnthropicCreateArgs;
       expect(anthropicRequest).toEqual(
-        expect.objectContaining({ output_config: { effort: 'high' } }),
+        expect.objectContaining({
+          output_config: { effort: 'high' },
+          thinking: { type: 'enabled', budget_tokens: 64_000 },
+        }),
       );
     });
 

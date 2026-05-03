@@ -269,8 +269,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
   ): Promise<MessageCreateParamsWithThinking> {
     const sampling = this.buildSamplingParameters(request);
-    const thinking = this.buildThinkingConfig(request);
-    const outputConfig = this.buildOutputConfig(request);
+    // Normalize reasoning.effort once per request (clamps DeepSeek-only
+    // 'max' to 'high' for stricter Anthropic backends and logs the
+    // downgrade once). Both the thinking budget ladder and output_config
+    // consume the result so the wire shape stays internally consistent.
+    const effectiveEffort = this.resolveEffectiveEffort(request);
+    const thinking = this.buildThinkingConfig(request, effectiveEffort);
+    const outputConfig = this.buildOutputConfig(request, effectiveEffort);
 
     // Compute per-request: `Config.setModel()` mutates contentGeneratorConfig
     // in place, so a constructor-time cache could go stale on a runtime
@@ -370,8 +375,45 @@ export class AnthropicContentGenerator implements ContentGenerator {
     };
   }
 
+  /**
+   * Compute the effort value that both the thinking budget ladder and
+   * output_config should use for this request. Returns undefined whenever
+   * reasoning is disabled or the user didn't set an effort. Clamps the
+   * DeepSeek-only 'max' tier to 'high' on non-DeepSeek anthropic backends
+   * (real Anthropic only accepts low/medium/high), with a debugLogger.warn
+   * the first time a request needs the downgrade so users notice the
+   * misconfiguration without spamming the log on every turn.
+   */
+  private resolveEffectiveEffort(
+    request: GenerateContentParameters,
+  ): 'low' | 'medium' | 'high' | 'max' | undefined {
+    if (request.config?.thinkingConfig?.includeThoughts === false) {
+      return undefined;
+    }
+    const reasoning = this.contentGeneratorConfig.reasoning;
+    if (reasoning === false || reasoning === undefined) {
+      return undefined;
+    }
+    const effort = reasoning.effort;
+    if (effort === undefined) {
+      return undefined;
+    }
+    if (
+      effort === 'max' &&
+      !isDeepSeekAnthropicProvider(this.contentGeneratorConfig)
+    ) {
+      debugLogger.warn(
+        "reasoning.effort='max' is a DeepSeek extension; clamping to 'high' " +
+          'for non-DeepSeek anthropic provider to avoid HTTP 400.',
+      );
+      return 'high';
+    }
+    return effort;
+  }
+
   private buildThinkingConfig(
     request: GenerateContentParameters,
+    effectiveEffort: 'low' | 'medium' | 'high' | 'max' | undefined,
   ): { type: 'enabled'; budget_tokens: number } | undefined {
     if (request.config?.thinkingConfig?.includeThoughts === false) {
       return undefined;
@@ -390,17 +432,18 @@ export class AnthropicContentGenerator implements ContentGenerator {
       };
     }
 
-    const effort = reasoning?.effort;
     // When using interleaved thinking with tools, this budget token limit is the entire context window(200k tokens).
     // 'max' is the DeepSeek-specific extra-strong tier; bump the budget
     // accordingly so any client-side budgeting matches the spirit of the
-    // server-side label.
+    // server-side label. resolveEffectiveEffort already clamps 'max' to
+    // 'high' on non-DeepSeek anthropic backends so the budget here stays
+    // consistent with the effort label written into output_config.
     const budgetTokens =
-      effort === 'low'
+      effectiveEffort === 'low'
         ? 16_000
-        : effort === 'max'
+        : effectiveEffort === 'max'
           ? 128_000
-          : effort === 'high'
+          : effectiveEffort === 'high'
             ? 64_000
             : 32_000;
 
@@ -412,40 +455,16 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
   private buildOutputConfig(
     request: GenerateContentParameters,
+    effectiveEffort: 'low' | 'medium' | 'high' | 'max' | undefined,
   ): { effort: 'low' | 'medium' | 'high' | 'max' } | undefined {
-    // Honor per-request opt-out so side queries (suggestionGenerator,
-    // ArenaManager, forkedAgent) don't leak a reasoning-shaped output_config
-    // alongside an absent top-level `thinking` parameter.
-    if (request.config?.thinkingConfig?.includeThoughts === false) {
-      return undefined;
-    }
-
-    const reasoning = this.contentGeneratorConfig.reasoning;
-    if (reasoning === false || reasoning === undefined) {
-      return undefined;
-    }
-
-    if (reasoning.effort === undefined) {
-      return undefined;
-    }
-
-    // 'max' is a DeepSeek-specific extension; real Anthropic accepts only
-    // low/medium/high. Clamp on non-DeepSeek anthropic-compatible providers
-    // so configurations targeting DeepSeek don't 400 when the user later
-    // switches the same auth profile to a stricter Anthropic backend.
-    let effort = reasoning.effort;
-    if (
-      effort === 'max' &&
-      !isDeepSeekAnthropicProvider(this.contentGeneratorConfig)
-    ) {
-      debugLogger.warn(
-        "reasoning.effort='max' is a DeepSeek extension; clamping to 'high' " +
-          'for non-DeepSeek anthropic provider to avoid HTTP 400.',
-      );
-      effort = 'high';
-    }
-
-    return { effort };
+    // resolveEffectiveEffort already returns undefined when:
+    //   - per-request includeThoughts is false (side queries)
+    //   - reasoning is disabled or unset
+    //   - the user didn't set an effort
+    // and clamps DeepSeek-only 'max' to 'high' on stricter anthropic
+    // backends. Just consume the value here.
+    if (effectiveEffort === undefined) return undefined;
+    return { effort: effectiveEffort };
   }
 
   private async *processStream(
