@@ -1049,6 +1049,25 @@ describe('GeminiChat', async () => {
     });
   });
 
+  describe('getHistoryLength', () => {
+    it('returns 0 for an empty history', () => {
+      expect(chat.getHistoryLength()).toBe(0);
+    });
+
+    it('reflects entries added via addHistory', () => {
+      chat.addHistory({ role: 'user', parts: [{ text: 'a' }] });
+      chat.addHistory({ role: 'model', parts: [{ text: 'b' }] });
+      expect(chat.getHistoryLength()).toBe(2);
+    });
+
+    it('matches getHistory().length without paying the structuredClone cost', () => {
+      chat.addHistory({ role: 'user', parts: [{ text: 'a' }] });
+      chat.addHistory({ role: 'model', parts: [{ text: 'b' }] });
+      chat.addHistory({ role: 'user', parts: [{ text: 'c' }] });
+      expect(chat.getHistoryLength()).toBe(chat.getHistory().length);
+    });
+  });
+
   describe('sendMessageStream with retries', () => {
     it('should retry on invalid content, succeed, and report metrics', async () => {
       vi.useFakeTimers();

@@ -482,11 +482,7 @@ describe('Gemini Client (client.ts)', () => {
     it('truncateHistory clears the cache when entries are actually removed', () => {
       const cacheClear = mockFileReadCacheClear();
       client['chat'] = {
-        getHistory: vi.fn().mockReturnValue([
-          { role: 'user', parts: [{ text: 'a' }] },
-          { role: 'model', parts: [{ text: 'b' }] },
-          { role: 'user', parts: [{ text: 'c' }] },
-        ]),
+        getHistoryLength: vi.fn().mockReturnValue(3),
         truncateHistory: vi.fn(),
       } as unknown as GeminiChat;
 
@@ -498,10 +494,7 @@ describe('Gemini Client (client.ts)', () => {
     it('truncateHistory does NOT clear the cache when keepCount >= history length (no-op)', () => {
       const cacheClear = mockFileReadCacheClear();
       client['chat'] = {
-        getHistory: vi.fn().mockReturnValue([
-          { role: 'user', parts: [{ text: 'a' }] },
-          { role: 'model', parts: [{ text: 'b' }] },
-        ]),
+        getHistoryLength: vi.fn().mockReturnValue(2),
         truncateHistory: vi.fn(),
       } as unknown as GeminiChat;
 
@@ -512,6 +505,22 @@ describe('Gemini Client (client.ts)', () => {
       // keepCount exceeds history length — also a no-op.
       client.truncateHistory(99);
       expect(cacheClear).not.toHaveBeenCalled();
+    });
+
+    it('truncateHistory uses O(1) getHistoryLength, not getHistory (avoids structuredClone)', () => {
+      mockFileReadCacheClear();
+      const getHistoryLength = vi.fn().mockReturnValue(5);
+      const getHistory = vi.fn();
+      client['chat'] = {
+        getHistoryLength,
+        getHistory,
+        truncateHistory: vi.fn(),
+      } as unknown as GeminiChat;
+
+      client.truncateHistory(3);
+
+      expect(getHistoryLength).toHaveBeenCalled();
+      expect(getHistory).not.toHaveBeenCalled();
     });
 
     it('retry strips orphaned trailing user entries and clears the cache', async () => {

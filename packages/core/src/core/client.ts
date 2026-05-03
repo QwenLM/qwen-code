@@ -230,7 +230,10 @@ export class GeminiClient {
   }
 
   truncateHistory(keepCount: number) {
-    const prevLen = this.getChat().getHistory().length;
+    // Use the O(1) length getter rather than getHistory() — the latter
+    // structuredClone's the entire history just to read .length, which
+    // gets expensive in long-running sessions.
+    const prevLen = this.getChat().getHistoryLength();
     this.getChat().truncateHistory(keepCount);
     // Truncation can drop prior read_file results past keepCount while
     // the FileReadCache still records those reads — same staleness
