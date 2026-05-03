@@ -50,26 +50,17 @@ const debugLogger = createDebugLogger('SHELL');
 
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
-/**
- * Wall-clock duration above which a foreground bash command that
- * **completed naturally** (process exited without abort signal and
- * without external SIGTERM/SIGKILL) earns a "consider re-running with
- * is_background: true" advisory in the LLM-facing tool result.
- *
- * Programmatically coupled to half the foreground timeout so the two
- * stay in sync if either is tuned later — long enough that normal
- * `npm install` / `pytest` runs don't trigger it, short enough that a
- * legitimately-long-but-completing command (e.g. a 90s build) still
- * gets the advisory before approaching the timeout. Note that timeout
- * and external-kill paths intentionally do NOT get the hint (their own
- * result messaging is enough — see suppression at the call site).
- *
- * Hint is advisory, not corrective: the command's own result is
- * unchanged. The advice targets the agent's NEXT decision.
- */
-const LONG_RUNNING_FOREGROUND_THRESHOLD_MS = Math.floor(
-  DEFAULT_FOREGROUND_TIMEOUT_MS / 2,
-);
+
+// Long-run advisory threshold: half the EFFECTIVE foreground timeout
+// (not the default), computed per-invocation by `longRunThresholdFor`.
+// Couples to whichever timeout actually governs THIS command — so a
+// user who sets `timeout: 600_000` (10 min) gets the advisory at 5 min,
+// not at 60s. The 1/2 ratio is chosen so the hint surfaces well before
+// the timeout would hard-kill, but late enough that normal foreground
+// commands (under the 120s default) don't trigger it before ~60s.
+function longRunThresholdFor(effectiveTimeoutMs: number): number {
+  return Math.floor(effectiveTimeoutMs / 2);
+}
 
 /**
  * Format the long-run advisory appended to long foreground commands.
@@ -742,8 +733,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const shouldAppendLongRunHint =
       !result.aborted &&
       result.signal == null &&
-      elapsedMs >= LONG_RUNNING_FOREGROUND_THRESHOLD_MS;
+      elapsedMs >= longRunThresholdFor(effectiveTimeout);
 
+    // returnDisplayMessage is rebuilt below. In debug mode it mirrors
+    // `llmContent`, but the hint is appended AFTER both the truncation
+    // block and the returnDisplayMessage build (so debug-mode TUI shows
+    // the same pre-hint content the agent would see if hint were
+    // suppressed). We re-sync the debug branch after the hint append
+    // below so the user actually sees the advisory in the TUI too —
+    // otherwise the agent would suddenly suggest `is_background: true`
+    // with no visible trigger.
     let returnDisplayMessage = '';
     if (this.config.getDebugMode()) {
       returnDisplayMessage = llmContent;
@@ -794,8 +793,25 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // header (which the LLM might misread as part of the command's own
     // output). The hint is process metadata about the command, not
     // command output, so it belongs outside the truncation envelope.
-    if (shouldAppendLongRunHint && typeof llmContent === 'string') {
-      llmContent += `\n\n${buildLongRunningForegroundHint(elapsedMs)}`;
+    if (shouldAppendLongRunHint) {
+      if (typeof llmContent === 'string') {
+        llmContent += `\n\n${buildLongRunningForegroundHint(elapsedMs)}`;
+        // Re-sync debug mode's mirror of llmContent so the TUI shows
+        // the same advisory the agent sees (otherwise the agent would
+        // suddenly suggest `is_background: true` with no visible
+        // trigger in debug mode).
+        if (this.config.getDebugMode()) {
+          returnDisplayMessage = llmContent;
+        }
+      }
+      // else: llmContent is a structured `Part[]` / `Part` rather than
+      // a plain string. Today shell.ts only emits string llmContent,
+      // but the type union allows structured content. If a future
+      // refactor changes that, the hint silently disappears here. We
+      // accept that risk for now — the alternative (encoding the hint
+      // as a Part) would require deciding on a rendering convention,
+      // and structured llmContent isn't on the roadmap. Revisit if
+      // someone adds a non-string return path.
     }
 
     const executionError = result.error
