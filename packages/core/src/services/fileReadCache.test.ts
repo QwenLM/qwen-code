@@ -243,7 +243,12 @@ describe('FileReadCache', () => {
       );
     });
 
-    it('preserves lastReadAt set by an earlier recordRead', () => {
+    it('refreshes lastReadAt to match the write — the author saw all bytes', () => {
+      // recordWrite always re-stamps the read metadata: the model
+      // authored the bytes it just wrote, so for prior-read
+      // enforcement purposes it now counts as having seen the full
+      // current content, regardless of whatever partial / ranged /
+      // non-cacheable read happened earlier in the session.
       const cache = new FileReadCache();
       const stats = makeStats();
       cache.recordRead('/x/foo.ts', stats, { full: true, cacheable: true });
@@ -253,8 +258,30 @@ describe('FileReadCache', () => {
         '/x/foo.ts',
         makeStats({ mtimeMs: 9999 }),
       );
-      expect(entry.lastReadAt).toBe(readTime);
       expect(entry.lastWriteAt).toBeGreaterThan(readTime);
+      expect(entry.lastReadAt).toBe(entry.lastWriteAt);
+    });
+
+    it('upgrades lastReadWasFull / lastReadCacheable after a full write', () => {
+      // Reproduction for the gap reviewer flagged: ReadFile(limit=10)
+      // → WriteFile(full) → Edit. Pre-fix, the partial read's
+      // lastReadWasFull=false persisted through the write and the
+      // Edit would be rejected with EDIT_REQUIRES_PRIOR_READ.
+      const cache = new FileReadCache();
+      const stats = makeStats();
+      cache.recordRead('/x/foo.ts', stats, { full: false, cacheable: true });
+      const partialEntry = cache.check(stats);
+      expect(partialEntry.state).toBe('fresh');
+      if (partialEntry.state === 'fresh') {
+        expect(partialEntry.entry.lastReadWasFull).toBe(false);
+      }
+      cache.recordWrite('/x/foo.ts', makeStats({ mtimeMs: 2000 }));
+      const afterWrite = cache.check(makeStats({ mtimeMs: 2000 }));
+      expect(afterWrite.state).toBe('fresh');
+      if (afterWrite.state === 'fresh') {
+        expect(afterWrite.entry.lastReadWasFull).toBe(true);
+        expect(afterWrite.entry.lastReadCacheable).toBe(true);
+      }
     });
   });
 
@@ -267,10 +294,14 @@ describe('FileReadCache', () => {
       vi.useRealTimers();
     });
 
-    it('records lastWriteAt > lastReadAt after Read → Write', () => {
-      // PR2 will use this ordering to decide whether a Read can return a
-      // file_unchanged placeholder. Verifying the timestamps move
-      // monotonically here gives that downstream logic a stable contract.
+    it('records lastWriteAt === lastReadAt after Read → Write', () => {
+      // recordWrite refreshes the read metadata to the write time
+      // because the model authored the bytes it just wrote and now
+      // counts as having seen them. ReadFile's file_unchanged
+      // fast-path therefore checks `lastReadAt > lastWriteAt`
+      // (strictly greater): equal timestamps mean "the last
+      // operation was a write" and a follow-up Read should re-emit
+      // the bytes rather than serve a placeholder.
       const cache = new FileReadCache();
       cache.recordRead('/x/foo.ts', makeStats({ mtimeMs: 1000 }), {
         full: true,
@@ -284,7 +315,7 @@ describe('FileReadCache', () => {
         const { lastReadAt, lastWriteAt } = result.entry;
         expect(lastReadAt).toBeDefined();
         expect(lastWriteAt).toBeDefined();
-        expect(lastWriteAt!).toBeGreaterThan(lastReadAt!);
+        expect(lastReadAt).toBe(lastWriteAt);
       }
     });
 

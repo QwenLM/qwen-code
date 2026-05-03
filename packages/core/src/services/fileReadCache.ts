@@ -119,24 +119,23 @@ export class FileReadCache {
    * fingerprint to the post-write Stats; otherwise the next Edit would
    * see its own write as a "stale" external change.
    *
-   * If the entry has never been Read in this session (i.e. this is a
-   * fresh file just created by Edit / WriteFile), populate the read
-   * metadata as well: the model authored the bytes it just wrote, so
-   * for the purposes of prior-read enforcement it has effectively
-   * "seen" the full text content. Without this, a create→edit→edit
-   * chain would be rejected on the second edit because
-   * `lastReadAt`/`lastReadWasFull`/`lastReadCacheable` would still be
-   * undefined.
+   * Read metadata is **always** refreshed alongside the write, not
+   * just for brand-new entries: the model authored the entire current
+   * content, so for prior-read enforcement purposes it has now "seen"
+   * all bytes — regardless of whether the prior recordRead happened
+   * to be partial (`lastReadWasFull=false`) or non-cacheable
+   * (`lastReadCacheable=false`). Without this, a sequence such as
+   * `ReadFile(limit=10)` → `WriteFile` (full content) → `Edit` would
+   * be rejected on the Edit because `lastReadWasFull=false` from the
+   * earlier partial read would persist through the write.
    */
   recordWrite(absPath: string, stats: Stats): FileReadEntry {
     const entry = this.upsert(absPath, stats);
     const now = Date.now();
     entry.lastWriteAt = now;
-    if (entry.lastReadAt === undefined) {
-      entry.lastReadAt = now;
-      entry.lastReadWasFull = true;
-      entry.lastReadCacheable = true;
-    }
+    entry.lastReadAt = now;
+    entry.lastReadWasFull = true;
+    entry.lastReadCacheable = true;
     return entry;
   }
 

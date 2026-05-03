@@ -31,6 +31,7 @@ import type { LineEnding } from '../services/fileSystemService.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import { ReadFileTool } from './read-file.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
@@ -51,6 +52,8 @@ import {
   maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
 } from '../utils/editHelper.js';
+
+const debugLogger = createDebugLogger('EDIT_PRIOR_READ');
 
 export function applyReplacement(
   currentContent: string | null,
@@ -157,9 +160,15 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     // the read pipeline below (and the content-derived error codes
     // it can produce — NO_OCCURRENCE_FOUND, EXPECTED_OCCURRENCE_MISMATCH,
     // NO_CHANGE) cannot be used as a read-less content oracle on a
-    // file the model has never legitimately Read. New-file creation
-    // is exempt because there are no current bytes to read first.
-    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+    // file the model has never legitimately Read.
+    //
+    // Run unconditionally (not gated on `fileExists`): checkPriorRead
+    // re-stats so a file that sprang into existence between
+    // isFilefileExists() and here — the same TOCTOU window WriteFile
+    // had — is now caught. ENOENT (genuinely absent) returns ok:true
+    // and falls through to the new-file path; an existing file that
+    // appeared in the race window is rejected as unread.
+    if (!this.config.getFileReadCacheDisabled()) {
       const decision = await checkPriorRead(
         this.config.getFileReadCache(),
         params.file_path,
@@ -225,6 +234,15 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         'editing',
       );
       if (!postDecision.ok) {
+        // Forensic trail for post-read TOCTOU rejections. These are
+        // rare ("file changed between stat and read") and the model
+        // self-heals by re-reading, so without a debug record an
+        // operator investigating "why did this Edit fail once?" has
+        // nothing to grep.
+        debugLogger.warn('post-read TOCTOU rejection', {
+          path: params.file_path,
+          reason: postDecision.type,
+        });
         return {
           currentContent: null,
           newContent: '',
@@ -457,6 +475,36 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
 
     try {
       this.ensureParentDirectoriesExist(this.params.file_path);
+
+      // Final pre-write freshness check. calculateEdit() ran a
+      // post-read check, but execute() can be called arbitrarily
+      // long after that (user approval, modify-and-confirm, etc.).
+      // Between the post-read check and the writeTextFile below,
+      // an external mutation could land and be silently overwritten.
+      // This last guard tightens the window from "post-read →
+      // writeTextFile (unbounded)" to "stat → writeTextFile (two
+      // syscalls)".
+      if (!editData.isNewFile && !this.config.getFileReadCacheDisabled()) {
+        const writeDecision = await checkPriorRead(
+          this.config.getFileReadCache(),
+          this.params.file_path,
+          'editing',
+        );
+        if (!writeDecision.ok) {
+          debugLogger.warn('pre-write TOCTOU rejection', {
+            path: this.params.file_path,
+            reason: writeDecision.type,
+          });
+          return {
+            llmContent: writeDecision.rawMessage,
+            returnDisplay: `Error: ${writeDecision.displayMessage}`,
+            error: {
+              message: writeDecision.rawMessage,
+              type: writeDecision.type,
+            },
+          };
+        }
+      }
 
       // For new files, apply default file encoding setting
       // For existing files, preserve the original encoding (BOM and charset)

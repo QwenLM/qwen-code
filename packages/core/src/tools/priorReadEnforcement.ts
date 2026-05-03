@@ -136,15 +136,22 @@ export async function checkPriorRead(
       displayMessage: `cannot verify prior read of ${filePath}; re-run ${ToolNames.READ_FILE} before ${verbDisplay}.`,
     };
   }
-  // Defensive: if stat succeeded but the path is not a regular file
-  // (directory, FIFO, socket, device), let the downstream
-  // readTextFile / write path surface its own error code (e.g.
-  // EISDIR -> TARGET_IS_DIRECTORY) instead of telling the model to
-  // re-read with read_file. read_file rejects directories with a
-  // dedicated error, so an enforcement loop here would tell the
-  // model to call read_file forever for directory targets — a
-  // regression vs the pre-PR behaviour.
-  if (!stats.isFile()) {
+  // Narrow the bypass to **directories only**. The earlier
+  // !stats.isFile() form was too broad: it also covered FIFOs,
+  // sockets, and character / block devices, none of which the
+  // model has a legitimate way to "read first" anyway, and
+  // letting those flow through to readTextFile risks blocking
+  // I/O (FIFO) or over-allocation (/dev/urandom).
+  //
+  // Directory targets get the bypass because read_file already has
+  // a dedicated TARGET_IS_DIRECTORY error and an enforcement loop
+  // ("call read_file first" → "read_file says directory") would be
+  // a real regression vs the pre-PR behaviour.
+  //
+  // Other non-regular files fall through to cache.check(): they
+  // will report `unknown` (no entry can exist because read_file
+  // rejects them) and enforcement will reject before any I/O.
+  if (stats.isDirectory()) {
     return { ok: true };
   }
   const status = cache.check(stats);

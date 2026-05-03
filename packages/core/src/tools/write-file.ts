@@ -174,6 +174,10 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         'overwriting',
       );
       if (!postDecision.ok) {
+        debugLogger.warn('post-read TOCTOU rejection (confirmation)', {
+          path: this.params.file_path,
+          reason: postDecision.type,
+        });
         throw new StructuredToolError(
           postDecision.rawMessage,
           postDecision.type,
@@ -306,6 +310,10 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         'overwriting',
       );
       if (!postDecision.ok) {
+        debugLogger.warn('post-read TOCTOU rejection (execute)', {
+          path: file_path,
+          reason: postDecision.type,
+        });
         return {
           llmContent: postDecision.rawMessage,
           returnDisplay: `Error: ${postDecision.displayMessage}`,
@@ -331,6 +339,32 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       }
       // else: user explicitly set 'utf-8' (no BOM) — respect it
       detectedEncoding = undefined;
+    }
+
+    // Final pre-write freshness check. The earlier post-read check
+    // ran before mkdirSync / encoding detection; we re-stat here so
+    // an external mutation that lands in the gap between those
+    // operations and the writeTextFile below is caught.
+    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+      const writeDecision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        file_path,
+        'overwriting',
+      );
+      if (!writeDecision.ok) {
+        debugLogger.warn('pre-write TOCTOU rejection', {
+          path: file_path,
+          reason: writeDecision.type,
+        });
+        return {
+          llmContent: writeDecision.rawMessage,
+          returnDisplay: `Error: ${writeDecision.displayMessage}`,
+          error: {
+            message: writeDecision.rawMessage,
+            type: writeDecision.type,
+          },
+        };
+      }
     }
 
     try {
