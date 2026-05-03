@@ -31,7 +31,7 @@ export const modelCommand: SlashCommand = {
   completionPriority: 100,
   get description() {
     return t(
-      'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately). ',
+      'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).',
     );
   },
   kind: CommandKind.BUILT_IN,
@@ -141,12 +141,12 @@ export const modelCommand: SlashCommand = {
             content: t('Settings service not available.'),
           };
         }
+        await config.setModel(modelName);
         settings.setValue(
           getPersistScopeForModelSelection(settings),
           'model.name',
           modelName,
         );
-        await config.setModel(modelName);
 
         if (config.getModelsConfig().hasModel(authType, modelName)) {
           return {
@@ -176,12 +176,12 @@ export const modelCommand: SlashCommand = {
             content: t('Settings service not available.'),
           };
         }
+        await config.setModel(modelName);
         settings.setValue(
           getPersistScopeForModelSelection(settings),
           'model.name',
           modelName,
         );
-        await config.setModel(modelName);
         return {
           type: 'message',
           messageType: 'info',
