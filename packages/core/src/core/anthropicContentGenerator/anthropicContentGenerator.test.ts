@@ -499,6 +499,11 @@ describe('AnthropicContentGenerator', () => {
         {
           model: 'deepseek-v4-pro',
           apiKey: 'test-key',
+          // The clamp decision uses hostname only, so a DeepSeek-shaped
+          // baseURL is required for `'max'` to pass through (model-name
+          // alone won't bypass the clamp — that would let "deepseek-clone"
+          // routed to api.anthropic.com sneak past it).
+          baseUrl: 'https://api.deepseek.com/anthropic',
           timeout: 10_000,
           maxRetries: 2,
           samplingParams: { max_tokens: 500 },
@@ -520,6 +525,46 @@ describe('AnthropicContentGenerator', () => {
           output_config: { effort: 'max' },
           thinking: { type: 'enabled', budget_tokens: 128_000 },
         }),
+      );
+    });
+
+    it("still clamps effort: 'max' when model name says 'deepseek' but hostname is api.anthropic.com", async () => {
+      // The broader `isDeepSeekAnthropicProvider` falls back to model-name
+      // matching to cover sglang/vllm self-hosted DeepSeek deployments,
+      // but trusting that for the 'max' clamp decision would let a model
+      // configured as e.g. "deepseek-distill" but routed to real
+      // api.anthropic.com bypass the clamp and trip a 400. The clamp
+      // therefore uses hostname-only detection.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'deepseek-distill', // model name suggests DeepSeek...
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com', // ...but routed to real Anthropic.
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ output_config: { effort: 'high' } }),
       );
     });
 

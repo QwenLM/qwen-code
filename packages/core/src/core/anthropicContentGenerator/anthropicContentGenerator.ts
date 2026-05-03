@@ -40,30 +40,44 @@ import {
 const debugLogger = createDebugLogger('ANTHROPIC');
 
 /**
+ * Hostname-only DeepSeek anthropic-compatible detector. Returns true ONLY
+ * when the resolved baseURL hostname is `api.deepseek.com` or one of its
+ * subdomains (e.g. `us.api.deepseek.com`). Use this for decisions where a
+ * false positive would route DeepSeek-only behavior to a stricter backend
+ * — e.g. clamping `reasoning.effort: 'max'`, where matching by model name
+ * could send `'max'` to real `api.anthropic.com` and trigger HTTP 400.
+ */
+function isDeepSeekAnthropicHostname(
+  contentGeneratorConfig: ContentGeneratorConfig,
+): boolean {
+  const baseUrl = contentGeneratorConfig.baseUrl ?? '';
+  if (!baseUrl) return false;
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return (
+      hostname === 'api.deepseek.com' || hostname.endsWith('.api.deepseek.com')
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * DeepSeek's anthropic-compatible API rejects requests in thinking mode when
  * a prior assistant turn carrying `tool_use` omits a thinking block.
  * Plain-text assistant turns without thinking are accepted unchanged. Detect
  * the provider by base URL hostname or model name so the converter can inject
- * empty thinking blocks on the affected turns.
+ * empty thinking blocks on the affected turns. The model-name fallback is
+ * intentional — it covers self-hosted DeepSeek deployments behind generic
+ * anthropic-compatible endpoints (sglang/vllm). For decisions where a model-
+ * name false positive is dangerous (e.g. `reasoning.effort: 'max'` clamping),
+ * use `isDeepSeekAnthropicHostname` instead.
  * https://github.com/QwenLM/qwen-code/issues/3786
  */
 function isDeepSeekAnthropicProvider(
   contentGeneratorConfig: ContentGeneratorConfig,
 ): boolean {
-  const baseUrl = contentGeneratorConfig.baseUrl ?? '';
-  if (baseUrl) {
-    try {
-      const hostname = new URL(baseUrl).hostname.toLowerCase();
-      if (
-        hostname === 'api.deepseek.com' ||
-        hostname.endsWith('.api.deepseek.com')
-      ) {
-        return true;
-      }
-    } catch {
-      // Invalid URL — fall through to model-name detection.
-    }
-  }
+  if (isDeepSeekAnthropicHostname(contentGeneratorConfig)) return true;
   const model = (contentGeneratorConfig.model ?? '').toLowerCase();
   return model.includes('deepseek');
 }
@@ -87,6 +101,9 @@ type MessageCreateParamsWithThinking = MessageCreateParamsNonStreaming & {
 export class AnthropicContentGenerator implements ContentGenerator {
   private client: Anthropic;
   private converter: AnthropicContentConverter;
+  // Latch so the 'max' clamp warning fires once per generator lifetime
+  // instead of on every request that needs the downgrade.
+  private effortClampWarned = false;
 
   constructor(
     private contentGeneratorConfig: ContentGeneratorConfig,
@@ -379,10 +396,17 @@ export class AnthropicContentGenerator implements ContentGenerator {
    * Compute the effort value that both the thinking budget ladder and
    * output_config should use for this request. Returns undefined whenever
    * reasoning is disabled or the user didn't set an effort. Clamps the
-   * DeepSeek-only 'max' tier to 'high' on non-DeepSeek anthropic backends
-   * (real Anthropic only accepts low/medium/high), with a debugLogger.warn
-   * the first time a request needs the downgrade so users notice the
-   * misconfiguration without spamming the log on every turn.
+   * DeepSeek-only 'max' tier to 'high' when the resolved baseURL is NOT a
+   * DeepSeek hostname (real Anthropic accepts low/medium/high only and
+   * would 400 on 'max'). Uses the hostname-only detector deliberately —
+   * the broader `isDeepSeekAnthropicProvider` model-name fallback exists
+   * for the thinking-block injection workaround (sglang/vllm self-hosted
+   * coverage), but trusting it here would let a model named e.g.
+   * "deepseek-clone" running on real api.anthropic.com bypass the clamp.
+   *
+   * The downgrade warning fires once per generator lifetime via the
+   * `effortClampWarned` latch — repeating on every request just spams
+   * the log without giving users new information.
    */
   private resolveEffectiveEffort(
     request: GenerateContentParameters,
@@ -400,12 +424,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
     }
     if (
       effort === 'max' &&
-      !isDeepSeekAnthropicProvider(this.contentGeneratorConfig)
+      !isDeepSeekAnthropicHostname(this.contentGeneratorConfig)
     ) {
-      debugLogger.warn(
-        "reasoning.effort='max' is a DeepSeek extension; clamping to 'high' " +
-          'for non-DeepSeek anthropic provider to avoid HTTP 400.',
-      );
+      if (!this.effortClampWarned) {
+        debugLogger.warn(
+          "reasoning.effort='max' is a DeepSeek extension; clamping to " +
+            "'high' for non-DeepSeek anthropic provider to avoid HTTP 400.",
+        );
+        this.effortClampWarned = true;
+      }
       return 'high';
     }
     return effort;
