@@ -18,6 +18,7 @@ import type { DialogEntry } from '../../hooks/useBackgroundTaskView.js';
 const KIND_NAMES = {
   agent: { singular: 'local agent', plural: 'local agents' },
   shell: { singular: 'shell', plural: 'shells' },
+  monitor: { singular: 'monitor', plural: 'monitors' },
 } as const;
 
 /**
@@ -47,12 +48,15 @@ export function getPillLabel(entries: readonly DialogEntry[]): string {
 }
 
 function groupAndFormat(entries: readonly DialogEntry[]): string {
-  const counts = { agent: 0, shell: 0 };
+  const counts = { agent: 0, shell: 0, monitor: 0 };
   for (const e of entries) counts[e.kind]++;
   const parts: string[] = [];
-  // Order: shell first (matches Claude Code's pill convention), agent second.
+  // Order: shell first (matches Claude Code's pill convention), then
+  // agent, then monitor. Monitor sits last because it tends to be the
+  // longest-lived entry and least urgent to glance at.
   if (counts.shell > 0) parts.push(formatCount('shell', counts.shell));
   if (counts.agent > 0) parts.push(formatCount('agent', counts.agent));
+  if (counts.monitor > 0) parts.push(formatCount('monitor', counts.monitor));
   return parts.join(', ');
 }
 
