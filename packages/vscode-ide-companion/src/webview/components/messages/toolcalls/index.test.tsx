@@ -14,10 +14,10 @@ import { ToolCallRouter } from './index.js';
 vi.mock('@qwen-code/webui', async () => {
   const React = await vi.importActual<typeof import('react')>('react');
 
+  // Use a data attribute to record which component was selected by the
+  // *real* routing logic, rather than maintaining a parallel mock router.
   const renderLabel = (label: string) =>
-    function MockTool({
-      toolCall,
-    }: {
+    function MockTool(props: {
       toolCall: {
         title?: string;
         rawOutput?: {
@@ -25,46 +25,68 @@ vi.mock('@qwen-code/webui', async () => {
           terminateReason?: string;
         };
       };
+      isFirst?: boolean;
+      isLast?: boolean;
     }) {
       return React.createElement(
         'div',
-        undefined,
-        `${label}:${toolCall.rawOutput?.taskDescription || toolCall.title || ''}:${toolCall.rawOutput?.terminateReason || ''}`,
+        {
+          'data-label': label,
+          'data-is-first': props.isFirst,
+          'data-is-last': props.isLast,
+        },
+        `${label}:${props.toolCall.rawOutput?.taskDescription || props.toolCall.title || ''}:${props.toolCall.rawOutput?.terminateReason || ''}`,
       );
     };
 
-  const isAgentExec = (toolCall: { rawOutput?: { type?: string } }) =>
-    toolCall.rawOutput?.type === 'task_execution';
+  // Import the real routing function so the test validates actual routing
+  // rather than a manually-maintained parallel mock that can silently drift.
+  const {
+    getToolCallComponent: realGetToolCallComponent,
+    isAgentExecutionToolCall,
+  } =
+    await vi.importActual<typeof import('@qwen-code/webui')>(
+      '@qwen-code/webui',
+    );
 
-  const agentComponent = renderLabel('agent');
-  const genericComponent = renderLabel('generic');
-  const readComponent = renderLabel('read');
-  const shellComponent = renderLabel('shell');
-
-  return {
-    shouldShowToolCall: () => true,
-    isAgentExecutionToolCall: isAgentExec,
-    GenericToolCall: genericComponent,
+  // Map each real component to its label-based mock.
+  const componentMocks: Record<string, ReturnType<typeof renderLabel>> = {
+    AgentToolCall: renderLabel('agent'),
+    GenericToolCall: renderLabel('generic'),
+    ReadToolCall: renderLabel('read'),
+    ShellToolCall: renderLabel('shell'),
     ThinkToolCall: renderLabel('think'),
-    SaveMemoryToolCall: renderLabel('memory'),
     EditToolCall: renderLabel('edit'),
     WriteToolCall: renderLabel('write'),
     SearchToolCall: renderLabel('search'),
     UpdatedPlanToolCall: renderLabel('plan'),
-    ShellToolCall: shellComponent,
-    ReadToolCall: readComponent,
     WebFetchToolCall: renderLabel('web'),
-    AgentToolCall: agentComponent,
-    getToolCallComponent: (toolCall: {
-      kind: string;
-      rawOutput?: { type?: string };
-    }) => {
-      if (isAgentExec(toolCall)) return agentComponent;
-      const kind = toolCall.kind.toLowerCase();
-      if (kind === 'read' || kind === 'read_file') return readComponent;
-      if (kind === 'execute' || kind === 'bash') return shellComponent;
-      return genericComponent;
-    },
+  };
+
+  // Wrap getToolCallComponent to return the label-mock instead of the real
+  // component — the routing logic is real, only the rendering is mocked.
+  const getToolCallComponent = (
+    toolCall: Parameters<typeof realGetToolCallComponent>[0],
+  ) => {
+    const realComponent = realGetToolCallComponent(toolCall);
+    const componentName = realComponent.displayName || realComponent.name || '';
+    return componentMocks[componentName] || componentMocks['GenericToolCall']!;
+  };
+
+  return {
+    shouldShowToolCall: () => true,
+    isAgentExecutionToolCall,
+    getToolCallComponent,
+    GenericToolCall: componentMocks['GenericToolCall'],
+    ThinkToolCall: componentMocks['ThinkToolCall'],
+    EditToolCall: componentMocks['EditToolCall'],
+    WriteToolCall: componentMocks['WriteToolCall'],
+    SearchToolCall: componentMocks['SearchToolCall'],
+    UpdatedPlanToolCall: componentMocks['UpdatedPlanToolCall'],
+    ShellToolCall: componentMocks['ShellToolCall'],
+    ReadToolCall: componentMocks['ReadToolCall'],
+    WebFetchToolCall: componentMocks['WebFetchToolCall'],
+    AgentToolCall: componentMocks['AgentToolCall'],
   };
 });
 
@@ -164,5 +186,29 @@ describe('ToolCallRouter agent execution rendering', () => {
     expect(container?.textContent).toContain(
       'agent:Explore auth logic:Subagent crashed',
     );
+  });
+
+  it('forwards isFirst and isLast props to the underlying component', () => {
+    act(() => {
+      root?.render(
+        <ToolCallRouter
+          toolCall={
+            {
+              toolCallId: 'read-1',
+              kind: 'read',
+              title: 'Read file',
+              status: 'completed',
+            } as never
+          }
+          isFirst
+          isLast={false}
+        />,
+      );
+    });
+
+    const renderedDiv = container?.querySelector('div');
+    expect(renderedDiv?.getAttribute('data-label')).toBe('read');
+    expect(renderedDiv?.getAttribute('data-is-first')).toBe('true');
+    expect(renderedDiv?.getAttribute('data-is-last')).toBe('false');
   });
 });

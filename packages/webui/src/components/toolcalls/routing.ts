@@ -9,8 +9,7 @@
 
 import type { FC } from 'react';
 import type { BaseToolCallProps, ToolCallData } from './shared/index.js';
-import { isAgentExecutionToolCall } from './AgentToolCall.js';
-import { AgentToolCall } from './AgentToolCall.js';
+import { AgentToolCall, isAgentExecutionToolCall } from './AgentToolCall.js';
 import { GenericToolCall } from './GenericToolCall.js';
 import { ThinkToolCall } from './ThinkToolCall.js';
 import { EditToolCall } from './EditToolCall.js';

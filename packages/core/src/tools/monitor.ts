@@ -371,6 +371,10 @@ class MonitorToolInvocation extends BaseToolInvocation<
       if (elapsed < 0) {
         // Clock went backwards (suspend/resume, NTP); reset to avoid
         // starving the bucket until the clock catches up.
+        // Note: logged to debug file only; no operator-visible output.
+        // If throttled line drops are observed without an active debug
+        // session, clock anomaly vs. genuine rate limiting cannot be
+        // distinguished from the notification alone.
         debugLogger.warn(
           `Monitor ${monitorId}: clock moved backwards by ${-elapsed}ms, resetting refill timestamp`,
         );
