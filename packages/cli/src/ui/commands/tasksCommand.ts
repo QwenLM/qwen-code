@@ -28,8 +28,13 @@ type TaskEntry = AgentTaskEntry | ShellTaskEntry | MonitorTaskEntry;
 
 function statusLabel(entry: TaskEntry): string {
   switch (entry.kind) {
-    case 'agent':
-      switch (entry.status) {
+    case 'agent': {
+      // Bind to a local so the `never`-typed default below operates on a
+      // narrow-able value. Using `entry.status` directly inside the default
+      // hits TS narrowing the whole `entry` to `never` after the case arms
+      // exhaust the discriminated union, breaking the `.status` access.
+      const status = entry.status;
+      switch (status) {
         case 'completed':
           return 'completed';
         case 'failed':
@@ -43,14 +48,16 @@ function statusLabel(entry: TaskEntry): string {
         case 'running':
           return 'running';
         default: {
-          const _exhaustive: never = entry.status;
+          const _exhaustive: never = status;
           throw new Error(
             `statusLabel(agent): unknown status: ${JSON.stringify(_exhaustive)}`,
           );
         }
       }
-    case 'shell':
-      switch (entry.status) {
+    }
+    case 'shell': {
+      const status = entry.status;
+      switch (status) {
         case 'completed':
           return `completed (exit ${entry.exitCode ?? '?'})`;
         case 'failed':
@@ -60,17 +67,19 @@ function statusLabel(entry: TaskEntry): string {
         case 'running':
           return 'running';
         default: {
-          const _exhaustive: never = entry.status;
+          const _exhaustive: never = status;
           throw new Error(
             `statusLabel(shell): unknown status: ${JSON.stringify(_exhaustive)}`,
           );
         }
       }
+    }
     case 'monitor': {
       // Append eventCount as a glanceable signal for activity. error (set
       // on `failed` and on auto-stopped `completed`) is included verbatim.
       const events = `${entry.eventCount} event${entry.eventCount === 1 ? '' : 's'}`;
-      switch (entry.status) {
+      const status = entry.status;
+      switch (status) {
         case 'completed':
           return entry.error
             ? `completed (${entry.error}, ${events})`
@@ -82,7 +91,7 @@ function statusLabel(entry: TaskEntry): string {
         case 'running':
           return `running (${events})`;
         default: {
-          const _exhaustive: never = entry.status;
+          const _exhaustive: never = status;
           throw new Error(
             `statusLabel(monitor): unknown status: ${JSON.stringify(_exhaustive)}`,
           );
