@@ -1051,7 +1051,7 @@ describe('EditTool', () => {
       });
       await expect(
         invocation.getConfirmationDetails(abortSignal),
-      ).rejects.toThrow(/read_file required before editing this file/);
+      ).rejects.toThrow(/has not been fully read in this session/);
     });
 
     it('rejects an edit when the file has been modified since the last read', async () => {
@@ -1153,7 +1153,11 @@ describe('EditTool', () => {
       fs.writeFileSync(filePath, 'untouched', 'utf8');
       // No seed: with the cache disabled, the model is on the
       // pre-cache contract — Edit must succeed without a prior Read.
-      (mockConfig.getFileReadCacheDisabled as Mock).mockReturnValueOnce(true);
+      // Use mockReturnValue (not mockReturnValueOnce): calculateEdit
+      // now calls getFileReadCacheDisabled twice — once before
+      // readTextFile and once after, for the post-read TOCTOU
+      // re-check — and both must see disabled=true to actually bypass.
+      (mockConfig.getFileReadCacheDisabled as Mock).mockReturnValue(true);
       const params: EditToolParams = {
         file_path: filePath,
         old_string: 'untouched',

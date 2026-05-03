@@ -136,6 +136,17 @@ export async function checkPriorRead(
       displayMessage: `cannot verify prior read of ${filePath}; re-run ${ToolNames.READ_FILE} before ${verbDisplay}.`,
     };
   }
+  // Defensive: if stat succeeded but the path is not a regular file
+  // (directory, FIFO, socket, device), let the downstream
+  // readTextFile / write path surface its own error code (e.g.
+  // EISDIR -> TARGET_IS_DIRECTORY) instead of telling the model to
+  // re-read with read_file. read_file rejects directories with a
+  // dedicated error, so an enforcement loop here would tell the
+  // model to call read_file forever for directory targets — a
+  // regression vs the pre-PR behaviour.
+  if (!stats.isFile()) {
+    return { ok: true };
+  }
   const status = cache.check(stats);
   if (
     status.state === 'fresh' &&
@@ -176,11 +187,16 @@ export async function checkPriorRead(
       `WriteFile tools cannot mutate that payload safely — re-reading ` +
       `it would not change this. Use a different mechanism (e.g. shell ` +
       `tool with a binary-aware writer) if you need to overwrite it.`;
+    // displayMessage uses the bare verb (`edit` / `overwrite`)
+    // rather than the gerund — the noun phrase "cannot editing
+    // via this tool" would be ungrammatical, and `returnDisplay`
+    // surfaces this string directly to the user.
+    const verbBare = verb === 'editing' ? 'edit' : 'overwrite';
     return {
       ok: false,
       type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
       rawMessage: raw,
-      displayMessage: `non-text payload; cannot ${verb} via this tool.`,
+      displayMessage: `non-text payload; cannot ${verbBare} via this tool.`,
     };
   }
   // unknown OR fresh-but-partial: require a fresh full text read.

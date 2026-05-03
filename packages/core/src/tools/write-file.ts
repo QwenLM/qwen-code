@@ -154,6 +154,25 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       }
     }
 
+    // Post-read freshness re-check. Closes the TOCTOU window between
+    // the pre-read checkPriorRead above and the readTextFile that
+    // produced `originalContent`: showing the user a diff computed
+    // from bytes the model never saw is the very confusing-approval
+    // UX this enforcement block exists to prevent.
+    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+      const postDecision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        this.params.file_path,
+        'overwriting',
+      );
+      if (!postDecision.ok) {
+        throw new StructuredToolError(
+          postDecision.rawMessage,
+          postDecision.type,
+        );
+      }
+    }
+
     const relativePath = makeRelative(
       this.params.file_path,
       this.config.getTargetDir(),
@@ -257,6 +276,30 @@ class WriteFileToolInvocation extends BaseToolInvocation<
             },
           };
         }
+      }
+    }
+
+    // Post-read freshness re-check. Closes the TOCTOU window between
+    // the pre-read checkPriorRead above and the readTextFile that
+    // produced `originalContent`: an external write that lands
+    // between those two syscalls would otherwise overwrite bytes the
+    // model never saw, even though enforcement was supposed to block
+    // exactly that.
+    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+      const postDecision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        file_path,
+        'overwriting',
+      );
+      if (!postDecision.ok) {
+        return {
+          llmContent: postDecision.rawMessage,
+          returnDisplay: `Error: ${postDecision.displayMessage}`,
+          error: {
+            message: postDecision.rawMessage,
+            type: postDecision.type,
+          },
+        };
       }
     }
 

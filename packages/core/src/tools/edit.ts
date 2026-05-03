@@ -210,6 +210,38 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       }
     }
 
+    // Post-read freshness re-check. The pre-read checkPriorRead above
+    // and readTextFile are two separate syscalls; if the file is
+    // modified between them, currentContent reflects post-write bytes
+    // the model never saw and any edit applied to it would still be
+    // a stale-write. Re-running checkPriorRead here closes the TOCTOU
+    // window: a stale state now (mtime/size drifted) means we read
+    // bytes the cache no longer trusts, and we reject before
+    // returning a CalculatedEdit that the call sites would honour.
+    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+      const postDecision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        params.file_path,
+        'editing',
+      );
+      if (!postDecision.ok) {
+        return {
+          currentContent: null,
+          newContent: '',
+          occurrences: 0,
+          error: {
+            display: postDecision.displayMessage,
+            raw: postDecision.rawMessage,
+            type: postDecision.type,
+          },
+          isNewFile: false,
+          encoding: 'utf-8',
+          bom: false,
+          lineEnding: 'lf',
+        };
+      }
+    }
+
     const normalizedStrings = normalizeEditStrings(
       currentContent,
       finalOldString,
@@ -331,15 +363,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     }
 
     if (editData.error) {
-      // The error type from `calculateEdit` includes the new
-      // prior-read codes (EDIT_REQUIRES_PRIOR_READ /
-      // FILE_CHANGED_SINCE_READ). Wrap in PriorReadEnforcementError
-      // so coreToolScheduler surfaces the correct ToolErrorType
-      // instead of UNHANDLED_EXCEPTION.
-      throw new StructuredToolError(
-        `Edit error: ${editData.error.display}`,
-        editData.error.type,
-      );
+      // Use the full `raw` message, not the short `display` form:
+      // the scheduler propagates `error.message` straight into the
+      // model-facing tool response. `raw` carries the remediation
+      // detail (file path, stale-vs-unread distinction, "without
+      // offset / limit / pages" hint) that `execute()` already
+      // surfaces — confirmation-required flows should not lose it.
+      throw new StructuredToolError(editData.error.raw, editData.error.type);
     }
 
     const fileName = path.basename(this.params.file_path);
