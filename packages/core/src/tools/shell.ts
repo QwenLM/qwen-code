@@ -133,15 +133,16 @@ function tokeniseSegment(segment: string): string[] | null {
     while (i < tokens.length && tokens[i]!.startsWith('-')) {
       const flag = tokens[i]!;
       i++;
-      // Only sudo has value-taking flags in this allowlist; for
-      // `command` and `env`'s flag-only options we leave i alone.
-      // (`env -u NAME` also takes a value, but skipping the
-      // following KEY=VALUE block below covers it implicitly.)
-      if (
-        wrapper === 'sudo' &&
-        SUDO_FLAGS_WITH_VALUE.has(flag) &&
-        i < tokens.length
-      ) {
+      // Value-taking flag tables, per wrapper: `sudo -u user`,
+      // `env -u NAME` (unset), `env -S string` (split-string args).
+      // `command` has no value-taking options in this allowlist.
+      // Without skipping the value, `env -u FOO git commit ...`
+      // would leave `FOO` as `tokens[0]` and the parser would treat
+      // it as the program — masking the real `git commit`.
+      const takesValue =
+        (wrapper === 'sudo' && SUDO_FLAGS_WITH_VALUE.has(flag)) ||
+        (wrapper === 'env' && ENV_FLAGS_WITH_VALUE.has(flag));
+      if (takesValue && i < tokens.length) {
         i++;
       }
     }
@@ -173,6 +174,12 @@ const SUDO_FLAGS_WITH_VALUE = new Set([
   '--role',
   '--type',
 ]);
+
+// `env`'s value-taking flags. `-u NAME` unsets a variable;
+// `-S "string"` splits a single string into args. Without skipping
+// the value, `env -u FOO git commit ...` would leave `FOO` as the
+// next token and the parser would treat it as the program.
+const ENV_FLAGS_WITH_VALUE = new Set(['-u', '--unset', '-S', '--split-string']);
 
 /**
  * Walk a `git ...` token sequence past git's global flags

@@ -1247,6 +1247,38 @@ describe('ShellTool', () => {
         );
       });
 
+      // `env -u NAME` unsets a variable. The flag takes a value, so
+      // tokeniseSegment has to skip it; otherwise NAME would be left
+      // as the next token and the parser would treat it as the
+      // program, masking the real `git commit`.
+      it('should add co-author when git commit is wrapped in env -u NAME', async () => {
+        const command = 'env -u GIT_AUTHOR_DATE git commit -m "Test commit"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
       it('should NOT add co-author for cd .. && git commit (could escape repo)', async () => {
         const command = 'cd .. && git commit -m "Test commit"';
         const invocation = shellTool.build({ command, is_background: false });
