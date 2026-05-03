@@ -6,8 +6,8 @@
 
 /**
  * Tracks background shell processes spawned via the `shell` tool with
- * `is_background: true`. Each entry holds the metadata the agent,
- * `/tasks`, and the interactive Background tasks dialog need to query,
+ * `is_background: true`. Each entry holds the metadata that the agent,
+ * `/tasks`, and the interactive Background tasks dialog use to query,
  * observe, or terminate a running background shell.
  *
  * State machine: register → running → { completed | failed | cancelled }.
