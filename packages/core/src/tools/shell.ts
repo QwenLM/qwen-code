@@ -51,21 +51,37 @@ const debugLogger = createDebugLogger('SHELL');
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
 /**
- * Wall-clock duration above which a foreground bash command earns a
- * "consider re-running with is_background: true" advisory in the LLM-
- * facing tool result. Half the default 120s timeout — long enough that
- * normal `npm install` / `pytest` runs don't trigger it, short enough
- * that a hung-but-still-streaming process surfaces the suggestion before
- * it gets killed by the timeout. Hint is advisory, not corrective: the
- * command's own result is unchanged.
+ * Wall-clock duration above which a foreground bash command that
+ * **completed naturally** (process exited without abort signal and
+ * without external SIGTERM/SIGKILL) earns a "consider re-running with
+ * is_background: true" advisory in the LLM-facing tool result.
+ *
+ * Programmatically coupled to half the foreground timeout so the two
+ * stay in sync if either is tuned later — long enough that normal
+ * `npm install` / `pytest` runs don't trigger it, short enough that a
+ * legitimately-long-but-completing command (e.g. a 90s build) still
+ * gets the advisory before approaching the timeout. Note that timeout
+ * and external-kill paths intentionally do NOT get the hint (their own
+ * result messaging is enough — see suppression at the call site).
+ *
+ * Hint is advisory, not corrective: the command's own result is
+ * unchanged. The advice targets the agent's NEXT decision.
  */
-const LONG_RUNNING_FOREGROUND_THRESHOLD_MS = 60000;
+const LONG_RUNNING_FOREGROUND_THRESHOLD_MS = Math.floor(
+  DEFAULT_FOREGROUND_TIMEOUT_MS / 2,
+);
 
 /**
  * Format the long-run advisory appended to long foreground commands.
  * Exported so tests and any future consumer (e.g. an alternative
  * renderer) can render the same text without duplicating the threshold
  * logic.
+ *
+ * Wording deliberately keeps the dialog mention conditional ("when
+ * running interactively") so the LLM doesn't relay misleading guidance
+ * to non-TTY users (`-p` headless / ACP / SDK consumers, where no
+ * dialog or footer pill exists). `/tasks` and the on-disk output file
+ * work in every mode.
  */
 export function buildLongRunningForegroundHint(elapsedMs: number): string {
   const seconds = Math.round(elapsedMs / 1000);
@@ -74,9 +90,10 @@ export function buildLongRunningForegroundHint(elapsedMs: number): string {
     `For long-running processes (build watchers, dev servers, soak ` +
     `tests, polling loops), prefer re-running with ` +
     `\`is_background: true\` so the agent isn't blocked while the ` +
-    `command runs. The output stays inspectable via /tasks (text), the ` +
-    `interactive Background tasks dialog (footer pill + Enter), and ` +
-    `the on-disk output file.`
+    `command runs. The output stays inspectable via /tasks (text, any ` +
+    `mode) or the on-disk output file; in interactive mode the ` +
+    `Background tasks dialog also has a per-entry detail view + live ` +
+    `updates.`
   );
 }
 
@@ -585,8 +602,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     // Bracket the spawn → settle wall-clock so the result builder below
     // can decide whether to append the long-run advisory. Mirrors the
-    // background path's `entry.startTime` capture (line ~781) and is the
-    // only added side state for the foreground long-run hint feature.
+    // `entry.startTime` capture in the background-shell path. Only added
+    // side state for the foreground long-run hint feature.
     const executionStartTime = Date.now();
 
     const { result: resultPromise, pid } = await ShellExecutionService.execute(
@@ -700,18 +717,32 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `Process Group PGID: ${result.pid ?? '(none)'}`,
       ].join('\n');
 
-      // Long-run advisory: only on the non-aborted branch. Timeout /
-      // user-cancel paths (the `if (result.aborted)` arm above) already
-      // surface the duration via their own message and benefit nothing
-      // from a "should have been background" reminder — the agent
-      // already knows the command didn't complete. Fires for both
-      // successful and error completions because the advice is the same
-      // ("next time, background it") in both cases.
-      const elapsedMs = Date.now() - executionStartTime;
-      if (elapsedMs >= LONG_RUNNING_FOREGROUND_THRESHOLD_MS) {
-        llmContent += `\n\n${buildLongRunningForegroundHint(elapsedMs)}`;
-      }
+      // (Long-run advisory append happens AFTER `truncateToolOutput`
+      // below — see the explanation there for why post-truncation.)
     }
+    // Decide whether to emit the long-run advisory. Conditions:
+    //   - Process completed under its own steam (no AbortSignal
+    //     trigger, no external signal). Specifically:
+    //       * Suppressed on aborted (`result.aborted: true`) — covers
+    //         the `if (result.aborted)` arm above (timeout / user-
+    //         cancel). Their own messaging is enough; a "should have
+    //         been background" reminder when the agent already knows
+    //         the command didn't complete is noise.
+    //       * Suppressed on external signal kills (`result.signal !=
+    //         null` with `aborted: false`, e.g. SIGTERM from container
+    //         shutdown, k8s eviction, OOM killer, sibling reaping the
+    //         process group). `shellExecutionService` only sets
+    //         `aborted` when the AbortSignal we passed was triggered,
+    //         so external signals fall through to the non-aborted
+    //         branch — same rationale as timeout.
+    //   - Wall-clock duration ≥ threshold.
+    // Fires on both successful and naturally-failed completions since
+    // the advice ("next time, background it") is the same in both.
+    const elapsedMs = Date.now() - executionStartTime;
+    const shouldAppendLongRunHint =
+      !result.aborted &&
+      result.signal == null &&
+      elapsedMs >= LONG_RUNNING_FOREGROUND_THRESHOLD_MS;
 
     let returnDisplayMessage = '';
     if (this.config.getDebugMode()) {
@@ -756,6 +787,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
           (returnDisplayMessage ? '\n' : '') +
           `Output too long and was saved to: ${truncatedResult.outputFile}`;
       }
+    }
+
+    // Append the long-run advisory AFTER truncation so the hint isn't
+    // wrapped in `truncateToolOutput`'s "Truncated part of the output"
+    // header (which the LLM might misread as part of the command's own
+    // output). The hint is process metadata about the command, not
+    // command output, so it belongs outside the truncation envelope.
+    if (shouldAppendLongRunHint && typeof llmContent === 'string') {
+      llmContent += `\n\n${buildLongRunningForegroundHint(elapsedMs)}`;
     }
 
     const executionError = result.error

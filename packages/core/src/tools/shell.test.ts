@@ -866,6 +866,150 @@ describe('ShellTool', () => {
         expect(result.llmContent).toContain('Command was cancelled');
         expect(result.llmContent).not.toContain('foreground command ran for');
       });
+
+      it('omits the hint on the timeout path (combinedSignal aborted, signal not)', async () => {
+        // The plain `aborted: true` resolution above exercises the user-
+        // cancel branch (`combinedSignal.aborted && signal.aborted`).
+        // The TIMEOUT branch (`combinedSignal.aborted && !signal.aborted`)
+        // needs an `AbortSignal.any` mock that returns an already-aborted
+        // combined signal — same pattern as `should handle timeout vs
+        // user cancellation correctly` further down. Pinning the timeout
+        // branch separately so a future regression that flips the
+        // suppression check (e.g. `!result.aborted` → `!combinedSignal.aborted`)
+        // would fail loudly on this case.
+        const userAbort = new AbortController();
+        const mockTimeoutSignal = {
+          aborted: false,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        } as unknown as AbortSignal;
+        const mockCombinedSignal = {
+          aborted: true,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        } as unknown as AbortSignal;
+        const originalAbortSignal = globalThis.AbortSignal;
+        vi.stubGlobal('AbortSignal', {
+          ...originalAbortSignal,
+          timeout: vi.fn().mockReturnValue(mockTimeoutSignal),
+          any: vi.fn().mockReturnValue(mockCombinedSignal),
+        });
+
+        const invocation = shellTool.build({
+          command: 'tail -f /tmp/never.log',
+          is_background: false,
+          timeout: 60_000,
+        });
+        const promise = invocation.execute(userAbort.signal);
+        await vi.advanceTimersByTimeAsync(60_000);
+        resolveShellExecution({
+          output: 'partial',
+          exitCode: null,
+          aborted: true,
+        });
+        const result = await promise;
+        vi.stubGlobal('AbortSignal', originalAbortSignal);
+
+        expect(result.llmContent).toContain('Command timed out after 60000ms');
+        expect(result.llmContent).not.toContain('foreground command ran for');
+      });
+
+      it('omits the hint when the process was killed by an external signal (SIGTERM / OOM / etc.)', async () => {
+        // External signals (`result.signal != null`) with `aborted: false`:
+        // `shellExecutionService` only sets `aborted` when the AbortSignal
+        // we passed was triggered, so SIGTERM from container shutdown,
+        // k8s eviction, OOM killer, or a sibling reaping the process group
+        // falls through to the non-aborted branch. The advisory shouldn't
+        // fire there either — the process didn't run to its conclusion,
+        // so "next time, background it" doesn't apply.
+        const invocation = shellTool.build({
+          command: 'tail -f /tmp/never.log',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(75_000);
+        // SIGTERM = 15; ShellExecutionResult stores the numeric signal
+        // code (see `signal: number | null` in shellExecutionService.ts
+        // and the `os.constants.signals[signal]` lookup at the spawn
+        // settle path).
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: 15,
+          aborted: false,
+        });
+        const result = await promise;
+        // Falls through to the normal result formatter (non-aborted).
+        expect(result.llmContent).toContain('Signal: 15');
+        expect(result.llmContent).not.toContain('foreground command ran for');
+      });
+
+      it('off-by-one: omits the hint at threshold − 1ms', async () => {
+        // Pin the boundary so a regression that flips `>=` to `>` would
+        // fail loudly. Pairs with the existing 60_000ms-exactly test
+        // (which fires) — these two together pin the boundary tightly.
+        const invocation = shellTool.build({
+          command: 'echo hi',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(59_999);
+        resolveShellExecution({ output: 'hi', exitCode: 0 });
+        const result = await promise;
+        expect(result.llmContent).not.toContain('foreground command ran for');
+      });
+
+      it('appends the hint AFTER truncation (so it survives `truncateToolOutput`)', async () => {
+        // `truncateToolOutput` wraps over-budget output in a "Truncated
+        // part of the output:" envelope. If the hint were appended
+        // inside that envelope (i.e. before truncation), the LLM might
+        // read the advisory as part of the command's own output. Pin
+        // the post-truncation insertion order: the hint must appear
+        // outside the truncation marker.
+        //
+        // Mock `truncateToolOutput` directly rather than driving real
+        // truncation — the real path needs `fs.writeFile` to actually
+        // succeed (the catch fallback returns no `outputFile`, so the
+        // shell.ts replacement branch never fires). Mocking here pins
+        // ordering, which is all this test cares about.
+        const truncationModule = await import('../utils/truncation.js');
+        const spy = vi
+          .spyOn(truncationModule, 'truncateToolOutput')
+          .mockResolvedValue({
+            content: 'Tool output was too large and has been truncated.\n[mocked truncated body]',
+            outputFile: '/tmp/qwen-temp/shell_mocked.output',
+          });
+
+        const invocation = shellTool.build({
+          command: 'long-output-cmd',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(60_000);
+        resolveShellExecution({ output: 'A'.repeat(500), exitCode: 0 });
+        const result = await promise;
+        spy.mockRestore();
+
+        const content = result.llmContent as string;
+        // Hint present.
+        expect(content).toContain('foreground command ran for 60s');
+        // Truncation envelope present (proves the truncation branch
+        // actually ran in shell.ts — `outputFile` was set so the
+        // replacement happened).
+        expect(content).toContain(
+          'Tool output was too large and has been truncated.',
+        );
+        // Hint comes AFTER the truncation marker — pins the
+        // post-truncation insertion order so a regression that moves
+        // the append back inside the non-aborted llmContent builder
+        // (where it'd get wrapped by the truncation envelope on long
+        // output) would fail loudly.
+        const truncIdx = content.indexOf(
+          'Tool output was too large and has been truncated.',
+        );
+        const hintIdx = content.indexOf('foreground command ran for');
+        expect(hintIdx).toBeGreaterThan(truncIdx);
+      });
     });
 
     describe('addCoAuthorToGitCommit', () => {
