@@ -8,7 +8,14 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { tasksCommand } from './tasksCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-import type { BackgroundShellEntry } from '@qwen-code/qwen-code-core';
+import type {
+  BackgroundShellEntry,
+  BackgroundTaskEntry,
+} from '@qwen-code/qwen-code-core';
+
+type AgentTaskTestEntry = BackgroundTaskEntry & {
+  resumeBlockedReason?: string;
+};
 
 function entry(
   overrides: Partial<BackgroundShellEntry> = {},
@@ -25,16 +32,33 @@ function entry(
   };
 }
 
+function agentEntry(
+  overrides: Partial<AgentTaskTestEntry> = {},
+): AgentTaskTestEntry {
+  return {
+    agentId: 'agent_aaaaaaaa',
+    description: 'Investigate flaky test failure',
+    subagentType: 'researcher',
+    status: 'running',
+    startTime: Date.now() - 7_000,
+    abortController: new AbortController(),
+    ...overrides,
+  };
+}
+
 describe('tasksCommand', () => {
   let context: CommandContext;
-  let getAll: ReturnType<typeof vi.fn>;
+  let getShells: ReturnType<typeof vi.fn>;
+  let getAgents: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
-    getAll = vi.fn().mockReturnValue([]);
+    getShells = vi.fn().mockReturnValue([]);
+    getAgents = vi.fn().mockReturnValue([]);
     context = createMockCommandContext({
       services: {
         config: {
-          getBackgroundShellRegistry: () => ({ getAll }),
+          getBackgroundShellRegistry: () => ({ getAll: getShells }),
+          getBackgroundTaskRegistry: () => ({ getAll: getAgents }),
         },
       },
     } as unknown as Parameters<typeof createMockCommandContext>[0]);
@@ -45,12 +69,12 @@ describe('tasksCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'No background shells.',
+      content: 'No background tasks.',
     });
   });
 
-  it('lists running and terminal entries with status / runtime / output path', async () => {
-    getAll.mockReturnValue([
+  it('lists running and terminal shell entries with status / runtime / output path', async () => {
+    getShells.mockReturnValue([
       entry({
         shellId: 'bg_run',
         command: 'npm run dev',
@@ -81,7 +105,7 @@ describe('tasksCommand', () => {
     if (!result || result.type !== 'message') {
       throw new Error('expected message result');
     }
-    expect(result.content).toContain('Background shells (3 total)');
+    expect(result.content).toContain('Background tasks (3 total)');
     expect(result.content).toContain('[bg_run] running');
     expect(result.content).toContain('pid=1111');
     expect(result.content).toContain('npm run dev');
@@ -90,5 +114,47 @@ describe('tasksCommand', () => {
     expect(result.content).toContain(
       'output: /tmp/tasks/sess/shell-bg_done.output',
     );
+  });
+
+  it('includes background agent entries alongside shells', async () => {
+    getAgents.mockReturnValue([
+      agentEntry({
+        agentId: 'agent_run',
+        description: 'Fix flaky test and send patch',
+        subagentType: 'researcher',
+        status: 'running',
+        outputFile: '/tmp/tasks/sess/agent_run.jsonl',
+      }),
+      agentEntry({
+        agentId: 'agent_pause',
+        description: 'Resume-safe task',
+        subagentType: 'researcher',
+        status: 'paused',
+        resumeBlockedReason: 'Subagent "researcher" is no longer available.',
+      }),
+    ]);
+    getShells.mockReturnValue([
+      entry({
+        shellId: 'bg_shell',
+        command: 'npm run dev',
+        status: 'running',
+      }),
+    ]);
+
+    const result = await tasksCommand.action!(context, '');
+    if (!result || result.type !== 'message') {
+      throw new Error('expected message result');
+    }
+
+    expect(result.content).toContain('Background tasks (3 total)');
+    expect(result.content).toContain('[agent_run] running');
+    expect(result.content).toContain(
+      'researcher: Fix flaky test and send patch',
+    );
+    expect(result.content).toContain('output: /tmp/tasks/sess/agent_run.jsonl');
+    expect(result.content).toContain(
+      '[agent_pause] paused (resume blocked): Subagent "researcher" is no longer available.',
+    );
+    expect(result.content).toContain('[bg_shell] running');
   });
 });

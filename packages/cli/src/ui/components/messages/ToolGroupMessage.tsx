@@ -30,6 +30,18 @@ function isAgentWithPendingConfirmation(
   );
 }
 
+function isRunningAgent(
+  rd: IndividualToolCallDisplay['resultDisplay'],
+): rd is AgentResultDisplay {
+  return (
+    typeof rd === 'object' &&
+    rd !== null &&
+    'type' in rd &&
+    (rd as AgentResultDisplay).type === 'task_execution' &&
+    (rd as AgentResultDisplay).status === 'running'
+  );
+}
+
 interface ToolGroupMessageProps {
   groupId: number;
   toolCalls: IndividualToolCallDisplay[];
@@ -128,6 +140,18 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   }
 
   const focusedSubagentCallId = focusedSubagentRef.current;
+  // When no subagent has a pending confirmation, fall back to the *first*
+  // running subagent for Ctrl+E/Ctrl+F shortcut focus. "First" (array order)
+  // is the oldest — the one most likely to have accumulated tool calls and
+  // display the "+N more (ctrl+e to expand)" hint.
+  const runningSubagentCallId = useMemo(
+    () =>
+      toolCalls.find((tc) => isRunningAgent(tc.resultDisplay))?.callId ?? null,
+    [toolCalls],
+  );
+  // Pending confirmation takes strict priority over running fallback.
+  const keyboardFocusedSubagentCallId =
+    focusedSubagentCallId ?? runningSubagentCallId;
 
   // Compact mode: entire group → single line summary
   // Force-expand when: user must interact (Confirming or subagent pending
@@ -256,12 +280,15 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
       {toolCalls.map((tool) => {
         const isConfirming = toolAwaitingApproval?.callId === tool.callId;
         // A subagent's inline confirmation should only receive keyboard focus
-        // when (1) there is no direct tool-level confirmation active, and
-        // (2) this tool currently holds the focus lock.
+        // when (1) there is no direct tool-level confirmation active, and (2)
+        // this tool currently holds the subagent keyboard focus. Pending
+        // confirmations keep the existing first-come focus lock; otherwise the
+        // first running subagent owns Ctrl+E/Ctrl+F so the compact hint remains
+        // actionable without making parallel subagents toggle in lock-step.
         const isSubagentFocused =
           isFocused &&
           !toolAwaitingApproval &&
-          focusedSubagentCallId === tool.callId;
+          keyboardFocusedSubagentCallId === tool.callId;
         // Show the waiting indicator only when this subagent genuinely has a
         // pending confirmation AND another subagent holds the focus lock.
         const isWaitingForOtherApproval =

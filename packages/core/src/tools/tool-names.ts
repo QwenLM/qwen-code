@@ -38,6 +38,7 @@ export const ToolNames = {
   CRON_DELETE: 'cron_delete',
   TASK_STOP: 'task_stop',
   SEND_MESSAGE: 'send_message',
+  MONITOR: 'monitor',
 } as const;
 
 /**
@@ -66,6 +67,7 @@ export const ToolDisplayNames = {
   CRON_DELETE: 'CronDelete',
   TASK_STOP: 'TaskStop',
   SEND_MESSAGE: 'SendMessage',
+  MONITOR: 'Monitor',
 } as const;
 
 // Migration from old tool names to new tool names

@@ -15,6 +15,8 @@ import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
   QwenLogger,
+  isTelemetrySdkInitialized,
+  shutdownTelemetry,
 } from '../telemetry/index.js';
 import type {
   ContentGenerator,
@@ -168,7 +170,6 @@ vi.mock('../core/client.js', () => ({
   GeminiClient: vi.fn().mockImplementation(() => ({
     initialize: vi.fn().mockResolvedValue(undefined),
     isInitialized: vi.fn().mockReturnValue(true),
-    stripThoughtsFromHistory: vi.fn(),
     setTools: vi.fn(),
   })),
 }));
@@ -178,6 +179,8 @@ vi.mock('../telemetry/index.js', async (importOriginal) => {
   return {
     ...actual,
     initializeTelemetry: vi.fn(),
+    isTelemetrySdkInitialized: vi.fn(() => false),
+    shutdownTelemetry: vi.fn().mockResolvedValue(undefined),
     uiTelemetryService: {
       getLastPromptTokenCount: vi.fn(),
     },
@@ -286,6 +289,7 @@ describe('Server Config (config.ts)', () => {
   beforeEach(() => {
     // Reset mocks if necessary
     vi.clearAllMocks();
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
     vi.spyOn(QwenLogger.prototype, 'logStartSessionEvent').mockImplementation(
       async () => undefined,
     );
@@ -322,6 +326,76 @@ describe('Server Config (config.ts)', () => {
 
     expect(config.getAppendSystemPrompt()).toBe('Be extra concise.');
     expect(config.getSystemPrompt()).toBeUndefined();
+  });
+
+  describe('FileReadCache isolation', () => {
+    it('returns a distinct cache for child Configs created via Object.create', () => {
+      // Subagent / scoped-agent / fork construction all use
+      // `Object.create(parent)`, which does NOT run field initializers.
+      // Without explicit handling the child would resolve fileReadCache
+      // through the prototype chain back to the parent's instance, so a
+      // subagent's ReadFile would see the parent's recorded reads and
+      // return file_unchanged placeholders for files the subagent has
+      // never received in its own transcript.
+      const parent = new Config(baseParams);
+      const child = Object.create(parent) as Config;
+
+      const parentCache = parent.getFileReadCache();
+      const childCache = child.getFileReadCache();
+
+      expect(parentCache).toBeDefined();
+      expect(childCache).toBeDefined();
+      expect(childCache).not.toBe(parentCache);
+
+      parentCache.recordRead(
+        '/tmp/parent.ts',
+        {
+          dev: 1,
+          ino: 100,
+          mtimeMs: 1_000_000,
+          size: 42,
+        } as unknown as import('node:fs').Stats,
+        { full: true, cacheable: true },
+      );
+
+      expect(parentCache.size()).toBe(1);
+      expect(childCache.size()).toBe(0);
+    });
+
+    it('returns the same cache instance on repeated getter calls within one Config', () => {
+      // Sanity: the lazy own-property initialization in
+      // getFileReadCache() must not allocate a fresh cache on every
+      // call — recorded entries would vanish between operations.
+      const config = new Config(baseParams);
+      expect(config.getFileReadCache()).toBe(config.getFileReadCache());
+    });
+  });
+
+  describe('startNewSession', () => {
+    it('clears the FileReadCache so a new session does not inherit prior reads', () => {
+      // Regression guard: the file-read cache backs ReadFile's
+      // file_unchanged placeholder, whose correctness depends on the
+      // model having seen the prior read earlier in the *current*
+      // conversation. /clear and resume both go through
+      // startNewSession(), so it must drop cache entries the new
+      // session has never seen.
+      const config = new Config(baseParams);
+      const cache = config.getFileReadCache();
+      cache.recordRead(
+        '/tmp/whatever.ts',
+        {
+          dev: 1,
+          ino: 100,
+          mtimeMs: 1_000_000,
+          size: 42,
+        } as unknown as import('node:fs').Stats,
+        { full: true, cacheable: true },
+      );
+      expect(cache.size()).toBe(1);
+
+      config.startNewSession();
+      expect(cache.size()).toBe(0);
+    });
   });
 
   describe('initialize', () => {
@@ -487,10 +561,6 @@ describe('Server Config (config.ts)', () => {
       await config.refreshAuth(AuthType.USE_VERTEX_AI);
 
       await config.refreshAuth(AuthType.USE_GEMINI);
-
-      expect(
-        config.getGeminiClient().stripThoughtsFromHistory,
-      ).not.toHaveBeenCalledWith();
     });
   });
 
@@ -572,12 +642,48 @@ describe('Server Config (config.ts)', () => {
 
       await config.refreshAuth(AuthType.QWEN_OAUTH);
 
-      const stripSpy = config.getGeminiClient().stripThoughtsFromHistory;
-      vi.mocked(stripSpy).mockClear();
+      await config.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
+    });
+
+    it('should notify model change listeners after switchModel', async () => {
+      const config = new Config(baseParams);
+
+      const mockContentConfig: ContentGeneratorConfig = {
+        authType: AuthType.QWEN_OAUTH,
+        model: 'coder-model',
+        apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+        baseUrl: DEFAULT_DASHSCOPE_BASE_URL,
+        timeout: 60000,
+        maxRetries: 3,
+      } as ContentGeneratorConfig;
+
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+        (_config, authType, generationConfig) => ({
+          config: {
+            ...mockContentConfig,
+            authType,
+            model: generationConfig?.model ?? mockContentConfig.model,
+          } as ContentGeneratorConfig,
+          sources: {},
+        }),
+      );
+      vi.mocked(createContentGenerator).mockResolvedValue({
+        generateContent: vi.fn(),
+        generateContentStream: vi.fn(),
+        countTokens: vi.fn(),
+        embedContent: vi.fn(),
+      } as unknown as ContentGenerator);
+
+      await config.refreshAuth(AuthType.QWEN_OAUTH);
+
+      const listener = vi.fn();
+      const unsubscribe = config.onModelChange(listener);
 
       await config.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
 
-      expect(stripSpy).not.toHaveBeenCalled();
+      expect(listener).toHaveBeenCalledWith('coder-model');
+
+      unsubscribe();
     });
   });
 
@@ -817,6 +923,32 @@ describe('Server Config (config.ts)', () => {
     expect(config.getTelemetryEnabled()).toBe(true);
   });
 
+  it('Config shutdown should flush telemetry when SDK is initialized', async () => {
+    const paramsWithTelemetry: ConfigParameters = {
+      ...baseParams,
+      telemetry: { enabled: true },
+    };
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(true);
+    const config = new Config(paramsWithTelemetry);
+
+    await config.shutdown();
+
+    expect(shutdownTelemetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('Config shutdown should skip telemetry shutdown before SDK initialization', async () => {
+    const paramsWithTelemetry: ConfigParameters = {
+      ...baseParams,
+      telemetry: { enabled: true },
+    };
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
+    const config = new Config(paramsWithTelemetry);
+
+    await config.shutdown();
+
+    expect(shutdownTelemetry).not.toHaveBeenCalled();
+  });
+
   it('Config constructor should set telemetry to false when provided as false', () => {
     const paramsWithTelemetry: ConfigParameters = {
       ...baseParams,
@@ -989,6 +1121,41 @@ describe('Server Config (config.ts)', () => {
       delete paramsWithoutTelemetry.telemetry;
       const config = new Config(paramsWithoutTelemetry);
       expect(config.getTelemetryOtlpProtocol()).toBe('grpc');
+    });
+  });
+
+  describe('Per-Signal OTLP Endpoint Configuration', () => {
+    it('should return per-signal endpoints when provided', () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        telemetry: {
+          enabled: true,
+          otlpTracesEndpoint: 'http://traces:4318/v1/traces',
+          otlpLogsEndpoint: 'http://logs:4318/v1/logs',
+          otlpMetricsEndpoint: 'http://metrics:4318/v1/metrics',
+        },
+      };
+      const config = new Config(params);
+      expect(config.getTelemetryOtlpTracesEndpoint()).toBe(
+        'http://traces:4318/v1/traces',
+      );
+      expect(config.getTelemetryOtlpLogsEndpoint()).toBe(
+        'http://logs:4318/v1/logs',
+      );
+      expect(config.getTelemetryOtlpMetricsEndpoint()).toBe(
+        'http://metrics:4318/v1/metrics',
+      );
+    });
+
+    it('should return undefined when per-signal endpoints are not provided', () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        telemetry: { enabled: true },
+      };
+      const config = new Config(params);
+      expect(config.getTelemetryOtlpTracesEndpoint()).toBeUndefined();
+      expect(config.getTelemetryOtlpLogsEndpoint()).toBeUndefined();
+      expect(config.getTelemetryOtlpMetricsEndpoint()).toBeUndefined();
     });
   });
 
