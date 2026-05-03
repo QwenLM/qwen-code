@@ -232,6 +232,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         this.config.getFileReadCache(),
         params.file_path,
         'editing',
+        { expectExisting: true },
       );
       if (!postDecision.ok) {
         // Forensic trail for post-read TOCTOU rejections. These are
@@ -496,6 +497,14 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           this.config.getFileReadCache(),
           this.params.file_path,
           'editing',
+          // For an in-place edit (`!isNewFile`), the file existed at
+          // read time and must still exist now — an ENOENT here
+          // means the original target disappeared and we should
+          // reject rather than fall through to a new-file write
+          // that would silently re-create a file from stale bytes.
+          // For genuine new-file creation, ENOENT is the expected
+          // pre-write state (ok:true → writeTextFile creates).
+          { expectExisting: !editData.isNewFile },
         );
         if (!writeDecision.ok) {
           debugLogger.warn('pre-write TOCTOU rejection', {

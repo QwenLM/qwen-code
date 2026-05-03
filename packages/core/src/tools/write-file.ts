@@ -120,7 +120,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
     let originalContent = '';
-    const fileExists = await isFilefileExists(this.params.file_path);
+    let fileExists = await isFilefileExists(this.params.file_path);
     // Run prior-read enforcement *before* we read the file to render
     // a confirmation diff. Otherwise the user could approve a diff
     // computed from current bytes that the model has never received,
@@ -156,9 +156,20 @@ class WriteFileToolInvocation extends BaseToolInvocation<
           .readTextFile({ path: this.params.file_path });
         originalContent = content;
       } catch (err) {
-        throw new Error(
-          `Error reading existing file for confirmation: ${getErrorMessage(err)}`,
-        );
+        // ENOENT here means the file disappeared between
+        // isFilefileExists() and readTextFile (a disappearance
+        // race). The pre-read checkPriorRead above already returned
+        // ok:true for ENOENT and let us fall through; mirror that
+        // in this read by falling back to the new-file diff (empty
+        // originalContent) instead of throwing a plain Error that
+        // the scheduler would surface as UNHANDLED_EXCEPTION.
+        if (isNodeError(err) && err.code === 'ENOENT') {
+          fileExists = false;
+        } else {
+          throw new Error(
+            `Error reading existing file for confirmation: ${getErrorMessage(err)}`,
+          );
+        }
       }
     }
 
@@ -172,6 +183,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         this.config.getFileReadCache(),
         this.params.file_path,
         'overwriting',
+        { expectExisting: true },
       );
       if (!postDecision.ok) {
         debugLogger.warn('post-read TOCTOU rejection (confirmation)', {
@@ -308,6 +320,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         this.config.getFileReadCache(),
         file_path,
         'overwriting',
+        { expectExisting: true },
       );
       if (!postDecision.ok) {
         debugLogger.warn('post-read TOCTOU rejection (execute)', {
@@ -358,6 +371,14 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         this.config.getFileReadCache(),
         file_path,
         'overwriting',
+        // If the file existed when we read it (`fileExists` is still
+        // true after readTextFile), ENOENT here means the original
+        // target disappeared between the post-read check and now —
+        // reject rather than fall through and silently re-create the
+        // file from stale bytes. For new-file creation
+        // (`fileExists === false`), ENOENT is the expected pre-write
+        // state (ok:true → writeTextFile creates).
+        { expectExisting: fileExists },
       );
       if (!writeDecision.ok) {
         debugLogger.warn('pre-write TOCTOU rejection', {

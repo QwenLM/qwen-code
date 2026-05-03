@@ -1014,6 +1014,32 @@ describe('EditTool', () => {
         /binary \/ image \/ audio \/ video \/ PDF \/ notebook payload/,
       );
       expect(result.error?.message).not.toMatch(/Use the read_file tool first/);
+      // EditTool's verb is "edit", not "overwrite" — using the
+      // wrong one here would be confusing for in-place edits.
+      expect(result.error?.message).toMatch(/if you need to edit it\./);
+      expect(result.error?.message).not.toMatch(
+        /if you need to overwrite it\./,
+      );
+    });
+
+    it('rejects an edit on a directory with TARGET_IS_DIRECTORY', async () => {
+      // Pre-fix, the directory exemption returned ok:true and
+      // readTextFile would either throw EISDIR (caught by execute as
+      // EDIT_PREPARATION_FAILURE) or — in WriteFile.getConfirmationDetails —
+      // collapse into UNHANDLED_EXCEPTION. The structured rejection
+      // here gives a stable error code regardless of where the call
+      // hits in the pipeline.
+      const dirPath = path.join(rootDir, 'enforce-dir');
+      fs.mkdirSync(dirPath);
+      const result = await tool
+        .build({
+          file_path: dirPath,
+          old_string: 'foo',
+          new_string: 'bar',
+        })
+        .execute(abortSignal);
+      expect(result.error?.type).toBe(ToolErrorType.TARGET_IS_DIRECTORY);
+      expect(result.error?.message).toMatch(/is a directory/);
     });
 
     it('does not let an unread file be probed via NO_OCCURRENCE_FOUND', async () => {

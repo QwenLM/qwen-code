@@ -72,6 +72,22 @@ export type PriorReadDecision =
 export type PriorReadVerb = 'editing' | 'overwriting';
 
 /**
+ * Options for {@link checkPriorRead}.
+ *
+ *  - `expectExisting`: when true, an `ENOENT` from the stat call
+ *    rejects with `FILE_CHANGED_SINCE_READ` instead of returning
+ *    `ok: true`. Use this for the post-read and pre-write recheck
+ *    calls — at those points the model has already committed to
+ *    mutating an existing path, so a disappeared file is a stale-read
+ *    drift, not a "the file genuinely never existed" disappearance
+ *    race. The default (`expectExisting: false`) is the pre-read
+ *    behaviour: ENOENT means "go ahead and create".
+ */
+export interface CheckPriorReadOptions {
+  expectExisting?: boolean;
+}
+
+/**
  * Test whether a mutating tool is cleared to proceed against
  * `filePath` based on the session FileReadCache.
  *
@@ -103,6 +119,7 @@ export async function checkPriorRead(
   cache: FileReadCache,
   filePath: string,
   verb: PriorReadVerb,
+  options: CheckPriorReadOptions = {},
 ): Promise<PriorReadDecision> {
   let stats: fs.Stats;
   try {
@@ -110,9 +127,28 @@ export async function checkPriorRead(
   } catch (err) {
     const code = (err as NodeJS.ErrnoException | undefined)?.code;
     if (code === 'ENOENT') {
-      // Disappearance race vs the caller's fileExists check. Let the
-      // downstream write path surface the absence — synthesising a
-      // "you must read first" message here would be misleading.
+      if (options.expectExisting) {
+        // Post-read or pre-write: the file existed at planning time
+        // but disappeared before this recheck. That is not a benign
+        // disappearance race — it is the original target going away
+        // from under the model. Reject so the caller does not
+        // silently fall through to the new-file path with stale
+        // bytes.
+        const raw =
+          `File ${filePath} disappeared after the model read it ` +
+          `(stat now returns ENOENT). Re-read with the ${ToolNames.READ_FILE} ` +
+          `tool — the path may have been deleted or moved — before ` +
+          `retrying ${verb} it.`;
+        return {
+          ok: false,
+          type: ToolErrorType.FILE_CHANGED_SINCE_READ,
+          rawMessage: raw,
+          displayMessage: `file disappeared after last read; re-run ${ToolNames.READ_FILE} first.`,
+        };
+      }
+      // Pre-read disappearance race vs the caller's fileExists check.
+      // Let the downstream write path surface the absence — synthesising
+      // a "you must read first" message here would be misleading.
       return { ok: true };
     }
     // Any other stat failure: fail closed. We cannot prove the file
@@ -136,26 +172,26 @@ export async function checkPriorRead(
       displayMessage: `cannot verify prior read of ${filePath}; re-run ${ToolNames.READ_FILE} before ${verbDisplay}.`,
     };
   }
-  // Narrow the bypass to **directories only**. The earlier
-  // !stats.isFile() form was too broad: it also covered FIFOs,
-  // sockets, and character / block devices, none of which the
-  // model has a legitimate way to "read first" anyway, and
-  // letting those flow through to readTextFile risks blocking
-  // I/O (FIFO) or over-allocation (/dev/urandom).
-  //
-  // Directory targets get the bypass because read_file already has
-  // a dedicated TARGET_IS_DIRECTORY error and an enforcement loop
-  // ("call read_file first" → "read_file says directory") would be
-  // a real regression vs the pre-PR behaviour.
-  //
-  // Non-regular non-directory paths (FIFO / socket / character /
-  // block device) get a dedicated rejection: read_file rejects
-  // them as "not a regular file" with no recovery, so telling the
-  // model to "call read_file first" would loop forever. The
-  // dedicated message tells the model the path cannot be edited
-  // via Edit / WriteFile at all and to use a different tool.
+  // Directory and other non-regular paths get dedicated rejections
+  // with structured ToolErrorType codes — never `ok: true`. Falling
+  // through to readTextFile would either block (FIFO),
+  // over-allocate (/dev/urandom), or throw a plain Error that the
+  // confirmation path collapses into UNHANDLED_EXCEPTION (e.g.
+  // EISDIR on WriteFile.getConfirmationDetails, which never reaches
+  // execute()'s explicit EISDIR mapping).
   if (stats.isDirectory()) {
-    return { ok: true };
+    const verbBare = verb === 'editing' ? 'edit' : 'overwrite';
+    const raw =
+      `${filePath} is a directory. The Edit / WriteFile tools only ` +
+      `operate on regular files. Use a different mechanism (e.g. ` +
+      `the shell tool) if you need to ${verbBare} the contents of ` +
+      `this directory.`;
+    return {
+      ok: false,
+      type: ToolErrorType.TARGET_IS_DIRECTORY,
+      rawMessage: raw,
+      displayMessage: `path is a directory; cannot ${verbBare} via this tool.`,
+    };
   }
   if (!stats.isFile()) {
     const verbBare = verb === 'editing' ? 'edit' : 'overwrite';
@@ -205,18 +241,21 @@ export async function checkPriorRead(
     status.entry.lastReadWasFull &&
     !status.entry.lastReadCacheable
   ) {
+    // Both raw and displayMessage use the bare verb (`edit` /
+    // `overwrite`) rather than the gerund — the noun phrase
+    // "cannot editing via this tool" would be ungrammatical, and
+    // both strings need to read correctly on the EditTool path
+    // (where "overwrite" would be the wrong verb for an in-place
+    // edit) and the WriteFileTool path (where "overwrite" is
+    // correct).
+    const verbBare = verb === 'editing' ? 'edit' : 'overwrite';
     const raw =
       `File ${filePath} is a binary / image / audio / video / PDF / ` +
       `notebook payload that the ${ToolNames.READ_FILE} tool returns ` +
       `as a structured value rather than as plain text. The Edit / ` +
       `WriteFile tools cannot mutate that payload safely — re-reading ` +
       `it would not change this. Use a different mechanism (e.g. shell ` +
-      `tool with a binary-aware writer) if you need to overwrite it.`;
-    // displayMessage uses the bare verb (`edit` / `overwrite`)
-    // rather than the gerund — the noun phrase "cannot editing
-    // via this tool" would be ungrammatical, and `returnDisplay`
-    // surfaces this string directly to the user.
-    const verbBare = verb === 'editing' ? 'edit' : 'overwrite';
+      `tool with a binary-aware writer) if you need to ${verbBare} it.`;
     return {
       ok: false,
       type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,

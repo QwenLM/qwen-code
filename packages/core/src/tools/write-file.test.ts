@@ -837,8 +837,47 @@ describe('WriteFileTool', () => {
         .build({ file_path: filePath, content: 'clobber' })
         .execute(abortSignal);
       expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+      // Verb in the dead-end guidance must read correctly for
+      // overwrite (the WriteFile path), not "edit".
+      expect(result.error?.message).toMatch(/if you need to overwrite it\./);
 
       fs.unlinkSync(filePath);
+    });
+
+    it('confirmation falls back to a new-file diff when the file disappears mid-flight', async () => {
+      // isFilefileExists() saw the file. Between that and the
+      // readTextFile inside getConfirmationDetails, an external
+      // process deletes it. Pre-fix, readTextFile threw ENOENT and
+      // the confirmation collapsed into UNHANDLED_EXCEPTION; the new
+      // catch falls back to fileExists=false so the user sees the
+      // brand-new-file diff instead.
+      const filePath = path.join(rootDir, 'enforce-disappear.txt');
+      fs.writeFileSync(filePath, 'will disappear', 'utf-8');
+      seedPriorRead(filePath);
+      const readSpy = vi
+        .spyOn(fsService, 'readTextFile')
+        .mockRejectedValueOnce(
+          Object.assign(new Error('ENOENT'), { code: 'ENOENT' }),
+        );
+
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'new content',
+      });
+      const confirmation = await invocation.getConfirmationDetails(abortSignal);
+      // Should produce a confirmation diff (not throw), with the
+      // new content as the proposed value.
+      expect(confirmation).toEqual(
+        expect.objectContaining({
+          type: 'edit',
+          newContent: 'new content',
+        }),
+      );
+
+      readSpy.mockRestore();
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
     });
 
     it('rejects confirmation requests on an unread existing file before showing a diff', async () => {
