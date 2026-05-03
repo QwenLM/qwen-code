@@ -606,6 +606,22 @@ Symlinked skill body.
       );
       expect(config.whenToUse).toBe('When editing React components');
     });
+
+    it('sets skillRoot to the SKILL.md directory (parity with managed parser)', () => {
+      // Regression: extension parser previously omitted `skillRoot`, so
+      // `registerSkillHooks.ts` skipped setting `QWEN_SKILL_ROOT` for
+      // command-type hooks on extension skills — `$QWEN_SKILL_ROOT/...`
+      // references in those hooks broke silently.
+      mockParseYaml.mockReturnValueOnce({
+        name: 'tsx-helper',
+        description: 'React skill',
+      });
+      const config = parseSkillContent(
+        `---\nname: tsx-helper\ndescription: React skill\n---\n\nBody.\n`,
+        '/test/extension/skills/tsx-helper/SKILL.md',
+      );
+      expect(config.skillRoot).toBe('/test/extension/skills/tsx-helper');
+    });
   });
 
   describe('parseSkillContent model field', () => {

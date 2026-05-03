@@ -174,6 +174,21 @@ export function parseSkillContent(
     argumentHint,
     model,
     filePath,
+    // Set skillRoot to the directory containing SKILL.md so command
+    // hooks for extension skills get `QWEN_SKILL_ROOT` set in their
+    // environment (registerSkillHooks.ts:116 skips the env var when
+    // skillRoot is undefined). Matches the project/user/bundled
+    // parser in skill-manager.ts. The previous omission silently
+    // broke `$QWEN_SKILL_ROOT/scripts/...` references in extension
+    // skill hook commands.
+    //
+    // Note: extension parser still does not extract `hooks:`
+    // frontmatter; that's a separate alignment task and may be
+    // intentionally restricted to managed (project/user/bundled)
+    // skills as a security boundary. If hooks become supported here
+    // they need their own extraction pass and the same managed-vs-
+    // extension trust review.
+    skillRoot: path.dirname(filePath),
     body: body.trim(),
     level: 'extension',
     whenToUse,

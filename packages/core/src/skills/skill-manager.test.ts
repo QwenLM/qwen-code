@@ -120,6 +120,14 @@ describe('SkillManager', () => {
           paths = ['lib/**'];
         } else if (yamlString.includes('"src/**/*.ts"')) {
           paths = ['src/**/*.ts'];
+        } else {
+          // Generic fallback: extract any quoted string under a `- "..."`
+          // bullet inside the paths block. Lets the oversized-glob and
+          // similar fixtures work without a per-test branch.
+          const bulletMatches = yamlString.match(/-\s+"([^"]+)"/g);
+          if (bulletMatches) {
+            paths = bulletMatches.map((m) => m.replace(/^-\s+"|"$/g, ''));
+          }
         }
         const result: Record<string, unknown> = { name, description, paths };
         if (yamlString.includes('disable-model-invocation: true')) {
@@ -1187,6 +1195,44 @@ User body.
 
       const errors = manager.getParseErrors();
       expect(errors.size).toBeGreaterThan(0);
+    });
+
+    it('surfaces invalid `paths:` glob patterns through parseErrors', async () => {
+      // Regression: bad globs were only logged at debug level, leaving
+      // affected skills with a permanent "gated by path-based
+      // activation" error and no actionable diagnostic. The registry
+      // now calls back into SkillManager.parseErrors so the failure is
+      // visible through `getParseErrors()` (and the `/skills` UI).
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'bad-glob-skill',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      // 70 KB pattern — picomatch's default pattern length cap is 65,536
+      // chars, so it throws at compile time.
+      const oversizedGlob = 'a'.repeat(70_000);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: bad-glob-skill
+description: Has an oversized glob
+paths:
+  - "${oversizedGlob}"
+---
+
+Body.
+`);
+
+      await manager.refreshCache();
+
+      const errors = manager.getParseErrors();
+      const entries = Array.from(errors.entries());
+      const oversizedEntry = entries.find(([key]) => key.includes('#paths['));
+      expect(oversizedEntry).toBeDefined();
+      expect(oversizedEntry![1].message).toMatch(/Invalid glob in "paths"/);
+      expect(oversizedEntry![1].skillName).toBe('bad-glob-skill');
     });
   });
 

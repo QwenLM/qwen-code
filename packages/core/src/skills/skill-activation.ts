@@ -65,12 +65,28 @@ export function splitConditionalSkills(skills: readonly SkillConfig[]): {
  * activations do not carry over across rebuilds (same as
  * ConditionalRulesRegistry).
  */
+/**
+ * Optional callback invoked by the registry when picomatch rejects a
+ * `paths:` entry. SkillManager wires this into its `parseErrors` map
+ * so the failure is surfaced via `getParseErrors()` (and the `/skills`
+ * UI) instead of only landing in debug logs.
+ */
+export type InvalidPatternHandler = (
+  skill: SkillConfig,
+  pattern: string,
+  error: Error,
+) => void;
+
 export class SkillActivationRegistry {
   private readonly compiled: CompiledSkill[];
   private readonly activated = new Set<string>();
   private readonly projectRoot: string;
 
-  constructor(conditionalSkills: readonly SkillConfig[], projectRoot: string) {
+  constructor(
+    conditionalSkills: readonly SkillConfig[],
+    projectRoot: string,
+    onInvalidPattern?: InvalidPatternHandler,
+  ) {
     this.projectRoot = projectRoot;
     this.compiled = conditionalSkills.map((skill) => {
       const matchers: picomatch.Matcher[] = [];
@@ -88,9 +104,16 @@ export class SkillActivationRegistry {
           // the rest of the skill — better than letting the error bubble
           // up to refreshCache and abort skill loading entirely (this
           // site is outside the levels-level Promise.allSettled boundary).
+          //
+          // Surface to the caller (SkillManager) so the failure shows up
+          // in `getParseErrors()` / the `/skills` UI instead of
+          // disappearing into a debug-level log line that the typical
+          // skill author never sees.
+          const err = e instanceof Error ? e : new Error(String(e));
           debugLogger.warn(
-            `Skill "${skill.name}" has invalid glob "${p}", skipping pattern: ${e instanceof Error ? e.message : String(e)}`,
+            `Skill "${skill.name}" has invalid glob "${p}", skipping pattern: ${err.message}`,
           );
+          onInvalidPattern?.(skill, p, err);
         }
       }
       return { skill, matchers };

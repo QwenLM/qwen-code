@@ -173,6 +173,23 @@ describe('SkillTool', () => {
       expect(tool.description).not.toContain('<script>');
     });
 
+    it('should XML-escape modelInvocableCommands name (bypasses validateSkillName)', async () => {
+      // file-based skill names go through `validateSkillName` (regex
+      // whitelist) at parse time. Command names from
+      // modelInvocableCommands come from MCP / extensions and bypass
+      // that validator entirely — so the SkillTool description must
+      // escape them at the sink before they're handed to the model.
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue([]);
+      vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
+        () => [{ name: 'mcp<inject>', description: 'unrelated description' }],
+      );
+      const tool = new SkillTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(tool.description).toContain('mcp&lt;inject&gt;');
+      expect(tool.description).not.toContain('mcp<inject>');
+    });
+
     it('should XML-escape modelInvocableCommands description', async () => {
       // Same XML-injection vector via the cmd.description field — an
       // MCP prompt can ship a crafted description and the SkillTool's

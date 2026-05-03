@@ -345,9 +345,24 @@ export class SkillManager {
       }
     }
     const { conditional } = splitConditionalSkills(eligibleForActivation);
+    // Surface picomatch compile failures via parseErrors so a malformed
+    // `paths:` glob shows up in `getParseErrors()` (and downstream
+    // `/skills` UI) instead of only landing in debug logs. Otherwise
+    // an author who wrote `src/***/file.tsx` sees a permanent "gated
+    // by path-based activation" error with no actionable diagnostic.
     this.activationRegistry = new SkillActivationRegistry(
       conditional,
       this.config.getProjectRoot(),
+      (skill, pattern, error) => {
+        this.parseErrors.set(
+          `${skill.filePath}#paths[${pattern}]`,
+          new SkillError(
+            `Invalid glob in "paths": ${pattern} — ${error.message}`,
+            SkillErrorCode.INVALID_CONFIG,
+            skill.name,
+          ),
+        );
+      },
     );
 
     debugLogger.info(

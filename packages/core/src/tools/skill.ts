@@ -196,9 +196,15 @@ ${skill.level}
     }
 
     for (const cmd of this.modelInvocableCommands) {
+      // Escape `cmd.name` too — file-based skill names go through
+      // `validateSkillName` (charset whitelist), but command names come
+      // from externally-injected sources (MCP servers, extensions) and
+      // bypass that validator. A command shipped with an XML-special
+      // name (`<`, `>`, `&`) would otherwise inject raw tags into the
+      // model-facing `<available_skills>` block.
       allSkillEntries.push(`<skill>
 <name>
-${cmd.name}
+${escapeXml(cmd.name)}
 </name>
 <description>
 ${escapeXml(cmd.description)}
