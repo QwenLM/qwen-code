@@ -1045,6 +1045,48 @@ describe('ShellTool', () => {
         const result = await promise;
         expect(result.llmContent).not.toContain('foreground command ran for');
       });
+
+      it('threshold-scaling positive case: hint DOES fire at the scaled threshold', async () => {
+        // Pair with the negative test above. If `longRunThresholdFor`
+        // regressed to a fixed 60s, the negative test would still pass
+        // (no hint at 100s under default threshold either) but THIS
+        // one would also fire incorrectly at 100s — pinning both ends
+        // catches the failure mode.
+        const invocation = shellTool.build({
+          command: 'pytest --slow',
+          is_background: false,
+          timeout: 600_000,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(305_000); // past 300s scaled threshold
+        resolveShellExecution({ output: 'all green', exitCode: 0 });
+        const result = await promise;
+        expect(result.llmContent).toContain('foreground command ran for 305s');
+      });
+
+      it('debug-mode TUI mirror is re-synced after the hint append', async () => {
+        // Pin the debug-mode re-sync introduced to avoid the agent
+        // suddenly suggesting `is_background: true` with no visible
+        // trigger in the TUI. All other tests in this describe run
+        // under the default `getDebugMode → false`; this one flips it
+        // to true and asserts the hint is in `returnDisplay` too.
+        const debugMock = mockConfig as unknown as { getDebugMode: Mock };
+        debugMock.getDebugMode.mockReturnValue(true);
+        try {
+          const invocation = shellTool.build({
+            command: 'pytest -q',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          await vi.advanceTimersByTimeAsync(60_000);
+          resolveShellExecution({ output: 'all green', exitCode: 0 });
+          const result = await promise;
+          expect(result.llmContent).toContain('foreground command ran for 60s');
+          expect(result.returnDisplay).toContain('foreground command ran for 60s');
+        } finally {
+          debugMock.getDebugMode.mockReturnValue(false);
+        }
+      });
     });
 
     describe('addCoAuthorToGitCommit', () => {

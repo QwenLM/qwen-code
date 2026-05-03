@@ -726,13 +726,20 @@ export class ShellToolInvocation extends BaseToolInvocation<
     //         `aborted` when the AbortSignal we passed was triggered,
     //         so external signals fall through to the non-aborted
     //         branch — same rationale as timeout.
-    //   - Wall-clock duration ≥ threshold.
+    //   - Wall-clock duration ≥ threshold. Measured spawn → resultPromise
+    //     settle, intentionally BEFORE the post-processing block below
+    //     (truncation I/O, output-file write). The hint reports how long
+    //     the COMMAND blocked the agent, not how long the tool call
+    //     spent including post-processing — that's the number the agent
+    //     should be reasoning about when deciding whether to background
+    //     next time. Truncation time is bounded by the temp-dir backend
+    //     and isn't representative of the command's actual wait.
     // Fires on both successful and naturally-failed completions since
     // the advice ("next time, background it") is the same in both.
     const elapsedMs = Date.now() - executionStartTime;
     const shouldAppendLongRunHint =
       !result.aborted &&
-      result.signal == null &&
+      result.signal === null &&
       elapsedMs >= longRunThresholdFor(effectiveTimeout);
 
     // returnDisplayMessage is rebuilt below. In debug mode it mirrors
@@ -795,13 +802,20 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // command output, so it belongs outside the truncation envelope.
     if (shouldAppendLongRunHint) {
       if (typeof llmContent === 'string') {
-        llmContent += `\n\n${buildLongRunningForegroundHint(elapsedMs)}`;
-        // Re-sync debug mode's mirror of llmContent so the TUI shows
-        // the same advisory the agent sees (otherwise the agent would
-        // suddenly suggest `is_background: true` with no visible
-        // trigger in debug mode).
+        const hint = buildLongRunningForegroundHint(elapsedMs);
+        llmContent += `\n\n${hint}`;
+        // Surface the hint in the user-facing TUI too — the user is
+        // the one waiting for long commands and benefits from the
+        // same "consider backgrounding next time" cue the agent sees.
+        // Debug mode mirrors the full llmContent (covers both the
+        // truncation block's stale snapshot and the new hint in one
+        // re-sync); non-debug mode appends only the hint to preserve
+        // the terse output-or-status form built above.
         if (this.config.getDebugMode()) {
           returnDisplayMessage = llmContent;
+        } else {
+          returnDisplayMessage +=
+            (returnDisplayMessage ? '\n\n' : '') + hint;
         }
       }
       // else: llmContent is a structured `Part[]` / `Part` rather than
