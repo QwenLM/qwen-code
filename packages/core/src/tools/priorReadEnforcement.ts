@@ -10,17 +10,26 @@ import { ToolErrorType } from './tool-error.js';
 import { ToolNames } from './tool-names.js';
 
 /**
- * Error thrown by `getConfirmationDetails()` when prior-read enforcement
- * rejects a request before any diff is rendered. Carries the structured
- * `ToolErrorType` so the tool scheduler can surface it as the right
- * tool error code (`EDIT_REQUIRES_PRIOR_READ` /
- * `FILE_CHANGED_SINCE_READ`) instead of the generic
- * `UNHANDLED_EXCEPTION` that any plain `Error` would otherwise become.
+ * Error thrown by `getConfirmationDetails()` when it needs to surface
+ * a structured `ToolErrorType` to the scheduler instead of letting
+ * the throw collapse into a generic `UNHANDLED_EXCEPTION`. Originally
+ * introduced for prior-read enforcement (hence the file location)
+ * but now also carries other content-derived `calculateEdit` errors
+ * — `EDIT_NO_OCCURRENCE_FOUND`, `EDIT_EXPECTED_OCCURRENCE_MISMATCH`,
+ * `EDIT_NO_CHANGE`, `ATTEMPT_TO_CREATE_EXISTING_FILE` — through the
+ * confirmation path so they keep their proper error code instead of
+ * being reported as "unhandled exception".
  *
  * Caught by `coreToolScheduler` via the `errorType` instance field.
+ *
+ * Naming note: kept generic (`StructuredToolError`) rather than
+ * `PriorReadEnforcementError` so the name matches the broader set of
+ * `ToolErrorType` values it actually carries — an oncall engineer
+ * seeing this in a log paired with `edit_no_occurrence_found` should
+ * not have to wonder what prior-read has to do with it.
  */
-export class PriorReadEnforcementError extends Error {
-  override readonly name = 'PriorReadEnforcementError';
+export class StructuredToolError extends Error {
+  override readonly name = 'StructuredToolError';
   constructor(
     message: string,
     readonly errorType: ToolErrorType,
@@ -109,7 +118,12 @@ export async function checkPriorRead(
     // Any other stat failure: fail closed. We cannot prove the file
     // has been read; treating that as approval would silently bypass
     // enforcement on transient metadata errors that don't prevent
-    // the subsequent write from succeeding.
+    // the subsequent write from succeeding. Use a distinct
+    // PRIOR_READ_VERIFICATION_FAILED code (rather than
+    // EDIT_REQUIRES_PRIOR_READ) because the model may have
+    // legitimately read this file — we just cannot verify it.
+    // Operators monitoring on error codes can route the two
+    // populations separately.
     const raw =
       `Could not stat ${filePath} to verify prior read (${code ?? 'unknown error'}). ` +
       `Re-read with the ${ToolNames.READ_FILE} tool, then retry ${verb} it.`;
@@ -117,7 +131,7 @@ export async function checkPriorRead(
       verb === 'editing' ? 'editing this file' : 'overwriting this file';
     return {
       ok: false,
-      type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
+      type: ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
       rawMessage: raw,
       displayMessage: `cannot verify prior read of ${filePath}; re-run ${ToolNames.READ_FILE} before ${verbDisplay}.`,
     };

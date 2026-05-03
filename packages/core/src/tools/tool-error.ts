@@ -40,6 +40,15 @@ export enum ToolErrorType {
   // has not (yet) read this session via ReadFile. The session-scoped
   // FileReadCache is the source of truth — see read-file.ts and the
   // related FileReadCache service.
+  //
+  // Despite the `EDIT_` prefix this code is shared between EditTool
+  // and WriteFileTool: the boundary it guards is "the model is about
+  // to mutate bytes it has not legitimately seen", which both tools
+  // can hit. The prefix is kept for backwards-compatibility with
+  // logs/dashboards already keyed on it; consumers that need to
+  // distinguish edit-vs-write should look at the originating tool
+  // name in the surrounding ToolCallEvent rather than the error
+  // code itself.
   EDIT_REQUIRES_PRIOR_READ = 'edit_requires_prior_read',
   // Returned when Edit / WriteFile is asked to mutate a file the model
   // *has* read this session, but the on-disk bytes have changed since
@@ -47,6 +56,14 @@ export enum ToolErrorType {
   // is expected to re-read with ReadFile to refresh its mental model
   // before retrying the edit.
   FILE_CHANGED_SINCE_READ = 'file_changed_since_read',
+  // Returned when Edit / WriteFile cannot determine whether the model
+  // has read a file because `fs.stat` itself failed for a reason
+  // other than ENOENT (typically EACCES, EBUSY, or an NFS hiccup).
+  // Distinct from EDIT_REQUIRES_PRIOR_READ ("definitely not read")
+  // because the model may have legitimately read the file — we just
+  // cannot verify. Operators monitoring on error codes can route this
+  // separately.
+  PRIOR_READ_VERIFICATION_FAILED = 'prior_read_verification_failed',
 
   // Glob-specific Errors
   GLOB_EXECUTION_ERROR = 'glob_execution_error',

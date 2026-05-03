@@ -893,7 +893,12 @@ describe('WriteFileTool', () => {
       const result = await tool
         .build({ file_path: filePath, content: 'clobber' })
         .execute(abortSignal);
-      expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+      // Distinct error code: the model may have legitimately read the
+      // file — we just cannot verify because stat itself failed.
+      // EDIT_REQUIRES_PRIOR_READ would imply "definitely not read".
+      expect(result.error?.type).toBe(
+        ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
+      );
       expect(result.error?.message).toMatch(/Could not stat .*\(EACCES\)/);
       // File untouched.
       expect(fs.readFileSync(filePath, 'utf-8')).toBe('untouched');

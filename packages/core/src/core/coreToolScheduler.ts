@@ -1259,7 +1259,7 @@ export class CoreToolScheduler {
 
           // Errors thrown from getConfirmationDetails() may carry a
           // structured ToolErrorType via an `errorType` instance
-          // field (see PriorReadEnforcementError in
+          // field (see StructuredToolError in
           // tools/priorReadEnforcement.ts). When present, surface
           // that code instead of collapsing every confirmation-time
           // failure into UNHANDLED_EXCEPTION.
