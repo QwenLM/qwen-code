@@ -151,6 +151,7 @@ describe('useResumeCommand', () => {
     const geminiClient = {
       initialize: vi.fn(),
     };
+    const resetMonitorRegistry = vi.fn();
 
     const config = {
       getTargetDir: () => '/tmp',
@@ -163,6 +164,10 @@ describe('useResumeCommand', () => {
       getBackgroundShellRegistry: () => ({
         getAll: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([]),
+        reset: resetMonitorRegistry,
       }),
       loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
       getBackgroundAgentResumeService: () => ({
@@ -216,6 +221,7 @@ describe('useResumeCommand', () => {
     expect(geminiClient.initialize).toHaveBeenCalledTimes(1);
     expect(historyManager.clearItems).toHaveBeenCalledTimes(1);
     expect(historyManager.loadHistory).toHaveBeenCalledTimes(1);
+    expect(resetMonitorRegistry).toHaveBeenCalledTimes(1);
   });
 
   it('adds a recovered-background-agents notice when paused agents are restored', async () => {
@@ -242,6 +248,10 @@ describe('useResumeCommand', () => {
       }),
       getBackgroundShellRegistry: () => ({
         getAll: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
       }),
       loadPausedBackgroundAgents: vi
@@ -296,6 +306,73 @@ describe('useResumeCommand', () => {
       }),
       getBackgroundShellRegistry: () => ({
         getAll: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+      }),
+      getTargetDir: () => '/tmp',
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+        debug: vi.fn(),
+        error: vi.fn(),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        historyManager,
+        startNewSession,
+      }),
+    );
+
+    act(() => {
+      result.current.openResumeDialog();
+    });
+
+    await act(async () => {
+      await result.current.handleResume('session-blocked');
+    });
+
+    expect(result.current.isResumeDialogOpen).toBe(false);
+    expect(startNewSession).not.toHaveBeenCalled();
+    expect(historyManager.clearItems).not.toHaveBeenCalled();
+    expect(historyManager.loadHistory).not.toHaveBeenCalled();
+    expect(historyManager.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('blocks resume when the current session still has a running monitor', async () => {
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+
+    const config = {
+      getBackgroundTaskRegistry: () => ({
+        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getBackgroundShellRegistry: () => ({
+        getAll: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([
+          {
+            monitorId: 'mon_123',
+            status: 'running',
+          },
+        ]),
         reset: vi.fn(),
       }),
       getTargetDir: () => '/tmp',

@@ -580,6 +580,117 @@ export function parseNumstat(numstatOutput: string): Map<string, number> {
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
 
+/**
+ * Detect standalone or leading `sleep N` patterns that should use Monitor
+ * instead. Catches `sleep 5`, `sleep 2.5`, `sleep 2s`,
+ * `sleep 5 && check`, `sleep 5; check`, `sleep 5 # wait` — but not sleep
+ * inside pipelines, subshells, backgrounded commands, or scripts (those are
+ * fine).
+ */
+export function detectBlockedSleepPattern(command: string): string | null {
+  // Strip trailing shell comments first; otherwise `sleep 5 # wait` would
+  // present `# wait` as the suffix, which `getSleepSequentialSeparator`
+  // rejects (only &&/||/;/\n are recognized), letting the foreground sleep
+  // bypass the guard. Shell ignores top-level trailing comments, so for the
+  // purposes of detection they are equivalent to end-of-command.
+  const trimmed = trimTrailingShellComment(command).trim();
+  if (!trimmed.startsWith('sleep')) return null;
+  const afterSleep = trimmed.slice('sleep'.length);
+  if (!afterSleep || !/\s/.test(afterSleep[0]!)) return null;
+
+  let index = 0;
+  while (index < afterSleep.length && /\s/.test(afterSleep[index]!)) {
+    index++;
+  }
+  const durationStart = index;
+  while (
+    index < afterSleep.length &&
+    !/\s/.test(afterSleep[index]!) &&
+    ![';', '&', '|', '\n'].includes(afterSleep[index]!)
+  ) {
+    index++;
+  }
+
+  const durationToken = afterSleep.slice(durationStart, index);
+  const secs = parseSleepDurationToSeconds(durationToken);
+  if (secs === null || secs < 2) return null;
+
+  const suffix = afterSleep.slice(index);
+  const separator = getSleepSequentialSeparator(suffix);
+  if (separator === null) return null;
+
+  const rest = separator.rest.trim();
+  return rest
+    ? `sleep ${durationToken} followed by: ${rest}`
+    : `standalone sleep ${durationToken}`;
+}
+
+function parseSleepDurationToSeconds(token: string): number | null {
+  if (!token) return null;
+
+  let index = 0;
+  let seenDigit = false;
+  let seenDot = false;
+  while (index < token.length) {
+    const char = token[index]!;
+    if (char >= '0' && char <= '9') {
+      seenDigit = true;
+      index++;
+      continue;
+    }
+    if (char === '.' && !seenDot) {
+      seenDot = true;
+      index++;
+      continue;
+    }
+    break;
+  }
+
+  if (!seenDigit) return null;
+  const value = Number.parseFloat(token.slice(0, index));
+  if (!Number.isFinite(value)) return null;
+
+  const unit = token.slice(index).toLowerCase();
+  switch (unit || 's') {
+    case 'ms':
+      return value / 1000;
+    case 's':
+      return value;
+    case 'm':
+      return value * 60;
+    case 'h':
+      return value * 60 * 60;
+    case 'd':
+      return value * 60 * 60 * 24;
+    default:
+      return null;
+  }
+}
+
+function getSleepSequentialSeparator(suffix: string): { rest: string } | null {
+  let index = 0;
+  while (
+    index < suffix.length &&
+    suffix[index] !== '\n' &&
+    /\s/.test(suffix[index]!)
+  ) {
+    index++;
+  }
+
+  const restWithSeparator = suffix.slice(index);
+  if (!restWithSeparator) return { rest: '' };
+  if (
+    restWithSeparator.startsWith('&&') ||
+    restWithSeparator.startsWith('||')
+  ) {
+    return { rest: restWithSeparator.slice(2) };
+  }
+  if (restWithSeparator[0] === ';' || restWithSeparator[0] === '\n') {
+    return { rest: restWithSeparator.slice(1) };
+  }
+  return null;
+}
+
 function trimTrailingShellComment(command: string): string {
   let inSingleQuote = false;
   let inDoubleQuote = false;
@@ -859,6 +970,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
   ): Promise<ToolCallConfirmationDetails> {
     const command = stripShellWrapper(this.params.command);
     const pm = this.config.getPermissionManager?.();
+    const cwd = this.params.directory || this.config.getTargetDir();
 
     // Split compound command and filter out already-allowed (read-only) sub-commands
     const subCommands = splitCommands(command);
@@ -877,7 +989,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
       if (pm) {
         try {
-          if ((await pm.isCommandAllowed(sub)) === 'allow') {
+          if ((await pm.isCommandAllowed(sub, cwd)) === 'allow') {
             continue;
           }
         } catch (e) {
@@ -962,9 +1074,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     // Add co-author to git commit commands and Qwen Code attribution to
     // `gh pr create` bodies. Both wrappers are no-ops on commands they
-    // don't recognise.
+    // don't recognise. Apply to the *trimmed original* (not strippedCommand)
+    // so leading env assignments and shell wrappers (`FOO=bar bash -c '...'`)
+    // are preserved through to execution; the rewriters operate at the
+    // top-level shell layer and become no-ops when the commit hides
+    // inside a wrapper.
     const processedCommand = this.addAttributionToPR(
-      this.addCoAuthorToGitCommit(strippedCommand),
+      this.addCoAuthorToGitCommit(this.params.command.trim()),
     );
     const commandToExecute = processedCommand;
     const cwd = this.params.directory || this.config.getTargetDir();
@@ -1251,8 +1367,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // was both too greedy (it ate `&&` and `\&`) and a ReDoS hazard on
     // long all-`&` inputs. Plain string checks here are linear and clearer
     // than a lookbehind regex.
-    const noTrailingAmp = stripTrailingBackgroundAmp(strippedCommand);
-    if (noTrailingAmp !== strippedCommand) {
+    //
+    // Operate on the trimmed *original* command so leading env assignments
+    // / shell wrappers survive through to execution; ShellExecutionService
+    // re-runs the user-approved invocation verbatim.
+    const trimmedOriginal = this.params.command.trim();
+    const noTrailingAmp = stripTrailingBackgroundAmp(trimmedOriginal);
+    if (noTrailingAmp !== trimmedOriginal) {
       debugLogger.warn(
         'Stripped trailing & from background shell command — managed path handles backgrounding',
       );
@@ -2239,6 +2360,24 @@ export class ShellTool extends BaseDeclarativeTool<
 
       if (!isWithinWorkspace) {
         return `Directory '${params.directory}' is not within any of the registered workspace directories.`;
+      }
+    }
+    // Sleep interception: block sleep >= 2s in foreground, suggest Monitor.
+    // Strip shell wrappers first so `bash -c 'sleep 5'` / `sh -c '...'` etc.
+    // cannot route around the check by hiding the foreground sleep inside a
+    // `-c` script. This matches every other sensitive check in this file
+    // (directory, read-only, command-root extraction, etc.).
+    if (!params.is_background) {
+      const sleepPattern = detectBlockedSleepPattern(
+        stripShellWrapper(params.command),
+      );
+      if (sleepPattern !== null) {
+        return (
+          `Blocked: ${sleepPattern}. ` +
+          'Run blocking commands in the background with is_background: true. ' +
+          'For streaming events (watching logs, polling APIs), use the Monitor tool. ' +
+          'If you genuinely need a delay (rate limiting, deliberate pacing), keep it under 2 seconds.'
+        );
       }
     }
     return null;
