@@ -71,6 +71,7 @@ describe('clearCommand', () => {
           }),
           getBackgroundShellRegistry: vi.fn().mockReturnValue({
             getAll: vi.fn().mockReturnValue([]),
+            hasRunningEntries: vi.fn().mockReturnValue(false),
             reset: mockResetBackgroundShells,
             abortAll: mockAbortBackgroundShells,
           }),
@@ -307,6 +308,7 @@ describe('clearCommand', () => {
             }),
             getBackgroundShellRegistry: vi.fn().mockReturnValue({
               getAll: vi.fn().mockReturnValue([]),
+              hasRunningEntries: vi.fn().mockReturnValue(false),
               reset: mockResetBackgroundShells,
               abortAll: mockAbortBackgroundShells,
             }),
@@ -380,6 +382,7 @@ describe('clearCommand', () => {
             }),
             getBackgroundShellRegistry: vi.fn().mockReturnValue({
               getAll: vi.fn().mockReturnValue([]),
+              hasRunningEntries: vi.fn().mockReturnValue(false),
               reset: vi.fn(),
             }),
             getMonitorRegistry: vi.fn().mockReturnValue({
@@ -430,6 +433,7 @@ describe('clearCommand', () => {
             }),
             getBackgroundShellRegistry: vi.fn().mockReturnValue({
               getAll: vi.fn().mockReturnValue([]),
+              hasRunningEntries: vi.fn().mockReturnValue(false),
               reset: vi.fn(),
             }),
             getMonitorRegistry: vi.fn().mockReturnValue({
@@ -490,6 +494,7 @@ describe('clearCommand', () => {
                   status: 'running',
                 },
               ]),
+              hasRunningEntries: vi.fn().mockReturnValue(true),
               reset: vi.fn(),
             }),
             getMonitorRegistry: vi.fn().mockReturnValue({

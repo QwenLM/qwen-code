@@ -10,10 +10,7 @@ export function hasBlockingBackgroundWork(config: Config): boolean {
   return (
     config.getBackgroundTaskRegistry().hasUnfinalizedTasks() ||
     config.getMonitorRegistry().getRunning().length > 0 ||
-    config
-      .getBackgroundShellRegistry()
-      .getAll()
-      .some((entry) => entry.status === 'running')
+    config.getBackgroundShellRegistry().hasRunningEntries()
   );
 }
 
