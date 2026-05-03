@@ -436,5 +436,26 @@ Use hooks.`,
         reg.matchAndConsume('/project/.github/workflows/ci.yml'),
       ).toContain('YAML rule.');
     });
+
+    it('rejects Windows cross-drive paths (shared cross-drive guard)', () => {
+      // Regression: ConditionalRulesRegistry historically only checked
+      // `..` / `../` and accepted the absolute string that
+      // `path.win32.relative('C:\\proj', 'D:\\elsewhere')` produces. The
+      // shared `resolveProjectRelativePath` helper (now used by both the
+      // skill and rules registries) catches the cross-drive case via
+      // `pathModule.isAbsolute(rawRelativePath)`. Direct unit cover for
+      // the helper lives in skill-activation.test.ts via the
+      // `path.win32`-parameterized test; this case asserts the rules
+      // registry calls into the hardened path. On POSIX runners the
+      // input shape exercises the existing `..` branch — either
+      // platform must return undefined for off-project paths.
+      const reg = new ConditionalRulesRegistry(
+        [rule('/r/broad.md', ['**/*.ts'], 'Broad rule.')],
+        '/project',
+      );
+      expect(
+        reg.matchAndConsume('/totally/other/place/file.ts'),
+      ).toBeUndefined();
+    });
   });
 });

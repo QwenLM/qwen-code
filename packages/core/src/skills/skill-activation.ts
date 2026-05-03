@@ -15,45 +15,23 @@
 // but returns skill names (not content), because the activation affects which
 // skills are advertised in SkillTool's description rather than injecting text.
 
-import * as path from 'node:path';
 import picomatch from 'picomatch';
 import type { SkillConfig } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { resolveProjectRelativePath } from '../utils/projectPath.js';
+
+// Re-export so existing consumers (skill-activation.test.ts) keep
+// working through the old import path. The canonical home is now
+// `utils/projectPath.ts` so `ConditionalRulesRegistry` can share the
+// same Windows-cross-drive guard without inverting the dependency
+// direction (utils → skills would be wrong).
+export { resolveProjectRelativePath } from '../utils/projectPath.js';
 
 const debugLogger = createDebugLogger('SKILL_ACTIVATION');
 
 interface CompiledSkill {
   readonly skill: SkillConfig;
   readonly matchers: picomatch.Matcher[];
-}
-
-/**
- * Compute a project-relative, forward-slash-normalized path for matching
- * against skill `paths:` globs, or `null` if the input falls outside the
- * project root. Pure (no I/O), and parameterized over a `path` module so
- * unit tests can pin the Windows-specific `path.win32` cross-drive case
- * (where `path.relative('C:\\proj', 'D:\\elsewhere')` returns an
- * absolute string that, after normalizing backslashes, would otherwise
- * false-match a broad glob like `**\/*.ts`).
- */
-export function resolveProjectRelativePath(
-  filePath: string,
-  projectRoot: string,
-  pathModule: typeof path = path,
-): string | null {
-  const absolutePath = pathModule.isAbsolute(filePath)
-    ? filePath
-    : pathModule.resolve(projectRoot, filePath);
-  const rawRelativePath = pathModule.relative(projectRoot, absolutePath);
-  if (
-    rawRelativePath === '..' ||
-    rawRelativePath.startsWith(`..${pathModule.sep}`) ||
-    rawRelativePath.startsWith('../') ||
-    pathModule.isAbsolute(rawRelativePath)
-  ) {
-    return null;
-  }
-  return rawRelativePath.replace(/\\/g, '/');
 }
 
 /**
