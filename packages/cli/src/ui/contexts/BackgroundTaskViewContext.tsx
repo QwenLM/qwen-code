@@ -177,15 +177,29 @@ export function BackgroundTaskViewProvider({
       config.abandonBackgroundAgent(target.agentId);
       return;
     }
-    // Both registries' cancel paths are no-ops on non-running entries, so
-    // no pre-check here. Shell cancel goes through requestCancel — it
-    // triggers the AbortController only and lets the spawn's settle path
-    // record the real terminal moment + outcome (mirrors the task_stop
-    // tool path in #3687).
-    if (target.kind === 'agent') {
-      config.getBackgroundTaskRegistry().cancel(target.agentId);
-    } else {
-      config.getBackgroundShellRegistry().requestCancel(target.shellId);
+    // All three registries' cancel paths are no-ops on non-running
+    // entries, so no pre-check here. Shell cancel goes through
+    // requestCancel — it triggers the AbortController only and lets the
+    // spawn's settle path record the real terminal moment + outcome
+    // (mirrors the task_stop tool path in #3687). Monitor cancel is
+    // synchronous: settle + abort happen inside the registry's cancel(),
+    // matching its own task_stop path.
+    switch (target.kind) {
+      case 'agent':
+        config.getBackgroundTaskRegistry().cancel(target.agentId);
+        break;
+      case 'shell':
+        config.getBackgroundShellRegistry().requestCancel(target.shellId);
+        break;
+      case 'monitor':
+        config.getMonitorRegistry().cancel(target.monitorId);
+        break;
+      default: {
+        const _exhaustive: never = target;
+        throw new Error(
+          `cancelSelected: unknown DialogEntry kind: ${JSON.stringify(_exhaustive)}`,
+        );
+      }
     }
   }, [config, entries, selectedIndex]);
 

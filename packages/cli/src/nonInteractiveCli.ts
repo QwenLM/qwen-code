@@ -36,6 +36,7 @@ import type { ControlService } from './nonInteractive/control/ControlService.js'
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 import {
+  AlreadyReportedError,
   handleError,
   handleToolError,
   handleCancellationError,
@@ -466,8 +467,11 @@ export async function runNonInteractive(
               config.getContentGeneratorConfig()?.authType,
             );
             process.stderr.write(`${errorText}\n`);
-            // Throw error to exit with non-zero code
-            throw new Error(errorText);
+            // We have already formatted and written the message; mark the
+            // throw so the top-level handleError doesn't reformat (which
+            // would yield "[API Error: [API Error: ...]]") or print it a
+            // second time. Exit code stays 1 — same as before.
+            throw new AlreadyReportedError(errorText);
           }
         }
 
@@ -622,7 +626,10 @@ export async function runNonInteractive(
                     config.getContentGeneratorConfig()?.authType,
                   );
                   process.stderr.write(`${errorText}\n`);
-                  throw new Error(errorText);
+                  // See the matching note in the first stream loop above —
+                  // we mark the throw so handleError doesn't reformat or
+                  // reprint downstream.
+                  throw new AlreadyReportedError(errorText);
                 }
               }
 
@@ -834,15 +841,29 @@ export async function runNonInteractive(
         outputFormat === OutputFormat.JSON
           ? uiTelemetryService.getMetrics()
           : undefined;
-      adapter.emitResult({
-        isError: true,
-        durationMs: Date.now() - startTime,
-        apiDurationMs: totalApiDurationMs,
-        numTurns: turnCount,
-        errorMessage: message,
-        usage,
-        stats,
-      });
+
+      // In TEXT mode the adapter's emitResult writes errorMessage straight
+      // to stderr, which would duplicate the line the stream-error handler
+      // has already printed. AlreadyReportedError marks the case where the
+      // user-facing line is already on the wire — skip the adapter call
+      // entirely in that case so we don't emit a phantom blank line.
+      // JSON / STREAM_JSON modes still emit normally; the adapter is the
+      // primary output channel there, not a duplicate of stderr.
+      const isAlreadyReportedError = error instanceof AlreadyReportedError;
+      const skipAdapterEmit =
+        outputFormat === OutputFormat.TEXT && isAlreadyReportedError;
+
+      if (!skipAdapterEmit) {
+        adapter.emitResult({
+          isError: true,
+          durationMs: Date.now() - startTime,
+          apiDurationMs: totalApiDurationMs,
+          numTurns: turnCount,
+          errorMessage: message,
+          usage,
+          stats,
+        });
+      }
       await handleError(error, config);
     } finally {
       const reg = config.getBackgroundTaskRegistry();

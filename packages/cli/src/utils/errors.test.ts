@@ -12,6 +12,7 @@ import {
   ToolErrorType,
 } from '@qwen-code/qwen-code-core';
 import {
+  AlreadyReportedError,
   _resetExitLatchForTest,
   getErrorMessage,
   handleError,
@@ -203,6 +204,22 @@ describe('errors', () => {
           'API Error: String error',
         );
       });
+
+      it('does not reformat or reprint AlreadyReportedError', async () => {
+        // The non-interactive runner formats and prints the API error
+        // itself, then throws AlreadyReportedError as a marker. handleError
+        // must propagate that throw without producing a second stderr line
+        // (the bug this fix targets) or running parseAndFormatApiError on
+        // the already-formatted message (which would yield
+        // "[API Error: [API Error: ...]]").
+        const reported = new AlreadyReportedError(
+          '[API Error: 402 Model X is not available for billing.]',
+        );
+
+        await expect(handleError(reported, mockConfig)).rejects.toBe(reported);
+
+        expect(mockWriteStderrLine).not.toHaveBeenCalled();
+      });
     });
 
     describe('in JSON mode', () => {
@@ -226,6 +243,32 @@ describe('errors', () => {
                 type: 'Error',
                 message: 'Test error',
                 code: 1,
+              },
+            },
+            null,
+            2,
+          ),
+        );
+      });
+
+      it('does not reformat or reprint AlreadyReportedError in JSON mode', async () => {
+        const reported = new AlreadyReportedError(
+          '[API Error: 402 Model X is not available for billing.]',
+          42,
+        );
+
+        await expect(handleError(reported, mockConfig)).rejects.toThrow(
+          'process.exit called with code: 42',
+        );
+
+        expect(mockWriteStderrLine).toHaveBeenCalledTimes(1);
+        expect(mockWriteStderrLine).toHaveBeenCalledWith(
+          JSON.stringify(
+            {
+              error: {
+                type: 'AlreadyReportedError',
+                message: '[API Error: 402 Model X is not available for billing.]',
+                code: 42,
               },
             },
             null,

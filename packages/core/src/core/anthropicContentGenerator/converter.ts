@@ -31,6 +31,44 @@ type AnthropicToolParam = Anthropic.Tool & {
 };
 type AnthropicContentBlockParam = Anthropic.ContentBlockParam;
 
+export interface ConvertGeminiRequestToAnthropicOptions {
+  /**
+   * On every assistant turn, fill in `signature: ''` on any `thinking` block
+   * that lacks the required `signature` field. Preserves the original
+   * `thinking` text. Common case: cross-provider history where non-Anthropic
+   * generators (OpenAI / Gemini / agent-runtime) only set `thought: true`,
+   * or `redacted_thinking` blocks that lost their `data` field through the
+   * Gemini-Part round trip.
+   */
+  normalizeAssistantThinkingSignature?: boolean;
+  /**
+   * On assistant turns containing `tool_use` but lacking any thinking block,
+   * prepend a synthetic empty thinking block. Required by DeepSeek's
+   * anthropic-compatible API when thinking mode is enabled — without this,
+   * follow-up requests fail with HTTP 400 ("The content[].thinking in the
+   * thinking mode must be passed back to the API.").
+   *
+   * Pair with `normalizeAssistantThinkingSignature` so that any
+   * signature-less `thinking` block already present is normalized (filled
+   * with `signature: ''`) before this pass runs. After normalization the
+   * block has a valid `signature` and is treated as already-satisfying, so
+   * no synthetic block is prepended and the original thinking text is
+   * preserved on the wire.
+   *
+   * Must be gated on the same per-request condition that emits the
+   * top-level `thinking` config so disabled-thinking requests don't ship
+   * stray thinking blocks. https://github.com/QwenLM/qwen-code/issues/3786
+   */
+  injectThinkingOnToolUseTurns?: boolean;
+  /**
+   * Strip thinking and redacted_thinking blocks from assistant messages.
+   * Used to keep DeepSeek requests consistent when thinking mode is off but
+   * session history still carries `thought: true` parts (e.g. side-queries
+   * spawned with `thinkingConfig.includeThoughts: false`).
+   */
+  stripAssistantThinking?: boolean;
+}
+
 export class AnthropicContentConverter {
   private model: string;
   private schemaCompliance: SchemaComplianceMode;
@@ -46,7 +84,10 @@ export class AnthropicContentConverter {
     this.enableCacheControl = enableCacheControl;
   }
 
-  convertGeminiRequestToAnthropic(request: GenerateContentParameters): {
+  convertGeminiRequestToAnthropic(
+    request: GenerateContentParameters,
+    options: ConvertGeminiRequestToAnthropicOptions = {},
+  ): {
     system?: Anthropic.TextBlockParam[] | string;
     messages: AnthropicMessageParam[];
   } {
@@ -57,6 +98,18 @@ export class AnthropicContentConverter {
     );
 
     this.processContents(request.contents, messages);
+
+    if (options.stripAssistantThinking) {
+      this.stripThinkingFromAssistantMessages(messages);
+    }
+    // Normalization runs before injection so non-compliant blocks are seen
+    // as already-present (and not duplicated) by the injection pass.
+    if (options.normalizeAssistantThinkingSignature) {
+      this.fillMissingThinkingSignatures(messages);
+    }
+    if (options.injectThinkingOnToolUseTurns) {
+      this.injectEmptyThinkingOnToolUseTurns(messages);
+    }
 
     // Add cache_control to enable prompt caching (if enabled)
     const system = this.enableCacheControl
@@ -542,6 +595,129 @@ export class AnthropicContentConverter {
         cache_control: { type: 'ephemeral' },
       },
     ];
+  }
+
+  /**
+   * Remove thinking and redacted_thinking blocks from assistant messages.
+   * Used by DeepSeek when thinking mode is off but session history still
+   * has `thought: true` parts — keeps the request body in sync with the
+   * absent top-level `thinking` config.
+   *
+   * If stripping would leave an assistant message with no content blocks
+   * (a thinking-only turn, e.g. one cut off by max_tokens before any text
+   * or tool_use was emitted), we keep the original blocks. An empty
+   * `content: []` is rejected by the Anthropic API, and dropping the
+   * message would break the required user/assistant alternation. DeepSeek
+   * empirically tolerates the residual `thinking-block + no-thinking-config`
+   * shape (verified against api.deepseek.com/anthropic), so leaving it as
+   * an unaltered passthrough is the safer fallback.
+   */
+  private stripThinkingFromAssistantMessages(
+    messages: AnthropicMessageParam[],
+  ): void {
+    for (const message of messages) {
+      if (message.role !== 'assistant') continue;
+      if (!Array.isArray(message.content)) continue;
+
+      const filtered = message.content.filter((block) => {
+        const t = (block as { type?: string }).type;
+        return t !== 'thinking' && t !== 'redacted_thinking';
+      });
+      if (filtered.length === 0) continue;
+      if (filtered.length !== message.content.length) {
+        message.content = filtered;
+      }
+    }
+  }
+
+  /**
+   * Fill in `signature: ''` on every assistant `thinking` block that lacks
+   * a `signature` field. Preserves the original thinking text. Common cases:
+   *
+   * - Cross-provider history where the upstream generator (OpenAI / Gemini /
+   *   agent-runtime) only set `thought: true` without a signature.
+   * - `redacted_thinking` blocks whose `data` field didn't survive the
+   *   round-trip through Gemini Part format.
+   *
+   * DeepSeek empirically accepts empty signatures, so this keeps the wire
+   * shape spec-compliant without discarding any preserved thinking text.
+   */
+  private fillMissingThinkingSignatures(
+    messages: AnthropicMessageParam[],
+  ): void {
+    for (const message of messages) {
+      if (message.role !== 'assistant') continue;
+      if (!Array.isArray(message.content)) continue;
+
+      let modified = false;
+      const normalized = message.content.map((block) => {
+        const b = block as { type?: string; signature?: unknown };
+        if (b.type === 'thinking' && typeof b.signature !== 'string') {
+          modified = true;
+          return {
+            ...(block as object),
+            signature: '',
+          } as unknown as AnthropicContentBlockParam;
+        }
+        return block;
+      });
+      if (modified) {
+        message.content = normalized;
+      }
+    }
+  }
+
+  /**
+   * DeepSeek's anthropic-compatible API rejects follow-up requests when an
+   * assistant turn carrying `tool_use` omits a thinking block while thinking
+   * mode is on, returning HTTP 400 ("The content[].thinking in the thinking
+   * mode must be passed back to the API."). The model can legitimately
+   * return a tool round without thinking content, so prepend a synthetic
+   * empty thinking block when one is missing.
+   *
+   * Live verification against api.deepseek.com/anthropic confirmed the
+   * trigger is specific to tool_use turns — plain-text assistant turns
+   * without thinking are accepted unchanged. We mirror that boundary here
+   * to avoid bloating replay history with synthetic blocks for turns the
+   * API already accepts.
+   *
+   * Should be paired with `fillMissingThinkingSignatures` running first
+   * so that signature-less `thinking` blocks become compliant in place
+   * (preserving their original text), and this pass then sees them as
+   * already-satisfying. https://github.com/QwenLM/qwen-code/issues/3786
+   */
+  private injectEmptyThinkingOnToolUseTurns(
+    messages: AnthropicMessageParam[],
+  ): void {
+    for (const message of messages) {
+      if (message.role !== 'assistant') continue;
+      if (!Array.isArray(message.content)) continue;
+
+      const blocks = message.content;
+
+      const hasToolUse = blocks.some(
+        (block) => (block as { type?: string }).type === 'tool_use',
+      );
+      if (!hasToolUse) continue;
+
+      const hasThinking = blocks.some((block) => {
+        const t = (block as { type?: string }).type;
+        return t === 'thinking' || t === 'redacted_thinking';
+      });
+      if (hasThinking) continue;
+
+      // DeepSeek currently accepts an empty `signature` for synthetic
+      // thinking blocks. The `signature` field is an opaque token in the
+      // Anthropic spec, so this is a workaround — if DeepSeek tightens
+      // validation in the future, we may need to switch to
+      // `redacted_thinking` or another approach.
+      const emptyThinking = {
+        type: 'thinking',
+        thinking: '',
+        signature: '',
+      } as unknown as AnthropicContentBlockParam;
+      message.content = [emptyThinking, ...blocks];
+    }
   }
 
   /**

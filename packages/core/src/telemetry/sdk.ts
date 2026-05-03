@@ -245,6 +245,10 @@ export function initializeTelemetry(config: Config): void {
 
   sdk = new NodeSDK({
     resource,
+    // Disable async host/process/env resource detectors: they leave attributes
+    // pending and trigger an OTel diag.error on any resource attribute read
+    // before the detectors settle (e.g. during HttpInstrumentation span creation).
+    autoDetectResources: false,
     spanProcessors: spanExporter ? [new BatchSpanProcessor(spanExporter)] : [],
     logRecordProcessors: logExporter
       ? [new BatchLogRecordProcessor(logExporter)]
