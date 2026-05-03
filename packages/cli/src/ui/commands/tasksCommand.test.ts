@@ -232,7 +232,13 @@ describe('tasksCommand', () => {
     expect(result.content).toContain(
       '[mon_auto] completed (Max events reached, 1000 events)',
     );
-    expect(result.content).toContain('[mon_fail] failed: spawn ENOENT');
+    // Pin the full string (not just the prefix) so a regression that
+    // drops the `(N events)` suffix from monitor's failed branch fails
+    // loudly. The other status branches above already have full-string
+    // assertions; this one was incidentally shorter.
+    expect(result.content).toContain(
+      '[mon_fail] failed: spawn ENOENT (0 events)',
+    );
     // No on-disk output file for monitors — events stream via
     // task_notification, so the "output:" line should not appear for
     // any monitor entry.

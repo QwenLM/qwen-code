@@ -26,55 +26,61 @@ type MonitorTaskEntry = MonitorEntry & { kind: 'monitor' };
 type TaskEntry = AgentTaskEntry | ShellTaskEntry | MonitorTaskEntry;
 
 function statusLabel(entry: TaskEntry): string {
-  if (entry.kind === 'agent') {
-    switch (entry.status) {
-      case 'completed':
-        return 'completed';
-      case 'failed':
-        return `failed: ${entry.error ?? 'unknown error'}`;
-      case 'cancelled':
-        return 'cancelled';
-      case 'paused':
-        return entry.resumeBlockedReason
-          ? `paused (resume blocked): ${entry.resumeBlockedReason}`
-          : 'paused';
-      case 'running':
-      default:
-        return 'running';
+  switch (entry.kind) {
+    case 'agent':
+      switch (entry.status) {
+        case 'completed':
+          return 'completed';
+        case 'failed':
+          return `failed: ${entry.error ?? 'unknown error'}`;
+        case 'cancelled':
+          return 'cancelled';
+        case 'paused':
+          return entry.resumeBlockedReason
+            ? `paused (resume blocked): ${entry.resumeBlockedReason}`
+            : 'paused';
+        case 'running':
+        default:
+          return 'running';
+      }
+    case 'shell':
+      switch (entry.status) {
+        case 'completed':
+          return `completed (exit ${entry.exitCode ?? '?'})`;
+        case 'failed':
+          return `failed: ${entry.error ?? 'unknown error'}`;
+        case 'cancelled':
+          return 'cancelled';
+        case 'running':
+          return 'running';
+        default:
+          return 'running';
+      }
+    case 'monitor': {
+      // Append eventCount as a glanceable signal for activity. error (set
+      // on `failed` and on auto-stopped `completed`) is included verbatim.
+      const events = `${entry.eventCount} event${entry.eventCount === 1 ? '' : 's'}`;
+      switch (entry.status) {
+        case 'completed':
+          return entry.error
+            ? `completed (${entry.error}, ${events})`
+            : `completed (exit ${entry.exitCode ?? '?'}, ${events})`;
+        case 'failed':
+          return `failed: ${entry.error ?? 'unknown error'} (${events})`;
+        case 'cancelled':
+          return `cancelled (${events})`;
+        case 'running':
+          return `running (${events})`;
+        default:
+          return `running (${events})`;
+      }
     }
-  }
-
-  if (entry.kind === 'shell') {
-    switch (entry.status) {
-      case 'completed':
-        return `completed (exit ${entry.exitCode ?? '?'})`;
-      case 'failed':
-        return `failed: ${entry.error ?? 'unknown error'}`;
-      case 'cancelled':
-        return 'cancelled';
-      case 'running':
-        return 'running';
-      default:
-        return 'running';
+    default: {
+      const _exhaustive: never = entry;
+      throw new Error(
+        `statusLabel: unknown TaskEntry kind: ${JSON.stringify(_exhaustive)}`,
+      );
     }
-  }
-
-  // monitor — append eventCount as a glanceable signal for activity. error
-  // (set on `failed` and on auto-stopped `completed`) is included verbatim.
-  const events = `${entry.eventCount} event${entry.eventCount === 1 ? '' : 's'}`;
-  switch (entry.status) {
-    case 'completed':
-      return entry.error
-        ? `completed (${entry.error}, ${events})`
-        : `completed (exit ${entry.exitCode ?? '?'}, ${events})`;
-    case 'failed':
-      return `failed: ${entry.error ?? 'unknown error'} (${events})`;
-    case 'cancelled':
-      return `cancelled (${events})`;
-    case 'running':
-      return `running (${events})`;
-    default:
-      return `running (${events})`;
   }
 }
 
@@ -113,11 +119,22 @@ function taskId(entry: TaskEntry): string {
 }
 
 function taskOutputPath(entry: TaskEntry): string | undefined {
-  if (entry.kind === 'agent') return entry.outputFile;
-  if (entry.kind === 'shell') return entry.outputPath;
-  // Monitors stream to the agent via task_notification rather than a
-  // file on disk — no output path to surface here.
-  return undefined;
+  switch (entry.kind) {
+    case 'agent':
+      return entry.outputFile;
+    case 'shell':
+      return entry.outputPath;
+    case 'monitor':
+      // Monitors stream to the agent via task_notification rather than a
+      // file on disk — no output path to surface here.
+      return undefined;
+    default: {
+      const _exhaustive: never = entry;
+      throw new Error(
+        `taskOutputPath: unknown TaskEntry kind: ${JSON.stringify(_exhaustive)}`,
+      );
+    }
+  }
 }
 
 export const tasksCommand: SlashCommand = {
@@ -174,13 +191,16 @@ export const tasksCommand: SlashCommand = {
     // Soft redirect: in interactive mode the dialog is richer (per-entry
     // detail view, live updates, cancel keybinding). Don't show the hint
     // in non_interactive / acp — those consumers have no dialog to point
-    // at and the noise just clutters their output. Note: the dialog
-    // opens via Down arrow + Enter on the footer pill (NOT Ctrl+T —
-    // that's bound to the MCP tool descriptions toggle elsewhere).
+    // at and the noise just clutters their output. The wording avoids
+    // pinning a single-key path because Down may pass through the Arena
+    // agent tab bar first when subagents are present (`InputPrompt`
+    // focus chain: agent tab bar → bg pill); calling it "the footer
+    // Background tasks pill" lets the user reach it however the focus
+    // chain routes them today.
     if (context.executionMode === 'interactive') {
       lines.push(
         t(
-          'Tip: press ↓ from an empty composer then Enter to open the interactive Background tasks dialog with detail view + live updates.',
+          'Tip: focus the Background tasks pill in the footer (use ↓ from an empty composer) and press Enter for the interactive dialog with detail view + live updates.',
         ),
         '',
       );
