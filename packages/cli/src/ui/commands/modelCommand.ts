@@ -36,7 +36,7 @@ export const modelCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
-  completion: async (_context, partialArg) => {
+  completion: async (context, partialArg) => {
     if (partialArg && '--fast'.startsWith(partialArg)) {
       return [
         {
@@ -46,11 +46,13 @@ export const modelCommand: SlashCommand = {
           ),
         },
       ];
-    } else {
+    } else if (partialArg.trim()) {
       // Include model IDs matching the partial argument
-      return getAvailableModelIds(_context).filter((id) =>
+      return getAvailableModelIds(context).filter((id) =>
         id.startsWith(partialArg),
       );
+    } else {
+      return null;
     }
   },
   action: async (
