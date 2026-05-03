@@ -126,7 +126,15 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     // computed from current bytes that the model has never received,
     // and the subsequent execute() would still reject the call —
     // confusing UX for any approve flow.
-    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+    //
+    // Run unconditionally (not gated on `fileExists`): checkPriorRead's
+    // own stat decides whether the file actually exists right now.
+    // ENOENT means the path is genuinely absent → ok:true → fall
+    // through to the new-file diff; any other "stat says yes" outcome
+    // (including the file appearing between isFilefileExists() and
+    // here, a race window the pre-fix gating left wide open) means
+    // the model is about to clobber bytes it never read → reject.
+    if (!this.config.getFileReadCacheDisabled()) {
       const decision = await checkPriorRead(
         this.config.getFileReadCache(),
         this.params.file_path,
@@ -222,7 +230,13 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     //  - we should not be holding bytes of a file the model never
     //    legitimately saw, even transiently.
     // Mirrors the order in getConfirmationDetails() above.
-    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+    //
+    // Run unconditionally (not gated on `fileExists`): checkPriorRead
+    // re-stats so a file that sprang into existence between
+    // isFilefileExists() and here — exactly the TOCTOU window pointed
+    // out in review — is now caught and rejected instead of being
+    // silently overwritten.
+    if (!this.config.getFileReadCacheDisabled()) {
       const decision = await checkPriorRead(
         this.config.getFileReadCache(),
         file_path,
