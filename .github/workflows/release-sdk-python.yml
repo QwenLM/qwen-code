@@ -42,7 +42,7 @@ jobs:
     runs-on: 'ubuntu-latest'
     environment:
       name: 'production-release'
-      url: '${{ github.server_url }}/${{ github.repository }}/releases/tag/sdk-python-${{ steps.version.outputs.RELEASE_TAG }}'
+      url: '${{ github.server_url }}/${{ github.repository }}/releases'
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code' }}
     permissions:
@@ -164,7 +164,7 @@ jobs:
           extract_field() {
             local value
             value=$(echo "$VERSION_JSON" | jq -r ".$1")
-            if [[ -z "${value}" || "${value}" == "null" ]]; then
+            if [[ "${value}" == "null" ]]; then
               echo "Failed to extract $1 from version JSON: ${VERSION_JSON}" >&2
               exit 1
             fi
@@ -342,18 +342,12 @@ jobs:
 
       - name: 'Publish qwen-code-sdk to PyPI'
         if: |-
-          ${{ steps.vars.outputs.is_dry_run == 'false' && steps.version.outputs.RESUME_EXISTING_RELEASE != 'true' }}
+          ${{ steps.vars.outputs.is_dry_run == 'false' }}
         uses: 'pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b' # ratchet:pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: 'packages/sdk-python/dist'
-
-      - name: 'Skip duplicate PyPI publish for resumed release'
-        if: |-
-          ${{ steps.vars.outputs.is_dry_run == 'false' && steps.version.outputs.RESUME_EXISTING_RELEASE == 'true' }}
-        env:
-          PACKAGE_VERSION: '${{ steps.version.outputs.PACKAGE_VERSION }}'
-        run: |
-          echo "PyPI already has ${PACKAGE_VERSION}; reusing it and resuming GitHub release finalization."
+          # skip-existing handles resumed releases where some artifacts were already uploaded
+          skip-existing: '${{ steps.version.outputs.RESUME_EXISTING_RELEASE }}'
 
       - name: 'Show publish artifacts for dry-run'
         if: |-

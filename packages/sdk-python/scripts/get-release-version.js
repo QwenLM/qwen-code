@@ -124,10 +124,11 @@ function toBaseVersion(version) {
 async function getAllVersionsFromPyPI() {
   const response = await fetch(`https://pypi.org/pypi/${PACKAGE_NAME}/json`, {
     headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(30_000),
   });
 
   if (response.status === 404) {
-    return [];
+    return { versions: [], allVersions: [] };
   }
 
   if (!response.ok) {
@@ -138,16 +139,20 @@ async function getAllVersionsFromPyPI() {
 
   const payload = await response.json();
   const releases = payload.releases ?? {};
-  return Object.keys(releases).filter((version) => {
-    if (parseVersion(version) === null) {
-      return false;
-    }
+  const allVersions = Object.keys(releases).filter(
+    (version) => parseVersion(version) !== null,
+  );
+  // Yanked versions still occupy PyPI slots (re-upload fails), so allVersions
+  // includes them for conflict detection. The filtered list excludes yanked
+  // versions so base-version computation uses only live releases.
+  const versions = allVersions.filter((version) => {
     const files = releases[version];
     if (Array.isArray(files) && files.length > 0) {
       return !files.every((file) => file.yanked === true);
     }
     return true;
   });
+  return { versions, allVersions };
 }
 
 function getCurrentPackageBaseVersion() {
@@ -257,9 +262,9 @@ function isExpectedMissingGitHubRelease(error) {
   return message.includes('release not found') || message.includes('Not Found');
 }
 
-async function getReleaseState({ packageVersion, releaseTag }, versions) {
+async function getReleaseState({ packageVersion, releaseTag }, allVersions) {
   const state = {
-    packageVersionExistsOnPyPI: versions.includes(packageVersion),
+    packageVersionExistsOnPyPI: allVersions.includes(packageVersion),
     gitTagExists: false,
     githubReleaseExists: false,
   };
@@ -336,6 +341,13 @@ function getStableVersion(args, versions) {
   if (args.stable_version_override) {
     const overrideVersion = args.stable_version_override.replace(/^v/, '');
     validateVersion(overrideVersion, 'X.Y.Z', 'stable_version_override');
+    const latestStable = getLatestStableVersion(versions);
+    if (latestStable && compareVersions(overrideVersion, latestStable) < 0) {
+      throw new Error(
+        `stable_version_override ${overrideVersion} is older than latest stable ${latestStable}. ` +
+          `Publishing an older stable version is unusual — provide a newer version or contact a maintainer.`,
+      );
+    }
     return {
       releaseVersion: overrideVersion,
       packageVersion: overrideVersion,
@@ -353,8 +365,8 @@ function getStableVersion(args, versions) {
 
   if (latestPrerelease) {
     if (latestPrerelease.source !== 'preview') {
-      console.error(
-        `Stable release ${latestPrerelease.baseVersion} derived from ${latestPrerelease.source} (no preview release found with this base version).`,
+      console.log(
+        `::warning::Stable release ${latestPrerelease.baseVersion} derived from ${latestPrerelease.source} (no preview release found with this base version).`,
       );
     }
     if (
@@ -416,7 +428,7 @@ function bumpVersion(versionData) {
 async function getVersion(options = {}) {
   const args = { ...getArgs(), ...options };
   const type = args.type || 'nightly';
-  const versions = await getAllVersionsFromPyPI();
+  const { versions, allVersions } = await getAllVersionsFromPyPI();
   const hasManualOverride =
     (type === 'preview' && Boolean(args.preview_version_override)) ||
     (type === 'stable' && Boolean(args.stable_version_override));
@@ -443,7 +455,7 @@ async function getVersion(options = {}) {
         packageVersion: versionData.packageVersion,
         releaseTag: `v${versionData.releaseVersion}`,
       },
-      versions,
+      allVersions,
     );
 
     const versionExists =
@@ -524,7 +536,11 @@ async function getVersion(options = {}) {
   }
 
   const previousVersion =
-    type === 'stable' ? getLatestStableVersion(versions) : '';
+    type === 'stable'
+      ? getLatestStableVersion(
+          versions.filter((v) => v !== versionData.releaseVersion),
+        )
+      : '';
 
   return {
     releaseTag: `v${versionData.releaseVersion}`,

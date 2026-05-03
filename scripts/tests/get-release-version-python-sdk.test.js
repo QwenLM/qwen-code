@@ -722,4 +722,111 @@ describe('python sdk get-release-version', () => {
       previousReleaseTag: 'v0.0.9',
     });
   });
+
+  it('detects yanked versions as conflicts on PyPI', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.1.0': [{ yanked: true }],
+          },
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    // 0.1.0 is yanked so base-version computation ignores it and derives 0.1.0
+    // from pyproject.toml, but conflict detection sees it on PyPI. Since it has
+    // no GitHub release, the script resumes the existing release.
+    await expect(getVersion({ type: 'stable' })).resolves.toMatchObject({
+      releaseTag: 'v0.1.0',
+      packageVersion: '0.1.0',
+      resumeExistingRelease: true,
+    });
+  });
+
+  it('rejects stable_version_override that is older than latest stable', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.5.0': [{}],
+          },
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(
+      getVersion({
+        type: 'stable',
+        stable_version_override: 'v0.1.0',
+      }),
+    ).rejects.toThrow(
+      'stable_version_override 0.1.0 is older than latest stable 0.5.0',
+    );
+  });
+
+  it('allows stable_version_override equal to latest stable', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.5.0': [{}],
+          },
+        },
+      }),
+    );
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        releases: {
+          'sdk-python-v0.5.0': 'sdk-python-v0.5.0',
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    // Equal version already exists, so the override conflict check fires
+    await expect(
+      getVersion({
+        type: 'stable',
+        stable_version_override: 'v0.5.0',
+      }),
+    ).rejects.toThrow(
+      'Requested stable release 0.5.0 already exists on PyPI, GitHub releases.',
+    );
+  });
+
+  it('excludes current release from previousReleaseTag on resume', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse({
+        json: {
+          releases: {
+            '0.1.0': [{}],
+            '0.2.0': [{}],
+            '0.2.0rc0': [{}],
+          },
+        },
+      }),
+    );
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        releases: {
+          'sdk-python-v0.2.0': 'sdk-python-v0.2.0',
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    const result = await getVersion({ type: 'stable' });
+    expect(result).toMatchObject({
+      releaseTag: 'v0.2.0',
+      previousReleaseTag: 'v0.1.0',
+      resumeExistingRelease: true,
+    });
+  });
 });
