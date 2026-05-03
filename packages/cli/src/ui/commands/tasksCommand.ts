@@ -123,15 +123,17 @@ function taskOutputPath(entry: TaskEntry): string | undefined {
 export const tasksCommand: SlashCommand = {
   name: 'tasks',
   get description() {
-    return t('List background tasks (text dump — interactive UI is Ctrl+T)');
+    return t(
+      'List background tasks (text dump — interactive dialog opens via the footer pill)',
+    );
   },
   kind: CommandKind.BUILT_IN,
-  // Kept on all three modes: the interactive dialog (Ctrl+T) is the
-  // richer surface when a TTY is available, but `non_interactive` and
-  // `acp` consumers (headless `-p`, IDE bridges, SDK) have no dialog
-  // and rely on this text dump as the only way to inspect background
-  // task state. See the interactive-mode hint at the top of the output
-  // for the soft redirect.
+  // Kept on all three modes: the interactive dialog (reachable via ↓ +
+  // Enter on the footer Background tasks pill) is the richer surface
+  // when a TTY is available, but `non_interactive` and `acp` consumers
+  // (headless `-p`, IDE bridges, SDK) have no dialog and rely on this
+  // text dump as the only way to inspect background task state. See the
+  // interactive-mode hint at the top of the output for the soft redirect.
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context) => {
     const { config } = context.services;
@@ -169,14 +171,16 @@ export const tasksCommand: SlashCommand = {
 
     const now = Date.now();
     const lines: string[] = [];
-    // Soft redirect: in interactive mode the dialog (Ctrl+T) is richer
-    // (per-entry detail view, live updates, cancel keybinding). Don't
-    // show the hint in non_interactive / acp — those consumers have no
-    // dialog to point at and the noise just clutters their output.
+    // Soft redirect: in interactive mode the dialog is richer (per-entry
+    // detail view, live updates, cancel keybinding). Don't show the hint
+    // in non_interactive / acp — those consumers have no dialog to point
+    // at and the noise just clutters their output. Note: the dialog
+    // opens via Down arrow + Enter on the footer pill (NOT Ctrl+T —
+    // that's bound to the MCP tool descriptions toggle elsewhere).
     if (context.executionMode === 'interactive') {
       lines.push(
         t(
-          'Tip: Ctrl+T opens the interactive Background tasks dialog with detail view + live updates.',
+          'Tip: press ↓ from an empty composer then Enter to open the interactive Background tasks dialog with detail view + live updates.',
         ),
         '',
       );

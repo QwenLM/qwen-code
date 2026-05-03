@@ -265,13 +265,13 @@ describe('tasksCommand', () => {
     expect(result.content).not.toContain('1 events');
   });
 
-  it('shows the Ctrl+T hint only in interactive mode', async () => {
+  it('shows the dialog hint only in interactive mode', async () => {
     getShells.mockReturnValue([entry({ shellId: 'bg_x' })]);
 
     // non_interactive (default in beforeEach) — no hint.
     const noHint = await tasksCommand.action!(context, '');
     if (!noHint || noHint.type !== 'message') throw new Error('no result');
-    expect(noHint.content).not.toContain('Ctrl+T');
+    expect(noHint.content).not.toContain('Tip:');
 
     // Re-bind the same config under an interactive context.
     const interactiveCtx = createMockCommandContext({
@@ -286,11 +286,17 @@ describe('tasksCommand', () => {
     } as unknown as Parameters<typeof createMockCommandContext>[0]);
     const withHint = await tasksCommand.action!(interactiveCtx, '');
     if (!withHint || withHint.type !== 'message') throw new Error('no result');
-    expect(withHint.content).toContain('Ctrl+T');
+    expect(withHint.content).toContain('Tip:');
+    // Pin the actual key path so a regression that goes back to the
+    // wrong `Ctrl+T` text (which is bound to the MCP descriptions
+    // toggle, not the Background tasks dialog) fails loudly.
+    expect(withHint.content).toContain('↓');
+    expect(withHint.content).toContain('Enter');
+    expect(withHint.content).not.toContain('Ctrl+T');
     expect(withHint.content).toContain('Background tasks (1 total)');
   });
 
-  it('suppresses the Ctrl+T hint in acp mode (no dialog to point at)', async () => {
+  it('suppresses the dialog hint in acp mode (no dialog to point at)', async () => {
     // ACP / IDE-bridge consumers (Zed, etc.) have no TTY for the
     // dialog — same suppression rationale as non_interactive. Pinning
     // this so a future regression that switches to `!== 'non_interactive'`
@@ -308,7 +314,7 @@ describe('tasksCommand', () => {
     } as unknown as Parameters<typeof createMockCommandContext>[0]);
     const result = await tasksCommand.action!(acpCtx, '');
     if (!result || result.type !== 'message') throw new Error('no result');
-    expect(result.content).not.toContain('Ctrl+T');
+    expect(result.content).not.toContain('Tip:');
     expect(result.content).toContain('Background tasks (1 total)');
   });
 
