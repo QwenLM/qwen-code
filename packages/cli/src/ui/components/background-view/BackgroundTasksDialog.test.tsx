@@ -28,8 +28,22 @@ vi.mock('../../hooks/useBackgroundTaskView.js', () => ({
   // Re-export the helper so Dialog renderers can still resolve it under the
   // mocked module. Inline impl keeps the test independent of the hook
   // module while preserving the discriminator-based id contract.
-  entryId: (entry: DialogEntry): string =>
-    entry.kind === 'agent' ? entry.agentId : entry.shellId,
+  entryId: (entry: DialogEntry): string => {
+    switch (entry.kind) {
+      case 'agent':
+        return entry.agentId;
+      case 'shell':
+        return entry.shellId;
+      case 'monitor':
+        return entry.monitorId;
+      default: {
+        const _exhaustive: never = entry;
+        throw new Error(
+          `entryId: unknown DialogEntry kind: ${JSON.stringify(_exhaustive)}`,
+        );
+      }
+    }
+  },
 }));
 
 vi.mock('../../hooks/useKeypress.js', () => ({
@@ -51,6 +65,24 @@ function entry(overrides: Partial<AgentDialogEntry> = {}): DialogEntry {
   } as DialogEntry;
 }
 
+function monitorEntry(overrides: Partial<DialogEntry> = {}): DialogEntry {
+  return {
+    kind: 'monitor',
+    monitorId: 'mon-1',
+    command: 'tail -f app.log',
+    description: 'watch app logs',
+    status: 'running',
+    startTime: 0,
+    abortController: new AbortController(),
+    eventCount: 0,
+    lastEventTime: 0,
+    maxEvents: 1000,
+    idleTimeoutMs: 300_000,
+    droppedLines: 0,
+    ...overrides,
+  } as DialogEntry;
+}
+
 interface ProbeHandle {
   actions: ReturnType<typeof useBackgroundTaskViewActions>;
   state: ReturnType<typeof useBackgroundTaskViewState>;
@@ -61,6 +93,7 @@ interface Harness {
   cancel: ReturnType<typeof vi.fn>;
   resume: ReturnType<typeof vi.fn>;
   abandon: ReturnType<typeof vi.fn>;
+  monitorCancel: ReturnType<typeof vi.fn>;
   setEntries: (next: readonly DialogEntry[]) => void;
   pressKey: (key: { name?: string; sequence?: string }) => void;
   call: (fn: () => void) => void;
@@ -78,6 +111,7 @@ function setup(initial: readonly DialogEntry[]): Harness {
   const cancel = vi.fn();
   const resume = vi.fn();
   const abandon = vi.fn();
+  const monitorCancel = vi.fn();
   // Stub registry that resolves `.get(agentId)` against the current entries
   // snapshot — the dialog now re-reads agent entries via `.get()` to pick up
   // live activity/stats mutations the snapshot misses.
@@ -89,6 +123,17 @@ function setup(initial: readonly DialogEntry[]): Harness {
       get: (id: string) => {
         const match = currentEntries.find(
           (e) => e.kind === 'agent' && e.agentId === id,
+        );
+        return match;
+      },
+    }),
+    getMonitorRegistry: () => ({
+      cancel: monitorCancel,
+      // Resolve `.get(monitorId)` against the snapshot so the dialog's
+      // `selectedEntry` re-resolution path works for monitor kind too.
+      get: (id: string) => {
+        const match = currentEntries.find(
+          (e) => e.kind === 'monitor' && e.monitorId === id,
         );
         return match;
       },
@@ -136,6 +181,7 @@ function setup(initial: readonly DialogEntry[]): Harness {
     cancel,
     resume,
     abandon,
+    monitorCancel,
     setEntries(next) {
       handlers.length = 0;
       currentEntries = next;
@@ -191,6 +237,25 @@ describe('BackgroundTasksDialog', () => {
     h.setEntries([{ ...running, status: 'cancelled' }]);
 
     expect(h.probe.current!.state.dialogMode).toBe('list');
+  });
+
+  it('routes monitor cancel via monitorRegistry.cancel(monitorId)', () => {
+    // Pin the monitor-cancel branch in `cancelSelected` — flipping it to
+    // anything else (e.g. shell's `requestCancel`) would silently break,
+    // since neither task_stop nor the dialog-test mocks fail loudly on
+    // the wrong method name.
+    const mon = monitorEntry({ monitorId: 'mon-zzz', status: 'running' });
+    const h = setup([mon]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+
+    h.pressKey({ sequence: 'x' });
+    expect(h.monitorCancel).toHaveBeenCalledWith('mon-zzz');
+    // Agent registry's cancel must NOT be called for a monitor entry —
+    // belt-and-braces guard against the kind switch falling through.
+    expect(h.cancel).not.toHaveBeenCalled();
   });
 
   it('keeps detail mode when an already-terminal entry is opened (no spurious fallback)', () => {
@@ -289,5 +354,97 @@ describe('BackgroundTasksDialog', () => {
     expect(detailFrame).toContain('Error');
     expect(detailFrame).toContain('Temporary resume setup failed.');
     expect(detailFrame).toContain('r resume');
+  });
+
+  describe('MonitorDetailBody render branches', () => {
+    function openMonitorDetail(monitorOverrides: Partial<DialogEntry> = {}) {
+      const mon = monitorEntry({
+        monitorId: 'mon-z',
+        description: 'watch app logs',
+        command: 'tail -f app.log',
+        ...monitorOverrides,
+      });
+      const h = setup([mon]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      return h.lastFrame() ?? '';
+    }
+
+    it('renders title from description and shows Command block', () => {
+      const f = openMonitorDetail();
+      expect(f).toContain('Monitor');
+      expect(f).toContain('watch app logs');
+      expect(f).toContain('Command');
+      expect(f).toContain('tail -f app.log');
+    });
+
+    it('renders pid when defined, omits when undefined', () => {
+      expect(
+        openMonitorDetail({ pid: 4242 } as Partial<DialogEntry>),
+      ).toContain('pid 4242');
+      expect(openMonitorDetail()).not.toContain('pid ');
+    });
+
+    it('uses singular "1 event" / plural "N events"', () => {
+      const f1 = openMonitorDetail({ eventCount: 1 } as Partial<DialogEntry>);
+      expect(f1).toContain('1 event');
+      // Guard against false positive — substring "1 event" also matches "1 events".
+      expect(f1).not.toContain('1 events');
+
+      const f5 = openMonitorDetail({ eventCount: 5 } as Partial<DialogEntry>);
+      expect(f5).toContain('5 events');
+    });
+
+    it('renders droppedLines only when > 0', () => {
+      expect(
+        openMonitorDetail({ droppedLines: 0 } as Partial<DialogEntry>),
+      ).not.toContain('dropped');
+      expect(
+        openMonitorDetail({ droppedLines: 3 } as Partial<DialogEntry>),
+      ).toContain('3 dropped');
+    });
+
+    it('renders exitCode in subtitle when defined', () => {
+      expect(
+        openMonitorDetail({
+          status: 'completed',
+          exitCode: 0,
+        } as Partial<DialogEntry>),
+      ).toContain('exit 0');
+      expect(
+        openMonitorDetail({
+          status: 'completed',
+          exitCode: 1,
+        } as Partial<DialogEntry>),
+      ).toContain('exit 1');
+    });
+
+    it('renders Error block for failed status', () => {
+      const f = openMonitorDetail({
+        status: 'failed',
+        error: 'spawn ENOENT',
+      } as Partial<DialogEntry>);
+      expect(f).toContain('Error');
+      expect(f).toContain('spawn ENOENT');
+      // The auto-stop label must not appear on a `failed` entry — the
+      // two error-block branches share a render slot, so a regression
+      // collapsing them would silently swap the user-facing wording.
+      expect(f).not.toContain('Stopped because');
+    });
+
+    it('renders "Stopped because" block for completed with auto-stop reason', () => {
+      const f = openMonitorDetail({
+        status: 'completed',
+        error: 'Max events reached',
+      } as Partial<DialogEntry>);
+      expect(f).toContain('Stopped because');
+      expect(f).toContain('Max events reached');
+    });
+
+    it('omits the error block entirely when error is undefined', () => {
+      const f = openMonitorDetail({ status: 'completed' });
+      expect(f).not.toContain('Error');
+      expect(f).not.toContain('Stopped because');
+    });
   });
 });
