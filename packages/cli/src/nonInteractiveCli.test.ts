@@ -29,7 +29,7 @@ import type { LoadedSettings } from './config/settings.js';
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
 import { _resetCleanupFunctionsForTest } from './utils/cleanup.js';
-import { _resetExitLatchForTest } from './utils/errors.js';
+import { AlreadyReportedError, _resetExitLatchForTest } from './utils/errors.js';
 
 // Mock core modules
 vi.mock('./ui/hooks/atCommandProcessor.js');
@@ -887,6 +887,69 @@ describe('runNonInteractive', () => {
     const errorOutput = stderrCalls.map((call) => call[0]).join('');
     expect(errorOutput).toContain('401');
     expect(errorOutput).toContain('Incorrect API key provided');
+  });
+
+  it('does not double-wrap or double-format an API error in non-interactive mode', async () => {
+    // Regression test for the bug where a 4xx error event flowed through
+    // both the stream handler and handleError, each calling
+    // parseAndFormatApiError once. The second pass would wrap the
+    // already-formatted Error.message a second time, producing
+    // "[API Error: [API Error: 402 ...]]" on stderr.
+    //
+    // We don't assert on the *number* of stderr writes here — JsonOutputAdapter
+    // also emits the result message on the error path, which legitimately hits
+    // stderr in TEXT mode (separate concern, separate channel). What we
+    // strictly forbid is the double-wrap and any handleError-path duplicate.
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.TEXT);
+    setupMetricsMock();
+
+    const apiErrorEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.Error,
+      value: {
+        error: {
+          message: '402 Model gpt-oss-120b is not available for billing.',
+          status: 402,
+        },
+      },
+    };
+
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([apiErrorEvent]),
+    );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-double-wrap',
+      ),
+    ).rejects.toBeInstanceOf(AlreadyReportedError);
+
+    const stderrOutput = processStderrSpy.mock.calls
+      .map((call) => String(call[0]))
+      .join('');
+
+    // The "[API Error: [API Error:" double-wrap must never appear.
+    if (stderrOutput.includes('[API Error: [API Error:')) {
+      // Surface the raw bytes so a regression points at the actual offending
+      // line instead of needing a debugger.
+      const dump = processStderrSpy.mock.calls
+        .map((call, i) => `  [${i}] ${JSON.stringify(call[0])}`)
+        .join('\n');
+      throw new Error(`unexpected double-wrap on stderr:\n${dump}`);
+    }
+
+    // Each formatted line ("[API Error: ...]") must contain the upstream
+    // message verbatim — i.e. wrapping happens exactly once per emission.
+    for (const call of processStderrSpy.mock.calls) {
+      const line = String(call[0]);
+      if (line.startsWith('[API Error: ')) {
+        // The opening "[API Error: " should appear once; if it appears twice,
+        // we have a "[API Error: [API Error: ..." line.
+        expect(line.match(/\[API Error: /g)?.length ?? 0).toBe(1);
+      }
+    }
   });
 
   it('should handle FatalInputError with custom exit code in JSON format', async () => {
