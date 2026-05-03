@@ -459,10 +459,7 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('clears the FileReadCache so post-reset Reads re-emit content', async () => {
-      const cacheClear = vi.fn();
-      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
-        clear: cacheClear,
-      } as unknown as ReturnType<Config['getFileReadCache']>);
+      const cacheClear = mockFileReadCacheClear();
 
       await client.resetChat();
 
@@ -472,10 +469,7 @@ describe('Gemini Client (client.ts)', () => {
 
   describe('history mutation invalidates FileReadCache', () => {
     it('setHistory clears the cache', () => {
-      const cacheClear = vi.fn();
-      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
-        clear: cacheClear,
-      } as unknown as ReturnType<Config['getFileReadCache']>);
+      const cacheClear = mockFileReadCacheClear();
       client['chat'] = {
         setHistory: vi.fn(),
       } as unknown as GeminiChat;
@@ -485,12 +479,14 @@ describe('Gemini Client (client.ts)', () => {
       expect(cacheClear).toHaveBeenCalled();
     });
 
-    it('truncateHistory clears the cache', () => {
-      const cacheClear = vi.fn();
-      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
-        clear: cacheClear,
-      } as unknown as ReturnType<Config['getFileReadCache']>);
+    it('truncateHistory clears the cache when entries are actually removed', () => {
+      const cacheClear = mockFileReadCacheClear();
       client['chat'] = {
+        getHistory: vi.fn().mockReturnValue([
+          { role: 'user', parts: [{ text: 'a' }] },
+          { role: 'model', parts: [{ text: 'b' }] },
+          { role: 'user', parts: [{ text: 'c' }] },
+        ]),
         truncateHistory: vi.fn(),
       } as unknown as GeminiChat;
 
@@ -499,11 +495,27 @@ describe('Gemini Client (client.ts)', () => {
       expect(cacheClear).toHaveBeenCalled();
     });
 
+    it('truncateHistory does NOT clear the cache when keepCount >= history length (no-op)', () => {
+      const cacheClear = mockFileReadCacheClear();
+      client['chat'] = {
+        getHistory: vi.fn().mockReturnValue([
+          { role: 'user', parts: [{ text: 'a' }] },
+          { role: 'model', parts: [{ text: 'b' }] },
+        ]),
+        truncateHistory: vi.fn(),
+      } as unknown as GeminiChat;
+
+      // keepCount equals history length — nothing dropped, cache stays valid.
+      client.truncateHistory(2);
+      expect(cacheClear).not.toHaveBeenCalled();
+
+      // keepCount exceeds history length — also a no-op.
+      client.truncateHistory(99);
+      expect(cacheClear).not.toHaveBeenCalled();
+    });
+
     it('retry strips orphaned trailing user entries and clears the cache', async () => {
-      const cacheClear = vi.fn();
-      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
-        clear: cacheClear,
-      } as unknown as ReturnType<Config['getFileReadCache']>);
+      const cacheClear = mockFileReadCacheClear();
       const stripOrphanedUserEntriesFromHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
@@ -530,6 +542,19 @@ describe('Gemini Client (client.ts)', () => {
       expect(cacheClear).toHaveBeenCalled();
     });
   });
+
+  /**
+   * Test helper: replace mockConfig.getFileReadCache to return a stub
+   * whose clear() is a fresh spy. Returned spy lets tests assert on
+   * whether a code path invalidated the cache.
+   */
+  function mockFileReadCacheClear(): ReturnType<typeof vi.fn> {
+    const clearMock = vi.fn();
+    vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+      clear: clearMock,
+    } as unknown as ReturnType<Config['getFileReadCache']>);
+    return clearMock;
+  }
 
   describe('thinking block idle cleanup and latch', () => {
     let mockChat: Partial<GeminiChat>;
@@ -621,10 +646,7 @@ describe('Gemini Client (client.ts)', () => {
       // toolResultsNumToKeep = 5. Six read_file results + a 90-minute
       // idle gap means the oldest one gets cleared, so the if-meta
       // branch in sendMessageStream fires and must invalidate the cache.
-      const cacheClear = vi.fn();
-      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
-        clear: cacheClear,
-      } as unknown as ReturnType<Config['getFileReadCache']>);
+      const cacheClear = mockFileReadCacheClear();
 
       const history = makeReadFileResponses(6);
       const setHistory = vi.fn();
@@ -650,10 +672,7 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('does not clear the cache when the idle gap is below the threshold', async () => {
-      const cacheClear = vi.fn();
-      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
-        clear: cacheClear,
-      } as unknown as ReturnType<Config['getFileReadCache']>);
+      const cacheClear = mockFileReadCacheClear();
 
       const history = makeReadFileResponses(6);
       client['chat'] = {
