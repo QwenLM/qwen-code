@@ -245,6 +245,7 @@ export function initializeTelemetry(config: Config): void {
 
   sdk = new NodeSDK({
     resource,
+    autoDetectResources: false,
     spanProcessors: spanExporter ? [new BatchSpanProcessor(spanExporter)] : [],
     logRecordProcessors: logExporter
       ? [new BatchLogRecordProcessor(logExporter)]
